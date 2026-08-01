@@ -31,6 +31,11 @@ from polyarb.perception.market_truth import (
     market_truth_mismatch_reason,
     membership_hash,
 )
+from polyarb.perception.structure_contract import (
+    STRUCTURE_CERTIFICATION_COMPONENTS,
+    STRUCTURE_COMPONENTS,
+    STRUCTURE_SOURCE_COMPONENTS,
+)
 from polyarb.storage.schemas import (
     DDL,
     EVENT_TAGS_COLUMN_ORDER,
@@ -65,19 +70,52 @@ _BOOL_COLUMNS = ("active", "closed", "neg_risk", "incomplete")
 # events table also has bool fields stored as INTEGER 0/1.
 _EVENT_BOOL_COLUMNS = ("active", "closed")
 
-_STRUCTURE_COMPONENTS = (
-    "events",
-    "event_tags",
-    "memberships",
-    "group_truth",
-    "markets",
-    "issues",
-)
-_STRUCTURE_SOURCE_COMPONENTS = ("source_events", "source_markets")
-_STRUCTURE_CERTIFICATION_COMPONENTS = (
-    *_STRUCTURE_COMPONENTS,
-    *_STRUCTURE_SOURCE_COMPONENTS,
-)
+_STRUCTURE_COMPONENTS = STRUCTURE_COMPONENTS
+_STRUCTURE_SOURCE_COMPONENTS = STRUCTURE_SOURCE_COMPONENTS
+_STRUCTURE_CERTIFICATION_COMPONENTS = STRUCTURE_CERTIFICATION_COMPONENTS
+
+
+def _migrate_structure_event_market_progress(con: sqlite3.Connection) -> None:
+    """Add indexed subcursor authority to the brief pre-review progress schema."""
+    columns = {
+        str(row[1])
+        for row in con.execute(
+            "PRAGMA table_info(structure_sync_event_market_backfill_progress)"
+        )
+    }
+    if not columns or "event_cursor" in columns:
+        return
+    additions = (
+        ("window_checkpoint_at_ms", "INTEGER NOT NULL DEFAULT 0"),
+        ("event_cursor", "TEXT NOT NULL DEFAULT ''"),
+        ("member_offset", "INTEGER NOT NULL DEFAULT 0"),
+        ("relationships_processed", "INTEGER NOT NULL DEFAULT 0"),
+    )
+    for column, ddl in additions:
+        con.execute(
+            "ALTER TABLE structure_sync_event_market_backfill_progress "
+            f"ADD COLUMN {column} {ddl}"
+        )
+    rows = con.execute(
+        "SELECT progress.window_id,progress.after_rowid,window.checkpoint_at_ms "
+        "FROM structure_sync_event_market_backfill_progress progress JOIN "
+        "structure_sync_windows window ON window.id=progress.window_id"
+    ).fetchall()
+    for window_id, after_rowid, checkpoint_at_ms in rows:
+        cursor = con.execute(
+            "SELECT event_id FROM structure_sync_event_staging "
+            "WHERE window_id=? AND rowid=?",
+            (window_id, after_rowid),
+        ).fetchone()
+        con.execute(
+            "UPDATE structure_sync_event_market_backfill_progress SET "
+            "window_checkpoint_at_ms=?,event_cursor=? WHERE window_id=?",
+            (
+                int(checkpoint_at_ms),
+                "" if cursor is None else str(cursor[0]),
+                str(window_id),
+            ),
+        )
 
 
 def _migrate_structure_cleanup_progress_binding(con: sqlite3.Connection) -> None:
@@ -1516,6 +1554,7 @@ class SQLiteStore:
             con.executescript(STRUCTURE_DEFER_RECEIPTS_DDL)
             con.executescript(STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL)
             con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
+            _migrate_structure_event_market_progress(con)
             con.executescript(STRUCTURE_GENERATIONS_DDL)
             con.execute(
                 "CREATE VIEW IF NOT EXISTS current_structure_markets AS "
@@ -1642,6 +1681,7 @@ class SQLiteStore:
             )
             if has_snapshot_schema:
                 con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
+                _migrate_structure_event_market_progress(con)
                 con.executescript(STRUCTURE_GENERATIONS_DDL)
                 con.execute(
                     "CREATE VIEW IF NOT EXISTS current_structure_markets AS "
@@ -1725,12 +1765,16 @@ class SQLiteStore:
         *,
         window_id: str,
         max_events: int,
+        max_relationships: int,
         now_ms: int,
     ) -> dict[str, object]:
-        """Backfill one bounded legacy event-parent slice with a durable cursor."""
+        """Backfill a bounded event/relationship slice with a durable subcursor."""
         if (
             not window_id
             or not 1 <= max_events <= STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS
+            or not 1
+            <= max_relationships
+            <= STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS
             or now_ms < 0
         ):
             raise ValueError("invalid-structure-event-market-backfill")
@@ -1738,36 +1782,47 @@ class SQLiteStore:
         try:
             con.execute("BEGIN IMMEDIATE")
             window = con.execute(
-                "SELECT status FROM structure_sync_windows WHERE id=?", (window_id,)
+                "SELECT status,checkpoint_at_ms FROM structure_sync_windows WHERE id=?",
+                (window_id,),
             ).fetchone()
             if window is None or window[0] != "complete":
                 raise ValueError("structure-sync-window-not-complete")
+            window_checkpoint_at_ms = int(window[1])
             progress = con.execute(
-                "SELECT after_rowid,events_processed,completed_at_ms,blocked_reason "
+                "SELECT window_checkpoint_at_ms,event_cursor,member_offset,"
+                "events_processed,relationships_processed,completed_at_ms,blocked_reason "
                 "FROM structure_sync_event_market_backfill_progress WHERE window_id=?",
                 (window_id,),
             ).fetchone()
             if progress is None:
                 con.execute(
                     "INSERT INTO structure_sync_event_market_backfill_progress("
-                    "window_id,checkpoint_at_ms) VALUES (?,?)",
-                    (window_id, now_ms),
+                    "window_id,window_checkpoint_at_ms,checkpoint_at_ms) VALUES (?,?,?)",
+                    (window_id, window_checkpoint_at_ms, now_ms),
                 )
-                after_rowid = 0
-                processed_total = 0
+                event_cursor = ""
+                member_offset = 0
+                events_total = 0
+                relationships_total = 0
                 completed_at_ms = None
                 blocked_reason = None
             else:
-                after_rowid = int(progress[0])
-                processed_total = int(progress[1])
-                completed_at_ms = progress[2]
-                blocked_reason = progress[3]
+                if int(progress[0]) != window_checkpoint_at_ms:
+                    raise ValueError("structure-event-market-window-identity-drift")
+                event_cursor = str(progress[1])
+                member_offset = int(progress[2])
+                events_total = int(progress[3])
+                relationships_total = int(progress[4])
+                completed_at_ms = progress[5]
+                blocked_reason = progress[6]
             if blocked_reason is not None:
                 con.execute("COMMIT")
                 return {
                     "completed": False,
                     "events_processed": 0,
-                    "after_rowid": after_rowid,
+                    "relationships_processed": 0,
+                    "event_cursor": event_cursor,
+                    "member_offset": member_offset,
                     "blocked": True,
                     "blocked_reason": str(blocked_reason),
                 }
@@ -1776,7 +1831,9 @@ class SQLiteStore:
                 return {
                     "completed": True,
                     "events_processed": 0,
-                    "after_rowid": after_rowid,
+                    "relationships_processed": 0,
+                    "event_cursor": event_cursor,
+                    "member_offset": member_offset,
                     "blocked": False,
                     "blocked_reason": None,
                 }
@@ -1784,15 +1841,32 @@ class SQLiteStore:
             # bounded source slice without holding SQLite's writer lock; only
             # the cursor-authorized relationship insert below is a write txn.
             con.execute("COMMIT")
-            rows = con.execute(
-                "SELECT rowid,event_id,payload_json FROM structure_sync_event_staging "
-                "WHERE window_id=? AND rowid>? ORDER BY rowid LIMIT ?",
-                (window_id, after_rowid, max_events),
-            ).fetchall()
+            if member_offset:
+                current = con.execute(
+                    "SELECT event_id,payload_json FROM structure_sync_event_staging "
+                    "WHERE window_id=? AND event_id=?",
+                    (window_id, event_cursor),
+                ).fetchall()
+                following = con.execute(
+                    "SELECT event_id,payload_json FROM structure_sync_event_staging "
+                    "WHERE window_id=? AND event_id>? ORDER BY event_id LIMIT ?",
+                    (window_id, event_cursor, max_events - 1),
+                ).fetchall()
+                rows = [*current, *following]
+            else:
+                rows = con.execute(
+                    "SELECT event_id,payload_json FROM structure_sync_event_staging "
+                    "WHERE window_id=? AND event_id>? ORDER BY event_id LIMIT ?",
+                    (window_id, event_cursor, max_events),
+                ).fetchall()
             parent_rows: list[tuple[object, ...]] = []
+            events_processed = 0
+            next_event_cursor = event_cursor
+            next_member_offset = member_offset
+            remaining_relationships = max_relationships
             current_event_id = "unknown"
             try:
-                for rowid, event_id, payload_json in rows:
+                for row_index, (event_id, payload_json) in enumerate(rows):
                     current_event_id = str(event_id)
                     payload = json.loads(str(payload_json))
                     if not isinstance(payload, dict):
@@ -1800,11 +1874,29 @@ class SQLiteStore:
                     members = payload.get("markets", [])
                     if not isinstance(members, list):
                         raise ValueError(f"invalid-event-markets:{event_id}")
+                    start = member_offset if row_index == 0 else 0
+                    if start > len(members):
+                        raise ValueError(f"invalid-event-member-offset:{event_id}")
+                    checked: list[str] = []
                     for member in members:
                         market_id = member.get("id") if isinstance(member, dict) else None
                         if not isinstance(market_id, str) or not market_id:
                             raise ValueError(f"invalid-event-market:{event_id}")
-                        parent_rows.append((window_id, market_id, event_id, int(rowid)))
+                        checked.append(market_id)
+                    end = min(len(checked), start + remaining_relationships)
+                    parent_rows.extend(
+                        (window_id, market_id, event_id, 0)
+                        for market_id in checked[start:end]
+                    )
+                    remaining_relationships -= end - start
+                    next_event_cursor = str(event_id)
+                    if end < len(checked):
+                        next_member_offset = end
+                        break
+                    next_member_offset = 0
+                    events_processed += 1
+                    if remaining_relationships == 0:
+                        break
             except (json.JSONDecodeError, ValueError) as error:
                 reason = (
                     f"invalid-event-json:{current_event_id}"
@@ -1815,9 +1907,17 @@ class SQLiteStore:
                 updated = con.execute(
                     "UPDATE structure_sync_event_market_backfill_progress SET "
                     "checkpoint_at_ms=?,blocked_reason=? WHERE window_id=? "
-                    "AND after_rowid=? AND completed_at_ms IS NULL "
+                    "AND window_checkpoint_at_ms=? AND event_cursor=? "
+                    "AND member_offset=? AND completed_at_ms IS NULL "
                     "AND blocked_reason IS NULL",
-                    (now_ms, reason[:200], window_id, after_rowid),
+                    (
+                        now_ms,
+                        reason[:200],
+                        window_id,
+                        window_checkpoint_at_ms,
+                        event_cursor,
+                        member_offset,
+                    ),
                 )
                 if updated.rowcount != 1:
                     raise ValueError("structure-event-market-backfill-cursor-race")
@@ -1825,33 +1925,56 @@ class SQLiteStore:
                 return {
                     "completed": False,
                     "events_processed": 0,
-                    "after_rowid": after_rowid,
+                    "relationships_processed": 0,
+                    "event_cursor": event_cursor,
+                    "member_offset": member_offset,
                     "blocked": True,
                     "blocked_reason": reason[:200],
                 }
             con.execute("BEGIN IMMEDIATE")
             current = con.execute(
-                "SELECT after_rowid,completed_at_ms,blocked_reason FROM "
+                "SELECT window_checkpoint_at_ms,event_cursor,member_offset,"
+                "completed_at_ms,blocked_reason FROM "
                 "structure_sync_event_market_backfill_progress WHERE window_id=?",
                 (window_id,),
             ).fetchone()
-            if current != (after_rowid, None, None):
+            if current != (
+                window_checkpoint_at_ms,
+                event_cursor,
+                member_offset,
+                None,
+                None,
+            ):
                 raise ValueError("structure-event-market-backfill-cursor-race")
+            identity = con.execute(
+                "SELECT status,checkpoint_at_ms FROM structure_sync_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            if identity != ("complete", window_checkpoint_at_ms):
+                raise ValueError("structure-event-market-window-identity-drift")
             con.executemany(
                 "INSERT OR IGNORE INTO structure_sync_event_market_staging("
                 "window_id,market_id,event_id,source_ordinal) VALUES (?,?,?,?)",
                 parent_rows,
             )
-            events_processed = len(rows)
-            next_rowid = after_rowid if not rows else int(rows[-1][0])
-            completed = events_processed < max_events
+            relationships_processed = len(parent_rows)
+            completed = False
+            if next_member_offset == 0:
+                completed = con.execute(
+                    "SELECT 1 FROM structure_sync_event_staging "
+                    "WHERE window_id=? AND event_id>? LIMIT 1",
+                    (window_id, next_event_cursor),
+                ).fetchone() is None
             con.execute(
                 "UPDATE structure_sync_event_market_backfill_progress SET "
-                "after_rowid=?,events_processed=?,checkpoint_at_ms=?,completed_at_ms=? "
+                "event_cursor=?,member_offset=?,events_processed=?,"
+                "relationships_processed=?,checkpoint_at_ms=?,completed_at_ms=? "
                 "WHERE window_id=?",
                 (
-                    next_rowid,
-                    processed_total + events_processed,
+                    next_event_cursor,
+                    next_member_offset,
+                    events_total + events_processed,
+                    relationships_total + relationships_processed,
                     now_ms,
                     now_ms if completed else None,
                     window_id,
@@ -1861,7 +1984,9 @@ class SQLiteStore:
             return {
                 "completed": completed,
                 "events_processed": events_processed,
-                "after_rowid": next_rowid,
+                "relationships_processed": relationships_processed,
+                "event_cursor": next_event_cursor,
+                "member_offset": next_member_offset,
                 "blocked": False,
                 "blocked_reason": None,
             }
@@ -3041,8 +3166,8 @@ class SQLiteStore:
             "group_truth": ("neg_risk_market_id",),
             "markets": ("market_id",),
             "issues": ("issue_index",),
-            "source_events": ("source_ordinal", "event_id"),
-            "source_markets": ("source_ordinal", "market_id"),
+            "source_events": ("event_id",),
+            "source_markets": ("market_id",),
         }
         with sqlite3.connect(self._db_path) as read_con:
             publication = read_con.execute(
@@ -3102,8 +3227,9 @@ class SQLiteStore:
                 singular = "event" if source == "events" else "market"
                 table = f"structure_sync_{singular}_staging"
                 rows = read_con.execute(
-                    f"SELECT source_ordinal,{singular}_id,payload_json FROM {table} "
-                    f"WHERE window_id=?{clause} ORDER BY {','.join(keys)} LIMIT ?",
+                    f"SELECT COALESCE(source_ordinal,rowid),{singular}_id,payload_json "
+                    f"FROM {table} WHERE window_id=?{clause} "
+                    f"ORDER BY {','.join(keys)} LIMIT ?",
                     parameters,
                 ).fetchall()
                 positions = {"source_ordinal": 0, f"{singular}_id": 1}
@@ -4026,6 +4152,16 @@ class SQLiteStore:
                 "SELECT generation_snapshot_id,phase,rows_deleted,checkpoint_at_ms,"
                 "blocked_reason FROM structure_generation_cleanup_progress LIMIT 1"
             ).fetchone()
+            bootstrap = con.execute(
+                "SELECT progress.window_id,progress.event_cursor,"
+                "progress.member_offset,progress.events_processed,"
+                "progress.relationships_processed,progress.checkpoint_at_ms,"
+                "progress.completed_at_ms,progress.blocked_reason FROM "
+                "structure_sync_event_market_backfill_progress progress JOIN "
+                "structure_sync_windows window ON window.id=progress.window_id "
+                "WHERE window.status='complete' AND progress.completed_at_ms IS NULL "
+                "ORDER BY progress.checkpoint_at_ms DESC,progress.window_id DESC LIMIT 1"
+            ).fetchone()
             generation_probe = con.execute(
                 "SELECT p.snapshot_id FROM structure_publications p WHERE "
                 "p.status='published' AND p.published_at_ms>=0 AND NOT EXISTS (SELECT 1 FROM "
@@ -4168,6 +4304,18 @@ class SQLiteStore:
                 "write_component": publication[5],
                 "write_cursor": publication[6],
                 "checkpoint_at_ms": int(publication[7]),
+            },
+            "bootstrap": None
+            if bootstrap is None
+            else {
+                "window_id": str(bootstrap[0]),
+                "event_cursor": str(bootstrap[1]),
+                "member_offset": int(bootstrap[2]),
+                "events_processed": int(bootstrap[3]),
+                "relationships_processed": int(bootstrap[4]),
+                "checkpoint_at_ms": int(bootstrap[5]),
+                "completed_at_ms": bootstrap[6],
+                "blocked_reason": bootstrap[7],
             },
             "comparison": None
             if comparison is None
@@ -5022,6 +5170,66 @@ class SQLiteStore:
         finally:
             con.close()
 
+    def rotate_blocked_structure_sync_window(
+        self,
+        *,
+        window_id: str,
+        rotated_at_ms: int,
+    ) -> dict[str, object]:
+        """Preserve a blocked complete window and atomically open a clean successor."""
+        if not window_id or rotated_at_ms < 0:
+            raise ValueError("invalid-structure-bootstrap-rotation")
+        successor_id = uuid.uuid4().hex
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            blocked = con.execute(
+                "SELECT progress.blocked_reason,progress.window_checkpoint_at_ms,"
+                "window.checkpoint_at_ms FROM "
+                "structure_sync_event_market_backfill_progress progress JOIN "
+                "structure_sync_windows window ON window.id=progress.window_id "
+                "LEFT JOIN structure_publications publication "
+                "ON publication.window_id=window.id WHERE progress.window_id=? "
+                "AND window.status='complete' AND progress.blocked_reason IS NOT NULL "
+                "AND progress.completed_at_ms IS NULL AND publication.window_id IS NULL",
+                (window_id,),
+            ).fetchone()
+            if (
+                blocked is None
+                or int(blocked[1]) != int(blocked[2])
+                or not str(blocked[0])
+            ):
+                raise ValueError("structure-bootstrap-window-not-rotatable")
+            reason = str(blocked[0])[:200]
+            changed = con.execute(
+                "UPDATE structure_sync_windows SET status='failed',failure_reason=?,"
+                "checkpoint_at_ms=? WHERE id=? AND status='complete' "
+                "AND checkpoint_at_ms=?",
+                (reason, rotated_at_ms, window_id, int(blocked[2])),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("structure-bootstrap-window-rotation-race")
+            con.execute(
+                "INSERT INTO structure_sync_windows("
+                "id,status,started_at_ms,checkpoint_at_ms) VALUES (?,'open',?,?)",
+                (successor_id, rotated_at_ms, rotated_at_ms + 1),
+            )
+            row = con.execute(
+                "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
+                "checkpoint_at_ms,event_pages,market_pages,failure_reason,"
+                "published_snapshot_id FROM structure_sync_windows WHERE id=?",
+                (successor_id,),
+            ).fetchone()
+            con.execute("COMMIT")
+            assert row is not None
+            return self._structure_sync_window_row(row)
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
     def mark_structure_sync_published(
         self, *, window_id: str, snapshot_id: int, published_at_ms: int
     ) -> None:
@@ -5338,22 +5546,34 @@ class SQLiteStore:
                 parent_rows,
             )
             if completed:
-                last_rowid = int(
+                final_event_id = str(
                     con.execute(
-                        "SELECT COALESCE(MAX(rowid),0) FROM "
+                        "SELECT COALESCE(MAX(event_id),'') FROM "
                         "structure_sync_event_staging WHERE window_id=?",
                         (window_id,),
                     ).fetchone()[0]
                 )
                 con.execute(
                     "INSERT INTO structure_sync_event_market_backfill_progress("
-                    "window_id,after_rowid,events_processed,checkpoint_at_ms,"
-                    "completed_at_ms) VALUES (?,?,?,?,?) ON CONFLICT(window_id) "
-                    "DO UPDATE SET after_rowid=excluded.after_rowid,"
-                    "events_processed=excluded.events_processed,"
+                    "window_id,window_checkpoint_at_ms,event_cursor,member_offset,"
+                    "events_processed,relationships_processed,checkpoint_at_ms,"
+                    "completed_at_ms) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(window_id) "
+                    "DO UPDATE SET window_checkpoint_at_ms="
+                    "excluded.window_checkpoint_at_ms,event_cursor=excluded.event_cursor,"
+                    "member_offset=0,events_processed=excluded.events_processed,"
+                    "relationships_processed=excluded.relationships_processed,"
                     "checkpoint_at_ms=excluded.checkpoint_at_ms,"
                     "completed_at_ms=excluded.completed_at_ms,blocked_reason=NULL",
-                    (window_id, last_rowid, 0, finished_at_ms, finished_at_ms),
+                    (
+                        window_id,
+                        finished_at_ms,
+                        final_event_id,
+                        0,
+                        0,
+                        0,
+                        finished_at_ms,
+                        finished_at_ms,
+                    ),
                 )
             con.execute(
                 "UPDATE structure_sync_windows SET status=?,event_cursor=?,"

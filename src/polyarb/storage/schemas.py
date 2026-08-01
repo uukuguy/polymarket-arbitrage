@@ -2362,12 +2362,19 @@ CREATE INDEX IF NOT EXISTS idx_structure_sync_event_market_first
 ON structure_sync_event_market_staging(window_id,market_id,source_ordinal,event_id);
 CREATE TABLE IF NOT EXISTS structure_sync_event_market_backfill_progress (
     window_id TEXT PRIMARY KEY REFERENCES structure_sync_windows(id) ON DELETE CASCADE,
-    after_rowid INTEGER NOT NULL DEFAULT 0 CHECK(after_rowid >= 0),
+    window_checkpoint_at_ms INTEGER NOT NULL CHECK(window_checkpoint_at_ms >= 0),
+    event_cursor TEXT NOT NULL DEFAULT '',
+    member_offset INTEGER NOT NULL DEFAULT 0 CHECK(member_offset >= 0),
     events_processed INTEGER NOT NULL DEFAULT 0 CHECK(events_processed >= 0),
+    relationships_processed INTEGER NOT NULL DEFAULT 0
+        CHECK(relationships_processed >= 0),
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
     completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),
     blocked_reason TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_structure_event_market_backfill_active
+ON structure_sync_event_market_backfill_progress(checkpoint_at_ms DESC,window_id DESC)
+WHERE completed_at_ms IS NULL;
 CREATE TABLE IF NOT EXISTS structure_sync_market_staging (
     window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
     market_id TEXT NOT NULL,
@@ -2376,6 +2383,48 @@ CREATE TABLE IF NOT EXISTS structure_sync_market_staging (
     source_ordinal INTEGER,
     PRIMARY KEY(window_id,market_id)
 );
+CREATE TRIGGER IF NOT EXISTS trg_structure_event_staging_insert_guard
+BEFORE INSERT ON structure_sync_event_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=NEW.window_id)!='open'
+BEGIN SELECT RAISE(ABORT,'structure-event-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_event_staging_update_guard
+BEFORE UPDATE ON structure_sync_event_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='open'
+BEGIN SELECT RAISE(ABORT,'structure-event-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_event_staging_delete_guard
+BEFORE DELETE ON structure_sync_event_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)='complete'
+BEGIN SELECT RAISE(ABORT,'structure-event-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_market_staging_insert_guard
+BEFORE INSERT ON structure_sync_market_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=NEW.window_id)!='events_complete'
+BEGIN SELECT RAISE(ABORT,'structure-market-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_market_staging_update_guard
+BEFORE UPDATE ON structure_sync_market_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='events_complete'
+BEGIN SELECT RAISE(ABORT,'structure-market-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_market_staging_delete_guard
+BEFORE DELETE ON structure_sync_market_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)='complete'
+BEGIN SELECT RAISE(ABORT,'structure-market-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_event_market_insert_guard
+BEFORE INSERT ON structure_sync_event_market_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=NEW.window_id)!='open'
+AND NOT EXISTS (
+    SELECT 1 FROM structure_sync_event_market_backfill_progress progress
+    JOIN structure_sync_windows window ON window.id=progress.window_id
+    WHERE progress.window_id=NEW.window_id AND window.status='complete'
+      AND progress.completed_at_ms IS NULL AND progress.blocked_reason IS NULL
+)
+BEGIN SELECT RAISE(ABORT,'structure-event-market-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_event_market_update_guard
+BEFORE UPDATE ON structure_sync_event_market_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='open'
+BEGIN SELECT RAISE(ABORT,'structure-event-market-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_event_market_delete_guard
+BEFORE DELETE ON structure_sync_event_market_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)='complete'
+BEGIN SELECT RAISE(ABORT,'structure-event-market-staging-frozen'); END;
 """
 
 # H-011 publication generations.  Bulk rows are keyed by the immutable

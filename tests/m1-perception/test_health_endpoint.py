@@ -105,6 +105,45 @@ def test_structure_generation_health_fails_stale_active_comparison() -> None:
 
 
 @pytest.mark.parametrize(
+    ("checkpoint_at_ms", "blocked_reason", "expected"),
+    ((99_000, None, "warn"), (1_000, None, "fail"), (99_000, "invalid-json", "fail")),
+)
+def test_structure_generation_health_exposes_bootstrap_progress(
+    checkpoint_at_ms: int,
+    blocked_reason: str | None,
+    expected: str,
+) -> None:
+    checks = health_module._structure_generation_health_checks(
+        {
+            "pointer_snapshot_id": None,
+            "publication": None,
+            "bootstrap": {
+                "window_id": "window-1",
+                "event_cursor": "event-42",
+                "member_offset": 3,
+                "checkpoint_at_ms": checkpoint_at_ms,
+                "blocked_reason": blocked_reason,
+            },
+            "comparison": None,
+            "retained_generation_count_lower_bound": 0,
+            "retained_generation_count_is_exact": True,
+            "reclaimable_generation_count_lower_bound": 0,
+            "retention_floor": 2,
+        },
+        now_ms=100_000,
+        read_mode="legacy",
+        publication_sla_s=50,
+        pressure_warn_count=4,
+        pressure_fail_count=8,
+    )
+    check = checks["snapshot:structure_generation"][0]
+    assert check["status"] == expected
+    assert "stage=event-market-bootstrap" in check["output"]
+    assert "event_cursor=event-42" in check["output"]
+    assert "member_offset=3" in check["output"]
+
+
+@pytest.mark.parametrize(
     ("free", "expected_status"),
     ((25, "pass"), (19, "warn"), (9, "fail")),
 )

@@ -8,18 +8,10 @@ from pathlib import Path
 
 from polyarb.config import Settings
 from polyarb.perception.market_truth import EventMember, GroupTruth
+from polyarb.perception.structure_contract import STRUCTURE_COMPONENTS
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 from polyarb.snapshot.orchestrator import SnapshotResult
 from polyarb.storage.sqlite_store import SQLiteStore, StructurePublicationState
-
-STRUCTURE_COMPONENTS = (
-    "events",
-    "event_tags",
-    "memberships",
-    "group_truth",
-    "markets",
-    "issues",
-)
 
 
 @dataclass(frozen=True)

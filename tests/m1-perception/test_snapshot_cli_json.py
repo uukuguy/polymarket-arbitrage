@@ -139,10 +139,12 @@ def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
             "DELETE FROM structure_sync_event_market_backfill_progress WHERE window_id=?",
             (window["id"],),
         )
+        con.execute("DROP TRIGGER trg_structure_event_market_delete_guard")
         con.execute(
             "DELETE FROM structure_sync_event_market_staging WHERE window_id=?",
             (window["id"],),
         )
+    store.init_structure_sync_schema()
     monkeypatch.setattr(
         cli_module,
         "load_settings",
@@ -155,12 +157,15 @@ def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == {
-        "after_rowid": 2,
         "blocked": False,
         "blocked_reason": None,
         "complete": False,
         "copied_rows": 2,
+        "event_cursor": "event-1",
+        "events_processed": 2,
+        "member_offset": 0,
         "phase": "event-market-bootstrap",
+        "rotated_to_window_id": None,
         "window_id": window["id"],
     }
 

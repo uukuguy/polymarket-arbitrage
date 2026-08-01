@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -462,6 +463,54 @@ def test_bounded_certification_resumes_every_primary_key_checkpoint(
     assert "from event_market_memberships" not in pointer_sql
 
 
+def test_certification_keysets_legacy_null_source_ordinals(tmp_path: Path) -> None:
+    """Legacy NULL ordinals must not make certification skip the remaining source."""
+    store = SQLiteStore(tmp_path / "null-ordinal.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store, snapshot_id=1, market_id="market-1", now_ms=1_000
+    )
+    _append_generation_truth(
+        store,
+        publication,
+        snapshot_id=1,
+        market_id="market-1",
+        now_ms=1_004,
+    )
+    store.append_structure_publication_chunk(
+        publication.publication_id,
+        "issues",
+        (),
+        expected_prior_cursor="market-1",
+        next_cursor="issues|done",
+        now_ms=1_009,
+    )
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_event_staging_update_guard")
+        con.execute("DROP TRIGGER trg_structure_event_staging_insert_guard")
+        con.execute(
+            "UPDATE structure_sync_event_staging SET source_ordinal=NULL "
+            "WHERE window_id=?",
+            (publication.window_id,),
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_staging("
+            "window_id,event_id,payload_json,source_cursor,source_ordinal) "
+            "VALUES (?, 'event-2', ?, NULL, NULL)",
+            (publication.window_id, json.dumps({"id": "event-2", "markets": []})),
+        )
+    store.init_structure_sync_schema()
+
+    with pytest.raises(ValueError, match="source-truth-invalid"):
+        for offset in range(20):
+            store.advance_structure_certification_chunk(
+                publication.publication_id,
+                max_rows=1,
+                now_ms=1_011 + offset,
+            )
+
+
 def test_comparison_certification_rejects_pinned_legacy_identity_drift(
     tmp_path: Path,
 ) -> None:
@@ -779,6 +828,10 @@ def test_worker_entry_migrates_pre_task3_structure_schema(tmp_path: Path) -> Non
             "CREATE TABLE structure_sync_market_staging("
             "window_id TEXT,market_id TEXT,payload_json TEXT,source_cursor TEXT,"
             "PRIMARY KEY(window_id,market_id));"
+            "CREATE TABLE structure_sync_event_market_backfill_progress("
+            "window_id TEXT PRIMARY KEY,after_rowid INTEGER NOT NULL DEFAULT 0,"
+            "events_processed INTEGER NOT NULL DEFAULT 0,checkpoint_at_ms INTEGER,"
+            "completed_at_ms INTEGER,blocked_reason TEXT);"
             "CREATE TABLE structure_publications("
             "publication_id TEXT PRIMARY KEY,window_id TEXT,snapshot_id INTEGER,"
             "status TEXT,normalization_component TEXT,normalization_source_cursor TEXT,"
@@ -803,6 +856,12 @@ def test_worker_entry_migrates_pre_task3_structure_schema(tmp_path: Path) -> Non
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='structure_sync_event_market_staging'"
         ).fetchone()
+        progress_columns = {
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_sync_event_market_backfill_progress)"
+            )
+        }
     assert {
         "write_prior_cursor",
         "certification_component",
@@ -812,6 +871,12 @@ def test_worker_entry_migrates_pre_task3_structure_schema(tmp_path: Path) -> Non
     } <= publication_columns
     assert "source_ordinal" in event_columns
     assert event_market_table == (1,)
+    assert {
+        "window_checkpoint_at_ms",
+        "event_cursor",
+        "member_offset",
+        "relationships_processed",
+    } <= progress_columns
 
 
 def test_bounded_certification_rejects_stale_membership_hash(tmp_path: Path) -> None:

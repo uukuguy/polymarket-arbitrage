@@ -271,15 +271,32 @@ async def run_structure_sync_until_published(
             store.advance_structure_event_market_backfill,
             window_id=str(latest["id"]),
             max_events=max_publication_rows,
+            max_relationships=max_publication_rows,
             now_ms=int(time.time() * 1_000),
         )
         if migration["blocked"]:
-            raise ValueError(str(migration["blocked_reason"]))
-        if int(migration["events_processed"]) > 0 or not migration["completed"]:
+            successor = await asyncio.to_thread(
+                store.rotate_blocked_structure_sync_window,
+                window_id=str(latest["id"]),
+                rotated_at_ms=int(time.time() * 1_000),
+            )
+            raise ValueError(
+                "structure-bootstrap-window-rotated:"
+                f"{latest['id']}:{successor['id']}:{migration['blocked_reason']}"
+            )
+        if (
+            int(migration["events_processed"]) > 0
+            or int(migration["relationships_processed"]) > 0
+            or not migration["completed"]
+        ):
             return StructureSyncCheckpoint(
                 window_id=str(latest["id"]),
                 stage="complete",
-                pages_processed=max(1, int(migration["events_processed"])),
+                pages_processed=max(
+                    1,
+                    int(migration["events_processed"]),
+                    int(migration["relationships_processed"]),
+                ),
             )
     async with GammaClient(settings) as gamma:
         if latest is not None and latest["status"] == "complete":

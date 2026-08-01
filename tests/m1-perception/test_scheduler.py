@@ -444,6 +444,94 @@ async def test_snapshot_subprocess_accepts_publication_checkpoint() -> None:
     assert result.publication_id == "publication-1"
 
 
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_accepts_every_shared_publication_component() -> None:
+    from polyarb.daemon.scheduler import (
+        IsolatedStructurePublicationCheckpoint,
+        run_snapshot_in_subprocess,
+    )
+    from polyarb.perception.structure_contract import (
+        STRUCTURE_PUBLICATION_CHECKPOINT_COMPONENTS,
+    )
+
+    for component in STRUCTURE_PUBLICATION_CHECKPOINT_COMPONENTS:
+        process = _FakeProcess(
+            {
+                "checkpointed": True,
+                "stage": "certifying",
+                "component": component,
+                "rows_processed": 1,
+                "cursor": "cursor",
+                "publication_id": "publication-1",
+            },
+            returncode=0,
+        )
+
+        async def spawn(*_args, **_kwargs):
+            return process
+
+        result = await run_snapshot_in_subprocess(spawn=spawn)
+        assert isinstance(result, IsolatedStructurePublicationCheckpoint)
+        assert result.component == component
+
+    ready = _FakeProcess(
+        {
+            "checkpointed": True,
+            "stage": "ready",
+            "component": None,
+            "rows_processed": 0,
+            "cursor": None,
+            "publication_id": "publication-1",
+        },
+        returncode=0,
+    )
+
+    async def spawn_ready(*_args, **_kwargs):
+        return ready
+
+    result = await run_snapshot_in_subprocess(spawn=spawn_ready)
+    assert isinstance(result, IsolatedStructurePublicationCheckpoint)
+    assert result.stage == "ready"
+    assert result.component is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "component"),
+    [
+        ("ready", "events"),
+        ("normalizing", "source_events"),
+        ("normalizing", "legacy-universe"),
+    ],
+)
+async def test_snapshot_subprocess_rejects_invalid_publication_checkpoint_pair(
+    stage: str,
+    component: str,
+) -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    process = _FakeProcess(
+        {
+            "checkpointed": True,
+            "stage": stage,
+            "component": component,
+            "rows_processed": 1,
+            "cursor": "cursor",
+            "publication_id": "publication-1",
+        },
+        returncode=0,
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-invalid-json"):
+        await run_snapshot_in_subprocess(spawn=spawn)
+
+
 def test_snapshot_stage_parser_keeps_only_final_allowlisted_marker() -> None:
     """Arbitrary child stderr never becomes a scheduler diagnostic."""
     from polyarb.daemon.scheduler import _parse_last_snapshot_stage

@@ -713,22 +713,22 @@ def test_legacy_event_market_bootstrap_is_durable_and_bounded(tmp_path) -> None:
             "DELETE FROM structure_sync_event_market_backfill_progress WHERE window_id=?",
             (window["id"],),
         )
+        con.execute("DROP TRIGGER trg_structure_event_market_delete_guard")
         con.execute(
             "DELETE FROM structure_sync_event_market_staging WHERE window_id=?",
             (window["id"],),
         )
-        con.execute(
-            "UPDATE structure_sync_event_staging SET source_ordinal=NULL WHERE window_id=?",
-            (window["id"],),
-        )
+    store.init_structure_sync_schema()
 
     first = store.advance_structure_event_market_backfill(
-        window_id=window["id"], max_events=5, now_ms=400
+        window_id=window["id"], max_events=5, max_relationships=5, now_ms=400
     )
     assert first == {
         "completed": False,
         "events_processed": 5,
-        "after_rowid": 5,
+        "event_cursor": "event-0004",
+        "member_offset": 0,
+        "relationships_processed": 5,
         "blocked": False,
         "blocked_reason": None,
     }
@@ -740,33 +740,39 @@ def test_legacy_event_market_bootstrap_is_durable_and_bounded(tmp_path) -> None:
 
     reopened = SQLiteStore(store.db_path)
     second = reopened.advance_structure_event_market_backfill(
-        window_id=window["id"], max_events=5, now_ms=500
+        window_id=window["id"], max_events=5, max_relationships=5, now_ms=500
     )
     third = reopened.advance_structure_event_market_backfill(
-        window_id=window["id"], max_events=5, now_ms=600
+        window_id=window["id"], max_events=5, max_relationships=5, now_ms=600
     )
     fourth = reopened.advance_structure_event_market_backfill(
-        window_id=window["id"], max_events=5, now_ms=700
+        window_id=window["id"], max_events=5, max_relationships=5, now_ms=700
     )
 
     assert second == {
         "completed": False,
         "events_processed": 5,
-        "after_rowid": 10,
+        "event_cursor": "event-0009",
+        "member_offset": 0,
+        "relationships_processed": 5,
         "blocked": False,
         "blocked_reason": None,
     }
     assert third == {
         "completed": True,
         "events_processed": 2,
-        "after_rowid": 12,
+        "event_cursor": "event-0011",
+        "member_offset": 0,
+        "relationships_processed": 2,
         "blocked": False,
         "blocked_reason": None,
     }
     assert fourth == {
         "completed": True,
         "events_processed": 0,
-        "after_rowid": 12,
+        "event_cursor": "event-0011",
+        "member_offset": 0,
+        "relationships_processed": 0,
         "blocked": False,
         "blocked_reason": None,
     }
@@ -786,6 +792,13 @@ def test_event_market_bootstrap_invalid_json_blocks_without_advancing(tmp_path) 
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()
     window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO structure_sync_event_staging("
+            "window_id,event_id,payload_json,source_cursor,source_ordinal) "
+            "VALUES (?,'broken','{',NULL,NULL)",
+            (window["id"],),
+        )
     store.commit_structure_event_page(
         window_id=window["id"], requested_cursor=None, next_cursor=None,
         completed=True, events=[], finished_at_ms=200,
@@ -799,22 +812,264 @@ def test_event_market_bootstrap_invalid_json_blocks_without_advancing(tmp_path) 
             "DELETE FROM structure_sync_event_market_backfill_progress WHERE window_id=?",
             (window["id"],),
         )
+
+    result = store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=500, max_relationships=500, now_ms=400
+    )
+    assert result["blocked"] is True
+    assert str(result["blocked_reason"]).startswith("invalid-event-json:")
+    assert result["event_cursor"] == ""
+    assert result["member_offset"] == 0
+    assert store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=500, max_relationships=500, now_ms=500
+    ) == result
+
+    bootstrap = store.structure_generation_status()["bootstrap"]
+    assert bootstrap == {
+        "window_id": window["id"],
+        "event_cursor": "",
+        "member_offset": 0,
+        "events_processed": 0,
+        "relationships_processed": 0,
+        "checkpoint_at_ms": 400,
+        "completed_at_ms": None,
+        "blocked_reason": result["blocked_reason"],
+    }
+
+    successor = store.rotate_blocked_structure_sync_window(
+        window_id=window["id"], rotated_at_ms=600
+    )
+    assert successor["status"] == "open"
+    assert successor["id"] != window["id"]
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT status,failure_reason FROM structure_sync_windows WHERE id=?",
+            (window["id"],),
+        ).fetchone() == ("failed", result["blocked_reason"])
+        assert con.execute(
+            "SELECT blocked_reason FROM structure_sync_event_market_backfill_progress "
+            "WHERE window_id=?",
+            (window["id"],),
+        ).fetchone() == (result["blocked_reason"],)
+
+
+async def test_scheduler_path_rotates_blocked_bootstrap_window(
+    settings_for_test,
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    with sqlite3.connect(store.db_path) as con:
         con.execute(
             "INSERT INTO structure_sync_event_staging("
             "window_id,event_id,payload_json,source_cursor,source_ordinal) "
             "VALUES (?,'broken','{',NULL,NULL)",
             (window["id"],),
         )
-
-    result = store.advance_structure_event_market_backfill(
-        window_id=window["id"], max_events=500, now_ms=400
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=[], finished_at_ms=200,
     )
-    assert result["blocked"] is True
-    assert str(result["blocked_reason"]).startswith("invalid-event-json:")
-    assert result["after_rowid"] == 0
-    assert store.advance_structure_event_market_backfill(
-        window_id=window["id"], max_events=500, now_ms=500
-    ) == result
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=[], finished_at_ms=300,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "DELETE FROM structure_sync_event_market_backfill_progress WHERE window_id=?",
+            (window["id"],),
+        )
+
+    with pytest.raises(ValueError, match="structure-bootstrap-window-rotated"):
+        await run_structure_sync_until_published(
+            settings_for_test,
+            max_elapsed_s=45,
+            max_publication_rows=500,
+        )
+
+    latest = store.get_latest_structure_sync()
+    assert latest is not None and latest["status"] == "open"
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT status FROM structure_sync_windows WHERE id=?", (window["id"],)
+        ).fetchone() == ("failed",)
+
+
+def test_event_market_bootstrap_bounds_one_huge_event_and_resumes_offset(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True,
+        events=[
+            {
+                "id": "huge-event",
+                "markets": [{"id": f"market-{index}"} for index in range(7)],
+            }
+        ], finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True,
+        markets=[{"id": f"market-{index}"} for index in range(7)],
+        finished_at_ms=300,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "DELETE FROM structure_sync_event_market_backfill_progress WHERE window_id=?",
+            (window["id"],),
+        )
+        con.execute("DROP TRIGGER trg_structure_event_market_delete_guard")
+        con.execute(
+            "DELETE FROM structure_sync_event_market_staging WHERE window_id=?",
+            (window["id"],),
+        )
+    store.init_structure_sync_schema()
+
+    offsets = []
+    for now_ms in (400, 500, 600, 700):
+        result = SQLiteStore(store.db_path).advance_structure_event_market_backfill(
+            window_id=window["id"],
+            max_events=10,
+            max_relationships=2,
+            now_ms=now_ms,
+        )
+        assert result["relationships_processed"] <= 2
+        offsets.append((result["event_cursor"], result["member_offset"]))
+
+    assert offsets == [
+        ("huge-event", 2),
+        ("huge-event", 4),
+        ("huge-event", 6),
+        ("huge-event", 0),
+    ]
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_market_staging WHERE window_id=?",
+            (window["id"],),
+        ).fetchone() == (7,)
+
+
+def test_bootstrap_and_source_certification_keysets_use_indexes(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        event_plan = con.execute(
+            "EXPLAIN QUERY PLAN SELECT event_id,payload_json FROM "
+            "structure_sync_event_staging WHERE window_id=? AND event_id>? "
+            "ORDER BY event_id LIMIT ?",
+            ("window", "", 500),
+        ).fetchall()
+        market_plan = con.execute(
+            "EXPLAIN QUERY PLAN SELECT market_id,payload_json FROM "
+            "structure_sync_market_staging WHERE window_id=? AND market_id>? "
+            "ORDER BY market_id LIMIT ?",
+            ("window", "", 500),
+        ).fetchall()
+
+    for plan in (event_plan, market_plan):
+        detail = " ".join(str(row[3]).upper() for row in plan)
+        assert "SEARCH" in detail
+        assert "TEMP B-TREE" not in detail
+
+
+def test_complete_structure_staging_is_database_frozen(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True,
+        events=[{"id": "event-1", "markets": [{"id": "market-1"}]}],
+        finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=[{"id": "market-1"}], finished_at_ms=300,
+    )
+
+    statements = (
+        (
+            "UPDATE structure_sync_event_staging SET payload_json='{}' "
+            "WHERE window_id=?",
+            "structure-event-staging-frozen",
+        ),
+        (
+            "DELETE FROM structure_sync_market_staging WHERE window_id=?",
+            "structure-market-staging-frozen",
+        ),
+        (
+            "UPDATE structure_sync_event_market_staging SET source_ordinal=9 "
+            "WHERE window_id=?",
+            "structure-event-market-staging-frozen",
+        ),
+    )
+    with sqlite3.connect(store.db_path) as con:
+        for sql, reason in statements:
+            with pytest.raises(sqlite3.IntegrityError, match=reason):
+                con.execute(sql, (window["id"],))
+
+
+def test_bootstrap_cursor_commit_rejects_window_identity_drift(
+    tmp_path, monkeypatch
+) -> None:
+    from polyarb.storage import sqlite_store as store_module
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True,
+        events=[{"id": "event-1", "markets": [{"id": "market-1"}]}],
+        finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=[{"id": "market-1"}], finished_at_ms=300,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "DELETE FROM structure_sync_event_market_backfill_progress WHERE window_id=?",
+            (window["id"],),
+        )
+        con.execute("DROP TRIGGER trg_structure_event_market_delete_guard")
+        con.execute(
+            "DELETE FROM structure_sync_event_market_staging WHERE window_id=?",
+            (window["id"],),
+        )
+    store.init_structure_sync_schema()
+    real_loads = store_module.json.loads
+    changed = False
+
+    def mutate_identity(payload):
+        nonlocal changed
+        result = real_loads(payload)
+        if not changed:
+            changed = True
+            with sqlite3.connect(store.db_path) as con:
+                con.execute(
+                    "UPDATE structure_sync_windows SET checkpoint_at_ms=301 WHERE id=?",
+                    (window["id"],),
+                )
+        return result
+
+    monkeypatch.setattr(store_module.json, "loads", mutate_identity)
+    with pytest.raises(ValueError, match="window-identity-drift"):
+        store.advance_structure_event_market_backfill(
+            window_id=window["id"],
+            max_events=5,
+            max_relationships=5,
+            now_ms=400,
+        )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_market_staging WHERE window_id=?",
+            (window["id"],),
+        ).fetchone() == (0,)
 
 
 def test_structure_child_schema_init_never_scans_legacy_staging(tmp_path) -> None:
@@ -871,10 +1126,12 @@ async def test_completed_legacy_window_checkpoints_bootstrap_before_publication(
             "DELETE FROM structure_sync_event_market_backfill_progress WHERE window_id=?",
             (window["id"],),
         )
+        con.execute("DROP TRIGGER trg_structure_event_market_delete_guard")
         con.execute(
             "DELETE FROM structure_sync_event_market_staging WHERE window_id=?",
             (window["id"],),
         )
+    store.init_structure_sync_schema()
 
     class Gamma:
         async def __aenter__(self):

@@ -85,18 +85,33 @@ def structure_generation_backfill(
         migration = store.advance_structure_event_market_backfill(
             window_id=str(latest["id"]),
             max_events=max_rows,
+            max_relationships=max_rows,
             now_ms=int(time.time() * 1_000),
         )
-        if int(migration["events_processed"]) > 0 or not migration["completed"]:
+        if (
+            int(migration["events_processed"]) > 0
+            or int(migration["relationships_processed"]) > 0
+            or not migration["completed"]
+        ):
+            rotated_to = None
+            if migration["blocked"]:
+                successor = store.rotate_blocked_structure_sync_window(
+                    window_id=str(latest["id"]),
+                    rotated_at_ms=int(time.time() * 1_000),
+                )
+                rotated_to = successor["id"]
             print(
                 json.dumps(
                     {
-                        "after_rowid": migration["after_rowid"],
+                        "event_cursor": migration["event_cursor"],
+                        "member_offset": migration["member_offset"],
                         "blocked": migration["blocked"],
                         "blocked_reason": migration["blocked_reason"],
                         "complete": migration["completed"],
-                        "copied_rows": migration["events_processed"],
+                        "copied_rows": migration["relationships_processed"],
+                        "events_processed": migration["events_processed"],
                         "phase": "event-market-bootstrap",
+                        "rotated_to_window_id": rotated_to,
                         "window_id": str(latest["id"]),
                     },
                     sort_keys=True,

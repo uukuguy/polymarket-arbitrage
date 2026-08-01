@@ -41,6 +41,9 @@ from enum import StrEnum
 from loguru import logger
 
 from polyarb.daemon.structure_schedule import derive_structure_schedule
+from polyarb.perception.structure_contract import (
+    valid_structure_publication_checkpoint,
+)
 from polyarb.validator.category import SnapshotStatus
 
 
@@ -282,16 +285,7 @@ async def run_snapshot_in_subprocess(
             if (
                 not isinstance(publication_id, str)
                 or not publication_id
-                or stage not in {"normalizing", "certifying", "ready"}
-                or component not in {
-                    None,
-                    "events",
-                    "event_tags",
-                    "memberships",
-                    "group_truth",
-                    "markets",
-                    "issues",
-                }
+                or not valid_structure_publication_checkpoint(stage, component)
                 or isinstance(rows_processed, bool)
                 or not isinstance(rows_processed, int)
                 or rows_processed < 0

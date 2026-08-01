@@ -433,8 +433,31 @@ def _structure_generation_health_checks(
 ) -> dict[str, list[dict[str, Any]]]:
     """Project generation rollout metadata without scanning immutable bulk rows."""
     publication = status.get("publication")
+    bootstrap = status.get("bootstrap")
     checkpoint_age_s: float | None = None
-    if publication is None:
+    if isinstance(bootstrap, dict):
+        checkpoint = bootstrap.get("checkpoint_at_ms")
+        if isinstance(checkpoint, int):
+            checkpoint_age_s = max(0.0, (now_ms - checkpoint) / 1_000)
+        blocked_reason = bootstrap.get("blocked_reason")
+        publication_status = (
+            "fail"
+            if blocked_reason is not None
+            or checkpoint_age_s is None
+            or checkpoint_age_s > publication_sla_s
+            else "warn"
+        )
+        publication_output = (
+            "stage=event-market-bootstrap "
+            f"window_id={bootstrap.get('window_id')} "
+            f"event_cursor={bootstrap.get('event_cursor')} "
+            f"member_offset={bootstrap.get('member_offset')} "
+            f"events_processed={bootstrap.get('events_processed')} "
+            f"relationships_processed={bootstrap.get('relationships_processed')} "
+            f"checkpoint_age_seconds={checkpoint_age_s} "
+            f"blocked_reason={blocked_reason}"
+        )
+    elif publication is None:
         stage = "idle"
         publication_status = (
             "warn"
