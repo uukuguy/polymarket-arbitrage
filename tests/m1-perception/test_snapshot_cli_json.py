@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -9,6 +10,7 @@ from typer.testing import CliRunner
 from polyarb.perception.structure_publication import StructurePublicationCheckpoint
 from polyarb.perception.structure_sync import StructureSyncCheckpoint
 from polyarb.snapshot.cli import app
+from polyarb.storage.sqlite_store import SQLiteStore
 
 
 def test_structure_sync_cli_returns_certified_snapshot_json(monkeypatch) -> None:
@@ -107,6 +109,60 @@ def test_structure_sync_cli_reports_publication_checkpoint_and_row_budget(
         "publication_id": "publication-1",
     }
     assert run.await_args.kwargs["max_publication_rows"] == 17
+
+
+def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
+    monkeypatch, tmp_path
+) -> None:
+    from polyarb.snapshot import cli as cli_module
+
+    db_path = tmp_path / "state.db"
+    store = SQLiteStore(db_path)
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True,
+        events=[
+            {"id": f"event-{index}", "markets": [{"id": f"market-{index}"}]}
+            for index in range(3)
+        ], finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True,
+        markets=[{"id": f"market-{index}"} for index in range(3)],
+        finished_at_ms=300,
+    )
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "DELETE FROM structure_sync_event_market_backfill_progress WHERE window_id=?",
+            (window["id"],),
+        )
+        con.execute(
+            "DELETE FROM structure_sync_event_market_staging WHERE window_id=?",
+            (window["id"],),
+        )
+    monkeypatch.setattr(
+        cli_module,
+        "load_settings",
+        lambda: SimpleNamespace(db_path=db_path),
+    )
+
+    result = CliRunner().invoke(
+        app, ["structure-generation-backfill", "--max-rows", "2"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        "after_rowid": 2,
+        "blocked": False,
+        "blocked_reason": None,
+        "complete": False,
+        "copied_rows": 2,
+        "phase": "event-market-bootstrap",
+        "window_id": window["id"],
+    }
 
 
 def test_snapshot_cli_json_contract(monkeypatch) -> None:

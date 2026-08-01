@@ -16,6 +16,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 import typer
@@ -38,7 +39,7 @@ def _generation_store(*, initialize: bool = True):
     settings = load_settings()
     store = SQLiteStore(settings.db_path)
     if initialize:
-        store.init_schema()
+        store.init_structure_sync_schema()
     return settings, store
 
 
@@ -71,10 +72,39 @@ def structure_generation_status() -> None:
 
 @app.command(name="structure-generation-backfill")
 def structure_generation_backfill(
-    max_rows: int = typer.Option(500, "--max-rows", min=1),
+    max_rows: int = typer.Option(500, "--max-rows", min=1, max=5_000),
 ) -> None:
     """Advance exactly one bounded legacy-to-generation backfill chunk."""
     _settings, store = _generation_store()
+    latest = store.get_latest_structure_sync()
+    if (
+        latest is not None
+        and latest["status"] == "complete"
+        and store.get_structure_publication_progress(str(latest["id"])) is None
+    ):
+        migration = store.advance_structure_event_market_backfill(
+            window_id=str(latest["id"]),
+            max_events=max_rows,
+            now_ms=int(time.time() * 1_000),
+        )
+        if int(migration["events_processed"]) > 0 or not migration["completed"]:
+            print(
+                json.dumps(
+                    {
+                        "after_rowid": migration["after_rowid"],
+                        "blocked": migration["blocked"],
+                        "blocked_reason": migration["blocked_reason"],
+                        "complete": migration["completed"],
+                        "copied_rows": migration["events_processed"],
+                        "phase": "event-market-bootstrap",
+                        "window_id": str(latest["id"]),
+                    },
+                    sort_keys=True,
+                )
+            )
+            if migration["blocked"]:
+                raise typer.Exit(code=1)
+            return
     result = store.backfill_current_structure_generation(max_rows=max_rows)
     print(
         json.dumps(

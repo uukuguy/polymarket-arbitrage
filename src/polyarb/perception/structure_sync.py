@@ -19,7 +19,10 @@ from polyarb.clients.gamma_client import (
     PaginationResult,
 )
 from polyarb.config import Settings
-from polyarb.storage.sqlite_store import SQLiteStore
+from polyarb.storage.sqlite_store import (
+    STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS,
+    SQLiteStore,
+)
 
 _monotonic = time.monotonic
 
@@ -254,11 +257,30 @@ async def run_structure_sync_until_published(
         raise ValueError("structure-sync-max-pages-must-be-positive")
     if max_elapsed_s is not None and max_elapsed_s <= 0:
         raise ValueError("structure-sync-max-elapsed-must-be-positive")
-    if max_publication_rows < 1:
+    if not 1 <= max_publication_rows <= STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS:
         raise ValueError("structure-publication-max-rows-must-be-positive")
     store = SQLiteStore(settings.db_path)
     store.init_structure_sync_schema()
     latest = store.get_latest_structure_sync()
+    if (
+        latest is not None
+        and latest["status"] == "complete"
+        and (max_pages is not None or max_elapsed_s is not None)
+    ):
+        migration = await asyncio.to_thread(
+            store.advance_structure_event_market_backfill,
+            window_id=str(latest["id"]),
+            max_events=max_publication_rows,
+            now_ms=int(time.time() * 1_000),
+        )
+        if migration["blocked"]:
+            raise ValueError(str(migration["blocked_reason"]))
+        if int(migration["events_processed"]) > 0 or not migration["completed"]:
+            return StructureSyncCheckpoint(
+                window_id=str(latest["id"]),
+                stage="complete",
+                pages_processed=max(1, int(migration["events_processed"])),
+            )
     async with GammaClient(settings) as gamma:
         if latest is not None and latest["status"] == "complete":
             if max_pages is not None or max_elapsed_s is not None:

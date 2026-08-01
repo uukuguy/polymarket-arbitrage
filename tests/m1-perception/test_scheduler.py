@@ -411,6 +411,39 @@ async def test_snapshot_subprocess_accepts_cooperative_checkpoint() -> None:
     assert result.pages_processed == 80
 
 
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_accepts_publication_checkpoint() -> None:
+    """A durable publication chunk must not be reclassified as child failure."""
+    from polyarb.daemon.scheduler import (
+        IsolatedStructurePublicationCheckpoint,
+        run_snapshot_in_subprocess,
+    )
+
+    process = _FakeProcess(
+        {
+            "checkpointed": True,
+            "stage": "normalizing",
+            "component": "events",
+            "rows_processed": 500,
+            "cursor": "events|event-500",
+            "publication_id": "publication-1",
+        },
+        returncode=0,
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    result = await run_snapshot_in_subprocess(spawn=spawn)
+
+    assert isinstance(result, IsolatedStructurePublicationCheckpoint)
+    assert result.stage == "normalizing"
+    assert result.component == "events"
+    assert result.rows_processed == 500
+    assert result.cursor == "events|event-500"
+    assert result.publication_id == "publication-1"
+
+
 def test_snapshot_stage_parser_keeps_only_final_allowlisted_marker() -> None:
     """Arbitrary child stderr never becomes a scheduler diagnostic."""
     from polyarb.daemon.scheduler import _parse_last_snapshot_stage

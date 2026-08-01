@@ -134,6 +134,16 @@ class IsolatedStructureCheckpoint:
     elapsed_ms: int
 
 
+@dataclass(frozen=True)
+class IsolatedStructurePublicationCheckpoint:
+    stage: str
+    component: str | None
+    rows_processed: int
+    cursor: str | None
+    publication_id: str
+    elapsed_ms: int
+
+
 async def run_snapshot_in_subprocess(
     *,
     spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (
@@ -263,6 +273,50 @@ async def run_snapshot_in_subprocess(
             elapsed_ms=process_elapsed_ms,
         )
     if payload.get("checkpointed") is True:
+        publication_id = payload.get("publication_id")
+        if publication_id is not None:
+            stage = payload.get("stage")
+            component = payload.get("component")
+            rows_processed = payload.get("rows_processed")
+            cursor = payload.get("cursor")
+            if (
+                not isinstance(publication_id, str)
+                or not publication_id
+                or stage not in {"normalizing", "certifying", "ready"}
+                or component not in {
+                    None,
+                    "events",
+                    "event_tags",
+                    "memberships",
+                    "group_truth",
+                    "markets",
+                    "issues",
+                }
+                or isinstance(rows_processed, bool)
+                or not isinstance(rows_processed, int)
+                or rows_processed < 0
+                or (cursor is not None and not isinstance(cursor, str))
+                or process.returncode != 0
+            ):
+                raise SnapshotSubprocessError(
+                    "invalid-json",
+                    last_stage=last_stage,
+                    elapsed_ms=process_elapsed_ms,
+                )
+            logger.info(
+                "isolated Structure publication checkpointed "
+                f"pid={getattr(process, 'pid', None)} elapsed_ms={process_elapsed_ms} "
+                f"stage={stage} component={component} rows={rows_processed} "
+                f"publication_id={publication_id}"
+            )
+            return IsolatedStructurePublicationCheckpoint(
+                stage=str(stage),
+                component=None if component is None else str(component),
+                rows_processed=rows_processed,
+                cursor=None if cursor is None else str(cursor),
+                publication_id=publication_id,
+                elapsed_ms=process_elapsed_ms,
+            )
         window_id = payload.get("window_id")
         stage = payload.get("stage")
         pages_processed = payload.get("pages_processed")
@@ -721,12 +775,18 @@ class SnapshotScheduler:
                 result = await self._run_snapshot()
             finally:
                 self._release_producer_slot()
-            if isinstance(result, IsolatedStructureCheckpoint):
-                last_stage = (
-                    "gamma-events"
-                    if result.stage == "events"
-                    else "gamma-markets"
-                )
+            if isinstance(
+                result,
+                (IsolatedStructureCheckpoint, IsolatedStructurePublicationCheckpoint),
+            ):
+                if isinstance(result, IsolatedStructurePublicationCheckpoint):
+                    last_stage = "persist"
+                    pages_or_rows = result.rows_processed
+                else:
+                    last_stage = (
+                        "gamma-events" if result.stage == "events" else "gamma-markets"
+                    )
+                    pages_or_rows = result.pages_processed
                 await self._finish_attempt(
                     attempt_id=attempt_id,
                     outcome="cancelled",
@@ -738,7 +798,7 @@ class SnapshotScheduler:
                 self._checkpoint_pending = True
                 logger.info(
                     "snapshot tick checkpointed: "
-                    f"stage={result.stage} pages={result.pages_processed} "
+                    f"stage={result.stage} rows_or_pages={pages_or_rows} "
                     f"failure_counter={self._failure_counter}"
                 )
                 self._persist_counter()

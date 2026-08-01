@@ -2360,6 +2360,14 @@ CREATE TABLE IF NOT EXISTS structure_sync_event_market_staging (
 );
 CREATE INDEX IF NOT EXISTS idx_structure_sync_event_market_first
 ON structure_sync_event_market_staging(window_id,market_id,source_ordinal,event_id);
+CREATE TABLE IF NOT EXISTS structure_sync_event_market_backfill_progress (
+    window_id TEXT PRIMARY KEY REFERENCES structure_sync_windows(id) ON DELETE CASCADE,
+    after_rowid INTEGER NOT NULL DEFAULT 0 CHECK(after_rowid >= 0),
+    events_processed INTEGER NOT NULL DEFAULT 0 CHECK(events_processed >= 0),
+    checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
+    completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),
+    blocked_reason TEXT
+);
 CREATE TABLE IF NOT EXISTS structure_sync_market_staging (
     window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
     market_id TEXT NOT NULL,
