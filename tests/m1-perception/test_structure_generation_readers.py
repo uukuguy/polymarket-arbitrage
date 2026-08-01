@@ -510,6 +510,7 @@ def test_generation_history_queries_are_bounded_and_indexed(tmp_path: Path) -> N
             pressure_probe_limit=8,
         )
         assert "active_comparison" in plans
+        assert "pointer_repair" in plans
     for plan in plans.values():
         detail = " ".join(plan).upper()
         assert "SCAN " not in detail
@@ -628,6 +629,71 @@ def test_pre_task5_missing_receipt_health_is_warn_only_for_fresh_active_repair(
     )
     assert fresh["snapshot:structure_generation_comparison"][0]["status"] == "warn"
     assert stale["snapshot:structure_generation_comparison"][0]["status"] == "fail"
+
+
+def test_pre_task5_missing_receipt_rejects_wrong_publication_progress_identity(
+    tmp_path: Path,
+) -> None:
+    from polyarb.http.health import _structure_generation_health_checks
+
+    path = tmp_path / "pre-task5-wrong-progress-publication.db"
+    SQLiteStore(path).init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="old", point_current=True)
+    _seed_structure_revision(path, snapshot_id=2, market_suffix="new", point_current=False)
+    _downgrade_to_pre_task5_pointer(path)
+    with sqlite3.connect(path) as con:
+        con.execute("DROP TRIGGER trg_structure_comparison_receipt_delete")
+        con.execute(
+            "DELETE FROM structure_generation_comparison_receipts "
+            "WHERE generation_snapshot_id=1"
+        )
+    SQLiteStore(path).init_schema()
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "UPDATE structure_generation_comparison_progress SET publication_id="
+            "'test-publication-2' WHERE generation_snapshot_id=1"
+        )
+
+    status = SQLiteStore(path).structure_generation_status(retain_generations=2)
+    checks = _structure_generation_health_checks(
+        status,
+        now_ms=1_001,
+        read_mode="generation",
+        publication_sla_s=100,
+        pressure_warn_count=4,
+        pressure_fail_count=8,
+    )
+    assert status["generation_count_agrees"] is True
+    assert status["generation_hash_agrees"] is True
+    assert status["comparison_recoverable_missing_receipt"] is False
+    assert checks["snapshot:structure_generation_comparison"][0]["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [("digest_state_json", "{}"), ("row_cursor_json", "{}")],
+)
+def test_pre_task5_missing_receipt_rejects_unresumable_progress_state(
+    tmp_path: Path,
+    column: str,
+    value: str,
+) -> None:
+    path = tmp_path / f"pre-task5-unresumable-{column}.db"
+    SQLiteStore(path).init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="old", point_current=True)
+    _downgrade_to_pre_task5_pointer(path)
+    with sqlite3.connect(path) as con:
+        con.execute("DROP TRIGGER trg_structure_comparison_receipt_delete")
+        con.execute("DELETE FROM structure_generation_comparison_receipts")
+    SQLiteStore(path).init_schema()
+    with sqlite3.connect(path) as con:
+        con.execute(
+            f"UPDATE structure_generation_comparison_progress SET {column}=?",  # noqa: S608
+            (value,),
+        )
+
+    status = SQLiteStore(path).structure_generation_status(retain_generations=2)
+    assert status["comparison_recoverable_missing_receipt"] is False
 
 
 @pytest.mark.parametrize("protected_snapshot_id", [3, 2])

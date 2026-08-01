@@ -467,6 +467,35 @@ def _initialize_structure_comparison_progress(
     return phase is not None and phase[0] != "sealed"
 
 
+def _structure_comparison_progress_is_resumable(progress: tuple[object, ...]) -> bool:
+    """Validate the bounded state needed to resume an authenticated comparison."""
+    phase = str(progress[0])
+    expected_cursor_size = 4 if phase.endswith("universe") else 3
+    try:
+        cursor = None if progress[1] is None else json.loads(str(progress[1]))
+        SerializableSHA256.from_json(str(progress[2]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if cursor is not None and (
+        not isinstance(cursor, list)
+        or len(cursor) != expected_cursor_size
+        or not all(isinstance(value, str) for value in cursor)
+    ):
+        return False
+    required_hashes = {
+        "legacy-universe": 0,
+        "generation-universe": 1,
+        "legacy-rejections": 2,
+        "generation-rejections": 3,
+    }.get(phase)
+    if required_hashes is None:
+        return False
+    return all(
+        isinstance(value, str) and len(value) == 64
+        for value in progress[5 : 5 + required_hashes]
+    )
+
+
 def _repair_current_structure_generation_authentication(
     con: sqlite3.Connection,
 ) -> None:
@@ -3869,10 +3898,12 @@ class SQLiteStore:
                     (int(pointer[0]),),
                 ).fetchone()
                 pointer_repair_progress = con.execute(
-                    "SELECT phase,checkpoint_at_ms FROM "
+                    "SELECT phase,row_cursor_json,digest_state_json,phase_row_count,"
+                    "checkpoint_at_ms,legacy_universe_hash,generation_universe_hash,"
+                    "legacy_source_truth_hash FROM "
                     "structure_generation_comparison_progress WHERE "
-                    "generation_snapshot_id=? AND phase!='sealed'",
-                    (int(pointer[0]),),
+                    "generation_snapshot_id=? AND publication_id=? AND phase!='sealed'",
+                    (int(pointer[0]), str(pointer[1])),
                 ).fetchone()
         count_agrees = hash_agrees = False
         comparison_authenticated = pointer is None
@@ -3894,10 +3925,13 @@ class SQLiteStore:
                     and count_agrees
                     and hash_agrees
                     and pointer_repair_progress is not None
+                    and _structure_comparison_progress_is_resumable(
+                        pointer_repair_progress
+                    )
                 )
-                if pointer_repair_progress is not None:
+                if comparison_recoverable_missing_receipt:
                     comparison_repair_checkpoint_at_ms = int(
-                        pointer_repair_progress[1]
+                        pointer_repair_progress[4]
                     )
             else:
                 expected_digest = _comparison_receipt_digest(
@@ -4010,6 +4044,14 @@ class SQLiteStore:
     ) -> dict[str, tuple[str, ...]]:
         """Expose stable SQLite planner evidence for bounded operator queries."""
         queries = {
+            "pointer_repair": (
+                "SELECT phase,row_cursor_json,digest_state_json,phase_row_count,"
+                "checkpoint_at_ms,legacy_universe_hash,generation_universe_hash,"
+                "legacy_source_truth_hash FROM "
+                "structure_generation_comparison_progress WHERE "
+                "generation_snapshot_id=? AND publication_id=? AND phase!='sealed'",
+                (-1, "planner-probe"),
+            ),
             "active_comparison": (
                 "SELECT generation_snapshot_id,phase,row_cursor_json,checkpoint_at_ms "
                 "FROM structure_generation_comparison_progress WHERE phase!='sealed' "

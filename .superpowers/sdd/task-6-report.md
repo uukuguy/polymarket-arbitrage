@@ -134,3 +134,23 @@ Second-review verification:
 - Focused four-gap regression: 7 tests passed.
 - Expanded publication/readers/health/migration/schema regression: passed.
 - Full M1 gate: **3003 passed, 1 skipped, 1 xfailed** in 508.59 seconds.
+
+## Final identity-binding review
+
+The final narrow review found that the pre-Task5 missing-receipt exception
+looked up repair progress by generation alone. It is now fail-closed unless one
+indexed lookup matches both the current pointer's `generation_snapshot_id` and
+`publication_id`. The same O(1) check also proves that the serialized SHA-256
+state and phase cursor are parseable and structurally resumable, including all
+prior phase hashes required by the active phase. A valid publication belonging
+to another generation cannot authorize a warning.
+
+Final-review verification:
+
+- Exact wrong-publication tamper reproduced RED, then passed GREEN.
+- Malformed digest-state and cursor-state cases fail closed; the valid same-pair
+  case remains warn inside SLA and fail after SLA.
+- Pointer-repair EXPLAIN uses an index SEARCH with no scan or temporary B-tree.
+- Focused and expanded generation/health/migration/schema suites passed.
+- Full M1 gate: **3006 passed, 1 skipped, 1 xfailed** in 507.89 seconds.
+- Ruff, docs contract, planning no-drift, and diff checks passed.
