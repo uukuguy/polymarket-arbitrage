@@ -5882,3 +5882,26 @@ After written-spec approval, invoke `writing-plans`, create the TDD execution
 plan, implement the bounded handoff, run local gates, deploy exact releases, and
 observe one natural Structure-to-Quote transition with no opportunity 503.
 First repository command: `make planning-status`.
+
+## SESSION 125 — 2026-08-01 (double-buffer implementation plan ready)
+
+- [SPEC APPROVED] The user approved the committed written double-buffer spec.
+- [PLAN COMMITTED] Commit `4340b41` adds the self-reviewed TDD implementation
+  plan at
+  `docs/superpowers/plans/2026-08-01-m1-opportunity-feed-double-buffer.md`.
+- [SELF-REVIEW FINDING] Existing market-truth age is anchored to Structure
+  `taken_at_ms`, while the approved handoff SLA is anchored to completion. The
+  plan adds a separate completion-age fact and preserves the existing freshness
+  metric instead of silently changing its meaning.
+- [CHAIN TRUTH] The plan also updates Polywatch's exact warning recognition and
+  validates `refreshing` against served/latest revision IDs, closing the path
+  from writer to health to incident decision.
+- [BOUNDARY] No implementation code has changed. The writing-plans execution
+  handoff remains before TDD work.
+
+### [NEXT — CURRENT]
+
+Choose inline execution or explicitly authorize subagent-driven execution.
+Given the repository's no-subagent default, inline execution is the recommended
+available path. Then execute Task 1 RED→GREEN from the committed plan.
+First repository command: `make planning-status`.
