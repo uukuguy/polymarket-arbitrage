@@ -27,6 +27,31 @@ def _read_market_truth_health(path: Path, *, now_s: float):
     return reader(path, now_s)
 
 
+@pytest.mark.parametrize(
+    ("free", "expected_status"),
+    ((25, "pass"), (19, "warn"), (9, "fail")),
+)
+def test_health_tracks_physical_volume_headroom(
+    http_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    free: int,
+    expected_status: str,
+) -> None:
+    monkeypatch.setattr(
+        health_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=100, used=100 - free, free=free),
+    )
+
+    check = http_test_client.get("/health").json()["checks"][
+        "storage:volume_free_percent"
+    ][0]
+
+    assert check["observedValue"] == float(free)
+    assert check["status"] == expected_status
+    assert check["output"] == f"free_bytes={free} total_bytes=100"
+
+
 @pytest.mark.parametrize("handler_name", ["health", "healthz"])
 async def test_health_database_projection_runs_off_event_loop(
     daemon_settings_for_test: Any,

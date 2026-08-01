@@ -498,6 +498,14 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
             f"error={retention.get('output')})",
         )
 
+    volume = _extract_check(healthz, "storage:volume_free_percent", {})
+    if volume and volume.get("status") != "pass":
+        return (
+            "push",
+            "L1 volume headroom "
+            f"{volume.get('status')} (free={volume.get('observedValue')}%)",
+        )
+
     return (
         "noop",
         "L1 ok "

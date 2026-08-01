@@ -47,6 +47,7 @@ M1_MAKE_TARGETS = {
     "scan-arb-live",
     "diagnose-arb-feed-prod",
     "collect-neg-risk-quotes",
+    "cleanup-neg-risk-quotes",
     "scan-arb-quotes",
     "eval-local",
     "l3-promote-dry-run",

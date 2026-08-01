@@ -13,6 +13,7 @@ leg_executor so all legs trivially succeed (paper mode).
 from __future__ import annotations
 
 import json
+from unittest.mock import MagicMock, call
 
 import pytest
 from typer.testing import CliRunner
@@ -27,6 +28,33 @@ from polyarb.routing.opportunity_scanner import (
 from polyarb.routing.position_tracker import PositionTracker
 
 runner = CliRunner()
+
+
+def test_cleanup_neg_risk_quotes_runs_bounded_single_run_transactions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    purge = MagicMock(side_effect=[1, 1, 0])
+    store = MagicMock()
+    store.purge_old_runs = purge
+    monkeypatch.setattr(cli_mod, "NegRiskQuoteStore", MagicMock(return_value=store))
+
+    result = runner.invoke(
+        app,
+        ["cleanup-neg-risk-quotes", "--db-path", "state.db", "--max-runs", "20"],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "deleted_runs": 2,
+        "keep_last_per_status": 10,
+        "max_runs": 20,
+        "status": "complete",
+    }
+    assert purge.call_args_list == [
+        call(keep_last_per_status=10, max_runs=1),
+        call(keep_last_per_status=10, max_runs=1),
+        call(keep_last_per_status=10, max_runs=1),
+    ]
 
 
 @pytest.fixture(autouse=True)

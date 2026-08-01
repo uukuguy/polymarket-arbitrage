@@ -344,6 +344,11 @@ scan-arb:
 collect-neg-risk-quotes:
 	@uv run python -m polyarb.cli_arbitrage collect-neg-risk-quotes --db-path "$(if $(strip $(db)),$(db),data/state.db)"
 
+.PHONY: cleanup-neg-risk-quotes
+## cleanup-neg-risk-quotes: Catch up terminal Quote history in one-run transactions; keeps 10 complete and 10 failed. Usage: make cleanup-neg-risk-quotes [db=data/state.db] [max_runs=20]
+cleanup-neg-risk-quotes:
+	@uv run python -m polyarb.cli_arbitrage cleanup-neg-risk-quotes --db-path "$(if $(strip $(db)),$(db),data/state.db)" --max-runs "$(or $(max_runs),20)"
+
 ## scan-arb-quotes: Inspect the latest complete known-universe quote run from a local SQLite DB; returns nonzero if unavailable/stale.
 scan-arb-quotes:
 	@uv run python -m polyarb.cli_arbitrage scan-quotes --db-path "$(if $(strip $(db)),$(db),data/state.db)" --min-edge-bps "$(or $(min_edge_bps),0)" --max-quote-age-s "$(or $(max_quote_age_s),300)" --max-universe-age-s "$(or $(max_universe_age_s),50400)"

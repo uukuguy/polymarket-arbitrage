@@ -611,6 +611,11 @@ class NegRiskQuoteStore:
                 raise ValueError(f"{name} must be {'non-negative' if allow_zero else 'positive'}")
         con = self._connect()
         try:
+            # Quote payloads are public market data.  Securely overwriting tens
+            # of thousands of deleted rows made one bounded production purge
+            # take 12-129 seconds; leave pages on SQLite's freelist instead so
+            # future quote runs reuse them without blocking the hot producer.
+            con.execute("PRAGMA secure_delete=OFF")
             self._begin_immediate(con)
             try:
                 rows = con.execute(

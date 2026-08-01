@@ -86,6 +86,7 @@ def test_diagnose_arb_feed_make_entry_is_listed_and_dry_runs() -> None:
 
 def test_local_quote_make_entries_are_safe_discoverable_and_forward_options() -> None:
     collect_recipe = _make_recipe("collect-neg-risk-quotes")
+    cleanup_recipe = _make_recipe("cleanup-neg-risk-quotes")
     scan_recipe = _make_recipe("scan-arb-quotes")
     unsafe = (
         r"\b(flyctl|POST|PUT|PATCH|DELETE|deploy|scale|restart|secret|schema|migrat|"
@@ -96,6 +97,8 @@ def test_local_quote_make_entries_are_safe_discoverable_and_forward_options() ->
         'cli_arbitrage collect-neg-risk-quotes --db-path "$(if $(strip $(db)),$(db),data/state.db)"'
     )
     assert collect_entry in collect_recipe
+    assert "cli_arbitrage cleanup-neg-risk-quotes" in cleanup_recipe
+    assert '--max-runs "$(or $(max_runs),20)"' in cleanup_recipe
     assert "cli_arbitrage scan-quotes" in scan_recipe
     assert '--db-path "$(if $(strip $(db)),$(db),data/state.db)"' in scan_recipe
     assert '--min-edge-bps "$(or $(min_edge_bps),0)"' in scan_recipe
@@ -106,7 +109,11 @@ def test_local_quote_make_entries_are_safe_discoverable_and_forward_options() ->
 
     help_result = _make("help")
     assert help_result.returncode == 0, help_result.stderr
-    for target in ("collect-neg-risk-quotes:", "scan-arb-quotes:"):
+    for target in (
+        "collect-neg-risk-quotes:",
+        "cleanup-neg-risk-quotes:",
+        "scan-arb-quotes:",
+    ):
         assert target in help_result.stdout
 
     default_collect = _make("-n", "collect-neg-risk-quotes")

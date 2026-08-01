@@ -47,6 +47,7 @@ Source: datatracker.ietf.org/doc/html/draft-inadarei-api-health-check-06
 from __future__ import annotations
 
 import asyncio
+import shutil
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -444,6 +445,32 @@ def _build_health_checks(
     """
     checks: dict[str, list[dict[str, Any]]] = {}
     overall = "pass"
+
+    try:
+        volume = shutil.disk_usage(store.db_path.parent)
+        free_percent = (
+            100.0 * volume.free / volume.total if volume.total > 0 else 0.0
+        )
+        volume_status = (
+            "pass" if free_percent >= 20.0 else "warn" if free_percent >= 10.0 else "fail"
+        )
+        volume_output = f"free_bytes={volume.free} total_bytes={volume.total}"
+    except OSError as error:
+        free_percent = None
+        volume_status = "fail"
+        volume_output = type(error).__name__
+    overall = _severity(overall, volume_status)
+    checks["storage:volume_free_percent"] = [
+        {
+            "componentId": "sqlite-volume",
+            "componentType": "datastore",
+            "observedValue": free_percent,
+            "observedUnit": "%",
+            "status": volume_status,
+            "output": volume_output,
+            "time": _utc_now_iso(),
+        }
+    ]
 
     recovery_enabled = bool(getattr(settings, "opportunity_producer_supervisor_enabled", False))
     resource_enabled = bool(getattr(settings, "opportunity_resource_controller_enabled", False))

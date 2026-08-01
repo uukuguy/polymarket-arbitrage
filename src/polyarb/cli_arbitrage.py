@@ -133,6 +133,39 @@ def collect_neg_risk_quotes_command(
     )
 
 
+@app.command("cleanup-neg-risk-quotes")
+def cleanup_neg_risk_quotes_command(
+    db_path: Path = typer.Option(Path("data/state.db"), "--db-path"),
+    max_runs: int = typer.Option(20, "--max-runs", min=1, max=1_000),
+) -> None:
+    """Catch up terminal quote retention using one short transaction per run."""
+    store = NegRiskQuoteStore(db_path)
+    deleted_runs = 0
+    try:
+        while deleted_runs < max_runs:
+            deleted = store.purge_old_runs(
+                keep_last_per_status=10,
+                max_runs=1,
+            )
+            if deleted == 0:
+                break
+            deleted_runs += deleted
+    except (sqlite3.Error, ValueError) as error:
+        typer.secho(f"quote retention cleanup failed: {error}", err=True)
+        raise typer.Exit(code=2) from error
+    typer.echo(
+        json.dumps(
+            {
+                "deleted_runs": deleted_runs,
+                "keep_last_per_status": 10,
+                "max_runs": max_runs,
+                "status": "complete",
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def _build_synthetic_signal(
     mid: float,
     stake: float,

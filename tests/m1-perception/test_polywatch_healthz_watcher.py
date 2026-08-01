@@ -159,6 +159,28 @@ def test_l1_quote_retention_failure_pushes() -> None:
     )
 
 
+def test_l1_volume_headroom_warning_pushes() -> None:
+    health = _health(
+        checks={
+            "snapshot:last_success_age_seconds": _check(60.0),
+            "market_truth:coverage": _check("complete"),
+            "quote_feed:last_complete_age_seconds": _check(20.0),
+            "quote_feed:collector_state": _check("pass"),
+            "quote_feed:retention": _check(0),
+            "storage:volume_free_percent": _check(
+                19.0,
+                status="warn",
+                output="free_bytes=19 total_bytes=100",
+            ),
+        }
+    )
+
+    assert WATCHER.decide_l1(health) == (
+        "push",
+        "L1 volume headroom warn (free=19.0%)",
+    )
+
+
 def test_polywatch_alerts_on_market_truth_coverage_failure() -> None:
     health = _health(
         checks={

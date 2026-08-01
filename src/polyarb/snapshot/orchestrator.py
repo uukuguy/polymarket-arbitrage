@@ -789,12 +789,13 @@ async def run_snapshot(
                 and event_failure_reason is None
                 and market_failure_reason is None
             ):
-                # Only active/open event members can represent a race against
-                # the active/open market keyset.  Gamma legitimately keeps a
-                # large historical tail of inactive or closed members embedded
-                # in active events; point-checking that tail exhausts the
-                # bounded reconciliation budget without adding source truth.
-                missing_event_members = sorted(authoritative_member_ids - seen_ids)
+                # normalize_events keeps only active/open or status-omitted
+                # nested members in this mapping.  Gamma legitimately keeps a
+                # large explicit inactive/closed historical tail in active
+                # events; point-checking that tail exhausts the bounded budget
+                # without adding source truth.  Status-omitted ordinary event
+                # members remain obligations and therefore stay fail-closed.
+                missing_event_members = sorted(set(market_to_event_map) - seen_ids)
                 if missing_event_members:
                     try:
                         point_states = await gamma.fetch_market_states(missing_event_members)

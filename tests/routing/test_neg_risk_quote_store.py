@@ -181,8 +181,19 @@ def _complete(store: NegRiskQuoteStore) -> int:
     return run_id
 
 
-def test_purge_old_runs_keeps_recent_complete_and_failed_history(quote_db) -> None:
+def test_purge_old_runs_keeps_recent_complete_and_failed_history(
+    quote_db, monkeypatch
+) -> None:
     store = NegRiskQuoteStore(quote_db)
+    statements: list[str] = []
+    connect = store._connect
+
+    def traced_connect():
+        con = connect()
+        con.set_trace_callback(statements.append)
+        return con
+
+    monkeypatch.setattr(store, "_connect", traced_connect)
     complete_ids = [_complete(store) for _ in range(4)]
     failed_ids: list[int] = []
     for index in range(3):
@@ -218,6 +229,7 @@ def test_purge_old_runs_keeps_recent_complete_and_failed_history(quote_db) -> No
     ]
     assert remaining_legs == set(complete_ids[-2:] + failed_ids[-2:])
     assert remaining_quotes == set(complete_ids[-2:])
+    assert any(statement.upper() == "PRAGMA SECURE_DELETE=OFF" for statement in statements)
 
 
 def test_purge_old_runs_is_bounded_and_never_deletes_collecting(quote_db) -> None:
