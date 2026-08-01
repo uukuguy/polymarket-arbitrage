@@ -1,7 +1,7 @@
 # M1 Quote-Priority Generation Publication Design
 
 **Date:** 2026-08-01  
-**Status:** approved design; awaiting written-spec review  
+**Status:** approved for implementation
 **Scope:** Phase 05.6 Plan 02 production closure  
 **Amends:** `2026-07-31-m1-self-healing-structure-design.md` and
 `2026-08-01-m1-opportunity-feed-double-buffer-design.md`
@@ -129,10 +129,11 @@ the next Quote collection.
 
 ## Candidate lifecycle queue
 
-Atomic Quote feed publication writes one durable, idempotent reconciliation
-item identified by `(quote_run_id, universe_hash)`. Publishing an existing item
-is a no-op. A newer unclaimed item may supersede older unclaimed work, but a
-claimed item retains its exact identity until terminal success or retry.
+The durable Quote-run certification transaction writes one idempotent
+reconciliation item identified by `(quote_run_id, universe_hash)` before the
+in-memory feed is published. Publishing an existing item is a no-op. Items are
+claimed FIFO and no certified run may be superseded or discarded before its
+terminal receipt; this preserves candidates that exist for only one Quote run.
 
 The consumer:
 
@@ -206,7 +207,7 @@ Local tests must prove:
    maintenance, and candidate queue enqueue;
 4. attempt runtime starts at slot acquisition and defer age is independently
    reported;
-5. lifecycle queue lease recovery, coalescing, restart continuation, stable
+5. lifecycle queue lease recovery, lossless FIFO ordering, restart continuation, stable
    opportunity IDs, complete transition history, and notification retry;
 6. existing fail-closed market truth, Quote identity, double-buffer, and
    opportunity response contracts remain intact; and
