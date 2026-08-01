@@ -265,6 +265,48 @@ def test_purge_detaches_attempt_fk_but_retains_durable_run_identity(quote_db) ->
         )
 
 
+def test_start_attempt_closes_orphan_and_bounds_terminal_history(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    orphan_id = store.start_collection_attempt(started_at_ms=NOW_MS - 120_001)
+    successor_id = store.start_collection_attempt(started_at_ms=NOW_MS)
+    with sqlite3.connect(quote_db) as con:
+        orphan = con.execute(
+            "SELECT checkpoint_at_ms,phase,outcome,failure_kind "
+            "FROM neg_risk_quote_attempts WHERE id=?",
+            (orphan_id,),
+        ).fetchone()
+
+    assert orphan == (NOW_MS, "failed", "failed", "parent-orphaned")
+
+    with sqlite3.connect(quote_db) as con:
+        con.executemany(
+            "INSERT INTO neg_risk_quote_attempts("
+            "started_at_ms,checkpoint_at_ms,phase,outcome,failure_kind) "
+            "VALUES (?,?,'failed','failed','fixture')",
+            [(NOW_MS - 10_000 + offset, NOW_MS - 10_000 + offset) for offset in range(1002)],
+        )
+
+    newest_id = store.start_collection_attempt(started_at_ms=NOW_MS + 1)
+
+    with sqlite3.connect(quote_db) as con:
+        terminal_count = con.execute(
+            "SELECT COUNT(*) FROM neg_risk_quote_attempts "
+            "WHERE outcome IN ('complete','failed')"
+        ).fetchone()
+        successor = con.execute(
+            "SELECT phase,outcome FROM neg_risk_quote_attempts WHERE id=?",
+            (successor_id,),
+        ).fetchone()
+        newest = con.execute(
+            "SELECT phase,outcome FROM neg_risk_quote_attempts WHERE id=?",
+            (newest_id,),
+        ).fetchone()
+
+    assert terminal_count[0] <= 1000
+    assert successor == ("universe", "collecting")
+    assert newest == ("universe", "collecting")
+
+
 @pytest.mark.parametrize(
     ("keep_last_per_status", "max_runs"),
     [(-1, 1), (1, 0), (True, 1), (1, True)],
@@ -1086,6 +1128,45 @@ def test_completed_receipt_seals_snapshot_and_full_leg_quote_identity(quote_db) 
 
     projection = store.latest_complete_projection()
     assert projection is not None and projection.run_id == run_id
+
+
+def test_unsealed_draft_receipt_is_quarantined_without_structure_fallback(
+    quote_db,
+    monkeypatch,
+) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    universe = store.latest_verified_universe()
+    run_id = store.begin_verified_run(universe, quoted_at_ms=NOW_MS)
+    store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b")))
+    store.complete_run(run_id, completed_at_ms=NOW_MS + 1, successful_response_count=2)
+    with sqlite3.connect(quote_db) as con:
+        con.execute("DROP TRIGGER trg_complete_quote_receipt_immutable_update")
+        con.execute(
+            "UPDATE neg_risk_quote_source_receipts SET leg_quote_digest='' "
+            "WHERE quote_run_id=?",
+            (run_id,),
+        )
+
+    SQLiteStore(quote_db).init_schema()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("quarantined receipt used Structure compatibility scan")
+
+    monkeypatch.setattr(
+        quote_store_module,
+        "_verified_universe_for_snapshot",
+        forbidden,
+    )
+    assert store.latest_complete_projection() is None
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT reason FROM neg_risk_quote_unsealed_receipts WHERE quote_run_id=?",
+            (run_id,),
+        ).fetchone() == ("missing-leg-quote-digest",)
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_quote_source_receipts WHERE quote_run_id=?",
+            (run_id,),
+        ).fetchone() == (0,)
 
 
 def test_legacy_projection_receipt_rejects_source_mutation_before_admission(quote_db) -> None:

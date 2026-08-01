@@ -1739,6 +1739,30 @@ class SQLiteStore:
                 "leg_quote_digest",
                 "TEXT NOT NULL DEFAULT ''",
             )
+            # The first, unreleased receipt draft did not seal legs/quotes.
+            # Never backfill it from mutable rows or fall back to a Structure
+            # scan. Quarantine and remove it under the same authority used by
+            # bounded purge; a fresh Quote run must independently recertify.
+            con.execute(
+                "INSERT OR IGNORE INTO neg_risk_quote_unsealed_receipts("
+                "quote_run_id,reason) SELECT q.quote_run_id,'missing-leg-quote-digest' "
+                "FROM neg_risk_quote_source_receipts q JOIN neg_risk_quote_runs r "
+                "ON r.id=q.quote_run_id WHERE r.status='complete' "
+                "AND q.leg_quote_digest=''"
+            )
+            con.execute(
+                "INSERT OR IGNORE INTO neg_risk_quote_purge_authority(quote_run_id) "
+                "SELECT quote_run_id FROM neg_risk_quote_unsealed_receipts"
+            )
+            con.execute(
+                "DELETE FROM neg_risk_quote_source_receipts WHERE leg_quote_digest='' "
+                "AND quote_run_id IN (SELECT quote_run_id "
+                "FROM neg_risk_quote_unsealed_receipts)"
+            )
+            con.execute(
+                "DELETE FROM neg_risk_quote_purge_authority WHERE quote_run_id IN ("
+                "SELECT quote_run_id FROM neg_risk_quote_unsealed_receipts)"
+            )
             _ensure_column(
                 "snapshots",
                 "market_view_published",

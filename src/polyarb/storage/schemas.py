@@ -1916,6 +1916,11 @@ CREATE TABLE IF NOT EXISTS neg_risk_quote_source_receipts (
   leg_quote_digest TEXT NOT NULL DEFAULT '',
   receipt_digest TEXT NOT NULL CHECK(length(receipt_digest)=64)
 );
+CREATE TABLE IF NOT EXISTS neg_risk_quote_unsealed_receipts (
+  quote_run_id INTEGER PRIMARY KEY,
+  quarantined_at_ms INTEGER NOT NULL DEFAULT 0,
+  reason TEXT NOT NULL
+);
 
 -- Completed quote evidence is immutable except during the store's explicit,
 -- bounded purge transaction.  This prevents a coordinated row rewrite from

@@ -629,6 +629,27 @@ def test_slow_collector_renews_lease_before_an_expired_run_can_be_reclaimed(
     asyncio.run(scenario())
 
 
+def test_fetch_timeout_has_stable_type_and_failed_run_reason(quote_db) -> None:
+    from polyarb.routing.neg_risk_quote_collector import QuoteFetchTimeoutError
+
+    async def scenario() -> None:
+        store = NegRiskQuoteStore(quote_db, now_ms=lambda: NOW_MS)
+        reader = BlockingReader([])
+        with pytest.raises(QuoteFetchTimeoutError, match="clob-fetch-timeout"):
+            await collect_neg_risk_quotes(
+                quote_store=store,
+                reader=reader,
+                fetch_timeout_s=0.001,
+            )
+
+        with sqlite3.connect(quote_db) as con:
+            assert con.execute(
+                "SELECT status,failure_reason FROM neg_risk_quote_runs"
+            ).fetchone() == ("failed", "clob-fetch-timeout")
+
+    asyncio.run(scenario())
+
+
 def test_lease_renewal_failure_cancels_collection_and_fails_closed(
     quote_db, monkeypatch: pytest.MonkeyPatch
 ) -> None:

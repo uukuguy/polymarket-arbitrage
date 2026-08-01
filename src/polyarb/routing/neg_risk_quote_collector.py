@@ -32,6 +32,13 @@ class QuoteCollectionIntegrityError(RuntimeError):
         super().__init__("clob-response-integrity-failed")
 
 
+class QuoteFetchTimeoutError(TimeoutError):
+    """The bounded CLOB fetch stage exceeded its configured deadline."""
+
+    def __init__(self) -> None:
+        super().__init__("clob-fetch-timeout")
+
+
 class BooksReader(Protocol):
     """The read-only slice of ``ClobReaderClient`` required by collection."""
 
@@ -96,6 +103,7 @@ class QuoteCollectionResult:
 
 _MISSING = object()
 _QUOTE_RUN_LEASE_RENEWAL_S = QUOTE_RUN_LEASE_MS / 3_000
+QUOTE_FETCH_TIMEOUT_EXIT_CODE = 75
 
 
 async def collect_neg_risk_quotes(
@@ -211,10 +219,11 @@ async def collect_neg_risk_quotes(
                 )
         except QuoteRunLeaseLostError:
             raise
-        except Exception as error:
-            failure_reason = (
-                "clob-fetch-timeout" if isinstance(error, TimeoutError) else "clob-fetch-failed"
-            )
+        except TimeoutError as error:
+            failure_reason = "clob-fetch-timeout"
+            raise QuoteFetchTimeoutError() from error
+        except Exception:
+            failure_reason = "clob-fetch-failed"
             raise
         stage_started = time.perf_counter()
         indexed_count, terminal_quotes = await asyncio.to_thread(

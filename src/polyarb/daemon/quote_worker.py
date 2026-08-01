@@ -16,7 +16,10 @@ from loguru import logger
 
 from polyarb.config import Settings
 from polyarb.daemon.opportunity_watcher import OpportunityWatcher
-from polyarb.routing.neg_risk_quote_collector import QuoteCollectionResult
+from polyarb.routing.neg_risk_quote_collector import (
+    QUOTE_FETCH_TIMEOUT_EXIT_CODE,
+    QuoteCollectionResult,
+)
 from polyarb.routing.neg_risk_quote_store import (
     CompleteQuoteProjection,
     NegRiskQuoteStore,
@@ -127,6 +130,7 @@ class QuoteCollectionSubprocessError(RuntimeError):
     """The isolated quote collector did not return one valid complete result."""
 
     def __init__(self, reason: str) -> None:
+        self.reason = reason
         super().__init__(f"quote-collection-subprocess-{reason}")
 
 
@@ -369,6 +373,10 @@ async def _terminate_quote_child(
     except TimeoutError:
         communicate_task.cancel()
         await asyncio.gather(communicate_task, return_exceptions=True)
+        # communicate() normally includes wait()/reap. If its pipe readers
+        # wedge even after SIGKILL, wait on the process explicitly so the
+        # parent never leaves a zombie behind.
+        await asyncio.wait_for(process.wait(), timeout=terminate_timeout_s)
 
 
 async def collect_quotes_in_subprocess(
@@ -429,16 +437,38 @@ async def collect_quotes_in_subprocess(
             timeout=communicate_budget_s,
         )
     except TimeoutError as error:
-        await _terminate_quote_child(
-            process,
-            communicate_task,
-            terminate_timeout_s=terminate_timeout_s,
+        termination_error: Exception | None = None
+        try:
+            await _terminate_quote_child(
+                process,
+                communicate_task,
+                terminate_timeout_s=terminate_timeout_s,
+            )
+        except Exception as child_error:  # preserve timeout evidence and cleanup
+            termination_error = child_error
+            logger.error(
+                "quote child reap failed "
+                f"attempt_id={attempt_id} kind={type(child_error).__name__}"
+            )
+        try:
+            await asyncio.to_thread(
+                attempt_store.fail_collecting_runs,
+                failure_reason="collector-hard-timeout",
+            )
+        except Exception as cleanup_error:  # attempt terminalization must still run
+            logger.error(
+                "quote timeout run cleanup failed "
+                f"attempt_id={attempt_id} kind={type(cleanup_error).__name__}"
+            )
+        await _terminalize_quote_attempt(
+            attempt_store,
+            attempt_id,
+            (
+                "child-reap-timeout"
+                if termination_error is not None
+                else "child-hard-timeout"
+            ),
         )
-        await asyncio.to_thread(
-            attempt_store.fail_collecting_runs,
-            failure_reason="collector-hard-timeout",
-        )
-        await _terminalize_quote_attempt(attempt_store, attempt_id, "child-hard-timeout")
         raise QuoteCollectionSubprocessError("timeout") from error
     except asyncio.CancelledError:
         await _terminate_quote_child(
@@ -450,6 +480,29 @@ async def collect_quotes_in_subprocess(
         raise
 
     if process.returncode != 0:
+        if process.returncode == QUOTE_FETCH_TIMEOUT_EXIT_CODE:
+            try:
+                failure_payload = json.loads(stdout)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                failure_payload = None
+            if (
+                isinstance(failure_payload, dict)
+                and set(failure_payload)
+                == {"attempt_id", "elapsed_ms", "outcome", "reason", "stage"}
+                and failure_payload.get("attempt_id") == attempt_id
+                and not isinstance(failure_payload.get("elapsed_ms"), bool)
+                and isinstance(failure_payload.get("elapsed_ms"), int)
+                and failure_payload["elapsed_ms"] >= 0
+                and failure_payload.get("outcome") == "failed"
+                and failure_payload.get("reason") == "fetch-timeout"
+                and failure_payload.get("stage") == "fetch"
+            ):
+                await _terminalize_quote_attempt(
+                    attempt_store,
+                    attempt_id,
+                    "child-fetch-timeout",
+                )
+                raise QuoteCollectionSubprocessError("timeout")
         await _terminalize_quote_attempt(attempt_store, attempt_id, "child-failed")
         diagnostic = stderr.decode("utf-8", errors="replace")
         if "verified universe snapshot is no longer the latest published truth" in diagnostic:
@@ -777,6 +830,20 @@ class QuoteWorker:
                     logger.info(
                         "neg-risk quote collection superseded by Structure; "
                         "retrying immediately"
+                    )
+                except QuoteCollectionSubprocessError as error:
+                    # Child timeout/protocol/fetch failures already released
+                    # their process, lease and durable attempt. Do not spend
+                    # the remaining cadence sleeping while the old feed ages.
+                    retry_immediately = error.reason == "timeout"
+                    if result is not None and self._fail_attempt is not None:
+                        await self._fail_attempt(result, type(error).__name__)
+                    self.runtime.mark_failure(error)
+                    logger.exception(
+                        "neg-risk quote child failed "
+                        f"retry_immediately={retry_immediately} "
+                        f"kind={type(error).__name__} "
+                        f"consecutive={self.runtime.consecutive_failures}"
                     )
                 except Exception as error:  # fail-soft producer boundary
                     if result is not None and self._fail_attempt is not None:

@@ -220,6 +220,39 @@ async def test_worker_failure_is_recorded_and_next_attempt_can_succeed() -> None
     assert snapshot.last_run_id == 9
 
 
+async def test_subprocess_failure_retries_without_cadence_sleep() -> None:
+    from polyarb.daemon.quote_worker import (
+        QuoteCollectionSubprocessError,
+        QuoteWorker,
+    )
+
+    attempts = 0
+    delays: list[float] = []
+
+    async def collect_once() -> QuoteCollectionResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise QuoteCollectionSubprocessError("timeout")
+        return _result(9)
+
+    async def wait_for_stop(_stop: asyncio.Event, delay_s: float) -> bool:
+        delays.append(delay_s)
+        return attempts >= 2
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        interval_s=120,
+        wait_for_stop=wait_for_stop,
+    )
+
+    await worker.run(asyncio.Event())
+
+    assert attempts == 2
+    assert delays[0] == 0.0
+    assert worker.runtime.snapshot().success_count == 1
+
+
 async def test_worker_publishes_projection_only_after_certification() -> None:
     from polyarb.daemon.quote_worker import QuoteWorker
 
@@ -667,6 +700,7 @@ class _FakeProcess:
         self.block = block
         self.terminated = False
         self.killed = False
+        self.wait_called = False
 
     async def communicate(self):
         if self.block and not self.killed:
@@ -678,6 +712,10 @@ class _FakeProcess:
 
     def kill(self) -> None:
         self.killed = True
+
+    async def wait(self) -> int:
+        self.wait_called = True
+        return self.returncode
 
 
 def _subprocess_payload(**overrides) -> bytes:
@@ -743,6 +781,23 @@ async def test_isolated_collection_parses_one_bounded_result(tmp_path) -> None:
     ("process", "reason"),
     (
         (_FakeProcess(returncode=2, stderr=b"private detail"), "failed"),
+        (_FakeProcess(returncode=75), "failed"),
+        (_FakeProcess(returncode=75, stdout=b"not-json"), "failed"),
+        (
+            _FakeProcess(
+                returncode=75,
+                stdout=json.dumps(
+                    {
+                        "attempt_id": 999,
+                        "elapsed_ms": 100_000,
+                        "outcome": "failed",
+                        "reason": "fetch-timeout",
+                        "stage": "fetch",
+                    }
+                ).encode(),
+            ),
+            "failed",
+        ),
         (_FakeProcess(stdout=b"not-json"), "invalid-json"),
         (
             _FakeProcess(
@@ -847,6 +902,149 @@ async def test_isolated_collection_hard_timeout_kills_child_and_releases_run(tmp
         assert con.execute(
             "SELECT failure_reason FROM neg_risk_quote_runs"
         ).fetchone() == ("collector-hard-timeout",)
+
+
+async def test_cli_fetch_timeout_envelope_drives_parent_timeout_retry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from typer.testing import CliRunner
+
+    from polyarb import cli_arbitrage as cli_module
+    from polyarb.cli_arbitrage import app
+    from polyarb.daemon.quote_worker import (
+        QuoteCollectionSubprocessError,
+        collect_quotes_in_subprocess,
+    )
+    from polyarb.routing.neg_risk_quote_collector import (
+        QUOTE_FETCH_TIMEOUT_EXIT_CODE,
+        QuoteFetchTimeoutError,
+    )
+
+    db_path = tmp_path / "state.db"
+
+    async def fetch_timeout(**_kwargs):
+        raise QuoteFetchTimeoutError()
+
+    monkeypatch.setattr(cli_module, "collect_neg_risk_quotes", fetch_timeout)
+    child = await asyncio.to_thread(
+        CliRunner().invoke,
+        app,
+        [
+            "collect-neg-risk-quotes",
+            "--db-path",
+            str(db_path),
+            "--attempt-id",
+            "1",
+        ],
+    )
+    assert child.exit_code == QUOTE_FETCH_TIMEOUT_EXIT_CODE
+    envelope = json.loads(child.stdout)
+    assert envelope == {
+        "attempt_id": 1,
+        "elapsed_ms": envelope["elapsed_ms"],
+        "outcome": "failed",
+        "reason": "fetch-timeout",
+        "stage": "fetch",
+    }
+    assert isinstance(envelope["elapsed_ms"], int)
+    assert envelope["elapsed_ms"] >= 0
+
+    process = _FakeProcess(
+        returncode=child.exit_code,
+        stdout=child.stdout.encode(),
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(QuoteCollectionSubprocessError) as captured:
+        await collect_quotes_in_subprocess(
+            Settings(db_path=db_path),
+            spawn=spawn,
+        )
+
+    assert captured.value.reason == "timeout"
+    attempt = NegRiskQuoteStore(db_path).latest_collection_attempt()
+    assert attempt is not None
+    assert (attempt["outcome"], attempt["failure_kind"]) == (
+        "failed",
+        "child-fetch-timeout",
+    )
+
+
+async def test_hard_timeout_explicitly_waits_if_killed_child_pipes_never_close(
+    tmp_path,
+) -> None:
+    from polyarb.daemon.quote_worker import (
+        QuoteCollectionSubprocessError,
+        collect_quotes_in_subprocess,
+    )
+
+    class WedgedPipesProcess(_FakeProcess):
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+    process = WedgedPipesProcess(block=True)
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(QuoteCollectionSubprocessError, match="subprocess-timeout"):
+        await collect_quotes_in_subprocess(
+            Settings(
+                db_path=tmp_path / "state.db",
+                neg_risk_quote_child_hard_limit_s=0.08,
+                neg_risk_quote_fetch_timeout_s=0.05,
+            ),
+            spawn=spawn,
+            terminate_timeout_s=0.01,
+        )
+
+    assert process.killed is True
+    assert process.wait_called is True
+    attempt = NegRiskQuoteStore(tmp_path / "state.db").latest_collection_attempt()
+    assert attempt is not None
+    assert attempt["outcome"] == "failed"
+
+
+async def test_hard_timeout_terminalizes_attempt_when_run_cleanup_fails(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from polyarb.daemon.quote_worker import (
+        QuoteCollectionSubprocessError,
+        collect_quotes_in_subprocess,
+    )
+
+    process = _FakeProcess(block=True)
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise sqlite3.OperationalError("cleanup unavailable")
+
+    monkeypatch.setattr(NegRiskQuoteStore, "fail_collecting_runs", fail_cleanup)
+
+    with pytest.raises(QuoteCollectionSubprocessError) as captured:
+        await collect_quotes_in_subprocess(
+            Settings(
+                db_path=tmp_path / "state.db",
+                neg_risk_quote_child_hard_limit_s=0.08,
+                neg_risk_quote_fetch_timeout_s=0.05,
+            ),
+            spawn=spawn,
+            terminate_timeout_s=0.01,
+        )
+
+    assert captured.value.reason == "timeout"
+    attempt = NegRiskQuoteStore(tmp_path / "state.db").latest_collection_attempt()
+    assert attempt is not None
+    assert (attempt["outcome"], attempt["failure_kind"]) == (
+        "failed",
+        "child-hard-timeout",
+    )
 
 
 async def test_isolated_collection_spawn_failure_terminalizes_attempt(tmp_path) -> None:

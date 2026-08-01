@@ -27,6 +27,7 @@ import asyncio
 import json
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -44,7 +45,11 @@ from polyarb.models.slippage import SlippageCalculator
 from polyarb.routing.config import ExecutionConfig, PositionConfig, RoutingConfig
 from polyarb.routing.engine import RoutingEngine
 from polyarb.routing.money import Money
-from polyarb.routing.neg_risk_quote_collector import collect_neg_risk_quotes
+from polyarb.routing.neg_risk_quote_collector import (
+    QUOTE_FETCH_TIMEOUT_EXIT_CODE,
+    QuoteFetchTimeoutError,
+    collect_neg_risk_quotes,
+)
 from polyarb.routing.neg_risk_quote_store import (
     NegRiskQuoteStore,
     QuoteUniverseUnavailableError,
@@ -106,6 +111,7 @@ def collect_neg_risk_quotes_command(
 ) -> None:
     """Collect one local read-only CLOB quote run; not a scheduler or order command."""
     _setup_logger(verbose)
+    started = time.perf_counter()
     try:
         settings = Settings()
         SQLiteStore(db_path).init_schema()
@@ -122,6 +128,20 @@ def collect_neg_risk_quotes_command(
                 fetch_timeout_s=settings.neg_risk_quote_fetch_timeout_s,
             )
         )
+    except QuoteFetchTimeoutError as error:
+        typer.echo(
+            json.dumps(
+                {
+                    "attempt_id": attempt_id,
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    "outcome": "failed",
+                    "reason": "fetch-timeout",
+                    "stage": "fetch",
+                },
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=QUOTE_FETCH_TIMEOUT_EXIT_CODE) from error
     except Exception as error:
         typer.secho(f"quote collection failed: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from error

@@ -172,13 +172,36 @@ class NegRiskQuoteStore:
         started = self.current_time_ms() if started_at_ms is None else started_at_ms
         con = self._connect()
         try:
+            self._begin_immediate(con)
+            # A previous parent can die before terminalizing its attempt. A
+            # checkpoint older than the absolute child limit cannot still own
+            # a live child and is closed before admitting the successor.
+            con.execute(
+                "UPDATE neg_risk_quote_attempts SET checkpoint_at_ms=?,phase='failed',"
+                "outcome='failed',failure_kind='parent-orphaned' "
+                "WHERE outcome='collecting' AND checkpoint_at_ms<=?",
+                (started, max(0, started - 120_000)),
+            )
+            # Failure-only periods never reach success-side run retention.
+            # Bound terminal attempt evidence on every admission instead.
+            con.execute(
+                "DELETE FROM neg_risk_quote_attempts WHERE id IN ("
+                "SELECT id FROM neg_risk_quote_attempts WHERE outcome IN ('complete','failed') "
+                "AND id NOT IN (SELECT id FROM neg_risk_quote_attempts "
+                "ORDER BY started_at_ms DESC,id DESC LIMIT 1000) "
+                "ORDER BY started_at_ms,id LIMIT 20)"
+            )
             cur = con.execute(
                 "INSERT INTO neg_risk_quote_attempts("
                 "started_at_ms,checkpoint_at_ms,phase,outcome) "
                 "VALUES (?,?,'universe','collecting')",
                 (started, started),
             )
+            con.execute("COMMIT")
             return int(cur.lastrowid)
+        except Exception:
+            _rollback_without_masking(con)
+            raise
         finally:
             con.close()
 
@@ -1018,6 +1041,14 @@ class NegRiskQuoteStore:
                     (run.run_id,),
                 ).fetchone()
                 if source_receipt is None:
+                    unsealed = con.execute(
+                        "SELECT 1 FROM neg_risk_quote_unsealed_receipts WHERE quote_run_id=?",
+                        (run.run_id,),
+                    ).fetchone()
+                    if unsealed is not None:
+                        # Never let an unsealed draft regain trust through the
+                        # historical no-receipt Structure compatibility path.
+                        continue
                     # One-time compatibility path for runs produced before the
                     # run-bound source receipt existed. New runs never rescan.
                     try:
