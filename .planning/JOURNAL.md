@@ -5858,3 +5858,27 @@ After the user approves design A, write and commit the concise double-buffer
 spec, self-review it, obtain the required spec review confirmation, then run
 the writing-plans/TDD implementation path. First repository command:
 `make planning-status`.
+
+## SESSION 124 — 2026-08-01 (double-buffer written-spec review gate)
+
+- [APPROVED DIRECTION] The user explicitly approved recommended design A: one
+  prior complete opportunity revision remains serveable during a bounded
+  Structure-to-Quote handoff, followed by an atomic swap.
+- [SPEC COMMITTED] Commit `7fa4004` records the full serving predicate, response
+  contract, health/alert semantics, failure boundaries, tests, and natural
+  production acceptance in
+  `docs/superpowers/specs/2026-08-01-m1-opportunity-feed-double-buffer-design.md`.
+- [SELF-REVIEWED] The spec contains no placeholders. It makes both independent
+  300-second limits explicit, forbids source regression and mixed versions, and
+  prevents repeated Structure publications from indefinitely extending an old
+  Quote.
+- [BOUNDARY] No implementation change has begun. Brainstorming requires the
+  user to review the committed written spec before writing the implementation
+  plan.
+
+### [NEXT — CURRENT]
+
+After written-spec approval, invoke `writing-plans`, create the TDD execution
+plan, implement the bounded handoff, run local gates, deploy exact releases, and
+observe one natural Structure-to-Quote transition with no opportunity 503.
+First repository command: `make planning-status`.

@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Exact L1/L2 releases are healthy; awaiting approval for bounded Structure-to-Quote double-buffer availability before final closure
-last_updated: "2026-07-31T13:46:00Z"
+stopped_at: Double-buffer design committed at 7fa4004; awaiting written-spec review before implementation
+last_updated: "2026-08-01T02:03:57Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -28,9 +28,11 @@ Phase: 05.6 (self-healing Structure production) — Plan 02 in progress
 - **Current production:** L1/L2 strict health HTTP 200, snapshot 781 complete,
   opportunity runs advancing, resident Polywatch alert/recovery chain proven.
 - **Open gate:** Structure publication creates a measured 93-second
-  opportunity 503 window while the matching Quote is produced. Recommended
-  bounded double-buffer design awaits explicit user approval; do not mark
-  Plan 05.6-02 complete before that policy is implemented and verified.
+  opportunity 503 window while the matching Quote is produced. The user
+  approved the bounded double-buffer direction; written spec commit `7fa4004`
+  now awaits the required spec review before planning, TDD implementation, and
+  a natural production handoff proof. Do not mark Plan 05.6-02 complete before
+  those gates pass.
 
 Phase: 05 (WS /book + /prices 增量推送) — Plan 06 operational closure in progress
 
