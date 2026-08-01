@@ -419,7 +419,12 @@ def test_published_structure_retention_is_bounded_and_keeps_latest_window(
             requested_cursor=None,
             next_cursor=None,
             completed=True,
-            events=[{"id": f"event-{index}"}],
+            events=[
+                {
+                    "id": f"event-{index}",
+                    "markets": [{"id": f"market-{index}"}],
+                }
+            ],
             finished_at_ms=index * 100 + 20,
         )
         store.commit_structure_market_page(
@@ -452,6 +457,14 @@ def test_published_structure_retention_is_bounded_and_keeps_latest_window(
             "SELECT COUNT(*) FROM structure_sync_market_staging WHERE window_id=?",
             (window_ids[0],),
         ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_market_staging WHERE window_id=?",
+            (window_ids[0],),
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_market_staging WHERE window_id=?",
+            (window_ids[2],),
+        ).fetchone()[0] == 1
         assert [
             row[0]
             for row in con.execute(
@@ -475,7 +488,7 @@ def test_failed_structure_retention_reclaims_staging_and_window(tmp_path) -> Non
         requested_cursor=None,
         next_cursor=None,
         completed=True,
-        events=[{"id": "event-old"}],
+        events=[{"id": "event-old", "markets": [{"id": "market-old"}]}],
         finished_at_ms=200,
     )
     store.commit_structure_market_page(
@@ -508,6 +521,13 @@ def test_failed_structure_retention_reclaims_staging_and_window(tmp_path) -> Non
             "SELECT COUNT(*) FROM structure_sync_market_staging WHERE window_id=?",
             (old["id"],),
         ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_market_staging WHERE window_id=?",
+            (old["id"],),
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_windows WHERE status='open'"
+        ).fetchone()[0] == 1
 
 
 async def test_rejected_cursor_restarts_once_then_rebuilds_from_first_page(

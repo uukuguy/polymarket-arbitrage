@@ -80,11 +80,7 @@ def _install_structure_generation_freeze_triggers(con: sqlite3.Connection) -> No
     """Reject every generation-row mutation after certification starts."""
     for component in _STRUCTURE_COMPONENTS:
         table = f"structure_generation_{component}"
-        for operation, reference in (
-            ("insert", "NEW"),
-            ("update", "OLD"),
-            ("delete", "OLD"),
-        ):
+        for operation, reference in (("insert", "NEW"), ("delete", "OLD")):
             con.execute(
                 f"CREATE TRIGGER IF NOT EXISTS trg_{table}_frozen_{operation} "
                 f"BEFORE {operation.upper()} ON {table} WHEN EXISTS (SELECT 1 FROM "
@@ -93,6 +89,13 @@ def _install_structure_generation_freeze_triggers(con: sqlite3.Connection) -> No
                 "p.certification_component IS NOT NULL) "
                 "BEGIN SELECT RAISE(ABORT,'structure-generation-frozen'); END"  # noqa: S608
             )
+        con.execute(
+            f"CREATE TRIGGER IF NOT EXISTS trg_{table}_frozen_update_v2 "
+            f"BEFORE UPDATE ON {table} WHEN EXISTS (SELECT 1 FROM "
+            "structure_publications p WHERE p.certification_component IS NOT NULL "
+            "AND (p.snapshot_id=OLD.snapshot_id OR p.snapshot_id=NEW.snapshot_id)) "
+            "BEGIN SELECT RAISE(ABORT,'structure-generation-frozen'); END"  # noqa: S608
+        )
 
 
 class StructurePublicationCursorError(ValueError):
@@ -2196,7 +2199,12 @@ class SQLiteStore:
             snapshot_id, window_id = int(publication[0]), str(publication[1])
             expected = json.loads(str(publication[3]))
             committed = json.loads(str(publication[4]))
-            if publication[6] == "bounded-complete":
+            authenticated_frozen_receipt = (
+                publication[6] == "backfill-authenticated"
+                if window_id.startswith("backfill:")
+                else publication[6] == "bounded-complete"
+            )
+            if authenticated_frozen_receipt:
                 actual = committed
                 if actual != expected:
                     raise ValueError("structure-publication-count-mismatch")
@@ -2276,6 +2284,35 @@ class SQLiteStore:
         finally:
             con.close()
 
+    def _freeze_backfill_generation(self, publication_id: str) -> None:
+        """Durably freeze a complete backfill before any receipt hash scan."""
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            cur = con.execute(
+                "UPDATE structure_publications SET "
+                "certification_component='backfill-frozen' "
+                "WHERE publication_id=? AND status='writing' "
+                "AND certification_component IS NULL "
+                "AND expected_counts_json=committed_counts_json",
+                (publication_id,),
+            )
+            if cur.rowcount != 1:
+                marker = con.execute(
+                    "SELECT status,certification_component FROM structure_publications "
+                    "WHERE publication_id=?",
+                    (publication_id,),
+                ).fetchone()
+                if marker != ("writing", "backfill-frozen"):
+                    raise ValueError("structure-backfill-freeze-race")
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
     def backfill_current_structure_generation(
         self, max_rows: int
     ) -> BackfillCheckpoint:
@@ -2298,7 +2335,8 @@ class SQLiteStore:
                 return BackfillCheckpoint(int(pointer[0]), 0, None, True)
             publication = con.execute(
                 "SELECT publication_id,snapshot_id,window_id,status,write_component,"
-                "write_row_cursor,expected_counts_json FROM structure_publications "
+                "write_row_cursor,expected_counts_json,certification_component "
+                "FROM structure_publications "
                 "WHERE status IN ('writing','ready') AND window_id LIKE 'backfill:%' "
                 "ORDER BY created_at_ms DESC LIMIT 1"
             ).fetchone()
@@ -2370,6 +2408,7 @@ class SQLiteStore:
                     "events",
                     None,
                     json.dumps(expected, sort_keys=True, separators=(",", ":")),
+                    None,
                 )
             publication_id = str(publication[0])
             snapshot_id = int(publication[1])
@@ -2377,8 +2416,20 @@ class SQLiteStore:
             component = str(publication[4])
             cursor = None if publication[5] is None else str(publication[5])
             expected = json.loads(str(publication[6]))
+            certification_component = (
+                None if publication[7] is None else str(publication[7])
+            )
             if status == "ready":
+                if certification_component not in {
+                    "bounded-complete",
+                    "backfill-authenticated",
+                }:
+                    raise ValueError("structure-backfill-receipt-missing")
                 publish_id = publication_id
+                con.execute("COMMIT")
+            elif certification_component == "backfill-frozen":
+                publish_id = publication_id
+                needs_certification = True
                 con.execute("COMMIT")
             else:
                 market_columns = tuple(
@@ -2512,6 +2563,8 @@ class SQLiteStore:
             con.close()
         if publish_id is not None:
             assert snapshot_id is not None
+            if needs_certification:
+                self._freeze_backfill_generation(publish_id)
             with sqlite3.connect(self._db_path) as read_con:
                 finished_at_ms = int(
                     read_con.execute(
@@ -2529,11 +2582,15 @@ class SQLiteStore:
                     certify_con.execute("BEGIN IMMEDIATE")
                     cur = certify_con.execute(
                         "UPDATE structure_publications SET status='ready',"
-                        "validation_hash=?,certification_component='bounded-complete',"
+                        "validation_hash=?,"
+                        "certification_component='backfill-authenticated',"
+                        "certification_hash=?,"
                         "certified_at_ms=?,checkpoint_at_ms=? "
                         "WHERE publication_id=? AND status='writing' "
+                        "AND certification_component='backfill-frozen' "
                         "AND expected_counts_json=committed_counts_json",
                         (
+                            destination_hash,
                             destination_hash,
                             finished_at_ms,
                             finished_at_ms,
@@ -2703,6 +2760,11 @@ class SQLiteStore:
             if to_delete:
                 delete_placeholders = ",".join("?" for _ in to_delete)
                 con.execute(
+                    "DELETE FROM structure_sync_event_market_staging "
+                    f"WHERE window_id IN ({delete_placeholders})",
+                    to_delete,
+                )
+                con.execute(
                     "DELETE FROM structure_sync_event_staging "
                     f"WHERE window_id IN ({delete_placeholders})",
                     to_delete,
@@ -2753,6 +2815,11 @@ class SQLiteStore:
             ]
             if to_delete:
                 placeholders = ",".join("?" for _ in to_delete)
+                con.execute(
+                    "DELETE FROM structure_sync_event_market_staging "
+                    f"WHERE window_id IN ({placeholders})",
+                    to_delete,
+                )
                 con.execute(
                     "DELETE FROM structure_sync_event_staging "
                     f"WHERE window_id IN ({placeholders})",

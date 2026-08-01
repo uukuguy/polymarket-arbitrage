@@ -457,6 +457,110 @@ def test_certification_start_freezes_every_generation_mutation(tmp_path: Path) -
                 con.execute(statement)
 
 
+def test_frozen_generation_rejects_snapshot_id_moves_from_every_component(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store, snapshot_id=1, market_id="market-1", now_ms=1_000
+    )
+    _append_generation_truth(
+        store, publication, snapshot_id=1, market_id="market-1", now_ms=1_004
+    )
+    store.append_structure_publication_chunk(
+        publication.publication_id,
+        "issues",
+        (),
+        expected_prior_cursor="market-1",
+        next_cursor="issues|done",
+        now_ms=1_009,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+            "market_view_published,data_product,archive_status,snapshot_status,is_valid,"
+            "parquet_path) VALUES (2,1,2,'full',1,0,'structure','local','building',0,'')"
+        )
+        con.execute(
+            "INSERT INTO structure_generation_events(snapshot_id,id,slug,fetched_at_ms) "
+            "VALUES (2,'u-event','u-event',2)"
+        )
+        con.execute(
+            "INSERT INTO structure_generation_event_tags(snapshot_id,event_id,tag_id,"
+            "tag_label,tag_slug) VALUES (2,'u-event','u-tag','U','u')"
+        )
+        con.execute(
+            "INSERT INTO structure_generation_memberships(snapshot_id,event_id,"
+            "neg_risk_market_id,market_id,member_kind,active,closed) "
+            "VALUES (2,'u-event','u-group','u-market','named',1,0)"
+        )
+        con.execute(
+            "INSERT INTO structure_generation_group_truth(snapshot_id,event_id,"
+            "neg_risk_market_id,neg_risk_type,expected_member_count,active_named_count,"
+            "membership_hash,quality) VALUES "
+            "(2,'u-event','u-group','standard',1,1,'u-hash','complete-supported')"
+        )
+        con.execute(
+            "INSERT INTO structure_generation_markets(snapshot_id,market_id,condition_id,"
+            "fetched_at_ms) VALUES (2,'u-market','u-condition',2)"
+        )
+        con.execute(
+            "INSERT INTO structure_generation_issues(snapshot_id,issue_index,layer,"
+            "category) VALUES (2,1,1,'schema')"
+        )
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
+
+    tables = (
+        "events",
+        "event_tags",
+        "memberships",
+        "group_truth",
+        "markets",
+        "issues",
+    )
+    with sqlite3.connect(store.db_path) as con:
+        frozen_hash = store._generation_hash(con, 1)
+        unfrozen_hash = store._generation_hash(con, 2)
+        before_counts = {
+            table: tuple(
+                con.execute(
+                    f"SELECT snapshot_id,COUNT(*) FROM structure_generation_{table} "
+                    "GROUP BY snapshot_id ORDER BY snapshot_id"
+                ).fetchall()
+            )
+            for table in tables
+        }
+        pointer = con.execute("SELECT * FROM current_structure_generation").fetchall()
+
+    for table in tables:
+        with sqlite3.connect(store.db_path) as con:
+            con.execute(
+                f"UPDATE structure_generation_{table} SET snapshot_id=2 "
+                "WHERE snapshot_id=2"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="structure-generation-frozen"):
+            with sqlite3.connect(store.db_path) as con:
+                con.execute(
+                    f"UPDATE structure_generation_{table} SET snapshot_id=1 "
+                    "WHERE snapshot_id=2"
+                )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert store._generation_hash(con, 1) == frozen_hash
+        assert store._generation_hash(con, 2) == unfrozen_hash
+        assert {
+            table: tuple(
+                con.execute(
+                    f"SELECT snapshot_id,COUNT(*) FROM structure_generation_{table} "
+                    "GROUP BY snapshot_id ORDER BY snapshot_id"
+                ).fetchall()
+            )
+            for table in tables
+        } == before_counts
+        assert con.execute("SELECT * FROM current_structure_generation").fetchall() == pointer
+
+
 def test_bounded_certification_rejects_generation_source_drift(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()
@@ -1148,11 +1252,84 @@ def test_backfill_current_generation_resumes_bounded_and_switches_last(
     assert second.complete is True
     assert second.copied_rows == 1
     assert store.current_generation_market_ids() == ("market-a", "market-b")
-
     replay = store.backfill_current_structure_generation(max_rows=1)
     assert replay.complete is True
     assert replay.copied_rows == 0
     assert store.current_generation_market_ids() == ("market-a", "market-b")
+
+
+def test_backfill_freezes_before_hash_and_resumes_after_hash_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteStore(tmp_path / "legacy-freeze.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+            "market_view_published,data_product,archive_status,snapshot_status,is_valid,"
+            "parquet_path) VALUES (7,1,2,'full',1,1,'structure','legacy','ok',1,'')"
+        )
+        con.execute(
+            "INSERT INTO markets(market_id,condition_id,fetched_at_ms,snapshot_id,"
+            "incomplete) VALUES ('market-a','condition-a',2,7,0)"
+        )
+
+    original_hash = SQLiteStore._legacy_generation_hash
+    observed: dict[str, object] = {}
+
+    def crash_before_source_hash(_con: sqlite3.Connection, _snapshot_id: int) -> str:
+        with sqlite3.connect(store.db_path) as probe:
+            observed["marker"] = probe.execute(
+                "SELECT certification_component FROM structure_publications "
+                "WHERE publication_id='backfill:7'"
+            ).fetchone()
+        raise RuntimeError("crash-before-backfill-hash")
+
+    monkeypatch.setattr(
+        SQLiteStore, "_legacy_generation_hash", staticmethod(crash_before_source_hash)
+    )
+    with pytest.raises(RuntimeError, match="crash-before-backfill-hash"):
+        store.backfill_current_structure_generation(max_rows=1)
+
+    assert observed["marker"] == ("backfill-frozen",)
+    assert store.current_structure_generation() is None
+
+    def source_hash_with_mutation_attempt(
+        con: sqlite3.Connection, snapshot_id: int
+    ) -> str:
+        source_hash = original_hash(con, snapshot_id)
+        with sqlite3.connect(store.db_path) as probe:
+            try:
+                probe.execute(
+                    "UPDATE structure_generation_markets SET question='tampered' "
+                    "WHERE snapshot_id=7"
+                )
+            except sqlite3.IntegrityError as exc:
+                observed["mutation"] = str(exc)
+        observed["source_hash"] = source_hash
+        return source_hash
+
+    monkeypatch.setattr(
+        SQLiteStore,
+        "_legacy_generation_hash",
+        staticmethod(source_hash_with_mutation_attempt),
+    )
+    resumed = SQLiteStore(store.db_path).backfill_current_structure_generation(max_rows=1)
+    assert resumed.complete is True
+    assert resumed.copied_rows == 0
+    assert store.current_generation_market_ids() == ("market-a",)
+    assert observed["mutation"] == "structure-generation-frozen"
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT question FROM structure_generation_markets WHERE snapshot_id=7"
+        ).fetchone() == (None,)
+        assert con.execute(
+            "SELECT certification_component FROM structure_publications "
+            "WHERE publication_id='backfill:7'"
+        ).fetchone() == ("backfill-authenticated",)
+    replay = store.backfill_current_structure_generation(max_rows=1)
+    assert replay.complete is True
+    assert replay.copied_rows == 0
 
 
 def test_backfill_bounds_every_component_and_advances_deterministically(
