@@ -116,10 +116,6 @@ def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
     monkeypatch, tmp_path
 ) -> None:
     from polyarb.snapshot import cli as cli_module
-    from polyarb.storage import sqlite_store as sqlite_store_module
-
-    monkeypatch.setattr(sqlite_store_module, "SQLITE_BUSY_TIMEOUT_S", 0.05)
-
     db_path = tmp_path / "state.db"
     store = SQLiteStore(db_path)
     store.init_schema()
@@ -222,7 +218,9 @@ def test_generation_backfill_cli_defers_writer_busy_from_later_phase(
             return None
 
         def backfill_current_structure_generation(self, *, max_rows):
-            raise sqlite3.OperationalError("database is locked")
+            error = sqlite3.OperationalError("database is locked")
+            error.sqlite_errorcode = sqlite3.SQLITE_BUSY | (1 << 8)
+            raise error
 
     monkeypatch.setattr(
         cli_module,
@@ -241,6 +239,85 @@ def test_generation_backfill_cli_defers_writer_busy_from_later_phase(
         "defer_reason": "writer-busy",
         "deferred": True,
         "phase": "operator-admission",
+    }
+
+
+def test_generation_backfill_cli_does_not_swallow_non_lock_operational_error(
+    monkeypatch,
+) -> None:
+    from polyarb.snapshot import cli as cli_module
+
+    class BrokenStore:
+        def init_structure_sync_schema(self):
+            raise sqlite3.OperationalError("no such table: busy_queue")
+
+    monkeypatch.setattr(
+        cli_module,
+        "_generation_store",
+        lambda **_kwargs: (SimpleNamespace(), BrokenStore()),
+    )
+
+    result = CliRunner().invoke(app, ["structure-generation-backfill"])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, sqlite3.OperationalError)
+
+
+def test_generation_backfill_cli_never_defers_after_blocked_progress_commit(
+    monkeypatch,
+) -> None:
+    from polyarb.snapshot import cli as cli_module
+
+    class RotationBusyStore:
+        def init_structure_sync_schema(self):
+            return None
+
+        def get_latest_structure_sync(self):
+            return {"id": "window-1", "status": "complete"}
+
+        def get_structure_publication_progress(self, _window_id):
+            return None
+
+        def advance_structure_event_market_backfill(self, **_kwargs):
+            return {
+                "event_cursor": "broken-event",
+                "member_offset": 0,
+                "blocked": True,
+                "blocked_reason": "invalid-event-json:broken-event",
+                "completed": False,
+                "relationships_processed": 0,
+                "events_processed": 0,
+            }
+
+        def rotate_blocked_structure_sync_window(self, **_kwargs):
+            error = sqlite3.OperationalError("database is locked")
+            error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+            raise error
+
+    monkeypatch.setattr(
+        cli_module,
+        "_generation_store",
+        lambda **_kwargs: (SimpleNamespace(), RotationBusyStore()),
+    )
+
+    result = CliRunner().invoke(app, ["structure-generation-backfill"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "blocked": True,
+        "blocked_reason": "invalid-event-json:broken-event",
+        "complete": False,
+        "copied_rows": 0,
+        "defer_reason": None,
+        "deferred": False,
+        "event_cursor": "broken-event",
+        "events_processed": 0,
+        "member_offset": 0,
+        "mutated": True,
+        "phase": "event-market-bootstrap",
+        "rotated_to_window_id": None,
+        "rotation_pending": True,
+        "window_id": "window-1",
     }
 
 

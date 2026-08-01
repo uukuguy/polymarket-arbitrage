@@ -33,6 +33,15 @@ from polyarb.snapshot.orchestrator import run_snapshot
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
 
+def _is_sqlite_writer_busy(error: sqlite3.OperationalError) -> bool:
+    """Recognize only SQLite's BUSY/LOCKED primary result codes."""
+    code = getattr(error, "sqlite_errorcode", None)
+    return isinstance(code, int) and (code & 0xFF) in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }
+
+
 def _generation_store(
     *,
     initialize: bool = True,
@@ -108,10 +117,40 @@ def structure_generation_backfill(
             ):
                 rotated_to = None
                 if migration["blocked"]:
-                    successor = store.rotate_blocked_structure_sync_window(
-                        window_id=str(latest["id"]),
-                        rotated_at_ms=int(time.time() * 1_000),
-                    )
+                    try:
+                        successor = store.rotate_blocked_structure_sync_window(
+                            window_id=str(latest["id"]),
+                            rotated_at_ms=int(time.time() * 1_000),
+                        )
+                    except sqlite3.OperationalError as error:
+                        if not _is_sqlite_writer_busy(error):
+                            raise
+                        print(
+                            json.dumps(
+                                {
+                                    "event_cursor": migration["event_cursor"],
+                                    "member_offset": migration["member_offset"],
+                                    "blocked": True,
+                                    "blocked_reason": migration["blocked_reason"],
+                                    "complete": False,
+                                    "copied_rows": migration[
+                                        "relationships_processed"
+                                    ],
+                                    "defer_reason": None,
+                                    "deferred": False,
+                                    "events_processed": migration[
+                                        "events_processed"
+                                    ],
+                                    "mutated": True,
+                                    "phase": "event-market-bootstrap",
+                                    "rotated_to_window_id": None,
+                                    "rotation_pending": True,
+                                    "window_id": str(latest["id"]),
+                                },
+                                sort_keys=True,
+                            )
+                        )
+                        raise typer.Exit(code=1) from error
                     rotated_to = successor["id"]
                 print(
                     json.dumps(
@@ -137,7 +176,7 @@ def structure_generation_backfill(
                 return
         result = store.backfill_current_structure_generation(max_rows=max_rows)
     except sqlite3.OperationalError as error:
-        if not any(token in str(error).lower() for token in ("locked", "busy")):
+        if not _is_sqlite_writer_busy(error):
             raise
         print(
             json.dumps(

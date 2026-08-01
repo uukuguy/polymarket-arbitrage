@@ -44,6 +44,10 @@ zero and incremented the failure counter.
   bootstrap, copy, certification, and comparison phases. Writer contention
   returns retryable exit-0 JSON (`deferred=true`, `writer-busy`, zero copied
   rows) instead of waiting behind the production writer and consuming Quote SLA.
+  Admission recognizes only SQLite BUSY/LOCKED primary result codes. If a
+  blocked-progress commit already happened and successor rotation then contends,
+  the command exits 1 with `mutated=true` and `rotation_pending=true`; it never
+  misreports that post-mutation state as a zero-write defer.
 - The parent now strictly parses normalization/certification publication
   checkpoint JSON instead of reclassifying a committed child chunk as
   `snapshot-subprocess-invalid-json`.
@@ -55,11 +59,12 @@ switch, database mutation, or production restart was performed by this task.
 ## TDD and verification
 
 Initial RED: 3 failures for the absent durable migration API/schema and absent
-publication-checkpoint result type. The final focused gate, including
-nonblocking operator admission, covered 361 tests.
+publication-checkpoint result type. The final operator-admission remediation
+covered 293 expanded tests; the independent reviewer gate covered 97 tests.
 
-- Focused authority/bootstrap/operator admission: `361 passed in 34.20s`.
-- Full M1: `3061 passed, 1 skipped, 1 xfailed in 518.81s`.
+- Expanded authority/bootstrap/operator admission: `293 passed`.
+- Independent reviewer focused gate: `97 passed` plus Ruff.
+- Full M1: `3063 passed, 1 skipped, 1 xfailed in 519.03s`.
 - Changed-file Ruff: PASS.
 - `git diff --check`: PASS.
 - Documentation, planning status, and pre-commit gate are recorded after the
