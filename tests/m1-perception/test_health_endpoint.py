@@ -627,6 +627,24 @@ def test_health_surfaces_short_incomplete_structure_slice_budget(
     assert "slice_elapsed_budget_s=45 finalizer_slot_budget_s=180" in schedule["output"]
 
 
+def test_health_surfaces_bounded_generation_publication_budgets(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    """A terminal chunk cannot silently inherit the former 180s finalizer slot."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    now_ms = int(time.time() * 1000)
+    _insert_snapshot(daemon_settings_for_test.db_path, taken_at_ms=now_ms - 2_000)
+    SQLiteStore(daemon_settings_for_test.db_path).init_schema()
+
+    schedule = http_test_client.get("/health").json()["checks"]["snapshot:schedule"][0]
+
+    assert "generation_slice_budget_s=75" in schedule["output"]
+    assert "pointer_switch_budget_s=15" in schedule["output"]
+    assert "finalizer_slot_budget_s" not in schedule["output"]
+
+
 def test_health_fails_a_stalled_snapshot_attempt_while_truth_is_fresh(
     daemon_settings_for_test: Any,
     http_test_client: TestClient,

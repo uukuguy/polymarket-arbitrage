@@ -489,6 +489,75 @@ async def test_snapshot_waits_for_shared_producer_slot(
 
 
 @pytest.mark.asyncio
+async def test_snapshot_attempt_starts_after_shared_producer_slot_is_acquired(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    """Queue wait is not a running child and cannot fabricate a timeout."""
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    lock_wait_started = asyncio.Event()
+
+    class ObservedLock(asyncio.Lock):
+        async def acquire(self) -> bool:
+            lock_wait_started.set()
+            return await super().acquire()
+
+    producer_lock = ObservedLock()
+    await producer_lock.acquire()
+    lock_wait_started.clear()
+    child_started = asyncio.Event()
+    finish_child = asyncio.Event()
+    wall_s = 1_000.0
+
+    async def run_snapshot(*, timeout_s: float):
+        assert timeout_s > 0
+        child_started.set()
+        await finish_child.wait()
+        return _FakeResult(
+            SnapshotStatus.OK,
+            snapshot_id=10,
+            last_stage="persist",
+            elapsed_ms=2_000,
+        )
+
+    monkeypatch.setattr(scheduler_module, "run_snapshot_in_subprocess", run_snapshot)
+    monkeypatch.setattr(scheduler_module.time, "time", lambda: wall_s)
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+        producer_lock=producer_lock,
+    )
+
+    tick = asyncio.create_task(scheduler._tick())
+    await lock_wait_started.wait()
+    wall_s = 1_181.0
+    await asyncio.sleep(0)
+
+    assert store.get_latest_snapshot_attempt() is None
+
+    producer_lock.release()
+    await child_started.wait()
+    running = store.get_latest_snapshot_attempt()
+    assert running is not None
+    assert running["outcome"] == "running"
+    assert running["started_at_ms"] == 1_181_000
+
+    wall_s = 1_183.0
+    finish_child.set()
+    await tick
+
+    terminal = store.get_latest_snapshot_attempt()
+    assert terminal is not None
+    assert terminal["outcome"] == "succeeded"
+    assert terminal["finished_at_ms"] - terminal["started_at_ms"] == 2_000
+    assert terminal["elapsed_ms"] == 2_000
+
+
+@pytest.mark.asyncio
 async def test_incomplete_structure_slice_has_shorter_producer_slot_budget(
     daemon_settings_for_test,
     monkeypatch,
