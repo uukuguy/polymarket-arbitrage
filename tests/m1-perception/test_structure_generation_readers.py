@@ -511,6 +511,7 @@ def test_generation_history_queries_are_bounded_and_indexed(tmp_path: Path) -> N
         )
         assert "active_comparison" in plans
         assert "pointer_repair" in plans
+        assert "active_bootstrap" in plans
     for plan in plans.values():
         detail = " ".join(plan).upper()
         assert "SCAN " not in detail

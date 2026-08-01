@@ -2370,11 +2370,31 @@ CREATE TABLE IF NOT EXISTS structure_sync_event_market_backfill_progress (
         CHECK(relationships_processed >= 0),
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
     completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),
-    blocked_reason TEXT
+    blocked_reason TEXT,
+    migration_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_structure_event_market_backfill_active
 ON structure_sync_event_market_backfill_progress(checkpoint_at_ms DESC,window_id DESC)
 WHERE completed_at_ms IS NULL;
+CREATE TABLE IF NOT EXISTS structure_bootstrap_rotation_observations (
+    observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_window_id TEXT NOT NULL UNIQUE REFERENCES structure_sync_windows(id),
+    event_cursor TEXT NOT NULL,
+    member_offset INTEGER NOT NULL CHECK(member_offset >= 0),
+    blocked_reason TEXT NOT NULL,
+    checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
+    successor_window_id TEXT NOT NULL UNIQUE REFERENCES structure_sync_windows(id),
+    rotated_at_ms INTEGER NOT NULL CHECK(rotated_at_ms >= 0),
+    observation_digest TEXT NOT NULL CHECK(length(observation_digest)=64)
+);
+CREATE INDEX IF NOT EXISTS idx_structure_bootstrap_rotation_latest
+ON structure_bootstrap_rotation_observations(rotated_at_ms DESC,observation_id DESC);
+CREATE TRIGGER IF NOT EXISTS trg_structure_bootstrap_rotation_update
+BEFORE UPDATE ON structure_bootstrap_rotation_observations
+BEGIN SELECT RAISE(ABORT,'bootstrap-rotation-append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_bootstrap_rotation_delete
+BEFORE DELETE ON structure_bootstrap_rotation_observations
+BEGIN SELECT RAISE(ABORT,'bootstrap-rotation-append-only'); END;
 CREATE TABLE IF NOT EXISTS structure_sync_market_staging (
     window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
     market_id TEXT NOT NULL,

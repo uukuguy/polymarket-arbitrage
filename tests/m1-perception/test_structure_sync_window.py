@@ -19,7 +19,11 @@ from polyarb.perception.structure_sync import (
     finalize_structure_window,
     run_structure_sync_until_published,
 )
-from polyarb.storage.sqlite_store import SQLITE_BUSY_TIMEOUT_S, SQLiteStore
+from polyarb.storage.sqlite_store import (
+    SQLITE_BUSY_TIMEOUT_S,
+    STRUCTURE_EVENT_PAYLOAD_MAX_BYTES,
+    SQLiteStore,
+)
 
 
 def test_structure_window_commits_page_and_resumes_exact_successor_cursor(tmp_path) -> None:
@@ -435,6 +439,12 @@ def test_published_structure_retention_is_bounded_and_keeps_latest_window(
             markets=[{"id": f"market-{index}"}],
             finished_at_ms=index * 100 + 30,
         )
+        assert store.advance_structure_event_market_backfill(
+            window_id=window_id,
+            max_events=10,
+            max_relationships=10,
+            now_ms=index * 100 + 35,
+        )["completed"] is True
         store.mark_structure_sync_published(
             window_id=window_id,
             snapshot_id=int(snapshot_id),
@@ -852,6 +862,170 @@ def test_event_market_bootstrap_invalid_json_blocks_without_advancing(tmp_path) 
             (window["id"],),
         ).fetchone() == (result["blocked_reason"],)
 
+    rotated_status = store.structure_generation_status()
+    assert rotated_status["bootstrap"] == {
+        "window_id": window["id"],
+        "event_cursor": "",
+        "member_offset": 0,
+        "events_processed": 0,
+        "relationships_processed": 0,
+        "checkpoint_at_ms": 400,
+        "completed_at_ms": None,
+        "blocked_reason": result["blocked_reason"],
+        "successor_window_id": successor["id"],
+        "recovery_state": "rotated",
+    }
+    assert rotated_status["bootstrap_rotation"]["recovered"] is False
+    with sqlite3.connect(store.db_path) as con:
+        observation = con.execute(
+            "SELECT old_window_id,event_cursor,member_offset,blocked_reason,"
+            "checkpoint_at_ms,successor_window_id,rotated_at_ms,observation_digest "
+            "FROM structure_bootstrap_rotation_observations"
+        ).fetchone()
+        assert observation[:7] == (
+            window["id"],
+            "",
+            0,
+            result["blocked_reason"],
+            400,
+            successor["id"],
+            600,
+        )
+        assert len(observation[7]) == 64
+        with pytest.raises(sqlite3.IntegrityError, match="bootstrap-rotation-append-only"):
+            con.execute("UPDATE structure_bootstrap_rotation_observations SET member_offset=1")
+
+    store.commit_structure_event_page(
+        window_id=successor["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=[{"id": "recovered", "markets": []}],
+        finished_at_ms=700,
+    )
+    store.commit_structure_market_page(
+        window_id=successor["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=[], finished_at_ms=800,
+    )
+    recovered = store.advance_structure_event_market_backfill(
+        window_id=successor["id"], max_events=10, max_relationships=10, now_ms=900
+    )
+    assert recovered["completed"] is True
+    recovered_status = store.structure_generation_status()
+    assert recovered_status["bootstrap"] is None
+    assert recovered_status["bootstrap_rotation"]["recovered"] is True
+
+
+def test_fresh_window_binds_bootstrap_to_final_complete_identity(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor="event-page-2",
+        completed=False,
+        events=[{"id": "z-event", "markets": [{"id": "market-z"}]}],
+        finished_at_ms=200,
+    )
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor="event-page-2", next_cursor=None,
+        completed=True,
+        events=[{"id": "a-event", "markets": [{"id": "market-a"}]}],
+        finished_at_ms=300,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor="market-page-2",
+        completed=False, markets=[{"id": "market-z"}], finished_at_ms=400,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor="market-page-2", next_cursor=None,
+        completed=True, markets=[{"id": "market-a"}], finished_at_ms=500,
+    )
+
+    first = store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=1, max_relationships=1, now_ms=600
+    )
+    second = store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=1, max_relationships=1, now_ms=700
+    )
+
+    assert first["event_cursor"] == "a-event"
+    assert second["completed"] is True
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT window_checkpoint_at_ms FROM "
+            "structure_sync_event_market_backfill_progress WHERE window_id=?",
+            (window["id"],),
+        ).fetchone() == (500,)
+        assert con.execute(
+            "SELECT event_id,market_id FROM structure_sync_event_market_staging "
+            "WHERE window_id=? ORDER BY event_id", (window["id"],),
+        ).fetchall() == [("a-event", "market-a"), ("z-event", "market-z")]
+
+
+def test_fresh_window_malformed_member_blocks_bounded_bootstrap(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True,
+        events=[{"id": "broken", "markets": [{"slug": "missing-id"}]}],
+        finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=[], finished_at_ms=300,
+    )
+
+    result = store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=1, max_relationships=1, now_ms=400
+    )
+
+    assert result["blocked"] is True
+    assert result["blocked_reason"] == "invalid-event-market:broken"
+
+
+def test_oversized_event_payload_blocks_before_json_materialization(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from polyarb.storage import sqlite_store as store_module
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True,
+        events=[{
+            "id": "oversized",
+            "title": "x" * STRUCTURE_EVENT_PAYLOAD_MAX_BYTES,
+            "markets": [{"id": "market-1"}],
+        }],
+        finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=[{"id": "market-1"}], finished_at_ms=300,
+    )
+    calls = 0
+    real_loads = store_module.json.loads
+
+    def guarded_loads(payload):
+        nonlocal calls
+        calls += 1
+        return real_loads(payload)
+
+    monkeypatch.setattr(store_module.json, "loads", guarded_loads)
+    result = store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=1, max_relationships=1, now_ms=400
+    )
+
+    assert result["blocked"] is True
+    assert str(result["blocked_reason"]).startswith("event-payload-too-large:oversized:")
+    assert calls == 0
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_market_staging WHERE window_id=?",
+            (window["id"],),
+        ).fetchone() == (0,)
+
 
 async def test_scheduler_path_rotates_blocked_bootstrap_window(
     settings_for_test,
@@ -990,6 +1164,9 @@ def test_complete_structure_staging_is_database_frozen(tmp_path) -> None:
         window_id=window["id"], requested_cursor=None, next_cursor=None,
         completed=True, markets=[{"id": "market-1"}], finished_at_ms=300,
     )
+    assert store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=10, max_relationships=10, now_ms=350
+    )["completed"] is True
 
     statements = (
         (

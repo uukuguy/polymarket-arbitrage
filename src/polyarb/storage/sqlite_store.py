@@ -64,6 +64,7 @@ _VALID_MODES = ("subset", "full")
 # the production volume, so SQLite's five-second default is too short.
 SQLITE_BUSY_TIMEOUT_S = 120.0
 STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS = 5_000
+STRUCTURE_EVENT_PAYLOAD_MAX_BYTES = 1_000_000
 
 # Booleans that are stored as INTEGER 0/1 in SQLite — convert before insert.
 _BOOL_COLUMNS = ("active", "closed", "neg_risk", "incomplete")
@@ -83,7 +84,14 @@ def _migrate_structure_event_market_progress(con: sqlite3.Connection) -> None:
             "PRAGMA table_info(structure_sync_event_market_backfill_progress)"
         )
     }
-    if not columns or "event_cursor" in columns:
+    if not columns:
+        return
+    if "migration_reason" not in columns:
+        con.execute(
+            "ALTER TABLE structure_sync_event_market_backfill_progress "
+            "ADD COLUMN migration_reason TEXT"
+        )
+    if "event_cursor" in columns:
         return
     additions = (
         ("window_checkpoint_at_ms", "INTEGER NOT NULL DEFAULT 0"),
@@ -96,26 +104,14 @@ def _migrate_structure_event_market_progress(con: sqlite3.Connection) -> None:
             "ALTER TABLE structure_sync_event_market_backfill_progress "
             f"ADD COLUMN {column} {ddl}"
         )
-    rows = con.execute(
-        "SELECT progress.window_id,progress.after_rowid,window.checkpoint_at_ms "
-        "FROM structure_sync_event_market_backfill_progress progress JOIN "
-        "structure_sync_windows window ON window.id=progress.window_id"
-    ).fetchall()
-    for window_id, after_rowid, checkpoint_at_ms in rows:
-        cursor = con.execute(
-            "SELECT event_id FROM structure_sync_event_staging "
-            "WHERE window_id=? AND rowid=?",
-            (window_id, after_rowid),
-        ).fetchone()
-        con.execute(
-            "UPDATE structure_sync_event_market_backfill_progress SET "
-            "window_checkpoint_at_ms=?,event_cursor=? WHERE window_id=?",
-            (
-                int(checkpoint_at_ms),
-                "" if cursor is None else str(cursor[0]),
-                str(window_id),
-            ),
-        )
+    con.execute(
+        "UPDATE structure_sync_event_market_backfill_progress SET "
+        "window_checkpoint_at_ms=(SELECT checkpoint_at_ms FROM structure_sync_windows "
+        "WHERE id=structure_sync_event_market_backfill_progress.window_id),"
+        "event_cursor='',member_offset=0,events_processed=0,"
+        "relationships_processed=0,completed_at_ms=NULL,"
+        "migration_reason='legacy-after-rowid-rewound'"
+    )
 
 
 def _migrate_structure_cleanup_progress_binding(con: sqlite3.Connection) -> None:
@@ -318,6 +314,32 @@ def _comparison_receipt_digest(
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _bootstrap_rotation_digest(
+    *,
+    old_window_id: str,
+    event_cursor: str,
+    member_offset: int,
+    blocked_reason: str,
+    checkpoint_at_ms: int,
+    successor_window_id: str,
+    rotated_at_ms: int,
+) -> str:
+    payload = json.dumps(
+        {
+            "blocked_reason": blocked_reason,
+            "checkpoint_at_ms": checkpoint_at_ms,
+            "event_cursor": event_cursor,
+            "member_offset": member_offset,
+            "old_window_id": old_window_id,
+            "rotated_at_ms": rotated_at_ms,
+            "successor_window_id": successor_window_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _generation_cleanup_digest(
@@ -1843,19 +1865,25 @@ class SQLiteStore:
             con.execute("COMMIT")
             if member_offset:
                 current = con.execute(
-                    "SELECT event_id,payload_json FROM structure_sync_event_staging "
+                    "SELECT event_id,payload_json,length(CAST(payload_json AS BLOB)),"
+                    "COALESCE(source_ordinal,rowid) "
+                    "FROM structure_sync_event_staging "
                     "WHERE window_id=? AND event_id=?",
                     (window_id, event_cursor),
                 ).fetchall()
                 following = con.execute(
-                    "SELECT event_id,payload_json FROM structure_sync_event_staging "
+                    "SELECT event_id,payload_json,length(CAST(payload_json AS BLOB)),"
+                    "COALESCE(source_ordinal,rowid) "
+                    "FROM structure_sync_event_staging "
                     "WHERE window_id=? AND event_id>? ORDER BY event_id LIMIT ?",
                     (window_id, event_cursor, max_events - 1),
                 ).fetchall()
                 rows = [*current, *following]
             else:
                 rows = con.execute(
-                    "SELECT event_id,payload_json FROM structure_sync_event_staging "
+                    "SELECT event_id,payload_json,length(CAST(payload_json AS BLOB)),"
+                    "COALESCE(source_ordinal,rowid) "
+                    "FROM structure_sync_event_staging "
                     "WHERE window_id=? AND event_id>? ORDER BY event_id LIMIT ?",
                     (window_id, event_cursor, max_events),
                 ).fetchall()
@@ -1866,8 +1894,17 @@ class SQLiteStore:
             remaining_relationships = max_relationships
             current_event_id = "unknown"
             try:
-                for row_index, (event_id, payload_json) in enumerate(rows):
+                for row_index, (
+                    event_id,
+                    payload_json,
+                    payload_bytes,
+                    source_ordinal,
+                ) in enumerate(rows):
                     current_event_id = str(event_id)
+                    if int(payload_bytes) > STRUCTURE_EVENT_PAYLOAD_MAX_BYTES:
+                        raise ValueError(
+                            f"event-payload-too-large:{event_id}:{payload_bytes}"
+                        )
                     payload = json.loads(str(payload_json))
                     if not isinstance(payload, dict):
                         raise ValueError(f"invalid-event-payload:{event_id}")
@@ -1885,7 +1922,7 @@ class SQLiteStore:
                         checked.append(market_id)
                     end = min(len(checked), start + remaining_relationships)
                     parent_rows.extend(
-                        (window_id, market_id, event_id, 0)
+                        (window_id, market_id, event_id, int(source_ordinal))
                         for market_id in checked[start:end]
                     )
                     remaining_relationships -= end - start
@@ -4157,10 +4194,27 @@ class SQLiteStore:
                 "progress.member_offset,progress.events_processed,"
                 "progress.relationships_processed,progress.checkpoint_at_ms,"
                 "progress.completed_at_ms,progress.blocked_reason FROM "
-                "structure_sync_event_market_backfill_progress progress JOIN "
+                "structure_sync_event_market_backfill_progress progress "
+                "INDEXED BY idx_structure_event_market_backfill_active JOIN "
                 "structure_sync_windows window ON window.id=progress.window_id "
-                "WHERE window.status='complete' AND progress.completed_at_ms IS NULL "
+                "WHERE progress.completed_at_ms IS NULL "
+                "AND progress.checkpoint_at_ms>=0 AND window.status='complete' "
                 "ORDER BY progress.checkpoint_at_ms DESC,progress.window_id DESC LIMIT 1"
+            ).fetchone()
+            bootstrap_rotation = con.execute(
+                "SELECT observation.old_window_id,observation.event_cursor,"
+                "observation.member_offset,observation.blocked_reason,"
+                "observation.checkpoint_at_ms,observation.successor_window_id,"
+                "observation.rotated_at_ms,observation.observation_digest,"
+                "successor.status,progress.completed_at_ms FROM "
+                "structure_bootstrap_rotation_observations observation "
+                "INDEXED BY idx_structure_bootstrap_rotation_latest JOIN "
+                "structure_sync_windows successor "
+                "ON successor.id=observation.successor_window_id LEFT JOIN "
+                "structure_sync_event_market_backfill_progress progress "
+                "ON progress.window_id=observation.successor_window_id "
+                "WHERE observation.rotated_at_ms>=0 ORDER BY "
+                "observation.rotated_at_ms DESC,observation.observation_id DESC LIMIT 1"
             ).fetchone()
             generation_probe = con.execute(
                 "SELECT p.snapshot_id FROM structure_publications p WHERE "
@@ -4281,6 +4335,34 @@ class SQLiteStore:
                 cleanup_blocked_reason = "cleanup-observation-digest-mismatch"
             elif cleanup_observation[2] == "blocked":
                 cleanup_blocked_reason = str(cleanup_observation[3])
+        rotation_status = None
+        if bootstrap_rotation is not None:
+            recovered = (
+                bootstrap_rotation[8] in {"complete", "published"}
+                and bootstrap_rotation[9] is not None
+            )
+            rotation_status = {
+                "old_window_id": str(bootstrap_rotation[0]),
+                "event_cursor": str(bootstrap_rotation[1]),
+                "member_offset": int(bootstrap_rotation[2]),
+                "blocked_reason": str(bootstrap_rotation[3]),
+                "checkpoint_at_ms": int(bootstrap_rotation[4]),
+                "successor_window_id": str(bootstrap_rotation[5]),
+                "rotated_at_ms": int(bootstrap_rotation[6]),
+                "observation_digest": str(bootstrap_rotation[7]),
+                "recovered": recovered,
+            }
+            if not recovered:
+                bootstrap = (
+                    bootstrap_rotation[0],
+                    bootstrap_rotation[1],
+                    bootstrap_rotation[2],
+                    0,
+                    0,
+                    bootstrap_rotation[4],
+                    None,
+                    bootstrap_rotation[3],
+                )
         return {
             "pointer_snapshot_id": pointer_snapshot_id,
             "pointer_publication_id": pointer_publication_id,
@@ -4316,7 +4398,18 @@ class SQLiteStore:
                 "checkpoint_at_ms": int(bootstrap[5]),
                 "completed_at_ms": bootstrap[6],
                 "blocked_reason": bootstrap[7],
+                **(
+                    {
+                        "successor_window_id": str(bootstrap_rotation[5]),
+                        "recovery_state": "rotated",
+                    }
+                    if bootstrap_rotation is not None
+                    and not rotation_status["recovered"]
+                    and str(bootstrap[0]) == str(bootstrap_rotation[0])
+                    else {}
+                ),
             },
+            "bootstrap_rotation": rotation_status,
             "comparison": None
             if comparison is None
             else {
@@ -4353,6 +4446,19 @@ class SQLiteStore:
     ) -> dict[str, tuple[str, ...]]:
         """Expose stable SQLite planner evidence for bounded operator queries."""
         queries = {
+            "active_bootstrap": (
+                "SELECT progress.window_id,progress.event_cursor,"
+                "progress.member_offset,progress.events_processed,"
+                "progress.relationships_processed,progress.checkpoint_at_ms,"
+                "progress.completed_at_ms,progress.blocked_reason FROM "
+                "structure_sync_event_market_backfill_progress progress "
+                "INDEXED BY idx_structure_event_market_backfill_active JOIN "
+                "structure_sync_windows window ON window.id=progress.window_id "
+                "WHERE progress.completed_at_ms IS NULL "
+                "AND progress.checkpoint_at_ms>=0 AND window.status='complete' "
+                "ORDER BY progress.checkpoint_at_ms DESC,progress.window_id DESC LIMIT 1",
+                (),
+            ),
             "pointer_repair": (
                 "SELECT phase,row_cursor_json,digest_state_json,phase_row_count,"
                 "checkpoint_at_ms,legacy_universe_hash,generation_universe_hash,"
@@ -5185,7 +5291,8 @@ class SQLiteStore:
             con.execute("BEGIN IMMEDIATE")
             blocked = con.execute(
                 "SELECT progress.blocked_reason,progress.window_checkpoint_at_ms,"
-                "window.checkpoint_at_ms FROM "
+                "window.checkpoint_at_ms,progress.event_cursor,progress.member_offset,"
+                "progress.checkpoint_at_ms FROM "
                 "structure_sync_event_market_backfill_progress progress JOIN "
                 "structure_sync_windows window ON window.id=progress.window_id "
                 "LEFT JOIN structure_publications publication "
@@ -5213,6 +5320,31 @@ class SQLiteStore:
                 "INSERT INTO structure_sync_windows("
                 "id,status,started_at_ms,checkpoint_at_ms) VALUES (?,'open',?,?)",
                 (successor_id, rotated_at_ms, rotated_at_ms + 1),
+            )
+            digest = _bootstrap_rotation_digest(
+                old_window_id=window_id,
+                event_cursor=str(blocked[3]),
+                member_offset=int(blocked[4]),
+                blocked_reason=reason,
+                checkpoint_at_ms=int(blocked[5]),
+                successor_window_id=successor_id,
+                rotated_at_ms=rotated_at_ms,
+            )
+            con.execute(
+                "INSERT INTO structure_bootstrap_rotation_observations("
+                "old_window_id,event_cursor,member_offset,blocked_reason,"
+                "checkpoint_at_ms,successor_window_id,rotated_at_ms,"
+                "observation_digest) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    window_id,
+                    str(blocked[3]),
+                    int(blocked[4]),
+                    reason,
+                    int(blocked[5]),
+                    successor_id,
+                    rotated_at_ms,
+                    digest,
+                ),
             )
             row = con.execute(
                 "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
@@ -5528,53 +5660,6 @@ class SQLiteStore:
                 "payload_json=excluded.payload_json,source_cursor=excluded.source_cursor",
                 [(window_id, *item) for item in ordered],
             )
-            parent_rows: list[tuple[object, ...]] = []
-            for index, event in enumerate(events, start=1):
-                event_id = str(event["id"])
-                members = event.get("markets")
-                if not isinstance(members, list):
-                    continue
-                for member in members:
-                    market_id = member.get("id") if isinstance(member, dict) else None
-                    if isinstance(market_id, str) and market_id:
-                        parent_rows.append(
-                            (window_id, market_id, event_id, ordinal_base + index)
-                        )
-            con.executemany(
-                "INSERT OR IGNORE INTO structure_sync_event_market_staging("
-                "window_id,market_id,event_id,source_ordinal) VALUES (?,?,?,?)",
-                parent_rows,
-            )
-            if completed:
-                final_event_id = str(
-                    con.execute(
-                        "SELECT COALESCE(MAX(event_id),'') FROM "
-                        "structure_sync_event_staging WHERE window_id=?",
-                        (window_id,),
-                    ).fetchone()[0]
-                )
-                con.execute(
-                    "INSERT INTO structure_sync_event_market_backfill_progress("
-                    "window_id,window_checkpoint_at_ms,event_cursor,member_offset,"
-                    "events_processed,relationships_processed,checkpoint_at_ms,"
-                    "completed_at_ms) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(window_id) "
-                    "DO UPDATE SET window_checkpoint_at_ms="
-                    "excluded.window_checkpoint_at_ms,event_cursor=excluded.event_cursor,"
-                    "member_offset=0,events_processed=excluded.events_processed,"
-                    "relationships_processed=excluded.relationships_processed,"
-                    "checkpoint_at_ms=excluded.checkpoint_at_ms,"
-                    "completed_at_ms=excluded.completed_at_ms,blocked_reason=NULL",
-                    (
-                        window_id,
-                        finished_at_ms,
-                        final_event_id,
-                        0,
-                        0,
-                        0,
-                        finished_at_ms,
-                        finished_at_ms,
-                    ),
-                )
             con.execute(
                 "UPDATE structure_sync_windows SET status=?,event_cursor=?,"
                 "checkpoint_at_ms=?,event_pages=event_pages+1 WHERE id=?",
@@ -5665,6 +5750,20 @@ class SQLiteStore:
                     window_id,
                 ),
             )
+            if completed:
+                con.execute(
+                    "INSERT INTO structure_sync_event_market_backfill_progress("
+                    "window_id,window_checkpoint_at_ms,event_cursor,member_offset,"
+                    "events_processed,relationships_processed,checkpoint_at_ms,"
+                    "completed_at_ms,blocked_reason,migration_reason) "
+                    "VALUES (?,?,'',0,0,0,?,NULL,NULL,NULL) "
+                    "ON CONFLICT(window_id) DO UPDATE SET "
+                    "window_checkpoint_at_ms=excluded.window_checkpoint_at_ms,"
+                    "event_cursor='',member_offset=0,events_processed=0,"
+                    "relationships_processed=0,checkpoint_at_ms=excluded.checkpoint_at_ms,"
+                    "completed_at_ms=NULL,blocked_reason=NULL,migration_reason=NULL",
+                    (window_id, finished_at_ms, finished_at_ms),
+                )
             con.execute("COMMIT")
         except BaseException:
             if con.in_transaction:

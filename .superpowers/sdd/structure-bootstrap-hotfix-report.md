@@ -20,16 +20,19 @@ zero and incremented the failure counter.
   without a writer lock, then revalidates the window identity/cursor and commits
   at most `max_relationships` relation rows plus the next checkpoint in one
   bounded writer transaction.
-- A newly collected window marks this migration complete in the same transaction
-  as its final event page. Legacy complete windows advance one chunk and return a
-  clean scheduler checkpoint before publication begins.
+- Fresh event pages only stage immutable raw events; they never expand nested
+  relationships inside the page transaction. The final market-page transaction
+  creates an incomplete bootstrap checkpoint bound to the exact complete-window
+  identity. Fresh and legacy windows then use the same bounded parser before
+  publication begins.
 - `structure-generation-backfill` prioritizes this prerequisite and emits stable
   JSON. Event and relationship rows have independent equal hard budgets;
   `event_cursor + member_offset` resumes even inside one oversized event.
   Default `max_rows=500` requires at least 128 calls for 63,919 production
   events; the hard maximum 5,000 requires at least 13, with additional calls
   when nested relationships are more numerous.
-- Invalid JSON or member shape records a durable blocked reason, exits nonzero,
+- Invalid JSON/member shape or a raw event above the 1,000,000-byte hard limit
+  records a durable blocked reason before bulk materialization, exits nonzero,
   and never advances the cursor or silently omits parent truth.
 - The parent now strictly parses normalization/certification publication
   checkpoint JSON instead of reclassifying a committed child chunk as
@@ -42,11 +45,11 @@ switch, database mutation, or production restart was performed by this task.
 ## TDD and verification
 
 Initial RED: 3 failures for the absent durable migration API/schema and absent
-publication-checkpoint result type. The final focused authority/bootstrap gate
-covered 262 tests.
+publication-checkpoint result type. The reviewer-remediated focused
+authority/bootstrap gate covered 220 tests.
 
-- Focused authority/bootstrap: `262 passed in 46.40s`.
-- Full M1: `3032 passed, 1 skipped, 1 xfailed in 518.16s`.
+- Focused authority/bootstrap: `220 passed in 28.48s`.
+- Full M1: `3044 passed, 1 skipped, 1 xfailed in 516.52s`.
 - Changed-file Ruff: PASS.
 - `git diff --check`: PASS.
 - Documentation, planning status, and pre-commit gate are recorded after the
@@ -63,4 +66,8 @@ or `market_id`; EXPLAIN proves index SEARCH without a temporary sort. The shared
 checkpoint vocabulary includes source and comparison phases, complete staging
 is database-frozen, progress binds the exact window checkpoint, and corrupt
 source automatically rotates to a clean successor while preserving blocked
-evidence. Status/strict health expose cursor, offset, age, and blocked reason.
+evidence in an append-only digest-sealed observation. Status/strict health keep
+that recovery fail visible until the successor finishes bootstrap, then retain
+history without poisoning current health. The old `after_rowid` migration now
+rewinds to the lexical beginning for idempotent bounded replay, preventing
+scrambled rowid/event-id order from skipping truth.

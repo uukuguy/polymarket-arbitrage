@@ -43,6 +43,11 @@ def _source_cursor(component: str, durable_cursor: str | None) -> str | None:
     return None if value == "done" else value
 
 
+def _checkpoint_component(component: str) -> str:
+    """Project the durable comparison transition as its first concrete phase."""
+    return "legacy-universe" if component == "comparison" else component
+
+
 def _member_row(member: EventMember) -> dict[str, object]:
     return {
         "event_id": member.event_id,
@@ -213,7 +218,7 @@ def run_structure_publication_step(
         return StructurePublicationCheckpoint(
             "certifying" if certification is not None else "normalizing",
             (
-                certification[0]
+                _checkpoint_component(certification[0])
                 if certification is not None
                 else progress.component or STRUCTURE_COMPONENTS[0]
             ),
@@ -252,7 +257,7 @@ def run_structure_publication_step(
             )
             return StructurePublicationCheckpoint(
                 "ready" if certification.ready else "certifying",
-                certification.component,
+                _checkpoint_component(certification.component),
                 certification.rows_processed,
                 certification.cursor,
                 publication.publication_id,

@@ -86,6 +86,48 @@ def test_ready_publication_requires_a_later_invocation_to_switch(
     assert store.current_structure_generation()["snapshot_id"] == published.snapshot_id
 
 
+@pytest.mark.asyncio
+async def test_actual_comparison_transition_checkpoint_is_accepted_by_parent(
+    settings_for_test,
+) -> None:
+    from polyarb.daemon.scheduler import (
+        IsolatedStructurePublicationCheckpoint,
+        run_snapshot_in_subprocess,
+    )
+
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    window_id = _complete_window(store, "market-1", now_ms=100)
+    for _ in range(40):
+        checkpoint = run_structure_publication_step(
+            settings_for_test, window_id, max_rows=1, max_elapsed_s=60
+        )
+        if (
+            isinstance(checkpoint, StructurePublicationCheckpoint)
+            and checkpoint.stage == "certifying"
+            and checkpoint.component == "legacy-universe"
+        ):
+            break
+    else:
+        raise AssertionError("actual comparison transition checkpoint not emitted")
+
+    class Process:
+        returncode = 0
+        stderr = b""
+
+        async def communicate(self):
+            return json.dumps(
+                {"checkpointed": True, **checkpoint.__dict__}
+            ).encode(), self.stderr
+
+    async def spawn(*_args, **_kwargs):
+        return Process()
+
+    parsed = await run_snapshot_in_subprocess(spawn=spawn)
+    assert isinstance(parsed, IsolatedStructurePublicationCheckpoint)
+    assert parsed.component == "legacy-universe"
+
+
 def test_elapsed_budget_checkpoints_before_starting_a_chunk(
     settings_for_test, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -226,6 +268,13 @@ def _complete_window(store: SQLiteStore, market_id: str, *, now_ms: int) -> str:
         ],
         finished_at_ms=now_ms + 2,
     )
+    bootstrap = store.advance_structure_event_market_backfill(
+        window_id=window_id,
+        max_events=10,
+        max_relationships=10,
+        now_ms=now_ms + 3,
+    )
+    assert bootstrap["completed"] is True
     return window_id
 
 
@@ -799,6 +848,9 @@ def test_duplicate_market_uses_first_source_parent_and_never_publishes(
         ],
         finished_at_ms=102,
     )
+    assert store.advance_structure_event_market_backfill(
+        window_id=window_id, max_events=10, max_relationships=10, now_ms=103
+    )["completed"] is True
 
     publication_id = None
     with pytest.raises(ValueError, match="generation-validation-issues|membership-invalid"):
@@ -840,6 +892,32 @@ def test_worker_entry_migrates_pre_task3_structure_schema(tmp_path: Path) -> Non
             "checkpoint_at_ms INTEGER,certified_at_ms INTEGER,published_at_ms INTEGER,"
             "failure_reason TEXT);"
         )
+        con.execute(
+            "INSERT INTO structure_sync_windows VALUES "
+            "('legacy-window','complete',NULL,NULL,100,300,1,1,NULL,NULL)"
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_staging VALUES (?,?,?,?)",
+            (
+                "legacy-window",
+                "z-event",
+                json.dumps({"id": "z-event", "markets": [{"id": "market-z"}]}),
+                None,
+            ),
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_staging VALUES (?,?,?,?)",
+            (
+                "legacy-window",
+                "a-event",
+                json.dumps({"id": "a-event", "markets": [{"id": "market-a"}]}),
+                None,
+            ),
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress "
+            "VALUES ('legacy-window',1,1,200,NULL,NULL)"
+        )
 
     store = SQLiteStore(db_path)
     store.init_structure_sync_schema()
@@ -876,7 +954,28 @@ def test_worker_entry_migrates_pre_task3_structure_schema(tmp_path: Path) -> Non
         "event_cursor",
         "member_offset",
         "relationships_processed",
+        "migration_reason",
     } <= progress_columns
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT event_cursor,member_offset,events_processed,completed_at_ms,"
+            "migration_reason FROM structure_sync_event_market_backfill_progress "
+            "WHERE window_id='legacy-window'"
+        ).fetchone() == ("", 0, 0, None, "legacy-after-rowid-rewound")
+
+    first = store.advance_structure_event_market_backfill(
+        window_id="legacy-window", max_events=1, max_relationships=1, now_ms=400
+    )
+    second = store.advance_structure_event_market_backfill(
+        window_id="legacy-window", max_events=1, max_relationships=1, now_ms=500
+    )
+    assert first["event_cursor"] == "a-event"
+    assert second["completed"] is True
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT event_id,market_id FROM structure_sync_event_market_staging "
+            "WHERE window_id='legacy-window' ORDER BY event_id"
+        ).fetchall() == [("a-event", "market-a"), ("z-event", "market-z")]
 
 
 def test_bounded_certification_rejects_stale_membership_hash(tmp_path: Path) -> None:
