@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from polyarb.storage.sqlite_store import SQLiteStore
+from polyarb.storage.sqlite_store import SQLiteStore, StructurePublicationCursorError
 
 COMPONENT_COUNTS = {
     "events": 1,
@@ -480,3 +480,79 @@ def test_generation_publication_attempt_rejects_invalid_membership_truth(
 
     assert store.current_structure_generation()["snapshot_id"] == 10
     assert store.current_generation_market_ids() == ("old-market",)
+
+
+def test_generation_chunk_cursor_mismatch_rolls_back_rows_and_progress(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store,
+        snapshot_id=11,
+        market_id="market-a",
+        now_ms=11_000,
+    )
+    _append_market(
+        store,
+        publication,
+        snapshot_id=11,
+        market_id="market-a",
+        now_ms=11_004,
+    )
+
+    with pytest.raises(StructurePublicationCursorError):
+        store.append_structure_publication_chunk(
+            publication_id=publication.publication_id,
+            component="markets",
+            rows=(_market("market-b", 11),),
+            next_cursor="market-a",
+            now_ms=11_005,
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT market_id FROM structure_generation_markets "
+            "WHERE snapshot_id=11 ORDER BY market_id"
+        ).fetchall() == [("market-a",)]
+        counts_json, cursor = con.execute(
+            "SELECT committed_counts_json,write_row_cursor "
+            "FROM structure_publications WHERE publication_id=?",
+            (publication.publication_id,),
+        ).fetchone()
+    assert '"markets":1' in counts_json
+    assert cursor == "market-a"
+
+
+def test_backfill_current_generation_resumes_bounded_and_switches_last(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "legacy.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+            "market_view_published,data_product,archive_status,snapshot_status,is_valid,"
+            "parquet_path) VALUES (7,1,2,'full',2,1,'structure','legacy','ok',1,'')"
+        )
+        for market_id in ("market-a", "market-b"):
+            con.execute(
+                "INSERT INTO markets(market_id,condition_id,fetched_at_ms,snapshot_id,"
+                "incomplete) VALUES (?,?,?,?,0)",
+                (market_id, f"condition-{market_id}", 2, 7),
+            )
+
+    first = store.backfill_current_structure_generation(max_rows=1)
+    assert first.complete is False
+    assert first.copied_rows == 1
+    assert store.current_structure_generation() is None
+
+    second = store.backfill_current_structure_generation(max_rows=1)
+    assert second.complete is True
+    assert second.copied_rows == 1
+    assert store.current_generation_market_ids() == ("market-a", "market-b")
+
+    replay = store.backfill_current_structure_generation(max_rows=1)
+    assert replay.complete is True
+    assert replay.copied_rows == 0
+    assert store.current_generation_market_ids() == ("market-a", "market-b")

@@ -2348,6 +2348,131 @@ CREATE TABLE IF NOT EXISTS structure_sync_market_staging (
 );
 """
 
+# H-011 publication generations.  Bulk rows are keyed by the immutable
+# snapshot generation; online readers reach them only through the singleton
+# pointer.  Schema bootstrap creates empty tables and never performs backfill.
+STRUCTURE_GENERATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS structure_publications (
+    publication_id TEXT PRIMARY KEY,
+    window_id TEXT NOT NULL UNIQUE REFERENCES structure_sync_windows(id),
+    snapshot_id INTEGER NOT NULL UNIQUE REFERENCES snapshots(id),
+    status TEXT NOT NULL CHECK(status IN (
+        'normalizing','writing','ready','published','failed'
+    )),
+    normalization_component TEXT,
+    normalization_source_cursor TEXT,
+    write_component TEXT,
+    write_row_cursor TEXT,
+    expected_counts_json TEXT NOT NULL,
+    committed_counts_json TEXT NOT NULL,
+    validation_hash TEXT CHECK(
+        validation_hash IS NULL OR length(validation_hash)=64
+    ),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
+    certified_at_ms INTEGER,
+    published_at_ms INTEGER,
+    failure_reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS structure_generation_events (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    title TEXT,
+    ticker TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    closed INTEGER NOT NULL DEFAULT 0,
+    liquidity_usd REAL,
+    volume_usd REAL,
+    end_time_ms INTEGER,
+    fetched_at_ms INTEGER NOT NULL,
+    page_fetched_at_ms INTEGER,
+    PRIMARY KEY(snapshot_id,id)
+);
+CREATE TABLE IF NOT EXISTS structure_generation_event_tags (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    event_id TEXT NOT NULL,
+    tag_id TEXT NOT NULL,
+    tag_label TEXT NOT NULL,
+    tag_slug TEXT NOT NULL,
+    PRIMARY KEY(snapshot_id,event_id,tag_id)
+);
+CREATE TABLE IF NOT EXISTS structure_generation_memberships (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    event_id TEXT NOT NULL,
+    neg_risk_market_id TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    member_kind TEXT NOT NULL CHECK(member_kind IN (
+        'named','other','inactive-reserved'
+    )),
+    active INTEGER NOT NULL CHECK(active IN (0,1)),
+    closed INTEGER NOT NULL CHECK(closed IN (0,1)),
+    PRIMARY KEY(snapshot_id,event_id,market_id)
+);
+CREATE TABLE IF NOT EXISTS structure_generation_group_truth (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    event_id TEXT NOT NULL,
+    neg_risk_market_id TEXT NOT NULL,
+    neg_risk_type TEXT NOT NULL CHECK(neg_risk_type IN ('standard','augmented')),
+    expected_member_count INTEGER NOT NULL CHECK(expected_member_count >= 0),
+    active_named_count INTEGER NOT NULL CHECK(active_named_count >= 0),
+    membership_hash TEXT NOT NULL,
+    quality TEXT NOT NULL CHECK(quality IN (
+        'complete-supported','complete-unsupported',
+        'incomplete-source','incomplete-quotes'
+    )),
+    reason TEXT,
+    PRIMARY KEY(snapshot_id,neg_risk_market_id),
+    CHECK(expected_member_count > 0 OR quality='incomplete-source')
+);
+CREATE TABLE IF NOT EXISTS structure_generation_markets (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    market_id TEXT NOT NULL,
+    condition_id TEXT NOT NULL,
+    slug TEXT,
+    question TEXT,
+    yes_token_id TEXT,
+    no_token_id TEXT,
+    mid_price REAL,
+    liquidity_usd REAL,
+    volume_usd REAL,
+    best_bid_price REAL,
+    best_bid_size REAL,
+    best_ask_price REAL,
+    best_ask_size REAL,
+    end_time_ms INTEGER,
+    active INTEGER,
+    closed INTEGER,
+    neg_risk INTEGER,
+    neg_risk_market_id TEXT,
+    fetched_at_ms INTEGER NOT NULL,
+    page_fetched_at_ms INTEGER,
+    incomplete INTEGER NOT NULL DEFAULT 0,
+    event_id TEXT,
+    PRIMARY KEY(snapshot_id,market_id)
+);
+CREATE INDEX IF NOT EXISTS idx_structure_generation_markets_event
+ON structure_generation_markets(snapshot_id,event_id);
+CREATE TABLE IF NOT EXISTS structure_generation_issues (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    issue_index INTEGER NOT NULL,
+    layer INTEGER NOT NULL,
+    category TEXT NOT NULL,
+    market_id TEXT,
+    detail TEXT,
+    raw_payload TEXT,
+    PRIMARY KEY(snapshot_id,issue_index)
+);
+CREATE TABLE IF NOT EXISTS current_structure_generation (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    snapshot_id INTEGER NOT NULL UNIQUE REFERENCES snapshots(id),
+    publication_id TEXT NOT NULL UNIQUE,
+    switched_at_ms INTEGER NOT NULL CHECK(switched_at_ms >= 0),
+    FOREIGN KEY(publication_id) REFERENCES structure_publications(publication_id)
+);
+"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 03.1 Plan 01: l2_mirror_state singleton table (GAP-2 + GAP-3)
 #

@@ -36,6 +36,7 @@ from polyarb.storage.schemas import (
     MARKETS_COLUMN_ORDER,
     MARKETS_INSERT_SQL,
     SNAPSHOT_SCHEMA,
+    STRUCTURE_GENERATIONS_DDL,
 )
 from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -124,6 +125,32 @@ def test_market_truth_tables_are_created_by_init_schema(tmp_path: Path) -> None:
         }
 
     assert set(MARKET_TRUTH_COLUMNS) <= tables
+
+
+def test_structure_generation_tables_are_declared_and_created(tmp_path: Path) -> None:
+    expected = {
+        "structure_publications",
+        "structure_generation_events",
+        "structure_generation_event_tags",
+        "structure_generation_memberships",
+        "structure_generation_group_truth",
+        "structure_generation_markets",
+        "structure_generation_issues",
+        "current_structure_generation",
+    }
+    for table in expected:
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in STRUCTURE_GENERATIONS_DDL
+
+    store = SQLiteStore(tmp_path / "generations.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        actual = {
+            row[0]
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert expected <= actual
 
 
 def _ddl_markets_columns() -> list[str]:
