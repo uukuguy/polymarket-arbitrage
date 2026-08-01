@@ -202,7 +202,7 @@ patch-gsd-worktree-cleanup:
 # M1-perception Phase 01: market snapshot tool
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v sync-structure-local archive-markets-local snapshot-status snapshot-attempt-status snapshot-fresh snapshots-purge snapshot-cache-purge
+.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v sync-structure-local archive-markets-local snapshot-status snapshot-attempt-status snapshot-fresh snapshots-purge snapshot-cache-purge structure-generation-status structure-generation-backfill structure-generation-compare structure-generation-cleanup
 
 ## snapshot-markets: Capture snapshot (subset, liquidity > $1k, ~15-30 min). Quiet, cron-friendly. Auto-loads .env for Supabase+R2 mirror.
 snapshot-markets:
@@ -239,6 +239,22 @@ sync-structure-local:
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	echo ">> sync-structure-local — Gamma-only Structure revision (local mutation)"; \
 	uv run python -m polyarb.snapshot structure-sync
+
+## structure-generation-status: Read pointer/publication/comparison/retention state; never changes production read mode.
+structure-generation-status:
+	@uv run python -m polyarb.snapshot structure-generation-status
+
+## structure-generation-backfill: Advance one bounded generation backfill/certification chunk; optional max_rows=500.
+structure-generation-backfill:
+	@uv run python -m polyarb.snapshot structure-generation-backfill --max-rows "$(or $(max_rows),500)"
+
+## structure-generation-compare: Read the authenticated legacy/generation comparison; exits nonzero unless PASS.
+structure-generation-compare:
+	@uv run python -m polyarb.snapshot structure-generation-compare
+
+## structure-generation-cleanup: Advance one bounded evidence cleanup phase; preserves current + rollback floor and immutable proof skeleton.
+structure-generation-cleanup:
+	@uv run python -m polyarb.snapshot structure-generation-cleanup --max-rows "$(or $(max_rows),500)" --retain-generations "$(or $(retain_generations),2)"
 
 ## archive-markets-local: Explicit full CLOB/Parquet research archive; never replaces the online Structure market view or schedules production work.
 archive-markets-local:

@@ -2552,6 +2552,29 @@ CREATE TABLE IF NOT EXISTS structure_generation_comparison_progress (
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0)
 );
 
+-- Append-only authorization/evidence for bounded reclamation of old immutable
+-- generation bulk rows. Publication, comparison receipt, snapshot, and legacy
+-- truth remain as the authenticated audit skeleton.
+CREATE TABLE IF NOT EXISTS structure_generation_cleanup_receipts (
+    generation_snapshot_id INTEGER PRIMARY KEY REFERENCES snapshots(id),
+    publication_id TEXT NOT NULL UNIQUE REFERENCES structure_publications(publication_id),
+    component_counts_json TEXT NOT NULL,
+    generation_validation_hash TEXT NOT NULL CHECK(length(generation_validation_hash)=64),
+    reclaimed_at_ms INTEGER NOT NULL CHECK(reclaimed_at_ms >= 0),
+    cleanup_digest TEXT NOT NULL CHECK(length(cleanup_digest)=64)
+);
+CREATE TABLE IF NOT EXISTS structure_generation_cleanup_progress (
+    generation_snapshot_id INTEGER PRIMARY KEY REFERENCES snapshots(id),
+    publication_id TEXT NOT NULL UNIQUE REFERENCES structure_publications(publication_id),
+    phase TEXT NOT NULL CHECK(phase IN (
+        'events','event_tags','memberships','group_truth','markets','issues'
+    )),
+    rows_deleted INTEGER NOT NULL DEFAULT 0 CHECK(rows_deleted >= 0),
+    started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+    checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
+    blocked_reason TEXT
+);
+
 """
 
 # ─────────────────────────────────────────────────────────────────────────────

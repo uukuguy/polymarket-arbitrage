@@ -422,6 +422,132 @@ def _severity(a: str, b: str) -> str:
     return a if order.get(a, 0) >= order.get(b, 0) else b
 
 
+def _structure_generation_health_checks(
+    status: dict[str, Any],
+    *,
+    now_ms: int,
+    read_mode: str,
+    publication_sla_s: int,
+    pressure_warn_count: int,
+    pressure_fail_count: int,
+) -> dict[str, list[dict[str, Any]]]:
+    """Project generation rollout metadata without scanning immutable bulk rows."""
+    publication = status.get("publication")
+    checkpoint_age_s: float | None = None
+    if publication is None:
+        stage = "idle"
+        publication_status = (
+            "warn"
+            if status.get("pointer_snapshot_id") is None and read_mode != "legacy"
+            else "pass"
+        )
+        publication_output = "stage=idle"
+    else:
+        stage = str(publication.get("status") or "unknown")
+        checkpoint = publication.get("checkpoint_at_ms")
+        if isinstance(checkpoint, int):
+            checkpoint_age_s = max(0.0, (now_ms - checkpoint) / 1_000)
+        active = stage in {"normalizing", "writing", "ready"}
+        publication_status = (
+            "fail"
+            if active
+            and checkpoint_age_s is not None
+            and checkpoint_age_s > publication_sla_s
+            else "warn" if active else "pass"
+        )
+        publication_output = (
+            f"stage={stage} normalization_component="
+            f"{publication.get('normalization_component')} "
+            f"normalization_cursor={publication.get('normalization_cursor')} "
+            f"write_component={publication.get('write_component')} "
+            f"write_cursor={publication.get('write_cursor')} "
+            f"checkpoint_age_seconds={checkpoint_age_s}"
+        )
+    if status.get("pointer_snapshot_id") is None and read_mode == "generation":
+        publication_status = "fail"
+    if status.get("pointer_snapshot_id") is not None and not (
+        status.get("generation_count_agrees")
+        and status.get("generation_hash_agrees")
+    ):
+        publication_status = "fail"
+
+    comparison = status.get("comparison")
+    if isinstance(comparison, dict) and comparison.get("receipt_present"):
+        comparison_status = "pass"
+        comparison_value = "sealed"
+    elif isinstance(comparison, dict) and comparison.get("phase") not in {None, "sealed"}:
+        comparison_status = "warn"
+        comparison_value = str(comparison.get("phase"))
+    else:
+        comparison_status = "fail" if read_mode in {"compare", "generation"} else "pass"
+        comparison_value = "missing"
+    comparison_output = (
+        f"cursor={comparison.get('cursor')} checkpoint_at_ms="
+        f"{comparison.get('checkpoint_at_ms')}"
+        if isinstance(comparison, dict)
+        else "comparison-not-started"
+    )
+
+    retained = int(status.get("retained_generation_count") or 0)
+    reclaimable = int(status.get("reclaimable_generation_count") or 0)
+    cleanup = status.get("cleanup")
+    blocked_reason = cleanup.get("blocked_reason") if isinstance(cleanup, dict) else None
+    if blocked_reason is not None or retained >= pressure_fail_count:
+        evidence_status = "fail"
+    elif retained >= pressure_warn_count or reclaimable > 0 or cleanup is not None:
+        evidence_status = "warn"
+    else:
+        evidence_status = "pass"
+    cleanup_snapshot_id = (
+        cleanup.get("generation_snapshot_id") if isinstance(cleanup, dict) else None
+    )
+    cleanup_phase = cleanup.get("phase") if isinstance(cleanup, dict) else None
+    cleanup_checkpoint = (
+        cleanup.get("checkpoint_at_ms") if isinstance(cleanup, dict) else None
+    )
+    evidence_output = (
+        f"retained={retained} reclaimable={reclaimable} "
+        f"retention_floor={status.get('retention_floor')} "
+        f"cleanup_snapshot_id={cleanup_snapshot_id} "
+        f"cleanup_phase={cleanup_phase} "
+        f"cleanup_checkpoint_at_ms={cleanup_checkpoint} "
+        f"blocked_reason={blocked_reason}"
+    )
+    timestamp = _utc_now_iso()
+    return {
+        "snapshot:structure_generation": [
+            {
+                "componentId": "structure-generation-publication",
+                "componentType": "datastore",
+                "observedValue": status.get("pointer_snapshot_id"),
+                "status": publication_status,
+                "output": publication_output,
+                "time": timestamp,
+            }
+        ],
+        "snapshot:structure_generation_comparison": [
+            {
+                "componentId": "structure-generation-comparison",
+                "componentType": "datastore",
+                "observedValue": comparison_value,
+                "status": comparison_status,
+                "output": comparison_output,
+                "time": timestamp,
+            }
+        ],
+        "snapshot:structure_generation_evidence": [
+            {
+                "componentId": "structure-generation-cleanup",
+                "componentType": "datastore",
+                "observedValue": retained,
+                "status": evidence_status,
+                "output": evidence_output,
+                "time": timestamp,
+            }
+        ],
+    }
+
+
 def _build_health_checks(
     store: Any,
     settings: Any,
@@ -986,6 +1112,45 @@ def _build_health_checks(
             "time": _utc_now_iso(),
         }
     ]
+
+    try:
+        generation_status = store.structure_generation_status(
+            retain_generations=int(
+                getattr(settings, "structure_generation_retention_floor", 2)
+            )
+        )
+        generation_checks = _structure_generation_health_checks(
+            generation_status,
+            now_ms=int(now_s * 1_000),
+            read_mode=str(
+                getattr(settings, "structure_generation_read_mode", "legacy")
+            ),
+            publication_sla_s=int(
+                getattr(settings, "structure_publication_sla_s", 25 * 3600)
+            ),
+            pressure_warn_count=int(
+                getattr(settings, "structure_generation_pressure_warn_count", 4)
+            ),
+            pressure_fail_count=int(
+                getattr(settings, "structure_generation_pressure_fail_count", 8)
+            ),
+        )
+    except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+        generation_checks = {
+            "snapshot:structure_generation": [
+                {
+                    "componentId": "structure-generation-publication",
+                    "componentType": "datastore",
+                    "observedValue": None,
+                    "status": "fail",
+                    "output": type(error).__name__,
+                    "time": _utc_now_iso(),
+                }
+            ]
+        }
+    checks.update(generation_checks)
+    for entries in generation_checks.values():
+        overall = _severity(overall, str(entries[0]["status"]))
 
     # ── Check 3: Supabase mirror age (only if mirror enabled) ────────────
     # supabase:mirror_age_seconds — seconds since last successful Supabase push.

@@ -158,6 +158,11 @@ class Settings(BaseSettings):
     structure_generation_read_mode: Literal["legacy", "compare", "generation"] = (
         "legacy"
     )
+    structure_publication_sla_s: int = Field(default=25 * 3600, gt=0)
+    structure_generation_retention_floor: int = Field(default=2, ge=2)
+    structure_generation_pressure_warn_count: int = Field(default=4, ge=2)
+    structure_generation_pressure_fail_count: int = Field(default=8, ge=3)
+    structure_generation_cleanup_max_rows: int = Field(default=500, ge=1)
     market_map_max_age_s: int = Field(default=1800, gt=0)
     neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
 

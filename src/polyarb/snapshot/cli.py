@@ -31,6 +31,102 @@ from polyarb.snapshot.orchestrator import run_snapshot
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
 
+def _generation_store():
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = load_settings()
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    return settings, store
+
+
+@app.command(name="structure-generation-status")
+def structure_generation_status() -> None:
+    """Read generation pointer, publication, comparison, and retention state."""
+    settings, store = _generation_store()
+    result = store.structure_generation_status(
+        retain_generations=int(
+            getattr(settings, "structure_generation_retention_floor", 2)
+        )
+    )
+    print(json.dumps(result, sort_keys=True))
+
+
+@app.command(name="structure-generation-backfill")
+def structure_generation_backfill(
+    max_rows: int = typer.Option(500, "--max-rows", min=1),
+) -> None:
+    """Advance exactly one bounded legacy-to-generation backfill chunk."""
+    _settings, store = _generation_store()
+    result = store.backfill_current_structure_generation(max_rows=max_rows)
+    print(
+        json.dumps(
+            {
+                "complete": result.complete,
+                "copied_rows": result.copied_rows,
+                "cursor": result.cursor,
+                "snapshot_id": result.snapshot_id,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+@app.command(name="structure-generation-compare")
+def structure_generation_compare() -> None:
+    """Read the immutable comparison receipt without changing read mode."""
+    from polyarb.storage.sqlite_store import (
+        StructureGenerationReadError,
+        compare_current_structure_generation,
+    )
+
+    settings = load_settings()
+    try:
+        result = compare_current_structure_generation(settings.db_path)
+    except StructureGenerationReadError as error:
+        print(
+            json.dumps(
+                {"matches": False, "mismatch_reasons": [str(error)]},
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=1) from None
+    payload = {
+        "generation_market_count": result.generation_market_count,
+        "generation_snapshot_id": result.generation_snapshot_id,
+        "generation_source_truth_hash": result.generation_source_truth_hash,
+        "generation_universe_hash": result.generation_universe_hash,
+        "legacy_market_count": result.legacy_market_count,
+        "legacy_snapshot_id": result.legacy_snapshot_id,
+        "legacy_source_truth_hash": result.legacy_source_truth_hash,
+        "legacy_universe_hash": result.legacy_universe_hash,
+        "matches": result.matches,
+        "mismatch_reasons": list(result.mismatch_reasons),
+    }
+    print(json.dumps(payload, sort_keys=True))
+    if not result.matches:
+        raise typer.Exit(code=1)
+
+
+@app.command(name="structure-generation-cleanup")
+def structure_generation_cleanup(
+    max_rows: int = typer.Option(500, "--max-rows", min=1),
+    retain_generations: int = typer.Option(2, "--retain-generations", min=2),
+) -> None:
+    """Advance one bounded evidence-aware old-generation cleanup phase."""
+    import time
+
+    _settings, store = _generation_store()
+    result = store.cleanup_structure_generation_evidence(
+        retain_generations=retain_generations,
+        max_rows=max_rows,
+        now_ms=int(time.time() * 1_000),
+    )
+    print(json.dumps(result, sort_keys=True))
+    if result["blocked"]:
+        raise typer.Exit(code=1)
+
+
 @app.command(name="structure-sync")
 def structure_sync(
     json_output: bool = typer.Option(False, "--json"),

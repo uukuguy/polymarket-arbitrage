@@ -1,138 +1,62 @@
-# Task 6 Implementer Report
+# Structure Task 6 Report — Rollout Health and Bounded Evidence Cleanup
 
-## Status and scope
+## Status
 
-Implemented locally with TDD. No deployment, feature enablement, production
-database, secret, wallet, signing, balance, order, harness, evaluator, or
-fault `VERIFIED` work was performed.
-
-The seam is exactly the existing durable outbox boundary:
-`OpportunityWatcher.deliver_pending_notifications()` consumes
-`TELEGRAM_OPPORTUNITY_CARD/str(PendingNotification.id)` immediately before
-the unchanged `_send_telegram(settings, _format_card(notification))` call.
-`SendTelegram`, `send_opportunity_alert`, card formatting, and the real
-transport remain owned by their existing code.
+Implemented and locally verified with TDD. This task did not deploy, change the
+production read mode, touch credentials, or introduce wallet/order authority.
 
 ## Delivered
 
-- Added `TelegramDeliveryFault` and the deterministic
-  `QualifiedTelegramTransportError`. Injection receipt persistence completes
-  before the exception is raised; the exception carries only fault ID, call
-  ID, and injection time.
-- Exact-target injection fails only that notification. Other pending
-  notifications in the same loop call the real sender once. Disabled,
-  unmatched, consumed, degraded, controller-failed, and injection-receipt
-  failure paths pass through without authority reads on the ordinary hot path.
-- Extended notification attempts so each append returns its exact immutable
-  `NotificationAttempt` from one `INSERT ... RETURNING`. The watcher no longer
-  infers ownership from `notification_attempts(...)[-1]` or shared counts.
-- Preserved the existing `telegram-delivery-failed` Incident lifecycle.
-  `NotificationIncidents` now returns the authoritative Incident/attempt
-  pointer and a typed first-event qualified receipt. The first detected event
-  contains the exact injected call ID. Pre-existing, same-millisecond, deduped,
-  and other-notification Incidents cannot be linked.
-- Added `TELEGRAM_DELIVERY` recovery receipts. Recovery validation and the
-  `RECOVERED` append run in the existing single fault-authority transaction and
-  require the same notification, current runtime/ownership, exact latest
-  append-only attempt overall, `outcome='delivered'`, no error kind, and a
-  writer time strictly after injection and not after authority time.
-- Another notification target is `NOT_APPLICABLE` without mutation or losing
-  pending recovery. An exact-target wrong writer family, stale, failed,
-  fabricated, or semantically invalid exact evidence is
-  `INVALID`/`EVIDENCE_INVALID`. Authority/SQLite failure is
-  `UNAVAILABLE` with cleanup/freeze/degrade, never false invalidity.
-- Cleanup is persisted before retry. Existing Incident verification happens
-  only from the exact delivered attempt; fault recovery does not write
-  `VERIFIED`.
-- Failed and delivered attempt writers plus their evidence work are
-  cancellation-settled per invocation. A committed write retains exactly one
-  receipt before the original outer cancellation propagates. An uncommitted
-  write fabricates no attempt, Incident detection, or recovery and cannot
-  strand an `INJECTED` fault.
-- Fault/Incident evidence and logs contain only outbox ID, safe error type,
-  call/Incident IDs, and recovery IDs. Tests directly scan all fault tables and
-  the real intent/event rows for a card marker, Telegram URL, and bot token;
-  none is persisted.
+- Added strict generation health for publication stage/cursor/checkpoint age,
+  pointer identity and authenticated count/hash agreement, comparison
+  receipt/progress, Quote-priority defer visibility, and retained evidence
+  pressure/cleanup blockage.
+- Added stable JSON operator commands and Make targets:
+  `structure-generation-status`, `structure-generation-backfill`,
+  `structure-generation-compare`, and `structure-generation-cleanup`.
+  Status/compare are read-only; backfill advances one `max_rows` chunk; no
+  command changes `structure_generation_read_mode`.
+- Added durable bounded cleanup progress. Candidate ownership is fixed under
+  `BEGIN IMMEDIATE` only after it is outside the current+rollback floor and its
+  immutable publication/comparison proof authenticates. Each invocation
+  deletes at most `max_rows` from exactly one component phase and can resume
+  after store/process reopen.
+- Frozen generation DELETE triggers permit only a matching active cleanup
+  progress row. INSERT/UPDATE remain frozen. After all six bulk components are
+  empty, cleanup atomically seals an append-only digest-bound receipt and
+  removes progress. It never deletes the publication, comparison receipt,
+  snapshot, sync window, or legacy proof skeleton.
+- Exact generation reads reject both active cleanup and reclaimed generations,
+  preventing an old reclaimed identity from being treated as a rollback target.
+  Generic snapshot purge remains separate and never performs generation-chain
+  reclamation.
+- Updated the living M1 manual with the exact schema deploy → bounded backfill
+  → compare PASS → generation mode → natural publication rollout, pointer
+  switch semantics, explicit legacy rollback, health interpretation, and the
+  bounded cleanup command.
 
-## Plan-versus-real-API corrections
+## TDD evidence
 
-The brief listed only the adapter, watcher, and two new test files. The real
-interfaces required four minimal typed extensions:
+Observed RED before implementation for missing store cleanup/status APIs, all
+four Make/CLI surfaces, generation health projection, stable unavailable compare
+JSON, and manual rollout/cleanup contracts.
 
-1. `OpportunityLedger.mark_notification_failed/delivered` returns the exact
-   append receipt.
-2. `NotificationIncidents` returns and validates the authoritative first
-   Incident event and exact delivered attempt.
-3. `FaultRecoveryWriter` accepts an integer Telegram delivery attempt ID.
-4. `FaultRuntime` and `FaultAuthorityStore` route and validate the notification
-   recovery family.
+GREEN evidence:
 
-No schema, sender signature, card payload, global Telegram client, control
-surface, or Make target changed.
-
-## RED / GREEN evidence
-
-1. Initial RED failed collection because
-   `QualifiedTelegramTransportError`, `TelegramDeliveryFault`, and
-   `QualifiedNotificationIncidentReceipt` did not exist.
-2. Watcher RED showed zero typed outbox calls and incorrectly delivered the
-   targeted notification. GREEN proves exact ID 1 fails while ID 2 uses the
-   real sender exactly once.
-3. Real-authority recovery RED stopped at `CLEANED`. GREEN records
-   `authorized → armed → injected → detected → contained → cleaned →
-   recovered` only after the later exact delivered attempt.
-4. Latest-attempt RED/contract uses `d1 delivered → f2 failed`: d1 is stale and
-   invalid. A later d3 delivered attempt is accepted as the latest overall.
-5. Failed-attempt commit/cancel RED stranded `INJECTED`; GREEN preserves one
-   exact failed attempt, exact Incident evidence, and `CLEANED`.
-6. Delivered-attempt commit/cancel RED stranded `CLEANED`; GREEN preserves one
-   delivered attempt and `RECOVERED`. Both rethrow the original cancellation.
-7. Attempt-store and Incident-store unavailability RED escaped or stranded
-   injection. GREEN produces no fabricated receipt, cleans to `ABANDONED`,
-   freezes/degrades, then passes the next real sender call through.
-8. Review HIGH RED proved exact-target Telegram, Candidate, Discovery, and
-   Reconciliation cross-family writers were incorrectly `NOT_APPLICABLE`.
-   GREEN routes legal writers by `FaultKind`: exact-target family mismatch
-   appends `EVIDENCE_INVALID` while ownership is held and freezes/degrades;
-   different targets remain zero-mutation `NOT_APPLICABLE`, and authority
-   unavailability remains `UNAVAILABLE` with no invalid event.
-9. Final-review HIGH RED proved cross-family and post-validator semantic
-   invalidity still returned `INVALID` when the terminal
-   `EVIDENCE_INVALID` append raised SQLite `OperationalError`; durable history
-   remained `CLEANED`. GREEN centralizes owned invalidation and returns
-   `INVALID` only when `receipt_persisted is True` and the returned terminal is
-   exactly `EVIDENCE_INVALID`. Failed, missing, or wrong-terminal invalidation
-   proof returns `UNAVAILABLE`, retains freeze/degrade, clears pending
-   recovery, and never resumes claims.
-
-## Verification
-
-- Task 6 adapter/Incident + daemon watcher + outbox ledger: 37 tests passed.
-- Full `tests/perception` plus daemon opportunity watcher/main fault wiring,
-  outbox ledger, and M1 control regressions: 1,023 tests passed.
-- The first aggregate run had one unrelated load-sensitive Resource
-  open-authority read failure. The untouched isolated test passed 5/5; a fresh
-  full 1,023-test aggregate rerun passed 100%.
-- Focused Ruff: passed.
+- Required health/Make/manual suites: all passed.
+- Expanded generation publication/readers/store migration/schema/operator
+  regression: 281 tests passed.
+- Full M1 gate: **2984 passed, 1 skipped, 1 xfailed** in 668.83 seconds.
+- `uv run ruff check src tests/m1-perception`: passed.
+- `make docs-m1-check`: passed.
+- `make planning-status`: no drift.
 - `git diff --check`: passed.
-- Post-commit focused tests and Ruff: passed.
-- `make planning-status`: 82 plans, no drift.
 
-### Review HIGH remediation verification
+## Remaining risk / Task 7 handoff
 
-- Exact-target cross-family/different-target/authority-unavailable plus
-  invalid-terminal-append runtime matrix: 11 tests passed.
-- Task 3–6 fault control, authority, runtime, Gamma/Candidate/Telegram
-  adapters and Incidents, daemon wiring, notification/outbox, and related
-  SQLite/store regressions: 742 tests passed.
-- Focused Ruff and Task 6 scoped `git diff --check`: passed.
-- Repository-wide `git diff --check` remains blocked only by an unstaged,
-  user-owned trailing blank line in `.superpowers/sdd/task-7-brief.md`; Task 6
-  did not edit or stage that file.
-- `make planning-status`: 82 plans, no drift.
-
-## Concerns
-
-- Telegram `delivered` remains transport-writer evidence, not proof of handset
-  display/read.
-- The independent evaluator and fault `VERIFIED` transition remain Task 7.
+- No production schema migration, backfill, compare, read-mode switch, natural
+  generation, cleanup, or rollback was run here. Task 7 owns exact-SHA production
+  qualification.
+- Cleanup intentionally preserves immutable proof skeleton metadata. Capacity
+  health measures unreclaimed bulk generations; SQLite file shrink/VACUUM is a
+  separate operator concern and is not performed automatically.

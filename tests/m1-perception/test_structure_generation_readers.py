@@ -241,6 +241,128 @@ def generation_db(tmp_path: Path) -> Path:
     return path
 
 
+def test_generation_operations_report_pressure_and_reclaim_one_safe_chain(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "generation-operations.db"
+    SQLiteStore(path).init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="one", point_current=False)
+    _seed_structure_revision(path, snapshot_id=2, market_suffix="two", point_current=False)
+    _seed_structure_revision(path, snapshot_id=3, market_suffix="three", point_current=True)
+    store = SQLiteStore(path)
+
+    status = store.structure_generation_status(retain_generations=2)
+    assert status["pointer_snapshot_id"] == 3
+    assert status["retained_generation_count"] == 3
+    assert status["reclaimable_generation_count"] == 1
+    assert status["generation_count_agrees"] is True
+    assert status["generation_hash_agrees"] is True
+
+    steps = []
+    while True:
+        cleanup = SQLiteStore(path).cleanup_structure_generation_evidence(
+            retain_generations=2,
+            max_rows=1,
+            now_ms=10_000 + len(steps),
+        )
+        steps.append(cleanup)
+        assert cleanup["rows_deleted"] <= 1
+        if len(steps) == 1:
+            with pytest.raises(
+                StructureGenerationReadError,
+                match="generation-evidence-cleanup-active",
+            ):
+                with structure_read_transaction(
+                    path, mode="generation", snapshot_id=1
+                ):
+                    pass
+        if cleanup["reclaimed_generation_ids"]:
+            break
+    assert cleanup["blocked"] is False
+    assert cleanup["blocked_reason"] is None
+    assert cleanup["reclaimed_generation_ids"] == [1]
+    assert cleanup["retained_generation_ids"] == [3, 2]
+    assert len(steps) > 1
+    replay = store.cleanup_structure_generation_evidence(
+        retain_generations=2,
+        max_rows=1,
+        now_ms=20_000,
+    )
+    assert replay["blocked"] is False
+    assert replay["reclaimed_generation_ids"] == []
+    assert replay["retained_generation_ids"] == [3, 2]
+    assert replay["rows_deleted"] == 0
+    with pytest.raises(
+        StructureGenerationReadError,
+        match="generation-evidence-reclaimed",
+    ):
+        with structure_read_transaction(path, mode="generation", snapshot_id=1):
+            pass
+
+    with sqlite3.connect(path) as con:
+        assert con.execute(
+            "SELECT snapshot_id FROM structure_publications ORDER BY snapshot_id"
+        ).fetchall() == [(1,), (2,), (3,)]
+        assert con.execute(
+            "SELECT DISTINCT snapshot_id FROM structure_generation_markets "
+            "ORDER BY snapshot_id"
+        ).fetchall() == [(2,), (3,)]
+        # Cleanup owns generation evidence only. Legacy truth required by any
+        # retained authenticated comparison receipt remains untouched.
+        assert con.execute(
+            "SELECT id FROM snapshots ORDER BY id"
+        ).fetchall() == [(1,), (2,), (3,)]
+        assert con.execute(
+            "SELECT DISTINCT snapshot_id FROM markets ORDER BY snapshot_id"
+        ).fetchall() == [(1,), (2,), (3,)]
+        assert con.execute(
+            "SELECT generation_snapshot_id FROM structure_generation_cleanup_receipts"
+        ).fetchall() == [(1,)]
+        assert con.execute(
+            "SELECT generation_snapshot_id FROM "
+            "structure_generation_comparison_receipts ORDER BY generation_snapshot_id"
+        ).fetchall() == [(1,), (2,), (3,)]
+        with pytest.raises(sqlite3.IntegrityError, match="cleanup-receipt-sealed"):
+            con.execute(
+                "UPDATE structure_generation_cleanup_receipts SET reclaimed_at_ms=0 "
+                "WHERE generation_snapshot_id=1"
+            )
+
+
+def test_generation_cleanup_fails_closed_on_unauthenticated_candidate(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "generation-cleanup-blocked.db"
+    SQLiteStore(path).init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="one", point_current=False)
+    _seed_structure_revision(path, snapshot_id=2, market_suffix="two", point_current=False)
+    _seed_structure_revision(path, snapshot_id=3, market_suffix="three", point_current=True)
+    with sqlite3.connect(path) as con:
+        con.execute("DROP TRIGGER trg_structure_comparison_receipt_update")
+        con.execute(
+            "UPDATE structure_generation_comparison_receipts SET receipt_digest=? "
+            "WHERE generation_snapshot_id=1",
+            ("f" * 64,),
+        )
+
+    result = SQLiteStore(path).cleanup_structure_generation_evidence(
+        retain_generations=2,
+        max_rows=1,
+        now_ms=10_000,
+    )
+    assert result["blocked"] is True
+    assert result["blocked_reason"] == "comparison-receipt-digest-mismatch"
+    assert result["reclaimed_generation_ids"] == []
+
+    with sqlite3.connect(path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_markets WHERE snapshot_id=1"
+        ).fetchone() == (2,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_publications WHERE snapshot_id=1"
+        ).fetchone() == (1,)
+
+
 def test_read_mode_defaults_legacy_and_rejects_unknown(monkeypatch) -> None:
     monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
     assert Settings().structure_generation_read_mode == "legacy"

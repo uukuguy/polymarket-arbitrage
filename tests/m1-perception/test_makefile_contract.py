@@ -16,9 +16,11 @@ APIs and take 10-20 minutes). All make assertions use ``-n`` (dry-run).
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -101,6 +103,101 @@ def test_make_explicit_data_product_targets_are_wired(
     )
     assert result.returncode == 0, f"make -n {target} failed: {result.stderr}"
     assert expected in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("structure-generation-status", "structure-generation-status"),
+        ("structure-generation-backfill", "structure-generation-backfill"),
+        ("structure-generation-compare", "structure-generation-compare"),
+        ("structure-generation-cleanup", "structure-generation-cleanup"),
+    ],
+)
+def test_make_structure_generation_operator_surfaces_are_wired(
+    target: str, expected: str
+) -> None:
+    result = subprocess.run(
+        ["make", "-n", target],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert expected in result.stdout
+
+
+def test_structure_generation_status_cli_prints_stable_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from polyarb.snapshot import cli as cli_module
+    from polyarb.storage import sqlite_store as store_module
+
+    class FakeStore:
+        def __init__(self, _path):
+            pass
+
+        def init_schema(self) -> None:
+            pass
+
+        def structure_generation_status(self, *, retain_generations: int):
+            assert retain_generations == 2
+            return {"pointer_snapshot_id": 7, "retention_floor": 2}
+
+    monkeypatch.setattr(
+        cli_module,
+        "load_settings",
+        lambda: SimpleNamespace(db_path=tmp_path / "state.db"),
+    )
+    monkeypatch.setattr(store_module, "SQLiteStore", FakeStore)
+    result = runner.invoke(app, ["structure-generation-status"])
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "pointer_snapshot_id": 7,
+        "retention_floor": 2,
+    }
+
+
+def test_structure_generation_compare_cli_fails_with_stable_json_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from polyarb.snapshot import cli as cli_module
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    path = tmp_path / "empty.db"
+    SQLiteStore(path).init_schema()
+    monkeypatch.setattr(
+        cli_module,
+        "load_settings",
+        lambda: SimpleNamespace(db_path=path),
+    )
+    result = runner.invoke(app, ["structure-generation-compare"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "matches": False,
+        "mismatch_reasons": ["legacy-structure-unavailable"],
+    }
+
+
+def test_structure_generation_cleanup_cli_is_bounded_and_idempotent_on_empty_db(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from polyarb.snapshot import cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module,
+        "load_settings",
+        lambda: SimpleNamespace(db_path=tmp_path / "empty.db"),
+    )
+    result = runner.invoke(
+        app,
+        ["structure-generation-cleanup", "--max-rows", "1"],
+    )
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["rows_deleted"] == 0
+    assert payload["reclaimed_generation_ids"] == []
 
 
 def test_makefile_phony_declaration_present() -> None:

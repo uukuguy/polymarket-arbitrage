@@ -153,6 +153,21 @@ def test_valid_manual_has_no_errors(tmp_path: Path) -> None:
     assert validate_manual(_repo(tmp_path), _valid_manual()) == []
 
 
+def test_manual_documents_generation_rollout_rollback_and_bounded_cleanup() -> None:
+    manual = (ROOT / MANUAL).read_text()
+    for command in (
+        "make structure-generation-status",
+        "make structure-generation-backfill",
+        "make structure-generation-compare",
+        "make structure-generation-cleanup",
+    ):
+        assert command in manual
+    assert "schema deploy → bounded backfill → compare PASS" in manual
+    assert "pointer switch" in manual
+    assert "legacy" in manual
+    assert "max_rows" in manual
+
+
 def test_rejects_missing_section_and_unknown_label(tmp_path: Path) -> None:
     text = _valid_manual().replace("## 10. section-10\nbody\n", "")
     text = text.replace("已验证可用", "大概可用")

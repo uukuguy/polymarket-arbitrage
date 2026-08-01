@@ -27,6 +27,52 @@ def _read_market_truth_health(path: Path, *, now_s: float):
     return reader(path, now_s)
 
 
+def test_structure_generation_health_exposes_stalled_publication_and_cleanup_pressure() -> None:
+    builder = getattr(health_module, "_structure_generation_health_checks", None)
+    assert callable(builder), "generation health builder is not implemented"
+    checks = builder(
+        {
+            "pointer_snapshot_id": 9,
+            "generation_count_agrees": True,
+            "generation_hash_agrees": True,
+            "publication": {
+                "status": "writing",
+                "write_component": "markets",
+                "write_cursor": "market-42",
+                "checkpoint_at_ms": 1_000,
+            },
+            "comparison": {
+                "phase": "generation-universe",
+                "cursor": "market-41",
+                "checkpoint_at_ms": 1_000,
+                "receipt_present": False,
+            },
+            "cleanup": {
+                "generation_snapshot_id": 1,
+                "phase": "markets",
+                "rows_deleted": 500,
+                "checkpoint_at_ms": 1_000,
+                "blocked_reason": "generation-entered-retention-floor",
+            },
+            "retained_generation_count": 9,
+            "reclaimable_generation_count": 7,
+            "retention_floor": 2,
+        },
+        now_ms=101_001,
+        read_mode="legacy",
+        publication_sla_s=100,
+        pressure_warn_count=4,
+        pressure_fail_count=8,
+    )
+    assert checks["snapshot:structure_generation"][0]["status"] == "fail"
+    assert "stage=writing" in checks["snapshot:structure_generation"][0]["output"]
+    assert checks["snapshot:structure_generation_comparison"][0]["status"] == "warn"
+    assert checks["snapshot:structure_generation_evidence"][0]["status"] == "fail"
+    assert "blocked_reason=generation-entered-retention-floor" in checks[
+        "snapshot:structure_generation_evidence"
+    ][0]["output"]
+
+
 @pytest.mark.parametrize(
     ("free", "expected_status"),
     ((25, "pass"), (19, "warn"), (9, "fail")),
