@@ -554,7 +554,7 @@ git commit -m "fix(m1): align health with bounded feed handoff"
 - Consumes: passing Tasks 1-3 and the exact clean Git SHA.
 - Produces: operator guidance, exact release evidence, one natural no-503 handoff trace, and completed Phase 05.6 state.
 
-- [ ] **Step 1: Update the learning contract**
+- [x] **Step 1: Update the learning contract**
 
 Add:
 
@@ -570,7 +570,7 @@ Add:
 Document `make scan-arb-live min_edge_bps=0`, strict `/health`, and
 `make polywatch-resident-status`.
 
-- [ ] **Step 2: Run final local verification**
+- [x] **Step 2: Run final local verification**
 
 ```bash
 uv run pytest tests/m1-perception/test_feed_handoff.py tests/m1-perception/test_arbitrage_opportunities_http.py tests/m1-perception/test_quote_feed_health.py tests/m1-perception/test_polywatch_healthz_watcher.py -q
@@ -584,7 +584,7 @@ make planning-status
 Expected: focused and full pytest pass with only repository-declared skip/xfail,
 Ruff and diff exit zero, docs pass, and planning has no drift.
 
-- [ ] **Step 3: Commit verified local documentation**
+- [x] **Step 3: Commit verified local documentation**
 
 Keep Plan 05.6-02 `in_progress` until production proof:
 

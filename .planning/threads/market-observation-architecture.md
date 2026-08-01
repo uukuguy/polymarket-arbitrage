@@ -1476,3 +1476,20 @@ success is not user receipt/read evidence.
   double buffer bounded by the unchanged 300-second Quote SLA; partial or
   mixed revisions remain forbidden. This is an explicit product policy gate,
   not an implementation detail to change silently.
+
+### §2.20 One-version handoff needs one policy across HTTP, health, and alerts (2026-08-01)
+
+- The approved double buffer is not a second mutable projection. Runtime keeps
+  one immutable certified feed pointer until a complete successor atomically
+  replaces it; endpoint-side rescans and partial publication remain forbidden.
+- Availability is one shared pure decision over source/latest revision order,
+  Quote age, Universe age, and Structure completion age. HTTP and strict health
+  consume the same result, preventing a health-warn/API-503 policy split.
+- Existing market-truth freshness is anchored to `taken_at_ms`. The handoff SLA
+  is anchored to `finished_at_ms`, so completion age is a separate fact; changing
+  the old metric in place would silently alter the Structure health contract.
+- A valid previous feed reports `refreshing=true`, the newer
+  `latest_structure_snapshot_id`, and its own older `source_snapshot_id`.
+  Polywatch validates that relationship. It suppresses a healthy bounded Quote
+  transition, but an unreachable opportunity endpoint now alerts even during
+  refresh because continuous serving is the feature's core promise.

@@ -5905,3 +5905,27 @@ Choose inline execution or explicitly authorize subagent-driven execution.
 Given the repository's no-subagent default, inline execution is the recommended
 available path. Then execute Task 1 RED→GREEN from the committed plan.
 First repository command: `make planning-status`.
+
+## SESSION 126 — 2026-08-01 (double-buffer local implementation verified)
+
+- [TDD COMPLETE] Commits `83fb405`, `05decdf`, and `cf8698b` implement the
+  shared feed decision, opportunity HTTP double buffer, exact Structure
+  completion-age fact, strict health, and Polywatch version/incident contract.
+- [CHAIN TRUTH CLOSED LOCALLY] HTTP and health use one policy. Polywatch allows
+  the explicit bounded warning but now alerts when the opportunity endpoint is
+  unreachable during that warning and rejects contradictory `refreshing` and
+  revision IDs.
+- [VERIFIED] All 3,783 repository tests passed with one expected xfail and one
+  skip. Changed-file Ruff, `git diff --check`, `make docs-m1-check`, and
+  `make planning-status` passed.
+- [BOUNDARY] Production still runs the prior release. No production-readiness
+  claim is made until the exact clean candidate is deployed and a natural
+  Structure-to-Quote crossing proves continuous HTTP 200 with old/new IDs then
+  atomic swap.
+
+### [NEXT — CURRENT]
+
+Commit the verified local documentation, deploy the exact clean SHA with
+`make deploy`, verify release/machine/image identity, then sample strict health
+and opportunities at least every 10 seconds through one natural Structure
+publication. First repository command: `make planning-status`.

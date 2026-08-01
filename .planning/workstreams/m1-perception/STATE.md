@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Written spec approved and implementation plan committed at 4340b41; awaiting execution-mode handoff
-last_updated: "2026-08-01T02:16:45Z"
+stopped_at: Double-buffer locally verified across 3783 tests; exact L1 deploy and natural handoff proof remain
+last_updated: "2026-08-01T03:16:28Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -30,9 +30,11 @@ Phase: 05.6 (self-healing Structure production) — Plan 02 in progress
 - **Open gate:** Structure publication creates a measured 93-second
   opportunity 503 window while the matching Quote is produced. The user
   approved the bounded double-buffer direction and written spec `7fa4004`.
-  Self-reviewed implementation plan `4340b41` is ready for TDD execution and a
-  natural production handoff proof. Do not mark Plan 05.6-02 complete before
-  those gates pass.
+  TDD commits `83fb405`, `05decdf`, and `cf8698b` now implement the shared
+  policy, HTTP serving contract, strict health, and Polywatch chain truth.
+  All 3,783 repository tests pass with one expected xfail and one skip. Exact
+  L1 deployment and a natural production handoff proof remain; do not mark
+  Plan 05.6-02 complete before those gates pass.
 
 Phase: 05 (WS /book + /prices 增量推送) — Plan 06 operational closure in progress
 
