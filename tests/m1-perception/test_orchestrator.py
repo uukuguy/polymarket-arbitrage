@@ -2177,6 +2177,72 @@ async def test_inactive_event_member_missing_from_active_stream_does_not_block_p
 
 
 @pytest.mark.asyncio
+async def test_event_inactive_member_active_in_market_stream_quarantines_group(
+    tmp_path: Path,
+) -> None:
+    """A cross-catalogue activation race must use the point-recheck path."""
+    settings = _make_settings(tmp_path)
+    settings.event_bus_enabled = True
+    markets = [
+        {
+            **market,
+            "active": True,
+            "closed": False,
+            "negRisk": True,
+            "negRiskMarketID": "group-neg-risk",
+        }
+        for market in _load_gamma_fixture()[:2]
+    ]
+    event = _standard_neg_risk_event(markets)
+    event["negRiskAugmented"] = True
+    event["markets"][1]["active"] = False
+    fake_gamma = _make_fake_gamma(markets, [event])
+    clob_data = _load_clob_fixture()
+
+    with (
+        patch("polyarb.snapshot.orchestrator.GammaClient", return_value=fake_gamma),
+        patch("polyarb.snapshot.orchestrator.ClobReaderClient") as ClobMock,
+        patch(
+            "polyarb.snapshot.orchestrator.publish_snapshot_complete",
+            new_callable=AsyncMock,
+        ) as publish_mock,
+    ):
+        clob_inst = ClobMock.return_value
+        clob_inst.get_books = AsyncMock(return_value=_books_as_objects(clob_data["books"]))
+        clob_inst.get_prices_buy_sell = AsyncMock(
+            return_value={"buy": clob_data["prices_buy"], "sell": clob_data["prices_sell"]}
+        )
+
+        result = await run_snapshot(
+            settings,
+            mode="subset",
+            product="structure",
+            now_ms=1_777_448_000_000,
+        )
+
+    with sqlite3.connect(settings.db_path) as con:
+        coverage = con.execute(
+            "SELECT completed,failure_source,failure_reason "
+            "FROM snapshot_source_coverage WHERE snapshot_id=?",
+            (result.snapshot_id,),
+        ).fetchone()
+        truth = con.execute(
+            "SELECT quality,reason FROM neg_risk_group_truth "
+            "WHERE snapshot_id=? AND neg_risk_market_id='group-neg-risk'",
+            (result.snapshot_id,),
+        ).fetchone()
+
+    assert result.is_valid is True
+    assert coverage == (1, None, None)
+    assert truth == (
+        "complete-unsupported",
+        "market-side-active-member-absent-from-event-structure",
+    )
+    fake_gamma.fetch_market_states.assert_awaited_once_with([markets[1]["id"]])
+    assert publish_mock.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_closed_ordinary_mapped_market_missing_from_active_stream_is_reconciled(
     tmp_path: Path,
 ) -> None:

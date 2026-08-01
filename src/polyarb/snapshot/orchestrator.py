@@ -626,6 +626,16 @@ async def run_snapshot(
             }
             structural_member_ids = {member.market_id for member in event_members}
             known_group_ids = {truth.group_id for truth in group_truths}
+            reconcilable_group_ids = {
+                truth.group_id
+                for truth in group_truths
+                if truth.quality != "incomplete-source"
+            }
+            non_open_structural_member_ids = {
+                member.market_id
+                for member in event_members
+                if not member.active or member.closed
+            }
             semantic_validator = MarketTruthSemanticValidator(
                 event_members,
                 group_truths,
@@ -679,8 +689,11 @@ async def run_snapshot(
                                 normalized.get("event_id") is None
                                 and normalized.get("neg_risk") is True
                                 and isinstance(group_id, str)
-                                and group_id in known_group_ids
-                                and mid not in structural_member_ids
+                                and group_id in reconcilable_group_ids
+                                and (
+                                    mid not in structural_member_ids
+                                    or mid in non_open_structural_member_ids
+                                )
                                 and mid not in market_to_event_map
                             )
                             # Inspect before duplicate suppression: pagination
