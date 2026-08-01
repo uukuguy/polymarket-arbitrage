@@ -145,6 +145,7 @@ class IsolatedStructurePublicationCheckpoint:
     cursor: str | None
     publication_id: str
     elapsed_ms: int
+    chunks_processed: int = 1
 
 
 async def run_snapshot_in_subprocess(
@@ -282,6 +283,8 @@ async def run_snapshot_in_subprocess(
             component = payload.get("component")
             rows_processed = payload.get("rows_processed")
             cursor = payload.get("cursor")
+            chunks_processed = payload.get("chunks_processed", 1)
+            child_elapsed_ms = payload.get("elapsed_ms", 0)
             if (
                 not isinstance(publication_id, str)
                 or not publication_id
@@ -289,6 +292,12 @@ async def run_snapshot_in_subprocess(
                 or isinstance(rows_processed, bool)
                 or not isinstance(rows_processed, int)
                 or rows_processed < 0
+                or isinstance(chunks_processed, bool)
+                or not isinstance(chunks_processed, int)
+                or not 1 <= chunks_processed <= 100
+                or isinstance(child_elapsed_ms, bool)
+                or not isinstance(child_elapsed_ms, int)
+                or child_elapsed_ms < 0
                 or (cursor is not None and not isinstance(cursor, str))
                 or process.returncode != 0
             ):
@@ -301,7 +310,7 @@ async def run_snapshot_in_subprocess(
                 "isolated Structure publication checkpointed "
                 f"pid={getattr(process, 'pid', None)} elapsed_ms={process_elapsed_ms} "
                 f"stage={stage} component={component} rows={rows_processed} "
-                f"publication_id={publication_id}"
+                f"chunks={chunks_processed} publication_id={publication_id}"
             )
             return IsolatedStructurePublicationCheckpoint(
                 stage=str(stage),
@@ -310,6 +319,7 @@ async def run_snapshot_in_subprocess(
                 cursor=None if cursor is None else str(cursor),
                 publication_id=publication_id,
                 elapsed_ms=process_elapsed_ms,
+                chunks_processed=chunks_processed,
             )
         window_id = payload.get("window_id")
         stage = payload.get("stage")
@@ -317,7 +327,7 @@ async def run_snapshot_in_subprocess(
         if (
             not isinstance(window_id, str)
             or not window_id
-            or stage not in {"events", "markets", "complete"}
+            or stage not in {"events", "markets", "complete", "bootstrap"}
             or isinstance(pages_processed, bool)
             or not isinstance(pages_processed, int)
             or pages_processed < 1
@@ -710,6 +720,7 @@ class SnapshotScheduler:
         failure_kind: str | None,
         last_stage: str | None = None,
         elapsed_ms: int | None = None,
+        chunks_processed: int | None = None,
     ) -> None:
         """Best-effort terminal record; scheduler behavior remains primary truth."""
         try:
@@ -722,6 +733,7 @@ class SnapshotScheduler:
                 failure_kind=failure_kind,
                 last_stage=last_stage,
                 elapsed_ms=elapsed_ms,
+                chunks_processed=chunks_processed,
             )
         except Exception as error:  # noqa: BLE001 - operational evidence is fail-soft
             logger.warning(
@@ -776,11 +788,17 @@ class SnapshotScheduler:
                 if isinstance(result, IsolatedStructurePublicationCheckpoint):
                     last_stage = "persist"
                     pages_or_rows = result.rows_processed
+                    chunks_processed = result.chunks_processed
                 else:
                     last_stage = (
-                        "gamma-events" if result.stage == "events" else "gamma-markets"
+                        "gamma-events"
+                        if result.stage == "events"
+                        else "persist"
+                        if result.stage == "bootstrap"
+                        else "gamma-markets"
                     )
                     pages_or_rows = result.pages_processed
+                    chunks_processed = None
                 await self._finish_attempt(
                     attempt_id=attempt_id,
                     outcome="cancelled",
@@ -788,6 +806,7 @@ class SnapshotScheduler:
                     failure_kind="structure-checkpoint",
                     last_stage=last_stage,
                     elapsed_ms=result.elapsed_ms,
+                    chunks_processed=chunks_processed,
                 )
                 self._checkpoint_pending = True
                 logger.info(

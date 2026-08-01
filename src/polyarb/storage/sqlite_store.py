@@ -1785,6 +1785,7 @@ class SQLiteStore:
             )
             _ensure_column("snapshot_attempts", "last_stage", "TEXT")
             _ensure_column("snapshot_attempts", "elapsed_ms", "INTEGER")
+            _ensure_column("snapshot_attempts", "chunks_processed", "INTEGER")
             _ensure_column("structure_publications", "write_prior_cursor", "TEXT")
             _ensure_column("structure_publications", "certification_component", "TEXT")
             _ensure_column("structure_publications", "certification_row_cursor", "TEXT")
@@ -6168,16 +6169,25 @@ class SQLiteStore:
         failure_kind: str | None,
         last_stage: str | None = None,
         elapsed_ms: int | None = None,
+        chunks_processed: int | None = None,
     ) -> None:
         """Close one running attempt exactly once with a bounded outcome."""
         if outcome not in {"succeeded", "failed", "cancelled"}:
             raise ValueError(f"invalid terminal snapshot attempt outcome: {outcome}")
+        if (
+            chunks_processed is not None
+            and (
+                isinstance(chunks_processed, bool)
+                or not 1 <= chunks_processed <= 100
+            )
+        ):
+            raise ValueError("invalid snapshot attempt chunks_processed")
         con = self._connect_writer()
         try:
             cur = con.execute(
                 "UPDATE snapshot_attempts "
                 "SET finished_at_ms=?, outcome=?, snapshot_id=?, failure_kind=?, "
-                "last_stage=?, elapsed_ms=? "
+                "last_stage=?, elapsed_ms=?, chunks_processed=? "
                 "WHERE id=? AND outcome='running'",
                 (
                     finished_at_ms,
@@ -6186,6 +6196,7 @@ class SQLiteStore:
                     failure_kind,
                     last_stage,
                     elapsed_ms,
+                    chunks_processed,
                     attempt_id,
                 ),
             )
@@ -6204,7 +6215,7 @@ class SQLiteStore:
         try:
             row = con.execute(
                 "SELECT id,started_at_ms,finished_at_ms,outcome,snapshot_id,failure_kind,"
-                "last_stage,elapsed_ms "
+                "last_stage,elapsed_ms,chunks_processed "
                 "FROM snapshot_attempts ORDER BY id DESC LIMIT 1"
             ).fetchone()
             if row is None:
@@ -6218,6 +6229,7 @@ class SQLiteStore:
                 "failure_kind": row[5],
                 "last_stage": row[6],
                 "elapsed_ms": row[7],
+                "chunks_processed": row[8],
             }
         finally:
             con.close()
@@ -6233,7 +6245,7 @@ class SQLiteStore:
         try:
             rows = con.execute(
                 "SELECT id,started_at_ms,finished_at_ms,outcome,snapshot_id,"
-                "failure_kind,last_stage,elapsed_ms "
+                "failure_kind,last_stage,elapsed_ms,chunks_processed "
                 "FROM snapshot_attempts ORDER BY id DESC LIMIT ?",
                 (bounded_limit,),
             ).fetchall()
@@ -6246,6 +6258,7 @@ class SQLiteStore:
                 "failure_kind",
                 "last_stage",
                 "elapsed_ms",
+                "chunks_processed",
             )
             return [dict(zip(keys, row, strict=True)) for row in rows]
         finally:

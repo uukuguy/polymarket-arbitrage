@@ -11,6 +11,7 @@ from polyarb.clients.gamma_client import (
     MarketPage,
     PaginationCursorRejectedError,
 )
+from polyarb.perception import structure_publication as structure_publication_module
 from polyarb.perception import structure_sync as structure_sync_module
 from polyarb.perception.structure_sync import (
     StagedGammaSource,
@@ -223,10 +224,10 @@ async def test_structure_sync_checkpoints_on_elapsed_wall_clock(
     assert cursors == [None, "event-2"]
 
 
-async def test_bounded_slice_yields_before_entering_structure_finalizer(
+async def test_bounded_slice_uses_remaining_time_for_publication(
     settings_for_test,
 ) -> None:
-    """A child admitted with 75s cannot silently enter the 180s finalizer."""
+    """Completed page discovery enters the cooperative slice without a new child."""
     store = SQLiteStore(settings_for_test.db_path)
     store.init_schema()
 
@@ -244,6 +245,15 @@ async def test_bounded_slice_yields_before_entering_structure_finalizer(
             return MarketPage((), None, None, True, 30, 40)
 
     finalizer = AsyncMock(side_effect=AssertionError("finalizer must use next slot"))
+    checkpoint = structure_publication_module.StructurePublicationCheckpoint(
+        stage="normalizing",
+        component="events",
+        rows_processed=1_000,
+        cursor="event-1000",
+        publication_id="publication-1",
+        chunks_processed=2,
+        elapsed_ms=2_000,
+    )
     with (
         patch(
             "polyarb.perception.structure_sync.GammaClient",
@@ -255,20 +265,21 @@ async def test_bounded_slice_yields_before_entering_structure_finalizer(
         ),
         patch(
             "polyarb.perception.structure_sync._monotonic",
-            side_effect=[0.0, 1.0, 2.0],
+            side_effect=[0.0, 1.0, 2.0, 3.0],
         ),
+        patch(
+            "polyarb.perception.structure_publication.run_structure_publication_slice",
+            return_value=checkpoint,
+        ) as publication_slice,
     ):
         result = await run_structure_sync_until_published(
             settings_for_test,
             max_elapsed_s=45.0,
         )
 
-    assert result == StructureSyncCheckpoint(
-        window_id=store.get_latest_structure_sync()["id"],
-        stage="markets",
-        pages_processed=2,
-    )
+    assert result == checkpoint
     assert store.get_latest_structure_sync()["status"] == "complete"
+    assert publication_slice.call_args.kwargs["max_elapsed_s"] == 42.0
     finalizer.assert_not_awaited()
 
 
@@ -1514,9 +1525,7 @@ async def test_completed_legacy_window_checkpoints_bootstrap_before_publication(
             max_publication_rows=2,
         )
 
-    assert result == StructureSyncCheckpoint(
-        window_id=window["id"],
-        stage="complete",
-        pages_processed=2,
-    )
-    assert store.get_latest_structure_publication() is None
+    assert isinstance(result, structure_publication_module.StructurePublicationCheckpoint)
+    assert result.stage == "ready"
+    assert result.chunks_processed > 1
+    assert store.get_latest_structure_publication().status == "ready"

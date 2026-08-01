@@ -161,6 +161,7 @@ def test_snapshot_attempt_lifecycle_is_append_only(daemon_settings_for_test: Any
         finished_at_ms=2_000,
         snapshot_id=None,
         failure_kind="snapshot-subprocess-signal-sigkill-possible-oom",
+        chunks_processed=9,
     )
 
     assert store.get_latest_snapshot_attempt() == {
@@ -172,6 +173,7 @@ def test_snapshot_attempt_lifecycle_is_append_only(daemon_settings_for_test: Any
         "failure_kind": "snapshot-subprocess-signal-sigkill-possible-oom",
         "last_stage": None,
         "elapsed_ms": None,
+        "chunks_processed": 9,
     }
 
 
@@ -183,7 +185,7 @@ def test_snapshot_attempt_diagnostic_columns_migrate_legacy_rows(tmp_path: Path)
     SQLiteStore(fresh_db).init_schema()
     with sqlite3.connect(fresh_db) as con:
         fresh_columns = {row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")}
-    assert {"elapsed_ms", "last_stage"} <= fresh_columns
+    assert {"elapsed_ms", "last_stage", "chunks_processed"} <= fresh_columns
 
     legacy_db = tmp_path / "legacy.db"
     with sqlite3.connect(legacy_db) as con:
@@ -205,10 +207,11 @@ def test_snapshot_attempt_diagnostic_columns_migrate_legacy_rows(tmp_path: Path)
     with sqlite3.connect(legacy_db) as con:
         legacy_columns = {row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")}
         historical_diagnostics = con.execute(
-            "SELECT last_stage, elapsed_ms FROM snapshot_attempts WHERE id = 1"
+            "SELECT last_stage, elapsed_ms, chunks_processed "
+            "FROM snapshot_attempts WHERE id = 1"
         ).fetchone()
-    assert {"elapsed_ms", "last_stage"} <= legacy_columns
-    assert historical_diagnostics == (None, None)
+    assert {"elapsed_ms", "last_stage", "chunks_processed"} <= legacy_columns
+    assert historical_diagnostics == (None, None, None)
 
 
 def test_snapshot_attempt_terminal_row_cannot_be_rewritten(
@@ -270,6 +273,7 @@ async def test_scheduler_persists_sigkill_attempt_failure(
         "failure_kind": "snapshot-subprocess-timeout",
         "last_stage": "gamma-markets",
         "elapsed_ms": 245_012,
+        "chunks_processed": None,
     }
 
 
@@ -427,6 +431,8 @@ async def test_snapshot_subprocess_accepts_publication_checkpoint() -> None:
             "rows_processed": 500,
             "cursor": "events|event-500",
             "publication_id": "publication-1",
+            "chunks_processed": 11,
+            "elapsed_ms": 44_000,
         },
         returncode=0,
     )
@@ -442,6 +448,7 @@ async def test_snapshot_subprocess_accepts_publication_checkpoint() -> None:
     assert result.rows_processed == 500
     assert result.cursor == "events|event-500"
     assert result.publication_id == "publication-1"
+    assert result.chunks_processed == 11
 
 
 @pytest.mark.asyncio

@@ -259,59 +259,93 @@ async def run_structure_sync_until_published(
         raise ValueError("structure-sync-max-elapsed-must-be-positive")
     if not 1 <= max_publication_rows <= STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS:
         raise ValueError("structure-publication-max-rows-must-be-positive")
+    slice_started = _monotonic()
     store = SQLiteStore(settings.db_path)
     store.init_structure_sync_schema()
     latest = store.get_latest_structure_sync()
+    bootstrap_chunks = 0
+    publication_progress = (
+        store.get_structure_publication_progress(str(latest["id"]))
+        if latest is not None and latest["status"] == "complete"
+        else None
+    )
+    if (
+        latest is not None
+        and latest["status"] == "complete"
+        and publication_progress is None
+        and (max_pages is not None or max_elapsed_s is not None)
+    ):
+        bootstrap_rows = 0
+        bootstrap_completed = False
+        while bootstrap_chunks < 100:
+            if (
+                max_elapsed_s is not None
+                and _monotonic() - slice_started >= max_elapsed_s
+            ):
+                break
+            migration = await asyncio.to_thread(
+                store.advance_structure_event_market_backfill,
+                window_id=str(latest["id"]),
+                max_events=max_publication_rows,
+                max_relationships=max_publication_rows,
+                now_ms=int(time.time() * 1_000),
+            )
+            bootstrap_chunks += 1
+            bootstrap_rows += max(
+                int(migration["events_processed"]),
+                int(migration["relationships_processed"]),
+            )
+            if migration["blocked"]:
+                successor = await asyncio.to_thread(
+                    store.rotate_blocked_structure_sync_window,
+                    window_id=str(latest["id"]),
+                    rotated_at_ms=int(time.time() * 1_000),
+                )
+                raise ValueError(
+                    "structure-bootstrap-window-rotated:"
+                    f"{latest['id']}:{successor['id']}:{migration['blocked_reason']}"
+                )
+            if migration["completed"]:
+                bootstrap_completed = True
+                break
+            if (
+                max_elapsed_s is not None
+                and _monotonic() - slice_started >= max_elapsed_s
+            ):
+                break
+        if not bootstrap_completed or bootstrap_chunks >= 100 or (
+            max_elapsed_s is not None
+            and _monotonic() - slice_started >= max_elapsed_s
+        ):
+            return StructureSyncCheckpoint(
+                window_id=str(latest["id"]),
+                stage="bootstrap",
+                pages_processed=max(1, bootstrap_rows),
+            )
     if (
         latest is not None
         and latest["status"] == "complete"
         and (max_pages is not None or max_elapsed_s is not None)
     ):
-        migration = await asyncio.to_thread(
-            store.advance_structure_event_market_backfill,
-            window_id=str(latest["id"]),
-            max_events=max_publication_rows,
-            max_relationships=max_publication_rows,
-            now_ms=int(time.time() * 1_000),
+        from polyarb.perception.structure_publication import (
+            run_structure_publication_slice,
         )
-        if migration["blocked"]:
-            successor = await asyncio.to_thread(
-                store.rotate_blocked_structure_sync_window,
-                window_id=str(latest["id"]),
-                rotated_at_ms=int(time.time() * 1_000),
-            )
-            raise ValueError(
-                "structure-bootstrap-window-rotated:"
-                f"{latest['id']}:{successor['id']}:{migration['blocked_reason']}"
-            )
-        if (
-            int(migration["events_processed"]) > 0
-            or int(migration["relationships_processed"]) > 0
-            or not migration["completed"]
-        ):
-            return StructureSyncCheckpoint(
-                window_id=str(latest["id"]),
-                stage="complete",
-                pages_processed=max(
-                    1,
-                    int(migration["events_processed"]),
-                    int(migration["relationships_processed"]),
-                ),
-            )
+
+        return await asyncio.to_thread(
+            run_structure_publication_slice,
+            settings,
+            str(latest["id"]),
+            max_rows=max_publication_rows,
+            max_elapsed_s=(
+                max(0.001, max_elapsed_s - (_monotonic() - slice_started))
+                if max_elapsed_s is not None
+                else 60.0
+            ),
+            max_chunks=100 - bootstrap_chunks,
+            store=store,
+        )
     async with GammaClient(settings) as gamma:
         if latest is not None and latest["status"] == "complete":
-            if max_pages is not None or max_elapsed_s is not None:
-                from polyarb.perception.structure_publication import (
-                    run_structure_publication_step,
-                )
-
-                return await asyncio.to_thread(
-                    run_structure_publication_step,
-                    settings,
-                    str(latest["id"]),
-                    max_publication_rows,
-                    max_elapsed_s if max_elapsed_s is not None else 60.0,
-                )
             return await finalize_structure_window(
                 settings,
                 str(latest["id"]),
@@ -321,7 +355,6 @@ async def run_structure_sync_until_published(
         worker = StructureSyncWorker(gamma=gamma, store=store)
         cursor_restarts = 0
         pages_processed = 0
-        slice_started = _monotonic()
         while True:
             try:
                 batch = await worker.run_batch()
@@ -356,23 +389,43 @@ async def run_structure_sync_until_published(
                 max_elapsed_s is not None
                 and _monotonic() - slice_started >= max_elapsed_s
             )
-            finalizer_requires_next_slot = (
-                max_elapsed_s is not None
-                and batch.stage == "markets"
-                and batch.completed
-            )
             if (
                 max_pages is not None and pages_processed >= max_pages
-            ) or elapsed_budget_reached or finalizer_requires_next_slot:
+            ) or elapsed_budget_reached:
                 return StructureSyncCheckpoint(
                     window_id=batch.window_id,
                     stage=batch.stage,
                     pages_processed=pages_processed,
                 )
             if batch.stage == "markets" and batch.completed:
-                return await finalize_structure_window(
+                from polyarb.perception.structure_publication import (
+                    run_structure_publication_slice,
+                )
+
+                remaining_s = (
+                    max_elapsed_s - (_monotonic() - slice_started)
+                    if max_elapsed_s is not None
+                    else None
+                )
+                if remaining_s is None:
+                    return await finalize_structure_window(
+                        settings,
+                        batch.window_id,
+                        now_ms=int(time.time() * 1_000),
+                        point_client=gamma,
+                    )
+                if remaining_s <= 0:
+                    return StructureSyncCheckpoint(
+                        window_id=batch.window_id,
+                        stage=batch.stage,
+                        pages_processed=pages_processed,
+                    )
+                return await asyncio.to_thread(
+                    run_structure_publication_slice,
                     settings,
                     batch.window_id,
-                    now_ms=int(time.time() * 1_000),
-                    point_client=gamma,
+                    max_rows=max_publication_rows,
+                    max_elapsed_s=remaining_s,
+                    max_chunks=100,
+                    store=store,
                 )

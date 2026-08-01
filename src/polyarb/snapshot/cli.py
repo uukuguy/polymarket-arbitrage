@@ -360,6 +360,8 @@ def structure_sync(
                         "rows_processed": result.rows_processed,
                         "cursor": result.cursor,
                         "publication_id": result.publication_id,
+                        "chunks_processed": result.chunks_processed,
+                        "elapsed_ms": result.elapsed_ms,
                     },
                     sort_keys=True,
                 )
@@ -369,7 +371,8 @@ def structure_sync(
                 "CHECKPOINTED | "
                 f"stage={result.stage} component={result.component} "
                 f"rows={result.rows_processed} cursor={result.cursor} "
-                f"publication_id={result.publication_id}"
+                f"publication_id={result.publication_id} "
+                f"chunks={result.chunks_processed} elapsed_ms={result.elapsed_ms}"
             )
         return
     if isinstance(result, StructureSyncCheckpoint):

@@ -13,6 +13,7 @@ from polyarb.perception.market_truth import EventMember, membership_hash
 from polyarb.perception.structure_publication import (
     StructurePublicationCheckpoint,
     normalize_structure_component_chunk,
+    run_structure_publication_slice,
     run_structure_publication_step,
 )
 from polyarb.storage.sqlite_store import SQLiteStore, StructurePublicationCursorError
@@ -25,6 +26,122 @@ COMPONENT_COUNTS = {
     "markets": 1,
     "issues": 0,
 }
+
+
+def test_publication_slice_advances_multiple_durable_chunks_before_returning(
+    settings_for_test, monkeypatch
+) -> None:
+    checkpoints = iter(
+        (
+            StructurePublicationCheckpoint(
+                "normalizing", "events", 500, "event-500", "publication-1"
+            ),
+            StructurePublicationCheckpoint(
+                "normalizing", "events", 500, "event-1000", "publication-1"
+            ),
+            StructurePublicationCheckpoint(
+                "certifying", "legacy-universe", 17, "legacy-17", "publication-1"
+            ),
+        )
+    )
+    calls: list[tuple[int, float, object]] = []
+
+    def advance(_settings, _window_id, max_rows, remaining_s, *, store=None):
+        calls.append((max_rows, remaining_s, store))
+        return next(checkpoints)
+
+    ticks = iter((100.0, 100.0, 101.0, 101.0, 102.0, 102.0, 145.0))
+    monkeypatch.setattr(structure_publication_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        structure_publication_module, "run_structure_publication_step", advance
+    )
+    store = object()
+
+    result = run_structure_publication_slice(
+        settings_for_test,
+        "window-1",
+        max_rows=500,
+        max_elapsed_s=45.0,
+        max_chunks=100,
+        store=store,
+    )
+
+    assert result == StructurePublicationCheckpoint(
+        stage="certifying",
+        component="legacy-universe",
+        rows_processed=1_017,
+        cursor="legacy-17",
+        publication_id="publication-1",
+        chunks_processed=3,
+        elapsed_ms=45_000,
+    )
+    assert [call[0] for call in calls] == [500, 500, 500]
+    assert [call[1] for call in calls] == [45.0, 44.0, 43.0]
+    assert all(call[2] is store for call in calls)
+
+
+def test_publication_slice_stops_before_starting_chunk_at_elapsed_deadline(
+    settings_for_test, monkeypatch
+) -> None:
+    calls = 0
+
+    def advance(_settings, _window_id, _max_rows, _remaining_s, *, store=None):
+        nonlocal calls
+        calls += 1
+        return StructurePublicationCheckpoint(
+            "normalizing", "events", 500, f"event-{calls * 500}", "publication-1"
+        )
+
+    ticks = iter((100.0, 100.0, 145.0))
+    monkeypatch.setattr(structure_publication_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        structure_publication_module, "run_structure_publication_step", advance
+    )
+
+    result = run_structure_publication_slice(
+        settings_for_test,
+        "window-1",
+        max_rows=500,
+        max_elapsed_s=45.0,
+        max_chunks=100,
+        store=object(),
+    )
+
+    assert calls == 1
+    assert result.chunks_processed == 1
+    assert result.elapsed_ms == 45_000
+
+
+def test_publication_slice_rejects_mixed_publication_identity(
+    settings_for_test, monkeypatch
+) -> None:
+    checkpoints = iter(
+        (
+            StructurePublicationCheckpoint(
+                "normalizing", "events", 500, "event-500", "publication-1"
+            ),
+            StructurePublicationCheckpoint(
+                "normalizing", "events", 500, "event-1000", "publication-2"
+            ),
+        )
+    )
+    ticks = iter((100.0, 100.0, 101.0, 101.0))
+    monkeypatch.setattr(structure_publication_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        structure_publication_module,
+        "run_structure_publication_step",
+        lambda *_args, **_kwargs: next(checkpoints),
+    )
+
+    with pytest.raises(ValueError, match="structure-publication-identity-changed"):
+        run_structure_publication_slice(
+            settings_for_test,
+            "window-1",
+            max_rows=500,
+            max_elapsed_s=45.0,
+            max_chunks=100,
+            store=object(),
+        )
 
 
 def test_normalization_chunk_never_fetches_more_than_raw_row_budget(

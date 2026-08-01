@@ -2617,6 +2617,9 @@ CREATE TABLE IF NOT EXISTS snapshot_attempts (
     failure_kind   TEXT,
     last_stage     TEXT,
     elapsed_ms     INTEGER,
+    chunks_processed INTEGER CHECK(
+        chunks_processed IS NULL OR chunks_processed BETWEEN 1 AND 100
+    ),
     CHECK(
         (outcome = 'running' AND finished_at_ms IS NULL
          AND snapshot_id IS NULL AND failure_kind IS NULL)

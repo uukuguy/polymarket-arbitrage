@@ -83,6 +83,8 @@ def test_structure_sync_cli_reports_publication_checkpoint_and_row_budget(
         rows_processed=17,
         cursor="event-17",
         publication_id="publication-1",
+        chunks_processed=4,
+        elapsed_ms=12_345,
     )
     with patch(
         "polyarb.snapshot.cli.run_structure_sync_until_published",
@@ -108,6 +110,8 @@ def test_structure_sync_cli_reports_publication_checkpoint_and_row_budget(
         "rows_processed": 17,
         "cursor": "event-17",
         "publication_id": "publication-1",
+        "chunks_processed": 4,
+        "elapsed_ms": 12_345,
     }
     assert run.await_args.kwargs["max_publication_rows"] == 17
 

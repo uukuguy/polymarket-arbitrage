@@ -50,6 +50,7 @@ def test_snapshot_attempt_status_reports_latest_failed_attempt(tmp_path: Path) -
         "latest": {
             "failure_kind": "snapshot-subprocess-signal-sigkill-possible-oom",
             "elapsed_ms": 245_012,
+            "chunks_processed": None,
             "finished_at_ms": 2_000,
             "id": 1,
             "last_stage": "gamma-markets",

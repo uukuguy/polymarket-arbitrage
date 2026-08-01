@@ -30,6 +30,8 @@ class StructurePublicationCheckpoint:
     rows_processed: int
     cursor: str | None
     publication_id: str
+    chunks_processed: int = 1
+    elapsed_ms: int = 0
 
 
 def _encoded_cursor(component: str, source_key: str | None, *, complete: bool) -> str:
@@ -183,13 +185,16 @@ def run_structure_publication_step(
     window_id: str,
     max_rows: int,
     max_elapsed_s: float,
+    *,
+    store: SQLiteStore | None = None,
 ) -> StructurePublicationCheckpoint | SnapshotResult:
     """Advance at most one normalization/certification chunk or pointer switch."""
     if max_rows < 1 or max_elapsed_s <= 0:
         raise ValueError("invalid-structure-publication-budget")
     started_at = time.monotonic()
-    store = SQLiteStore(settings.db_path)
-    store.init_structure_sync_schema()
+    if store is None:
+        store = SQLiteStore(settings.db_path)
+        store.init_structure_sync_schema()
     progress = store.get_structure_publication_progress(window_id)
     now_ms = int(time.time() * 1_000)
     if progress is None:
@@ -273,4 +278,63 @@ def run_structure_publication_step(
         chunk.source_rows,
         chunk.cursor,
         publication.publication_id,
+    )
+
+
+def run_structure_publication_slice(
+    settings: Settings,
+    window_id: str,
+    *,
+    max_rows: int,
+    max_elapsed_s: float,
+    max_chunks: int = 100,
+    store: SQLiteStore | None = None,
+) -> StructurePublicationCheckpoint | SnapshotResult:
+    """Advance independently committed chunks within one cooperative process slice."""
+    if max_rows < 1 or max_elapsed_s <= 0 or not 1 <= max_chunks <= 100:
+        raise ValueError("invalid-structure-publication-slice-budget")
+    if store is None:
+        store = SQLiteStore(settings.db_path)
+        store.init_structure_sync_schema()
+    started_at = time.monotonic()
+    rows_processed = 0
+    chunks_processed = 0
+    publication_id: str | None = None
+    final_checkpoint: StructurePublicationCheckpoint | None = None
+
+    while chunks_processed < max_chunks:
+        elapsed_s = time.monotonic() - started_at
+        if elapsed_s >= max_elapsed_s:
+            break
+        result = run_structure_publication_step(
+            settings,
+            window_id,
+            max_rows,
+            max_elapsed_s - elapsed_s,
+            store=store,
+        )
+        if isinstance(result, SnapshotResult):
+            return result
+        if publication_id is None:
+            publication_id = result.publication_id
+        elif result.publication_id != publication_id:
+            raise ValueError("structure-publication-identity-changed")
+        chunks_processed += 1
+        rows_processed += result.rows_processed
+        final_checkpoint = result
+        elapsed_s = time.monotonic() - started_at
+        if result.stage == "ready" or elapsed_s >= max_elapsed_s:
+            break
+
+    if final_checkpoint is None:
+        raise ValueError("structure-publication-slice-made-no-progress")
+    elapsed_ms = max(0, int(elapsed_s * 1_000))
+    return StructurePublicationCheckpoint(
+        stage=final_checkpoint.stage,
+        component=final_checkpoint.component,
+        rows_processed=rows_processed,
+        cursor=final_checkpoint.cursor,
+        publication_id=final_checkpoint.publication_id,
+        chunks_processed=chunks_processed,
+        elapsed_ms=elapsed_ms,
     )
