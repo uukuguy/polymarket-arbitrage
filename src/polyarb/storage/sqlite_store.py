@@ -147,6 +147,57 @@ def _comparison_receipt_digest(
     ).hexdigest()
 
 
+def _initialize_structure_comparison_progress(
+    con: sqlite3.Connection,
+    *,
+    publication_id: str,
+    snapshot_id: int,
+    generation_market_count: int,
+    now_ms: int,
+) -> bool:
+    """Pin legacy identity and create active bounded-comparison provenance."""
+    legacy = con.execute(
+        "SELECT s.id,s.taken_at_ms,s.finished_at_ms,s.market_count FROM snapshots s "
+        "JOIN snapshot_source_coverage c ON c.snapshot_id=s.id AND c.completed=1 "
+        "WHERE s.data_product='structure' AND s.market_view_published=1 "
+        "AND s.is_valid=1 ORDER BY s.id DESC LIMIT 1"
+    ).fetchone()
+    if legacy is None:
+        bootstrap = con.execute(
+            "SELECT id,taken_at_ms,finished_at_ms FROM snapshots WHERE id=?",
+            (snapshot_id,),
+        ).fetchone()
+        if bootstrap is None:
+            return False
+        legacy = (*bootstrap, generation_market_count)
+    digest = SerializableSHA256.new()
+    digest.update(b"[")
+    con.execute(
+        "INSERT OR IGNORE INTO structure_generation_comparison_progress("
+        "publication_id,generation_snapshot_id,legacy_snapshot_id,"
+        "legacy_taken_at_ms,legacy_finished_at_ms,legacy_market_count,phase,"
+        "row_cursor_json,digest_state_json,phase_row_count,created_at_ms,"
+        "checkpoint_at_ms) VALUES (?,?,?,?,?,?,'legacy-universe',NULL,?,0,?,?)",
+        (
+            publication_id,
+            snapshot_id,
+            int(legacy[0]),
+            int(legacy[1]),
+            int(legacy[2]),
+            int(legacy[3]),
+            digest.to_json(),
+            now_ms,
+            now_ms,
+        ),
+    )
+    phase = con.execute(
+        "SELECT phase FROM structure_generation_comparison_progress "
+        "WHERE publication_id=? AND generation_snapshot_id=?",
+        (publication_id, snapshot_id),
+    ).fetchone()
+    return phase is not None and phase[0] != "sealed"
+
+
 def _repair_current_structure_generation_authentication(
     con: sqlite3.Connection,
 ) -> None:
@@ -207,17 +258,7 @@ def _repair_current_structure_generation_authentication(
     )
     if not publication_valid:
         return
-    pointer_auth = row[2:5]
-    if all(value is None for value in pointer_auth):
-        con.execute(
-            "UPDATE current_structure_generation SET validation_hash=?,counts_json=?,"
-            "certification_component=? WHERE id=1 AND validation_hash IS NULL "
-            "AND counts_json IS NULL AND certification_component IS NULL",
-            (row[10], canonical_counts, marker),
-        )
-    elif pointer_auth != (row[10], canonical_counts, marker):
-        return
-    if row[5] is not None:
+    if not all(value is None for value in row[2:6]):
         return
     receipt = con.execute(
         "SELECT publication_id,legacy_snapshot_id,legacy_market_count,"
@@ -227,7 +268,28 @@ def _repair_current_structure_generation_authentication(
         "FROM structure_generation_comparison_receipts WHERE generation_snapshot_id=?",
         (row[0],),
     ).fetchone()
-    if receipt is None or receipt[10] is None:
+    if receipt is None:
+        finished_at_ms = con.execute(
+            "SELECT finished_at_ms FROM snapshots WHERE id=?",
+            (int(row[0]),),
+        ).fetchone()
+        if finished_at_ms is not None and _initialize_structure_comparison_progress(
+            con,
+            publication_id=str(row[1]),
+            snapshot_id=int(row[0]),
+            generation_market_count=int(committed["markets"]),
+            now_ms=int(finished_at_ms[0]),
+        ):
+            con.execute(
+                "UPDATE current_structure_generation SET validation_hash=?,"
+                "counts_json=?,certification_component=? WHERE id=1 "
+                "AND validation_hash IS NULL AND counts_json IS NULL "
+                "AND certification_component IS NULL "
+                "AND comparison_receipt_digest IS NULL",
+                (row[10], canonical_counts, marker),
+            )
+        return
+    if receipt[10] is None:
         return
     expected_digest = _comparison_receipt_digest(
         generation_snapshot_id=int(row[0]),
@@ -255,9 +317,12 @@ def _repair_current_structure_generation_authentication(
         and receipt[8] == row[10]
     ):
         con.execute(
-            "UPDATE current_structure_generation SET comparison_receipt_digest=? "
-            "WHERE id=1 AND comparison_receipt_digest IS NULL",
-            (expected_digest,),
+            "UPDATE current_structure_generation SET validation_hash=?,counts_json=?,"
+            "certification_component=?,comparison_receipt_digest=? WHERE id=1 "
+            "AND validation_hash IS NULL AND counts_json IS NULL "
+            "AND certification_component IS NULL "
+            "AND comparison_receipt_digest IS NULL",
+            (row[10], canonical_counts, marker, expected_digest),
         )
 
 
@@ -443,11 +508,15 @@ def _resolve_generation_structure(
         row = con.execute(
             "SELECT g.snapshot_id,g.publication_id,g.validation_hash,g.counts_json,"
             "g.certification_component,g.comparison_receipt_digest,"
+            "cp.phase,"
             "s.taken_at_ms,s.finished_at_ms,s.market_count,"
             "p.window_id,p.expected_counts_json,p.committed_counts_json,p.validation_hash,"
             "p.certification_component,p.certification_hash FROM "
             "current_structure_generation g JOIN structure_publications p "
             "ON p.publication_id=g.publication_id AND p.snapshot_id=g.snapshot_id "
+            "LEFT JOIN structure_generation_comparison_progress cp "
+            "ON cp.publication_id=g.publication_id "
+            "AND cp.generation_snapshot_id=g.snapshot_id "
             "JOIN snapshots s ON s.id=g.snapshot_id WHERE g.id=1 AND "
             "p.status='published' AND s.data_product='structure' AND "
             "s.market_view_published=1 AND s.is_valid=1"
@@ -463,7 +532,8 @@ def _resolve_generation_structure(
             )
         resolved_id, publication_id = int(row[0]), str(row[1])
         pointer_hash, pointer_counts, pointer_marker, pointer_receipt_digest = row[2:6]
-        metadata = row[6:]
+        comparison_phase = row[6]
+        metadata = row[7:]
     else:
         row = con.execute(
             "SELECT s.taken_at_ms,s.finished_at_ms,s.market_count,p.window_id,"
@@ -478,6 +548,7 @@ def _resolve_generation_structure(
             raise StructureGenerationReadError("generation-identity-mismatch")
         resolved_id, publication_id = int(snapshot_id), str(row[9])
         pointer_hash = pointer_counts = pointer_marker = pointer_receipt_digest = None
+        comparison_phase = None
         metadata = row[:9]
     (
         taken_at_ms,
@@ -515,6 +586,18 @@ def _resolve_generation_structure(
         separators=(",", ":"),
     )
     if current:
+        active_repair = pointer_receipt_digest is None and comparison_phase in {
+            "legacy-universe",
+            "generation-universe",
+            "legacy-rejections",
+            "generation-rejections",
+        }
+        sealed_receipt = (
+            isinstance(pointer_receipt_digest, str)
+            and len(pointer_receipt_digest) == 64
+        )
+        if not (active_repair or sealed_receipt):
+            raise StructureGenerationReadError("generation-identity-mismatch")
         if pointer_hash != validation_hash:
             raise StructureGenerationReadError("generation-validation-hash-mismatch")
         if pointer_counts != canonical_counts:
@@ -2132,40 +2215,14 @@ class SQLiteStore:
         now_ms: int,
     ) -> None:
         """Pin legacy identity and initialize canonical list framing."""
-        legacy = con.execute(
-            "SELECT s.id,s.taken_at_ms,s.finished_at_ms,s.market_count FROM snapshots s "
-            "JOIN snapshot_source_coverage c ON c.snapshot_id=s.id AND c.completed=1 "
-            "WHERE s.data_product='structure' AND s.market_view_published=1 "
-            "AND s.is_valid=1 ORDER BY s.id DESC LIMIT 1"
-        ).fetchone()
-        if legacy is None:
-            bootstrap = con.execute(
-                "SELECT id,taken_at_ms,finished_at_ms FROM snapshots WHERE id=?",
-                (snapshot_id,),
-            ).fetchone()
-            if bootstrap is None:
-                raise ValueError("structure-comparison-legacy-unavailable")
-            legacy = (*bootstrap, generation_market_count)
-        digest = SerializableSHA256.new()
-        digest.update(b"[")
-        con.execute(
-            "INSERT OR IGNORE INTO structure_generation_comparison_progress("
-            "publication_id,generation_snapshot_id,legacy_snapshot_id,"
-            "legacy_taken_at_ms,legacy_finished_at_ms,legacy_market_count,phase,"
-            "row_cursor_json,digest_state_json,phase_row_count,created_at_ms,"
-            "checkpoint_at_ms) VALUES (?,?,?,?,?,?,'legacy-universe',NULL,?,0,?,?)",
-            (
-                publication_id,
-                snapshot_id,
-                int(legacy[0]),
-                int(legacy[1]),
-                int(legacy[2]),
-                int(legacy[3]),
-                digest.to_json(),
-                now_ms,
-                now_ms,
-            ),
-        )
+        if not _initialize_structure_comparison_progress(
+            con,
+            publication_id=publication_id,
+            snapshot_id=snapshot_id,
+            generation_market_count=generation_market_count,
+            now_ms=now_ms,
+        ):
+            raise ValueError("structure-comparison-legacy-unavailable")
 
     @staticmethod
     def _comparison_legacy_identity(
@@ -3529,33 +3586,12 @@ class SQLiteStore:
             if pointer is not None:
                 snapshot_id = int(pointer[0])
                 if pointer[2] is None:
-                    repair_publication = con.execute(
-                        "SELECT committed_counts_json,validation_hash,certification_hash,"
-                        "status FROM structure_publications WHERE publication_id=? "
-                        "AND snapshot_id=?",
-                        (str(pointer[1]), snapshot_id),
-                    ).fetchone()
-                    if (
-                        repair_publication is None
-                        or repair_publication[3] != "published"
-                        or repair_publication[1] != repair_publication[2]
-                    ):
+                    try:
+                        generation = _resolve_generation_structure(con, None)
+                    except StructureGenerationReadError:
                         con.execute("COMMIT")
                         return BackfillCheckpoint(snapshot_id, 0, None, True)
-                    counts = json.loads(str(repair_publication[0]))
-                    repair_now_ms = int(
-                        con.execute(
-                            "SELECT finished_at_ms FROM snapshots WHERE id=?",
-                            (snapshot_id,),
-                        ).fetchone()[0]
-                    )
-                    self._start_structure_comparison(
-                        con,
-                        publication_id=str(pointer[1]),
-                        snapshot_id=snapshot_id,
-                        generation_market_count=int(counts["markets"]),
-                        now_ms=repair_now_ms,
-                    )
+                    repair_now_ms = int(generation.finished_at_ms)
                     con.execute("COMMIT")
                     repaired = self._advance_structure_comparison_chunk(
                         str(pointer[1]),
@@ -3570,7 +3606,7 @@ class SQLiteStore:
                         repaired.ready,
                     )
                 con.execute("COMMIT")
-                return BackfillCheckpoint(int(pointer[0]), 0, None, True)
+                return BackfillCheckpoint(snapshot_id, 0, None, True)
             publication = con.execute(
                 "SELECT publication_id,snapshot_id,window_id,status,write_component,"
                 "write_row_cursor,expected_counts_json,certification_component "
@@ -4720,8 +4756,9 @@ class SQLiteStore:
     ) -> tuple[int, list[int]]:
         """Delete one bounded batch older than N days, keeping M most recent.
 
-        Deletes in FK-safe order: validation_issues → markets → event_tags →
-        events → snapshots. Also deletes parquet files.
+        Deletes ordinary snapshot rows in FK-safe order. Immutable Structure
+        generation evidence is excluded during candidate selection and requires
+        a dedicated bounded evidence-aware cleanup workflow.
 
         Bounding each transaction prevents a large historical backlog from growing
         WAL for minutes and losing all progress when a deployment interrupts it.
@@ -4747,9 +4784,33 @@ class SQLiteStore:
             to_delete = [
                 r[0]
                 for r in con.execute(
-                    f"SELECT id FROM snapshots "
-                    f"WHERE taken_at_ms < ? AND id NOT IN ({placeholders}) "
-                    f"ORDER BY id LIMIT ?",
+                    f"SELECT s.id FROM snapshots s WHERE s.taken_at_ms < ? "
+                    f"AND s.id NOT IN ({placeholders}) "
+                    "AND NOT EXISTS (SELECT 1 FROM current_structure_generation g "
+                    "WHERE g.snapshot_id=s.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM structure_publications p "
+                    "WHERE p.snapshot_id=s.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM "
+                    "structure_generation_comparison_progress cp WHERE "
+                    "cp.generation_snapshot_id=s.id OR cp.legacy_snapshot_id=s.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM "
+                    "structure_generation_comparison_receipts cr WHERE "
+                    "cr.generation_snapshot_id=s.id OR cr.legacy_snapshot_id=s.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM structure_sync_windows sw "
+                    "WHERE sw.published_snapshot_id=s.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM structure_generation_events ge "
+                    "WHERE ge.snapshot_id=s.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM structure_generation_event_tags gt "
+                    "WHERE gt.snapshot_id=s.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM structure_generation_memberships gm "
+                    "WHERE gm.snapshot_id=s.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM structure_generation_group_truth gg "
+                    "WHERE gg.snapshot_id=s.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM structure_generation_markets gk "
+                    "WHERE gk.snapshot_id=s.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM structure_generation_issues gi "
+                    "WHERE gi.snapshot_id=s.id) "
+                    "ORDER BY s.id LIMIT ?",
                     [cutoff_ms, *keep_ids, max_snapshots_per_run],
                 ).fetchall()
             ]

@@ -316,6 +316,136 @@ def test_purge_old_snapshots_removes_market_truth_rows(store: SQLiteStore) -> No
             ).fetchone() == (0,)
 
 
+def test_generic_purge_retains_complete_authenticated_generation_chain(
+    store: SQLiteStore,
+) -> None:
+    old_ms = int((time.time() - 8 * 86_400) * 1000)
+
+    def write_revision(taken_at_ms: int, *, structure: bool = False) -> int:
+        return store.write_snapshot(
+            taken_at_ms=taken_at_ms,
+            finished_at_ms=taken_at_ms,
+            mode="full",
+            parquet_path="",
+            is_valid=True,
+            market_rows=[],
+            issues=[],
+            data_product="structure" if structure else "legacy_combined",
+            archive_status="legacy",
+            **_complete_publication(),
+        )
+
+    legacy_id = write_revision(old_ms, structure=True)
+    generation_id = write_revision(old_ms + 1, structure=True)
+    unrelated_id = write_revision(old_ms + 2)
+    recent_id = write_revision(int(time.time() * 1000))
+    counts_json = (
+        '{"event_tags":0,"events":0,"group_truth":0,"issues":0,'
+        '"markets":0,"memberships":0}'
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO structure_generation_events(snapshot_id,id,slug,fetched_at_ms) "
+            "VALUES (?,'retained-event','retained-event',?)",
+            (generation_id, old_ms),
+        )
+        con.execute(
+            "INSERT INTO structure_sync_windows(id,status,started_at_ms,"
+            "checkpoint_at_ms,published_snapshot_id) "
+            "VALUES ('retained-window','published',?,?,?)",
+            (old_ms, old_ms + 1, generation_id),
+        )
+        con.execute(
+            "INSERT INTO structure_publications(publication_id,window_id,snapshot_id,"
+            "status,expected_counts_json,committed_counts_json,validation_hash,"
+            "certification_component,certification_hash,certification_counts_json,"
+            "created_at_ms,checkpoint_at_ms,certified_at_ms,published_at_ms) "
+            "VALUES ('retained-publication','retained-window',?,'published',?,?,?,"
+            "'bounded-complete',?,?,?, ?,?,?)",
+            (
+                generation_id,
+                counts_json,
+                counts_json,
+                "b" * 64,
+                "b" * 64,
+                counts_json,
+                old_ms,
+                old_ms + 1,
+                old_ms + 1,
+                old_ms + 1,
+            ),
+        )
+        con.execute(
+            "INSERT INTO structure_generation_comparison_receipts("
+            "generation_snapshot_id,publication_id,legacy_snapshot_id,"
+            "legacy_market_count,generation_market_count,legacy_universe_hash,"
+            "generation_universe_hash,legacy_source_truth_hash,"
+            "generation_source_truth_hash,generation_validation_hash,created_at_ms,"
+            "receipt_digest) VALUES (?,'retained-publication',?,0,0,?,?,?,?,?,?,?)",
+            (
+                generation_id,
+                legacy_id,
+                "c" * 64,
+                "c" * 64,
+                "d" * 64,
+                "d" * 64,
+                "b" * 64,
+                old_ms + 1,
+                "e" * 64,
+            ),
+        )
+        con.execute(
+            "INSERT INTO structure_generation_comparison_progress("
+            "publication_id,generation_snapshot_id,legacy_snapshot_id,"
+            "legacy_taken_at_ms,legacy_finished_at_ms,legacy_market_count,phase,"
+            "digest_state_json,phase_row_count,legacy_universe_hash,"
+            "generation_universe_hash,legacy_source_truth_hash,"
+            "generation_source_truth_hash,created_at_ms,checkpoint_at_ms) "
+            "VALUES ('retained-publication',?,?,?, ?,0,'sealed','{}',0,?,?,?,?,?,?)",
+            (
+                generation_id,
+                legacy_id,
+                old_ms,
+                old_ms,
+                "c" * 64,
+                "c" * 64,
+                "d" * 64,
+                "d" * 64,
+                old_ms,
+                old_ms + 1,
+            ),
+        )
+        con.execute(
+            "INSERT INTO current_structure_generation(id,snapshot_id,publication_id,"
+            "validation_hash,counts_json,certification_component,"
+            "comparison_receipt_digest,switched_at_ms) "
+            "VALUES (1,?,'retained-publication',?,?,'bounded-complete',?,?)",
+            (generation_id, "b" * 64, counts_json, "e" * 64, old_ms + 1),
+        )
+
+    deleted, deleted_ids = store.purge_old_snapshots(
+        older_than_days=7,
+        keep_last=1,
+        max_snapshots_per_run=10,
+    )
+
+    assert (deleted, deleted_ids) == (1, [unrelated_id])
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute("SELECT id FROM snapshots ORDER BY id").fetchall() == [
+            (legacy_id,),
+            (generation_id,),
+            (recent_id,),
+        ]
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_comparison_receipts"
+        ).fetchone() == (1,)
+    assert store.purge_old_snapshots(
+        older_than_days=7,
+        keep_last=1,
+        max_snapshots_per_run=10,
+    ) == (0, [])
+
+
 def test_streaming_disk_full_preserves_original_error_when_sqlite_auto_rolls_back(
     store: SQLiteStore, monkeypatch
 ) -> None:

@@ -61,8 +61,12 @@ pre-Task-5 pointers.
   `_repair_current_structure_generation_authentication(con)`.
 
 - [ ] Write RED tests creating literal pre-Task-5 pointer tables/data, then prove
-  valid NULL auth columns repair atomically and repeatedly; invalid publication,
-  snapshot, conflicting non-NULL values, and corrupt receipt fail closed.
+  all four NULL auth fields repair atomically and repeatedly. With no receipt,
+  prove the first three fields plus active comparison provenance are atomic,
+  generation remains usable, compare reports `comparison-receipt-missing`, and
+  bounded backfill seals the receipt. Exercise every fabricated mixed NULL/non-NULL
+  combination and prove init/backfill preserve exact row equality while generation
+  and compare remain fail-closed.
 - [ ] Write RED tests proving receipt digest tamper and identity swap are reported,
   both-side false count/hash mutation is rejected or detected, and sealed UPDATE /
   DELETE raises `sqlite3.IntegrityError`.
@@ -110,6 +114,21 @@ pre-Task-5 pointers.
   semantics, and remaining non-rollout concerns to the Task 5 report.
 - [ ] Stage only Task 5 refinement files and commit once as
   `fix(m1): seal bounded comparison receipts`.
+
+### Task 5: Generic retention boundary
+
+**Files:**
+- Modify: `src/polyarb/storage/sqlite_store.py`
+- Modify: `tests/m1-perception/test_sqlite_store.py`
+
+- [ ] Write a RED retention test with an otherwise-expired current generation,
+  publication, sealed receipt, comparison progress, exact legacy identity, and
+  generation rows plus one unrelated expired snapshot.
+- [ ] Exclude every referenced evidence identity in the bounded candidate query;
+  do not delete or update sealed evidence and do not use FK rollback as filtering.
+- [ ] Prove unrelated deletion succeeds, the full chain remains, and replay is
+  idempotent. Document that generation reclamation needs a future dedicated
+  bounded evidence-aware cleanup API before production closure.
 
 ## Self-review
 

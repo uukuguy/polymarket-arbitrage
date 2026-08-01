@@ -118,11 +118,13 @@ chain as generation validation:
   hash, generation validation hash, and creation time. Readers recompute it,
   verify the pointer binding, and cross-check both snapshot market counts.
   Digest-sealed receipt UPDATE/DELETE operations are rejected.
-- Literal pre-Task-5 pointers repair only when all new authentication fields are
-  NULL and the referenced publication/snapshot prove a frozen published identity.
-  Partial, conflicting, or unverifiable state remains fail-closed. Initialization
-  is idempotent; a missing receipt permits generation mode, makes compare report
-  `comparison-receipt-missing`, and is repaired incrementally through backfill.
+- Literal pre-Task-5 pointers repair only when all four authentication fields are
+  NULL and publication plus snapshot prove the frozen identity. A sealed receipt
+  fills all four fields. Without one, initialization atomically fills the first
+  three and creates active comparison provenance: generation remains usable,
+  compare reports `comparison-receipt-missing`, and bounded backfill later binds
+  the digest. Every fabricated partial, conflicting, or unverifiable state is
+  unchanged by repeated init/backfill and remains fail-closed.
 - Pointer publication verifies metadata and the sealed receipt only. SQL-trace
   tests prove it executes no `COUNT`, legacy membership scan, or generation market
   scan; the former one-shot backfill comparison helper is gone.
@@ -133,3 +135,27 @@ Task 3–5 verification passed **101 tests** with no failures, errors, or skips.
 The full requested certification/backfill/pointer/schema/migration/hot-reader and
 consumer regression passed **423 tests**, with 0 failures, 0 errors, and 1 existing
 skip (48.941 seconds). Changed-file Ruff and `git diff --check` passed.
+
+## Final narrow review: pointer state and retention
+
+- Added the complete 14-case partial authentication matrix, including the
+  digest-only fabricated state. Every case preserves the exact pointer row across
+  repeated initialization and generic backfill; no field is opportunistically
+  filled, generation raises, and compare reports a mismatch.
+- Added the distinct all-four-NULL/no-receipt migration case. Initialization
+  atomically records the three provable pointer facts plus durable active comparison
+  provenance; only that provenance authorizes generation reads and bounded digest
+  repair, while compare remains explicitly missing until sealing.
+- Generic snapshot purge now excludes identities referenced by the current
+  generation pointer, publications, comparison progress/receipts, published sync
+  windows, and every generation component table during candidate selection.
+  Tests prove an unrelated expired snapshot is deleted successfully while the
+  authenticated generation plus exact legacy chain remains intact; replay deletes
+  nothing and no sealed receipt mutation or FK rollback is used.
+- Old generation reclamation deliberately remains out of generic retention. A
+  dedicated bounded evidence-aware cleanup API must be implemented and exposed
+  before production closure.
+- Final narrow verification passed **174 focused tests** with no failures, errors,
+  or skips. The complete requested regression passed **438 tests**, with 0
+  failures, 0 errors, and 1 existing skip. Changed-file Ruff, `git diff --check`,
+  and `make planning-status` (no drift) passed.

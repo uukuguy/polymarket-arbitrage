@@ -118,11 +118,22 @@ arbitrary update or delete. The pointer records the sealed receipt digest;
 pointer switching verifies metadata and the digest only and performs no full
 count or hash scan.
 
-Schema initialization repairs a literal pre-Task-5 pointer only when its new
-authentication columns are NULL and its referenced publication and snapshot
-prove the frozen authenticated identity, canonical counts, and validation hash.
-The repair copies those facts atomically and is idempotent. Conflicting non-NULL
-values or unverifiable references remain fail-closed. A recoverable digest-bound
-receipt is bound at the same time; otherwise generation mode becomes usable while
-compare reports an explicit missing receipt until the bounded comparison repair
-seals and binds one.
+Schema initialization repairs a literal pre-Task-5 pointer only when all four new
+authentication fields—validation hash, component counts, certification marker,
+and comparison receipt digest—are NULL and its publication and snapshot prove the
+frozen identity. A sealed receipt copies all four facts atomically. If no receipt
+exists, initialization copies the first three facts and atomically creates durable
+bounded-comparison progress; generation is usable while compare reports
+`comparison-receipt-missing`, and generic backfill may only continue that exact
+provenance until it atomically binds the digest. Every fabricated mixed
+NULL/non-NULL state, conflicting value, or unverifiable reference remains unchanged
+and fail-closed. Both repair forms are idempotent.
+
+Generic snapshot retention never reclaims immutable generation evidence. Its
+bounded candidate query excludes snapshots referenced by the current pointer,
+publication metadata, comparison progress or receipts, sync-window publication,
+or any generation component row. It can continue deleting unrelated snapshots
+without touching a sealed receipt or depending on a foreign-key rollback. Old
+generation reclamation requires a separate bounded, evidence-aware cleanup API
+with explicit chain ownership; that API must be implemented and exposed before
+production closure and is outside Task 5.

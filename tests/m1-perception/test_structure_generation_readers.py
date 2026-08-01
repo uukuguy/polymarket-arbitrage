@@ -319,7 +319,7 @@ def test_literal_pre_task5_pointer_repairs_and_replays_idempotently(
         assert read.snapshot_id == 1
 
 
-def test_pre_task5_pointer_without_receipt_recovers_generation_only(
+def test_pre_task5_pointer_without_receipt_repairs_with_bounded_provenance(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "pre-task5-no-receipt.db"
@@ -332,25 +332,43 @@ def test_pre_task5_pointer_without_receipt_recovers_generation_only(
         con.execute("DELETE FROM structure_generation_comparison_receipts")
 
     SQLiteStore(path).init_schema()
-    with structure_read_transaction(path, mode="generation") as read:
-        assert read.snapshot_id == 1
+    with structure_read_transaction(path, mode="generation") as generation:
+        assert generation.snapshot_id == 1
     with structure_read_transaction(path, mode="compare") as read:
         assert read.comparison is not None
         assert read.comparison.mismatch_reasons == ("comparison-receipt-missing",)
+    with sqlite3.connect(path) as con:
+        before = con.execute(
+            "SELECT validation_hash,counts_json,certification_component,"
+            "comparison_receipt_digest FROM current_structure_generation WHERE id=1"
+        ).fetchone()
+        progress = con.execute(
+            "SELECT phase FROM structure_generation_comparison_progress "
+            "WHERE publication_id='test-publication-1'"
+        ).fetchone()
+    assert all(value is not None for value in before[:3])
+    assert before[3] is None
+    assert progress is not None and progress[0] != "sealed"
     for _ in range(20):
-        repaired = SQLiteStore(path).backfill_current_structure_generation(max_rows=1)
-        if repaired.complete:
-            with sqlite3.connect(path) as con:
-                bound = con.execute(
-                    "SELECT comparison_receipt_digest "
-                    "FROM current_structure_generation WHERE id=1"
-                ).fetchone()[0]
-            if bound is not None:
-                break
-    assert bound is not None
-    with structure_read_transaction(path, mode="compare") as repaired_read:
-        assert repaired_read.comparison is not None
-        assert repaired_read.comparison.mismatch_reasons == ()
+        SQLiteStore(path).backfill_current_structure_generation(max_rows=1)
+        with sqlite3.connect(path) as con:
+            digest = con.execute(
+                "SELECT comparison_receipt_digest "
+                "FROM current_structure_generation WHERE id=1"
+            ).fetchone()[0]
+        if digest is not None:
+            break
+    SQLiteStore(path).init_schema()
+    with sqlite3.connect(path) as con:
+        after = con.execute(
+            "SELECT validation_hash,counts_json,certification_component,"
+            "comparison_receipt_digest FROM current_structure_generation WHERE id=1"
+        ).fetchone()
+    assert after[:3] == before[:3]
+    assert after[3] is not None
+    with structure_read_transaction(path, mode="compare") as repaired:
+        assert repaired.comparison is not None
+        assert repaired.comparison.matches is True
 
 
 def test_pre_task5_pointer_unverifiable_publication_remains_fail_closed(
@@ -395,6 +413,67 @@ def test_pre_task5_pointer_partial_authentication_is_not_self_healed(
     with pytest.raises(StructureGenerationReadError):
         with structure_read_transaction(path, mode="generation"):
             pass
+
+
+@pytest.mark.parametrize("present_mask", range(1, 15))
+def test_pre_task5_pointer_partial_authentication_matrix_never_mutates(
+    tmp_path: Path,
+    present_mask: int,
+) -> None:
+    path = tmp_path / f"pre-task5-partial-{present_mask}.db"
+    store = SQLiteStore(path)
+    store.init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="old", point_current=True)
+    with sqlite3.connect(path) as con:
+        valid = con.execute(
+            "SELECT validation_hash,committed_counts_json,certification_component "
+            "FROM structure_publications WHERE publication_id='test-publication-1'"
+        ).fetchone()
+        valid_digest = con.execute(
+            "SELECT receipt_digest FROM structure_generation_comparison_receipts "
+            "WHERE generation_snapshot_id=1"
+        ).fetchone()[0]
+    _downgrade_to_pre_task5_pointer(path)
+    with sqlite3.connect(path) as con:
+        for column in (
+            "validation_hash",
+            "counts_json",
+            "certification_component",
+            "comparison_receipt_digest",
+        ):
+            con.execute(
+                f"ALTER TABLE current_structure_generation ADD COLUMN {column} TEXT"
+            )
+        values = (valid[0], valid[1], valid[2], valid_digest)
+        selected = tuple(
+            value if present_mask & (1 << index) else None
+            for index, value in enumerate(values)
+        )
+        con.execute(
+            "UPDATE current_structure_generation SET validation_hash=?,counts_json=?,"
+            "certification_component=?,comparison_receipt_digest=? WHERE id=1",
+            selected,
+        )
+        before = con.execute(
+            "SELECT validation_hash,counts_json,certification_component,"
+            "comparison_receipt_digest FROM current_structure_generation WHERE id=1"
+        ).fetchone()
+
+    SQLiteStore(path).init_schema()
+    SQLiteStore(path).backfill_current_structure_generation(max_rows=1)
+    SQLiteStore(path).init_schema()
+    with sqlite3.connect(path) as con:
+        after = con.execute(
+            "SELECT validation_hash,counts_json,certification_component,"
+            "comparison_receipt_digest FROM current_structure_generation WHERE id=1"
+        ).fetchone()
+    assert after == before
+    with pytest.raises(StructureGenerationReadError):
+        with structure_read_transaction(path, mode="generation"):
+            pass
+    with structure_read_transaction(path, mode="compare") as read:
+        assert read.comparison is not None
+        assert read.comparison.matches is False
 
 
 def test_current_generation_view_selects_only_pointer_rows(generation_db: Path) -> None:
