@@ -760,7 +760,10 @@ def _build_health_checks(
         ]
 
     # ── Check 2.5: parent-observed scheduler attempt truth ───────────────
-    from polyarb.daemon.scheduler import SNAPSHOT_SUBPROCESS_TIMEOUT_S
+    from polyarb.daemon.scheduler import (
+        SNAPSHOT_SUBPROCESS_TIMEOUT_S,
+        STRUCTURE_PRODUCER_SLOT_BUDGET_S,
+    )
 
     schedule_adjustment = store.get_latest_structure_schedule_adjustment()
     configured_timeout_s = int(SNAPSHOT_SUBPROCESS_TIMEOUT_S)
@@ -779,6 +782,8 @@ def _build_health_checks(
         success_sample_count = int(schedule_adjustment["success_sample_count"])
         success_p95_s = schedule_adjustment["success_p95_s"]
         schedule_reason = str(schedule_adjustment["reason"])
+    producer_slot_budget_s = int(STRUCTURE_PRODUCER_SLOT_BUDGET_S)
+    attempt_timeout_s = min(effective_timeout_s, producer_slot_budget_s)
 
     checks["snapshot:schedule"] = [
         {
@@ -789,6 +794,8 @@ def _build_health_checks(
             "output": (
                 f"configured_timeout_s={configured_timeout_s} "
                 f"effective_timeout_s={effective_timeout_s} "
+                f"producer_slot_budget_s={producer_slot_budget_s} "
+                f"attempt_timeout_s={attempt_timeout_s} "
                 f"configured_cadence_s={configured_cadence_s} "
                 f"effective_cadence_s={effective_cadence_s} "
                 f"success_samples={success_sample_count} "
@@ -833,7 +840,7 @@ def _build_health_checks(
                 0.0,
                 now_s - int(latest_attempt["started_at_ms"]) / 1000.0,
             )
-            if attempt_age_s > effective_timeout_s:
+            if attempt_age_s > attempt_timeout_s:
                 attempt_status = "fail"
                 attempt_output = "snapshot-subprocess-timeout-exceeded"
             else:

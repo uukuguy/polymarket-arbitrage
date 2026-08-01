@@ -184,7 +184,7 @@ def test_scheduler_bootstraps_and_persists_effective_schedule(
 
 
 @pytest.mark.asyncio
-async def test_scheduler_passes_effective_timeout_to_snapshot_child(
+async def test_scheduler_caps_adaptive_timeout_at_producer_slot_budget(
     daemon_settings_for_test: Any,
 ) -> None:
     daemon_settings_for_test.scheduler_interval_s = 300
@@ -202,7 +202,8 @@ async def test_scheduler_passes_effective_timeout_to_snapshot_child(
     ) as run_child:
         await scheduler._run_snapshot()
 
-    run_child.assert_awaited_once_with(timeout_s=288)
+    assert scheduler.effective_timeout_s == 288
+    run_child.assert_awaited_once_with(timeout_s=120.0)
 
 
 @pytest.mark.asyncio

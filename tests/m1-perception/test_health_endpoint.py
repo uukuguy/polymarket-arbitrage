@@ -520,7 +520,7 @@ def test_health_uses_effective_snapshot_timeout_and_surfaces_schedule(
     daemon_settings_for_test: Any,
     http_test_client: TestClient,
 ) -> None:
-    """Adaptive timeout is the running-attempt health deadline."""
+    """Producer-slot budget caps adaptive timeout and stays health-visible."""
     from polyarb.storage.sqlite_store import SQLiteStore
 
     now_ms = int(time.time() * 1000)
@@ -554,12 +554,13 @@ def test_health_uses_effective_snapshot_timeout_and_surfaces_schedule(
 
     checks = response.json()["checks"]
     assert checks["snapshot:latest_attempt"][0]["observedValue"] == "running"
-    assert checks["snapshot:latest_attempt"][0]["status"] == "pass"
+    assert checks["snapshot:latest_attempt"][0]["status"] == "fail"
     schedule = checks["snapshot:schedule"][0]
     assert schedule["observedValue"] == "adaptive"
     assert schedule["status"] == "pass"
     assert schedule["output"] == (
         "configured_timeout_s=240 effective_timeout_s=288 "
+        "producer_slot_budget_s=120 attempt_timeout_s=120 "
         "configured_cadence_s=3600 effective_cadence_s=348 "
         "success_samples=10 success_p95_s=236 reason=timeout-backoff"
     )

@@ -454,10 +454,12 @@ async def test_snapshot_waits_for_shared_producer_slot(
     producer_lock = asyncio.Lock()
     await producer_lock.acquire()
     calls = 0
+    observed_timeout_s = None
 
     async def run_snapshot(*, timeout_s: float):
-        nonlocal calls
+        nonlocal calls, observed_timeout_s
         calls += 1
+        observed_timeout_s = timeout_s
         return SimpleNamespace(status=SnapshotStatus.OK)
 
     monkeypatch.setattr(
@@ -470,6 +472,7 @@ async def test_snapshot_waits_for_shared_producer_slot(
         sqlite_store=MagicMock(),
         producer_lock=producer_lock,
     )
+    scheduler._effective_timeout_s = 240
     running = asyncio.create_task(scheduler._run_snapshot())
     await asyncio.sleep(0)
     assert calls == 0
@@ -478,6 +481,7 @@ async def test_snapshot_waits_for_shared_producer_slot(
     await running
 
     assert calls == 1
+    assert observed_timeout_s == 120
 
 
 async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics() -> None:
