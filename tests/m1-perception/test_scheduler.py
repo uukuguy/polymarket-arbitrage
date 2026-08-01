@@ -362,7 +362,7 @@ async def test_snapshot_pipeline_runs_in_isolated_subprocess(
         "--json",
         "--low-priority",
         "--max-pages",
-        "80",
+        "40",
     )
     assert kwargs["stdout"] == asyncio.subprocess.PIPE
     assert kwargs["stderr"] == asyncio.subprocess.PIPE
