@@ -34,6 +34,7 @@ from polyarb.perception.market_truth import (
 from polyarb.perception.structure_contract import (
     STRUCTURE_CERTIFICATION_COMPONENTS,
     STRUCTURE_COMPONENTS,
+    STRUCTURE_PUBLICATION_MAX_ROWS,
     STRUCTURE_SOURCE_COMPONENTS,
 )
 from polyarb.storage.schemas import (
@@ -63,7 +64,7 @@ _VALID_MODES = ("subset", "full")
 # bounded bulk transactions can legitimately overlap for tens of seconds on
 # the production volume, so SQLite's five-second default is too short.
 SQLITE_BUSY_TIMEOUT_S = 120.0
-STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS = 5_000
+STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS = STRUCTURE_PUBLICATION_MAX_ROWS
 STRUCTURE_EVENT_PAYLOAD_MAX_BYTES = 1_000_000
 STRUCTURE_BOOTSTRAP_PAYLOAD_MAX_BYTES = 16_000_000
 
@@ -2260,6 +2261,25 @@ class SQLiteStore:
         finally:
             con.close()
 
+    def structure_event_market_backfill_complete(self, window_id: str) -> bool:
+        """Return whether one complete window owns its sealed relationship staging."""
+        if not window_id:
+            raise ValueError("invalid-structure-sync-window")
+        with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as con:
+            row = con.execute(
+                "SELECT window.status,progress.completed_at_ms,progress.blocked_reason "
+                "FROM structure_sync_windows window LEFT JOIN "
+                "structure_sync_event_market_backfill_progress progress "
+                "ON progress.window_id=window.id WHERE window.id=?",
+                (window_id,),
+            ).fetchone()
+        return bool(
+            row is not None
+            and row[0] == "complete"
+            and row[1] is not None
+            and row[2] is None
+        )
+
     def write_snapshot(
         self,
         *,
@@ -3026,6 +3046,33 @@ class SQLiteStore:
                 (publication_id, event_id),
             ).fetchone() is not None
 
+    def structure_events_with_duplicate_markets(
+        self,
+        publication_id: str,
+        event_ids: list[str],
+    ) -> set[str]:
+        """Resolve duplicate-market quality for one bounded event chunk in O(1) SQL."""
+        if (
+            not publication_id
+            or len(event_ids) > 500
+            or any(not isinstance(event_id, str) or not event_id for event_id in event_ids)
+        ):
+            raise ValueError("invalid-structure-duplicate-event-chunk")
+        if not event_ids:
+            return set()
+        placeholders = ",".join("?" for _ in event_ids)
+        with sqlite3.connect(self._db_path) as con:
+            rows = con.execute(
+                "SELECT DISTINCT mine.event_id FROM structure_publications p JOIN "
+                "structure_sync_event_market_staging mine ON mine.window_id=p.window_id "
+                "JOIN structure_sync_event_market_staging other ON "
+                "other.window_id=mine.window_id AND other.market_id=mine.market_id "
+                "AND other.event_id!=mine.event_id WHERE p.publication_id=? "
+                f"AND mine.event_id IN ({placeholders})",
+                (publication_id, *event_ids),
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
     def fetch_structure_duplicate_market_chunk(
         self, *, window_id: str, after_market_id: str | None, limit: int
     ) -> list[tuple[str, str]]:
@@ -3432,7 +3479,7 @@ class SQLiteStore:
         self, publication_id: str, *, max_rows: int, now_ms: int
     ) -> StructureCertificationChunk:
         """Hash and validate at most one primary-key generation chunk."""
-        if max_rows < 1:
+        if not 1 <= max_rows <= STRUCTURE_PUBLICATION_MAX_ROWS:
             raise ValueError("structure-certification-max-rows-must-be-positive")
         order = {
             "events": ("id",),
@@ -3866,6 +3913,22 @@ class SQLiteStore:
         con = self._connect_writer()
         try:
             con.execute("BEGIN IMMEDIATE")
+            window = con.execute(
+                "SELECT status FROM structure_sync_windows WHERE id=?", (window_id,)
+            ).fetchone()
+            if window is None or window[0] != "complete":
+                raise ValueError("structure-sync-window-not-complete")
+            bootstrap = con.execute(
+                "SELECT completed_at_ms,blocked_reason FROM "
+                "structure_sync_event_market_backfill_progress WHERE window_id=?",
+                (window_id,),
+            ).fetchone()
+            if (
+                bootstrap is None
+                or bootstrap[0] is None
+                or bootstrap[1] is not None
+            ):
+                raise ValueError("structure-bootstrap-incomplete")
             existing = con.execute(
                 "SELECT publication_id,snapshot_id,window_id,status,"
                 "committed_counts_json FROM structure_publications WHERE window_id=?",
@@ -3876,11 +3939,6 @@ class SQLiteStore:
                     raise ValueError("structure-publication-window-conflict")
                 con.execute("COMMIT")
                 return self._publication_state(existing)
-            window = con.execute(
-                "SELECT status FROM structure_sync_windows WHERE id=?", (window_id,)
-            ).fetchone()
-            if window is None or window[0] != "complete":
-                raise ValueError("structure-sync-window-not-complete")
             if con.execute(
                 "SELECT 1 FROM snapshots WHERE id=?", (snapshot_id,)
             ).fetchone() is not None:
@@ -6178,7 +6236,7 @@ class SQLiteStore:
             chunks_processed is not None
             and (
                 isinstance(chunks_processed, bool)
-                or not 1 <= chunks_processed <= 100
+                or not 0 <= chunks_processed <= 100
             )
         ):
             raise ValueError("invalid snapshot attempt chunks_processed")

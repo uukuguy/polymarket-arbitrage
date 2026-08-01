@@ -66,10 +66,12 @@ class SnapshotSubprocessError(RuntimeError):
         *,
         last_stage: str | None = None,
         elapsed_ms: int = 0,
+        chunks_processed: int | None = None,
     ) -> None:
         super().__init__(f"snapshot-subprocess-{reason}")
         self.last_stage = last_stage
         self.elapsed_ms = max(0, elapsed_ms)
+        self.chunks_processed = chunks_processed
 
 
 SNAPSHOT_SUBPROCESS_TIMEOUT_S = 240.0
@@ -109,6 +111,13 @@ _SNAPSHOT_STAGE_MARKER_RE = re.compile(
     rb"state=(?:start|complete) elapsed_ms=(?:0|[1-9][0-9]*)$",
     re.MULTILINE,
 )
+_STRUCTURE_PROGRESS_MARKER_RE = re.compile(
+    rb"^structure-publication-progress "
+    rb"stage=(?:normalizing|certifying|ready) "
+    rb"component=(?:[a-z][a-z_-]{0,31}|none) "
+    rb"chunks=(100|[1-9][0-9]?) rows=(?:0|[1-9][0-9]*)$",
+    re.MULTILINE,
+)
 
 
 def _parse_last_snapshot_stage(stderr: bytes) -> str | None:
@@ -117,6 +126,14 @@ def _parse_last_snapshot_stage(stderr: bytes) -> str | None:
     for marker in _SNAPSHOT_STAGE_MARKER_RE.finditer(stderr):
         last_stage = marker.group(1).decode("ascii")
     return last_stage
+
+
+def _parse_last_structure_chunks(stderr: bytes) -> int | None:
+    """Extract the last fully flushed committed-chunk marker from child stderr."""
+    chunks_processed: int | None = None
+    for marker in _STRUCTURE_PROGRESS_MARKER_RE.finditer(stderr):
+        chunks_processed = int(marker.group(1))
+    return chunks_processed
 
 
 @dataclass(frozen=True)
@@ -210,6 +227,7 @@ async def run_snapshot_in_subprocess(
             reason,
             last_stage=_parse_last_snapshot_stage(stderr),
             elapsed_ms=elapsed_ms(),
+            chunks_processed=_parse_last_structure_chunks(stderr),
         )
 
     try:
@@ -250,6 +268,7 @@ async def run_snapshot_in_subprocess(
             f"signal-{signal_name}{suffix}",
             last_stage=last_stage,
             elapsed_ms=process_elapsed_ms,
+            chunks_processed=_parse_last_structure_chunks(stderr),
         )
 
     try:
@@ -294,7 +313,7 @@ async def run_snapshot_in_subprocess(
                 or rows_processed < 0
                 or isinstance(chunks_processed, bool)
                 or not isinstance(chunks_processed, int)
-                or not 1 <= chunks_processed <= 100
+                or not 0 <= chunks_processed <= 100
                 or isinstance(child_elapsed_ms, bool)
                 or not isinstance(child_elapsed_ms, int)
                 or child_elapsed_ms < 0
@@ -946,6 +965,7 @@ class SnapshotScheduler:
                     failure_kind=str(error),
                     last_stage=getattr(error, "last_stage", None),
                     elapsed_ms=getattr(error, "elapsed_ms", None),
+                    chunks_processed=getattr(error, "chunks_processed", None),
                 )
             self._failure_counter += 1
             logger.exception(

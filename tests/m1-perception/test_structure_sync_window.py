@@ -263,9 +263,9 @@ async def test_bounded_slice_uses_remaining_time_for_publication(
             "polyarb.perception.structure_sync.finalize_structure_window",
             new=finalizer,
         ),
-        patch(
-            "polyarb.perception.structure_sync._monotonic",
-            side_effect=[0.0, 1.0, 2.0, 3.0],
+            patch(
+                "polyarb.perception.structure_sync._monotonic",
+                side_effect=[0.0, 1.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0],
         ),
         patch(
             "polyarb.perception.structure_publication.run_structure_publication_slice",
@@ -279,7 +279,7 @@ async def test_bounded_slice_uses_remaining_time_for_publication(
 
     assert result == checkpoint
     assert store.get_latest_structure_sync()["status"] == "complete"
-    assert publication_slice.call_args.kwargs["max_elapsed_s"] == 42.0
+    assert publication_slice.call_args.kwargs["max_elapsed_s"] == 40.0
     finalizer.assert_not_awaited()
 
 
@@ -1199,15 +1199,15 @@ def test_bootstrap_total_payload_budget_stops_before_materializing_next_row(
     with pytest.raises(ValueError, match="invalid-structure-event-market-backfill"):
         store.advance_structure_event_market_backfill(
             window_id=window["id"],
-            max_events=5_000,
-            max_relationships=5_000,
+                max_events=500,
+                max_relationships=500,
             max_payload_bytes=STRUCTURE_EVENT_PAYLOAD_MAX_BYTES - 1,
             now_ms=350,
         )
     first = store.advance_structure_event_market_backfill(
         window_id=window["id"],
-        max_events=5_000,
-        max_relationships=5_000,
+        max_events=500,
+        max_relationships=500,
         max_payload_bytes=1_700_000,
         now_ms=400,
     )
@@ -1217,8 +1217,8 @@ def test_bootstrap_total_payload_budget_stops_before_materializing_next_row(
     assert decoded_bytes <= 1_700_000
     second = store.advance_structure_event_market_backfill(
         window_id=window["id"],
-        max_events=5_000,
-        max_relationships=5_000,
+        max_events=500,
+        max_relationships=500,
         max_payload_bytes=1_700_000,
         now_ms=500,
     )
@@ -1529,3 +1529,58 @@ async def test_completed_legacy_window_checkpoints_bootstrap_before_publication(
     assert result.stage == "ready"
     assert result.chunks_processed > 1
     assert store.get_latest_structure_publication().status == "ready"
+
+
+def test_publication_cannot_begin_before_relationship_bootstrap_completes(
+    settings_for_test,
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[{"id": "event-1", "markets": [{"id": "market-1"}]}],
+        finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        markets=[{"id": "market-1"}],
+        finished_at_ms=300,
+    )
+
+    with pytest.raises(ValueError, match="structure-bootstrap-incomplete"):
+        store.begin_structure_publication(
+            window_id=window["id"],
+            snapshot_metadata={
+                "snapshot_id": 1,
+                "taken_at_ms": 400,
+                "mode": "full",
+                "data_product": "structure",
+                "expected_counts": {
+                    component: 0
+                    for component in (
+                        "events",
+                        "event_tags",
+                        "memberships",
+                        "group_truth",
+                        "markets",
+                        "issues",
+                    )
+                },
+            },
+            now_ms=400,
+        )
+
+    assert store.advance_structure_event_market_backfill(
+        window_id=window["id"],
+        max_events=500,
+        max_relationships=500,
+        now_ms=500,
+    )["completed"] is True
+    assert store.structure_event_market_backfill_complete(window["id"]) is True

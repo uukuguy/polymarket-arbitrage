@@ -334,6 +334,7 @@ def structure_sync(
         500,
         "--max-publication-rows",
         min=1,
+        max=500,
         hidden=True,
     ),
 ) -> None:

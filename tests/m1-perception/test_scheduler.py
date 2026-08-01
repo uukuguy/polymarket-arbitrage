@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 import sqlite3
 import threading
 import time
@@ -257,8 +258,9 @@ async def test_scheduler_persists_sigkill_attempt_failure(
     scheduler._run_snapshot = AsyncMock(
         side_effect=SnapshotSubprocessError(
             "timeout",
-            last_stage="gamma-markets",
+            last_stage="persist",
             elapsed_ms=245_012,
+            chunks_processed=7,
         )
     )
 
@@ -271,9 +273,9 @@ async def test_scheduler_persists_sigkill_attempt_failure(
         "outcome": "failed",
         "snapshot_id": None,
         "failure_kind": "snapshot-subprocess-timeout",
-        "last_stage": "gamma-markets",
+        "last_stage": "persist",
         "elapsed_ms": 245_012,
-        "chunks_processed": None,
+        "chunks_processed": 7,
     }
 
 
@@ -449,6 +451,30 @@ async def test_snapshot_subprocess_accepts_publication_checkpoint() -> None:
     assert result.cursor == "events|event-500"
     assert result.publication_id == "publication-1"
     assert result.chunks_processed == 11
+
+
+@pytest.mark.asyncio
+async def test_snapshot_timeout_recovers_last_committed_publication_chunk() -> None:
+    from polyarb.daemon.scheduler import SnapshotSubprocessError, run_snapshot_in_subprocess
+
+    process = _FakeProcess(
+        b"",
+        returncode=-signal.SIGKILL,
+        stderr=(
+            b"snapshot-stage stage=persist state=start elapsed_ms=0\n"
+            b"structure-publication-progress stage=normalizing component=events "
+            b"chunks=7 rows=3500\n"
+        ),
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(SnapshotSubprocessError) as captured:
+        await run_snapshot_in_subprocess(spawn=spawn)
+
+    assert captured.value.last_stage == "persist"
+    assert captured.value.chunks_processed == 7
 
 
 @pytest.mark.asyncio

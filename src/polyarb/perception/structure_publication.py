@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from polyarb.config import Settings
 from polyarb.perception.market_truth import EventMember, GroupTruth
-from polyarb.perception.structure_contract import STRUCTURE_COMPONENTS
+from polyarb.perception.structure_contract import (
+    STRUCTURE_COMPONENTS,
+    STRUCTURE_PUBLICATION_MAX_ROWS,
+    STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S,
+)
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 from polyarb.snapshot.orchestrator import SnapshotResult
 from polyarb.storage.sqlite_store import SQLiteStore, StructurePublicationState
@@ -50,6 +55,43 @@ def _checkpoint_component(component: str) -> str:
     return "legacy-universe" if component == "comparison" else component
 
 
+def _durable_publication_checkpoint(
+    store: SQLiteStore,
+    window_id: str,
+) -> StructurePublicationCheckpoint:
+    progress = store.get_structure_publication_progress(window_id)
+    if progress is None:
+        raise ValueError("structure-publication-slice-made-no-progress")
+    publication = progress.publication
+    if publication.status == "ready":
+        stage, component, cursor = "ready", None, None
+    else:
+        certification = store.structure_certification_checkpoint(
+            publication.publication_id
+        )
+        if certification is not None:
+            stage = "certifying"
+            component = _checkpoint_component(certification[0])
+            cursor = certification[1]
+        else:
+            stage = "normalizing"
+            component = progress.component or STRUCTURE_COMPONENTS[0]
+            cursor = progress.cursor
+            if cursor is not None and cursor.endswith("|done"):
+                index = STRUCTURE_COMPONENTS.index(component)
+                if index + 1 < len(STRUCTURE_COMPONENTS):
+                    component = STRUCTURE_COMPONENTS[index + 1]
+    return StructurePublicationCheckpoint(
+        stage=stage,
+        component=component,
+        rows_processed=0,
+        cursor=cursor,
+        publication_id=publication.publication_id,
+        chunks_processed=0,
+        elapsed_ms=0,
+    )
+
+
 def _member_row(member: EventMember) -> dict[str, object]:
     return {
         "event_id": member.event_id,
@@ -75,7 +117,10 @@ def normalize_structure_component_chunk(
     max_source_rows: int,
 ) -> NormalizationChunk:
     """Normalize one bounded raw keyset and atomically advance its cursor."""
-    if component not in STRUCTURE_COMPONENTS or max_source_rows < 1:
+    if (
+        component not in STRUCTURE_COMPONENTS
+        or not 1 <= max_source_rows <= STRUCTURE_PUBLICATION_MAX_ROWS
+    ):
         raise ValueError("invalid-structure-normalization-chunk")
     source = "markets" if component == "markets" else "events"
     progress = store.get_structure_publication_progress(publication.window_id)
@@ -94,6 +139,14 @@ def normalize_structure_component_chunk(
             after_key=after_source_key,
             limit=max_source_rows,
         )
+    duplicate_event_ids = (
+        store.structure_events_with_duplicate_markets(
+            publication.publication_id,
+            [str(source_key) for source_key, _raw in rows],
+        )
+        if component == "group_truth"
+        else set()
+    )
     taken_at_ms = store.structure_publication_taken_at_ms(publication.publication_id)
     canonical: list[dict[str, object]] = []
     for _source_key, raw in rows:
@@ -110,9 +163,7 @@ def normalize_structure_component_chunk(
             else:
                 for truth in truths:
                     row = _truth_row(truth)
-                    if store.structure_event_has_duplicate_market(
-                        publication.publication_id, truth.event_id
-                    ):
+                    if truth.event_id in duplicate_event_ids:
                         row["quality"] = "incomplete-source"
                         row["reason"] = "market-id-conflict-across-events"
                     canonical.append(row)
@@ -189,7 +240,7 @@ def run_structure_publication_step(
     store: SQLiteStore | None = None,
 ) -> StructurePublicationCheckpoint | SnapshotResult:
     """Advance at most one normalization/certification chunk or pointer switch."""
-    if max_rows < 1 or max_elapsed_s <= 0:
+    if not 1 <= max_rows <= STRUCTURE_PUBLICATION_MAX_ROWS or max_elapsed_s <= 0:
         raise ValueError("invalid-structure-publication-budget")
     started_at = time.monotonic()
     if store is None:
@@ -291,12 +342,21 @@ def run_structure_publication_slice(
     store: SQLiteStore | None = None,
 ) -> StructurePublicationCheckpoint | SnapshotResult:
     """Advance independently committed chunks within one cooperative process slice."""
-    if max_rows < 1 or max_elapsed_s <= 0 or not 1 <= max_chunks <= 100:
+    if (
+        not 1 <= max_rows <= STRUCTURE_PUBLICATION_MAX_ROWS
+        or max_elapsed_s <= 0
+        or not 1 <= max_chunks <= 100
+    ):
         raise ValueError("invalid-structure-publication-slice-budget")
     if store is None:
         store = SQLiteStore(settings.db_path)
         store.init_structure_sync_schema()
     started_at = time.monotonic()
+    print(
+        "snapshot-stage stage=persist state=start elapsed_ms=0",
+        file=sys.stderr,
+        flush=True,
+    )
     rows_processed = 0
     chunks_processed = 0
     publication_id: str | None = None
@@ -304,13 +364,14 @@ def run_structure_publication_slice(
 
     while chunks_processed < max_chunks:
         elapsed_s = time.monotonic() - started_at
-        if elapsed_s >= max_elapsed_s:
+        remaining_s = max_elapsed_s - elapsed_s
+        if remaining_s < STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S:
             break
         result = run_structure_publication_step(
             settings,
             window_id,
             max_rows,
-            max_elapsed_s - elapsed_s,
+            remaining_s,
             store=store,
         )
         if isinstance(result, SnapshotResult):
@@ -322,12 +383,19 @@ def run_structure_publication_slice(
         chunks_processed += 1
         rows_processed += result.rows_processed
         final_checkpoint = result
+        print(
+            "structure-publication-progress "
+            f"stage={result.stage} component={result.component or 'none'} "
+            f"chunks={chunks_processed} rows={rows_processed}",
+            file=sys.stderr,
+            flush=True,
+        )
         elapsed_s = time.monotonic() - started_at
         if result.stage == "ready" or elapsed_s >= max_elapsed_s:
             break
 
     if final_checkpoint is None:
-        raise ValueError("structure-publication-slice-made-no-progress")
+        return _durable_publication_checkpoint(store, window_id)
     elapsed_ms = max(0, int(elapsed_s * 1_000))
     return StructurePublicationCheckpoint(
         stage=final_checkpoint.stage,

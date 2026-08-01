@@ -19,10 +19,11 @@ from polyarb.clients.gamma_client import (
     PaginationResult,
 )
 from polyarb.config import Settings
-from polyarb.storage.sqlite_store import (
-    STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS,
-    SQLiteStore,
+from polyarb.perception.structure_contract import (
+    STRUCTURE_PUBLICATION_MAX_ROWS,
+    STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S,
 )
+from polyarb.storage.sqlite_store import SQLiteStore
 
 _monotonic = time.monotonic
 
@@ -257,22 +258,22 @@ async def run_structure_sync_until_published(
         raise ValueError("structure-sync-max-pages-must-be-positive")
     if max_elapsed_s is not None and max_elapsed_s <= 0:
         raise ValueError("structure-sync-max-elapsed-must-be-positive")
-    if not 1 <= max_publication_rows <= STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS:
+    if not 1 <= max_publication_rows <= STRUCTURE_PUBLICATION_MAX_ROWS:
         raise ValueError("structure-publication-max-rows-must-be-positive")
     slice_started = _monotonic()
     store = SQLiteStore(settings.db_path)
     store.init_structure_sync_schema()
     latest = store.get_latest_structure_sync()
     bootstrap_chunks = 0
-    publication_progress = (
-        store.get_structure_publication_progress(str(latest["id"]))
-        if latest is not None and latest["status"] == "complete"
-        else None
+    bootstrap_complete = bool(
+        latest is not None
+        and latest["status"] == "complete"
+        and store.structure_event_market_backfill_complete(str(latest["id"]))
     )
     if (
         latest is not None
         and latest["status"] == "complete"
-        and publication_progress is None
+        and not bootstrap_complete
         and (max_pages is not None or max_elapsed_s is not None)
     ):
         bootstrap_rows = 0
@@ -307,6 +308,7 @@ async def run_structure_sync_until_published(
                 )
             if migration["completed"]:
                 bootstrap_completed = True
+                bootstrap_complete = True
                 break
             if (
                 max_elapsed_s is not None
@@ -331,16 +333,26 @@ async def run_structure_sync_until_published(
             run_structure_publication_slice,
         )
 
+        remaining_s = (
+            max_elapsed_s - (_monotonic() - slice_started)
+            if max_elapsed_s is not None
+            else 60.0
+        )
+        if (
+            remaining_s < STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S
+            and store.get_structure_publication_progress(str(latest["id"])) is None
+        ):
+            return StructureSyncCheckpoint(
+                window_id=str(latest["id"]),
+                stage="bootstrap",
+                pages_processed=max(1, bootstrap_chunks),
+            )
         return await asyncio.to_thread(
             run_structure_publication_slice,
             settings,
             str(latest["id"]),
             max_rows=max_publication_rows,
-            max_elapsed_s=(
-                max(0.001, max_elapsed_s - (_monotonic() - slice_started))
-                if max_elapsed_s is not None
-                else 60.0
-            ),
+            max_elapsed_s=max(0.001, remaining_s),
             max_chunks=100 - bootstrap_chunks,
             store=store,
         )
@@ -398,10 +410,6 @@ async def run_structure_sync_until_published(
                     pages_processed=pages_processed,
                 )
             if batch.stage == "markets" and batch.completed:
-                from polyarb.perception.structure_publication import (
-                    run_structure_publication_slice,
-                )
-
                 remaining_s = (
                     max_elapsed_s - (_monotonic() - slice_started)
                     if max_elapsed_s is not None
@@ -420,12 +428,8 @@ async def run_structure_sync_until_published(
                         stage=batch.stage,
                         pages_processed=pages_processed,
                     )
-                return await asyncio.to_thread(
-                    run_structure_publication_slice,
+                return await run_structure_sync_until_published(
                     settings,
-                    batch.window_id,
-                    max_rows=max_publication_rows,
                     max_elapsed_s=remaining_s,
-                    max_chunks=100,
-                    store=store,
+                    max_publication_rows=max_publication_rows,
                 )

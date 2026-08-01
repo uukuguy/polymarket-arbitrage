@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -142,6 +143,161 @@ def test_publication_slice_rejects_mixed_publication_identity(
             max_chunks=100,
             store=object(),
         )
+
+
+def test_publication_slice_rejects_more_than_500_source_rows(
+    settings_for_test,
+) -> None:
+    with pytest.raises(ValueError, match="invalid-structure-publication-slice-budget"):
+        run_structure_publication_slice(
+            settings_for_test,
+            "window-1",
+            max_rows=501,
+            max_elapsed_s=45.0,
+        )
+
+    with pytest.raises(ValueError, match="invalid-structure-publication-budget"):
+        run_structure_publication_step(
+            settings_for_test,
+            "window-1",
+            501,
+            45.0,
+        )
+
+
+def test_publication_slice_emits_committed_progress_markers(
+    settings_for_test, monkeypatch, capsys
+) -> None:
+    checkpoints = iter(
+        (
+            StructurePublicationCheckpoint(
+                "normalizing", "events", 500, "event-500", "publication-1"
+            ),
+            StructurePublicationCheckpoint(
+                "ready", None, 0, None, "publication-1"
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        structure_publication_module,
+        "run_structure_publication_step",
+        lambda *_args, **_kwargs: next(checkpoints),
+    )
+
+    result = run_structure_publication_slice(
+        settings_for_test,
+        "window-1",
+        max_rows=500,
+        max_elapsed_s=45.0,
+        store=object(),
+    )
+
+    assert result.chunks_processed == 2
+    assert capsys.readouterr().err.splitlines() == [
+        "snapshot-stage stage=persist state=start elapsed_ms=0",
+        "structure-publication-progress stage=normalizing component=events "
+        "chunks=1 rows=500",
+        "structure-publication-progress stage=ready component=none chunks=2 rows=500",
+    ]
+
+
+def test_group_truth_500_event_chunk_uses_bounded_bulk_duplicate_lookup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    events = []
+    markets = []
+    for index in range(500):
+        market_id = "market-shared" if index < 2 else f"market-{index:03d}"
+        events.append(
+            {
+                "id": f"event-{index:03d}",
+                "negRisk": True,
+                "enableNegRisk": True,
+                "negRiskMarketID": f"group-{index:03d}",
+                "markets": [{"id": market_id, "active": True, "closed": False}],
+            }
+        )
+        if index != 1:
+            markets.append({"id": market_id, "active": True, "closed": False})
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=events, finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=markets, finished_at_ms=300,
+    )
+    assert store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=500, max_relationships=500, now_ms=400
+    )["completed"] is True
+    publication = store.begin_structure_publication(
+        window_id=window["id"],
+        snapshot_metadata={
+            "snapshot_id": 1,
+            "taken_at_ms": 500,
+            "mode": "full",
+            "data_product": "structure",
+            "expected_counts": COMPONENT_COUNTS,
+        },
+        now_ms=500,
+    )
+    event_ids = [f"event-{index:03d}" for index in range(500)] + ["missing-event"]
+    expected = {
+        event_id
+        for event_id in event_ids
+        if store.structure_event_has_duplicate_market(publication.publication_id, event_id)
+    }
+
+    real_connect = sqlite3.connect
+    connect_count = 0
+
+    def counted_connect(*args, **kwargs):
+        nonlocal connect_count
+        connect_count += 1
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", counted_connect)
+    started = time.monotonic()
+    actual = store.structure_events_with_duplicate_markets(
+        publication.publication_id, event_ids[:500]
+    )
+    elapsed_s = time.monotonic() - started
+
+    assert actual == expected == {"event-000", "event-001"}
+    assert connect_count == 1
+    assert elapsed_s < 10.0
+
+
+def test_publication_slice_with_insufficient_remaining_time_is_zero_chunk(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store,
+        snapshot_id=1,
+        market_id="market-1",
+        now_ms=100,
+    )
+    before = store.get_structure_publication_progress(publication.window_id)
+
+    result = run_structure_publication_slice(
+        type("Settings", (), {"db_path": store.db_path})(),
+        publication.window_id,
+        max_rows=500,
+        max_elapsed_s=9.0,
+        store=store,
+    )
+    after = store.get_structure_publication_progress(publication.window_id)
+
+    assert result.chunks_processed == 0
+    assert result.rows_processed == 0
+    assert result.stage == "normalizing"
+    assert result.component == "events"
+    assert after == before
 
 
 def test_normalization_chunk_never_fetches_more_than_raw_row_budget(

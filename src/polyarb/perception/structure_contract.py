@@ -28,6 +28,8 @@ STRUCTURE_PUBLICATION_CHECKPOINT_STAGES = (
     "certifying",
     "ready",
 )
+STRUCTURE_PUBLICATION_MAX_ROWS = 500
+STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S = 10.0
 
 
 def valid_structure_publication_checkpoint(

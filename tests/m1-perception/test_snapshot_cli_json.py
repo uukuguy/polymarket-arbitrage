@@ -116,6 +116,18 @@ def test_structure_sync_cli_reports_publication_checkpoint_and_row_budget(
     assert run.await_args.kwargs["max_publication_rows"] == 17
 
 
+def test_structure_sync_cli_rejects_publication_chunks_above_500(monkeypatch) -> None:
+    monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
+    monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
+
+    result = CliRunner().invoke(
+        app,
+        ["structure-sync", "--max-publication-rows", "501"],
+    )
+
+    assert result.exit_code == 2
+
+
 def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
     monkeypatch, tmp_path
 ) -> None:
