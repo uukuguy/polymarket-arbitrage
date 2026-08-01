@@ -167,6 +167,58 @@ async def test_structure_sync_yields_after_bounded_pages_without_losing_cursor(
     assert store.get_latest_structure_sync()["event_cursor"] == "event-3"
 
 
+async def test_structure_sync_checkpoints_on_elapsed_wall_clock(
+    settings_for_test,
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    cursors: list[str | None] = []
+
+    class Gamma:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def fetch_active_event_page(self, cursor, limit):
+            cursors.append(cursor)
+            page_number = len(cursors)
+            return EventPage(
+                ({"id": f"event-{page_number}"},),
+                cursor,
+                f"event-{page_number + 1}",
+                False,
+                page_number * 10,
+                page_number * 10 + 1,
+            )
+
+        async def fetch_active_market_page(self, cursor, limit):
+            raise AssertionError("event coverage is intentionally incomplete")
+
+    with (
+        patch(
+            "polyarb.perception.structure_sync.GammaClient",
+            return_value=Gamma(),
+        ),
+        patch(
+            "polyarb.perception.structure_sync._monotonic",
+            side_effect=[0.0, 10.0, 46.0],
+        ),
+    ):
+        result = await run_structure_sync_until_published(
+            settings_for_test,
+            max_elapsed_s=45.0,
+        )
+
+    assert result == StructureSyncCheckpoint(
+        window_id=store.get_latest_structure_sync()["id"],
+        stage="events",
+        pages_processed=2,
+    )
+    assert cursors == [None, "event-2"]
+
+
 async def test_structure_worker_emits_scheduler_stage_before_remote_page_fetch(
     tmp_path, capsys
 ) -> None:

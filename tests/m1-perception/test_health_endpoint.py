@@ -573,6 +573,23 @@ def test_health_uses_effective_snapshot_timeout_and_surfaces_schedule(
         cadence_s=348,
         reason="timeout-backoff",
     )
+    window = store.begin_or_resume_structure_sync(started_at_ms=now_ms - 30_000)
+    store.commit_structure_event_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[],
+        finished_at_ms=now_ms - 20_000,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        markets=[],
+        finished_at_ms=now_ms - 10_000,
+    )
     store.begin_snapshot_attempt(started_at_ms=now_ms - 250_000)
 
     response = http_test_client.get("/health")
@@ -586,9 +603,28 @@ def test_health_uses_effective_snapshot_timeout_and_surfaces_schedule(
     assert schedule["output"] == (
         "configured_timeout_s=240 effective_timeout_s=288 "
         "producer_slot_budget_s=180 attempt_timeout_s=180 "
+        "slice_elapsed_budget_s=45 finalizer_slot_budget_s=180 "
         "configured_cadence_s=3600 effective_cadence_s=348 "
         "success_samples=10 success_p95_s=236 reason=timeout-backoff"
     )
+
+
+def test_health_surfaces_short_incomplete_structure_slice_budget(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    now_ms = int(time.time() * 1000)
+    _insert_snapshot(daemon_settings_for_test.db_path, taken_at_ms=now_ms - 2_000)
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.begin_or_resume_structure_sync(started_at_ms=now_ms - 1_000)
+
+    response = http_test_client.get("/health")
+
+    schedule = response.json()["checks"]["snapshot:schedule"][0]
+    assert "producer_slot_budget_s=75 attempt_timeout_s=75" in schedule["output"]
+    assert "slice_elapsed_budget_s=45 finalizer_slot_budget_s=180" in schedule["output"]
 
 
 def test_health_fails_a_stalled_snapshot_attempt_while_truth_is_fresh(

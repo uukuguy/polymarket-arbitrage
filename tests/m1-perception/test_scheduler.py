@@ -363,6 +363,8 @@ async def test_snapshot_pipeline_runs_in_isolated_subprocess(
         "--low-priority",
         "--max-pages",
         "40",
+        "--max-elapsed-seconds",
+        "45.0",
     )
     assert kwargs["stdout"] == asyncio.subprocess.PIPE
     assert kwargs["stderr"] == asyncio.subprocess.PIPE
@@ -467,9 +469,11 @@ async def test_snapshot_waits_for_shared_producer_slot(
         "run_snapshot_in_subprocess",
         run_snapshot,
     )
+    store = MagicMock()
+    store.get_latest_structure_sync.return_value = {"status": "complete"}
     scheduler = SnapshotScheduler(
         settings=daemon_settings_for_test,
-        sqlite_store=MagicMock(),
+        sqlite_store=store,
         producer_lock=producer_lock,
     )
     scheduler._effective_timeout_s = 240
@@ -482,6 +486,39 @@ async def test_snapshot_waits_for_shared_producer_slot(
 
     assert calls == 1
     assert observed_timeout_s == 180
+
+
+@pytest.mark.asyncio
+async def test_incomplete_structure_slice_has_shorter_producer_slot_budget(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    """An upstream retry cannot let an incomplete slice starve Quote for 180s."""
+    from polyarb.daemon import scheduler as scheduler_module
+
+    observed_timeout_s = None
+
+    async def run_snapshot(*, timeout_s: float):
+        nonlocal observed_timeout_s
+        observed_timeout_s = timeout_s
+        return SimpleNamespace(status=SnapshotStatus.OK)
+
+    monkeypatch.setattr(
+        scheduler_module,
+        "run_snapshot_in_subprocess",
+        run_snapshot,
+    )
+    store = MagicMock()
+    store.get_latest_structure_sync.return_value = {"status": "events_complete"}
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+    )
+    scheduler._effective_timeout_s = 240
+
+    await scheduler._run_snapshot()
+
+    assert observed_timeout_s == 75
 
 
 async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics() -> None:

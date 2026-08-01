@@ -21,6 +21,8 @@ from polyarb.clients.gamma_client import (
 from polyarb.config import Settings
 from polyarb.storage.sqlite_store import SQLiteStore
 
+_monotonic = time.monotonic
+
 
 class StructureGamma(Protocol):
     async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage: ...
@@ -244,10 +246,13 @@ async def run_structure_sync_until_published(
     settings: Settings,
     *,
     max_pages: int | None = None,
+    max_elapsed_s: float | None = None,
 ):
     """Checkpoint pages until publication or one cooperative slice ends."""
     if max_pages is not None and max_pages < 1:
         raise ValueError("structure-sync-max-pages-must-be-positive")
+    if max_elapsed_s is not None and max_elapsed_s <= 0:
+        raise ValueError("structure-sync-max-elapsed-must-be-positive")
     store = SQLiteStore(settings.db_path)
     store.init_structure_sync_schema()
     latest = store.get_latest_structure_sync()
@@ -262,6 +267,7 @@ async def run_structure_sync_until_published(
         worker = StructureSyncWorker(gamma=gamma, store=store)
         cursor_restarts = 0
         pages_processed = 0
+        slice_started = _monotonic()
         while True:
             try:
                 batch = await worker.run_batch()
@@ -292,7 +298,13 @@ async def run_structure_sync_until_published(
                 )
                 continue
             pages_processed += 1
-            if max_pages is not None and pages_processed >= max_pages:
+            elapsed_budget_reached = (
+                max_elapsed_s is not None
+                and _monotonic() - slice_started >= max_elapsed_s
+            )
+            if (
+                max_pages is not None and pages_processed >= max_pages
+            ) or elapsed_budget_reached:
                 return StructureSyncCheckpoint(
                     window_id=batch.window_id,
                     stage=batch.stage,

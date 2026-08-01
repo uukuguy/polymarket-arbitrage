@@ -47,7 +47,14 @@ def test_structure_sync_cli_returns_cooperative_checkpoint_json(monkeypatch) -> 
     ) as run:
         result = CliRunner().invoke(
             app,
-            ["structure-sync", "--json", "--max-pages", "80"],
+            [
+                "structure-sync",
+                "--json",
+                "--max-pages",
+                "80",
+                "--max-elapsed-seconds",
+                "45",
+            ],
         )
 
     assert result.exit_code == 0
@@ -58,6 +65,7 @@ def test_structure_sync_cli_returns_cooperative_checkpoint_json(monkeypatch) -> 
         "window_id": "window-1",
     }
     assert run.await_args.kwargs["max_pages"] == 80
+    assert run.await_args.kwargs["max_elapsed_s"] == 45.0
 
 
 def test_snapshot_cli_json_contract(monkeypatch) -> None:

@@ -790,6 +790,8 @@ def _build_health_checks(
     from polyarb.daemon.scheduler import (
         SNAPSHOT_SUBPROCESS_TIMEOUT_S,
         STRUCTURE_PRODUCER_SLOT_BUDGET_S,
+        STRUCTURE_SLICE_MAX_ELAPSED_S,
+        structure_attempt_slot_budget_s,
     )
 
     schedule_adjustment = store.get_latest_structure_schedule_adjustment()
@@ -809,7 +811,11 @@ def _build_health_checks(
         success_sample_count = int(schedule_adjustment["success_sample_count"])
         success_p95_s = schedule_adjustment["success_p95_s"]
         schedule_reason = str(schedule_adjustment["reason"])
-    producer_slot_budget_s = int(STRUCTURE_PRODUCER_SLOT_BUDGET_S)
+    sync_window = store.get_latest_structure_sync()
+    sync_window_status = sync_window["status"] if sync_window is not None else None
+    producer_slot_budget_s = int(
+        structure_attempt_slot_budget_s(sync_window_status)
+    )
     attempt_timeout_s = min(effective_timeout_s, producer_slot_budget_s)
 
     checks["snapshot:schedule"] = [
@@ -823,6 +829,8 @@ def _build_health_checks(
                 f"effective_timeout_s={effective_timeout_s} "
                 f"producer_slot_budget_s={producer_slot_budget_s} "
                 f"attempt_timeout_s={attempt_timeout_s} "
+                f"slice_elapsed_budget_s={int(STRUCTURE_SLICE_MAX_ELAPSED_S)} "
+                f"finalizer_slot_budget_s={int(STRUCTURE_PRODUCER_SLOT_BUDGET_S)} "
                 f"configured_cadence_s={configured_cadence_s} "
                 f"effective_cadence_s={effective_cadence_s} "
                 f"success_samples={success_sample_count} "
@@ -910,7 +918,6 @@ def _build_health_checks(
         }
     ]
 
-    sync_window = store.get_latest_structure_sync()
     if sync_window is None:
         sync_value = "idle"
         sync_status = "pass"

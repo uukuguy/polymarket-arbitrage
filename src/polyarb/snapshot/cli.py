@@ -40,13 +40,23 @@ def structure_sync(
         min=1,
         hidden=True,
     ),
+    max_elapsed_seconds: float | None = typer.Option(
+        None,
+        "--max-elapsed-seconds",
+        min=1.0,
+        hidden=True,
+    ),
 ) -> None:
     """Resume bounded Gamma pages and publish one certified Structure revision."""
     if low_priority:
         os.nice(10)
     settings = load_settings()
     result = asyncio.run(
-        run_structure_sync_until_published(settings, max_pages=max_pages)
+        run_structure_sync_until_published(
+            settings,
+            max_pages=max_pages,
+            max_elapsed_s=max_elapsed_seconds,
+        )
     )
     if isinstance(result, StructureSyncCheckpoint):
         if json_output:
