@@ -5,6 +5,8 @@ import sqlite3
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
+
 from polyarb.daemon.quote_worker import QuoteWorkerRuntime
 from polyarb.routing.neg_risk_quote_store import (
     QuoteProjectionIntegrityError,
@@ -37,10 +39,12 @@ def _publish_feed(
     runtime: QuoteWorkerRuntime,
     *,
     opportunities=(_Opportunity(),),
+    snapshot_id: int = 10,
+    run_id: int = 20,
 ) -> None:
     projection = SimpleNamespace(
-        run_id=20,
-        universe_snapshot_id=10,
+        run_id=run_id,
+        universe_snapshot_id=snapshot_id,
         quoted_at_ms=int(NOW_S * 1000),
         universe_taken_at_ms=int(NOW_S * 1000),
         requested_token_count=1,
@@ -51,11 +55,18 @@ def _publish_feed(
     result = OpportunityScanResult(
         opportunities=opportunities,
         rejections={"augmented-neg-risk-not-supported": 4},
-        source_snapshot_id=10,
+        source_snapshot_id=snapshot_id,
         universe_hash="u1",
-        quote_run_id=20,
+        quote_run_id=run_id,
     )
     runtime.publish_certified_feed(projection, result)
+
+
+def _truth(snapshot_id: int | None, age_s: float = 0.0):
+    return SimpleNamespace(
+        last_complete_snapshot_id=snapshot_id,
+        last_complete_finished_age_seconds=age_s,
+    )
 
 
 def test_opportunity_endpoint_returns_explicit_gross_basis(http_test_client, monkeypatch) -> None:
@@ -63,8 +74,8 @@ def test_opportunity_endpoint_returns_explicit_gross_basis(http_test_client, mon
     _publish_feed(runtime)
     http_test_client.app.state.quote_worker_runtime = runtime
     monkeypatch.setattr(
-        "polyarb.http.arbitrage._last_complete_snapshot_id",
-        lambda _path: 10,
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: _truth(10),
     )
     monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
 
@@ -75,6 +86,8 @@ def test_opportunity_endpoint_returns_explicit_gross_basis(http_test_client, mon
         "strategy": "neg-risk-buy-all",
         "profit_basis": "gross-before-fees",
         "coverage": "verified-standard-neg-risk",
+        "refreshing": False,
+        "latest_structure_snapshot_id": 10,
         "source_snapshot_id": 10,
         "universe_hash": "u1",
         "quote_run_id": 20,
@@ -155,7 +168,10 @@ def test_legacy_feed_does_not_attach_an_old_observer_after_new_structure_publish
     runtime = QuoteWorkerRuntime()
     _publish_feed(runtime)
     http_test_client.app.state.quote_worker_runtime = runtime
-    monkeypatch.setattr("polyarb.http.arbitrage._last_complete_snapshot_id", lambda _path: 10)
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: _truth(10),
+    )
     monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
 
     response = http_test_client.get("/arbitrage/opportunities")
@@ -187,8 +203,8 @@ def test_opportunity_endpoint_returns_bounded_503_for_quote_run_preconditions(
     _publish_feed(runtime)
     http_test_client.app.state.quote_worker_runtime = runtime
     monkeypatch.setattr(
-        "polyarb.http.arbitrage._last_complete_snapshot_id",
-        lambda _path: 10,
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: _truth(10),
     )
     cases = [
         (
@@ -238,29 +254,88 @@ def test_opportunity_endpoint_cold_cache_fails_without_database_scan(
     assert response.json() == {"error": "verified market universe unavailable"}
 
 
-def test_opportunity_endpoint_fails_closed_when_market_truth_advances(
+def test_opportunity_endpoint_serves_previous_feed_when_market_truth_advances(
     http_test_client, monkeypatch
 ) -> None:
     runtime = QuoteWorkerRuntime()
     _publish_feed(runtime)
     http_test_client.app.state.quote_worker_runtime = runtime
     monkeypatch.setattr(
-        "polyarb.http.arbitrage._last_complete_snapshot_id",
-        lambda _path: 11,
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: _truth(11, 30.0),
     )
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
 
     def forbidden(*_args, **_kwargs):
-        raise AssertionError("stale projection must not be scanned")
+        raise AssertionError("HTTP must not rebuild the certified feed")
 
     monkeypatch.setattr(
-        "polyarb.http.arbitrage._select_cached_opportunities",
+        "polyarb.routing.opportunity_scanner.scan_certified_neg_risk_quote_projection",
         forbidden,
     )
 
     response = http_test_client.get("/arbitrage/opportunities")
 
+    assert response.status_code == 200
+    assert response.json()["refreshing"] is True
+    assert response.json()["latest_structure_snapshot_id"] == 11
+    assert response.json()["source_snapshot_id"] == 10
+    assert response.json()["quote_run_id"] == 20
+
+
+@pytest.mark.parametrize(
+    ("latest_id", "handoff_age"),
+    ((9, 1.0), (11, 300.1), (None, 0.0)),
+)
+def test_opportunity_endpoint_rejects_unavailable_revision_handoffs(
+    http_test_client,
+    monkeypatch,
+    latest_id: int | None,
+    handoff_age: float,
+) -> None:
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(runtime)
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: _truth(latest_id, handoff_age),
+    )
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+
+    response = http_test_client.get("/arbitrage/opportunities")
+
     assert response.status_code == 503
     assert response.json() == {"error": "verified market universe unavailable"}
+
+
+def test_opportunity_endpoint_atomically_switches_to_new_certified_feed(
+    http_test_client,
+    monkeypatch,
+) -> None:
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(runtime, snapshot_id=10, run_id=20)
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: _truth(11, 30.0),
+    )
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+
+    before = http_test_client.get("/arbitrage/opportunities")
+    _publish_feed(runtime, snapshot_id=11, run_id=21)
+    after = http_test_client.get("/arbitrage/opportunities")
+
+    assert before.status_code == after.status_code == 200
+    assert (
+        before.json()["source_snapshot_id"],
+        before.json()["quote_run_id"],
+        before.json()["refreshing"],
+    ) == (10, 20, True)
+    assert (
+        after.json()["source_snapshot_id"],
+        after.json()["quote_run_id"],
+        after.json()["refreshing"],
+    ) == (11, 21, False)
 
 
 def test_opportunity_endpoint_bounds_source_truth_read_latency(
@@ -299,8 +374,8 @@ def test_opportunity_endpoint_filters_precomputed_feed_without_rescan(
     )
     http_test_client.app.state.quote_worker_runtime = runtime
     monkeypatch.setattr(
-        "polyarb.http.arbitrage._last_complete_snapshot_id",
-        lambda _path: 10,
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: _truth(10),
     )
     monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
 

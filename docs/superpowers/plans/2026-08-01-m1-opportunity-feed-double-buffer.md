@@ -193,7 +193,7 @@ git commit -m "feat(m1): define certified feed handoff policy"
 - Consumes: `decide_feed_availability(...)`, `MarketTruthHealth`, and `read_market_truth_health(...)`.
 - Produces: successful fields `refreshing: bool` and `latest_structure_snapshot_id: int`; preserves served-feed identity.
 
-- [ ] **Step 1: Change endpoint tests to RED**
+- [x] **Step 1: Change endpoint tests to RED**
 
 Replace ID-only monkeypatches with truth metadata and require current-version
 metadata:
@@ -295,7 +295,7 @@ Keep the forbidden-rescan assertion active during the refreshing request. For
 missing truth, monkeypatch `_market_truth` to return `_truth(None, 0.0)` and
 assert HTTP 503.
 
-- [ ] **Step 2: Run endpoint tests and prove RED**
+- [x] **Step 2: Run endpoint tests and prove RED**
 
 ```bash
 uv run pytest tests/m1-perception/test_arbitrage_opportunities_http.py -q
@@ -303,7 +303,7 @@ uv run pytest tests/m1-perception/test_arbitrage_opportunities_http.py -q
 
 Expected: failures show missing `_market_truth`, missing response fields, and the old 503 behavior.
 
-- [ ] **Step 3: Add exact completion age and implement bounded policy mapping**
+- [x] **Step 3: Add exact completion age and implement bounded policy mapping**
 
 Extend `MarketTruthHealth` with:
 
@@ -365,7 +365,7 @@ Add:
 "latest_structure_snapshot_id": market_truth.last_complete_snapshot_id,
 ```
 
-- [ ] **Step 4: Run endpoint and cross-contract tests**
+- [x] **Step 4: Run endpoint and cross-contract tests**
 
 ```bash
 uv run pytest tests/m1-perception/test_arbitrage_opportunities_http.py tests/m1-perception/test_feed_handoff.py -q
@@ -374,7 +374,7 @@ uv run ruff check src/polyarb/http/arbitrage.py tests/m1-perception/test_arbitra
 
 Expected: all tests pass, no rescan occurs, and Ruff exits zero.
 
-- [ ] **Step 5: Commit the endpoint contract**
+- [x] **Step 5: Commit the endpoint contract**
 
 ```bash
 git add src/polyarb/http/arbitrage.py tests/m1-perception/test_arbitrage_opportunities_http.py

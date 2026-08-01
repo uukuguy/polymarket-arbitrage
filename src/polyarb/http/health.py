@@ -79,6 +79,7 @@ class MarketTruthHealth:
     latest_attempt_event_items: int | None
     last_complete_snapshot_id: int | None
     last_complete_age_seconds: float | None
+    last_complete_finished_age_seconds: float | None
 
 
 @dataclass(frozen=True)
@@ -313,6 +314,7 @@ def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
         latest_attempt_event_items=None,
         last_complete_snapshot_id=None,
         last_complete_age_seconds=None,
+        last_complete_finished_age_seconds=None,
     )
     try:
         con = sqlite3.connect(
@@ -333,7 +335,7 @@ def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
             "ORDER BY s.id DESC LIMIT 1"
         ).fetchone()
         complete = con.execute(
-            "SELECT s.id,s.taken_at_ms "
+            "SELECT s.id,s.taken_at_ms,s.finished_at_ms "
             "FROM snapshots s "
             "JOIN snapshot_source_coverage c ON c.snapshot_id=s.id "
             "WHERE s.data_product='structure' AND s.market_view_published=1 "
@@ -351,6 +353,11 @@ def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
     coverage_complete = completed == 1 and published == 1
     complete_id = complete[0] if complete is not None else None
     complete_age = max(0.0, now_s - complete[1] / 1000.0) if complete is not None else None
+    complete_finished_age = (
+        max(0.0, now_s - complete[2] / 1000.0)
+        if complete is not None and isinstance(complete[2], (int, float))
+        else None
+    )
     return MarketTruthHealth(
         coverage_status="pass" if coverage_complete else "fail",
         coverage_value="complete" if coverage_complete else "incomplete-source",
@@ -359,6 +366,7 @@ def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
         latest_attempt_event_items=event_items,
         last_complete_snapshot_id=complete_id,
         last_complete_age_seconds=complete_age,
+        last_complete_finished_age_seconds=complete_finished_age,
     )
 
 

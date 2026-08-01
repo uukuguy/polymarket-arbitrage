@@ -11,8 +11,12 @@ from pathlib import Path
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from polyarb.http.health import read_market_truth_health
+from polyarb.http.health import MarketTruthHealth, read_market_truth_health
 from polyarb.http.market_map import durable_opportunity_ids
+from polyarb.routing.feed_handoff import (
+    FeedAvailability,
+    decide_feed_availability,
+)
 from polyarb.routing.neg_risk_quote_store import QuoteUniverseUnavailableError
 from polyarb.routing.opportunity_scanner import (
     QUOTE_SLA_SECONDS,
@@ -25,11 +29,8 @@ from polyarb.routing.opportunity_scanner import (
 _SOURCE_TRUTH_READ_TIMEOUT_S = 1.0
 
 
-def _last_complete_snapshot_id(db_path: Path) -> int | None:
-    return read_market_truth_health(
-        db_path,
-        time.time(),
-    ).last_complete_snapshot_id
+def _market_truth(db_path: Path, now_s: float) -> MarketTruthHealth:
+    return read_market_truth_health(db_path, now_s)
 
 
 def _select_cached_opportunities(
@@ -44,25 +45,36 @@ def _select_cached_opportunities(
     if result is None:
         raise QuoteRunUnavailableError("quote run unavailable")
     quote_age_seconds = max(0.0, now_s - projection.quoted_at_ms / 1000)
-    if quote_age_seconds > QUOTE_SLA_SECONDS:
-        raise StaleQuoteRunError(
-            f"quote age {quote_age_seconds:.1f}s exceeds {QUOTE_SLA_SECONDS:.1f}s"
-        )
     universe_age_seconds = max(
         0.0,
         now_s - projection.universe_taken_at_ms / 1000,
     )
-    if universe_age_seconds > UNIVERSE_SLA_SECONDS:
-        raise StaleUniverseError(
-            "universe age "
-            f"{universe_age_seconds:.1f}s exceeds {UNIVERSE_SLA_SECONDS:.1f}s"
-        )
     selected = tuple(
         item
         for item in result.opportunities
         if item.gross_edge_bps >= min_edge_bps
     )[:limit]
     return result, selected, quote_age_seconds, universe_age_seconds
+
+
+def _require_available_feed(
+    availability: FeedAvailability,
+    *,
+    quote_age_seconds: float,
+    universe_age_seconds: float,
+) -> None:
+    if availability.available:
+        return
+    if availability.reason == "stale-quote":
+        raise StaleQuoteRunError(
+            f"quote age {quote_age_seconds:.1f}s exceeds {QUOTE_SLA_SECONDS:.1f}s"
+        )
+    if availability.reason == "stale-universe":
+        raise StaleUniverseError(
+            "universe age "
+            f"{universe_age_seconds:.1f}s exceeds {UNIVERSE_SLA_SECONDS:.1f}s"
+        )
+    raise QuoteUniverseUnavailableError(availability.reason or "feed-unavailable")
 
 
 async def opportunities(request: Request) -> JSONResponse:
@@ -85,16 +97,15 @@ async def opportunities(request: Request) -> JSONResponse:
             status_code=503,
         )
     try:
-        source_snapshot_id = await asyncio.wait_for(
+        now_s = time.time()
+        market_truth = await asyncio.wait_for(
             asyncio.to_thread(
-                _last_complete_snapshot_id,
+                _market_truth,
                 request.app.state.sqlite_store.db_path,
+                now_s,
             ),
             timeout=_SOURCE_TRUTH_READ_TIMEOUT_S,
         )
-        if source_snapshot_id != feed.projection.universe_snapshot_id:
-            raise QuoteUniverseUnavailableError("source-snapshot-mismatch")
-        now_s = time.time()
         result, selected, quote_age_seconds, universe_age_seconds = (
             _select_cached_opportunities(
                 feed,
@@ -102,6 +113,20 @@ async def opportunities(request: Request) -> JSONResponse:
                 limit=limit,
                 now_s=now_s,
             )
+        )
+        availability = decide_feed_availability(
+            source_snapshot_id=feed.projection.universe_snapshot_id,
+            latest_structure_snapshot_id=market_truth.last_complete_snapshot_id,
+            quote_age_seconds=quote_age_seconds,
+            universe_age_seconds=universe_age_seconds,
+            handoff_age_seconds=(
+                market_truth.last_complete_finished_age_seconds
+            ),
+        )
+        _require_available_feed(
+            availability,
+            quote_age_seconds=quote_age_seconds,
+            universe_age_seconds=universe_age_seconds,
         )
         durable_ids = await asyncio.wait_for(
             asyncio.to_thread(
@@ -136,6 +161,8 @@ async def opportunities(request: Request) -> JSONResponse:
             "strategy": "neg-risk-buy-all",
             "profit_basis": "gross-before-fees",
             "coverage": "verified-standard-neg-risk",
+            "refreshing": availability.refreshing,
+            "latest_structure_snapshot_id": market_truth.last_complete_snapshot_id,
             "source_snapshot_id": result.source_snapshot_id,
             "universe_hash": result.universe_hash,
             "quote_run_id": result.quote_run_id,
