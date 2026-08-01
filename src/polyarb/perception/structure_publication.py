@@ -82,12 +82,19 @@ def normalize_structure_component_chunk(
     progress = store.get_structure_publication_progress(publication.window_id)
     if progress is None or progress.publication.publication_id != publication.publication_id:
         raise ValueError("structure-publication-not-found")
-    rows = [] if component == "issues" else store.fetch_structure_staging_chunk(
-        window_id=publication.window_id,
-        source=source,
-        after_key=after_source_key,
-        limit=max_source_rows,
-    )
+    if component == "issues":
+        rows = store.fetch_structure_duplicate_market_chunk(
+            window_id=publication.window_id,
+            after_market_id=after_source_key,
+            limit=max_source_rows,
+        )
+    else:
+        rows = store.fetch_structure_staging_chunk(
+            window_id=publication.window_id,
+            source=source,
+            after_key=after_source_key,
+            limit=max_source_rows,
+        )
     taken_at_ms = store.structure_publication_taken_at_ms(publication.publication_id)
     canonical: list[dict[str, object]] = []
     for _source_key, raw in rows:
@@ -102,7 +109,14 @@ def normalize_structure_component_chunk(
             elif component == "memberships":
                 canonical.extend(_member_row(member) for member in members)
             else:
-                canonical.extend(_truth_row(truth) for truth in truths)
+                for truth in truths:
+                    row = _truth_row(truth)
+                    if store.structure_event_has_duplicate_market(
+                        publication.publication_id, truth.event_id
+                    ):
+                        row["quality"] = "incomplete-source"
+                        row["reason"] = "market-id-conflict-across-events"
+                    canonical.append(row)
         elif component == "markets":
             market_id = str(raw.get("id") or "")
             event_id = store.structure_event_id_for_market(
@@ -112,6 +126,15 @@ def normalize_structure_component_chunk(
             if normalized is not None:
                 normalized["fetched_at_ms"] = taken_at_ms
                 canonical.append(normalized)
+        elif component == "issues":
+            canonical.append(
+                {
+                    "layer": 1,
+                    "category": "api_jitter",
+                    "market_id": _source_key,
+                    "detail": f"market-id-conflict-across-events:{raw}"[:200],
+                }
+            )
     sort_keys = {
         "events": lambda row: (str(row["id"]),),
         "event_tags": lambda row: (str(row["event_id"]), str(row["tag_id"])),
@@ -121,7 +144,7 @@ def normalize_structure_component_chunk(
         "issues": lambda row: (str(row.get("issue_index", "")),),
     }
     canonical.sort(key=sort_keys[component])
-    completed = component == "issues" or len(rows) < max_source_rows
+    completed = len(rows) < max_source_rows
     source_cursor = None if not rows else rows[-1][0]
     next_cursor = _encoded_cursor(component, source_cursor, complete=completed)
     store.append_structure_publication_chunk(
@@ -140,22 +163,21 @@ def normalize_structure_component_chunk(
 def _result(
     store: SQLiteStore,
     publication: StructurePublicationState,
-    now_ms: int,
 ) -> SnapshotResult:
     current = store.current_structure_generation()
     assert current is not None
-    counts = publication.committed_counts
+    metadata = store.structure_publication_result_metadata(publication.publication_id)
     return SnapshotResult(
-        snapshot_id=publication.snapshot_id,
-        market_count=int(counts.get("markets", 0)),
-        is_valid=True,
-        status="ok",
-        mode="full",
-        issue_count=int(counts.get("issues", 0)),
-        issue_categories={},
-        parquet_path=Path("not-requested"),
-        taken_at_ms=store.structure_publication_taken_at_ms(publication.publication_id),
-        finished_at_ms=now_ms,
+        snapshot_id=int(metadata["snapshot_id"]),
+        market_count=int(metadata["market_count"]),
+        is_valid=bool(metadata["is_valid"]),
+        status=str(metadata["status"]),
+        mode=str(metadata["mode"]),
+        issue_count=int(metadata["issue_count"]),
+        issue_categories=dict(metadata["issue_categories"]),
+        parquet_path=Path(str(metadata["parquet_path"])),
+        taken_at_ms=int(metadata["taken_at_ms"]),
+        finished_at_ms=int(metadata["finished_at_ms"]),
     )
 
 
@@ -168,6 +190,7 @@ def run_structure_publication_step(
     """Advance at most one normalization/certification chunk or pointer switch."""
     if max_rows < 1 or max_elapsed_s <= 0:
         raise ValueError("invalid-structure-publication-budget")
+    started_at = time.monotonic()
     store = SQLiteStore(settings.db_path)
     store.init_structure_sync_schema()
     progress = store.get_structure_publication_progress(window_id)
@@ -189,19 +212,47 @@ def run_structure_publication_step(
         assert progress is not None
     else:
         publication = progress.publication
+    if publication.status == "published":
+        return _result(store, publication)
+    if time.monotonic() - started_at >= max_elapsed_s:
+        certification = store.structure_certification_checkpoint(
+            publication.publication_id
+        )
+        return StructurePublicationCheckpoint(
+            "certifying" if certification is not None else "normalizing",
+            (
+                certification[0]
+                if certification is not None
+                else progress.component or STRUCTURE_COMPONENTS[0]
+            ),
+            0,
+            certification[1] if certification is not None else progress.cursor,
+            publication.publication_id,
+        )
     if publication.status == "ready":
         snapshot_id = store.publish_structure_generation(publication.publication_id, now_ms)
         refreshed = store.get_structure_publication_progress(window_id)
         assert refreshed is not None and snapshot_id == publication.snapshot_id
-        return _result(store, refreshed.publication, now_ms)
-    if publication.status == "published":
-        return _result(store, publication, now_ms)
+        return _result(store, refreshed.publication)
 
     component = progress.component or STRUCTURE_COMPONENTS[0]
     if progress.cursor is not None and progress.cursor.endswith("|done"):
         index = STRUCTURE_COMPONENTS.index(component)
         if index + 1 == len(STRUCTURE_COMPONENTS):
-            store.seal_structure_publication_counts(publication.publication_id, now_ms=now_ms)
+            certification_checkpoint = store.structure_certification_checkpoint(
+                publication.publication_id
+            )
+            if certification_checkpoint is None:
+                store.seal_structure_publication_counts(
+                    publication.publication_id, now_ms=now_ms
+                )
+                return StructurePublicationCheckpoint(
+                    "certifying",
+                    STRUCTURE_COMPONENTS[0],
+                    0,
+                    None,
+                    publication.publication_id,
+                )
             certification = store.advance_structure_certification_chunk(
                 publication.publication_id,
                 max_rows=max_rows,

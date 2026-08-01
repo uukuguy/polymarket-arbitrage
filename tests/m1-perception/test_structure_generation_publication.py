@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import polyarb.perception.structure_publication as structure_publication_module
 from polyarb.perception.market_truth import EventMember, membership_hash
 from polyarb.perception.structure_publication import (
     StructurePublicationCheckpoint,
@@ -82,6 +83,26 @@ def test_ready_publication_requires_a_later_invocation_to_switch(
     )
     assert not isinstance(published, StructurePublicationCheckpoint)
     assert store.current_structure_generation()["snapshot_id"] == published.snapshot_id
+
+
+def test_elapsed_budget_checkpoints_before_starting_a_chunk(
+    settings_for_test, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    window_id = _complete_window(store, "market-1", now_ms=100)
+    clock = iter((0.0, 2.0))
+    monkeypatch.setattr(structure_publication_module.time, "monotonic", lambda: next(clock))
+
+    checkpoint = run_structure_publication_step(
+        settings_for_test, window_id, max_rows=1, max_elapsed_s=1
+    )
+
+    assert isinstance(checkpoint, StructurePublicationCheckpoint)
+    assert checkpoint.stage == "normalizing"
+    assert checkpoint.rows_processed == 0
+    progress = store.get_structure_publication_progress(window_id)
+    assert progress is not None and progress.cursor is None
 
 
 def _event(snapshot_id: int) -> dict[str, object]:
@@ -163,6 +184,8 @@ def _complete_window(store: SQLiteStore, market_id: str, *, now_ms: int) -> str:
         events=[
             {
                 "id": "event-1",
+                "slug": "event-1",
+                "title": "Generation publication event",
                 "active": True,
                 "closed": False,
                 "negRisk": True,
@@ -189,6 +212,10 @@ def _complete_window(store: SQLiteStore, market_id: str, *, now_ms: int) -> str:
         markets=[
             {
                 "id": market_id,
+                "conditionId": f"condition-{market_id}",
+                "slug": market_id,
+                "question": f"Will {market_id} publish?",
+                "clobTokenIds": f'["yes-{market_id}","no-{market_id}"]',
                 "event_id": "event-1",
                 "negRisk": True,
                 "negRiskMarketID": "group-1",
@@ -359,6 +386,14 @@ def test_bounded_certification_resumes_every_primary_key_checkpoint(
         market_id="market-1",
         now_ms=1_004,
     )
+    store.append_structure_publication_chunk(
+        publication.publication_id,
+        "issues",
+        (),
+        expected_prior_cursor="market-1",
+        next_cursor="issues|done",
+        now_ms=1_009,
+    )
     store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
 
     checkpoints: list[tuple[str | None, str | None, int]] = []
@@ -377,6 +412,8 @@ def test_bounded_certification_resumes_every_primary_key_checkpoint(
 
     assert any(component == "memberships" and cursor for component, cursor, _ in checkpoints)
     assert any(component == "group_truth" and cursor for component, cursor, _ in checkpoints)
+    assert any(component == "source_events" for component, _, _ in checkpoints)
+    assert any(component == "source_markets" for component, _, _ in checkpoints)
     assert store.current_structure_generation() is None
     with sqlite3.connect(db_path) as con:
         status, validation_hash, certification_component = con.execute(
@@ -387,6 +424,184 @@ def test_bounded_certification_resumes_every_primary_key_checkpoint(
     assert status == "ready"
     assert len(validation_hash) == 64
     assert certification_component == "bounded-complete"
+
+
+def test_certification_start_freezes_every_generation_mutation(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store, snapshot_id=1, market_id="market-1", now_ms=1_000
+    )
+    _append_generation_truth(
+        store, publication, snapshot_id=1, market_id="market-1", now_ms=1_004
+    )
+    store.append_structure_publication_chunk(
+        publication.publication_id,
+        "issues",
+        (),
+        expected_prior_cursor="market-1",
+        next_cursor="issues|done",
+        now_ms=1_009,
+    )
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
+
+    statements = (
+        "INSERT INTO structure_generation_issues(snapshot_id,issue_index,layer,category) "
+        "VALUES (1,1,1,'schema')",
+        "UPDATE structure_generation_events SET title='tampered' WHERE snapshot_id=1",
+        "DELETE FROM structure_generation_markets WHERE snapshot_id=1",
+    )
+    for statement in statements:
+        with pytest.raises(sqlite3.IntegrityError, match="structure-generation-frozen"):
+            with sqlite3.connect(store.db_path) as con:
+                con.execute(statement)
+
+
+def test_bounded_certification_rejects_generation_source_drift(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store, snapshot_id=1, market_id="market-1", now_ms=1_000
+    )
+    _append_generation_truth(
+        store, publication, snapshot_id=1, market_id="market-1", now_ms=1_004
+    )
+    store.append_structure_publication_chunk(
+        publication.publication_id,
+        "issues",
+        (),
+        expected_prior_cursor="market-1",
+        next_cursor="issues|done",
+        now_ms=1_009,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_generation_events SET title='source drift' "
+            "WHERE snapshot_id=1"
+        )
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
+
+    with pytest.raises(ValueError, match="source-truth-invalid"):
+        for offset in range(30):
+            store.advance_structure_certification_chunk(
+                publication.publication_id, max_rows=1, now_ms=1_011 + offset
+            )
+
+
+def test_duplicate_market_uses_first_source_parent_and_never_publishes(
+    settings_for_test,
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    window_id = str(window["id"])
+    events = []
+    for event_id, group_id in (("z-first", "group-z"), ("a-second", "group-a")):
+        events.append(
+            {
+                "id": event_id,
+                "active": True,
+                "closed": False,
+                "negRisk": True,
+                "enableNegRisk": True,
+                "negRiskAugmented": False,
+                "negRiskMarketID": group_id,
+                "markets": [
+                    {
+                        "id": "shared-market",
+                        "active": True,
+                        "closed": False,
+                        "negRiskOther": False,
+                    }
+                ],
+            }
+        )
+    store.commit_structure_event_page(
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=events,
+        finished_at_ms=101,
+    )
+    store.commit_structure_market_page(
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        markets=[
+            {
+                "id": "shared-market",
+                "negRisk": True,
+                "negRiskMarketID": "group-z",
+                "active": True,
+                "closed": False,
+            }
+        ],
+        finished_at_ms=102,
+    )
+
+    publication_id = None
+    with pytest.raises(ValueError, match="generation-validation-issues|membership-invalid"):
+        for _ in range(60):
+            checkpoint = run_structure_publication_step(
+                settings_for_test, window_id, max_rows=1, max_elapsed_s=60
+            )
+            if isinstance(checkpoint, StructurePublicationCheckpoint):
+                publication_id = checkpoint.publication_id
+    assert publication_id is not None
+    assert store.structure_event_id_for_market(publication_id, "shared-market") == "z-first"
+    assert store.current_structure_generation() is None
+
+
+def test_worker_entry_migrates_pre_task3_structure_schema(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as con:
+        con.executescript(
+            "CREATE TABLE snapshots(id INTEGER PRIMARY KEY);"
+            "CREATE TABLE structure_sync_windows("
+            "id TEXT PRIMARY KEY,status TEXT,event_cursor TEXT,market_cursor TEXT,"
+            "started_at_ms INTEGER,checkpoint_at_ms INTEGER,event_pages INTEGER,"
+            "market_pages INTEGER,published_snapshot_id INTEGER,failure_reason TEXT);"
+            "CREATE TABLE structure_sync_event_staging("
+            "window_id TEXT,event_id TEXT,payload_json TEXT,source_cursor TEXT,"
+            "PRIMARY KEY(window_id,event_id));"
+            "CREATE TABLE structure_sync_market_staging("
+            "window_id TEXT,market_id TEXT,payload_json TEXT,source_cursor TEXT,"
+            "PRIMARY KEY(window_id,market_id));"
+            "CREATE TABLE structure_publications("
+            "publication_id TEXT PRIMARY KEY,window_id TEXT,snapshot_id INTEGER,"
+            "status TEXT,normalization_component TEXT,normalization_source_cursor TEXT,"
+            "write_component TEXT,write_row_cursor TEXT,expected_counts_json TEXT,"
+            "committed_counts_json TEXT,validation_hash TEXT,created_at_ms INTEGER,"
+            "checkpoint_at_ms INTEGER,certified_at_ms INTEGER,published_at_ms INTEGER,"
+            "failure_reason TEXT);"
+        )
+
+    store = SQLiteStore(db_path)
+    store.init_structure_sync_schema()
+
+    with sqlite3.connect(db_path) as con:
+        publication_columns = {
+            str(row[1]) for row in con.execute("PRAGMA table_info(structure_publications)")
+        }
+        event_columns = {
+            str(row[1])
+            for row in con.execute("PRAGMA table_info(structure_sync_event_staging)")
+        }
+        event_market_table = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='structure_sync_event_market_staging'"
+        ).fetchone()
+    assert {
+        "write_prior_cursor",
+        "certification_component",
+        "certification_row_cursor",
+        "certification_hash",
+        "certification_counts_json",
+    } <= publication_columns
+    assert "source_ordinal" in event_columns
+    assert event_market_table == (1,)
 
 
 def test_bounded_certification_rejects_stale_membership_hash(tmp_path: Path) -> None:
@@ -404,6 +619,14 @@ def test_bounded_certification_rejects_stale_membership_hash(tmp_path: Path) -> 
         snapshot_id=1,
         market_id="market-1",
         now_ms=1_004,
+    )
+    store.append_structure_publication_chunk(
+        publication.publication_id,
+        "issues",
+        (),
+        expected_prior_cursor="market-1",
+        next_cursor="issues|done",
+        now_ms=1_009,
     )
     with sqlite3.connect(store.db_path) as con:
         con.execute(

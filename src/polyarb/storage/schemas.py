@@ -2337,13 +2337,24 @@ CREATE TABLE IF NOT EXISTS structure_sync_event_staging (
     event_id TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     source_cursor TEXT,
+    source_ordinal INTEGER,
     PRIMARY KEY(window_id,event_id)
 );
+CREATE TABLE IF NOT EXISTS structure_sync_event_market_staging (
+    window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
+    market_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    source_ordinal INTEGER NOT NULL,
+    PRIMARY KEY(window_id,event_id,market_id)
+);
+CREATE INDEX IF NOT EXISTS idx_structure_sync_event_market_first
+ON structure_sync_event_market_staging(window_id,market_id,source_ordinal,event_id);
 CREATE TABLE IF NOT EXISTS structure_sync_market_staging (
     window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
     market_id TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     source_cursor TEXT,
+    source_ordinal INTEGER,
     PRIMARY KEY(window_id,market_id)
 );
 """
@@ -2374,6 +2385,7 @@ CREATE TABLE IF NOT EXISTS structure_publications (
     certification_hash TEXT CHECK(
         certification_hash IS NULL OR length(certification_hash)=64
     ),
+    certification_counts_json TEXT,
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
     certified_at_ms INTEGER,
@@ -2477,6 +2489,7 @@ CREATE TABLE IF NOT EXISTS current_structure_generation (
     switched_at_ms INTEGER NOT NULL CHECK(switched_at_ms >= 0),
     FOREIGN KEY(publication_id) REFERENCES structure_publications(publication_id)
 );
+
 """
 
 # ─────────────────────────────────────────────────────────────────────────────

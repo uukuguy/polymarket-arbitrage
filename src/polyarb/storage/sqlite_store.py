@@ -69,6 +69,30 @@ _STRUCTURE_COMPONENTS = (
     "markets",
     "issues",
 )
+_STRUCTURE_SOURCE_COMPONENTS = ("source_events", "source_markets")
+_STRUCTURE_CERTIFICATION_COMPONENTS = (
+    *_STRUCTURE_COMPONENTS,
+    *_STRUCTURE_SOURCE_COMPONENTS,
+)
+
+
+def _install_structure_generation_freeze_triggers(con: sqlite3.Connection) -> None:
+    """Reject every generation-row mutation after certification starts."""
+    for component in _STRUCTURE_COMPONENTS:
+        table = f"structure_generation_{component}"
+        for operation, reference in (
+            ("insert", "NEW"),
+            ("update", "OLD"),
+            ("delete", "OLD"),
+        ):
+            con.execute(
+                f"CREATE TRIGGER IF NOT EXISTS trg_{table}_frozen_{operation} "
+                f"BEFORE {operation.upper()} ON {table} WHEN EXISTS (SELECT 1 FROM "
+                "structure_publications p WHERE "
+                f"p.snapshot_id={reference}.snapshot_id AND "
+                "p.certification_component IS NOT NULL) "
+                "BEGIN SELECT RAISE(ABORT,'structure-generation-frozen'); END"  # noqa: S608
+            )
 
 
 class StructurePublicationCursorError(ValueError):
@@ -523,6 +547,10 @@ class SQLiteStore:
             _ensure_column("structure_publications", "certification_component", "TEXT")
             _ensure_column("structure_publications", "certification_row_cursor", "TEXT")
             _ensure_column("structure_publications", "certification_hash", "TEXT")
+            _ensure_column("structure_publications", "certification_counts_json", "TEXT")
+            _ensure_column("structure_sync_event_staging", "source_ordinal", "INTEGER")
+            _ensure_column("structure_sync_market_staging", "source_ordinal", "INTEGER")
+            _install_structure_generation_freeze_triggers(con)
             _backfill_structure_snapshot_statuses(con)
             # H-009: quote collectors lease their collecting run.  A default
             # of zero makes any legacy collecting row immediately recoverable
@@ -573,6 +601,44 @@ class SQLiteStore:
             )
             if has_snapshot_schema:
                 con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
+                con.executescript(STRUCTURE_GENERATIONS_DDL)
+                existing = {
+                    str(row[1])
+                    for row in con.execute("PRAGMA table_info(structure_publications)")
+                }
+                for column, ddl in (
+                    ("write_prior_cursor", "TEXT"),
+                    ("certification_component", "TEXT"),
+                    ("certification_row_cursor", "TEXT"),
+                    ("certification_hash", "TEXT"),
+                    ("certification_counts_json", "TEXT"),
+                ):
+                    if column not in existing:
+                        con.execute(
+                            f"ALTER TABLE structure_publications ADD COLUMN {column} {ddl}"
+                        )
+                for table in (
+                    "structure_sync_event_staging",
+                    "structure_sync_market_staging",
+                ):
+                    columns = {
+                        str(row[1]) for row in con.execute(f"PRAGMA table_info({table})")
+                    }
+                    if "source_ordinal" not in columns:
+                        con.execute(f"ALTER TABLE {table} ADD COLUMN source_ordinal INTEGER")
+                    con.execute(
+                        f"UPDATE {table} SET source_ordinal=rowid "
+                        "WHERE source_ordinal IS NULL"
+                    )
+                con.execute(
+                    "INSERT OR IGNORE INTO structure_sync_event_market_staging("
+                    "window_id,market_id,event_id,source_ordinal) "
+                    "SELECT e.window_id,json_extract(member.value,'$.id'),e.event_id,"
+                    "e.source_ordinal FROM structure_sync_event_staging e JOIN "
+                    "json_each(e.payload_json,'$.markets') member "
+                    "WHERE json_type(member.value,'$.id')='text'"
+                )
+                _install_structure_generation_freeze_triggers(con)
                 return
         finally:
             con.close()
@@ -1181,28 +1247,104 @@ class SQLiteStore:
             raise ValueError("structure-publication-not-found")
         return int(row[0])
 
+    def structure_certification_checkpoint(
+        self, publication_id: str
+    ) -> tuple[str, str | None] | None:
+        """Return the durable bounded-certification cursor, if sealing started."""
+        with sqlite3.connect(self._db_path) as con:
+            row = con.execute(
+                "SELECT certification_component,certification_row_cursor FROM "
+                "structure_publications WHERE publication_id=?",
+                (publication_id,),
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return str(row[0]), None if row[1] is None else str(row[1])
+
+    def structure_publication_result_metadata(
+        self, publication_id: str
+    ) -> dict[str, object]:
+        """Read the published result from durable snapshot and generation facts."""
+        with sqlite3.connect(self._db_path) as con:
+            row = con.execute(
+                "SELECT s.id,s.market_count,s.is_valid,s.snapshot_status,s.mode,"
+                "s.parquet_path,s.taken_at_ms,s.finished_at_ms FROM "
+                "structure_publications p JOIN snapshots s ON s.id=p.snapshot_id "
+                "WHERE p.publication_id=? AND p.status='published'",
+                (publication_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("structure-publication-not-published")
+            categories = {
+                str(category): int(count)
+                for category, count in con.execute(
+                    "SELECT category,COUNT(*) FROM structure_generation_issues "
+                    "WHERE snapshot_id=? GROUP BY category ORDER BY category",
+                    (row[0],),
+                ).fetchall()
+            }
+        return {
+            "snapshot_id": int(row[0]),
+            "market_count": int(row[1]),
+            "is_valid": bool(row[2]),
+            "status": str(row[3]),
+            "mode": str(row[4]),
+            "parquet_path": str(row[5] or ""),
+            "taken_at_ms": int(row[6]),
+            "finished_at_ms": int(row[7]),
+            "issue_categories": categories,
+            "issue_count": sum(categories.values()),
+        }
+
     def structure_event_id_for_market(
         self, publication_id: str, market_id: str
     ) -> str | None:
         """Resolve one market parent from durable membership or staged JSON."""
         with sqlite3.connect(self._db_path) as con:
             row = con.execute(
-                "SELECT m.event_id FROM structure_publications p JOIN "
-                "structure_generation_memberships m ON m.snapshot_id=p.snapshot_id "
-                "WHERE p.publication_id=? AND m.market_id=? ORDER BY m.event_id LIMIT 1",
+                "SELECT parent.event_id FROM structure_publications p JOIN "
+                "structure_sync_event_market_staging parent "
+                "ON parent.window_id=p.window_id WHERE p.publication_id=? "
+                "AND parent.market_id=? "
+                "ORDER BY parent.source_ordinal,parent.event_id LIMIT 1",
                 (publication_id, market_id),
             ).fetchone()
             if row is None:
                 row = con.execute(
-                    "SELECT e.event_id FROM structure_publications p JOIN "
-                    "structure_sync_event_staging e ON e.window_id=p.window_id "
-                    "JOIN json_each(e.payload_json,'$.markets') member "
-                    "WHERE p.publication_id=? AND "
-                    "json_extract(member.value,'$.id')=? "
-                    "ORDER BY e.event_id LIMIT 1",
+                    "SELECT m.event_id FROM structure_publications p JOIN "
+                    "structure_generation_memberships m ON m.snapshot_id=p.snapshot_id "
+                    "WHERE p.publication_id=? AND m.market_id=? ORDER BY m.event_id LIMIT 1",
                     (publication_id, market_id),
                 ).fetchone()
         return None if row is None else str(row[0])
+
+    def structure_event_has_duplicate_market(
+        self, publication_id: str, event_id: str
+    ) -> bool:
+        with sqlite3.connect(self._db_path) as con:
+            return con.execute(
+                "SELECT 1 FROM structure_publications p JOIN "
+                "structure_sync_event_market_staging mine ON "
+                "mine.window_id=p.window_id JOIN structure_sync_event_market_staging "
+                "other ON other.window_id=mine.window_id AND "
+                "other.market_id=mine.market_id AND other.event_id!=mine.event_id "
+                "WHERE p.publication_id=? AND mine.event_id=? LIMIT 1",
+                (publication_id, event_id),
+            ).fetchone() is not None
+
+    def fetch_structure_duplicate_market_chunk(
+        self, *, window_id: str, after_market_id: str | None, limit: int
+    ) -> list[tuple[str, str]]:
+        with sqlite3.connect(self._db_path) as con:
+            rows = con.execute(
+                "SELECT market_id,GROUP_CONCAT(event_id,',') FROM (SELECT "
+                "market_id,event_id FROM structure_sync_event_market_staging "
+                "WHERE window_id=? AND (? IS NULL OR market_id>?) "
+                "ORDER BY market_id,source_ordinal,event_id) GROUP BY market_id "
+                "HAVING COUNT(DISTINCT event_id)>1 ORDER BY market_id LIMIT ?",
+                (window_id, after_market_id, after_market_id, limit),
+            ).fetchall()
+        return [(str(row[0]), str(row[1])) for row in rows]
 
     def seal_structure_publication_counts(
         self, publication_id: str, *, now_ms: int
@@ -1213,8 +1355,9 @@ class SQLiteStore:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
                 "SELECT snapshot_id,status,certification_component,"
-                "expected_counts_json,committed_counts_json "
-                "FROM structure_publications WHERE publication_id=?",
+                "expected_counts_json,committed_counts_json,window_id,"
+                "write_component,write_row_cursor FROM structure_publications "
+                "WHERE publication_id=?",
                 (publication_id,),
             ).fetchone()
             if row is None or row[1] != "writing":
@@ -1230,10 +1373,24 @@ class SQLiteStore:
                 for key, value in json.loads(str(row[4])).items()
             }
             encoded = json.dumps(counts, sort_keys=True, separators=(",", ":"))
+            window = con.execute(
+                "SELECT status FROM structure_sync_windows WHERE id=?", (row[5],)
+            ).fetchone()
+            if window is None or window[0] != "complete":
+                raise ValueError("source-coverage-incomplete")
+            if row[6] != "issues" or row[7] != "issues|done":
+                raise ValueError("normalization-incomplete")
+            zero_counts = json.dumps(
+                {component: 0 for component in _STRUCTURE_CERTIFICATION_COMPONENTS},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
             con.execute(
                 "UPDATE structure_publications SET expected_counts_json=?,"
-                "committed_counts_json=?,checkpoint_at_ms=? WHERE publication_id=?",
-                (encoded, encoded, now_ms, publication_id),
+                "committed_counts_json=?,certification_component='events',"
+                "certification_row_cursor=NULL,certification_hash=?,"
+                "certification_counts_json=?,checkpoint_at_ms=? WHERE publication_id=?",
+                (encoded, encoded, "0" * 64, zero_counts, now_ms, publication_id),
             )
             con.execute("COMMIT")
             return counts
@@ -1257,27 +1414,43 @@ class SQLiteStore:
             "group_truth": ("neg_risk_market_id",),
             "markets": ("market_id",),
             "issues": ("issue_index",),
+            "source_events": ("source_ordinal", "event_id"),
+            "source_markets": ("source_ordinal", "market_id"),
         }
         with sqlite3.connect(self._db_path) as read_con:
             publication = read_con.execute(
                 "SELECT snapshot_id,window_id,status,expected_counts_json,"
                 "committed_counts_json,certification_component,"
-                "certification_row_cursor,certification_hash "
-                "FROM structure_publications WHERE publication_id=?",
+                "certification_row_cursor,certification_hash,"
+                "certification_counts_json,s.taken_at_ms "
+                "FROM structure_publications p JOIN snapshots s ON "
+                "s.id=p.snapshot_id WHERE p.publication_id=?",
                 (publication_id,),
             ).fetchone()
             if publication is None or publication[2] != "writing":
                 raise ValueError("structure-publication-not-writing")
             if publication[3] != publication[4]:
                 raise ValueError("generation-incomplete")
-            snapshot_id, window_id = int(publication[0]), str(publication[1])
+            snapshot_id = int(publication[0])
+            window_id = str(publication[1])
+            taken_at_ms = int(publication[9])
             component = str(publication[5] or _STRUCTURE_COMPONENTS[0])
+            if component not in _STRUCTURE_CERTIFICATION_COMPONENTS:
+                raise ValueError("unknown-structure-certification-component")
             cursor = None if publication[6] is None else str(publication[6])
             prior_hash = str(publication[7] or ("0" * 64))
+            scanned_counts = {
+                str(key): int(value)
+                for key, value in json.loads(str(publication[8])).items()
+            }
+            for name in _STRUCTURE_CERTIFICATION_COMPONENTS:
+                scanned_counts.setdefault(name, 0)
             keys = order[component]
             cursor_values = None if cursor is None else json.loads(cursor)
             clause = ""
-            parameters: list[object] = [snapshot_id]
+            parameters: list[object] = [
+                window_id if component in _STRUCTURE_SOURCE_COMPONENTS else snapshot_id
+            ]
             if cursor_values is not None:
                 clause = (
                     f" AND ({','.join(keys)}) > "
@@ -1285,12 +1458,30 @@ class SQLiteStore:
                 )
                 parameters.extend(cursor_values)
             parameters.append(max_rows)
-            table = self._structure_component_table(component)
-            rows = read_con.execute(
-                f"SELECT * FROM {table} WHERE snapshot_id=?{clause} "
-                f"ORDER BY {','.join(keys)} LIMIT ?",  # noqa: S608
-                parameters,
-            ).fetchall()
+            if component in _STRUCTURE_SOURCE_COMPONENTS:
+                source = component.removeprefix("source_")
+                singular = "event" if source == "events" else "market"
+                table = f"structure_sync_{singular}_staging"
+                rows = read_con.execute(
+                    f"SELECT source_ordinal,{singular}_id,payload_json FROM {table} "
+                    f"WHERE window_id=?{clause} ORDER BY {','.join(keys)} LIMIT ?",
+                    parameters,
+                ).fetchall()
+                positions = {"source_ordinal": 0, f"{singular}_id": 1}
+            else:
+                table = self._structure_component_table(component)
+                rows = read_con.execute(
+                    f"SELECT * FROM {table} WHERE snapshot_id=?{clause} "
+                    f"ORDER BY {','.join(keys)} LIMIT ?",  # noqa: S608
+                    parameters,
+                ).fetchall()
+                column_names = [
+                    item[0]
+                    for item in read_con.execute(
+                        f"SELECT * FROM {table} LIMIT 0"  # noqa: S608
+                    ).description
+                ]
+                positions = {name: index for index, name in enumerate(column_names)}
             if component == "group_truth":
                 for truth in rows:
                     event_id = str(truth[1])
@@ -1313,6 +1504,8 @@ class SQLiteStore:
                         for member in member_rows
                     ]
                     if (
+                        truth[7] == "incomplete-source"
+                        or
                         len(members) != int(truth[4])
                         or sum(
                             member.member_kind == "named" and member.active
@@ -1322,6 +1515,154 @@ class SQLiteStore:
                         or membership_hash(event_id, group_id, members) != truth[6]
                     ):
                         raise ValueError("membership-invalid")
+            elif component == "memberships":
+                for member in rows:
+                    aligned = read_con.execute(
+                        "SELECT 1 FROM structure_generation_events e JOIN "
+                        "structure_generation_markets k ON k.snapshot_id=e.snapshot_id "
+                        "WHERE e.snapshot_id=? AND e.id=? AND k.market_id=? "
+                        "AND k.event_id=? AND k.neg_risk_market_id=?",
+                        (snapshot_id, member[1], member[3], member[1], member[2]),
+                    ).fetchone()
+                    if aligned is None:
+                        raise ValueError("membership-invalid")
+            elif component == "markets":
+                for market in rows:
+                    source = read_con.execute(
+                        "SELECT json_extract(raw.payload_json,'$.negRisk'),"
+                        "json_extract(raw.payload_json,'$.negRiskMarketID'),"
+                        "json_extract(raw.payload_json,'$.active'),"
+                        "json_extract(raw.payload_json,'$.closed'),parent.event_id "
+                        "FROM structure_publications p JOIN "
+                        "structure_sync_market_staging raw ON raw.window_id=p.window_id "
+                        "LEFT JOIN structure_sync_event_market_staging parent ON "
+                        "parent.window_id=p.window_id AND parent.market_id=raw.market_id "
+                        "WHERE p.publication_id=? AND raw.market_id=? ORDER BY "
+                        "parent.source_ordinal,parent.event_id LIMIT 1",
+                        (publication_id, market[1]),
+                    ).fetchone()
+                    if source is None or (
+                        source[0], source[1], source[2], source[3], source[4]
+                    ) != (market[17], market[18], market[15], market[16], market[22]):
+                        raise ValueError("source-truth-invalid")
+                    if (market[17] == 1 or market[18] is not None) and read_con.execute(
+                        "SELECT 1 FROM structure_generation_memberships m JOIN "
+                        "structure_generation_group_truth t ON "
+                        "t.snapshot_id=m.snapshot_id AND t.event_id=m.event_id AND "
+                        "t.neg_risk_market_id=m.neg_risk_market_id WHERE "
+                        "m.snapshot_id=? AND m.market_id=? AND m.event_id=? AND "
+                        "m.neg_risk_market_id=?",
+                        (snapshot_id, market[1], market[22], market[18]),
+                    ).fetchone() is None:
+                        raise ValueError("source-truth-invalid")
+            elif component == "issues" and rows:
+                raise ValueError("generation-validation-issues")
+            elif component == "source_events":
+                from polyarb.snapshot.normalizer import normalize_events
+
+                for source_event in rows:
+                    raw = json.loads(str(source_event[2]))
+                    events, tags, _mapping, members, truths = normalize_events([raw])
+                    if len(events) != 1:
+                        raise ValueError("source-truth-invalid")
+                    events[0]["fetched_at_ms"] = taken_at_ms
+                    actual_event = read_con.execute(
+                        f"SELECT {','.join(EVENTS_COLUMN_ORDER)} FROM "
+                        "structure_generation_events WHERE snapshot_id=? AND id=?",
+                        (snapshot_id, source_event[1]),
+                    ).fetchone()
+                    if actual_event != _event_row_to_tuple(events[0], snapshot_id):
+                        raise ValueError("source-truth-invalid")
+                    expected_tags = sorted(
+                        _event_tag_row_to_tuple(tag, snapshot_id) for tag in tags
+                    )
+                    actual_tags = read_con.execute(
+                        f"SELECT {','.join(EVENT_TAGS_COLUMN_ORDER)} FROM "
+                        "structure_generation_event_tags WHERE snapshot_id=? "
+                        "AND event_id=? ORDER BY tag_id",
+                        (snapshot_id, source_event[1]),
+                    ).fetchall()
+                    if actual_tags != expected_tags:
+                        raise ValueError("source-truth-invalid")
+                    for generated_component, expected_rows in (
+                        ("memberships", members),
+                        ("group_truth", truths),
+                    ):
+                        expected_values = []
+                        columns: tuple[str, ...] | None = None
+                        for expected_row in expected_rows:
+                            if isinstance(expected_row, EventMember):
+                                canonical_row: object = {
+                                    "event_id": expected_row.event_id,
+                                    "neg_risk_market_id": expected_row.group_id,
+                                    "market_id": expected_row.market_id,
+                                    "member_kind": expected_row.member_kind,
+                                    "active": expected_row.active,
+                                    "closed": expected_row.closed,
+                                }
+                            else:
+                                assert isinstance(expected_row, GroupTruth)
+                                canonical_row = {
+                                    "event_id": expected_row.event_id,
+                                    "neg_risk_market_id": expected_row.group_id,
+                                    "neg_risk_type": expected_row.neg_risk_type,
+                                    "expected_member_count": (
+                                        expected_row.expected_member_count
+                                    ),
+                                    "active_named_count": expected_row.active_named_count,
+                                    "membership_hash": expected_row.membership_hash,
+                                    "quality": expected_row.quality,
+                                    "reason": expected_row.reason,
+                                }
+                            columns, values = self._component_values(
+                                generated_component, canonical_row, snapshot_id, 0
+                            )
+                            expected_values.append(values)
+                        if columns is None:
+                            continue
+                        actual_values = read_con.execute(
+                            f"SELECT {','.join(columns)} FROM "
+                            f"{self._structure_component_table(generated_component)} "
+                            "WHERE snapshot_id=? AND event_id=? ORDER BY "
+                            + (
+                                "market_id"
+                                if generated_component == "memberships"
+                                else "neg_risk_market_id"
+                            ),
+                            (snapshot_id, source_event[1]),
+                        ).fetchall()
+                        if actual_values != sorted(expected_values):
+                            raise ValueError("source-truth-invalid")
+            elif component == "source_markets":
+                from polyarb.snapshot.normalizer import normalize_market
+
+                for source_market in rows:
+                    raw = json.loads(str(source_market[2]))
+                    parent = read_con.execute(
+                        "SELECT event_id FROM structure_sync_event_market_staging "
+                        "WHERE window_id=? AND market_id=? ORDER BY "
+                        "source_ordinal,event_id LIMIT 1",
+                        (window_id, source_market[1]),
+                    ).fetchone()
+                    normalized = normalize_market(
+                        raw,
+                        (
+                            {str(source_market[1]): str(parent[0])}
+                            if parent is not None
+                            else {}
+                        ),
+                    )
+                    if normalized is None:
+                        raise ValueError("source-truth-invalid")
+                    normalized["fetched_at_ms"] = taken_at_ms
+                    generated = read_con.execute(
+                        f"SELECT {','.join(MARKETS_COLUMN_ORDER)} "
+                        "FROM structure_generation_markets WHERE snapshot_id=? "
+                        "AND market_id=?",
+                        (snapshot_id, source_market[1]),
+                    ).fetchone()
+                    if generated != _row_to_tuple(normalized, snapshot_id):
+                        raise ValueError("source-truth-invalid")
             digest = hashlib.sha256()
             digest.update(bytes.fromhex(prior_hash))
             if cursor is None:
@@ -1330,81 +1671,32 @@ class SQLiteStore:
                 digest.update(
                     json.dumps(row, separators=(",", ":"), ensure_ascii=True).encode()
                 )
+            scanned_counts[component] += len(rows)
             next_hash = digest.hexdigest()
             next_cursor: str | None = cursor
             if rows:
-                column_names = [item[0] for item in read_con.execute(
-                    f"SELECT * FROM {table} LIMIT 0"  # noqa: S608
-                ).description]
-                positions = {name: index for index, name in enumerate(column_names)}
                 next_cursor = json.dumps(
                     [rows[-1][positions[key]] for key in keys], separators=(",", ":")
                 )
                 ready = False
                 next_component = component
             else:
-                index = _STRUCTURE_COMPONENTS.index(component)
-                ready = index + 1 == len(_STRUCTURE_COMPONENTS)
-                next_component = None if ready else _STRUCTURE_COMPONENTS[index + 1]
+                committed_counts = json.loads(str(publication[4]))
+                expected_count = int(
+                    committed_counts[
+                        component.removeprefix("source_")
+                        if component in _STRUCTURE_SOURCE_COMPONENTS
+                        else component
+                    ]
+                )
+                if scanned_counts[component] != expected_count:
+                    raise ValueError("generation-count-mismatch")
+                index = _STRUCTURE_CERTIFICATION_COMPONENTS.index(component)
+                ready = index + 1 == len(_STRUCTURE_CERTIFICATION_COMPONENTS)
+                next_component = (
+                    None if ready else _STRUCTURE_CERTIFICATION_COMPONENTS[index + 1]
+                )
                 next_cursor = None
-                if ready:
-                    source = read_con.execute(
-                        "SELECT status,(SELECT COUNT(*) FROM structure_sync_event_staging "
-                        "WHERE window_id=w.id),(SELECT COUNT(*) FROM "
-                        "structure_sync_market_staging WHERE window_id=w.id) "
-                        "FROM structure_sync_windows w WHERE id=?",
-                        (window_id,),
-                    ).fetchone()
-                    counts = json.loads(str(publication[3]))
-                    if (
-                        source is None
-                        or source[0] != "complete"
-                        or int(source[1]) != counts["events"]
-                        or int(source[2]) != counts["markets"]
-                    ):
-                        raise ValueError("source-coverage-incomplete")
-                    invalid = read_con.execute(
-                        "SELECT 1 FROM structure_generation_group_truth t "
-                        "WHERE t.snapshot_id=? AND (t.quality='incomplete-source' OR "
-                        "t.expected_member_count != (SELECT COUNT(*) FROM "
-                        "structure_generation_memberships m WHERE "
-                        "m.snapshot_id=t.snapshot_id AND m.event_id=t.event_id AND "
-                        "m.neg_risk_market_id=t.neg_risk_market_id)) LIMIT 1",
-                        (snapshot_id,),
-                    ).fetchone()
-                    if invalid is not None:
-                        raise ValueError("membership-invalid")
-                    orphan = read_con.execute(
-                        "SELECT 1 FROM structure_generation_memberships m WHERE "
-                        "m.snapshot_id=? AND (NOT EXISTS (SELECT 1 FROM "
-                        "structure_generation_group_truth t WHERE "
-                        "t.snapshot_id=m.snapshot_id AND t.event_id=m.event_id AND "
-                        "t.neg_risk_market_id=m.neg_risk_market_id) OR NOT EXISTS "
-                        "(SELECT 1 FROM structure_generation_events e WHERE "
-                        "e.snapshot_id=m.snapshot_id AND e.id=m.event_id) OR NOT EXISTS "
-                        "(SELECT 1 FROM structure_generation_markets k WHERE "
-                        "k.snapshot_id=m.snapshot_id AND k.market_id=m.market_id "
-                        "AND k.event_id=m.event_id AND "
-                        "k.neg_risk_market_id=m.neg_risk_market_id)) LIMIT 1",
-                        (snapshot_id,),
-                    ).fetchone()
-                    if orphan is not None:
-                        raise ValueError("membership-invalid")
-                    source_truth = read_con.execute(
-                        "SELECT 1 FROM structure_generation_markets k WHERE "
-                        "k.snapshot_id=? AND (k.neg_risk=1 OR "
-                        "k.neg_risk_market_id IS NOT NULL) AND NOT EXISTS (SELECT 1 "
-                        "FROM structure_generation_memberships m JOIN "
-                        "structure_generation_group_truth t ON "
-                        "t.snapshot_id=m.snapshot_id AND t.event_id=m.event_id AND "
-                        "t.neg_risk_market_id=m.neg_risk_market_id WHERE "
-                        "m.snapshot_id=k.snapshot_id AND m.market_id=k.market_id AND "
-                        "m.event_id=k.event_id AND "
-                        "m.neg_risk_market_id=k.neg_risk_market_id) LIMIT 1",
-                        (snapshot_id,),
-                    ).fetchone()
-                    if source_truth is not None:
-                        raise ValueError("source-truth-invalid")
         con = self._connect_writer()
         try:
             con.execute("BEGIN IMMEDIATE")
@@ -1413,24 +1705,30 @@ class SQLiteStore:
                     "UPDATE structure_publications SET status='ready',validation_hash=?,"
                     "certification_component='bounded-complete',"
                     "certification_row_cursor=NULL,certification_hash=?,"
-                    "certified_at_ms=?,checkpoint_at_ms=? WHERE publication_id=? "
+                    "certification_counts_json=?,certified_at_ms=?,checkpoint_at_ms=? "
+                    "WHERE publication_id=? "
                     "AND status='writing' AND certification_component IS ? "
                     "AND certification_row_cursor IS ? AND "
                     "COALESCE(certification_hash,?)=?",
                     (
-                        next_hash, next_hash, now_ms, now_ms, publication_id,
+                        next_hash, next_hash,
+                        json.dumps(scanned_counts, sort_keys=True, separators=(",", ":")),
+                        now_ms, now_ms, publication_id,
                         publication[5], publication[6], "0" * 64, prior_hash,
                     ),
                 )
             else:
                 cur = con.execute(
                     "UPDATE structure_publications SET certification_component=?,"
-                    "certification_row_cursor=?,certification_hash=?,checkpoint_at_ms=? "
+                    "certification_row_cursor=?,certification_hash=?,"
+                    "certification_counts_json=?,checkpoint_at_ms=? "
                     "WHERE publication_id=? AND status='writing' "
                     "AND certification_component IS ? AND certification_row_cursor IS ? "
                     "AND COALESCE(certification_hash,?)=?",
                     (
-                        next_component, next_cursor, next_hash, now_ms, publication_id,
+                        next_component, next_cursor, next_hash,
+                        json.dumps(scanned_counts, sort_keys=True, separators=(",", ":")),
+                        now_ms, publication_id,
                         publication[5], publication[6], "0" * 64, prior_hash,
                     ),
                 )
@@ -2620,12 +2918,40 @@ class SQLiteStore:
             ).fetchone()
             if row is None or row[0] != "open" or row[1] != requested_cursor:
                 raise ValueError("structure-event-page-cursor-mismatch")
+            ordinal_base = int(
+                con.execute(
+                    "SELECT COALESCE(MAX(source_ordinal),0) FROM "
+                    "structure_sync_event_staging WHERE window_id=?",
+                    (window_id,),
+                ).fetchone()[0]
+            )
+            ordered = [
+                (*item, ordinal_base + index)
+                for index, item in enumerate(serialized, start=1)
+            ]
             con.executemany(
                 "INSERT INTO structure_sync_event_staging("
-                "window_id,event_id,payload_json,source_cursor) "
-                "VALUES (?,?,?,?) ON CONFLICT(window_id,event_id) DO UPDATE SET "
+                "window_id,event_id,payload_json,source_cursor,source_ordinal) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(window_id,event_id) DO UPDATE SET "
                 "payload_json=excluded.payload_json,source_cursor=excluded.source_cursor",
-                [(window_id, *item) for item in serialized],
+                [(window_id, *item) for item in ordered],
+            )
+            parent_rows: list[tuple[object, ...]] = []
+            for index, event in enumerate(events, start=1):
+                event_id = str(event["id"])
+                members = event.get("markets")
+                if not isinstance(members, list):
+                    continue
+                for member in members:
+                    market_id = member.get("id") if isinstance(member, dict) else None
+                    if isinstance(market_id, str) and market_id:
+                        parent_rows.append(
+                            (window_id, market_id, event_id, ordinal_base + index)
+                        )
+            con.executemany(
+                "INSERT OR IGNORE INTO structure_sync_event_market_staging("
+                "window_id,market_id,event_id,source_ordinal) VALUES (?,?,?,?)",
+                parent_rows,
             )
             con.execute(
                 "UPDATE structure_sync_windows SET status=?,event_cursor=?,"
@@ -2690,12 +3016,22 @@ class SQLiteStore:
             ).fetchone()
             if row is None or row[0] != "events_complete" or row[1] != requested_cursor:
                 raise ValueError("structure-market-page-cursor-mismatch")
+            ordinal_base = int(
+                con.execute(
+                    "SELECT COALESCE(MAX(source_ordinal),0) FROM "
+                    "structure_sync_market_staging WHERE window_id=?",
+                    (window_id,),
+                ).fetchone()[0]
+            )
             con.executemany(
                 "INSERT INTO structure_sync_market_staging("
-                "window_id,market_id,payload_json,source_cursor) "
-                "VALUES (?,?,?,?) ON CONFLICT(window_id,market_id) DO UPDATE SET "
+                "window_id,market_id,payload_json,source_cursor,source_ordinal) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(window_id,market_id) DO UPDATE SET "
                 "payload_json=excluded.payload_json,source_cursor=excluded.source_cursor",
-                [(window_id, *item) for item in serialized],
+                [
+                    (window_id, *item, ordinal_base + index)
+                    for index, item in enumerate(serialized, start=1)
+                ],
             )
             con.execute(
                 "UPDATE structure_sync_windows SET status=?,market_cursor=?,"
