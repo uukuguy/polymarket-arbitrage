@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -31,24 +32,40 @@ from polyarb.snapshot.orchestrator import run_snapshot
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 
 
-def _generation_store():
+def _generation_store(*, initialize: bool = True):
     from polyarb.storage.sqlite_store import SQLiteStore
 
     settings = load_settings()
     store = SQLiteStore(settings.db_path)
-    store.init_schema()
+    if initialize:
+        store.init_schema()
     return settings, store
 
 
 @app.command(name="structure-generation-status")
 def structure_generation_status() -> None:
     """Read generation pointer, publication, comparison, and retention state."""
-    settings, store = _generation_store()
-    result = store.structure_generation_status(
-        retain_generations=int(
-            getattr(settings, "structure_generation_retention_floor", 2)
+    settings, store = _generation_store(initialize=False)
+    try:
+        result = store.structure_generation_status(
+            retain_generations=int(
+                getattr(settings, "structure_generation_retention_floor", 2)
+            ),
+            pressure_probe_limit=int(
+                getattr(settings, "structure_generation_pressure_fail_count", 8)
+            ),
         )
-    )
+    except (OSError, sqlite3.Error):
+        print(
+            json.dumps(
+                {
+                    "available": False,
+                    "error": "structure-generation-status-unavailable",
+                },
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=1) from None
     print(json.dumps(result, sort_keys=True))
 
 

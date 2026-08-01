@@ -472,7 +472,28 @@ def _structure_generation_health_checks(
         publication_status = "fail"
 
     comparison = status.get("comparison")
-    if isinstance(comparison, dict) and comparison.get("receipt_present"):
+    comparison_checkpoint_age_s = None
+    if isinstance(comparison, dict) and isinstance(
+        comparison.get("checkpoint_at_ms"), int
+    ):
+        comparison_checkpoint_age_s = max(
+            0.0,
+            (now_ms - int(comparison["checkpoint_at_ms"])) / 1_000,
+        )
+    if status.get("pointer_snapshot_id") is not None and not status.get(
+        "comparison_authenticated", False
+    ):
+        comparison_status = "fail"
+        comparison_value = "authentication-failed"
+    elif (
+        isinstance(comparison, dict)
+        and comparison.get("phase") not in {None, "sealed"}
+        and comparison_checkpoint_age_s is not None
+        and comparison_checkpoint_age_s > publication_sla_s
+    ):
+        comparison_status = "fail"
+        comparison_value = str(comparison.get("phase"))
+    elif isinstance(comparison, dict) and comparison.get("receipt_present"):
         comparison_status = "pass"
         comparison_value = "sealed"
     elif isinstance(comparison, dict) and comparison.get("phase") not in {None, "sealed"}:
@@ -483,15 +504,21 @@ def _structure_generation_health_checks(
         comparison_value = "missing"
     comparison_output = (
         f"cursor={comparison.get('cursor')} checkpoint_at_ms="
-        f"{comparison.get('checkpoint_at_ms')}"
+        f"{comparison.get('checkpoint_at_ms')} checkpoint_age_seconds="
+        f"{comparison_checkpoint_age_s} mismatch_reasons="
+        f"{','.join(status.get('comparison_mismatch_reasons') or ())}"
         if isinstance(comparison, dict)
         else "comparison-not-started"
     )
 
-    retained = int(status.get("retained_generation_count") or 0)
-    reclaimable = int(status.get("reclaimable_generation_count") or 0)
+    retained = int(status.get("retained_generation_count_lower_bound") or 0)
+    reclaimable = int(
+        status.get("reclaimable_generation_count_lower_bound") or 0
+    )
     cleanup = status.get("cleanup")
-    blocked_reason = cleanup.get("blocked_reason") if isinstance(cleanup, dict) else None
+    blocked_reason = (
+        cleanup.get("blocked_reason") if isinstance(cleanup, dict) else None
+    ) or status.get("cleanup_blocked_reason")
     if blocked_reason is not None or retained >= pressure_fail_count:
         evidence_status = "fail"
     elif retained >= pressure_warn_count or reclaimable > 0 or cleanup is not None:
@@ -507,6 +534,7 @@ def _structure_generation_health_checks(
     )
     evidence_output = (
         f"retained={retained} reclaimable={reclaimable} "
+        f"retained_count_exact={status.get('retained_generation_count_is_exact')} "
         f"retention_floor={status.get('retention_floor')} "
         f"cleanup_snapshot_id={cleanup_snapshot_id} "
         f"cleanup_phase={cleanup_phase} "
@@ -987,12 +1015,18 @@ def _build_health_checks(
             0.0,
             now_s - int(latest_defer["observed_at_ms"]) / 1_000,
         )
+        defer_status = (
+            "fail"
+            if queued_age_s
+            > int(getattr(settings, "structure_publication_sla_s", 25 * 3600))
+            else "warn"
+        )
         checks["snapshot:producer_defer"] = [
             {
                 "componentId": "snapshot-scheduler",
                 "componentType": "component",
                 "observedValue": latest_defer["reason"],
-                "status": "warn",
+                "status": defer_status,
                 "output": (
                     f"queued_age_seconds={round(queued_age_s, 1)} "
                     f"observed_age_seconds={round(observed_age_s, 1)}"
@@ -1000,7 +1034,7 @@ def _build_health_checks(
                 "time": _utc_now_iso(),
             }
         ]
-        overall = _severity(overall, "warn")
+        overall = _severity(overall, defer_status)
     if latest_attempt is None:
         attempt_value = "never-started"
         # Existing installations can have valid published truth from before
@@ -1117,7 +1151,10 @@ def _build_health_checks(
         generation_status = store.structure_generation_status(
             retain_generations=int(
                 getattr(settings, "structure_generation_retention_floor", 2)
-            )
+            ),
+            pressure_probe_limit=int(
+                getattr(settings, "structure_generation_pressure_fail_count", 8)
+            ),
         )
         generation_checks = _structure_generation_health_checks(
             generation_status,

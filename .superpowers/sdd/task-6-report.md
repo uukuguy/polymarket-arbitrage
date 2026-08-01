@@ -60,3 +60,45 @@ GREEN evidence:
 - Cleanup intentionally preserves immutable proof skeleton metadata. Capacity
   health measures unreclaimed bulk generations; SQLite file shrink/VACUUM is a
   separate operator concern and is not performed automatically.
+
+## Review hardening
+
+The first independent review found no Critical issues and requested six related
+root-cause corrections. They are now implemented as one coherent authority and
+boundedness refinement:
+
+- Status no longer shares the schema-initializing writer helper. It opens
+  SQLite with `mode=ro` plus `query_only`; compare was already read-only. Trace
+  contracts reject DDL/DML/repair, and a missing DB parent is not created.
+- Health fails Quote-priority defer or active comparison progress beyond the
+  Structure SLA. Status prefers next-generation active comparison progress over
+  the sealed current receipt, while still fully authenticating the current
+  pointer-bound receipt digest and identity.
+- Initial cleanup authentication failures append an immutable digest-bound
+  blocked observation without creating deletion authority. A later authenticated
+  start appends an authorized observation, so health sees one stable latest
+  state rather than a transient return value.
+- Cleanup progress is single-slot, composite-bound to
+  `(snapshot_id, publication_id)`, and receipt-digest authorized. Component
+  DELETE triggers require that same pair, the exact component phase, no blocked
+  reason, sealed receipt digest, complete count contract, validation hash, and
+  accepted certification marker. Forged cross-publication, wrong-phase, and
+  blocked rows cannot delete bulk evidence even through direct SQL.
+- Published history uses partial composite indexes. Pressure is a bounded
+  `fail_threshold + 1` probe with explicit lower-bound/exact semantics; retention
+  floor and oldest candidate queries are index searches. EXPLAIN contracts reject
+  table scans and temporary sort B-trees.
+- First backfill no longer performs six source `COUNT(*)` scans or generation
+  recounts after each chunk. Durable committed counts increment by each keyset
+  chunk; each component seals its exact expected count only at cursor exhaustion;
+  all six exhausted components then enter the existing bounded certification and
+  comparison chain. Trace tests run the complete `max_rows=1` backfill and find
+  no COUNT statement.
+- The manual now classifies status/compare under daily read-only and
+  backfill/cleanup under local mutation.
+
+Review-fix verification:
+
+- Reviewer reproducer and focused/expanded suites: all passed.
+- Full M1 gate: **2997 passed, 1 skipped, 1 xfailed** in 522.59 seconds.
+- Ruff, docs contract, planning no-drift, and diff checks passed.

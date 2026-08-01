@@ -35,6 +35,7 @@ def test_structure_generation_health_exposes_stalled_publication_and_cleanup_pre
             "pointer_snapshot_id": 9,
             "generation_count_agrees": True,
             "generation_hash_agrees": True,
+            "comparison_authenticated": True,
             "publication": {
                 "status": "writing",
                 "write_component": "markets",
@@ -54,8 +55,9 @@ def test_structure_generation_health_exposes_stalled_publication_and_cleanup_pre
                 "checkpoint_at_ms": 1_000,
                 "blocked_reason": "generation-entered-retention-floor",
             },
-            "retained_generation_count": 9,
-            "reclaimable_generation_count": 7,
+            "retained_generation_count_lower_bound": 9,
+            "retained_generation_count_is_exact": False,
+            "reclaimable_generation_count_lower_bound": 7,
             "retention_floor": 2,
         },
         now_ms=101_001,
@@ -66,11 +68,40 @@ def test_structure_generation_health_exposes_stalled_publication_and_cleanup_pre
     )
     assert checks["snapshot:structure_generation"][0]["status"] == "fail"
     assert "stage=writing" in checks["snapshot:structure_generation"][0]["output"]
-    assert checks["snapshot:structure_generation_comparison"][0]["status"] == "warn"
+    assert checks["snapshot:structure_generation_comparison"][0]["status"] == "fail"
     assert checks["snapshot:structure_generation_evidence"][0]["status"] == "fail"
     assert "blocked_reason=generation-entered-retention-floor" in checks[
         "snapshot:structure_generation_evidence"
     ][0]["output"]
+
+
+def test_structure_generation_health_fails_stale_active_comparison() -> None:
+    checks = health_module._structure_generation_health_checks(
+        {
+            "pointer_snapshot_id": 9,
+            "generation_count_agrees": True,
+            "generation_hash_agrees": True,
+            "comparison_authenticated": True,
+            "publication": {"status": "published", "checkpoint_at_ms": 100_000},
+            "comparison": {
+                "generation_snapshot_id": 10,
+                "phase": "generation-universe",
+                "cursor": "market-9",
+                "checkpoint_at_ms": 1_000,
+                "receipt_present": False,
+            },
+            "retained_generation_count_lower_bound": 2,
+            "retained_generation_count_is_exact": True,
+            "reclaimable_generation_count_lower_bound": 0,
+            "retention_floor": 2,
+        },
+        now_ms=102_000,
+        read_mode="legacy",
+        publication_sla_s=100,
+        pressure_warn_count=4,
+        pressure_fail_count=8,
+    )
+    assert checks["snapshot:structure_generation_comparison"][0]["status"] == "fail"
 
 
 @pytest.mark.parametrize(
@@ -718,6 +749,24 @@ def test_health_surfaces_restart_visible_quote_priority_defer(
     assert defer["status"] == "warn"
     assert "queued_age_seconds=" in defer["output"]
     assert "observed_age_seconds=" in defer["output"]
+
+
+def test_health_fails_quote_priority_defer_older_than_structure_sla(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    now_ms = int(time.time() * 1_000)
+    daemon_settings_for_test.structure_publication_sla_s = 100
+    SQLiteStore(daemon_settings_for_test.db_path).record_structure_defer(
+        reason="quote-pipeline-active",
+        queued_at_ms=now_ms - 101_000,
+        observed_at_ms=now_ms - 1_000,
+    )
+    response = http_test_client.get("/health")
+    assert response.status_code == 503
+    assert response.json()["checks"]["snapshot:producer_defer"][0]["status"] == "fail"
 
 
 def test_health_fails_a_stalled_snapshot_attempt_while_truth_is_fresh(

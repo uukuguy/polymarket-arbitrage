@@ -139,10 +139,13 @@ def test_structure_generation_status_cli_prints_stable_json(
             pass
 
         def init_schema(self) -> None:
-            pass
+            raise AssertionError("read-only status must not initialize schema")
 
-        def structure_generation_status(self, *, retain_generations: int):
+        def structure_generation_status(
+            self, *, retain_generations: int, pressure_probe_limit: int
+        ):
             assert retain_generations == 2
+            assert pressure_probe_limit == 8
             return {"pointer_snapshot_id": 7, "retention_floor": 2}
 
     monkeypatch.setattr(
@@ -157,6 +160,26 @@ def test_structure_generation_status_cli_prints_stable_json(
         "pointer_snapshot_id": 7,
         "retention_floor": 2,
     }
+
+
+def test_structure_generation_status_does_not_create_missing_database_parent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from polyarb.snapshot import cli as cli_module
+
+    path = tmp_path / "must-not-exist" / "state.db"
+    monkeypatch.setattr(
+        cli_module,
+        "load_settings",
+        lambda: SimpleNamespace(db_path=path),
+    )
+    result = runner.invoke(app, ["structure-generation-status"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "available": False,
+        "error": "structure-generation-status-unavailable",
+    }
+    assert not path.parent.exists()
 
 
 def test_structure_generation_compare_cli_fails_with_stable_json_when_unavailable(

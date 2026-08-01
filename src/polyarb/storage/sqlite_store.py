@@ -79,6 +79,51 @@ _STRUCTURE_CERTIFICATION_COMPONENTS = (
 )
 
 
+def _migrate_structure_cleanup_progress_binding(con: sqlite3.Connection) -> None:
+    """Rebuild the pre-review progress table with one-slot composite authority."""
+    columns = {
+        str(row[1])
+        for row in con.execute("PRAGMA table_info(structure_generation_cleanup_progress)")
+    }
+    if not columns or "slot" in columns:
+        return
+    for component in _STRUCTURE_COMPONENTS:
+        con.execute(
+            f"DROP TRIGGER IF EXISTS trg_structure_generation_{component}_frozen_delete"
+        )
+    con.execute(
+        "ALTER TABLE structure_generation_cleanup_progress "
+        "RENAME TO structure_generation_cleanup_progress_v1"
+    )
+    con.execute(
+        "CREATE TABLE structure_generation_cleanup_progress("
+        "slot INTEGER NOT NULL DEFAULT 1 UNIQUE CHECK(slot=1),"
+        "generation_snapshot_id INTEGER PRIMARY KEY REFERENCES snapshots(id),"
+        "publication_id TEXT NOT NULL UNIQUE,phase TEXT NOT NULL CHECK(phase IN "
+        "('events','event_tags','memberships','group_truth','markets','issues')) ,"
+        "rows_deleted INTEGER NOT NULL DEFAULT 0 CHECK(rows_deleted>=0),"
+        "started_at_ms INTEGER NOT NULL CHECK(started_at_ms>=0),"
+        "checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms>=0),"
+        "blocked_reason TEXT,authorization_digest TEXT NOT NULL CHECK("
+        "length(authorization_digest)=64),FOREIGN KEY(generation_snapshot_id,"
+        "publication_id) REFERENCES structure_publications(snapshot_id,publication_id))"
+    )
+    con.execute(
+        "INSERT INTO structure_generation_cleanup_progress("
+        "generation_snapshot_id,publication_id,phase,rows_deleted,started_at_ms,"
+        "checkpoint_at_ms,blocked_reason,authorization_digest) SELECT "
+        "v.generation_snapshot_id,v.publication_id,v.phase,v.rows_deleted,"
+        "v.started_at_ms,v.checkpoint_at_ms,v.blocked_reason,cr.receipt_digest FROM "
+        "structure_generation_cleanup_progress_v1 v JOIN structure_publications p "
+        "ON p.snapshot_id=v.generation_snapshot_id AND p.publication_id=v.publication_id "
+        "JOIN structure_generation_comparison_receipts cr ON "
+        "cr.generation_snapshot_id=v.generation_snapshot_id AND "
+        "cr.publication_id=v.publication_id WHERE v.blocked_reason IS NULL "
+        "ORDER BY v.checkpoint_at_ms DESC LIMIT 1"
+    )
+    con.execute("DROP TABLE structure_generation_cleanup_progress_v1")
+
+
 def _install_structure_generation_freeze_triggers(con: sqlite3.Connection) -> None:
     """Reject every generation-row mutation after certification starts."""
     for component in _STRUCTURE_COMPONENTS:
@@ -93,12 +138,23 @@ def _install_structure_generation_freeze_triggers(con: sqlite3.Connection) -> No
                     "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
                     (trigger,),
                 ).fetchone()
-                if installed is not None and "cleanup_progress" not in str(installed[0]):
+                if installed is not None and "authorization_digest" not in str(installed[0]):
                     con.execute(f"DROP TRIGGER {trigger}")  # noqa: S608
             cleanup_guard = (
                 " AND NOT EXISTS (SELECT 1 FROM "
-                "structure_generation_cleanup_progress r WHERE "
-                f"r.generation_snapshot_id={reference}.snapshot_id)"
+                "structure_generation_cleanup_progress r JOIN structure_publications p "
+                "ON p.snapshot_id=r.generation_snapshot_id AND "
+                "p.publication_id=r.publication_id JOIN "
+                "structure_generation_comparison_receipts cr ON "
+                "cr.generation_snapshot_id=r.generation_snapshot_id AND "
+                "cr.publication_id=r.publication_id WHERE "
+                f"r.generation_snapshot_id={reference}.snapshot_id AND "
+                f"r.phase='{component}' AND r.blocked_reason IS NULL AND "
+                "r.authorization_digest=cr.receipt_digest AND "
+                "cr.generation_validation_hash=p.validation_hash AND "
+                "p.status='published' AND p.expected_counts_json=p.committed_counts_json "
+                "AND p.certification_component IN "
+                "('bounded-complete','backfill-authenticated'))"
                 if operation == "delete"
                 else ""
             )
@@ -122,6 +178,11 @@ def _install_structure_generation_freeze_triggers(con: sqlite3.Connection) -> No
             f"CREATE TRIGGER IF NOT EXISTS trg_structure_cleanup_receipt_{operation} "
             f"BEFORE {operation.upper()} ON structure_generation_cleanup_receipts "
             "BEGIN SELECT RAISE(ABORT,'structure-cleanup-receipt-sealed'); END"
+        )
+        con.execute(
+            f"CREATE TRIGGER IF NOT EXISTS trg_structure_cleanup_observation_{operation} "
+            f"BEFORE {operation.upper()} ON structure_generation_cleanup_observations "
+            "BEGIN SELECT RAISE(ABORT,'structure-cleanup-observation-sealed'); END"
         )
 
 
@@ -191,6 +252,60 @@ def _generation_cleanup_digest(
     ).hexdigest()
 
 
+def _generation_cleanup_observation_digest(
+    *,
+    generation_snapshot_id: int,
+    publication_id: str,
+    state: str,
+    reason: str | None,
+    observed_at_ms: int,
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            (
+                generation_snapshot_id,
+                publication_id,
+                state,
+                reason,
+                observed_at_ms,
+            ),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def _append_generation_cleanup_observation(
+    con: sqlite3.Connection,
+    *,
+    generation_snapshot_id: int,
+    publication_id: str,
+    state: str,
+    reason: str | None,
+    observed_at_ms: int,
+) -> None:
+    digest = _generation_cleanup_observation_digest(
+        generation_snapshot_id=generation_snapshot_id,
+        publication_id=publication_id,
+        state=state,
+        reason=reason,
+        observed_at_ms=observed_at_ms,
+    )
+    con.execute(
+        "INSERT INTO structure_generation_cleanup_observations("
+        "generation_snapshot_id,publication_id,state,reason,observed_at_ms,"
+        "observation_digest) VALUES (?,?,?,?,?,?)",
+        (
+            generation_snapshot_id,
+            publication_id,
+            state,
+            reason,
+            observed_at_ms,
+            digest,
+        ),
+    )
+
+
 def _active_generation_cleanup_authentication_error(
     con: sqlite3.Connection,
     *,
@@ -199,7 +314,8 @@ def _active_generation_cleanup_authentication_error(
 ) -> str | None:
     """Revalidate the frozen proof skeleton before every destructive chunk."""
     publication = con.execute(
-        "SELECT validation_hash,certification_hash FROM structure_publications "
+        "SELECT validation_hash,certification_hash,expected_counts_json,"
+        "committed_counts_json,certification_component FROM structure_publications "
         "WHERE publication_id=? AND snapshot_id=? AND status='published'",
         (publication_id, snapshot_id),
     ).fetchone()
@@ -213,6 +329,13 @@ def _active_generation_cleanup_authentication_error(
     ).fetchone()
     if publication is None or receipt is None:
         return "generation-authentication-missing"
+    progress_auth = con.execute(
+        "SELECT authorization_digest FROM structure_generation_cleanup_progress "
+        "WHERE generation_snapshot_id=? AND publication_id=?",
+        (snapshot_id, publication_id),
+    ).fetchone()
+    if progress_auth is None or progress_auth[0] != receipt[9]:
+        return "cleanup-authorization-digest-mismatch"
     expected_digest = _comparison_receipt_digest(
         generation_snapshot_id=snapshot_id,
         publication_id=publication_id,
@@ -230,6 +353,17 @@ def _active_generation_cleanup_authentication_error(
         return "comparison-receipt-digest-mismatch"
     if publication[0] != publication[1] or receipt[7] != publication[0]:
         return "generation-validation-hash-mismatch"
+    if publication[2] != publication[3] or publication[4] not in {
+        "bounded-complete",
+        "backfill-authenticated",
+    }:
+        return "generation-count-contract-mismatch"
+    try:
+        committed = json.loads(str(publication[3]))
+    except (TypeError, ValueError):
+        return "generation-count-contract-mismatch"
+    if int(receipt[2]) != int(committed.get("markets", -1)):
+        return "generation-count-contract-mismatch"
     return None
 
 
@@ -874,9 +1008,15 @@ def resolve_structure_read_context(
 
 def compare_current_structure_generation(
     db_path: Path | str,
+    *,
+    trace_callback: Callable[[str], None] | None = None,
 ) -> StructureReadComparison:
     """Return the deterministic dual-read result consumed by strict health."""
-    with structure_read_transaction(db_path, mode="compare") as read:
+    with structure_read_transaction(
+        db_path,
+        mode="compare",
+        trace_callback=trace_callback,
+    ) as read:
         assert read.comparison is not None
         return read.comparison
 
@@ -1240,9 +1380,9 @@ class SQLiteStore:
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = Path(db_path)
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _connect_writer(self) -> sqlite3.Connection:
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(
             self._db_path,
             isolation_level=None,
@@ -1348,9 +1488,15 @@ class SQLiteStore:
             _ensure_column(
                 "structure_generation_comparison_receipts", "receipt_digest", "TEXT"
             )
+            _ensure_column(
+                "structure_generation_cleanup_progress",
+                "authorization_digest",
+                "TEXT",
+            )
             _ensure_column("structure_sync_event_staging", "source_ordinal", "INTEGER")
             _ensure_column("structure_sync_market_staging", "source_ordinal", "INTEGER")
             _repair_current_structure_generation_authentication(con)
+            _migrate_structure_cleanup_progress_binding(con)
             con.commit()
             _install_structure_generation_freeze_triggers(con)
             _install_structure_comparison_receipt_triggers(con)
@@ -1473,7 +1619,19 @@ class SQLiteStore:
                         "ALTER TABLE structure_generation_comparison_receipts "
                         "ADD COLUMN receipt_digest TEXT"
                     )
+                cleanup_columns = {
+                    str(row[1])
+                    for row in con.execute(
+                        "PRAGMA table_info(structure_generation_cleanup_progress)"
+                    )
+                }
+                if "authorization_digest" not in cleanup_columns:
+                    con.execute(
+                        "ALTER TABLE structure_generation_cleanup_progress "
+                        "ADD COLUMN authorization_digest TEXT"
+                    )
                 _repair_current_structure_generation_authentication(con)
+                _migrate_structure_cleanup_progress_binding(con)
                 con.commit()
                 _install_structure_generation_freeze_triggers(con)
                 _install_structure_comparison_receipt_triggers(con)
@@ -3575,11 +3733,21 @@ class SQLiteStore:
         self,
         *,
         retain_generations: int = 2,
+        pressure_probe_limit: int = 8,
+        trace_callback: Callable[[str], None] | None = None,
     ) -> dict[str, object]:
-        """Return bounded metadata-only rollout and evidence pressure status."""
+        """Return bounded read-only rollout and evidence pressure metadata."""
         if retain_generations < 2:
             raise ValueError("retain_generations must preserve current and rollback")
-        with sqlite3.connect(self._db_path) as con:
+        if pressure_probe_limit < retain_generations:
+            raise ValueError("pressure_probe_limit must cover retention floor")
+        with sqlite3.connect(
+            f"file:{self._db_path}?mode=ro",
+            uri=True,
+        ) as con:
+            con.execute("PRAGMA query_only=ON")
+            if trace_callback is not None:
+                con.set_trace_callback(trace_callback)
             pointer = con.execute(
                 "SELECT g.snapshot_id,g.publication_id,g.validation_hash,g.counts_json,"
                 "g.certification_component,g.comparison_receipt_digest,g.switched_at_ms,"
@@ -3592,41 +3760,66 @@ class SQLiteStore:
                 "SELECT publication_id,snapshot_id,status,normalization_component,"
                 "normalization_source_cursor,write_component,write_row_cursor,"
                 "checkpoint_at_ms FROM structure_publications "
-                "ORDER BY checkpoint_at_ms DESC,rowid DESC LIMIT 1"
+                "WHERE status IN ('normalizing','writing','ready') "
+                "ORDER BY checkpoint_at_ms DESC,publication_id DESC LIMIT 1"
             ).fetchone()
+            if publication is None:
+                publication = con.execute(
+                    "SELECT p.publication_id,p.snapshot_id,p.status,"
+                    "p.normalization_component,p.normalization_source_cursor,"
+                    "p.write_component,p.write_row_cursor,p.checkpoint_at_ms FROM "
+                    "current_structure_generation g JOIN structure_publications p "
+                    "ON p.snapshot_id=g.snapshot_id AND "
+                    "p.publication_id=g.publication_id WHERE g.id=1"
+                ).fetchone()
             comparison = con.execute(
                 "SELECT cp.generation_snapshot_id,cp.phase,cp.row_cursor_json,"
-                "cp.checkpoint_at_ms,cr.receipt_digest FROM "
-                "current_structure_generation g LEFT JOIN "
-                "structure_generation_comparison_progress cp "
-                "ON cp.generation_snapshot_id=g.snapshot_id LEFT JOIN "
-                "structure_generation_comparison_receipts cr "
-                "ON cr.generation_snapshot_id=g.snapshot_id WHERE g.id=1"
+                "cp.checkpoint_at_ms,NULL FROM structure_generation_comparison_progress cp "
+                "WHERE cp.phase!='sealed' ORDER BY cp.checkpoint_at_ms DESC,"
+                "cp.publication_id DESC LIMIT 1"
             ).fetchone()
+            if comparison is None:
+                comparison = con.execute(
+                    "SELECT g.snapshot_id,cp.phase,cp.row_cursor_json,"
+                    "cp.checkpoint_at_ms,cr.receipt_digest FROM "
+                    "current_structure_generation g LEFT JOIN "
+                    "structure_generation_comparison_progress cp "
+                    "ON cp.generation_snapshot_id=g.snapshot_id LEFT JOIN "
+                    "structure_generation_comparison_receipts cr "
+                    "ON cr.generation_snapshot_id=g.snapshot_id WHERE g.id=1"
+                ).fetchone()
             active_cleanup = con.execute(
                 "SELECT generation_snapshot_id,phase,rows_deleted,checkpoint_at_ms,"
                 "blocked_reason FROM structure_generation_cleanup_progress LIMIT 1"
             ).fetchone()
-            retained_generation_count = int(
-                con.execute(
-                    "SELECT COUNT(*) FROM structure_publications p LEFT JOIN "
-                    "structure_generation_cleanup_receipts r "
-                    "ON r.generation_snapshot_id=p.snapshot_id "
-                    "WHERE p.status='published' AND r.generation_snapshot_id IS NULL"
-                ).fetchone()[0]
-            )
-            retention_floor_ids = [
-                int(row[0])
-                for row in con.execute(
-                    "SELECT p.snapshot_id FROM structure_publications p "
-                    "LEFT JOIN structure_generation_cleanup_receipts r "
-                    "ON r.generation_snapshot_id=p.snapshot_id "
-                    "WHERE p.status='published' AND r.generation_snapshot_id IS NULL "
-                    "ORDER BY p.published_at_ms DESC,p.snapshot_id DESC LIMIT ?",
-                    (retain_generations,),
-                )
-            ]
+            generation_probe = con.execute(
+                "SELECT p.snapshot_id FROM structure_publications p WHERE "
+                "p.status='published' AND p.published_at_ms>=0 AND NOT EXISTS (SELECT 1 FROM "
+                "structure_generation_cleanup_receipts r WHERE "
+                "r.generation_snapshot_id=p.snapshot_id) ORDER BY "
+                "p.published_at_ms DESC,p.snapshot_id DESC LIMIT ?",
+                (pressure_probe_limit + 1,),
+            ).fetchall()
+            cleanup_observation = con.execute(
+                "SELECT generation_snapshot_id,publication_id,state,reason,"
+                "observed_at_ms,observation_digest FROM "
+                "structure_generation_cleanup_observations ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            pointer_receipt = None
+            if pointer is not None:
+                pointer_receipt = con.execute(
+                    "SELECT publication_id,legacy_snapshot_id,legacy_market_count,"
+                    "generation_market_count,legacy_universe_hash,"
+                    "generation_universe_hash,legacy_source_truth_hash,"
+                    "generation_source_truth_hash,generation_validation_hash,"
+                    "created_at_ms,receipt_digest FROM "
+                    "structure_generation_comparison_receipts WHERE "
+                    "generation_snapshot_id=?",
+                    (int(pointer[0]),),
+                ).fetchone()
         count_agrees = hash_agrees = False
+        comparison_authenticated = pointer is None
+        comparison_mismatch_reasons: list[str] = []
         pointer_snapshot_id = pointer_publication_id = switched_at_ms = None
         if pointer is not None:
             pointer_snapshot_id = int(pointer[0])
@@ -3635,12 +3828,67 @@ class SQLiteStore:
             count_agrees = pointer[3] == pointer[9]
             hash_agrees = pointer[2] == pointer[7] == pointer[8]
             count_agrees = count_agrees and pointer[4] == pointer[10]
+            if pointer_receipt is None:
+                comparison_mismatch_reasons.append("comparison-receipt-missing")
+            else:
+                expected_digest = _comparison_receipt_digest(
+                    generation_snapshot_id=pointer_snapshot_id,
+                    publication_id=str(pointer_receipt[0]),
+                    legacy_snapshot_id=int(pointer_receipt[1]),
+                    legacy_market_count=int(pointer_receipt[2]),
+                    generation_market_count=int(pointer_receipt[3]),
+                    legacy_universe_hash=str(pointer_receipt[4]),
+                    generation_universe_hash=str(pointer_receipt[5]),
+                    legacy_source_truth_hash=str(pointer_receipt[6]),
+                    generation_source_truth_hash=str(pointer_receipt[7]),
+                    generation_validation_hash=str(pointer_receipt[8]),
+                    created_at_ms=int(pointer_receipt[9]),
+                )
+                if (
+                    pointer_receipt[10] != expected_digest
+                    or pointer[5] != expected_digest
+                ):
+                    comparison_mismatch_reasons.append(
+                        "comparison-receipt-digest-mismatch"
+                    )
+                if (
+                    pointer_receipt[0] != pointer_publication_id
+                    or pointer_receipt[8] != pointer[2]
+                ):
+                    comparison_mismatch_reasons.append(
+                        "comparison-receipt-identity-mismatch"
+                    )
+            comparison_authenticated = not comparison_mismatch_reasons
+        probe_exact = len(generation_probe) <= pressure_probe_limit
+        retained_lower_bound = min(len(generation_probe), pressure_probe_limit + 1)
+        retention_floor_ids = [
+            int(row[0]) for row in generation_probe[:retain_generations]
+        ]
+        cleanup_blocked_reason = None
+        if cleanup_observation is not None:
+            observation_digest = _generation_cleanup_observation_digest(
+                generation_snapshot_id=int(cleanup_observation[0]),
+                publication_id=str(cleanup_observation[1]),
+                state=str(cleanup_observation[2]),
+                reason=(
+                    None
+                    if cleanup_observation[3] is None
+                    else str(cleanup_observation[3])
+                ),
+                observed_at_ms=int(cleanup_observation[4]),
+            )
+            if cleanup_observation[5] != observation_digest:
+                cleanup_blocked_reason = "cleanup-observation-digest-mismatch"
+            elif cleanup_observation[2] == "blocked":
+                cleanup_blocked_reason = str(cleanup_observation[3])
         return {
             "pointer_snapshot_id": pointer_snapshot_id,
             "pointer_publication_id": pointer_publication_id,
             "pointer_switched_at_ms": switched_at_ms,
             "generation_count_agrees": count_agrees,
             "generation_hash_agrees": hash_agrees,
+            "comparison_authenticated": comparison_authenticated,
+            "comparison_mismatch_reasons": comparison_mismatch_reasons,
             "publication": None
             if publication is None
             else {
@@ -3671,13 +3919,63 @@ class SQLiteStore:
                 "checkpoint_at_ms": int(active_cleanup[3]),
                 "blocked_reason": active_cleanup[4],
             },
-            "retained_generation_count": retained_generation_count,
+            "cleanup_blocked_reason": cleanup_blocked_reason,
+            "retained_generation_count_lower_bound": retained_lower_bound,
+            "retained_generation_count_is_exact": probe_exact,
             "retention_floor_generation_ids": retention_floor_ids,
-            "reclaimable_generation_count": max(
-                0, retained_generation_count - retain_generations
+            "reclaimable_generation_count_lower_bound": max(
+                0, retained_lower_bound - retain_generations
             ),
             "retention_floor": retain_generations,
         }
+
+    def structure_generation_query_plans(
+        self,
+        *,
+        retain_generations: int,
+        pressure_probe_limit: int,
+    ) -> dict[str, tuple[str, ...]]:
+        """Expose stable SQLite planner evidence for bounded operator queries."""
+        queries = {
+            "pressure": (
+                "SELECT p.snapshot_id FROM structure_publications p WHERE "
+                "p.status='published' AND p.published_at_ms>=0 AND NOT EXISTS (SELECT 1 FROM "
+                "structure_generation_cleanup_receipts r WHERE "
+                "r.generation_snapshot_id=p.snapshot_id) ORDER BY "
+                "p.published_at_ms DESC,p.snapshot_id DESC LIMIT ?",
+                (pressure_probe_limit + 1,),
+            ),
+            "retention_floor": (
+                "SELECT p.snapshot_id,p.publication_id FROM structure_publications p "
+                "WHERE p.status='published' AND p.published_at_ms>=0 AND NOT EXISTS (SELECT 1 FROM "
+                "structure_generation_cleanup_receipts r WHERE "
+                "r.generation_snapshot_id=p.snapshot_id) ORDER BY "
+                "p.published_at_ms DESC,p.snapshot_id DESC LIMIT ?",
+                (retain_generations,),
+            ),
+            "oldest_candidate": (
+                "SELECT p.snapshot_id,p.publication_id FROM structure_publications p "
+                "WHERE p.status='published' AND p.published_at_ms>=0 AND NOT EXISTS (SELECT 1 FROM "
+                "structure_generation_cleanup_receipts r WHERE "
+                "r.generation_snapshot_id=p.snapshot_id) AND p.snapshot_id NOT IN "
+                "(SELECT p2.snapshot_id FROM structure_publications p2 WHERE "
+                "p2.status='published' AND p2.published_at_ms>=0 AND NOT EXISTS (SELECT 1 FROM "
+                "structure_generation_cleanup_receipts r2 WHERE "
+                "r2.generation_snapshot_id=p2.snapshot_id) ORDER BY "
+                "p2.published_at_ms DESC,p2.snapshot_id DESC LIMIT ?) ORDER BY "
+                "p.published_at_ms,p.snapshot_id LIMIT 1",
+                (retain_generations,),
+            ),
+        }
+        with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as con:
+            con.execute("PRAGMA query_only=ON")
+            return {
+                name: tuple(
+                    str(row[3])
+                    for row in con.execute(f"EXPLAIN QUERY PLAN {sql}", params)
+                )
+                for name, (sql, params) in queries.items()
+            }
 
     def cleanup_structure_generation_evidence(
         self,
@@ -3702,9 +4000,9 @@ class SQLiteStore:
             ).fetchone()
             retained = con.execute(
                 "SELECT p.snapshot_id,p.publication_id FROM structure_publications p "
-                "LEFT JOIN structure_generation_cleanup_receipts r "
-                "ON r.generation_snapshot_id=p.snapshot_id "
-                "WHERE p.status='published' AND r.generation_snapshot_id IS NULL "
+                "WHERE p.status='published' AND p.published_at_ms>=0 AND NOT EXISTS (SELECT 1 FROM "
+                "structure_generation_cleanup_receipts r WHERE "
+                "r.generation_snapshot_id=p.snapshot_id) "
                 "ORDER BY p.published_at_ms DESC,p.snapshot_id DESC LIMIT ?",
                 (retain_generations,),
             ).fetchall()
@@ -3712,14 +4010,15 @@ class SQLiteStore:
             if active is None:
                 candidate = con.execute(
                     "SELECT p.snapshot_id,p.publication_id FROM structure_publications p "
-                    "LEFT JOIN structure_generation_cleanup_receipts r "
-                    "ON r.generation_snapshot_id=p.snapshot_id "
-                    "WHERE p.status='published' AND r.generation_snapshot_id IS NULL "
+                    "WHERE p.status='published' AND p.published_at_ms>=0 AND "
+                    "NOT EXISTS (SELECT 1 FROM "
+                    "structure_generation_cleanup_receipts r WHERE "
+                    "r.generation_snapshot_id=p.snapshot_id) "
                     "AND p.snapshot_id NOT IN (SELECT p2.snapshot_id FROM "
-                    "structure_publications p2 LEFT JOIN "
-                    "structure_generation_cleanup_receipts r2 "
-                    "ON r2.generation_snapshot_id=p2.snapshot_id WHERE "
-                    "p2.status='published' AND r2.generation_snapshot_id IS NULL "
+                    "structure_publications p2 WHERE p2.status='published' AND "
+                    "p2.published_at_ms>=0 AND "
+                    "NOT EXISTS (SELECT 1 FROM structure_generation_cleanup_receipts r2 "
+                    "WHERE r2.generation_snapshot_id=p2.snapshot_id) "
                     "ORDER BY p2.published_at_ms DESC,p2.snapshot_id DESC LIMIT ?) "
                     "ORDER BY p.published_at_ms,p.snapshot_id LIMIT 1",
                     (retain_generations,),
@@ -3745,8 +4044,8 @@ class SQLiteStore:
                     (snapshot_id, publication_id),
                 ).fetchone()
                 publication = con.execute(
-                    "SELECT window_id,committed_counts_json,validation_hash,"
-                    "certification_hash,certification_component FROM "
+                    "SELECT window_id,expected_counts_json,committed_counts_json,"
+                    "validation_hash,certification_hash,certification_component FROM "
                     "structure_publications WHERE publication_id=? AND snapshot_id=? "
                     "AND status='published'",
                     (publication_id, snapshot_id),
@@ -3768,14 +4067,31 @@ class SQLiteStore:
                     created_at_ms=int(receipt[8]),
                 ):
                     blocked_reason = "comparison-receipt-digest-mismatch"
-                elif publication[2] != publication[3] or receipt[7] != publication[2]:
+                elif publication[3] != publication[4] or receipt[7] != publication[3]:
                     blocked_reason = "generation-validation-hash-mismatch"
+                elif publication[1] != publication[2] or publication[5] not in {
+                    "bounded-complete",
+                    "backfill-authenticated",
+                }:
+                    blocked_reason = "generation-count-contract-mismatch"
+                elif int(receipt[2]) != int(
+                    json.loads(str(publication[2])).get("markets", -1)
+                ):
+                    blocked_reason = "generation-count-contract-mismatch"
                 elif con.execute(
                     "SELECT 1 FROM current_structure_generation WHERE snapshot_id=?",
                     (snapshot_id,),
                 ).fetchone() is not None:
                     blocked_reason = "generation-became-current"
                 if blocked_reason is not None:
+                    _append_generation_cleanup_observation(
+                        con,
+                        generation_snapshot_id=snapshot_id,
+                        publication_id=publication_id,
+                        state="blocked",
+                        reason=blocked_reason,
+                        observed_at_ms=now_ms,
+                    )
                     con.execute("COMMIT")
                     return {
                         "blocked": True,
@@ -3788,8 +4104,17 @@ class SQLiteStore:
                 con.execute(
                     "INSERT INTO structure_generation_cleanup_progress("
                     "generation_snapshot_id,publication_id,phase,rows_deleted,"
-                    "started_at_ms,checkpoint_at_ms) VALUES (?,?,'events',0,?,?)",
-                    (snapshot_id, publication_id, now_ms, now_ms),
+                    "started_at_ms,checkpoint_at_ms,authorization_digest) "
+                    "VALUES (?,?,'events',0,?,?,?)",
+                    (snapshot_id, publication_id, now_ms, now_ms, receipt[9]),
+                )
+                _append_generation_cleanup_observation(
+                    con,
+                    generation_snapshot_id=snapshot_id,
+                    publication_id=publication_id,
+                    state="authorized",
+                    reason=None,
+                    observed_at_ms=now_ms,
                 )
                 active = (snapshot_id, publication_id, "events", 0)
             snapshot_id, publication_id, phase, prior_deleted = (
@@ -4008,7 +4333,10 @@ class SQLiteStore:
             con.close()
 
     def backfill_current_structure_generation(
-        self, max_rows: int
+        self,
+        max_rows: int,
+        *,
+        trace_callback: Callable[[str], None] | None = None,
     ) -> BackfillCheckpoint:
         """Migrate at most ``max_rows`` legacy rows, resuming component/cursor."""
         if max_rows < 1:
@@ -4020,6 +4348,8 @@ class SQLiteStore:
         cursor: str | None = None
         snapshot_id: int | None = None
         try:
+            if trace_callback is not None:
+                con.set_trace_callback(trace_callback)
             con.execute("BEGIN IMMEDIATE")
             pointer = con.execute(
                 "SELECT snapshot_id,publication_id,comparison_receipt_digest "
@@ -4051,7 +4381,8 @@ class SQLiteStore:
                 return BackfillCheckpoint(snapshot_id, 0, None, True)
             publication = con.execute(
                 "SELECT publication_id,snapshot_id,window_id,status,write_component,"
-                "write_row_cursor,expected_counts_json,certification_component "
+                "write_row_cursor,expected_counts_json,committed_counts_json,"
+                "certification_component "
                 "FROM structure_publications "
                 "WHERE status IN ('writing','ready') AND window_id LIKE 'backfill:%' "
                 "ORDER BY created_at_ms DESC LIMIT 1"
@@ -4068,32 +4399,7 @@ class SQLiteStore:
                 snapshot_id = int(source[0])
                 window_id = f"backfill:{snapshot_id}"
                 publication_id = f"backfill:{snapshot_id}"
-                expected = {
-                    "events": int(con.execute(
-                        "SELECT COUNT(*) FROM events WHERE snapshot_id=?",
-                        (snapshot_id,),
-                    ).fetchone()[0]),
-                    "event_tags": int(con.execute(
-                        "SELECT COUNT(*) FROM event_tags WHERE snapshot_id=?",
-                        (snapshot_id,),
-                    ).fetchone()[0]),
-                    "memberships": int(con.execute(
-                        "SELECT COUNT(*) FROM event_market_memberships WHERE snapshot_id=?",
-                        (snapshot_id,),
-                    ).fetchone()[0]),
-                    "group_truth": int(con.execute(
-                        "SELECT COUNT(*) FROM neg_risk_group_truth WHERE snapshot_id=?",
-                        (snapshot_id,),
-                    ).fetchone()[0]),
-                    "markets": int(con.execute(
-                        "SELECT COUNT(*) FROM markets WHERE snapshot_id=?",
-                        (snapshot_id,),
-                    ).fetchone()[0]),
-                    "issues": int(con.execute(
-                        "SELECT COUNT(*) FROM validation_issues WHERE snapshot_id=?",
-                        (snapshot_id,),
-                    ).fetchone()[0]),
-                }
+                expected = {component: 0 for component in _STRUCTURE_COMPONENTS}
                 con.execute(
                     "INSERT INTO structure_sync_windows(id,status,started_at_ms,"
                     "checkpoint_at_ms) SELECT ?,'complete',taken_at_ms,finished_at_ms "
@@ -4111,7 +4417,7 @@ class SQLiteStore:
                         publication_id,
                         window_id,
                         snapshot_id,
-                        json.dumps(expected, sort_keys=True, separators=(",", ":")),
+                    json.dumps(expected, sort_keys=True, separators=(",", ":")),
                         json.dumps(zero_counts, sort_keys=True, separators=(",", ":")),
                         snapshot_id,
                     ),
@@ -4124,6 +4430,7 @@ class SQLiteStore:
                     "events",
                     None,
                     json.dumps(expected, sort_keys=True, separators=(",", ":")),
+                    json.dumps(zero_counts, sort_keys=True, separators=(",", ":")),
                     None,
                 )
             publication_id = str(publication[0])
@@ -4132,8 +4439,9 @@ class SQLiteStore:
             component = str(publication[4])
             cursor = None if publication[5] is None else str(publication[5])
             expected = json.loads(str(publication[6]))
+            committed = json.loads(str(publication[7]))
             certification_component = (
-                None if publication[7] is None else str(publication[7])
+                None if publication[8] is None else str(publication[8])
             )
             if status == "ready":
                 if certification_component not in {
@@ -4202,6 +4510,7 @@ class SQLiteStore:
                     ),
                 }
                 component_index = _STRUCTURE_COMPONENTS.index(component)
+                copy_complete = False
                 while copied_rows == 0 and component_index < len(_STRUCTURE_COMPONENTS):
                     component = _STRUCTURE_COMPONENTS[component_index]
                     source_table, columns, key_columns = specs[component]
@@ -4238,6 +4547,7 @@ class SQLiteStore:
                             selected,
                         )
                         copied_rows = len(selected)
+                        committed[component] = int(committed[component]) + copied_rows
                         column_indexes = {
                             name: index for index, name in enumerate(columns)
                         }
@@ -4252,26 +4562,41 @@ class SQLiteStore:
                             (snapshot_id, *next_values),
                         ).fetchone()
                         if more is None and component_index + 1 < len(_STRUCTURE_COMPONENTS):
+                            expected[component] = int(committed[component])
                             component_index += 1
                             component = _STRUCTURE_COMPONENTS[component_index]
                             cursor = None
+                        elif more is None:
+                            expected[component] = int(committed[component])
+                            copy_complete = True
                     elif component_index + 1 < len(_STRUCTURE_COMPONENTS):
+                        expected[component] = int(committed[component])
                         component_index += 1
                         component = _STRUCTURE_COMPONENTS[component_index]
                         cursor = None
                     else:
+                        expected[component] = int(committed[component])
+                        copy_complete = True
                         break
 
-                actual = self._generation_counts(con, snapshot_id)
-                counts_json = json.dumps(actual, sort_keys=True, separators=(",", ":"))
+                counts_json = json.dumps(
+                    committed,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                expected_json = json.dumps(
+                    expected,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
                 con.execute(
                     "UPDATE structure_publications SET write_component=?,"
                     "write_prior_cursor=write_row_cursor,write_row_cursor=?,"
-                    "committed_counts_json=? WHERE publication_id=?",
-                    (component, cursor, counts_json, publication_id),
+                    "expected_counts_json=?,committed_counts_json=? "
+                    "WHERE publication_id=?",
+                    (component, cursor, expected_json, counts_json, publication_id),
                 )
-                complete = actual == expected
-                if complete:
+                if copy_complete:
                     publish_id = publication_id
                     needs_certification = True
                 con.execute("COMMIT")

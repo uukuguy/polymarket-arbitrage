@@ -253,8 +253,9 @@ def test_generation_operations_report_pressure_and_reclaim_one_safe_chain(
 
     status = store.structure_generation_status(retain_generations=2)
     assert status["pointer_snapshot_id"] == 3
-    assert status["retained_generation_count"] == 3
-    assert status["reclaimable_generation_count"] == 1
+    assert status["retained_generation_count_lower_bound"] == 3
+    assert status["retained_generation_count_is_exact"] is True
+    assert status["reclaimable_generation_count_lower_bound"] == 1
     assert status["generation_count_agrees"] is True
     assert status["generation_hash_agrees"] is True
 
@@ -361,6 +362,230 @@ def test_generation_cleanup_fails_closed_on_unauthenticated_candidate(
         assert con.execute(
             "SELECT COUNT(*) FROM structure_publications WHERE snapshot_id=1"
         ).fetchone() == (1,)
+
+
+def test_generation_status_and_compare_execute_only_read_statements(
+    generation_db: Path,
+) -> None:
+    statements: list[str] = []
+    status = SQLiteStore(generation_db).structure_generation_status(
+        retain_generations=2,
+        pressure_probe_limit=8,
+        trace_callback=statements.append,
+    )
+    comparison = sqlite_store_module.compare_current_structure_generation(
+        generation_db,
+        trace_callback=statements.append,
+    )
+    assert status["pointer_snapshot_id"] == 1
+    assert comparison.generation_snapshot_id == 1
+    forbidden = ("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "REPLACE")
+    assert not [sql for sql in statements if sql.lstrip().upper().startswith(forbidden)]
+
+
+def test_generation_status_prefers_next_active_comparison_over_current_receipt(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "next-comparison.db"
+    SQLiteStore(path).init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="one", point_current=False)
+    _seed_structure_revision(path, snapshot_id=2, market_suffix="two", point_current=True)
+    with sqlite3.connect(path) as con:
+        state = sqlite_store_module.SerializableSHA256.new()
+        state.update(b"[")
+        con.execute(
+            "INSERT INTO structure_generation_comparison_progress("
+            "publication_id,generation_snapshot_id,legacy_snapshot_id,legacy_taken_at_ms,"
+            "legacy_finished_at_ms,legacy_market_count,phase,row_cursor_json,"
+            "digest_state_json,phase_row_count,created_at_ms,checkpoint_at_ms) "
+            "VALUES ('test-publication-1',1,1,1000,1001,2,'generation-universe',"
+            "NULL,?,0,1000,1001)",
+            (state.to_json(),),
+        )
+    status = SQLiteStore(path).structure_generation_status(retain_generations=2)
+    assert status["comparison"]["generation_snapshot_id"] == 1
+    assert status["comparison"]["phase"] == "generation-universe"
+
+
+def test_generation_status_authenticates_pointer_bound_comparison_digest(
+    generation_db: Path,
+) -> None:
+    with sqlite3.connect(generation_db) as con:
+        con.execute(
+            "UPDATE current_structure_generation SET comparison_receipt_digest=?",
+            ("f" * 64,),
+        )
+    status = SQLiteStore(generation_db).structure_generation_status(retain_generations=2)
+    assert status["comparison_authenticated"] is False
+    assert "comparison-receipt-digest-mismatch" in status["comparison_mismatch_reasons"]
+    from polyarb.http.health import _structure_generation_health_checks
+
+    checks = _structure_generation_health_checks(
+        status,
+        now_ms=10_000,
+        read_mode="legacy",
+        publication_sla_s=100,
+        pressure_warn_count=4,
+        pressure_fail_count=8,
+    )
+    assert checks["snapshot:structure_generation_comparison"][0]["status"] == "fail"
+
+
+def test_cleanup_blocked_authentication_is_append_only_and_health_visible(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "blocked-observation.db"
+    SQLiteStore(path).init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="one", point_current=False)
+    _seed_structure_revision(path, snapshot_id=2, market_suffix="two", point_current=False)
+    _seed_structure_revision(path, snapshot_id=3, market_suffix="three", point_current=True)
+    with sqlite3.connect(path) as con:
+        con.execute("DROP TRIGGER trg_structure_comparison_receipt_update")
+        con.execute(
+            "UPDATE structure_generation_comparison_receipts SET receipt_digest=? "
+            "WHERE generation_snapshot_id=1",
+            ("f" * 64,),
+        )
+    SQLiteStore(path).cleanup_structure_generation_evidence(
+        retain_generations=2, max_rows=1, now_ms=10_000
+    )
+    status = SQLiteStore(path).structure_generation_status(retain_generations=2)
+    assert status["cleanup_blocked_reason"] == "comparison-receipt-digest-mismatch"
+    with sqlite3.connect(path) as con:
+        with pytest.raises(sqlite3.IntegrityError, match="cleanup-observation-sealed"):
+            con.execute("DELETE FROM structure_generation_cleanup_observations")
+
+
+@pytest.mark.parametrize(
+    ("publication_id", "phase", "blocked_reason"),
+    [
+        ("test-publication-2", "events", None),
+        ("test-publication-1", "markets", None),
+        ("test-publication-1", "events", "forged-block"),
+    ],
+)
+def test_cleanup_trigger_rejects_forged_wrong_phase_or_blocked_progress(
+    tmp_path: Path,
+    publication_id: str,
+    phase: str,
+    blocked_reason: str | None,
+) -> None:
+    path = tmp_path / f"forged-{phase}-{blocked_reason}.db"
+    SQLiteStore(path).init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="one", point_current=False)
+    _seed_structure_revision(path, snapshot_id=2, market_suffix="two", point_current=True)
+    with sqlite3.connect(path) as con:
+        receipt_digest = con.execute(
+            "SELECT receipt_digest FROM structure_generation_comparison_receipts "
+            "WHERE generation_snapshot_id=1"
+        ).fetchone()[0]
+        try:
+            con.execute(
+                "INSERT INTO structure_generation_cleanup_progress("
+                "generation_snapshot_id,publication_id,phase,rows_deleted,started_at_ms,"
+                "checkpoint_at_ms,blocked_reason,authorization_digest) "
+                "VALUES (1,?,?,0,1000,1000,?,?)",
+                (publication_id, phase, blocked_reason, receipt_digest),
+            )
+        except sqlite3.IntegrityError:
+            pass
+        with pytest.raises(sqlite3.IntegrityError, match="structure-generation-frozen"):
+            con.execute(
+                "DELETE FROM structure_generation_events WHERE snapshot_id=1"
+            )
+
+
+def test_generation_history_queries_are_bounded_and_indexed(tmp_path: Path) -> None:
+    path = tmp_path / "query-plan.db"
+    SQLiteStore(path).init_schema()
+    with sqlite3.connect(path) as con:
+        indexes = {
+            row[0] for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+        assert "idx_structure_publications_published_history" in indexes
+        plans = SQLiteStore(path).structure_generation_query_plans(
+            retain_generations=2,
+            pressure_probe_limit=8,
+        )
+    for plan in plans.values():
+        detail = " ".join(plan).upper()
+        assert "SCAN " not in detail
+        assert "USE TEMP B-TREE" not in detail
+
+
+def test_backfill_uses_bounded_cursors_without_full_table_counts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bounded-backfill.db"
+    store = SQLiteStore(path)
+    store.init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="one", point_current=False)
+    with sqlite3.connect(path) as con:
+        con.execute("DELETE FROM current_structure_generation")
+        con.execute("DROP TRIGGER trg_structure_comparison_receipt_delete")
+        con.execute("DELETE FROM structure_generation_comparison_receipts")
+        con.execute("DELETE FROM structure_publications")
+        con.execute("DELETE FROM structure_sync_windows")
+        for component in sqlite_store_module._STRUCTURE_COMPONENTS:
+            con.execute(f"DELETE FROM structure_generation_{component}")
+    statements: list[str] = []
+    for _ in range(100):
+        checkpoint = SQLiteStore(path).backfill_current_structure_generation(
+            max_rows=1,
+            trace_callback=statements.append,
+        )
+        assert checkpoint.copied_rows <= 1
+        if checkpoint.complete:
+            break
+    else:
+        raise AssertionError("bounded backfill did not complete")
+    assert not [sql for sql in statements if "COUNT(" in sql.upper()]
+
+
+def test_cleanup_progress_v1_migrates_to_composite_single_slot_authority(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "cleanup-progress-v1.db"
+    SQLiteStore(path).init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="one", point_current=False)
+    with sqlite3.connect(path) as con:
+        for component in sqlite_store_module._STRUCTURE_COMPONENTS:
+            con.execute(
+                f"DROP TRIGGER trg_structure_generation_{component}_frozen_delete"
+            )
+        con.execute("DROP TABLE structure_generation_cleanup_progress")
+        con.execute(
+            "CREATE TABLE structure_generation_cleanup_progress("
+            "generation_snapshot_id INTEGER PRIMARY KEY,publication_id TEXT UNIQUE,"
+            "phase TEXT,rows_deleted INTEGER,started_at_ms INTEGER,"
+            "checkpoint_at_ms INTEGER,blocked_reason TEXT)"
+        )
+        con.execute(
+            "INSERT INTO structure_generation_cleanup_progress VALUES "
+            "(1,'test-publication-1','events',0,1000,1001,NULL)"
+        )
+
+    SQLiteStore(path).init_schema()
+
+    with sqlite3.connect(path) as con:
+        columns = {
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_cleanup_progress)"
+            )
+        }
+        assert {"slot", "authorization_digest"} <= columns
+        row = con.execute(
+            "SELECT slot,generation_snapshot_id,publication_id,authorization_digest "
+            "FROM structure_generation_cleanup_progress"
+        ).fetchone()
+        assert row[:3] == (1, 1, "test-publication-1")
+        assert row[3] == con.execute(
+            "SELECT receipt_digest FROM structure_generation_comparison_receipts "
+            "WHERE generation_snapshot_id=1"
+        ).fetchone()[0]
 
 
 def test_read_mode_defaults_legacy_and_rejects_unknown(monkeypatch) -> None:

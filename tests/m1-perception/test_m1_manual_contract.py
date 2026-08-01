@@ -167,6 +167,15 @@ def test_manual_documents_generation_rollout_rollback_and_bounded_cleanup() -> N
     assert "legacy" in manual
     assert "max_rows" in manual
 
+    read_only = manual.split("### 日常只读", 1)[1].split("### 本地 mutation", 1)[0]
+    local_mutation = manual.split("### 本地 mutation", 1)[1].split(
+        "### 生产 mutation", 1
+    )[0]
+    assert "make structure-generation-status" in read_only
+    assert "make structure-generation-compare" in read_only
+    assert "make structure-generation-backfill" in local_mutation
+    assert "make structure-generation-cleanup" in local_mutation
+
 
 def test_rejects_missing_section_and_unknown_label(tmp_path: Path) -> None:
     text = _valid_manual().replace("## 10. section-10\nbody\n", "")

@@ -2401,8 +2401,17 @@ CREATE TABLE IF NOT EXISTS structure_publications (
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
     certified_at_ms INTEGER,
     published_at_ms INTEGER,
-    failure_reason TEXT
+    failure_reason TEXT,
+    UNIQUE(snapshot_id,publication_id)
 );
+CREATE INDEX IF NOT EXISTS idx_structure_publications_published_history
+ON structure_publications(published_at_ms,snapshot_id)
+WHERE status='published';
+CREATE INDEX IF NOT EXISTS idx_structure_publications_active_checkpoint
+ON structure_publications(checkpoint_at_ms DESC,publication_id)
+WHERE status IN ('normalizing','writing','ready');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_structure_publications_snapshot_publication
+ON structure_publications(snapshot_id,publication_id);
 
 CREATE TABLE IF NOT EXISTS structure_generation_events (
     snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
@@ -2564,16 +2573,35 @@ CREATE TABLE IF NOT EXISTS structure_generation_cleanup_receipts (
     cleanup_digest TEXT NOT NULL CHECK(length(cleanup_digest)=64)
 );
 CREATE TABLE IF NOT EXISTS structure_generation_cleanup_progress (
+    slot INTEGER NOT NULL DEFAULT 1 UNIQUE CHECK(slot=1),
     generation_snapshot_id INTEGER PRIMARY KEY REFERENCES snapshots(id),
-    publication_id TEXT NOT NULL UNIQUE REFERENCES structure_publications(publication_id),
+    publication_id TEXT NOT NULL UNIQUE,
     phase TEXT NOT NULL CHECK(phase IN (
         'events','event_tags','memberships','group_truth','markets','issues'
     )),
     rows_deleted INTEGER NOT NULL DEFAULT 0 CHECK(rows_deleted >= 0),
     started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
-    blocked_reason TEXT
+    blocked_reason TEXT,
+    authorization_digest TEXT NOT NULL CHECK(length(authorization_digest)=64),
+    FOREIGN KEY(generation_snapshot_id,publication_id)
+        REFERENCES structure_publications(snapshot_id,publication_id)
 );
+CREATE TABLE IF NOT EXISTS structure_generation_cleanup_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    generation_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    publication_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('blocked','authorized')),
+    reason TEXT,
+    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    observation_digest TEXT NOT NULL CHECK(length(observation_digest)=64),
+    FOREIGN KEY(generation_snapshot_id,publication_id)
+        REFERENCES structure_publications(snapshot_id,publication_id),
+    CHECK((state='blocked' AND reason IS NOT NULL) OR
+          (state='authorized' AND reason IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_structure_cleanup_observations_latest
+ON structure_generation_cleanup_observations(id DESC);
 
 """
 
