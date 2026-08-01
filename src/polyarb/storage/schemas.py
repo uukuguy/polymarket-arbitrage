@@ -2328,6 +2328,7 @@ ON structure_schedule_adjustments(decided_at_ms DESC);
 STRUCTURE_SYNC_WINDOWS_DDL = """
 CREATE TABLE IF NOT EXISTS structure_sync_windows (
     id TEXT PRIMARY KEY,
+    recovery_root_window_id TEXT,
     status TEXT NOT NULL CHECK(status IN (
         'open','events_complete','complete','published','failed'
     )),
@@ -2342,7 +2343,6 @@ CREATE TABLE IF NOT EXISTS structure_sync_windows (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_structure_sync_one_open_window
 ON structure_sync_windows(status) WHERE status IN ('open','events_complete');
-
 CREATE TABLE IF NOT EXISTS structure_sync_event_staging (
     window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
     event_id TEXT NOT NULL,
@@ -2378,12 +2378,13 @@ ON structure_sync_event_market_backfill_progress(checkpoint_at_ms DESC,window_id
 WHERE completed_at_ms IS NULL;
 CREATE TABLE IF NOT EXISTS structure_bootstrap_rotation_observations (
     observation_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    old_window_id TEXT NOT NULL UNIQUE REFERENCES structure_sync_windows(id),
+    recovery_root_window_id TEXT NOT NULL,
+    old_window_id TEXT NOT NULL UNIQUE,
     event_cursor TEXT NOT NULL,
     member_offset INTEGER NOT NULL CHECK(member_offset >= 0),
     blocked_reason TEXT NOT NULL,
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
-    successor_window_id TEXT NOT NULL UNIQUE REFERENCES structure_sync_windows(id),
+    successor_window_id TEXT NOT NULL UNIQUE,
     rotated_at_ms INTEGER NOT NULL CHECK(rotated_at_ms >= 0),
     observation_digest TEXT NOT NULL CHECK(length(observation_digest)=64)
 );
@@ -2395,6 +2396,19 @@ BEGIN SELECT RAISE(ABORT,'bootstrap-rotation-append-only'); END;
 CREATE TRIGGER IF NOT EXISTS trg_structure_bootstrap_rotation_delete
 BEFORE DELETE ON structure_bootstrap_rotation_observations
 BEGIN SELECT RAISE(ABORT,'bootstrap-rotation-append-only'); END;
+CREATE TABLE IF NOT EXISTS structure_bootstrap_recovery_receipts (
+    recovery_root_window_id TEXT PRIMARY KEY,
+    successful_window_id TEXT NOT NULL UNIQUE,
+    window_checkpoint_at_ms INTEGER NOT NULL CHECK(window_checkpoint_at_ms >= 0),
+    completed_at_ms INTEGER NOT NULL CHECK(completed_at_ms >= 0),
+    receipt_digest TEXT NOT NULL CHECK(length(receipt_digest)=64)
+);
+CREATE TRIGGER IF NOT EXISTS trg_structure_bootstrap_recovery_update
+BEFORE UPDATE ON structure_bootstrap_recovery_receipts
+BEGIN SELECT RAISE(ABORT,'bootstrap-recovery-append-only'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_bootstrap_recovery_delete
+BEFORE DELETE ON structure_bootstrap_recovery_receipts
+BEGIN SELECT RAISE(ABORT,'bootstrap-recovery-append-only'); END;
 CREATE TABLE IF NOT EXISTS structure_sync_market_staging (
     window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
     market_id TEXT NOT NULL,

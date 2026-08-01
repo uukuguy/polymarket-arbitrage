@@ -34,6 +34,12 @@ zero and incremented the failure counter.
 - Invalid JSON/member shape or a raw event above the 1,000,000-byte hard limit
   records a durable blocked reason before bulk materialization, exits nonzero,
   and never advances the cursor or silently omits parent truth.
+- Metadata-only streaming plus a 16,000,000-byte invocation budget prevents a
+  high `max_rows` value from prefetching hundreds of megabytes of raw JSON.
+- Recovery roots survive cursor-restart successors. Digest-authenticated
+  rotation observations and same-transaction append-only recovery receipts are
+  independent of purgeable staging windows, so retention cannot resurrect a
+  resolved historical failure.
 - The parent now strictly parses normalization/certification publication
   checkpoint JSON instead of reclassifying a committed child chunk as
   `snapshot-subprocess-invalid-json`.
@@ -46,10 +52,10 @@ switch, database mutation, or production restart was performed by this task.
 
 Initial RED: 3 failures for the absent durable migration API/schema and absent
 publication-checkpoint result type. The reviewer-remediated focused
-authority/bootstrap gate covered 220 tests.
+authority/bootstrap gate covered 224 tests.
 
-- Focused authority/bootstrap: `220 passed in 28.48s`.
-- Full M1: `3044 passed, 1 skipped, 1 xfailed in 516.52s`.
+- Focused authority/bootstrap: `224 passed in 29.09s`.
+- Full M1: `3060 passed, 1 skipped, 1 xfailed in 516.74s`.
 - Changed-file Ruff: PASS.
 - `git diff --check`: PASS.
 - Documentation, planning status, and pre-commit gate are recorded after the

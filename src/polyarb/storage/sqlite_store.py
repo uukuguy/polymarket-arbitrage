@@ -65,6 +65,7 @@ _VALID_MODES = ("subset", "full")
 SQLITE_BUSY_TIMEOUT_S = 120.0
 STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS = 5_000
 STRUCTURE_EVENT_PAYLOAD_MAX_BYTES = 1_000_000
+STRUCTURE_BOOTSTRAP_PAYLOAD_MAX_BYTES = 16_000_000
 
 # Booleans that are stored as INTEGER 0/1 in SQLite — convert before insert.
 _BOOL_COLUMNS = ("active", "closed", "neg_risk", "incomplete")
@@ -111,6 +112,96 @@ def _migrate_structure_event_market_progress(con: sqlite3.Connection) -> None:
         "event_cursor='',member_offset=0,events_processed=0,"
         "relationships_processed=0,completed_at_ms=NULL,"
         "migration_reason='legacy-after-rowid-rewound'"
+    )
+
+
+def _migrate_structure_recovery_authority(con: sqlite3.Connection) -> None:
+    """Persist bounded recovery lineage and detach append-only evidence from staging."""
+    window_columns = {
+        str(row[1]) for row in con.execute("PRAGMA table_info(structure_sync_windows)")
+    }
+    if "recovery_root_window_id" not in window_columns:
+        con.execute(
+            "ALTER TABLE structure_sync_windows ADD COLUMN recovery_root_window_id TEXT"
+        )
+    con.execute(
+        "UPDATE structure_sync_windows SET recovery_root_window_id=id "
+        "WHERE recovery_root_window_id IS NULL OR recovery_root_window_id=''"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_structure_sync_recovery_lineage ON "
+        "structure_sync_windows(recovery_root_window_id,status,checkpoint_at_ms DESC,id DESC)"
+    )
+
+    observation_columns = {
+        str(row[1])
+        for row in con.execute(
+            "PRAGMA table_info(structure_bootstrap_rotation_observations)"
+        )
+    }
+    foreign_keys = con.execute(
+        "PRAGMA foreign_key_list(structure_bootstrap_rotation_observations)"
+    ).fetchall()
+    if observation_columns and (
+        "recovery_root_window_id" not in observation_columns or foreign_keys
+    ):
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_bootstrap_rotation_update")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_bootstrap_rotation_delete")
+        con.execute("DROP INDEX IF EXISTS idx_structure_bootstrap_rotation_latest")
+        legacy_rows = con.execute(
+            "SELECT observation_id,old_window_id,event_cursor,member_offset,"
+            "blocked_reason,checkpoint_at_ms,successor_window_id,rotated_at_ms "
+            "FROM structure_bootstrap_rotation_observations ORDER BY observation_id"
+        ).fetchall()
+        con.execute(
+            "ALTER TABLE structure_bootstrap_rotation_observations "
+            "RENAME TO structure_bootstrap_rotation_observations_legacy"
+        )
+        con.execute(
+            "CREATE TABLE structure_bootstrap_rotation_observations("
+            "observation_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "recovery_root_window_id TEXT NOT NULL,old_window_id TEXT NOT NULL UNIQUE,"
+            "event_cursor TEXT NOT NULL,member_offset INTEGER NOT NULL CHECK(member_offset>=0),"
+            "blocked_reason TEXT NOT NULL,checkpoint_at_ms INTEGER NOT NULL "
+            "CHECK(checkpoint_at_ms>=0),successor_window_id TEXT NOT NULL UNIQUE,"
+            "rotated_at_ms INTEGER NOT NULL CHECK(rotated_at_ms>=0),"
+            "observation_digest TEXT NOT NULL CHECK(length(observation_digest)=64))"
+        )
+        for row in legacy_rows:
+            root = con.execute(
+                "SELECT recovery_root_window_id FROM structure_sync_windows WHERE id=?",
+                (str(row[6]),),
+            ).fetchone()
+            recovery_root = str(row[6]) if root is None else str(root[0])
+            digest = _bootstrap_rotation_digest(
+                recovery_root_window_id=recovery_root,
+                old_window_id=str(row[1]),
+                event_cursor=str(row[2]),
+                member_offset=int(row[3]),
+                blocked_reason=str(row[4]),
+                checkpoint_at_ms=int(row[5]),
+                successor_window_id=str(row[6]),
+                rotated_at_ms=int(row[7]),
+            )
+            con.execute(
+                "INSERT INTO structure_bootstrap_rotation_observations VALUES "
+                "(?,?,?,?,?,?,?,?,?,?)",
+                (row[0], recovery_root, *row[1:8], digest),
+            )
+        con.execute("DROP TABLE structure_bootstrap_rotation_observations_legacy")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_structure_bootstrap_rotation_latest ON "
+        "structure_bootstrap_rotation_observations(rotated_at_ms DESC,observation_id DESC)"
+    )
+    con.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_bootstrap_rotation_update "
+        "BEFORE UPDATE ON structure_bootstrap_rotation_observations "
+        "BEGIN SELECT RAISE(ABORT,'bootstrap-rotation-append-only'); END"
+    )
+    con.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_bootstrap_rotation_delete "
+        "BEFORE DELETE ON structure_bootstrap_rotation_observations "
+        "BEGIN SELECT RAISE(ABORT,'bootstrap-rotation-append-only'); END"
     )
 
 
@@ -318,6 +409,7 @@ def _comparison_receipt_digest(
 
 def _bootstrap_rotation_digest(
     *,
+    recovery_root_window_id: str,
     old_window_id: str,
     event_cursor: str,
     member_offset: int,
@@ -333,6 +425,7 @@ def _bootstrap_rotation_digest(
             "event_cursor": event_cursor,
             "member_offset": member_offset,
             "old_window_id": old_window_id,
+            "recovery_root_window_id": recovery_root_window_id,
             "rotated_at_ms": rotated_at_ms,
             "successor_window_id": successor_window_id,
         },
@@ -340,6 +433,24 @@ def _bootstrap_rotation_digest(
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _bootstrap_recovery_digest(
+    *,
+    recovery_root_window_id: str,
+    successful_window_id: str,
+    window_checkpoint_at_ms: int,
+    completed_at_ms: int,
+) -> str:
+    payload = (
+        recovery_root_window_id,
+        successful_window_id,
+        window_checkpoint_at_ms,
+        completed_at_ms,
+    )
+    return hashlib.sha256(
+        json.dumps(payload, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _generation_cleanup_digest(
@@ -1576,6 +1687,7 @@ class SQLiteStore:
             con.executescript(STRUCTURE_DEFER_RECEIPTS_DDL)
             con.executescript(STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL)
             con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
+            _migrate_structure_recovery_authority(con)
             _migrate_structure_event_market_progress(con)
             con.executescript(STRUCTURE_GENERATIONS_DDL)
             con.execute(
@@ -1703,6 +1815,7 @@ class SQLiteStore:
             )
             if has_snapshot_schema:
                 con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
+                _migrate_structure_recovery_authority(con)
                 _migrate_structure_event_market_progress(con)
                 con.executescript(STRUCTURE_GENERATIONS_DDL)
                 con.execute(
@@ -1789,6 +1902,7 @@ class SQLiteStore:
         max_events: int,
         max_relationships: int,
         now_ms: int,
+        max_payload_bytes: int = STRUCTURE_BOOTSTRAP_PAYLOAD_MAX_BYTES,
     ) -> dict[str, object]:
         """Backfill a bounded event/relationship slice with a durable subcursor."""
         if (
@@ -1797,6 +1911,9 @@ class SQLiteStore:
             or not 1
             <= max_relationships
             <= STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS
+            or not STRUCTURE_EVENT_PAYLOAD_MAX_BYTES
+            <= max_payload_bytes
+            <= STRUCTURE_BOOTSTRAP_PAYLOAD_MAX_BYTES
             or now_ms < 0
         ):
             raise ValueError("invalid-structure-event-market-backfill")
@@ -1863,48 +1980,61 @@ class SQLiteStore:
             # bounded source slice without holding SQLite's writer lock; only
             # the cursor-authorized relationship insert below is a write txn.
             con.execute("COMMIT")
-            if member_offset:
-                current = con.execute(
-                    "SELECT event_id,payload_json,length(CAST(payload_json AS BLOB)),"
-                    "COALESCE(source_ordinal,rowid) "
-                    "FROM structure_sync_event_staging "
-                    "WHERE window_id=? AND event_id=?",
-                    (window_id, event_cursor),
-                ).fetchall()
-                following = con.execute(
-                    "SELECT event_id,payload_json,length(CAST(payload_json AS BLOB)),"
-                    "COALESCE(source_ordinal,rowid) "
-                    "FROM structure_sync_event_staging "
+            metadata_columns = (
+                "event_id,length(CAST(payload_json AS BLOB)),"
+                "COALESCE(source_ordinal,rowid)"
+            )
+
+            def metadata_rows() -> Iterator[tuple[object, ...]]:
+                remaining = max_events
+                if member_offset:
+                    current = con.execute(
+                        f"SELECT {metadata_columns} FROM "
+                        "structure_sync_event_staging WHERE window_id=? AND event_id=?",
+                        (window_id, event_cursor),
+                    ).fetchone()
+                    if current is not None:
+                        yield current
+                        remaining -= 1
+                if remaining <= 0:
+                    return
+                cursor = con.execute(
+                    f"SELECT {metadata_columns} FROM structure_sync_event_staging "
                     "WHERE window_id=? AND event_id>? ORDER BY event_id LIMIT ?",
-                    (window_id, event_cursor, max_events - 1),
-                ).fetchall()
-                rows = [*current, *following]
-            else:
-                rows = con.execute(
-                    "SELECT event_id,payload_json,length(CAST(payload_json AS BLOB)),"
-                    "COALESCE(source_ordinal,rowid) "
-                    "FROM structure_sync_event_staging "
-                    "WHERE window_id=? AND event_id>? ORDER BY event_id LIMIT ?",
-                    (window_id, event_cursor, max_events),
-                ).fetchall()
+                    (window_id, event_cursor, remaining),
+                )
+                while (row := cursor.fetchone()) is not None:
+                    yield row
+
             parent_rows: list[tuple[object, ...]] = []
             events_processed = 0
             next_event_cursor = event_cursor
             next_member_offset = member_offset
             remaining_relationships = max_relationships
+            payload_bytes_processed = 0
             current_event_id = "unknown"
             try:
                 for row_index, (
                     event_id,
-                    payload_json,
                     payload_bytes,
                     source_ordinal,
-                ) in enumerate(rows):
+                ) in enumerate(metadata_rows()):
                     current_event_id = str(event_id)
                     if int(payload_bytes) > STRUCTURE_EVENT_PAYLOAD_MAX_BYTES:
                         raise ValueError(
                             f"event-payload-too-large:{event_id}:{payload_bytes}"
                         )
+                    if payload_bytes_processed + int(payload_bytes) > max_payload_bytes:
+                        break
+                    payload_row = con.execute(
+                        "SELECT payload_json FROM structure_sync_event_staging "
+                        "WHERE window_id=? AND event_id=?",
+                        (window_id, event_id),
+                    ).fetchone()
+                    if payload_row is None:
+                        raise ValueError(f"event-payload-missing:{event_id}")
+                    payload_bytes_processed += int(payload_bytes)
+                    payload_json = payload_row[0]
                     payload = json.loads(str(payload_json))
                     if not isinstance(payload, dict):
                         raise ValueError(f"invalid-event-payload:{event_id}")
@@ -1984,10 +2114,16 @@ class SQLiteStore:
             ):
                 raise ValueError("structure-event-market-backfill-cursor-race")
             identity = con.execute(
-                "SELECT status,checkpoint_at_ms FROM structure_sync_windows WHERE id=?",
+                "SELECT status,checkpoint_at_ms,recovery_root_window_id FROM "
+                "structure_sync_windows WHERE id=?",
                 (window_id,),
             ).fetchone()
-            if identity != ("complete", window_checkpoint_at_ms):
+            if (
+                identity is None
+                or identity[:2] != ("complete", window_checkpoint_at_ms)
+                or not isinstance(identity[2], str)
+                or not identity[2]
+            ):
                 raise ValueError("structure-event-market-window-identity-drift")
             con.executemany(
                 "INSERT OR IGNORE INTO structure_sync_event_market_staging("
@@ -2017,6 +2153,47 @@ class SQLiteStore:
                     window_id,
                 ),
             )
+            if completed:
+                recovery_root = str(identity[2])
+                has_rotation = con.execute(
+                    "SELECT 1 FROM structure_bootstrap_rotation_observations "
+                    "WHERE recovery_root_window_id=? LIMIT 1",
+                    (recovery_root,),
+                ).fetchone() is not None
+                if has_rotation:
+                    receipt_digest = _bootstrap_recovery_digest(
+                        recovery_root_window_id=recovery_root,
+                        successful_window_id=window_id,
+                        window_checkpoint_at_ms=window_checkpoint_at_ms,
+                        completed_at_ms=now_ms,
+                    )
+                    con.execute(
+                        "INSERT OR IGNORE INTO structure_bootstrap_recovery_receipts("
+                        "recovery_root_window_id,successful_window_id,"
+                        "window_checkpoint_at_ms,completed_at_ms,receipt_digest) "
+                        "VALUES (?,?,?,?,?)",
+                        (
+                            recovery_root,
+                            window_id,
+                            window_checkpoint_at_ms,
+                            now_ms,
+                            receipt_digest,
+                        ),
+                    )
+                    receipt = con.execute(
+                        "SELECT successful_window_id,window_checkpoint_at_ms,"
+                        "completed_at_ms,receipt_digest FROM "
+                        "structure_bootstrap_recovery_receipts "
+                        "WHERE recovery_root_window_id=?",
+                        (recovery_root,),
+                    ).fetchone()
+                    if receipt != (
+                        window_id,
+                        window_checkpoint_at_ms,
+                        now_ms,
+                        receipt_digest,
+                    ):
+                        raise ValueError("structure-bootstrap-recovery-receipt-conflict")
             con.execute("COMMIT")
             return {
                 "completed": completed,
@@ -4202,20 +4379,27 @@ class SQLiteStore:
                 "ORDER BY progress.checkpoint_at_ms DESC,progress.window_id DESC LIMIT 1"
             ).fetchone()
             bootstrap_rotation = con.execute(
-                "SELECT observation.old_window_id,observation.event_cursor,"
+                "SELECT observation.recovery_root_window_id,observation.old_window_id,"
+                "observation.event_cursor,"
                 "observation.member_offset,observation.blocked_reason,"
                 "observation.checkpoint_at_ms,observation.successor_window_id,"
-                "observation.rotated_at_ms,observation.observation_digest,"
-                "successor.status,progress.completed_at_ms FROM "
+                "observation.rotated_at_ms,observation.observation_digest FROM "
                 "structure_bootstrap_rotation_observations observation "
-                "INDEXED BY idx_structure_bootstrap_rotation_latest JOIN "
-                "structure_sync_windows successor "
-                "ON successor.id=observation.successor_window_id LEFT JOIN "
-                "structure_sync_event_market_backfill_progress progress "
-                "ON progress.window_id=observation.successor_window_id "
+                "INDEXED BY idx_structure_bootstrap_rotation_latest "
                 "WHERE observation.rotated_at_ms>=0 ORDER BY "
                 "observation.rotated_at_ms DESC,observation.observation_id DESC LIMIT 1"
             ).fetchone()
+            bootstrap_recovery = None
+            if bootstrap_rotation is not None and isinstance(
+                bootstrap_rotation[0], str
+            ):
+                bootstrap_recovery = con.execute(
+                    "SELECT successful_window_id,window_checkpoint_at_ms,"
+                    "completed_at_ms,receipt_digest FROM "
+                    "structure_bootstrap_recovery_receipts "
+                    "WHERE recovery_root_window_id=?",
+                    (bootstrap_rotation[0],),
+                ).fetchone()
             generation_probe = con.execute(
                 "SELECT p.snapshot_id FROM structure_publications p WHERE "
                 "p.status='published' AND p.published_at_ms>=0 AND NOT EXISTS (SELECT 1 FROM "
@@ -4337,31 +4521,90 @@ class SQLiteStore:
                 cleanup_blocked_reason = str(cleanup_observation[3])
         rotation_status = None
         if bootstrap_rotation is not None:
-            recovered = (
-                bootstrap_rotation[8] in {"complete", "published"}
-                and bootstrap_rotation[9] is not None
+            valid_types = (
+                all(isinstance(bootstrap_rotation[index], str) for index in (0, 1, 2, 4, 6, 8))
+                and all(
+                    type(bootstrap_rotation[index]) is int
+                    and int(bootstrap_rotation[index]) >= 0
+                    for index in (3, 5, 7)
+                )
+                and all(str(bootstrap_rotation[index]) for index in (0, 1, 4, 6))
             )
+            expected_rotation_digest = None
+            if valid_types:
+                expected_rotation_digest = _bootstrap_rotation_digest(
+                    recovery_root_window_id=str(bootstrap_rotation[0]),
+                    old_window_id=str(bootstrap_rotation[1]),
+                    event_cursor=str(bootstrap_rotation[2]),
+                    member_offset=int(bootstrap_rotation[3]),
+                    blocked_reason=str(bootstrap_rotation[4]),
+                    checkpoint_at_ms=int(bootstrap_rotation[5]),
+                    successor_window_id=str(bootstrap_rotation[6]),
+                    rotated_at_ms=int(bootstrap_rotation[7]),
+                )
+            authenticated = bool(
+                expected_rotation_digest is not None
+                and bootstrap_rotation[8] == expected_rotation_digest
+            )
+            recovery_authenticated = False
+            if (
+                authenticated
+                and bootstrap_recovery is not None
+                and isinstance(bootstrap_recovery[0], str)
+                and bool(bootstrap_recovery[0])
+                and type(bootstrap_recovery[1]) is int
+                and int(bootstrap_recovery[1]) >= 0
+                and type(bootstrap_recovery[2]) is int
+                and int(bootstrap_recovery[2]) >= 0
+                and isinstance(bootstrap_recovery[3], str)
+            ):
+                expected_recovery_digest = _bootstrap_recovery_digest(
+                    recovery_root_window_id=str(bootstrap_rotation[0]),
+                    successful_window_id=str(bootstrap_recovery[0]),
+                    window_checkpoint_at_ms=int(bootstrap_recovery[1]),
+                    completed_at_ms=int(bootstrap_recovery[2]),
+                )
+                recovery_authenticated = bootstrap_recovery[3] == expected_recovery_digest
+            recovered = authenticated and recovery_authenticated
             rotation_status = {
-                "old_window_id": str(bootstrap_rotation[0]),
-                "event_cursor": str(bootstrap_rotation[1]),
-                "member_offset": int(bootstrap_rotation[2]),
-                "blocked_reason": str(bootstrap_rotation[3]),
-                "checkpoint_at_ms": int(bootstrap_rotation[4]),
-                "successor_window_id": str(bootstrap_rotation[5]),
-                "rotated_at_ms": int(bootstrap_rotation[6]),
-                "observation_digest": str(bootstrap_rotation[7]),
+                "recovery_root_window_id": str(bootstrap_rotation[0]),
+                "old_window_id": str(bootstrap_rotation[1]),
+                "event_cursor": str(bootstrap_rotation[2]),
+                "member_offset": (
+                    int(bootstrap_rotation[3])
+                    if type(bootstrap_rotation[3]) is int else 0
+                ),
+                "blocked_reason": str(bootstrap_rotation[4]),
+                "checkpoint_at_ms": (
+                    int(bootstrap_rotation[5])
+                    if type(bootstrap_rotation[5]) is int else 0
+                ),
+                "successor_window_id": str(bootstrap_rotation[6]),
+                "rotated_at_ms": (
+                    int(bootstrap_rotation[7])
+                    if type(bootstrap_rotation[7]) is int else 0
+                ),
+                "observation_digest": str(bootstrap_rotation[8]),
+                "authenticated": authenticated,
+                "recovery_receipt_authenticated": recovery_authenticated,
                 "recovered": recovered,
             }
             if not recovered:
                 bootstrap = (
-                    bootstrap_rotation[0],
                     bootstrap_rotation[1],
                     bootstrap_rotation[2],
+                    rotation_status["member_offset"],
                     0,
                     0,
-                    bootstrap_rotation[4],
+                    rotation_status["checkpoint_at_ms"],
                     None,
-                    bootstrap_rotation[3],
+                    (
+                        "bootstrap-rotation-evidence-invalid"
+                        if not authenticated
+                        else "bootstrap-recovery-receipt-invalid"
+                        if bootstrap_recovery is not None
+                        else str(bootstrap_rotation[4])
+                    ),
                 )
         return {
             "pointer_snapshot_id": pointer_snapshot_id,
@@ -4400,12 +4643,12 @@ class SQLiteStore:
                 "blocked_reason": bootstrap[7],
                 **(
                     {
-                        "successor_window_id": str(bootstrap_rotation[5]),
+                        "successor_window_id": str(bootstrap_rotation[6]),
                         "recovery_state": "rotated",
                     }
                     if bootstrap_rotation is not None
                     and not rotation_status["recovered"]
-                    and str(bootstrap[0]) == str(bootstrap_rotation[0])
+                    and str(bootstrap[0]) == str(bootstrap_rotation[1])
                     else {}
                 ),
             },
@@ -4939,10 +5182,11 @@ class SQLiteStore:
                 publication_id = f"backfill:{snapshot_id}"
                 expected = {component: 0 for component in _STRUCTURE_COMPONENTS}
                 con.execute(
-                    "INSERT INTO structure_sync_windows(id,status,started_at_ms,"
-                    "checkpoint_at_ms) SELECT ?,'complete',taken_at_ms,finished_at_ms "
+                    "INSERT INTO structure_sync_windows(id,recovery_root_window_id,status,"
+                    "started_at_ms,checkpoint_at_ms) "
+                    "SELECT ?,?,'complete',taken_at_ms,finished_at_ms "
                     "FROM snapshots WHERE id=?",
-                    (window_id, snapshot_id),
+                    (window_id, window_id, snapshot_id),
                 )
                 zero_counts = {component: 0 for component in _STRUCTURE_COMPONENTS}
                 con.execute(
@@ -5198,8 +5442,9 @@ class SQLiteStore:
                 window_id = uuid.uuid4().hex
                 con.execute(
                     "INSERT INTO structure_sync_windows("
-                    "id,status,started_at_ms,checkpoint_at_ms) VALUES (?,'open',?,?)",
-                    (window_id, started_at_ms, started_at_ms),
+                    "id,recovery_root_window_id,status,started_at_ms,checkpoint_at_ms) "
+                    "VALUES (?,?,'open',?,?)",
+                    (window_id, window_id, started_at_ms, started_at_ms),
                 )
                 row = con.execute(
                     "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
@@ -5247,6 +5492,13 @@ class SQLiteStore:
         con = self._connect_writer()
         try:
             con.execute("BEGIN IMMEDIATE")
+            lineage = con.execute(
+                "SELECT recovery_root_window_id FROM structure_sync_windows "
+                "WHERE id=? AND status IN ('open','events_complete')",
+                (window_id,),
+            ).fetchone()
+            if lineage is None or not str(lineage[0]):
+                raise ValueError("structure-sync-window-not-restartable")
             cur = con.execute(
                 "UPDATE structure_sync_windows SET status='failed',"
                 "failure_reason=?,checkpoint_at_ms=? "
@@ -5257,9 +5509,9 @@ class SQLiteStore:
                 raise ValueError("structure-sync-window-not-restartable")
             con.execute(
                 "INSERT INTO structure_sync_windows("
-                "id,status,started_at_ms,checkpoint_at_ms"
-                ") VALUES (?,'open',?,?)",
-                (successor_id, restarted_at_ms, restarted_at_ms + 1),
+                "id,recovery_root_window_id,status,started_at_ms,checkpoint_at_ms"
+                ") VALUES (?,?,'open',?,?)",
+                (successor_id, str(lineage[0]), restarted_at_ms, restarted_at_ms + 1),
             )
             row = con.execute(
                 "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
@@ -5292,7 +5544,7 @@ class SQLiteStore:
             blocked = con.execute(
                 "SELECT progress.blocked_reason,progress.window_checkpoint_at_ms,"
                 "window.checkpoint_at_ms,progress.event_cursor,progress.member_offset,"
-                "progress.checkpoint_at_ms FROM "
+                "progress.checkpoint_at_ms,window.recovery_root_window_id FROM "
                 "structure_sync_event_market_backfill_progress progress JOIN "
                 "structure_sync_windows window ON window.id=progress.window_id "
                 "LEFT JOIN structure_publications publication "
@@ -5318,10 +5570,12 @@ class SQLiteStore:
                 raise ValueError("structure-bootstrap-window-rotation-race")
             con.execute(
                 "INSERT INTO structure_sync_windows("
-                "id,status,started_at_ms,checkpoint_at_ms) VALUES (?,'open',?,?)",
-                (successor_id, rotated_at_ms, rotated_at_ms + 1),
+                "id,recovery_root_window_id,status,started_at_ms,checkpoint_at_ms) "
+                "VALUES (?,?,'open',?,?)",
+                (successor_id, str(blocked[6]), rotated_at_ms, rotated_at_ms + 1),
             )
             digest = _bootstrap_rotation_digest(
+                recovery_root_window_id=str(blocked[6]),
                 old_window_id=window_id,
                 event_cursor=str(blocked[3]),
                 member_offset=int(blocked[4]),
@@ -5332,10 +5586,11 @@ class SQLiteStore:
             )
             con.execute(
                 "INSERT INTO structure_bootstrap_rotation_observations("
-                "old_window_id,event_cursor,member_offset,blocked_reason,"
+                "recovery_root_window_id,old_window_id,event_cursor,member_offset,blocked_reason,"
                 "checkpoint_at_ms,successor_window_id,rotated_at_ms,"
-                "observation_digest) VALUES (?,?,?,?,?,?,?,?)",
+                "observation_digest) VALUES (?,?,?,?,?,?,?,?,?)",
                 (
+                    str(blocked[6]),
                     window_id,
                     str(blocked[3]),
                     int(blocked[4]),
