@@ -45,7 +45,7 @@
 - Consumes: `QUOTE_SLA_SECONDS` and `UNIVERSE_SLA_SECONDS` from `polyarb.routing.opportunity_scanner`.
 - Produces: `FeedAvailability(available: bool, refreshing: bool, reason: str | None)` and `decide_feed_availability(...) -> FeedAvailability`.
 
-- [ ] **Step 1: Write failing policy tests**
+- [x] **Step 1: Write failing policy tests**
 
 Create table-driven tests covering current, bounded previous, missing truth,
 source regression, quote expiry, universe expiry, missing handoff age, and exact
@@ -109,7 +109,7 @@ def test_unavailable_feed_reasons(overrides, reason: str) -> None:
     assert _decision(**overrides) == FeedAvailability(False, False, reason)
 ```
 
-- [ ] **Step 2: Run the focused tests and prove RED**
+- [x] **Step 2: Run the focused tests and prove RED**
 
 ```bash
 uv run pytest tests/m1-perception/test_feed_handoff.py -q
@@ -117,7 +117,7 @@ uv run pytest tests/m1-perception/test_feed_handoff.py -q
 
 Expected: collection fails with `ModuleNotFoundError: No module named 'polyarb.routing.feed_handoff'`.
 
-- [ ] **Step 3: Implement the minimal pure policy**
+- [x] **Step 3: Implement the minimal pure policy**
 
 ```python
 from dataclasses import dataclass
@@ -165,7 +165,7 @@ def decide_feed_availability(
     )
 ```
 
-- [ ] **Step 4: Run policy tests and lint**
+- [x] **Step 4: Run policy tests and lint**
 
 ```bash
 uv run pytest tests/m1-perception/test_feed_handoff.py -q
@@ -174,7 +174,7 @@ uv run ruff check src/polyarb/routing/feed_handoff.py tests/m1-perception/test_f
 
 Expected: all tests pass and Ruff exits zero.
 
-- [ ] **Step 5: Commit the policy**
+- [x] **Step 5: Commit the policy**
 
 ```bash
 git add src/polyarb/routing/feed_handoff.py tests/m1-perception/test_feed_handoff.py
