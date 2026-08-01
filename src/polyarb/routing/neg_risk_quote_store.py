@@ -13,12 +13,13 @@ import math
 import sqlite3
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from polyarb.storage.sqlite_store import (
     SQLITE_BUSY_TIMEOUT_S,
     StructureGenerationReadError,
+    _comparison_receipt_digest,
     _rollback_without_masking,
     resolve_structure_read_context,
     structure_read_transaction,
@@ -98,6 +99,11 @@ class VerifiedQuoteUniverse:
     universe_hash: str
     legs: tuple[UniverseLeg, ...]
     rejections: tuple[GroupRejection, ...]
+    # Non-empty only when the immutable generation projection was authenticated
+    # by the exact sealed comparison receipt inside the same read transaction.
+    structure_receipt_digest: str = ""
+    structure_revision: int = 0
+    structure_mode: str = "legacy"
 
 
 @dataclass(frozen=True)
@@ -162,6 +168,92 @@ class NegRiskQuoteStore:
         """Return this store's authoritative, injectable lease clock."""
         return self._now_ms()
 
+    def start_collection_attempt(self, *, started_at_ms: int | None = None) -> int:
+        started = self.current_time_ms() if started_at_ms is None else started_at_ms
+        con = self._connect()
+        try:
+            cur = con.execute(
+                "INSERT INTO neg_risk_quote_attempts("
+                "started_at_ms,checkpoint_at_ms,phase,outcome) "
+                "VALUES (?,?,'universe','collecting')",
+                (started, started),
+            )
+            return int(cur.lastrowid)
+        finally:
+            con.close()
+
+    def checkpoint_collection_attempt(
+        self,
+        attempt_id: int,
+        *,
+        phase: str,
+        checkpoint_at_ms: int | None = None,
+        quote_run_id: int | None = None,
+        target_count: int | None = None,
+        structure_receipt_digest: str | None = None,
+        phase_timings: dict[str, int] | None = None,
+        failure_kind: str | None = None,
+    ) -> None:
+        checkpoint = self.current_time_ms() if checkpoint_at_ms is None else checkpoint_at_ms
+        outcome = (
+            "complete"
+            if phase == "complete"
+            else "failed"
+            if phase == "failed"
+            else "collecting"
+        )
+        con = self._connect()
+        try:
+            cur = con.execute(
+                "UPDATE neg_risk_quote_attempts SET checkpoint_at_ms=?,phase=?,outcome=?,"
+                "quote_run_id=COALESCE(?,quote_run_id),"
+                "target_count=COALESCE(?,target_count),"
+                "structure_receipt_digest=COALESCE(?,structure_receipt_digest),"
+                "phase_timings_json=COALESCE(?,phase_timings_json),"
+                "failure_kind=? WHERE id=? AND outcome='collecting'",
+                (
+                    checkpoint,
+                    phase,
+                    outcome,
+                    quote_run_id,
+                    target_count,
+                    structure_receipt_digest,
+                    (
+                        json.dumps(phase_timings, sort_keys=True, separators=(",", ":"))
+                        if phase_timings is not None
+                        else None
+                    ),
+                    failure_kind,
+                    attempt_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                raise QuoteRunStateError("quote collection attempt is not active")
+        finally:
+            con.close()
+
+    def latest_collection_attempt(self) -> dict[str, object] | None:
+        with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as con:
+            row = con.execute(
+                "SELECT id,started_at_ms,checkpoint_at_ms,phase,outcome,quote_run_id,"
+                "target_count,structure_receipt_digest,phase_timings_json,failure_kind "
+                "FROM neg_risk_quote_attempts ORDER BY started_at_ms DESC,id DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row[0]),
+            "started_at_ms": int(row[1]),
+            "checkpoint_at_ms": int(row[2]),
+            "phase": str(row[3]),
+            "outcome": str(row[4]),
+            "quote_run_id": int(row[5]) if row[5] is not None else None,
+            "target_count": int(row[6]) if row[6] is not None else None,
+            "structure_receipt_digest": row[7],
+            "phase_timings": json.loads(str(row[8])),
+            "failure_kind": row[9],
+        }
+
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(
             self._db_path,
@@ -185,15 +277,15 @@ class NegRiskQuoteStore:
                 legacy_latest_snapshot=True,
             ) as read:
                 rows = read.connection.execute(
-                "SELECT m.neg_risk_market_id,m.market_id,m.condition_id,m.slug,"
-                "m.yes_token_id,COALESCE(t.event_id,''),COALESCE(t.membership_hash,'') "
-                f"FROM {read.table('markets')} m LEFT JOIN {read.table('group_truth')} t "
-                "ON t.snapshot_id=m.snapshot_id "
-                "AND t.neg_risk_market_id=m.neg_risk_market_id "
-                "WHERE m.snapshot_id = ? AND m.active = 1 AND m.closed = 0 "
-                "AND m.neg_risk_market_id IS NOT NULL AND m.neg_risk_market_id != '' "
-                "AND m.yes_token_id IS NOT NULL AND m.yes_token_id != '' "
-                "ORDER BY m.neg_risk_market_id,m.market_id",
+                    "SELECT m.neg_risk_market_id,m.market_id,m.condition_id,m.slug,"
+                    "m.yes_token_id,COALESCE(t.event_id,''),COALESCE(t.membership_hash,'') "
+                    f"FROM {read.table('markets')} m LEFT JOIN {read.table('group_truth')} t "
+                    "ON t.snapshot_id=m.snapshot_id "
+                    "AND t.neg_risk_market_id=m.neg_risk_market_id "
+                    "WHERE m.snapshot_id = ? AND m.active = 1 AND m.closed = 0 "
+                    "AND m.neg_risk_market_id IS NOT NULL AND m.neg_risk_market_id != '' "
+                    "AND m.yes_token_id IS NOT NULL AND m.yes_token_id != '' "
+                    "ORDER BY m.neg_risk_market_id,m.market_id",
                     (read.snapshot_id,),
                 ).fetchall()
                 snapshot_id = read.snapshot_id
@@ -213,7 +305,7 @@ class NegRiskQuoteStore:
                 self._db_path,
                 mode=self._structure_generation_read_mode,
             ) as read:
-                return _verified_universe_for_snapshot(
+                universe = _verified_universe_for_snapshot(
                     read.connection,
                     snapshot_id=read.snapshot_id,
                     taken_at_ms=read.taken_at_ms,
@@ -221,8 +313,14 @@ class NegRiskQuoteStore:
                     market_table=read.table("markets"),
                     membership_table=read.table("memberships"),
                 )
+                if read.mode == "generation":
+                    return _bind_generation_projection_receipt(
+                        read.connection,
+                        universe,
+                    )
+                return _bind_legacy_projection_receipt(read.connection, universe)
         except StructureGenerationReadError as error:
-            raise QuoteUniverseUnavailableError(str(error)) from error
+            raise QuoteUniverseUnavailableError() from error
 
     def verified_universe_for_snapshot(
         self,
@@ -262,6 +360,10 @@ class NegRiskQuoteStore:
             quoted_at_ms=quoted_at_ms,
             expected_universe_hash=universe.universe_hash,
             expected_source_truth_hash=_source_truth_hash(universe),
+            expected_structure_receipt_digest=universe.structure_receipt_digest,
+            expected_structure_revision=universe.structure_revision,
+            expected_structure_mode=universe.structure_mode,
+            expected_rejections=universe.rejections,
         )
 
     def begin_run(
@@ -280,6 +382,10 @@ class NegRiskQuoteStore:
             quoted_at_ms=quoted_at_ms,
             expected_universe_hash=None,
             expected_source_truth_hash=None,
+            expected_structure_receipt_digest=None,
+            expected_structure_revision=None,
+            expected_structure_mode=None,
+            expected_rejections=None,
         )
 
     def _begin_run(
@@ -291,6 +397,10 @@ class NegRiskQuoteStore:
         quoted_at_ms: int,
         expected_universe_hash: str | None,
         expected_source_truth_hash: str | None,
+        expected_structure_receipt_digest: str | None,
+        expected_structure_revision: int | None,
+        expected_structure_mode: str | None,
+        expected_rejections: tuple[GroupRejection, ...] | None,
     ) -> int:
         """Revalidate verified truth while atomically acquiring the DB lease."""
         requested_legs = _deduplicate_legs(legs)
@@ -337,24 +447,45 @@ class NegRiskQuoteStore:
                     raise QuoteRunStateError(
                         "verified universe snapshot is no longer the latest published truth"
                     )
-                verified = _verified_universe_for_snapshot(
-                    con,
-                    snapshot_id=universe_snapshot_id,
-                    taken_at_ms=universe_taken_at_ms,
-                    truth_table=structure.table("group_truth"),
-                    market_table=structure.table("markets"),
-                    membership_table=structure.table("memberships"),
-                )
-                snapshot_legs = verified.legs
-                if verified.universe_hash != universe_hash:
-                    raise QuoteRunStateError(
-                        "requested legs do not match verified snapshot membership"
+                if structure.mode == "generation":
+                    source_truth_hash = _require_generation_projection_receipt(
+                        con,
+                        snapshot_id=universe_snapshot_id,
+                        universe_hash=universe_hash,
+                        source_truth_hash=expected_source_truth_hash,
+                        receipt_digest=expected_structure_receipt_digest,
                     )
+                    snapshot_legs = requested_legs
+                elif expected_structure_receipt_digest is not None:
+                    source_truth_hash = _require_legacy_projection_receipt(
+                        con,
+                        snapshot_id=universe_snapshot_id,
+                        taken_at_ms=universe_taken_at_ms,
+                        universe_hash=universe_hash,
+                        source_truth_hash=expected_source_truth_hash,
+                        source_revision=expected_structure_revision,
+                        receipt_digest=expected_structure_receipt_digest,
+                    )
+                    snapshot_legs = requested_legs
+                else:
+                    verified = _verified_universe_for_snapshot(
+                        con,
+                        snapshot_id=universe_snapshot_id,
+                        taken_at_ms=universe_taken_at_ms,
+                        truth_table=structure.table("group_truth"),
+                        market_table=structure.table("markets"),
+                        membership_table=structure.table("memberships"),
+                    )
+                    snapshot_legs = verified.legs
+                    if verified.universe_hash != universe_hash:
+                        raise QuoteRunStateError(
+                            "requested legs do not match verified snapshot membership"
+                        )
+                    source_truth_hash = _source_truth_hash(verified)
                 if _legs_by_token(requested_legs) != _legs_by_token(snapshot_legs):
                     raise QuoteRunStateError(
                         "requested legs do not match verified snapshot membership"
                     )
-                source_truth_hash = _source_truth_hash(verified)
                 if (
                     expected_source_truth_hash is not None
                     and source_truth_hash != expected_source_truth_hash
@@ -398,6 +529,36 @@ class NegRiskQuoteStore:
                         for leg in requested_legs
                     ],
                 )
+                if (
+                    expected_structure_receipt_digest is not None
+                    and expected_structure_revision is not None
+                    and expected_structure_mode is not None
+                    and expected_rejections is not None
+                ):
+                    rejections_json = _rejections_json(expected_rejections)
+                    receipt_digest = _quote_source_receipt_digest(
+                        quote_run_id=run_id,
+                        source_mode=expected_structure_mode,
+                        source_revision=expected_structure_revision,
+                        projection_receipt_digest=expected_structure_receipt_digest,
+                        source_rejections_json=rejections_json,
+                        universe_hash=universe_hash,
+                        source_truth_hash=source_truth_hash,
+                    )
+                    con.execute(
+                        "INSERT INTO neg_risk_quote_source_receipts("
+                        "quote_run_id,source_mode,source_revision,"
+                        "projection_receipt_digest,source_rejections_json,receipt_digest) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (
+                            run_id,
+                            expected_structure_mode,
+                            expected_structure_revision,
+                            expected_structure_receipt_digest,
+                            rejections_json,
+                            receipt_digest,
+                        ),
+                    )
                 con.execute("COMMIT")
                 return run_id
             except Exception:
@@ -659,8 +820,12 @@ class NegRiskQuoteStore:
                     run_ids,
                 )
                 con.execute(
-                    "DELETE FROM neg_risk_quote_run_legs "
+                    "DELETE FROM neg_risk_quote_source_receipts "
                     f"WHERE quote_run_id IN ({placeholders})",
+                    run_ids,
+                )
+                con.execute(
+                    f"DELETE FROM neg_risk_quote_run_legs WHERE quote_run_id IN ({placeholders})",
                     run_ids,
                 )
                 con.execute(
@@ -742,8 +907,8 @@ class NegRiskQuoteStore:
                     "ORDER BY neg_risk_market_id,market_id,yes_token_id",
                     (run.run_id,),
                 ).fetchall()
-                has_blank_provenance, all_provenance_blank = (
-                    _blank_provenance_state(leg_rows, quote_rows)
+                has_blank_provenance, all_provenance_blank = _blank_provenance_state(
+                    leg_rows, quote_rows
                 )
                 if has_blank_provenance and not all_provenance_blank:
                     raise QuoteProjectionIntegrityError()
@@ -751,22 +916,61 @@ class NegRiskQuoteStore:
                     raise QuoteProjectionIntegrityError()
                 run_legs = tuple(UniverseLeg(*row) for row in leg_rows)
                 quotes = tuple(PersistedQuote(*row) for row in quote_rows)
-                try:
-                    source = resolve_structure_read_context(
+                source_receipt = con.execute(
+                    "SELECT source_mode,source_revision,projection_receipt_digest,"
+                    "source_rejections_json,receipt_digest FROM "
+                    "neg_risk_quote_source_receipts WHERE quote_run_id=?",
+                    (run.run_id,),
+                ).fetchone()
+                if source_receipt is None:
+                    # One-time compatibility path for runs produced before the
+                    # run-bound source receipt existed. New runs never rescan.
+                    try:
+                        source = resolve_structure_read_context(
+                            con,
+                            mode=self._structure_generation_read_mode,
+                            snapshot_id=run.universe_snapshot_id,
+                        )
+                    except StructureGenerationReadError:
+                        raise QuoteProjectionIntegrityError()
+                    source_universe = _verified_universe_for_snapshot(
                         con,
-                        mode=self._structure_generation_read_mode,
-                        snapshot_id=run.universe_snapshot_id,
+                        snapshot_id=source.snapshot_id,
+                        taken_at_ms=source.taken_at_ms,
+                        truth_table=source.table("group_truth"),
+                        market_table=source.table("markets"),
+                        membership_table=source.table("memberships"),
                     )
-                except StructureGenerationReadError:
-                    raise QuoteProjectionIntegrityError()
-                source_universe = _verified_universe_for_snapshot(
-                    con,
-                    snapshot_id=source.snapshot_id,
-                    taken_at_ms=source.taken_at_ms,
-                    truth_table=source.table("group_truth"),
-                    market_table=source.table("markets"),
-                    membership_table=source.table("memberships"),
-                )
+                else:
+                    try:
+                        rejection_values = json.loads(str(source_receipt[3]))
+                        rejections = tuple(
+                            GroupRejection(str(item[0]), str(item[1]), str(item[2]))
+                            for item in rejection_values
+                        )
+                    except (TypeError, ValueError, IndexError, json.JSONDecodeError) as error:
+                        raise QuoteProjectionIntegrityError() from error
+                    expected_receipt = _quote_source_receipt_digest(
+                        quote_run_id=run.run_id,
+                        source_mode=str(source_receipt[0]),
+                        source_revision=int(source_receipt[1]),
+                        projection_receipt_digest=str(source_receipt[2]),
+                        source_rejections_json=str(source_receipt[3]),
+                        universe_hash=run.universe_hash,
+                        source_truth_hash=run.source_truth_hash,
+                    )
+                    if source_receipt[4] != expected_receipt:
+                        raise QuoteProjectionIntegrityError()
+                    source_universe = VerifiedQuoteUniverse(
+                        snapshot_id=run.universe_snapshot_id,
+                        taken_at_ms=run.universe_taken_at_ms,
+                        universe_hash=run.universe_hash,
+                        legs=run_legs,
+                        rejections=rejections,
+                        structure_receipt_digest=str(source_receipt[2]),
+                        structure_revision=int(source_receipt[1]),
+                        structure_mode=str(source_receipt[0]),
+                    )
                 if all_provenance_blank:
                     raise QuoteProjectionIntegrityError()
                 if any(
@@ -807,13 +1011,11 @@ def _blank_provenance_state(
     quote_rows: list[tuple[object, ...]],
 ) -> tuple[bool, bool]:
     provenance = tuple(
-        (str(row[-2]).strip(), str(row[-1]).strip())
-        for row in (*leg_rows, *quote_rows)
+        (str(row[-2]).strip(), str(row[-1]).strip()) for row in (*leg_rows, *quote_rows)
     )
     has_blank = any(not event_id or not membership_hash for event_id, membership_hash in provenance)
     all_blank = bool(provenance) and all(
-        not event_id and not membership_hash
-        for event_id, membership_hash in provenance
+        not event_id and not membership_hash for event_id, membership_hash in provenance
     )
     return has_blank, all_blank
 
@@ -944,17 +1146,15 @@ def _verified_universe_for_snapshot(
         "ORDER BY neg_risk_market_id",
         (snapshot_id,),
     ).fetchall()
+    # Start from the small certified group authority.  Unsupported augmented
+    # groups can contain most of production's 116k rows; materializing those in
+    # Python on every Quote cycle caused the 300-second freshness incident.
     market_rows = con.execute(
-        "SELECT event_id,neg_risk_market_id,market_id,condition_id,slug,yes_token_id,"
-        f"active,closed,incomplete FROM {market_table} "
-        "WHERE snapshot_id=? AND neg_risk_market_id IS NOT NULL "
-        "AND neg_risk_market_id!='' ORDER BY neg_risk_market_id,market_id",
+        _supported_market_projection_sql(truth_table, market_table),
         (snapshot_id,),
     ).fetchall()
     membership_rows = con.execute(
-        "SELECT event_id,neg_risk_market_id,market_id,member_kind,active,closed "
-        f"FROM {membership_table} WHERE snapshot_id=? "
-        "ORDER BY neg_risk_market_id,market_id",
+        _supported_membership_projection_sql(truth_table, membership_table),
         (snapshot_id,),
     ).fetchall()
     markets_by_group: dict[str, list[tuple[object, ...]]] = {}
@@ -1010,9 +1210,7 @@ def _verified_universe_for_snapshot(
             )
         )
         if not membership_matches:
-            rejections.append(
-                GroupRejection(group_id, quality, "membership-market-mismatch")
-            )
+            rejections.append(GroupRejection(group_id, quality, "membership-market-mismatch"))
             continue
         legs.extend(
             UniverseLeg(
@@ -1045,6 +1243,209 @@ def _verified_universe_for_snapshot(
         legs=ordered_legs,
         rejections=tuple(rejections),
     )
+
+
+def _supported_market_projection_sql(truth_table: str, market_table: str) -> str:
+    return (
+        "SELECT k.event_id,k.neg_risk_market_id,k.market_id,k.condition_id,k.slug,"
+        f"k.yes_token_id,k.active,k.closed,k.incomplete FROM {truth_table} t "
+        f"JOIN {market_table} k ON k.snapshot_id=t.snapshot_id "
+        "AND k.event_id=t.event_id AND k.neg_risk_market_id=t.neg_risk_market_id "
+        "WHERE t.snapshot_id=? AND t.neg_risk_type='standard' "
+        "AND t.quality='complete-supported' "
+        "ORDER BY k.neg_risk_market_id,k.market_id"
+    )
+
+
+def _supported_membership_projection_sql(
+    truth_table: str,
+    membership_table: str,
+) -> str:
+    return (
+        "SELECT m.event_id,m.neg_risk_market_id,m.market_id,m.member_kind,m.active,m.closed "
+        f"FROM {truth_table} t JOIN {membership_table} m "
+        "ON m.snapshot_id=t.snapshot_id AND m.event_id=t.event_id "
+        "AND m.neg_risk_market_id=t.neg_risk_market_id WHERE t.snapshot_id=? "
+        "AND t.neg_risk_type='standard' AND t.quality='complete-supported' "
+        "ORDER BY m.neg_risk_market_id,m.market_id"
+    )
+
+
+def _generation_comparison_receipt(
+    con: sqlite3.Connection,
+    snapshot_id: int,
+) -> tuple[object, ...]:
+    row = con.execute(
+        "SELECT r.publication_id,r.legacy_snapshot_id,r.legacy_market_count,"
+        "r.generation_market_count,r.legacy_universe_hash,r.generation_universe_hash,"
+        "r.legacy_source_truth_hash,r.generation_source_truth_hash,"
+        "r.generation_validation_hash,r.created_at_ms,r.receipt_digest,"
+        "g.comparison_receipt_digest FROM current_structure_generation g "
+        "JOIN structure_generation_comparison_receipts r "
+        "ON r.generation_snapshot_id=g.snapshot_id "
+        "AND r.publication_id=g.publication_id WHERE g.id=1 AND g.snapshot_id=?",
+        (snapshot_id,),
+    ).fetchone()
+    if row is None:
+        raise QuoteRunStateError("generation projection receipt is unavailable")
+    expected = _comparison_receipt_digest(
+        generation_snapshot_id=snapshot_id,
+        publication_id=str(row[0]),
+        legacy_snapshot_id=int(row[1]),
+        legacy_market_count=int(row[2]),
+        generation_market_count=int(row[3]),
+        legacy_universe_hash=str(row[4]),
+        generation_universe_hash=str(row[5]),
+        legacy_source_truth_hash=str(row[6]),
+        generation_source_truth_hash=str(row[7]),
+        generation_validation_hash=str(row[8]),
+        created_at_ms=int(row[9]),
+    )
+    if row[10] != expected or row[11] != expected:
+        raise QuoteRunStateError("generation projection receipt is unauthenticated")
+    return row
+
+
+def _bind_generation_projection_receipt(
+    con: sqlite3.Connection,
+    universe: VerifiedQuoteUniverse,
+) -> VerifiedQuoteUniverse:
+    row = _generation_comparison_receipt(con, universe.snapshot_id)
+    if row[5] != universe.universe_hash or row[7] != _source_truth_hash(universe):
+        raise QuoteUniverseUnavailableError("generation projection receipt mismatch")
+    return replace(
+        universe,
+        structure_receipt_digest=str(row[10]),
+        structure_revision=universe.snapshot_id,
+        structure_mode="generation",
+    )
+
+
+def _projection_receipt_digest(
+    *,
+    source_mode: str,
+    snapshot_id: int,
+    taken_at_ms: int,
+    source_revision: int,
+    universe_hash: str,
+    source_truth_hash: str,
+) -> str:
+    payload = [
+        source_mode,
+        snapshot_id,
+        taken_at_ms,
+        source_revision,
+        universe_hash,
+        source_truth_hash,
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _bind_legacy_projection_receipt(
+    con: sqlite3.Connection,
+    universe: VerifiedQuoteUniverse,
+) -> VerifiedQuoteUniverse:
+    row = con.execute(
+        "SELECT revision FROM legacy_structure_revision WHERE id=1 AND NOT EXISTS "
+        "(SELECT 1 FROM legacy_structure_revision_dirty WHERE id=1)"
+    ).fetchone()
+    if row is None:
+        raise QuoteUniverseUnavailableError("legacy structure revision unavailable")
+    revision = int(row[0])
+    digest = _projection_receipt_digest(
+        source_mode="legacy",
+        snapshot_id=universe.snapshot_id,
+        taken_at_ms=universe.taken_at_ms,
+        source_revision=revision,
+        universe_hash=universe.universe_hash,
+        source_truth_hash=_source_truth_hash(universe),
+    )
+    return replace(
+        universe,
+        structure_receipt_digest=digest,
+        structure_revision=revision,
+        structure_mode="legacy",
+    )
+
+
+def _require_legacy_projection_receipt(
+    con: sqlite3.Connection,
+    *,
+    snapshot_id: int,
+    taken_at_ms: int,
+    universe_hash: str,
+    source_truth_hash: str | None,
+    source_revision: int | None,
+    receipt_digest: str,
+) -> str:
+    row = con.execute(
+        "SELECT revision FROM legacy_structure_revision WHERE id=1 AND NOT EXISTS "
+        "(SELECT 1 FROM legacy_structure_revision_dirty WHERE id=1)"
+    ).fetchone()
+    if source_truth_hash is None or source_revision is None:
+        raise QuoteRunStateError("legacy projection receipt is unavailable")
+    if row is None:
+        raise QuoteRunStateError("legacy projection receipt mismatch")
+    if int(row[0]) != source_revision or receipt_digest != _projection_receipt_digest(
+        source_mode="legacy",
+        snapshot_id=snapshot_id,
+        taken_at_ms=taken_at_ms,
+        source_revision=source_revision,
+        universe_hash=universe_hash,
+        source_truth_hash=source_truth_hash,
+    ):
+        raise QuoteRunStateError("legacy projection receipt mismatch")
+    return source_truth_hash
+
+
+def _rejections_json(rejections: tuple[GroupRejection, ...]) -> str:
+    return json.dumps(
+        [[rejection.group_id, rejection.quality, rejection.reason] for rejection in rejections],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _quote_source_receipt_digest(
+    *,
+    quote_run_id: int,
+    source_mode: str,
+    source_revision: int,
+    projection_receipt_digest: str,
+    source_rejections_json: str,
+    universe_hash: str,
+    source_truth_hash: str,
+) -> str:
+    payload = [
+        quote_run_id,
+        source_mode,
+        source_revision,
+        projection_receipt_digest,
+        source_rejections_json,
+        universe_hash,
+        source_truth_hash,
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _require_generation_projection_receipt(
+    con: sqlite3.Connection,
+    *,
+    snapshot_id: int,
+    universe_hash: str,
+    source_truth_hash: str | None,
+    receipt_digest: str | None,
+) -> str:
+    if not source_truth_hash or not receipt_digest:
+        raise QuoteRunStateError("generation projection receipt is required")
+    row = _generation_comparison_receipt(con, snapshot_id)
+    if row[5] != universe_hash or row[7] != source_truth_hash or row[10] != receipt_digest:
+        raise QuoteRunStateError("generation projection receipt mismatch")
+    return source_truth_hash
 
 
 def _universe_hash(legs: tuple[UniverseLeg, ...]) -> str:

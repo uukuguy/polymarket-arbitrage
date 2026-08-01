@@ -674,6 +674,13 @@ def _subprocess_payload(**overrides) -> bytes:
         "successful_response_count": 11,
         "universe_snapshot_id": 70,
         "universe_hash": "a" * 64,
+        "attempt_id": 1,
+        "universe_ms": 10,
+        "admission_ms": 2,
+        "fetch_ms": 8,
+        "transform_ms": 3,
+        "persist_ms": 2,
+        "structure_receipt_digest": "b" * 64,
     }
     payload.update(overrides)
     return json.dumps(payload).encode()
@@ -701,10 +708,17 @@ async def test_isolated_collection_parses_one_bounded_result(tmp_path) -> None:
         quote_taken_at_ms=1_700_000_000_000,
         elapsed_ms=25,
         universe_hash="a" * 64,
+        attempt_id=1,
+        universe_ms=10,
+        admission_ms=2,
+        fetch_ms=8,
+        transform_ms=3,
+        persist_ms=2,
+        structure_receipt_digest="b" * 64,
     )
     args, kwargs = calls[0]
     assert args[1:4] == ("-m", "polyarb.cli_arbitrage", "collect-neg-risk-quotes")
-    assert args[-2:] == ("--db-path", str(settings.db_path))
+    assert args[-4:] == ("--db-path", str(settings.db_path), "--attempt-id", "1")
     assert kwargs["stdout"] == asyncio.subprocess.PIPE
     assert kwargs["stderr"] == asyncio.subprocess.PIPE
 
@@ -751,8 +765,10 @@ async def test_isolated_collection_cancellation_terminates_then_kills_child(
     from polyarb.daemon.quote_worker import collect_quotes_in_subprocess
 
     process = _FakeProcess(block=True)
+    spawned = asyncio.Event()
 
     async def spawn(*_args, **_kwargs):
+        spawned.set()
         return process
 
     task = asyncio.create_task(
@@ -762,7 +778,7 @@ async def test_isolated_collection_cancellation_terminates_then_kills_child(
             terminate_timeout_s=0.01,
         )
     )
-    await asyncio.sleep(0)
+    await asyncio.wait_for(spawned.wait(), timeout=1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task

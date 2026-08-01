@@ -161,6 +161,7 @@ def quote_db(tmp_path):
             ") VALUES (?,?,?,'standard',2,2,?,'complete-supported',NULL)",
             (snapshot_id, EVENT_ID, "group-a", MEMBERSHIP_HASH),
         )
+        con.execute("DELETE FROM legacy_structure_revision_dirty")
     return path
 
 
@@ -177,6 +178,41 @@ def _collect(store: NegRiskQuoteStore, reader: FakeReader, *, start: int = NOW_M
             now_ms=_now_sequence(start, start + 25, start + 25, start + 25),
         )
     )
+
+
+def test_collection_attempt_checkpoints_every_terminal_phase(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db, now_ms=lambda: NOW_MS)
+    attempt_id = store.start_collection_attempt()
+
+    result = asyncio.run(
+        collect_neg_risk_quotes(
+            quote_store=store,
+            reader=FakeReader(
+                [
+                    FixtureBook("token-a", [{"price": "0.4", "size": "10"}]),
+                    FixtureBook("token-b", [{"price": "0.5", "size": "10"}]),
+                ]
+            ),
+            now_ms=_now_sequence(NOW_MS, NOW_MS + 25, NOW_MS + 25, NOW_MS + 25),
+            attempt_id=attempt_id,
+        )
+    )
+
+    attempt = store.latest_collection_attempt()
+    assert attempt is not None
+    assert attempt["id"] == attempt_id == result.attempt_id
+    assert attempt["phase"] == "certify"
+    assert attempt["outcome"] == "collecting"
+    assert attempt["quote_run_id"] == result.run_id
+    assert attempt["target_count"] == 2
+    assert len(str(attempt["structure_receipt_digest"])) == 64
+    assert set(attempt["phase_timings"]) == {
+        "universe_ms",
+        "admission_ms",
+        "fetch_ms",
+        "transform_ms",
+        "persist_ms",
+    }
 
 
 async def test_slow_universe_reconstruction_does_not_block_event_loop(quote_db) -> None:
@@ -464,6 +500,7 @@ def test_busy_or_unavailable_universe_does_not_call_clob(quote_db) -> None:
             ") VALUES (1,'augmented-event','augmented-group','augmented',1,1,"
             "'augmented-hash','complete-unsupported','augmented-neg-risk-not-supported')"
         )
+        con.execute("DELETE FROM legacy_structure_revision_dirty")
     zero_eligible_reader = FakeReader([])
     result = _collect(NegRiskQuoteStore(empty_path), zero_eligible_reader)
 
@@ -535,9 +572,9 @@ def test_zero_leg_completion_failure_fails_run_without_calling_clob(
 
     assert reader.requests == []
     with sqlite3.connect(path) as con:
-        assert con.execute(
-            "SELECT status,failure_reason FROM neg_risk_quote_runs"
-        ).fetchall() == [("failed", "collector-error")]
+        assert con.execute("SELECT status,failure_reason FROM neg_risk_quote_runs").fetchall() == [
+            ("failed", "collector-error")
+        ]
 
 
 def test_slow_collector_renews_lease_before_an_expired_run_can_be_reclaimed(

@@ -49,8 +49,7 @@ import pyarrow as pa
 def migrate_fault_auth_finalize(con) -> bool:
     """Upgrade Task3's auth operation CHECK while preserving every audit row."""
     row = con.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' "
-        "AND name='neg_risk_fault_auth_nonces'"
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='neg_risk_fault_auth_nonces'"
     ).fetchone()
     if row is None or "'finalize'" in str(row[0]):
         return False
@@ -116,8 +115,7 @@ def migrate_fault_auth_finalize(con) -> bool:
 def migrate_fault_intent_status(con) -> bool:
     """Expand immutable intent envelopes to represent accepted or rejected."""
     row = con.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' "
-        "AND name='neg_risk_fault_intents'"
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='neg_risk_fault_intents'"
     ).fetchone()
     if row is None or "status IN ('accepted','rejected')" in str(row[0]):
         return False
@@ -210,8 +208,7 @@ def migrate_fault_intent_status(con) -> bool:
 def migrate_fault_events_cleanup_confirmation(con) -> bool:
     """Expand the historical action CHECK without changing event identities."""
     row = con.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' "
-        "AND name='neg_risk_fault_events'"
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='neg_risk_fault_events'"
     ).fetchone()
     if row is None or "'cleanup-confirmed'" in str(row[0]):
         return False
@@ -259,9 +256,7 @@ def migrate_fault_events_cleanup_confirmation(con) -> bool:
             ORDER BY id;
             """
         )
-        violations = con.execute(
-            "PRAGMA foreign_key_check(neg_risk_fault_events)"
-        ).fetchall()
+        violations = con.execute("PRAGMA foreign_key_check(neg_risk_fault_events)").fetchall()
         if violations:
             raise sqlite3.IntegrityError("fault-event-migration-foreign-key-check")
         con.execute("DROP TABLE neg_risk_fault_events_pre_confirmation")
@@ -274,6 +269,7 @@ def migrate_fault_events_cleanup_confirmation(con) -> bool:
         con.execute("PRAGMA legacy_alter_table=OFF")
         con.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys_enabled else 'OFF'}")
     return True
+
 
 # Exact pre-v2 owner guard accepted for the one supported a527 migration.
 # Keep this as an explicit historical contract: startup migration must not
@@ -640,6 +636,10 @@ CREATE TABLE IF NOT EXISTS markets (
 CREATE INDEX IF NOT EXISTS idx_markets_liquidity ON markets(liquidity_usd);
 CREATE INDEX IF NOT EXISTS idx_markets_end_time ON markets(end_time_ms);
 CREATE INDEX IF NOT EXISTS idx_markets_event_id ON markets(event_id);
+CREATE INDEX IF NOT EXISTS idx_markets_snapshot_group_event
+  ON markets(snapshot_id,neg_risk_market_id,event_id,market_id);
+CREATE INDEX IF NOT EXISTS idx_markets_quote_projection_v2
+  ON markets(snapshot_id,neg_risk_market_id,market_id,event_id);
 
 CREATE TABLE IF NOT EXISTS validation_issues (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -675,6 +675,10 @@ CREATE TABLE IF NOT EXISTS event_market_memberships (
   closed INTEGER NOT NULL CHECK(closed IN (0,1)),
   PRIMARY KEY(snapshot_id, event_id, market_id)
 );
+CREATE INDEX IF NOT EXISTS idx_event_market_memberships_quote_projection
+  ON event_market_memberships(snapshot_id,neg_risk_market_id,event_id,market_id);
+CREATE INDEX IF NOT EXISTS idx_event_market_memberships_quote_projection_v2
+  ON event_market_memberships(snapshot_id,neg_risk_market_id,market_id,event_id);
 
 CREATE TABLE IF NOT EXISTS neg_risk_group_truth (
   snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
@@ -691,6 +695,87 @@ CREATE TABLE IF NOT EXISTS neg_risk_group_truth (
   PRIMARY KEY(snapshot_id, neg_risk_market_id),
   CHECK (expected_member_count > 0 OR quality = 'incomplete-source')
 );
+
+-- O(1) mutation fence for the legacy Structure read model.  The legacy tables
+-- are not generation-frozen, so Quote admission binds its target projection to
+-- this counter and refuses a run if any source row changed after projection.
+CREATE TABLE IF NOT EXISTS legacy_structure_revision (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  revision INTEGER NOT NULL CHECK(revision >= 0)
+);
+CREATE TABLE IF NOT EXISTS legacy_structure_revision_dirty (
+  id INTEGER PRIMARY KEY CHECK(id=1)
+);
+INSERT OR IGNORE INTO legacy_structure_revision(id,revision) VALUES (1,0);
+CREATE TRIGGER IF NOT EXISTS trg_markets_structure_revision_insert
+AFTER INSERT ON markets
+WHEN NOT EXISTS (SELECT 1 FROM legacy_structure_revision_dirty WHERE id=1)
+BEGIN
+  UPDATE legacy_structure_revision SET revision=revision+1 WHERE id=1;
+  INSERT INTO legacy_structure_revision_dirty(id) VALUES (1);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_markets_structure_revision_update
+AFTER UPDATE ON markets
+WHEN NOT EXISTS (SELECT 1 FROM legacy_structure_revision_dirty WHERE id=1)
+BEGIN
+  UPDATE legacy_structure_revision SET revision=revision+1 WHERE id=1;
+  INSERT INTO legacy_structure_revision_dirty(id) VALUES (1);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_markets_structure_revision_delete
+AFTER DELETE ON markets
+WHEN NOT EXISTS (SELECT 1 FROM legacy_structure_revision_dirty WHERE id=1)
+BEGIN
+  UPDATE legacy_structure_revision SET revision=revision+1 WHERE id=1;
+  INSERT INTO legacy_structure_revision_dirty(id) VALUES (1);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_memberships_structure_revision_insert
+AFTER INSERT ON event_market_memberships
+WHEN NOT EXISTS (SELECT 1 FROM legacy_structure_revision_dirty WHERE id=1)
+BEGIN
+  UPDATE legacy_structure_revision SET revision=revision+1 WHERE id=1;
+  INSERT INTO legacy_structure_revision_dirty(id) VALUES (1);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_memberships_structure_revision_update
+AFTER UPDATE ON event_market_memberships
+WHEN NOT EXISTS (SELECT 1 FROM legacy_structure_revision_dirty WHERE id=1)
+BEGIN
+  UPDATE legacy_structure_revision SET revision=revision+1 WHERE id=1;
+  INSERT INTO legacy_structure_revision_dirty(id) VALUES (1);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_memberships_structure_revision_delete
+AFTER DELETE ON event_market_memberships
+WHEN NOT EXISTS (SELECT 1 FROM legacy_structure_revision_dirty WHERE id=1)
+BEGIN
+  UPDATE legacy_structure_revision SET revision=revision+1 WHERE id=1;
+  INSERT INTO legacy_structure_revision_dirty(id) VALUES (1);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_group_truth_structure_revision_insert
+AFTER INSERT ON neg_risk_group_truth
+WHEN NOT EXISTS (SELECT 1 FROM legacy_structure_revision_dirty WHERE id=1)
+BEGIN
+  UPDATE legacy_structure_revision SET revision=revision+1 WHERE id=1;
+  INSERT INTO legacy_structure_revision_dirty(id) VALUES (1);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_group_truth_structure_revision_update
+AFTER UPDATE ON neg_risk_group_truth
+WHEN NOT EXISTS (SELECT 1 FROM legacy_structure_revision_dirty WHERE id=1)
+BEGIN
+  UPDATE legacy_structure_revision SET revision=revision+1 WHERE id=1;
+  INSERT INTO legacy_structure_revision_dirty(id) VALUES (1);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_group_truth_structure_revision_delete
+AFTER DELETE ON neg_risk_group_truth
+WHEN NOT EXISTS (SELECT 1 FROM legacy_structure_revision_dirty WHERE id=1)
+BEGIN
+  UPDATE legacy_structure_revision SET revision=revision+1 WHERE id=1;
+  INSERT INTO legacy_structure_revision_dirty(id) VALUES (1);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_publication_clears_revision_dirty
+AFTER UPDATE OF market_view_published ON snapshots
+WHEN NEW.market_view_published=1 AND OLD.market_view_published=0
+BEGIN
+  DELETE FROM legacy_structure_revision_dirty WHERE id=1;
+END;
 
 -- Opportunity-first read model. Group revisions are immutable membership
 -- evidence; quote batches are published only against the certified membership
@@ -1795,6 +1880,24 @@ CREATE TABLE IF NOT EXISTS neg_risk_quote_runs (
 CREATE INDEX IF NOT EXISTS idx_neg_risk_quote_runs_select
   ON neg_risk_quote_runs(status, quoted_at_ms DESC, id DESC);
 
+CREATE TABLE IF NOT EXISTS neg_risk_quote_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+  checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= started_at_ms),
+  phase TEXT NOT NULL CHECK(phase IN (
+    'universe','admission','fetch','transform','persist','certify','projection',
+    'complete','failed'
+  )),
+  outcome TEXT NOT NULL CHECK(outcome IN ('collecting','complete','failed')),
+  quote_run_id INTEGER REFERENCES neg_risk_quote_runs(id),
+  target_count INTEGER CHECK(target_count IS NULL OR target_count >= 0),
+  structure_receipt_digest TEXT,
+  phase_timings_json TEXT NOT NULL DEFAULT '{}',
+  failure_kind TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_neg_risk_quote_attempts_latest
+  ON neg_risk_quote_attempts(started_at_ms DESC,id DESC);
+
 -- The requested set must be durable so independently-created store instances
 -- can reject quote rows for tokens outside their run's snapshot universe.
 CREATE TABLE IF NOT EXISTS neg_risk_quote_run_legs (
@@ -1807,6 +1910,15 @@ CREATE TABLE IF NOT EXISTS neg_risk_quote_run_legs (
   slug TEXT,
   yes_token_id TEXT NOT NULL,
   PRIMARY KEY(quote_run_id, yes_token_id)
+);
+
+CREATE TABLE IF NOT EXISTS neg_risk_quote_source_receipts (
+  quote_run_id INTEGER PRIMARY KEY REFERENCES neg_risk_quote_runs(id),
+  source_mode TEXT NOT NULL CHECK(source_mode IN ('legacy','generation')),
+  source_revision INTEGER NOT NULL CHECK(source_revision >= 0),
+  projection_receipt_digest TEXT NOT NULL CHECK(length(projection_receipt_digest)=64),
+  source_rejections_json TEXT NOT NULL,
+  receipt_digest TEXT NOT NULL CHECK(length(receipt_digest)=64)
 );
 
 CREATE TABLE IF NOT EXISTS neg_risk_quotes (
@@ -1906,91 +2018,215 @@ CREATE INDEX IF NOT EXISTS idx_neg_risk_opportunity_notification_attempts_replay
 
 OWNER_JOURNAL_TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "neg_risk_group_revisions": (
-        "id", "group_id", "event_id", "revision", "membership_hash",
-        "started_at_ms", "observed_at_ms", "source_cursor", "status", "legs_json",
+        "id",
+        "group_id",
+        "event_id",
+        "revision",
+        "membership_hash",
+        "started_at_ms",
+        "observed_at_ms",
+        "source_cursor",
+        "status",
+        "legs_json",
     ),
     "neg_risk_group_schedule": (
-        "group_id", "event_id", "membership_hash", "quality", "reason",
-        "gross_edge_bps", "activity_rank", "liquidity_rank", "change_rank",
-        "age_rank", "priority_score", "priority_reason", "priority_class",
-        "liquidity_weight", "first_discovered_at_ms", "last_discovered_at_ms",
-        "last_visited_at_ms", "promoted_at_ms", "promotion_eligible_at_ms",
-        "promotion_queue_deadline_at_ms", "candidate_start_deadline_at_ms",
+        "group_id",
+        "event_id",
+        "membership_hash",
+        "quality",
+        "reason",
+        "gross_edge_bps",
+        "activity_rank",
+        "liquidity_rank",
+        "change_rank",
+        "age_rank",
+        "priority_score",
+        "priority_reason",
+        "priority_class",
+        "liquidity_weight",
+        "first_discovered_at_ms",
+        "last_discovered_at_ms",
+        "last_visited_at_ms",
+        "promoted_at_ms",
+        "promotion_eligible_at_ms",
+        "promotion_queue_deadline_at_ms",
+        "candidate_start_deadline_at_ms",
     ),
     "neg_risk_group_quote_batches": (
-        "id", "group_id", "group_revision", "membership_hash", "started_at_ms",
-        "quoted_at_ms", "status", "failure_reason", "legs_json",
+        "id",
+        "group_id",
+        "group_revision",
+        "membership_hash",
+        "started_at_ms",
+        "quoted_at_ms",
+        "status",
+        "failure_reason",
+        "legs_json",
     ),
     "neg_risk_candidate_success_receipts": (
-        "id", "transaction_id", "group_id", "event_id", "membership_hash",
-        "quote_batch_id", "group_revision_row_id", "quote_batch_row_id",
-        "candidate_fact_row_id", "observed_at_ms", "receipt_hash",
+        "id",
+        "transaction_id",
+        "group_id",
+        "event_id",
+        "membership_hash",
+        "quote_batch_id",
+        "group_revision_row_id",
+        "quote_batch_row_id",
+        "candidate_fact_row_id",
+        "observed_at_ms",
+        "receipt_hash",
     ),
     "neg_risk_candidate_admissions": (
-        "id", "group_id", "event_id", "membership_hash", "promoted_at_ms",
-        "candidate_start_deadline_at_ms", "effective_capacity",
-        "candidate_max_wait_ms", "selection_budget_ms", "poll_interval_ms",
-        "group_timeout_ms", "terminal_write_budget_ms",
-        "attempt_start_write_budget_ms", "high_burst_groups",
-        "reserved_non_high_slots", "effective_start_bound_ms", "recorded_at_ms",
+        "id",
+        "group_id",
+        "event_id",
+        "membership_hash",
+        "promoted_at_ms",
+        "candidate_start_deadline_at_ms",
+        "effective_capacity",
+        "candidate_max_wait_ms",
+        "selection_budget_ms",
+        "poll_interval_ms",
+        "group_timeout_ms",
+        "terminal_write_budget_ms",
+        "attempt_start_write_budget_ms",
+        "high_burst_groups",
+        "reserved_non_high_slots",
+        "effective_start_bound_ms",
+        "recorded_at_ms",
     ),
     "neg_risk_candidate_attempt_starts": (
-        "id", "group_id", "event_id", "membership_hash", "promoted_at_ms",
-        "candidate_max_wait_ms", "started_at_ms",
-        "candidate_start_deadline_at_ms", "deadline_breached",
+        "id",
+        "group_id",
+        "event_id",
+        "membership_hash",
+        "promoted_at_ms",
+        "candidate_max_wait_ms",
+        "started_at_ms",
+        "candidate_start_deadline_at_ms",
+        "deadline_breached",
     ),
     "neg_risk_candidate_current_authority": (
-        "group_id", "event_id", "membership_hash", "group_revision",
-        "quote_batch_id", "fact_id", "last_result", "opportunity", "legs_json",
-        "canonical_json", "row_hash",
+        "group_id",
+        "event_id",
+        "membership_hash",
+        "group_revision",
+        "quote_batch_id",
+        "fact_id",
+        "last_result",
+        "opportunity",
+        "legs_json",
+        "canonical_json",
+        "row_hash",
     ),
     "neg_risk_candidate_current_aggregate": (
-        "id", "current_group_count", "opportunity_count", "watching_count",
-        "no_edge_count", "unavailable_count", "aggregate_digest",
+        "id",
+        "current_group_count",
+        "opportunity_count",
+        "watching_count",
+        "no_edge_count",
+        "unavailable_count",
+        "aggregate_digest",
     ),
     "neg_risk_discovery_status_projection": (
-        "id", "domain", "version", "generation", "raw_authority_seq",
-        "owner_journal_id", "groups_json", "candidate_attempt_start_count",
-        "candidate_start_deadline_breach_count", "group_count", "queue_high",
-        "queue_normal", "queue_explore", "promotion_queue_depth",
-        "outstanding_admitted_count", "total_liquidity_weight",
-        "projection_digest", "checkpoint_hash",
+        "id",
+        "domain",
+        "version",
+        "generation",
+        "raw_authority_seq",
+        "owner_journal_id",
+        "groups_json",
+        "candidate_attempt_start_count",
+        "candidate_start_deadline_breach_count",
+        "group_count",
+        "queue_high",
+        "queue_normal",
+        "queue_explore",
+        "promotion_queue_depth",
+        "outstanding_admitted_count",
+        "total_liquidity_weight",
+        "projection_digest",
+        "checkpoint_hash",
     ),
     "neg_risk_discovery_group_projection": (
-        "group_id", "visit_anchor_ms", "payload_json", "row_hash",
+        "group_id",
+        "visit_anchor_ms",
+        "payload_json",
+        "row_hash",
     ),
     "neg_risk_incident_authority_checkpoint": (
-        "id", "generation", "through_event_id", "compacted_event_count",
-        "scope_floor_count", "prefix_hash", "checkpoint_hash",
+        "id",
+        "generation",
+        "through_event_id",
+        "compacted_event_count",
+        "scope_floor_count",
+        "prefix_hash",
+        "checkpoint_hash",
     ),
     "neg_risk_incident_open_authority": (
-        "incident_id", "sequence", "scope", "kind", "state",
-        "detected_at_ms", "occurred_at_ms", "evidence_json",
-        "recovery_occurred_at_ms", "recovery_evidence_json", "row_hash",
+        "incident_id",
+        "sequence",
+        "scope",
+        "kind",
+        "state",
+        "detected_at_ms",
+        "occurred_at_ms",
+        "evidence_json",
+        "recovery_occurred_at_ms",
+        "recovery_evidence_json",
+        "row_hash",
     ),
     "neg_risk_incident_open_aggregate": (
-        "id", "open_count", "aggregate_digest", "row_hash",
+        "id",
+        "open_count",
+        "aggregate_digest",
+        "row_hash",
     ),
     "neg_risk_incident_scope_floors": (
-        "scope", "through_event_id", "compacted_event_count", "floor_hash",
+        "scope",
+        "through_event_id",
+        "compacted_event_count",
+        "floor_hash",
         "row_hash",
     ),
     "neg_risk_incident_suffix_authority": (
-        "id", "event_count", "first_event_id", "last_event_id", "chain_hash",
+        "id",
+        "event_count",
+        "first_event_id",
+        "last_event_id",
+        "chain_hash",
     ),
     "neg_risk_incident_replay_anchors": (
-        "incident_id", "sequence", "scope", "kind", "state",
-        "occurred_at_ms", "evidence_json", "recovery_occurred_at_ms",
-        "recovery_evidence_json", "row_hash",
+        "incident_id",
+        "sequence",
+        "scope",
+        "kind",
+        "state",
+        "occurred_at_ms",
+        "evidence_json",
+        "recovery_occurred_at_ms",
+        "recovery_evidence_json",
+        "row_hash",
     ),
     "neg_risk_resource_authority_checkpoint": (
-        "id", "generation", "through_sample_id", "through_decision_id",
-        "through_sequence", "compacted_sample_count",
-        "compacted_decision_count", "prefix_digest", "last_decision_json",
-        "last_decision_digest", "checkpoint_hash",
+        "id",
+        "generation",
+        "through_sample_id",
+        "through_decision_id",
+        "through_sequence",
+        "compacted_sample_count",
+        "compacted_decision_count",
+        "prefix_digest",
+        "last_decision_json",
+        "last_decision_digest",
+        "checkpoint_hash",
     ),
     "neg_risk_evidence_failures": (
-        "component", "failed_at_ms", "reason", "recovered_at_ms", "row_hash",
+        "component",
+        "failed_at_ms",
+        "reason",
+        "recovered_at_ms",
+        "row_hash",
     ),
 }
 
@@ -2091,25 +2327,37 @@ V4_LEGACY_OWNER_JOURNAL_TABLE_COLUMNS = {
     for table, columns in OWNER_JOURNAL_TABLE_COLUMNS.items()
     if table != "neg_risk_incident_suffix_authority"
 }
-V4_LEGACY_OWNER_JOURNAL_TABLE_COLUMNS[
-    "neg_risk_incident_authority_checkpoint"
-] = (
-    "id", "generation", "through_event_id", "compacted_event_count",
-    "prefix_hash", "checkpoint_hash",
+V4_LEGACY_OWNER_JOURNAL_TABLE_COLUMNS["neg_risk_incident_authority_checkpoint"] = (
+    "id",
+    "generation",
+    "through_event_id",
+    "compacted_event_count",
+    "prefix_hash",
+    "checkpoint_hash",
 )
-V4_LEGACY_OWNER_JOURNAL_TABLE_COLUMNS[
-    "neg_risk_incident_open_authority"
-] = (
-    "incident_id", "sequence", "scope", "kind", "state", "occurred_at_ms",
-    "evidence_json", "recovery_occurred_at_ms", "recovery_evidence_json",
+V4_LEGACY_OWNER_JOURNAL_TABLE_COLUMNS["neg_risk_incident_open_authority"] = (
+    "incident_id",
+    "sequence",
+    "scope",
+    "kind",
+    "state",
+    "occurred_at_ms",
+    "evidence_json",
+    "recovery_occurred_at_ms",
+    "recovery_evidence_json",
     "row_hash",
 )
-V4_LEGACY_OWNER_JOURNAL_TABLE_COLUMNS[
-    "neg_risk_incident_open_aggregate"
-] = ("id", "open_count", "aggregate_digest")
-V4_LEGACY_OWNER_JOURNAL_TABLE_COLUMNS[
-    "neg_risk_incident_scope_floors"
-] = ("scope", "through_event_id", "compacted_event_count", "floor_hash")
+V4_LEGACY_OWNER_JOURNAL_TABLE_COLUMNS["neg_risk_incident_open_aggregate"] = (
+    "id",
+    "open_count",
+    "aggregate_digest",
+)
+V4_LEGACY_OWNER_JOURNAL_TABLE_COLUMNS["neg_risk_incident_scope_floors"] = (
+    "scope",
+    "through_event_id",
+    "compacted_event_count",
+    "floor_hash",
+)
 (
     V4_LEGACY_OWNER_JOURNAL_TRIGGER_DDL,
     V4_LEGACY_OWNER_JOURNAL_TRIGGER_NAMES,
@@ -2129,24 +2377,20 @@ _V3_OWNER_JOURNAL_TABLE_COLUMNS = {
     for table, columns in OWNER_JOURNAL_TABLE_COLUMNS.items()
     if table not in _V4_EVIDENCE_OWNER_TABLES
 }
-V3_OWNER_JOURNAL_TRIGGER_DDL, V3_OWNER_JOURNAL_TRIGGER_NAMES = (
-    _owner_journal_triggers(_V3_OWNER_JOURNAL_TABLE_COLUMNS)
+V3_OWNER_JOURNAL_TRIGGER_DDL, V3_OWNER_JOURNAL_TRIGGER_NAMES = _owner_journal_triggers(
+    _V3_OWNER_JOURNAL_TABLE_COLUMNS
 )
 V4_EVIDENCE_OWNER_JOURNAL_TRIGGER_DDL, _ = _owner_journal_triggers(
-    {
-        table: OWNER_JOURNAL_TABLE_COLUMNS[table]
-        for table in _V4_EVIDENCE_OWNER_TABLES
-    }
+    {table: OWNER_JOURNAL_TABLE_COLUMNS[table] for table in _V4_EVIDENCE_OWNER_TABLES}
 )
 (
     CANDIDATE_CURRENT_AGGREGATE_TRIGGER_DDL,
     _,
 ) = _owner_journal_triggers(
     {
-        "neg_risk_candidate_current_aggregate":
-            OWNER_JOURNAL_TABLE_COLUMNS[
-                "neg_risk_candidate_current_aggregate"
-            ]
+        "neg_risk_candidate_current_aggregate": OWNER_JOURNAL_TABLE_COLUMNS[
+            "neg_risk_candidate_current_aggregate"
+        ]
     }
 )
 _V2_OWNER_JOURNAL_TABLE_COLUMNS = dict(_V3_OWNER_JOURNAL_TABLE_COLUMNS)
@@ -2156,9 +2400,7 @@ _V2_OWNER_JOURNAL_TABLE_COLUMNS["neg_risk_candidate_current_aggregate"] = (
     "opportunity_count",
     "aggregate_digest",
 )
-V2_OWNER_JOURNAL_TRIGGER_DDL, _ = _owner_journal_triggers(
-    _V2_OWNER_JOURNAL_TABLE_COLUMNS
-)
+V2_OWNER_JOURNAL_TRIGGER_DDL, _ = _owner_journal_triggers(_V2_OWNER_JOURNAL_TABLE_COLUMNS)
 DDL += "\n" + _OWNER_TRIGGER_DDL
 
 # Order MUST match the DDL `CREATE TABLE markets(...)` declaration
@@ -2539,6 +2781,14 @@ CREATE TABLE IF NOT EXISTS structure_generation_memberships (
     closed INTEGER NOT NULL CHECK(closed IN (0,1)),
     PRIMARY KEY(snapshot_id,event_id,market_id)
 );
+CREATE INDEX IF NOT EXISTS idx_structure_generation_memberships_quote_projection
+ON structure_generation_memberships(
+    snapshot_id,neg_risk_market_id,event_id,market_id
+);
+CREATE INDEX IF NOT EXISTS idx_structure_generation_memberships_quote_projection_v2
+ON structure_generation_memberships(
+    snapshot_id,neg_risk_market_id,market_id,event_id
+);
 CREATE TABLE IF NOT EXISTS structure_generation_group_truth (
     snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
     event_id TEXT NOT NULL,
@@ -2583,6 +2833,14 @@ CREATE TABLE IF NOT EXISTS structure_generation_markets (
 );
 CREATE INDEX IF NOT EXISTS idx_structure_generation_markets_event
 ON structure_generation_markets(snapshot_id,event_id);
+CREATE INDEX IF NOT EXISTS idx_structure_generation_markets_quote_projection
+ON structure_generation_markets(
+    snapshot_id,neg_risk_market_id,event_id,market_id
+);
+CREATE INDEX IF NOT EXISTS idx_structure_generation_markets_quote_projection_v2
+ON structure_generation_markets(
+    snapshot_id,neg_risk_market_id,market_id,event_id
+);
 CREATE TABLE IF NOT EXISTS structure_generation_issues (
     snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
     issue_index INTEGER NOT NULL,

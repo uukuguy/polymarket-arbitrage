@@ -102,6 +102,7 @@ def collect_neg_risk_quotes_command(
         help="Local SQLite sidecar written by this one collection only",
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
+    attempt_id: int = typer.Option(0, "--attempt-id", min=0),
 ) -> None:
     """Collect one local read-only CLOB quote run; not a scheduler or order command."""
     _setup_logger(verbose)
@@ -117,6 +118,7 @@ def collect_neg_risk_quotes_command(
                     ),
                 ),
                 reader=ClobReaderClient(settings),
+                attempt_id=attempt_id,
             )
         )
     except Exception as error:
@@ -133,6 +135,13 @@ def collect_neg_risk_quotes_command(
                 "successful_response_count": result.successful_response_count,
                 "universe_snapshot_id": result.universe_snapshot_id,
                 "universe_hash": result.universe_hash,
+                "attempt_id": result.attempt_id,
+                "universe_ms": result.universe_ms,
+                "admission_ms": result.admission_ms,
+                "fetch_ms": result.fetch_ms,
+                "transform_ms": result.transform_ms,
+                "persist_ms": result.persist_ms,
+                "structure_receipt_digest": result.structure_receipt_digest,
             },
             sort_keys=True,
         )

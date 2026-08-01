@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 import pytest
 
+import polyarb.routing.neg_risk_quote_store as quote_store_module
 from polyarb.perception.market_truth import SourceCoverage
 from polyarb.routing.neg_risk_quote_store import (
     QUOTE_RUN_LEASE_MS,
@@ -89,6 +90,8 @@ def quote_db(tmp_path):
             ") VALUES (?,?,?,'standard',2,2,?,'complete-supported',NULL)",
             (snapshot_id, EVENT_ID, "group-a", MEMBERSHIP_HASH),
         )
+        # Direct fixture writes emulate one already-published atomic Structure.
+        con.execute("DELETE FROM legacy_structure_revision_dirty")
     return path
 
 
@@ -115,9 +118,7 @@ def _legs() -> tuple[UniverseLeg, ...]:
     )
 
 
-def test_quote_writer_uses_shared_production_busy_timeout(
-    quote_db, monkeypatch
-) -> None:
+def test_quote_writer_uses_shared_production_busy_timeout(quote_db, monkeypatch) -> None:
     """Quote and Structure writers must share one bounded contention policy."""
     real_connect = sqlite3.connect
     observed_timeouts: list[float | None] = []
@@ -182,9 +183,7 @@ def _complete(store: NegRiskQuoteStore) -> int:
     return run_id
 
 
-def test_purge_old_runs_keeps_recent_complete_and_failed_history(
-    quote_db, monkeypatch
-) -> None:
+def test_purge_old_runs_keeps_recent_complete_and_failed_history(quote_db, monkeypatch) -> None:
     store = NegRiskQuoteStore(quote_db)
     statements: list[str] = []
     connect = store._connect
@@ -206,20 +205,13 @@ def test_purge_old_runs_keeps_recent_complete_and_failed_history(
 
     assert deleted == 3
     with sqlite3.connect(quote_db) as con:
-        remaining = con.execute(
-            "SELECT id,status FROM neg_risk_quote_runs ORDER BY id"
-        ).fetchall()
+        remaining = con.execute("SELECT id,status FROM neg_risk_quote_runs ORDER BY id").fetchall()
         remaining_legs = {
             int(row[0])
-            for row in con.execute(
-                "SELECT DISTINCT quote_run_id FROM neg_risk_quote_run_legs"
-            )
+            for row in con.execute("SELECT DISTINCT quote_run_id FROM neg_risk_quote_run_legs")
         }
         remaining_quotes = {
-            int(row[0])
-            for row in con.execute(
-                "SELECT DISTINCT quote_run_id FROM neg_risk_quotes"
-            )
+            int(row[0]) for row in con.execute("SELECT DISTINCT quote_run_id FROM neg_risk_quotes")
         }
 
     assert remaining == [
@@ -241,9 +233,7 @@ def test_purge_old_runs_is_bounded_and_never_deletes_collecting(quote_db) -> Non
     assert store.purge_old_runs(keep_last_per_status=1, max_runs=2) == 2
 
     with sqlite3.connect(quote_db) as con:
-        remaining = con.execute(
-            "SELECT id,status FROM neg_risk_quote_runs ORDER BY id"
-        ).fetchall()
+        remaining = con.execute("SELECT id,status FROM neg_risk_quote_runs ORDER BY id").fetchall()
     assert remaining == [
         (complete_ids[2], "complete"),
         (complete_ids[3], "complete"),
@@ -877,14 +867,14 @@ def test_latest_verified_universe_excludes_augmented_and_reports_reason(quote_db
             ") VALUES (1,'event-x','group-x','augmented',1,1,'membership-hash-x',"
             "'complete-unsupported','augmented-neg-risk-not-supported')"
         )
+        con.execute("DELETE FROM legacy_structure_revision_dirty")
 
     universe = NegRiskQuoteStore(quote_db).latest_verified_universe()
 
     assert {leg.neg_risk_market_id for leg in universe.legs} == {"group-a"}
-    assert {
-        (leg.event_id, leg.membership_hash)
-        for leg in universe.legs
-    } == {(EVENT_ID, MEMBERSHIP_HASH)}
+    assert {(leg.event_id, leg.membership_hash) for leg in universe.legs} == {
+        (EVENT_ID, MEMBERSHIP_HASH)
+    }
     expected_identity = sorted(
         (
             leg.neg_risk_market_id,
@@ -894,13 +884,16 @@ def test_latest_verified_universe_excludes_augmented_and_reports_reason(quote_db
         )
         for leg in universe.legs
     )
-    assert universe.universe_hash == hashlib.sha256(
-        json.dumps(
-            expected_identity,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    assert (
+        universe.universe_hash
+        == hashlib.sha256(
+            json.dumps(
+                expected_identity,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
     assert [
         (rejection.group_id, rejection.quality, rejection.reason)
         for rejection in universe.rejections
@@ -928,6 +921,175 @@ def test_latest_verified_universe_reads_published_generation(quote_db) -> None:
 
     assert universe.snapshot_id == 1
     assert [leg.market_id for leg in universe.legs] == ["market-a", "market-b"]
+
+
+def test_verified_universe_does_not_materialize_unsupported_group_members(quote_db) -> None:
+    """A huge augmented group must remain one rejection row, not a Python pre-read."""
+    bulk_count = 2_000
+    with sqlite3.connect(quote_db) as con:
+        con.executemany(
+            "INSERT INTO markets("
+            "market_id,condition_id,yes_token_id,active,closed,neg_risk_market_id,"
+            "fetched_at_ms,snapshot_id,incomplete,event_id) "
+            "VALUES (?,?,?,1,0,'augmented-bulk',?,1,0,'event-bulk')",
+            [
+                (f"bulk-{index:05d}", f"condition-{index}", f"token-{index}", NOW_MS)
+                for index in range(bulk_count)
+            ],
+        )
+        con.executemany(
+            "INSERT INTO event_market_memberships("
+            "snapshot_id,event_id,neg_risk_market_id,market_id,member_kind,active,closed) "
+            "VALUES (1,'event-bulk','augmented-bulk',?,'named',1,0)",
+            [(f"bulk-{index:05d}",) for index in range(bulk_count)],
+        )
+        con.execute(
+            "INSERT INTO neg_risk_group_truth("
+            "snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+            "expected_member_count,active_named_count,membership_hash,quality,reason) "
+            "VALUES (1,'event-bulk','augmented-bulk','augmented',?,?,"
+            "'bulk-hash','complete-unsupported','augmented-neg-risk-not-supported')",
+            (bulk_count, bulk_count),
+        )
+
+        def reject_broad_materialization(_cursor, row):
+            if len(row) in {6, 9} and row[1] == "augmented-bulk":
+                raise AssertionError("unsupported membership was materialized")
+            return row
+
+        con.row_factory = reject_broad_materialization
+        universe = quote_store_module._verified_universe_for_snapshot(
+            con,
+            snapshot_id=1,
+            taken_at_ms=NOW_MS - 1_000,
+        )
+
+    assert [leg.market_id for leg in universe.legs] == ["market-a", "market-b"]
+    assert universe.rejections[-1].group_id == "augmented-bulk"
+
+
+def test_generation_begin_uses_authenticated_projection_without_target_rescan(
+    quote_db, monkeypatch
+) -> None:
+    """Frozen publication receipt, not a second 35k projection, admits the run."""
+    sqlite_store = SQLiteStore(quote_db)
+    for _ in range(6):
+        checkpoint = sqlite_store.backfill_current_structure_generation(max_rows=100)
+        if checkpoint.complete:
+            break
+    assert checkpoint.complete is True
+    store = NegRiskQuoteStore(
+        quote_db,
+        structure_generation_read_mode="generation",
+    )
+    universe = store.latest_verified_universe()
+
+    def forbidden_rescan(*_args, **_kwargs):
+        raise AssertionError("begin_verified_run repeated the target projection")
+
+    monkeypatch.setattr(
+        quote_store_module,
+        "_verified_universe_for_snapshot",
+        forbidden_rescan,
+    )
+
+    run_id = store.begin_verified_run(universe, quoted_at_ms=NOW_MS)
+
+    assert run_id > 0
+
+
+def test_legacy_complete_run_materializes_target_projection_once(quote_db, monkeypatch) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    real_projection = quote_store_module._verified_universe_for_snapshot
+    projection_calls = 0
+
+    def counted_projection(*args, **kwargs):
+        nonlocal projection_calls
+        projection_calls += 1
+        return real_projection(*args, **kwargs)
+
+    monkeypatch.setattr(
+        quote_store_module,
+        "_verified_universe_for_snapshot",
+        counted_projection,
+    )
+    universe = store.latest_verified_universe()
+    run_id = store.begin_verified_run(universe, quoted_at_ms=NOW_MS)
+    store.record_terminal_quotes(
+        run_id,
+        tuple(_quote(leg.yes_token_id, terminal_state="missing-ask") for leg in universe.legs),
+    )
+    store.complete_run(run_id, completed_at_ms=NOW_MS + 1, successful_response_count=0)
+
+    projection = store.latest_complete_projection()
+
+    assert projection is not None
+    assert projection.run_id == run_id
+    assert projection_calls == 1
+
+
+def test_legacy_projection_receipt_rejects_source_mutation_before_admission(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    universe = store.latest_verified_universe()
+    with sqlite3.connect(quote_db) as con:
+        con.execute("UPDATE markets SET slug='changed' WHERE market_id='market-a'")
+
+    with pytest.raises(QuoteRunStateError, match="legacy projection receipt mismatch"):
+        store.begin_verified_run(universe, quoted_at_ms=NOW_MS)
+
+
+def test_legacy_revision_fence_coalesces_bulk_row_mutations(quote_db) -> None:
+    """116k sync rows may evaluate a trigger, but only the first writes the fence."""
+    bulk_count = 2_000
+    with sqlite3.connect(quote_db) as con:
+        con.execute("DELETE FROM legacy_structure_revision_dirty")
+        before = con.total_changes
+        con.executemany(
+            "INSERT INTO markets("
+            "market_id,condition_id,yes_token_id,active,closed,neg_risk_market_id,"
+            "fetched_at_ms,snapshot_id,incomplete,event_id) "
+            "VALUES (?,?,?,1,0,'bulk-group',?,1,0,'bulk-event')",
+            [
+                (f"fence-{index:05d}", f"condition-{index}", f"token-{index}", NOW_MS)
+                for index in range(bulk_count)
+            ],
+        )
+        writes = con.total_changes - before
+        dirty = con.execute("SELECT COUNT(*) FROM legacy_structure_revision_dirty").fetchone()[0]
+
+    assert writes == bulk_count + 2  # rows + one revision UPDATE + one dirty INSERT
+    assert dirty == 1
+
+
+@pytest.mark.parametrize(
+    ("truth_table", "target_table", "sql_factory"),
+    [
+        (
+            "neg_risk_group_truth",
+            "markets",
+            quote_store_module._supported_market_projection_sql,
+        ),
+        (
+            "neg_risk_group_truth",
+            "event_market_memberships",
+            quote_store_module._supported_membership_projection_sql,
+        ),
+    ],
+)
+def test_legacy_target_projection_query_plan_is_indexed_without_temp_scan(
+    quote_db, truth_table, target_table, sql_factory
+) -> None:
+    with sqlite3.connect(quote_db) as con:
+        details = [
+            str(row[3])
+            for row in con.execute(
+                f"EXPLAIN QUERY PLAN {sql_factory(truth_table, target_table)}",
+                (1,),
+            )
+        ]
+
+    assert not any("USE TEMP B-TREE" in detail for detail in details), details
+    assert not any(f"SCAN {target_table}" in detail for detail in details), details
 
 
 def test_generation_quote_reader_fails_closed_without_pointer(quote_db) -> None:
@@ -974,11 +1136,11 @@ def test_complete_published_zero_market_snapshot_is_valid_empty_universe(tmp_pat
         issues=[],
         source_coverage=SourceCoverage.complete(0, 0),
         event_members=[],
-            group_truths=[],
-            publish_markets=True,
-            data_product="structure",
-            archive_status="not_requested",
-        )
+        group_truths=[],
+        publish_markets=True,
+        data_product="structure",
+        archive_status="not_requested",
+    )
 
     universe = NegRiskQuoteStore(path).latest_verified_universe()
 
@@ -990,6 +1152,7 @@ def test_complete_published_zero_market_snapshot_is_valid_empty_universe(tmp_pat
 def test_blank_membership_hash_rejects_supported_group(quote_db) -> None:
     with sqlite3.connect(quote_db) as con:
         con.execute("UPDATE neg_risk_group_truth SET membership_hash=''")
+        con.execute("DELETE FROM legacy_structure_revision_dirty")
 
     universe = NegRiskQuoteStore(quote_db).latest_verified_universe()
 
@@ -1033,6 +1196,7 @@ def test_begin_run_rejects_unverified_market_membership(
 def test_missing_required_market_rejects_whole_standard_group(quote_db) -> None:
     with sqlite3.connect(quote_db) as con:
         con.execute("DELETE FROM markets WHERE market_id='market-b'")
+        con.execute("DELETE FROM legacy_structure_revision_dirty")
 
     universe = NegRiskQuoteStore(quote_db).latest_verified_universe()
 
@@ -1059,6 +1223,7 @@ def test_verified_run_persists_universe_event_and_membership_identity(quote_db) 
             ") VALUES (1,'event-z','group-z','augmented',1,1,'membership-z',"
             "'complete-unsupported','augmented-neg-risk-not-supported')"
         )
+        con.execute("DELETE FROM legacy_structure_revision_dirty")
     universe = store.latest_verified_universe()
 
     run_id = store.begin_verified_run(universe, quoted_at_ms=NOW_MS)
@@ -1093,8 +1258,7 @@ def test_verified_run_persists_universe_event_and_membership_identity(quote_db) 
                 [
                     universe.universe_hash,
                     sorted(
-                        (item.group_id, item.quality, item.reason)
-                        for item in universe.rejections
+                        (item.group_id, item.quality, item.reason) for item in universe.rejections
                     ),
                 ],
                 ensure_ascii=False,
@@ -1102,8 +1266,7 @@ def test_verified_run_persists_universe_event_and_membership_identity(quote_db) 
             ).encode()
         ).hexdigest()
         assert con.execute(
-            "SELECT universe_hash,source_truth_hash "
-            "FROM neg_risk_quote_runs WHERE id=?",
+            "SELECT universe_hash,source_truth_hash FROM neg_risk_quote_runs WHERE id=?",
             (run_id,),
         ).fetchone() == (universe.universe_hash, expected_source_truth)
         assert con.execute(
@@ -1112,8 +1275,7 @@ def test_verified_run_persists_universe_event_and_membership_identity(quote_db) 
             (run_id,),
         ).fetchall() == [(EVENT_ID, MEMBERSHIP_HASH)]
         assert con.execute(
-            "SELECT DISTINCT event_id,membership_hash "
-            "FROM neg_risk_quotes WHERE quote_run_id=?",
+            "SELECT DISTINCT event_id,membership_hash FROM neg_risk_quotes WHERE quote_run_id=?",
             (run_id,),
         ).fetchall() == [(EVENT_ID, MEMBERSHIP_HASH)]
 
@@ -1203,14 +1365,8 @@ def test_complete_projection_uses_one_read_connection(
             "UPDATE neg_risk_quote_run_legs SET condition_id='forged-condition' "
             "WHERE yes_token_id='token-a'"
         ),
-        (
-            "UPDATE neg_risk_quotes SET event_id='forged-event' "
-            "WHERE yes_token_id='token-a'"
-        ),
-        (
-            "UPDATE neg_risk_quotes SET event_id='' "
-            "WHERE yes_token_id='token-a'"
-        ),
+        ("UPDATE neg_risk_quotes SET event_id='forged-event' WHERE yes_token_id='token-a'"),
+        ("UPDATE neg_risk_quotes SET event_id='' WHERE yes_token_id='token-a'"),
         "DELETE FROM neg_risk_quotes WHERE yes_token_id='token-a'",
         (
             "INSERT INTO neg_risk_quotes("
@@ -1219,10 +1375,7 @@ def test_complete_projection_uses_one_read_connection(
             ") VALUES (1,'group-a',?,?, 'extra-market','extra-condition','extra',"
             "'extra-token','missing-book',NULL,NULL)"
         ),
-        (
-            "UPDATE markets SET condition_id='source-condition-drift' "
-            "WHERE market_id='market-a'"
-        ),
+        ("UPDATE markets SET condition_id='source-condition-drift' WHERE market_id='market-a'"),
     ],
 )
 def test_complete_projection_rejects_any_cross_chain_identity_or_count_drift(

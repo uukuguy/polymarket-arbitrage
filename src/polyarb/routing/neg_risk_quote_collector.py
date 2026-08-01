@@ -53,9 +53,28 @@ class QuoteCollectionResult:
     quote_taken_at_ms: int
     elapsed_ms: int
     universe_hash: str = ""
+    attempt_id: int = 0
+    universe_ms: int = 0
+    admission_ms: int = 0
+    fetch_ms: int = 0
+    transform_ms: int = 0
+    persist_ms: int = 0
+    structure_receipt_digest: str = ""
 
     @classmethod
-    def from_run(cls, run: QuoteRun, *, elapsed_ms: int) -> QuoteCollectionResult:
+    def from_run(
+        cls,
+        run: QuoteRun,
+        *,
+        elapsed_ms: int,
+        attempt_id: int = 0,
+        universe_ms: int = 0,
+        admission_ms: int = 0,
+        fetch_ms: int = 0,
+        transform_ms: int = 0,
+        persist_ms: int = 0,
+        structure_receipt_digest: str = "",
+    ) -> QuoteCollectionResult:
         return cls(
             run_id=run.run_id,
             status=run.status,
@@ -65,6 +84,13 @@ class QuoteCollectionResult:
             quote_taken_at_ms=run.quoted_at_ms,
             elapsed_ms=elapsed_ms,
             universe_hash=run.universe_hash,
+            attempt_id=attempt_id,
+            universe_ms=universe_ms,
+            admission_ms=admission_ms,
+            fetch_ms=fetch_ms,
+            transform_ms=transform_ms,
+            persist_ms=persist_ms,
+            structure_receipt_digest=structure_receipt_digest,
         )
 
 
@@ -78,6 +104,7 @@ async def collect_neg_risk_quotes(
     reader: BooksReader,
     now_ms: Callable[[], int] | None = None,
     lease_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    attempt_id: int = 0,
 ) -> QuoteCollectionResult:
     """Collect every latest-universe YES quote into one complete-or-failed run.
 
@@ -90,10 +117,25 @@ async def collect_neg_risk_quotes(
     """
     clock = now_ms or quote_store.current_time_ms
     stage_started = time.perf_counter()
-    universe = await asyncio.to_thread(
-        quote_store.latest_verified_universe
-    )
+    logger.info("neg-risk quote projection phase started phase=source-projection")
+    universe = await asyncio.to_thread(quote_store.latest_verified_universe)
     universe_ms = int((time.perf_counter() - stage_started) * 1000)
+    if attempt_id:
+        await asyncio.to_thread(
+            quote_store.checkpoint_collection_attempt,
+            attempt_id,
+            phase="admission",
+            target_count=len(universe.legs),
+            structure_receipt_digest=universe.structure_receipt_digest,
+            phase_timings={"universe_ms": universe_ms},
+        )
+    logger.info(
+        "neg-risk quote projection phase complete "
+        f"phase=source-projection elapsed_ms={universe_ms} "
+        f"target_count={len(universe.legs)} "
+        f"structure_mode={universe.structure_mode} "
+        f"source_revision={universe.structure_revision}"
+    )
     legs = universe.legs
     quote_taken_at_ms = clock()
     stage_started = time.perf_counter()
@@ -103,6 +145,18 @@ async def collect_neg_risk_quotes(
         quoted_at_ms=quote_taken_at_ms,
     )
     begin_ms = int((time.perf_counter() - stage_started) * 1000)
+    if attempt_id:
+        await asyncio.to_thread(
+            quote_store.checkpoint_collection_attempt,
+            attempt_id,
+            phase="fetch",
+            quote_run_id=run_id,
+            phase_timings={"universe_ms": universe_ms, "admission_ms": begin_ms},
+        )
+    logger.info(
+        "neg-risk quote admission phase complete "
+        f"phase=run-admission run_id={run_id} elapsed_ms={begin_ms}"
+    )
     failure_reason = "collector-error"
     try:
         if not legs:
@@ -112,7 +166,22 @@ async def collect_neg_risk_quotes(
                 completed_at_ms=clock(),
                 successful_response_count=0,
             )
-            return QuoteCollectionResult.from_run(completed, elapsed_ms=0)
+            timings = {"universe_ms": universe_ms, "admission_ms": begin_ms}
+            if attempt_id:
+                await asyncio.to_thread(
+                    quote_store.checkpoint_collection_attempt,
+                    attempt_id,
+                    phase="certify",
+                    phase_timings=timings,
+                )
+            return QuoteCollectionResult.from_run(
+                completed,
+                elapsed_ms=0,
+                attempt_id=attempt_id,
+                universe_ms=universe_ms,
+                admission_ms=begin_ms,
+                structure_receipt_digest=universe.structure_receipt_digest,
+            )
         token_ids = list({leg.yes_token_id: None for leg in legs})
         try:
             stage_started = time.perf_counter()
@@ -125,6 +194,17 @@ async def collect_neg_risk_quotes(
                 lease_sleep=lease_sleep,
             )
             fetch_ms = int((time.perf_counter() - stage_started) * 1000)
+            if attempt_id:
+                await asyncio.to_thread(
+                    quote_store.checkpoint_collection_attempt,
+                    attempt_id,
+                    phase="transform",
+                    phase_timings={
+                        "universe_ms": universe_ms,
+                        "admission_ms": begin_ms,
+                        "fetch_ms": fetch_ms,
+                    },
+                )
         except QuoteRunLeaseLostError:
             raise
         except Exception:
@@ -138,6 +218,18 @@ async def collect_neg_risk_quotes(
             legs,
         )
         transform_ms = int((time.perf_counter() - stage_started) * 1000)
+        if attempt_id:
+            await asyncio.to_thread(
+                quote_store.checkpoint_collection_attempt,
+                attempt_id,
+                phase="persist",
+                phase_timings={
+                    "universe_ms": universe_ms,
+                    "admission_ms": begin_ms,
+                    "fetch_ms": fetch_ms,
+                    "transform_ms": transform_ms,
+                },
+            )
         stage_started = time.perf_counter()
         await asyncio.to_thread(
             quote_store.record_terminal_quotes,
@@ -187,9 +279,30 @@ async def collect_neg_risk_quotes(
         f"transform_ms={transform_ms} "
         f"persist_ms={persist_ms}"
     )
+    timings = {
+        "universe_ms": universe_ms,
+        "admission_ms": begin_ms,
+        "fetch_ms": fetch_ms,
+        "transform_ms": transform_ms,
+        "persist_ms": persist_ms,
+    }
+    if attempt_id:
+        await asyncio.to_thread(
+            quote_store.checkpoint_collection_attempt,
+            attempt_id,
+            phase="certify",
+            phase_timings=timings,
+        )
     return QuoteCollectionResult.from_run(
         completed,
         elapsed_ms=completed_at_ms - quote_taken_at_ms,
+        attempt_id=attempt_id,
+        universe_ms=universe_ms,
+        admission_ms=begin_ms,
+        fetch_ms=fetch_ms,
+        transform_ms=transform_ms,
+        persist_ms=persist_ms,
+        structure_receipt_digest=universe.structure_receipt_digest,
     )
 
 
@@ -207,9 +320,7 @@ async def _get_books_with_lease(
     lease_sleep: Callable[[float], Awaitable[None]],
 ) -> Sequence[Any]:
     """Await CLOB while proving that this task still owns its durable lease."""
-    reader_task = asyncio.create_task(
-        reader.get_books(token_ids, projection="top")
-    )
+    reader_task = asyncio.create_task(reader.get_books(token_ids, projection="top"))
     renewal_task = asyncio.create_task(
         _renew_lease_until_cancelled(
             quote_store=quote_store,

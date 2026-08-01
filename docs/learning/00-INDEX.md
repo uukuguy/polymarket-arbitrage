@@ -56,6 +56,7 @@
 | 42 | [生产故障控制边界](42-生产故障控制边界.md) | 四角色 SOURCE/VERDICT 能力矩阵 / fail-open control 与 fail-closed evidence / immutable source facts 与独立 stale 门 / group ID 与 outbox ID / cleanup→recovery→VERIFIED |
 | 43 | [Structure 分页恢复](43-Structure分页恢复.md) | opaque cursor 页面事务 / 超时续跑 / RECOVERING 不停产 / complete-window 原子发布 / point reconciliation |
 | 44 | [M1 生产恢复边界](44-M1生产恢复边界.md) | Quote 成功与 housekeeping 分界 / PostgreSQL→SQLite 类型适配 / L2 depth 继承 / 60-240-300 时钟 / 双缓冲政策门 |
+| 45 | [Quote 投影与阶段收据](45-Quote投影与阶段收据.md) | 目标索引投影 / Structure revision fence / run-bound source receipt / 采集阶段 checkpoint / 原子发布边界 |
 
 ## Phase 02.1 教学增量（2026-05）
 

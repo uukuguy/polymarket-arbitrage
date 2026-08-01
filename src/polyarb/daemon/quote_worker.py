@@ -6,6 +6,7 @@ import asyncio
 import ctypes
 import gc
 import json
+import sqlite3
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -25,6 +26,7 @@ from polyarb.routing.opportunity_scanner import (
     OpportunityScanResult,
     scan_certified_neg_risk_quote_projection,
 )
+from polyarb.storage.sqlite_store import SQLiteStore
 
 CollectOnce = Callable[[], Awaitable[QuoteCollectionResult]]
 CertifyProjection = Callable[
@@ -324,6 +326,14 @@ async def collect_quotes_in_subprocess(
     terminate_timeout_s: float = 3.0,
 ) -> QuoteCollectionResult:
     """Run all SDK fetch/decode/SQLite collection work outside the HTTP process."""
+    attempt_store = NegRiskQuoteStore(settings.db_path)
+    try:
+        attempt_id = await asyncio.to_thread(attempt_store.start_collection_attempt)
+    except sqlite3.OperationalError as error:
+        if "no such table: neg_risk_quote_attempts" not in str(error):
+            raise
+        await asyncio.to_thread(SQLiteStore(settings.db_path).init_schema)
+        attempt_id = await asyncio.to_thread(attempt_store.start_collection_attempt)
     process = await spawn(
         sys.executable,
         "-m",
@@ -331,6 +341,8 @@ async def collect_quotes_in_subprocess(
         "collect-neg-risk-quotes",
         "--db-path",
         str(settings.db_path),
+        "--attempt-id",
+        str(attempt_id),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -372,9 +384,21 @@ async def collect_quotes_in_subprocess(
                 # wedged pipe reader prevent daemon cancellation forever.
                 communicate_task.cancel()
                 await asyncio.gather(communicate_task, return_exceptions=True)
+        await asyncio.to_thread(
+            attempt_store.checkpoint_collection_attempt,
+            attempt_id,
+            phase="failed",
+            failure_kind="parent-cancelled",
+        )
         raise
 
     if process.returncode != 0:
+        await asyncio.to_thread(
+            attempt_store.checkpoint_collection_attempt,
+            attempt_id,
+            phase="failed",
+            failure_kind="child-failed",
+        )
         diagnostic = stderr.decode("utf-8", errors="replace")
         if "verified universe snapshot is no longer the latest published truth" in diagnostic:
             logger.info(
@@ -418,6 +442,13 @@ async def collect_quotes_in_subprocess(
         ),
         elapsed_ms=_required_json_int(payload, "elapsed_ms"),
         universe_hash=universe_hash,
+        attempt_id=_required_json_int(payload, "attempt_id"),
+        universe_ms=_required_json_int(payload, "universe_ms"),
+        admission_ms=_required_json_int(payload, "admission_ms"),
+        fetch_ms=_required_json_int(payload, "fetch_ms"),
+        transform_ms=_required_json_int(payload, "transform_ms"),
+        persist_ms=_required_json_int(payload, "persist_ms"),
+        structure_receipt_digest=str(payload.get("structure_receipt_digest", "")),
     )
     if (
         result.run_id <= 0
@@ -427,6 +458,18 @@ async def collect_quotes_in_subprocess(
         or result.successful_response_count > result.requested_token_count
         or result.quote_taken_at_ms < 0
         or result.elapsed_ms < 0
+        or result.attempt_id != attempt_id
+        or any(
+            value < 0
+            for value in (
+                result.universe_ms,
+                result.admission_ms,
+                result.fetch_ms,
+                result.transform_ms,
+                result.persist_ms,
+            )
+        )
+        or len(result.structure_receipt_digest) != 64
     ):
         raise QuoteCollectionSubprocessError("invalid-json")
     logger.info(
@@ -436,7 +479,10 @@ async def collect_quotes_in_subprocess(
         f"run_id={result.run_id} "
         f"collection_elapsed_ms={result.elapsed_ms} "
         f"responses={result.successful_response_count}/"
-        f"{result.requested_token_count}"
+        f"{result.requested_token_count} "
+        f"attempt_id={result.attempt_id} universe_ms={result.universe_ms} "
+        f"admission_ms={result.admission_ms} fetch_ms={result.fetch_ms} "
+        f"transform_ms={result.transform_ms} persist_ms={result.persist_ms}"
     )
     return result
 
@@ -707,10 +753,27 @@ def build_production_quote_worker(
     async def certify_projection(
         result: QuoteCollectionResult,
     ) -> CompleteQuoteProjection:
-        return await certify_latest_quote_projection(
+        started = time.perf_counter()
+        projection = await certify_latest_quote_projection(
             quote_store,
             result,
         )
+        certify_ms = int((time.perf_counter() - started) * 1000)
+        if result.attempt_id:
+            await asyncio.to_thread(
+                quote_store.checkpoint_collection_attempt,
+                result.attempt_id,
+                phase="projection",
+                phase_timings={
+                    "universe_ms": result.universe_ms,
+                    "admission_ms": result.admission_ms,
+                    "fetch_ms": result.fetch_ms,
+                    "transform_ms": result.transform_ms,
+                    "persist_ms": result.persist_ms,
+                    "certify_ms": certify_ms,
+                },
+            )
+        return projection
 
     async def prepare_opportunities(
         projection: CompleteQuoteProjection,
@@ -728,6 +791,20 @@ def build_production_quote_worker(
             f"count={len(result.opportunities)} "
             f"elapsed_ms={int((time.perf_counter() - started) * 1000)}"
         )
+        attempt = await asyncio.to_thread(quote_store.latest_collection_attempt)
+        if (
+            attempt is not None
+            and attempt["outcome"] == "collecting"
+            and attempt["quote_run_id"] == projection.run_id
+        ):
+            timings = dict(attempt["phase_timings"])
+            timings["projection_ms"] = int((time.perf_counter() - started) * 1000)
+            await asyncio.to_thread(
+                quote_store.checkpoint_collection_attempt,
+                int(attempt["id"]),
+                phase="complete",
+                phase_timings=timings,
+            )
         return result
 
     async def restore_feed() -> CertifiedQuoteFeed | None:

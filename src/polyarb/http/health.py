@@ -1442,6 +1442,49 @@ def _build_health_checks(
                 }
             ]
 
+        from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore
+
+        try:
+            quote_attempt = NegRiskQuoteStore(store.db_path).latest_collection_attempt()
+        except sqlite3.Error:
+            quote_attempt = None
+        if quote_attempt is None:
+            attempt_status = "pass"
+            attempt_age_s = None
+            attempt_output = "status=never-attempted"
+        else:
+            attempt_age_s = max(
+                0.0,
+                now_s - int(quote_attempt["checkpoint_at_ms"]) / 1000.0,
+            )
+            if quote_attempt["outcome"] == "collecting" and attempt_age_s >= 120:
+                attempt_status = "fail"
+            elif quote_attempt["outcome"] == "collecting" and attempt_age_s >= 45:
+                attempt_status = "warn"
+            elif quote_attempt["outcome"] == "failed":
+                attempt_status = "warn"
+            else:
+                attempt_status = "pass"
+            attempt_output = (
+                f"attempt_id={quote_attempt['id']} phase={quote_attempt['phase']} "
+                f"outcome={quote_attempt['outcome']} run_id={quote_attempt['quote_run_id']} "
+                f"target_count={quote_attempt['target_count']}"
+            )
+        overall = _severity(overall, attempt_status)
+        checks["quote_feed:collection_phase"] = [
+            {
+                "componentId": "neg-risk-quote-attempt",
+                "componentType": "datastore",
+                "observedValue": (
+                    round(attempt_age_s, 1) if attempt_age_s is not None else None
+                ),
+                "observedUnit": "s",
+                "status": attempt_status,
+                "output": attempt_output,
+                "time": _utc_now_iso(),
+            }
+        ]
+
     if opportunity_read_health is not None:
         read_checks = _opportunity_read_health_checks(
             opportunity_read_health,

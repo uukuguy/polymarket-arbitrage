@@ -2358,6 +2358,13 @@ class SQLiteStore:
                     issue_tuples,
                 )
 
+            # The snapshot row is inserted as published before its truth and
+            # market rows are populated, all inside this transaction.  Mark
+            # the coalesced legacy revision clean only at the real atomic
+            # publication boundary, after every source row is durable.
+            if publish_markets:
+                con.execute("DELETE FROM legacy_structure_revision_dirty WHERE id=1")
+
             con.execute("COMMIT")
         except Exception:
             _rollback_without_masking(con)
@@ -2544,6 +2551,11 @@ class SQLiteStore:
                     ") VALUES (?,?,?,?,?,?)",
                     issue_tuples,
                 )
+
+            # See write_snapshot: publication becomes externally visible at
+            # COMMIT, not when the snapshot metadata row is first inserted.
+            if publish_markets:
+                con.execute("DELETE FROM legacy_structure_revision_dirty WHERE id=1")
 
             con.execute("COMMIT")
         except Exception:

@@ -229,6 +229,9 @@ def _seed_structure_revision(
                     snapshot_id * 1_000 + 1,
                 ),
             )
+        # This fixture seeds the immutable result of a completed legacy
+        # publication directly instead of going through write_snapshot().
+        con.execute("DELETE FROM legacy_structure_revision_dirty WHERE id=1")
 
 
 @pytest.fixture

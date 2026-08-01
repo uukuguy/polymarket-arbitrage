@@ -172,6 +172,24 @@ def test_quote_age_boundaries(tmp_path, age_s: float, expected: str) -> None:
     assert overall == expected
 
 
+def test_collecting_quote_phase_checkpoint_fails_after_120_seconds(tmp_path) -> None:
+    settings = _settings(tmp_path, enabled=True)
+    _complete_run(settings, age_s=10)
+    attempt_store = NegRiskQuoteStore(
+        settings.db_path,
+        now_ms=lambda: NOW_MS - 121_000,
+    )
+    attempt_store.start_collection_attempt()
+
+    checks, overall = _quote_check(settings)
+
+    phase = checks["quote_feed:collection_phase"][0]
+    assert phase["observedValue"] == 121.0
+    assert phase["status"] == "fail"
+    assert "phase=universe" in phase["output"]
+    assert overall == "fail"
+
+
 def test_worker_error_warns_while_complete_run_is_fresh(tmp_path) -> None:
     settings = _settings(tmp_path, enabled=True)
     _complete_run(settings, age_s=10)
