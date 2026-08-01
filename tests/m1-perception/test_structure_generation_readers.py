@@ -171,13 +171,27 @@ def _seed_structure_revision(
                 generation=True,
             )
         )
+        receipt_created_at_ms = snapshot_id * 1_000 + 1
+        receipt_digest = sqlite_store_module._comparison_receipt_digest(
+            generation_snapshot_id=snapshot_id,
+            publication_id=publication_id,
+            legacy_snapshot_id=snapshot_id,
+            legacy_market_count=2,
+            generation_market_count=2,
+            legacy_universe_hash=legacy_universe_hash,
+            generation_universe_hash=generation_universe_hash,
+            legacy_source_truth_hash=legacy_source_truth_hash,
+            generation_source_truth_hash=generation_source_truth_hash,
+            generation_validation_hash=generation_hash,
+            created_at_ms=receipt_created_at_ms,
+        )
         con.execute(
             "INSERT INTO structure_generation_comparison_receipts("
             "generation_snapshot_id,publication_id,legacy_snapshot_id,"
             "legacy_market_count,generation_market_count,legacy_universe_hash,"
             "generation_universe_hash,legacy_source_truth_hash,"
-            "generation_source_truth_hash,generation_validation_hash,created_at_ms) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "generation_source_truth_hash,generation_validation_hash,created_at_ms,"
+            "receipt_digest) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 snapshot_id,
                 publication_id,
@@ -189,18 +203,21 @@ def _seed_structure_revision(
                 legacy_source_truth_hash,
                 generation_source_truth_hash,
                 generation_hash,
-                snapshot_id * 1_000 + 1,
+                receipt_created_at_ms,
+                receipt_digest,
             ),
         )
         if point_current:
             con.execute(
                 "INSERT INTO current_structure_generation(id,snapshot_id,publication_id,"
-                "validation_hash,counts_json,certification_component,switched_at_ms) "
-                "VALUES (1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                "validation_hash,counts_json,certification_component,"
+                "comparison_receipt_digest,switched_at_ms) "
+                "VALUES (1,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
                 "snapshot_id=excluded.snapshot_id,publication_id=excluded.publication_id,"
                 "validation_hash=excluded.validation_hash,"
                 "counts_json=excluded.counts_json,"
                 "certification_component=excluded.certification_component,"
+                "comparison_receipt_digest=excluded.comparison_receipt_digest,"
                 "switched_at_ms=excluded.switched_at_ms",
                 (
                     snapshot_id,
@@ -208,6 +225,7 @@ def _seed_structure_revision(
                     generation_hash,
                     counts_json,
                     "bounded-complete",
+                    receipt_digest,
                     snapshot_id * 1_000 + 1,
                 ),
             )
@@ -246,7 +264,137 @@ def test_existing_pointer_schema_adds_redundant_receipt_columns(tmp_path: Path) 
             row[1]
             for row in con.execute("PRAGMA table_info(current_structure_generation)")
         }
-    assert {"validation_hash", "counts_json", "certification_component"} <= columns
+    assert {
+        "validation_hash",
+        "counts_json",
+        "certification_component",
+        "comparison_receipt_digest",
+    } <= columns
+
+
+def _downgrade_to_pre_task5_pointer(path: Path) -> None:
+    with sqlite3.connect(path) as con:
+        con.execute("DROP VIEW current_structure_markets")
+        con.execute(
+            "ALTER TABLE current_structure_generation "
+            "RENAME TO current_structure_generation_task5"
+        )
+        con.execute(
+            "CREATE TABLE current_structure_generation("
+            "id INTEGER PRIMARY KEY,snapshot_id INTEGER,publication_id TEXT,"
+            "switched_at_ms INTEGER)"
+        )
+        con.execute(
+            "INSERT INTO current_structure_generation "
+            "SELECT id,snapshot_id,publication_id,switched_at_ms "
+            "FROM current_structure_generation_task5"
+        )
+        con.execute("DROP TABLE current_structure_generation_task5")
+
+
+def test_literal_pre_task5_pointer_repairs_and_replays_idempotently(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "pre-task5.db"
+    store = SQLiteStore(path)
+    store.init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="old", point_current=True)
+    _downgrade_to_pre_task5_pointer(path)
+
+    SQLiteStore(path).init_schema()
+    with sqlite3.connect(path) as con:
+        first = con.execute(
+            "SELECT validation_hash,counts_json,certification_component,"
+            "comparison_receipt_digest FROM current_structure_generation WHERE id=1"
+        ).fetchone()
+    SQLiteStore(path).init_schema()
+    with sqlite3.connect(path) as con:
+        second = con.execute(
+            "SELECT validation_hash,counts_json,certification_component,"
+            "comparison_receipt_digest FROM current_structure_generation WHERE id=1"
+        ).fetchone()
+    assert first == second
+    assert all(value is not None for value in first)
+    with structure_read_transaction(path, mode="generation") as read:
+        assert read.snapshot_id == 1
+
+
+def test_pre_task5_pointer_without_receipt_recovers_generation_only(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "pre-task5-no-receipt.db"
+    store = SQLiteStore(path)
+    store.init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="old", point_current=True)
+    _downgrade_to_pre_task5_pointer(path)
+    with sqlite3.connect(path) as con:
+        con.execute("DROP TRIGGER trg_structure_comparison_receipt_delete")
+        con.execute("DELETE FROM structure_generation_comparison_receipts")
+
+    SQLiteStore(path).init_schema()
+    with structure_read_transaction(path, mode="generation") as read:
+        assert read.snapshot_id == 1
+    with structure_read_transaction(path, mode="compare") as read:
+        assert read.comparison is not None
+        assert read.comparison.mismatch_reasons == ("comparison-receipt-missing",)
+    for _ in range(20):
+        repaired = SQLiteStore(path).backfill_current_structure_generation(max_rows=1)
+        if repaired.complete:
+            with sqlite3.connect(path) as con:
+                bound = con.execute(
+                    "SELECT comparison_receipt_digest "
+                    "FROM current_structure_generation WHERE id=1"
+                ).fetchone()[0]
+            if bound is not None:
+                break
+    assert bound is not None
+    with structure_read_transaction(path, mode="compare") as repaired_read:
+        assert repaired_read.comparison is not None
+        assert repaired_read.comparison.mismatch_reasons == ()
+
+
+def test_pre_task5_pointer_unverifiable_publication_remains_fail_closed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "pre-task5-corrupt.db"
+    store = SQLiteStore(path)
+    store.init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="old", point_current=True)
+    _downgrade_to_pre_task5_pointer(path)
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "UPDATE structure_publications SET certification_hash=? "
+            "WHERE publication_id='test-publication-1'",
+            ("f" * 64,),
+        )
+
+    SQLiteStore(path).init_schema()
+    with pytest.raises(StructureGenerationReadError):
+        with structure_read_transaction(path, mode="generation"):
+            pass
+
+
+def test_pre_task5_pointer_partial_authentication_is_not_self_healed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "pre-task5-partial.db"
+    store = SQLiteStore(path)
+    store.init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="old", point_current=True)
+    _downgrade_to_pre_task5_pointer(path)
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "ALTER TABLE current_structure_generation ADD COLUMN validation_hash TEXT"
+        )
+        con.execute(
+            "UPDATE current_structure_generation SET validation_hash=? WHERE id=1",
+            ("f" * 64,),
+        )
+
+    SQLiteStore(path).init_schema()
+    with pytest.raises(StructureGenerationReadError):
+        with structure_read_transaction(path, mode="generation"):
+            pass
 
 
 def test_current_generation_view_selects_only_pointer_rows(generation_db: Path) -> None:
@@ -275,7 +423,9 @@ def test_compare_serves_legacy_and_exposes_deterministic_mismatch(
             "FROM structure_publications WHERE publication_id='test-publication-2'),"
             "counts_json=(SELECT committed_counts_json FROM structure_publications "
             "WHERE publication_id='test-publication-2'),"
-            "certification_component='bounded-complete',switched_at_ms=2001 WHERE id=1"
+            "certification_component='bounded-complete',comparison_receipt_digest="
+            "(SELECT receipt_digest FROM structure_generation_comparison_receipts "
+            "WHERE generation_snapshot_id=2),switched_at_ms=2001 WHERE id=1"
         )
 
     with structure_read_transaction(generation_db, mode="compare") as read:
@@ -290,17 +440,16 @@ def test_compare_serves_legacy_and_exposes_deterministic_mismatch(
     assert read.comparison.matches is True
     assert read.comparison.mismatch_reasons == ()
 
-    with sqlite3.connect(generation_db) as con:
+    with sqlite3.connect(generation_db) as con, pytest.raises(
+        sqlite3.IntegrityError, match="comparison-receipt-sealed"
+    ):
         con.execute(
             "UPDATE structure_generation_comparison_receipts SET "
-            "legacy_universe_hash=? WHERE generation_snapshot_id=2",
-            ("d" * 64,),
+            "legacy_market_count=999,generation_market_count=999,"
+            "legacy_universe_hash=?,generation_universe_hash=? "
+            "WHERE generation_snapshot_id=2",
+            ("d" * 64, "d" * 64),
         )
-    with structure_read_transaction(generation_db, mode="compare") as drifted:
-        pass
-    assert drifted.comparison is not None
-    assert drifted.comparison.matches is False
-    assert drifted.comparison.mismatch_reasons == ("universe-hash-mismatch",)
 
 
 def test_generation_read_fails_closed_on_receipt_count_mismatch(
@@ -346,7 +495,9 @@ def test_read_transaction_stays_on_old_generation_across_pointer_switch(
                 "FROM structure_publications WHERE publication_id='test-publication-2'),"
                 "counts_json=(SELECT committed_counts_json FROM structure_publications "
                 "WHERE publication_id='test-publication-2'),"
-                "certification_component='bounded-complete',switched_at_ms=2001 WHERE id=1"
+                "certification_component='bounded-complete',comparison_receipt_digest="
+                "(SELECT receipt_digest FROM structure_generation_comparison_receipts "
+                "WHERE generation_snapshot_id=2),switched_at_ms=2001 WHERE id=1"
             )
         old_ids = old.connection.execute(
             f"SELECT market_id FROM {old.table('markets')} WHERE snapshot_id=? "
@@ -550,6 +701,7 @@ def test_compare_receipt_identity_and_hash_corruption_are_deterministic(
     generation_db: Path,
 ) -> None:
     with sqlite3.connect(generation_db) as con:
+        con.execute("DROP TRIGGER trg_structure_comparison_receipt_update")
         con.execute(
             "UPDATE structure_generation_comparison_receipts SET legacy_snapshot_id=999 "
             "WHERE generation_snapshot_id=1"
@@ -558,25 +710,64 @@ def test_compare_receipt_identity_and_hash_corruption_are_deterministic(
         pass
     assert identity.comparison is not None
     assert identity.comparison.mismatch_reasons == (
+        "comparison-receipt-digest-mismatch",
+    )
+
+    with sqlite3.connect(generation_db) as con:
+        fields = con.execute(
+            "SELECT publication_id,legacy_market_count,generation_market_count,"
+            "legacy_universe_hash,generation_universe_hash,legacy_source_truth_hash,"
+            "generation_source_truth_hash,generation_validation_hash,created_at_ms "
+            "FROM structure_generation_comparison_receipts "
+            "WHERE generation_snapshot_id=1"
+        ).fetchone()
+        swapped_digest = sqlite_store_module._comparison_receipt_digest(
+            generation_snapshot_id=1,
+            publication_id=str(fields[0]),
+            legacy_snapshot_id=999,
+            legacy_market_count=int(fields[1]),
+            generation_market_count=int(fields[2]),
+            legacy_universe_hash=str(fields[3]),
+            generation_universe_hash=str(fields[4]),
+            legacy_source_truth_hash=str(fields[5]),
+            generation_source_truth_hash=str(fields[6]),
+            generation_validation_hash=str(fields[7]),
+            created_at_ms=int(fields[8]),
+        )
+        con.execute(
+            "UPDATE structure_generation_comparison_receipts SET receipt_digest=? "
+            "WHERE generation_snapshot_id=1",
+            (swapped_digest,),
+        )
+        con.execute(
+            "UPDATE current_structure_generation SET comparison_receipt_digest=? "
+            "WHERE id=1",
+            (swapped_digest,),
+        )
+    with structure_read_transaction(generation_db, mode="compare") as swapped:
+        pass
+    assert swapped.comparison is not None
+    assert swapped.comparison.mismatch_reasons == (
         "comparison-receipt-identity-mismatch",
     )
 
     with sqlite3.connect(generation_db) as con:
         con.execute(
-            "UPDATE structure_generation_comparison_receipts SET legacy_snapshot_id=2,"
-            "generation_validation_hash=? WHERE generation_snapshot_id=1",
+            "UPDATE structure_generation_comparison_receipts SET receipt_digest=? "
+            "WHERE generation_snapshot_id=1",
             ("e" * 64,),
         )
-    with structure_read_transaction(generation_db, mode="compare") as hashed:
+    with structure_read_transaction(generation_db, mode="compare") as tampered:
         pass
-    assert hashed.comparison is not None
-    assert hashed.comparison.mismatch_reasons == (
-        "comparison-receipt-validation-hash-mismatch",
+    assert tampered.comparison is not None
+    assert tampered.comparison.mismatch_reasons == (
+        "comparison-receipt-digest-mismatch",
     )
 
 
 def test_compare_missing_receipt_is_deterministic_mismatch(generation_db: Path) -> None:
     with sqlite3.connect(generation_db) as con:
+        con.execute("DROP TRIGGER trg_structure_comparison_receipt_delete")
         con.execute(
             "DELETE FROM structure_generation_comparison_receipts "
             "WHERE generation_snapshot_id=1"

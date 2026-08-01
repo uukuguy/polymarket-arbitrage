@@ -94,3 +94,42 @@ legacy historical filtering, and metadata corruption. The final review gate ran
 **402 tests**, with 0 failures, 0 errors, and 1 existing skip (62.921 seconds).
 Changed-file Ruff, `git diff --check`, and `make planning-status` all passed; the
 planning check reported no drift.
+
+## Second re-review: bounded authenticated comparison
+
+The second review moved comparison evidence into the same durable certification
+chain as generation validation:
+
+- Normal publications and backfills now traverse four keyset phases—legacy and
+  generation universe, then legacy and generation rejections—before `ready`.
+  Each invocation processes no more than `max_rows`; cursor, row count, digest
+  state, phase, and checkpoint advance by CAS and survive store/process reopen.
+- Canonical hash framing is unchanged. A small pure serializable SHA-256 state
+  persists the eight FIPS state words, byte count, and at most 63 tail bytes.
+  It matched `hashlib.sha256` for NIST vectors (including one million `a` bytes),
+  every 0..130 split/reopen, tail boundaries, randomized partitions, empty input,
+  and multi-block input. Malformed states fail closed and no prefix bytes accumulate.
+- The exact current legacy snapshot is pinned before comparison and revalidated
+  in both the read snapshot and writer transaction. Identity drift aborts sealing.
+  A digest-bound immutable receipt is inserted in the same transaction that
+  makes a normal publication ready; a migrated published pointer uses the same
+  phases and atomically binds the digest without wedging generation reads.
+- `receipt_digest` authenticates every receipt identity, count, universe/source
+  hash, generation validation hash, and creation time. Readers recompute it,
+  verify the pointer binding, and cross-check both snapshot market counts.
+  Digest-sealed receipt UPDATE/DELETE operations are rejected.
+- Literal pre-Task-5 pointers repair only when all new authentication fields are
+  NULL and the referenced publication/snapshot prove a frozen published identity.
+  Partial, conflicting, or unverifiable state remains fail-closed. Initialization
+  is idempotent; a missing receipt permits generation mode, makes compare report
+  `comparison-receipt-missing`, and is repaired incrementally through backfill.
+- Pointer publication verifies metadata and the sealed receipt only. SQL-trace
+  tests prove it executes no `COUNT`, legacy membership scan, or generation market
+  scan; the former one-shot backfill comparison helper is gone.
+
+Second-review TDD observed RED for the missing SHA module/progress schema, absent
+receipt repair, and the original unbounded backfill assumptions. Final focused
+Task 3–5 verification passed **101 tests** with no failures, errors, or skips.
+The full requested certification/backfill/pointer/schema/migration/hot-reader and
+consumer regression passed **423 tests**, with 0 failures, 0 errors, and 1 existing
+skip (48.941 seconds). Changed-file Ruff and `git diff --check` passed.

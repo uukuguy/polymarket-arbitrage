@@ -137,6 +137,7 @@ def test_structure_generation_tables_are_declared_and_created(tmp_path: Path) ->
         "structure_generation_markets",
         "structure_generation_issues",
         "structure_generation_comparison_receipts",
+        "structure_generation_comparison_progress",
         "current_structure_generation",
     }
     for table in expected:
@@ -161,7 +162,16 @@ def test_structure_generation_tables_are_declared_and_created(tmp_path: Path) ->
         "validation_hash",
         "counts_json",
         "certification_component",
+        "comparison_receipt_digest",
     } <= pointer_columns
+    with sqlite3.connect(store.db_path) as con:
+        receipt_columns = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_comparison_receipts)"
+            )
+        }
+    assert "receipt_digest" in receipt_columns
 
 
 def _ddl_markets_columns() -> list[str]:

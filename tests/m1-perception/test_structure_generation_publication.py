@@ -334,6 +334,15 @@ def _certify(
             "certified_at_ms": now_ms,
         },
     )
+    for offset in range(20):
+        chunk = store.advance_structure_certification_chunk(
+            publication.publication_id,
+            max_rows=1,
+            now_ms=now_ms + offset + 1,
+        )
+        if chunk.ready:
+            return
+    raise AssertionError("comparison certification never reached ready")
 
 
 def _publish_generation(
@@ -411,9 +420,17 @@ def test_bounded_certification_resumes_every_primary_key_checkpoint(
         raise AssertionError("bounded certification never reached ready")
 
     assert any(component == "memberships" and cursor for component, cursor, _ in checkpoints)
+    assert all(rows_processed <= 1 for _, _, rows_processed in checkpoints)
     assert any(component == "group_truth" and cursor for component, cursor, _ in checkpoints)
     assert any(component == "source_events" for component, _, _ in checkpoints)
     assert any(component == "source_markets" for component, _, _ in checkpoints)
+    assert any(component == "generation-universe" for component, _, _ in checkpoints)
+    assert any(
+        component == "generation-universe" and cursor
+        for component, cursor, _ in checkpoints
+    )
+    assert any(component == "legacy-rejections" for component, _, _ in checkpoints)
+    assert any(component == "generation-rejections" for component, _, _ in checkpoints)
     assert store.current_structure_generation() is None
     with sqlite3.connect(db_path) as con:
         status, validation_hash, certification_component = con.execute(
@@ -424,6 +441,95 @@ def test_bounded_certification_resumes_every_primary_key_checkpoint(
     assert status == "ready"
     assert len(validation_hash) == 64
     assert certification_component == "bounded-complete"
+    with sqlite3.connect(db_path) as con:
+        receipt = con.execute(
+            "SELECT legacy_universe_hash,generation_universe_hash,receipt_digest "
+            "FROM structure_generation_comparison_receipts "
+            "WHERE generation_snapshot_id=1"
+        ).fetchone()
+    assert receipt is not None and len(receipt[2]) == 64
+    assert receipt[0] != receipt[1]
+
+    statements: list[str] = []
+    store.publish_structure_generation(
+        publication.publication_id,
+        now_ms=2_000,
+        trace_callback=statements.append,
+    )
+    pointer_sql = "\n".join(statements).lower()
+    assert "count(" not in pointer_sql
+    assert "from structure_generation_markets" not in pointer_sql
+    assert "from event_market_memberships" not in pointer_sql
+
+
+def test_comparison_certification_rejects_pinned_legacy_identity_drift(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "legacy-drift.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+            "market_view_published,data_product,archive_status,snapshot_status,is_valid,"
+            "parquet_path) VALUES (50,1,2,'full',0,1,'structure','legacy','ok',1,'')"
+        )
+        con.execute(
+            "INSERT INTO snapshot_source_coverage(snapshot_id,completed,market_items,"
+            "event_items) VALUES (50,1,0,0)"
+        )
+    publication = _begin_generation(
+        store,
+        snapshot_id=51,
+        market_id="market-51",
+        now_ms=51_000,
+    )
+    _append_generation_truth(
+        store,
+        publication,
+        snapshot_id=51,
+        market_id="market-51",
+        now_ms=51_004,
+    )
+    store.append_structure_publication_chunk(
+        publication.publication_id,
+        "issues",
+        (),
+        expected_prior_cursor="market-51",
+        next_cursor="issues|done",
+        now_ms=51_009,
+    )
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=51_010)
+    for offset in range(30):
+        SQLiteStore(store.db_path).advance_structure_certification_chunk(
+            publication.publication_id,
+            max_rows=1,
+            now_ms=51_011 + offset,
+        )
+        checkpoint = store.structure_certification_checkpoint(
+            publication.publication_id
+        )
+        if checkpoint is not None and checkpoint[0] == "comparison":
+            break
+    else:
+        raise AssertionError("comparison phase did not start")
+
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+            "market_view_published,data_product,archive_status,snapshot_status,is_valid,"
+            "parquet_path) VALUES (52,3,4,'full',0,1,'structure','legacy','ok',1,'')"
+        )
+        con.execute(
+            "INSERT INTO snapshot_source_coverage(snapshot_id,completed,market_items,"
+            "event_items) VALUES (52,1,0,0)"
+        )
+
+    with pytest.raises(ValueError, match="structure-comparison-legacy-drift"):
+        SQLiteStore(store.db_path).advance_structure_certification_chunk(
+            publication.publication_id,
+            max_rows=1,
+            now_ms=52_000,
+        )
 
 
 def test_certification_start_freezes_every_generation_mutation(tmp_path: Path) -> None:
@@ -1249,8 +1355,15 @@ def test_backfill_current_generation_resumes_bounded_and_switches_last(
     assert store.current_structure_generation() is None
 
     second = store.backfill_current_structure_generation(max_rows=1)
-    assert second.complete is True
+    assert second.complete is False
     assert second.copied_rows == 1
+    for _ in range(40):
+        second = SQLiteStore(store.db_path).backfill_current_structure_generation(
+            max_rows=1
+        )
+        if second.complete:
+            break
+    assert second.complete is True
     assert store.current_generation_market_ids() == ("market-a", "market-b")
     replay = store.backfill_current_structure_generation(max_rows=1)
     assert replay.complete is True
@@ -1258,7 +1371,7 @@ def test_backfill_current_generation_resumes_bounded_and_switches_last(
     assert store.current_generation_market_ids() == ("market-a", "market-b")
 
 
-def test_backfill_freezes_before_hash_and_resumes_after_hash_crash(
+def test_backfill_certification_never_calls_one_shot_hash_helpers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = SQLiteStore(tmp_path / "legacy-freeze.db")
@@ -1274,55 +1387,26 @@ def test_backfill_freezes_before_hash_and_resumes_after_hash_crash(
             "incomplete) VALUES ('market-a','condition-a',2,7,0)"
         )
 
-    original_hash = SQLiteStore._legacy_generation_hash
-    observed: dict[str, object] = {}
-
-    def crash_before_source_hash(_con: sqlite3.Connection, _snapshot_id: int) -> str:
-        with sqlite3.connect(store.db_path) as probe:
-            observed["marker"] = probe.execute(
-                "SELECT certification_component FROM structure_publications "
-                "WHERE publication_id='backfill:7'"
-            ).fetchone()
-        raise RuntimeError("crash-before-backfill-hash")
+    def forbidden_hash(*_args, **_kwargs) -> str:
+        raise AssertionError("backfill invoked one-shot hash helper")
 
     monkeypatch.setattr(
-        SQLiteStore, "_legacy_generation_hash", staticmethod(crash_before_source_hash)
+        SQLiteStore, "_legacy_generation_hash", staticmethod(forbidden_hash)
     )
-    with pytest.raises(RuntimeError, match="crash-before-backfill-hash"):
-        store.backfill_current_structure_generation(max_rows=1)
-
-    assert observed["marker"] == ("backfill-frozen",)
-    assert store.current_structure_generation() is None
-
-    def source_hash_with_mutation_attempt(
-        con: sqlite3.Connection, snapshot_id: int
-    ) -> str:
-        source_hash = original_hash(con, snapshot_id)
-        with sqlite3.connect(store.db_path) as probe:
-            try:
-                probe.execute(
-                    "UPDATE structure_generation_markets SET question='tampered' "
-                    "WHERE snapshot_id=7"
-                )
-            except sqlite3.IntegrityError as exc:
-                observed["mutation"] = str(exc)
-        observed["source_hash"] = source_hash
-        return source_hash
-
     monkeypatch.setattr(
         SQLiteStore,
-        "_legacy_generation_hash",
-        staticmethod(source_hash_with_mutation_attempt),
+        "_generation_hash",
+        staticmethod(forbidden_hash),
     )
-    resumed = SQLiteStore(store.db_path).backfill_current_structure_generation(max_rows=1)
+    for _ in range(40):
+        resumed = SQLiteStore(store.db_path).backfill_current_structure_generation(
+            max_rows=1
+        )
+        if resumed.complete:
+            break
     assert resumed.complete is True
-    assert resumed.copied_rows == 0
     assert store.current_generation_market_ids() == ("market-a",)
-    assert observed["mutation"] == "structure-generation-frozen"
     with sqlite3.connect(store.db_path) as con:
-        assert con.execute(
-            "SELECT question FROM structure_generation_markets WHERE snapshot_id=7"
-        ).fetchone() == (None,)
         assert con.execute(
             "SELECT certification_component FROM structure_publications "
             "WHERE publication_id='backfill:7'"
@@ -1390,7 +1474,7 @@ def test_backfill_bounds_every_component_and_advances_deterministically(
     )
     previous_total = 0
     observed_components: list[str] = []
-    for _ in range(12):
+    for _ in range(80):
         checkpoint = store.backfill_current_structure_generation(max_rows=1)
         with sqlite3.connect(store.db_path) as con:
             total = sum(
@@ -1434,7 +1518,8 @@ def test_backfill_resumes_ready_publication_after_pre_switch_crash(
 
     monkeypatch.setattr(store, "publish_structure_generation", _crash_before_switch)
     with pytest.raises(RuntimeError, match="crash:backfill:7"):
-        store.backfill_current_structure_generation(max_rows=1)
+        for _ in range(40):
+            store.backfill_current_structure_generation(max_rows=1)
     with sqlite3.connect(store.db_path) as con:
         assert con.execute(
             "SELECT status FROM structure_publications "

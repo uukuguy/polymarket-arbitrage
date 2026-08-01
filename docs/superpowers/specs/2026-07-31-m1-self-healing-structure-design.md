@@ -79,3 +79,50 @@ certified publication.  Production qualification begins only after deployment:
 a timestamped release ID, one complete new Structure revision, independent
 Quote completion bound to it, and a continuous 24-hour observation with
 Structure age <= 30 minutes and Quote age <= 300 seconds.
+
+## Task 5 refinement: bounded comparison authentication
+
+An authenticated generation cannot become `ready` until it owns a durable,
+sealed comparison receipt. Normal publication and legacy backfill use the same
+bounded comparison state machine; neither pointer publication nor a hot reader
+may scan Structure rows.
+
+The comparison state machine pins the exact current legacy snapshot identity
+before reading either side. Every later invocation revalidates that identity
+and rejects drift. It advances one of four keyset phases—legacy universe,
+generation universe, legacy rejections, generation rejections—and reads no more
+than `max_rows` in one invocation. Cursor, row count, digest state, and phase
+advance with compare-and-swap semantics so a crash or competing worker can
+repeat a chunk but cannot skip or combine it.
+
+Comparison hashes retain the existing canonical byte framing exactly: JSON list
+open/close bytes, comma placement, tuple serialization, universe-hash prefix,
+and rejection list framing do not change. Incremental progress persists a small
+pure SHA-256 state containing the eight 32-bit state words, total byte count, and
+at most 63 uncompressed tail bytes. It does not use pickle, OpenSSL internal
+state, a new hash algorithm, or unbounded prefix storage. Tests must prove
+NIST/hashlib vectors, malformed-state rejection, resume at every tail boundary
+and store reopen, deterministic framing, and equality with the existing one-shot
+`hashlib.sha256` result across empty, boundary, and randomized chunk partitions.
+If exact equality cannot be established, publication remains blocked rather than
+changing the canonical digest.
+
+After all four phases, one transaction verifies the pinned identities and
+counts, seals `structure_generation_comparison_receipts`, and only then marks
+the publication `ready`. `receipt_digest` is the SHA-256 of a canonical encoding
+of every receipt identity, count, universe/source-truth hash, generation
+validation hash, and creation timestamp. Readers recompute it and cross-check
+generation count against the resolved generation snapshot/pointer and legacy
+count against the exact legacy snapshot metadata. Sealed receipts reject
+arbitrary update or delete. The pointer records the sealed receipt digest;
+pointer switching verifies metadata and the digest only and performs no full
+count or hash scan.
+
+Schema initialization repairs a literal pre-Task-5 pointer only when its new
+authentication columns are NULL and its referenced publication and snapshot
+prove the frozen authenticated identity, canonical counts, and validation hash.
+The repair copies those facts atomically and is idempotent. Conflicting non-NULL
+values or unverifiable references remain fail-closed. A recoverable digest-bound
+receipt is bound at the same time; otherwise generation mode becomes usable while
+compare reports an explicit missing receipt until the bounded comparison repair
+seals and binds one.

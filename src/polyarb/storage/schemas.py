@@ -2502,6 +2502,7 @@ CREATE TABLE IF NOT EXISTS current_structure_generation (
     certification_component TEXT NOT NULL CHECK(certification_component IN (
         'bounded-complete','backfill-authenticated'
     )),
+    comparison_receipt_digest TEXT NOT NULL CHECK(length(comparison_receipt_digest)=64),
     switched_at_ms INTEGER NOT NULL CHECK(switched_at_ms >= 0),
     FOREIGN KEY(publication_id) REFERENCES structure_publications(publication_id)
 );
@@ -2517,7 +2518,38 @@ CREATE TABLE IF NOT EXISTS structure_generation_comparison_receipts (
     legacy_source_truth_hash TEXT NOT NULL CHECK(length(legacy_source_truth_hash)=64),
     generation_source_truth_hash TEXT NOT NULL CHECK(length(generation_source_truth_hash)=64),
     generation_validation_hash TEXT NOT NULL CHECK(length(generation_validation_hash)=64),
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0)
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    receipt_digest TEXT NOT NULL CHECK(length(receipt_digest)=64)
+);
+
+CREATE TABLE IF NOT EXISTS structure_generation_comparison_progress (
+    publication_id TEXT PRIMARY KEY REFERENCES structure_publications(publication_id),
+    generation_snapshot_id INTEGER NOT NULL UNIQUE REFERENCES snapshots(id),
+    legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    legacy_taken_at_ms INTEGER NOT NULL CHECK(legacy_taken_at_ms >= 0),
+    legacy_finished_at_ms INTEGER NOT NULL CHECK(legacy_finished_at_ms >= 0),
+    legacy_market_count INTEGER NOT NULL CHECK(legacy_market_count >= 0),
+    phase TEXT NOT NULL CHECK(phase IN (
+        'legacy-universe','generation-universe',
+        'legacy-rejections','generation-rejections','sealed'
+    )),
+    row_cursor_json TEXT,
+    digest_state_json TEXT NOT NULL,
+    phase_row_count INTEGER NOT NULL CHECK(phase_row_count >= 0),
+    legacy_universe_hash TEXT CHECK(
+        legacy_universe_hash IS NULL OR length(legacy_universe_hash)=64
+    ),
+    generation_universe_hash TEXT CHECK(
+        generation_universe_hash IS NULL OR length(generation_universe_hash)=64
+    ),
+    legacy_source_truth_hash TEXT CHECK(
+        legacy_source_truth_hash IS NULL OR length(legacy_source_truth_hash)=64
+    ),
+    generation_source_truth_hash TEXT CHECK(
+        generation_source_truth_hash IS NULL OR length(generation_source_truth_hash)=64
+    ),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0)
 );
 
 """
