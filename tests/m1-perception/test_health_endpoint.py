@@ -602,8 +602,9 @@ def test_health_uses_effective_snapshot_timeout_and_surfaces_schedule(
     assert schedule["status"] == "pass"
     assert schedule["output"] == (
         "configured_timeout_s=240 effective_timeout_s=288 "
-        "producer_slot_budget_s=180 attempt_timeout_s=180 "
-        "slice_elapsed_budget_s=45 finalizer_slot_budget_s=180 "
+        "producer_slot_budget_s=75 attempt_timeout_s=75 "
+        "generation_checkpoint_budget_s=45 generation_child_hard_limit_s=75 "
+        "pointer_switch_hard_deadline_s=15 "
         "configured_cadence_s=3600 effective_cadence_s=348 "
         "success_samples=10 success_p95_s=236 reason=timeout-backoff"
     )
@@ -624,7 +625,10 @@ def test_health_surfaces_short_incomplete_structure_slice_budget(
 
     schedule = response.json()["checks"]["snapshot:schedule"][0]
     assert "producer_slot_budget_s=75 attempt_timeout_s=75" in schedule["output"]
-    assert "slice_elapsed_budget_s=45 finalizer_slot_budget_s=180" in schedule["output"]
+    assert "generation_checkpoint_budget_s=45" in schedule["output"]
+    assert "generation_child_hard_limit_s=75" in schedule["output"]
+    assert "pointer_switch_hard_deadline_s=15" in schedule["output"]
+    assert "finalizer_slot_budget_s" not in schedule["output"]
 
 
 def test_health_surfaces_bounded_generation_publication_budgets(
@@ -640,8 +644,9 @@ def test_health_surfaces_bounded_generation_publication_budgets(
 
     schedule = http_test_client.get("/health").json()["checks"]["snapshot:schedule"][0]
 
-    assert "generation_slice_budget_s=75" in schedule["output"]
-    assert "pointer_switch_budget_s=15" in schedule["output"]
+    assert "generation_checkpoint_budget_s=45" in schedule["output"]
+    assert "generation_child_hard_limit_s=75" in schedule["output"]
+    assert "pointer_switch_hard_deadline_s=15" in schedule["output"]
     assert "finalizer_slot_budget_s" not in schedule["output"]
 
 

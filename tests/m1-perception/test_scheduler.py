@@ -537,20 +537,21 @@ async def test_snapshot_attempt_starts_after_shared_producer_slot_is_acquired(
     wall_s = 1_181.0
     await asyncio.sleep(0)
 
-    assert store.get_latest_snapshot_attempt() is None
+    queued_attempt = store.get_latest_snapshot_attempt()
 
     producer_lock.release()
     await child_started.wait()
     running = store.get_latest_snapshot_attempt()
-    assert running is not None
-    assert running["outcome"] == "running"
-    assert running["started_at_ms"] == 1_181_000
 
     wall_s = 1_183.0
     finish_child.set()
     await tick
 
     terminal = store.get_latest_snapshot_attempt()
+    assert queued_attempt is None
+    assert running is not None
+    assert running["outcome"] == "running"
+    assert running["started_at_ms"] == 1_181_000
     assert terminal is not None
     assert terminal["outcome"] == "succeeded"
     assert terminal["finished_at_ms"] - terminal["started_at_ms"] == 2_000
