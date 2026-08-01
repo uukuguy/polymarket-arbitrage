@@ -152,10 +152,15 @@ skip (48.941 seconds). Changed-file Ruff and `git diff --check` passed.
   Tests prove an unrelated expired snapshot is deleted successfully while the
   authenticated generation plus exact legacy chain remains intact; replay deletes
   nothing and no sealed receipt mutation or FK rollback is used.
+- Closed the candidate-selection TOCTOU window by acquiring `BEGIN IMMEDIATE`
+  before keep-set and full evidence exclusion. A deterministic injection test
+  reproduces the old FK rollback, then proves a competing generation-evidence
+  insert is locked out until deletion commits, unrelated snapshots are still
+  deleted, and replay is idempotent.
 - Old generation reclamation deliberately remains out of generic retention. A
   dedicated bounded evidence-aware cleanup API must be implemented and exposed
   before production closure.
-- Final narrow verification passed **174 focused tests** with no failures, errors,
-  or skips. The complete requested regression passed **438 tests**, with 0
+- Final narrow verification passed **175 focused tests** with no failures, errors,
+  or skips. The complete requested regression passed **439 tests**, with 0
   failures, 0 errors, and 1 existing skip. Changed-file Ruff, `git diff --check`,
   and `make planning-status` (no drift) passed.

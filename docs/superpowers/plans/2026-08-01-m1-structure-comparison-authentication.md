@@ -125,10 +125,14 @@ pre-Task-5 pointers.
   publication, sealed receipt, comparison progress, exact legacy identity, and
   generation rows plus one unrelated expired snapshot.
 - [ ] Exclude every referenced evidence identity in the bounded candidate query;
-  do not delete or update sealed evidence and do not use FK rollback as filtering.
+  run keep-set selection, full evidence exclusion, and deletion under one
+  `BEGIN IMMEDIATE`; do not delete or update sealed evidence and do not use FK
+  rollback as filtering.
 - [ ] Prove unrelated deletion succeeds, the full chain remains, and replay is
-  idempotent. Document that generation reclamation needs a future dedicated
-  bounded evidence-aware cleanup API before production closure.
+  idempotent. Inject a competing evidence writer after candidate-query execution
+  and prove the writer lock closes the TOCTOU window. Document that generation
+  reclamation needs a future dedicated bounded evidence-aware cleanup API before
+  production closure.
 
 ## Self-review
 

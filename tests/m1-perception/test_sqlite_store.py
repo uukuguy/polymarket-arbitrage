@@ -446,6 +446,97 @@ def test_generic_purge_retains_complete_authenticated_generation_chain(
     ) == (0, [])
 
 
+def test_purge_candidate_selection_holds_writer_lock_until_delete(
+    store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_ms = int((time.time() - 8 * 86_400) * 1000)
+    first_id = store.write_snapshot(
+        taken_at_ms=old_ms,
+        finished_at_ms=old_ms,
+        mode="full",
+        parquet_path="",
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        archive_status="legacy",
+        **_complete_publication(),
+    )
+    second_id = store.write_snapshot(
+        taken_at_ms=old_ms + 1,
+        finished_at_ms=old_ms + 1,
+        mode="full",
+        parquet_path="",
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        archive_status="legacy",
+        **_complete_publication(),
+    )
+    store.write_snapshot(
+        taken_at_ms=int(time.time() * 1000),
+        finished_at_ms=int(time.time() * 1000),
+        mode="full",
+        parquet_path="",
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        archive_status="legacy",
+        **_complete_publication(),
+    )
+
+    real_connect = sqlite3.connect
+    injection_attempts: list[str] = []
+
+    class _SelectionInjectionProxy:
+        def __init__(self, real_con: sqlite3.Connection):
+            self._real = real_con
+
+        def execute(self, sql, *args, **kwargs):
+            cursor = self._real.execute(sql, *args, **kwargs)
+            if (
+                not injection_attempts
+                and isinstance(sql, str)
+                and sql.startswith("SELECT s.id FROM snapshots s WHERE")
+            ):
+                contender = real_connect(store.db_path, timeout=0)
+                try:
+                    contender.execute("PRAGMA foreign_keys=ON")
+                    contender.execute(
+                        "INSERT INTO structure_generation_events("
+                        "snapshot_id,id,slug,fetched_at_ms) VALUES "
+                        "(?,'late-evidence','late-evidence',?)",
+                        (first_id, old_ms),
+                    )
+                    contender.commit()
+                    injection_attempts.append("inserted")
+                except sqlite3.OperationalError as error:
+                    injection_attempts.append(str(error))
+                finally:
+                    contender.close()
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    def _connect_proxy(*args, **kwargs):
+        return _SelectionInjectionProxy(real_connect(*args, **kwargs))
+
+    monkeypatch.setattr("polyarb.storage.sqlite_store.sqlite3.connect", _connect_proxy)
+
+    assert store.purge_old_snapshots(
+        older_than_days=7,
+        keep_last=1,
+        max_snapshots_per_run=10,
+    ) == (2, [first_id, second_id])
+    assert injection_attempts == ["database is locked"]
+    assert store.purge_old_snapshots(
+        older_than_days=7,
+        keep_last=1,
+        max_snapshots_per_run=10,
+    ) == (0, [])
+
+
 def test_streaming_disk_full_preserves_original_error_when_sqlite_auto_rolls_back(
     store: SQLiteStore, monkeypatch
 ) -> None:

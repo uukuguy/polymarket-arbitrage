@@ -4770,87 +4770,82 @@ class SQLiteStore:
             raise ValueError("max_snapshots_per_run must be positive")
         cutoff_ms = int((_time.time() - older_than_days * 86_400) * 1000)
 
-        con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
-        try:
-            # Find IDs to delete: older than cutoff AND not in the last M
-            keep_ids = [
-                r[0]
-                for r in con.execute(
-                    "SELECT id FROM snapshots ORDER BY id DESC LIMIT ?",
-                    (keep_last,),
-                ).fetchall()
-            ]
-            placeholders = ",".join("?" for _ in keep_ids)
-            to_delete = [
-                r[0]
-                for r in con.execute(
-                    f"SELECT s.id FROM snapshots s WHERE s.taken_at_ms < ? "
-                    f"AND s.id NOT IN ({placeholders}) "
-                    "AND NOT EXISTS (SELECT 1 FROM current_structure_generation g "
-                    "WHERE g.snapshot_id=s.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM structure_publications p "
-                    "WHERE p.snapshot_id=s.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM "
-                    "structure_generation_comparison_progress cp WHERE "
-                    "cp.generation_snapshot_id=s.id OR cp.legacy_snapshot_id=s.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM "
-                    "structure_generation_comparison_receipts cr WHERE "
-                    "cr.generation_snapshot_id=s.id OR cr.legacy_snapshot_id=s.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM structure_sync_windows sw "
-                    "WHERE sw.published_snapshot_id=s.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM structure_generation_events ge "
-                    "WHERE ge.snapshot_id=s.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM structure_generation_event_tags gt "
-                    "WHERE gt.snapshot_id=s.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM structure_generation_memberships gm "
-                    "WHERE gm.snapshot_id=s.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM structure_generation_group_truth gg "
-                    "WHERE gg.snapshot_id=s.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM structure_generation_markets gk "
-                    "WHERE gk.snapshot_id=s.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM structure_generation_issues gi "
-                    "WHERE gi.snapshot_id=s.id) "
-                    "ORDER BY s.id LIMIT ?",
-                    [cutoff_ms, *keep_ids, max_snapshots_per_run],
-                ).fetchall()
-            ]
-            # Archive ownership is explicit.  A Structure snapshot carries the
-            # no-archive marker in parquet_path for compatibility with the old
-            # non-null column contract; that marker is not a file to unlink.
-            # Never infer deletion ownership from a path-shaped string alone.
-            parquet_paths = (
-                [
-                    r[0]
-                    for r in con.execute(
-                        f"SELECT parquet_path, archive_status FROM snapshots "
-                        f"WHERE id IN ({','.join('?' for _ in to_delete)})",
-                        to_delete,
-                    ).fetchall()
-                    if r[1] != "not_requested"
-                ]
-                if parquet_root is not None and to_delete
-                else []
-            )
-        finally:
-            con.close()
-
-        if not to_delete:
-            logger.info("purge_old_snapshots: nothing to delete")
-            return (0, [])
-
-        if dry_run:
-            logger.info(
-                f"purge_old_snapshots DRY-RUN: would delete {len(to_delete)} "
-                f"snapshots (ids={to_delete}), {len(parquet_paths)} parquet files"
-            )
-            return (0, to_delete)
-
-        # Delete in FK-safe order
         con = self._connect_writer()
         try:
             con.execute("PRAGMA journal_mode=WAL")
             con.execute("BEGIN IMMEDIATE")
             try:
+                # Keep selection and deletion under one writer lock so no new
+                # publication or generation evidence can acquire a candidate.
+                keep_ids = [
+                    r[0]
+                    for r in con.execute(
+                        "SELECT id FROM snapshots ORDER BY id DESC LIMIT ?",
+                        (keep_last,),
+                    ).fetchall()
+                ]
+                placeholders = ",".join("?" for _ in keep_ids)
+                to_delete = [
+                    r[0]
+                    for r in con.execute(
+                        f"SELECT s.id FROM snapshots s WHERE s.taken_at_ms < ? "
+                        f"AND s.id NOT IN ({placeholders}) "
+                        "AND NOT EXISTS (SELECT 1 FROM current_structure_generation g "
+                        "WHERE g.snapshot_id=s.id) "
+                        "AND NOT EXISTS (SELECT 1 FROM structure_publications p "
+                        "WHERE p.snapshot_id=s.id) "
+                        "AND NOT EXISTS (SELECT 1 FROM "
+                        "structure_generation_comparison_progress cp WHERE "
+                        "cp.generation_snapshot_id=s.id OR cp.legacy_snapshot_id=s.id) "
+                        "AND NOT EXISTS (SELECT 1 FROM "
+                        "structure_generation_comparison_receipts cr WHERE "
+                        "cr.generation_snapshot_id=s.id OR cr.legacy_snapshot_id=s.id) "
+                        "AND NOT EXISTS (SELECT 1 FROM structure_sync_windows sw "
+                        "WHERE sw.published_snapshot_id=s.id) "
+                        "AND NOT EXISTS (SELECT 1 FROM structure_generation_events ge "
+                        "WHERE ge.snapshot_id=s.id) "
+                        "AND NOT EXISTS (SELECT 1 FROM structure_generation_event_tags gt "
+                        "WHERE gt.snapshot_id=s.id) "
+                        "AND NOT EXISTS (SELECT 1 FROM structure_generation_memberships gm "
+                        "WHERE gm.snapshot_id=s.id) "
+                        "AND NOT EXISTS (SELECT 1 FROM structure_generation_group_truth gg "
+                        "WHERE gg.snapshot_id=s.id) "
+                        "AND NOT EXISTS (SELECT 1 FROM structure_generation_markets gk "
+                        "WHERE gk.snapshot_id=s.id) "
+                        "AND NOT EXISTS (SELECT 1 FROM structure_generation_issues gi "
+                        "WHERE gi.snapshot_id=s.id) "
+                        "ORDER BY s.id LIMIT ?",
+                        [cutoff_ms, *keep_ids, max_snapshots_per_run],
+                    ).fetchall()
+                ]
+                # Archive ownership is explicit. A Structure snapshot carries the
+                # no-archive marker in parquet_path for compatibility with the old
+                # non-null contract; that marker is not a file to unlink.
+                parquet_paths = (
+                    [
+                        r[0]
+                        for r in con.execute(
+                            f"SELECT parquet_path, archive_status FROM snapshots "
+                            f"WHERE id IN ({','.join('?' for _ in to_delete)})",
+                            to_delete,
+                        ).fetchall()
+                        if r[1] != "not_requested"
+                    ]
+                    if parquet_root is not None and to_delete
+                    else []
+                )
+                if not to_delete or dry_run:
+                    con.execute("COMMIT")
+                    if not to_delete:
+                        logger.info("purge_old_snapshots: nothing to delete")
+                        return (0, [])
+                    logger.info(
+                        f"purge_old_snapshots DRY-RUN: would delete {len(to_delete)} "
+                        f"snapshots (ids={to_delete}), "
+                        f"{len(parquet_paths)} parquet files"
+                    )
+                    return (0, to_delete)
+
                 id_placeholders = ",".join("?" for _ in to_delete)
                 con.execute(
                     f"DELETE FROM validation_issues WHERE snapshot_id IN ({id_placeholders})",

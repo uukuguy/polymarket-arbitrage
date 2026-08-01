@@ -132,8 +132,11 @@ and fail-closed. Both repair forms are idempotent.
 Generic snapshot retention never reclaims immutable generation evidence. Its
 bounded candidate query excludes snapshots referenced by the current pointer,
 publication metadata, comparison progress or receipts, sync-window publication,
-or any generation component row. It can continue deleting unrelated snapshots
-without touching a sealed receipt or depending on a foreign-key rollback. Old
+or any generation component row. Keep-set selection, the complete evidence
+exclusion query, and deletion share one `BEGIN IMMEDIATE` transaction, preventing
+a new evidence writer from acquiring a selected snapshot before deletion. Purge
+can continue deleting unrelated snapshots without touching a sealed receipt or
+depending on a foreign-key rollback. Old
 generation reclamation requires a separate bounded, evidence-aware cleanup API
 with explicit chain ownership; that API must be implemented and exposed before
 production closure and is outside Task 5.
