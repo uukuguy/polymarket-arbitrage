@@ -68,3 +68,29 @@ GREEN verification:
   resolved SQLite generation; it does not make the remote delete/insert atomic.
 - Rollout remains at the default `legacy` mode. `compare` and `generation` require
   the later health/operations gates before any production enablement claim.
+
+## Review hardening follow-up
+
+The review follow-up removed all full-universe work from the hot readers and
+made comparison evidence durable:
+
+- Legacy resolution now reads snapshot metadata only. It does not materialize
+  markets, count structure rows, or compute hashes.
+- Generation resolution is O(1): it authenticates the pointer, publication,
+  snapshot, committed counts, validation hash, and certification marker from
+  bounded metadata rows. Pointer publication remains atomic.
+- Backfill creates a durable `structure_generation_comparison_receipts` row in a
+  pinned SQLite read snapshot before pointer publication. Its two universe and
+  source-truth hashes are computed with ordered cursor streaming outside the
+  writer lock; compare mode then needs one receipt lookup and no universe scan.
+- Missing, stale, identity-corrupt, or validation-hash-corrupt comparison receipts
+  fail deterministically. Pointer/publication/snapshot corruption also fails
+  closed before structure rows are served.
+- Exact legacy Supabase mirror reads retain historical semantics, including
+  invalid and non-`Structure` snapshots.
+
+Additional RED tests first exposed the old hot-path calls, receipt absence/staleness,
+legacy historical filtering, and metadata corruption. The final review gate ran
+**402 tests**, with 0 failures, 0 errors, and 1 existing skip (62.921 seconds).
+Changed-file Ruff, `git diff --check`, and `make planning-status` all passed; the
+planning check reported no drift.

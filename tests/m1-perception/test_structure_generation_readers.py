@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+import polyarb.http.market_map as market_map_module
+import polyarb.routing.focused_quote_collector as focused_module
+import polyarb.storage.sqlite_store as sqlite_store_module
 from polyarb.config import Settings
 from polyarb.http.market_map import _read_market_map
+from polyarb.routing.focused_quote_collector import SqliteStructureMembershipReader
+from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore, _source_truth_hash
 from polyarb.routing.opportunity_scanner import scan_neg_risk_buy_all
 from polyarb.storage.sqlite_store import (
     SQLiteStore,
@@ -132,15 +139,16 @@ def _seed_structure_revision(
         con.execute(
             "INSERT INTO structure_publications(publication_id,window_id,snapshot_id,"
             "status,expected_counts_json,committed_counts_json,validation_hash,"
-            "certification_component,certification_counts_json,created_at_ms,"
+            "certification_component,certification_hash,certification_counts_json,created_at_ms,"
             "checkpoint_at_ms,certified_at_ms,published_at_ms) VALUES (?,?,?,"
-            "'published',?,?,?,'bounded-complete',?,?,?,?,?)",
+            "'published',?,?,?,'bounded-complete',?,?,?,?,?,?)",
             (
                 publication_id,
                 window_id,
                 snapshot_id,
                 counts_json,
                 counts_json,
+                generation_hash,
                 generation_hash,
                 counts_json,
                 snapshot_id * 1_000,
@@ -149,13 +157,59 @@ def _seed_structure_revision(
                 snapshot_id * 1_000 + 1,
             ),
         )
+        legacy_universe_hash, legacy_source_truth_hash = (
+            sqlite_store_module._structure_universe_hash(
+                con,
+                snapshot_id=snapshot_id,
+                generation=False,
+            )
+        )
+        generation_universe_hash, generation_source_truth_hash = (
+            sqlite_store_module._structure_universe_hash(
+                con,
+                snapshot_id=snapshot_id,
+                generation=True,
+            )
+        )
+        con.execute(
+            "INSERT INTO structure_generation_comparison_receipts("
+            "generation_snapshot_id,publication_id,legacy_snapshot_id,"
+            "legacy_market_count,generation_market_count,legacy_universe_hash,"
+            "generation_universe_hash,legacy_source_truth_hash,"
+            "generation_source_truth_hash,generation_validation_hash,created_at_ms) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                snapshot_id,
+                publication_id,
+                snapshot_id,
+                2,
+                2,
+                legacy_universe_hash,
+                generation_universe_hash,
+                legacy_source_truth_hash,
+                generation_source_truth_hash,
+                generation_hash,
+                snapshot_id * 1_000 + 1,
+            ),
+        )
         if point_current:
             con.execute(
                 "INSERT INTO current_structure_generation(id,snapshot_id,publication_id,"
-                "switched_at_ms) VALUES (1,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                "validation_hash,counts_json,certification_component,switched_at_ms) "
+                "VALUES (1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
                 "snapshot_id=excluded.snapshot_id,publication_id=excluded.publication_id,"
+                "validation_hash=excluded.validation_hash,"
+                "counts_json=excluded.counts_json,"
+                "certification_component=excluded.certification_component,"
                 "switched_at_ms=excluded.switched_at_ms",
-                (snapshot_id, publication_id, snapshot_id * 1_000 + 1),
+                (
+                    snapshot_id,
+                    publication_id,
+                    generation_hash,
+                    counts_json,
+                    "bounded-complete",
+                    snapshot_id * 1_000 + 1,
+                ),
             )
 
 
@@ -174,6 +228,25 @@ def test_read_mode_defaults_legacy_and_rejects_unknown(monkeypatch) -> None:
     assert Settings().structure_generation_read_mode == "legacy"
     with pytest.raises(ValidationError):
         Settings(structure_generation_read_mode="shadow")
+
+
+def test_existing_pointer_schema_adds_redundant_receipt_columns(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-pointer.db"
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "CREATE TABLE current_structure_generation("
+            "id INTEGER PRIMARY KEY,snapshot_id INTEGER,publication_id TEXT,"
+            "switched_at_ms INTEGER)"
+        )
+
+    SQLiteStore(path).init_schema()
+
+    with sqlite3.connect(path) as con:
+        columns = {
+            row[1]
+            for row in con.execute("PRAGMA table_info(current_structure_generation)")
+        }
+    assert {"validation_hash", "counts_json", "certification_component"} <= columns
 
 
 def test_current_generation_view_selects_only_pointer_rows(generation_db: Path) -> None:
@@ -198,7 +271,11 @@ def test_compare_serves_legacy_and_exposes_deterministic_mismatch(
     with sqlite3.connect(generation_db) as con:
         con.execute(
             "UPDATE current_structure_generation SET snapshot_id=2,"
-            "publication_id='test-publication-2',switched_at_ms=2001 WHERE id=1"
+            "publication_id='test-publication-2',validation_hash=(SELECT validation_hash "
+            "FROM structure_publications WHERE publication_id='test-publication-2'),"
+            "counts_json=(SELECT committed_counts_json FROM structure_publications "
+            "WHERE publication_id='test-publication-2'),"
+            "certification_component='bounded-complete',switched_at_ms=2001 WHERE id=1"
         )
 
     with structure_read_transaction(generation_db, mode="compare") as read:
@@ -215,17 +292,15 @@ def test_compare_serves_legacy_and_exposes_deterministic_mismatch(
 
     with sqlite3.connect(generation_db) as con:
         con.execute(
-            "UPDATE markets SET yes_token_id='legacy-drift' "
-            "WHERE snapshot_id=2 AND market_id='market-new-1'"
+            "UPDATE structure_generation_comparison_receipts SET "
+            "legacy_universe_hash=? WHERE generation_snapshot_id=2",
+            ("d" * 64,),
         )
     with structure_read_transaction(generation_db, mode="compare") as drifted:
         pass
     assert drifted.comparison is not None
     assert drifted.comparison.matches is False
-    assert drifted.comparison.mismatch_reasons == (
-        "universe-hash-mismatch",
-        "source-truth-hash-mismatch",
-    )
+    assert drifted.comparison.mismatch_reasons == ("universe-hash-mismatch",)
 
 
 def test_generation_read_fails_closed_on_receipt_count_mismatch(
@@ -267,7 +342,11 @@ def test_read_transaction_stays_on_old_generation_across_pointer_switch(
         with sqlite3.connect(generation_db) as writer:
             writer.execute(
                 "UPDATE current_structure_generation SET snapshot_id=2,"
-                "publication_id='test-publication-2',switched_at_ms=2001 WHERE id=1"
+                "publication_id='test-publication-2',validation_hash=(SELECT validation_hash "
+                "FROM structure_publications WHERE publication_id='test-publication-2'),"
+                "counts_json=(SELECT committed_counts_json FROM structure_publications "
+                "WHERE publication_id='test-publication-2'),"
+                "certification_component='bounded-complete',switched_at_ms=2001 WHERE id=1"
             )
         old_ids = old.connection.execute(
             f"SELECT market_id FROM {old.table('markets')} WHERE snapshot_id=? "
@@ -320,3 +399,213 @@ def test_supabase_projection_resolves_generation_once(generation_db: Path) -> No
     )
     assert snapshot["id"] == 1
     assert [row["market_id"] for row in rows] == ["market-old-1", "market-old-2"]
+
+
+def test_generation_hot_resolution_never_calls_full_scan_helpers(
+    generation_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("hot generation read invoked full-universe helper")
+
+    monkeypatch.setattr(SQLiteStore, "_generation_counts", forbidden)
+    monkeypatch.setattr(SQLiteStore, "_generation_hash", forbidden)
+    monkeypatch.setattr(sqlite_store_module, "_structure_universe_hash", forbidden)
+
+    with structure_read_transaction(generation_db, mode="generation") as read:
+        assert read.snapshot_id == 1
+
+
+def test_compare_hot_resolution_consumes_receipt_without_full_scan_helpers(
+    generation_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("hot compare read invoked full-universe helper")
+
+    monkeypatch.setattr(SQLiteStore, "_generation_counts", forbidden)
+    monkeypatch.setattr(SQLiteStore, "_generation_hash", forbidden)
+    monkeypatch.setattr(sqlite_store_module, "_structure_universe_hash", forbidden)
+
+    with structure_read_transaction(generation_db, mode="compare") as read:
+        assert read.comparison is not None
+        assert read.comparison.mismatch_reasons == (
+            "comparison-receipt-identity-mismatch",
+        )
+
+
+def test_backfill_receipt_hashing_streams_without_fetchall_materialization() -> None:
+    source = inspect.getsource(sqlite_store_module._structure_universe_hash)
+    assert ".fetchall(" not in source
+
+
+def test_comparison_receipt_hashes_match_quote_universe_contract(
+    generation_db: Path,
+) -> None:
+    universe = NegRiskQuoteStore(generation_db).latest_verified_universe()
+    with sqlite3.connect(generation_db) as con:
+        receipt = con.execute(
+            "SELECT legacy_universe_hash,legacy_source_truth_hash FROM "
+            "structure_generation_comparison_receipts WHERE generation_snapshot_id=2"
+        ).fetchone()
+    assert receipt == (universe.universe_hash, _source_truth_hash(universe))
+
+
+def test_focused_generation_read_traces_only_requested_group(
+    generation_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+    original = sqlite_store_module.structure_read_transaction
+
+    @contextmanager
+    def traced(*args, **kwargs):
+        kwargs["trace_callback"] = statements.append
+        with original(*args, **kwargs) as read:
+            yield read
+
+    monkeypatch.setattr(focused_module, "structure_read_transaction", traced)
+
+    group = SqliteStructureMembershipReader(
+        generation_db,
+        structure_generation_read_mode="generation",
+    ).current_group("event-1", "group-1")
+
+    assert group is not None
+    sql = "\n".join(statements).lower()
+    assert "count(" not in sql
+    assert "structure_generation_issues" not in sql
+    assert "where snapshot_id=1 and event_id='event-1'" in sql
+    assert "neg_risk_market_id='group-1'" in sql
+
+
+def test_http_generation_read_does_not_hash_or_scan_market_rows(
+    generation_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+    original = sqlite_store_module.structure_read_transaction
+
+    @contextmanager
+    def traced(*args, **kwargs):
+        kwargs["trace_callback"] = statements.append
+        with original(*args, **kwargs) as read:
+            yield read
+
+    monkeypatch.setattr(market_map_module, "structure_read_transaction", traced)
+
+    payload = _read_market_map(
+        generation_db,
+        event_id="event-1",
+        now_ms=1_001,
+        max_age_s=60,
+        quote_max_age_s=60,
+        structure_generation_read_mode="generation",
+    )
+
+    assert payload["structure_revision"] == 1
+    sql = "\n".join(statements).lower()
+    assert "count(" not in sql
+    assert "from structure_generation_markets" not in sql
+    assert "where snapshot_id=1 and event_id='event-1'" in sql
+
+
+def test_generation_pointer_publication_identity_corruption_fails_closed(
+    generation_db: Path,
+) -> None:
+    with sqlite3.connect(generation_db) as con:
+        con.execute(
+            "UPDATE current_structure_generation SET publication_id="
+            "'test-publication-2' WHERE id=1"
+        )
+    with pytest.raises(StructureGenerationReadError, match="identity-mismatch"):
+        with structure_read_transaction(generation_db, mode="generation"):
+            pass
+
+
+def test_generation_pointer_validation_receipt_corruption_fails_closed(
+    generation_db: Path,
+) -> None:
+    with sqlite3.connect(generation_db) as con:
+        con.execute(
+            "UPDATE current_structure_generation SET validation_hash=? WHERE id=1",
+            ("f" * 64,),
+        )
+    with pytest.raises(StructureGenerationReadError, match="validation-hash-mismatch"):
+        with structure_read_transaction(generation_db, mode="generation"):
+            pass
+
+
+def test_generation_snapshot_identity_corruption_fails_closed(
+    generation_db: Path,
+) -> None:
+    with sqlite3.connect(generation_db) as con:
+        con.execute("UPDATE snapshots SET data_product='archive' WHERE id=1")
+    with pytest.raises(StructureGenerationReadError, match="identity-mismatch"):
+        with structure_read_transaction(generation_db, mode="generation"):
+            pass
+
+
+def test_compare_receipt_identity_and_hash_corruption_are_deterministic(
+    generation_db: Path,
+) -> None:
+    with sqlite3.connect(generation_db) as con:
+        con.execute(
+            "UPDATE structure_generation_comparison_receipts SET legacy_snapshot_id=999 "
+            "WHERE generation_snapshot_id=1"
+        )
+    with structure_read_transaction(generation_db, mode="compare") as identity:
+        pass
+    assert identity.comparison is not None
+    assert identity.comparison.mismatch_reasons == (
+        "comparison-receipt-identity-mismatch",
+    )
+
+    with sqlite3.connect(generation_db) as con:
+        con.execute(
+            "UPDATE structure_generation_comparison_receipts SET legacy_snapshot_id=2,"
+            "generation_validation_hash=? WHERE generation_snapshot_id=1",
+            ("e" * 64,),
+        )
+    with structure_read_transaction(generation_db, mode="compare") as hashed:
+        pass
+    assert hashed.comparison is not None
+    assert hashed.comparison.mismatch_reasons == (
+        "comparison-receipt-validation-hash-mismatch",
+    )
+
+
+def test_compare_missing_receipt_is_deterministic_mismatch(generation_db: Path) -> None:
+    with sqlite3.connect(generation_db) as con:
+        con.execute(
+            "DELETE FROM structure_generation_comparison_receipts "
+            "WHERE generation_snapshot_id=1"
+        )
+    with structure_read_transaction(generation_db, mode="compare") as read:
+        pass
+    assert read.comparison is not None
+    assert read.comparison.mismatch_reasons == ("comparison-receipt-missing",)
+
+
+def test_legacy_exact_mirror_accepts_invalid_non_structure_snapshot(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-exact.db"
+    store = SQLiteStore(path)
+    store.init_schema()
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+            "data_product,is_valid,market_view_published,parquet_path) "
+            "VALUES (7,1,2,'full',1,'archive',0,0,'archive.parquet')"
+        )
+        con.execute(
+            "INSERT INTO markets(market_id,condition_id,fetched_at_ms,snapshot_id) "
+            "VALUES ('legacy-market','legacy-condition',1,7)"
+        )
+
+    snapshot, rows = store.read_structure_mirror_projection(
+        structure_generation_read_mode="legacy",
+        snapshot_id=7,
+    )
+
+    assert snapshot["id"] == 7
+    assert [row["market_id"] for row in rows] == ["legacy-market"]

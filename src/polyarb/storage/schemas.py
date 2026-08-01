@@ -2497,8 +2497,27 @@ CREATE TABLE IF NOT EXISTS current_structure_generation (
     id INTEGER PRIMARY KEY CHECK(id=1),
     snapshot_id INTEGER NOT NULL UNIQUE REFERENCES snapshots(id),
     publication_id TEXT NOT NULL UNIQUE,
+    validation_hash TEXT NOT NULL CHECK(length(validation_hash)=64),
+    counts_json TEXT NOT NULL,
+    certification_component TEXT NOT NULL CHECK(certification_component IN (
+        'bounded-complete','backfill-authenticated'
+    )),
     switched_at_ms INTEGER NOT NULL CHECK(switched_at_ms >= 0),
     FOREIGN KEY(publication_id) REFERENCES structure_publications(publication_id)
+);
+
+CREATE TABLE IF NOT EXISTS structure_generation_comparison_receipts (
+    generation_snapshot_id INTEGER PRIMARY KEY REFERENCES snapshots(id),
+    publication_id TEXT NOT NULL UNIQUE REFERENCES structure_publications(publication_id),
+    legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    legacy_market_count INTEGER NOT NULL CHECK(legacy_market_count >= 0),
+    generation_market_count INTEGER NOT NULL CHECK(generation_market_count >= 0),
+    legacy_universe_hash TEXT NOT NULL CHECK(length(legacy_universe_hash)=64),
+    generation_universe_hash TEXT NOT NULL CHECK(length(generation_universe_hash)=64),
+    legacy_source_truth_hash TEXT NOT NULL CHECK(length(legacy_source_truth_hash)=64),
+    generation_source_truth_hash TEXT NOT NULL CHECK(length(generation_source_truth_hash)=64),
+    generation_validation_hash TEXT NOT NULL CHECK(length(generation_validation_hash)=64),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0)
 );
 
 """

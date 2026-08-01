@@ -17,7 +17,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -168,8 +168,8 @@ class _StructureIdentity:
     taken_at_ms: int
     finished_at_ms: int
     market_count: int
-    universe_hash: str
-    source_truth_hash: str
+    publication_id: str | None = None
+    validation_hash: str | None = None
 
 
 def _structure_universe_hash(
@@ -178,97 +178,64 @@ def _structure_universe_hash(
     snapshot_id: int,
     generation: bool,
 ) -> tuple[str, str]:
+    """Stream a certified universe receipt without materializing its row set."""
     prefix = "structure_generation_" if generation else ""
     truth_table = f"{prefix}group_truth" if generation else "neg_risk_group_truth"
     membership_table = (
         f"{prefix}memberships" if generation else "event_market_memberships"
     )
     market_table = f"{prefix}markets"
-    truths = con.execute(
-        "SELECT event_id,neg_risk_market_id,neg_risk_type,expected_member_count,"
-        "active_named_count,membership_hash,quality,reason "
-        f"FROM {truth_table} WHERE snapshot_id=? ORDER BY neg_risk_market_id",
+    universe_digest = hashlib.sha256()
+    universe_digest.update(b"[")
+    first = True
+    identities = con.execute(
+        "SELECT t.neg_risk_market_id,t.membership_hash,k.market_id,k.yes_token_id "
+        f"FROM {truth_table} t JOIN {membership_table} m ON "
+        "m.snapshot_id=t.snapshot_id AND m.event_id=t.event_id AND "
+        "m.neg_risk_market_id=t.neg_risk_market_id JOIN "
+        f"{market_table} k ON k.snapshot_id=m.snapshot_id AND "
+        "k.market_id=m.market_id AND k.event_id=t.event_id AND "
+        "k.neg_risk_market_id=t.neg_risk_market_id WHERE t.snapshot_id=? AND "
+        "t.neg_risk_type='standard' AND t.quality='complete-supported' AND "
+        "m.member_kind='named' AND m.active=1 AND m.closed=0 AND k.active=1 AND "
+        "k.closed=0 AND k.incomplete=0 AND trim(k.yes_token_id)!='' "
+        "ORDER BY t.neg_risk_market_id,t.membership_hash,k.market_id,k.yes_token_id",
         (snapshot_id,),
-    ).fetchall()
-    memberships = con.execute(
-        "SELECT event_id,neg_risk_market_id,market_id,member_kind,active,closed "
-        f"FROM {membership_table} WHERE snapshot_id=? "
-        "ORDER BY neg_risk_market_id,market_id",
-        (snapshot_id,),
-    ).fetchall()
-    markets = con.execute(
-        "SELECT event_id,neg_risk_market_id,market_id,yes_token_id,active,closed,"
-        f"incomplete FROM {market_table} WHERE snapshot_id=? "
-        "AND neg_risk_market_id IS NOT NULL AND neg_risk_market_id!='' "
-        "ORDER BY neg_risk_market_id,market_id",
-        (snapshot_id,),
-    ).fetchall()
-    membership_by_group: dict[str, list[tuple[object, ...]]] = {}
-    market_by_group: dict[str, list[tuple[object, ...]]] = {}
-    for row in memberships:
-        membership_by_group.setdefault(str(row[1]), []).append(row)
-    for row in markets:
-        market_by_group.setdefault(str(row[1]), []).append(row)
-    identity: list[tuple[str, str, str, str]] = []
-    rejections: list[tuple[str, str, str]] = []
-    for truth in truths:
-        event_id, group_id = str(truth[0]), str(truth[1])
-        quality = str(truth[6])
-        reason = str(truth[7]) if truth[7] is not None else "neg-risk-group-not-supported"
-        group_memberships = membership_by_group.get(group_id, [])
-        group_markets = market_by_group.get(group_id, [])
-        expected = int(truth[3])
-        supported = (
-            truth[2] == "standard"
-            and quality == "complete-supported"
-            and bool(event_id.strip())
-            and isinstance(truth[5], str)
-            and bool(str(truth[5]).strip())
-            and expected == int(truth[4])
-            and len(group_memberships) == expected
-            and len(group_markets) == expected
-            and {str(row[2]) for row in group_memberships}
-            == {str(row[2]) for row in group_markets}
-            and all(
-                str(row[0]) == event_id
-                and row[3] == "named"
-                and int(row[4]) == 1
-                and int(row[5]) == 0
-                for row in group_memberships
-            )
-            and all(
-                str(row[0]) == event_id
-                and isinstance(row[3], str)
-                and bool(row[3].strip())
-                and int(row[4]) == 1
-                and int(row[5]) == 0
-                and int(row[6]) == 0
-                for row in group_markets
-            )
-        )
-        if not supported:
-            rejections.append(
-                (
-                    group_id,
-                    quality,
-                    reason
-                    if truth[2] != "standard" or quality != "complete-supported"
-                    else "membership-market-mismatch",
-                )
-            )
-            continue
-        identity.extend(
-            (group_id, str(truth[5]), str(row[2]), str(row[3]))
-            for row in group_markets
-        )
-    canonical = json.dumps(sorted(identity), ensure_ascii=False, separators=(",", ":"))
-    universe_hash = hashlib.sha256(canonical.encode()).hexdigest()
-    source_canonical = json.dumps(
-        [universe_hash, sorted(rejections)],
-        ensure_ascii=False,
-        separators=(",", ":"),
     )
-    return universe_hash, hashlib.sha256(source_canonical.encode()).hexdigest()
+    for row in identities:
+        if not first:
+            universe_digest.update(b",")
+        universe_digest.update(
+            json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode()
+        )
+        first = False
+    universe_digest.update(b"]")
+    universe_hash = universe_digest.hexdigest()
+
+    source_digest = hashlib.sha256()
+    source_digest.update(b"[")
+    source_digest.update(
+        json.dumps(universe_hash, ensure_ascii=False, separators=(",", ":")).encode()
+    )
+    source_digest.update(b",[")
+    first = True
+    rejections = con.execute(
+        "SELECT neg_risk_market_id,quality,COALESCE(reason,"
+        "'neg-risk-group-not-supported') "
+        f"FROM {truth_table} WHERE snapshot_id=? AND "
+        "(neg_risk_type!='standard' OR quality!='complete-supported') "
+        "ORDER BY neg_risk_market_id,quality,reason",
+        (snapshot_id,),
+    )
+    for row in rejections:
+        if not first:
+            source_digest.update(b",")
+        source_digest.update(
+            json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode()
+        )
+        first = False
+    source_digest.update(b"]]")
+    return universe_hash, source_digest.hexdigest()
 
 
 def _resolve_legacy_structure(
@@ -280,11 +247,12 @@ def _resolve_legacy_structure(
     where = "AND s.id=?" if snapshot_id is not None else ""
     order = "" if snapshot_id is not None else "ORDER BY s.id DESC LIMIT 1"
     params = (snapshot_id,) if snapshot_id is not None else ()
+    exact_legacy = snapshot_id is not None and latest_snapshot
     row = con.execute(
         (
             "SELECT s.id,s.taken_at_ms,s.finished_at_ms,s.market_count FROM snapshots s "
             f"WHERE 1=1 {where} {order}"
-            if latest_snapshot
+            if latest_snapshot or exact_legacy
             else "SELECT s.id,s.taken_at_ms,s.finished_at_ms,s.market_count "
             "FROM snapshots s JOIN snapshot_source_coverage c "
             "ON c.snapshot_id=s.id AND c.completed=1 WHERE s.data_product='structure' "
@@ -295,22 +263,11 @@ def _resolve_legacy_structure(
     ).fetchone()
     if row is None:
         raise StructureGenerationReadError("legacy-structure-unavailable")
-    resolved_id = int(row[0])
-    actual_count = int(
-        con.execute(
-            "SELECT COUNT(*) FROM markets WHERE snapshot_id=?", (resolved_id,)
-        ).fetchone()[0]
-    )
-    universe_hash, source_truth_hash = _structure_universe_hash(
-        con, snapshot_id=resolved_id, generation=False
-    )
     return _StructureIdentity(
-        resolved_id,
+        int(row[0]),
         int(row[1]),
         int(row[2]),
-        actual_count,
-        universe_hash,
-        source_truth_hash,
+        int(row[3]),
     )
 
 
@@ -318,84 +275,144 @@ def _resolve_generation_structure(
     con: sqlite3.Connection,
     snapshot_id: int | None,
 ) -> _StructureIdentity:
-    if snapshot_id is None:
-        pointer = con.execute(
-            "SELECT snapshot_id,publication_id FROM current_structure_generation WHERE id=1"
+    current = snapshot_id is None
+    if current:
+        row = con.execute(
+            "SELECT g.snapshot_id,g.publication_id,g.validation_hash,g.counts_json,"
+            "g.certification_component,s.taken_at_ms,s.finished_at_ms,s.market_count,"
+            "p.window_id,p.expected_counts_json,p.committed_counts_json,p.validation_hash,"
+            "p.certification_component,p.certification_hash FROM "
+            "current_structure_generation g JOIN structure_publications p "
+            "ON p.publication_id=g.publication_id AND p.snapshot_id=g.snapshot_id "
+            "JOIN snapshots s ON s.id=g.snapshot_id WHERE g.id=1 AND "
+            "p.status='published' AND s.data_product='structure' AND "
+            "s.market_view_published=1 AND s.is_valid=1"
         ).fetchone()
-        if pointer is None:
-            raise StructureGenerationReadError("generation-pointer-missing")
-        resolved_id, publication_id = int(pointer[0]), str(pointer[1])
+        if row is None:
+            pointer_exists = con.execute(
+                "SELECT 1 FROM current_structure_generation WHERE id=1"
+            ).fetchone()
+            raise StructureGenerationReadError(
+                "generation-pointer-missing"
+                if pointer_exists is None
+                else "generation-identity-mismatch"
+            )
+        resolved_id, publication_id = int(row[0]), str(row[1])
+        pointer_hash, pointer_counts, pointer_marker = row[2], row[3], row[4]
+        metadata = row[5:]
     else:
-        resolved_id = snapshot_id
-        publication = con.execute(
-            "SELECT publication_id FROM structure_publications WHERE snapshot_id=? "
-            "AND status='published' ORDER BY published_at_ms DESC LIMIT 1",
-            (resolved_id,),
+        row = con.execute(
+            "SELECT s.taken_at_ms,s.finished_at_ms,s.market_count,p.window_id,"
+            "p.expected_counts_json,p.committed_counts_json,p.validation_hash,"
+            "p.certification_component,p.certification_hash,p.publication_id "
+            "FROM structure_publications p JOIN snapshots s ON s.id=p.snapshot_id "
+            "WHERE p.snapshot_id=? AND p.status='published' AND "
+            "s.data_product='structure' AND s.market_view_published=1 AND s.is_valid=1",
+            (snapshot_id,),
         ).fetchone()
-        if publication is None:
-            raise StructureGenerationReadError("generation-identity-missing")
-        publication_id = str(publication[0])
-    row = con.execute(
-        "SELECT s.taken_at_ms,s.finished_at_ms,s.market_count,p.expected_counts_json,"
-        "p.committed_counts_json,p.validation_hash,p.certification_counts_json "
-        "FROM structure_publications p JOIN snapshots s ON s.id=p.snapshot_id "
-        "WHERE p.publication_id=? AND p.snapshot_id=? AND p.status='published' "
-        "AND s.data_product='structure' AND s.market_view_published=1 AND s.is_valid=1",
-        (publication_id, resolved_id),
-    ).fetchone()
-    if row is None:
-        raise StructureGenerationReadError("generation-identity-mismatch")
-    expected = json.loads(str(row[3]))
-    committed = json.loads(str(row[4]))
-    actual = SQLiteStore._generation_counts(con, resolved_id)
-    certified = json.loads(str(row[6])) if row[6] is not None else actual
-    if expected != committed or actual != expected or certified != actual:
-        raise StructureGenerationReadError("generation-count-mismatch")
-    if row[2] is None or int(row[2]) != actual["markets"]:
-        raise StructureGenerationReadError("generation-market-count-mismatch")
-    if not isinstance(row[5], str) or row[5] != SQLiteStore._generation_hash(
-        con, resolved_id
-    ):
-        raise StructureGenerationReadError("generation-hash-mismatch")
-    universe_hash, source_truth_hash = _structure_universe_hash(
-        con, snapshot_id=resolved_id, generation=True
+        if row is None:
+            raise StructureGenerationReadError("generation-identity-mismatch")
+        resolved_id, publication_id = int(snapshot_id), str(row[9])
+        pointer_hash = pointer_counts = pointer_marker = None
+        metadata = row[:9]
+    (
+        taken_at_ms,
+        finished_at_ms,
+        snapshot_market_count,
+        window_id,
+        expected_json,
+        committed_json,
+        validation_hash,
+        certification_component,
+        certification_hash,
+    ) = metadata
+    authenticated_marker = (
+        "backfill-authenticated"
+        if str(window_id).startswith("backfill:")
+        else "bounded-complete"
     )
+    if certification_component != authenticated_marker:
+        raise StructureGenerationReadError("generation-identity-mismatch")
+    if (
+        not isinstance(validation_hash, str)
+        or len(validation_hash) != 64
+        or validation_hash != certification_hash
+    ):
+        raise StructureGenerationReadError("generation-validation-hash-mismatch")
+    expected = json.loads(str(expected_json))
+    committed = json.loads(str(committed_json))
+    if expected != committed or set(expected) != set(_STRUCTURE_COMPONENTS):
+        raise StructureGenerationReadError("generation-count-mismatch")
+    if int(snapshot_market_count) != int(committed["markets"]):
+        raise StructureGenerationReadError("generation-market-count-mismatch")
+    canonical_counts = json.dumps(
+        committed,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if current:
+        if pointer_hash != validation_hash:
+            raise StructureGenerationReadError("generation-validation-hash-mismatch")
+        if pointer_counts != canonical_counts:
+            raise StructureGenerationReadError("generation-count-mismatch")
+        if pointer_marker != authenticated_marker:
+            raise StructureGenerationReadError("generation-identity-mismatch")
     return _StructureIdentity(
         resolved_id,
-        int(row[0]),
-        int(row[1]),
-        actual["markets"],
-        universe_hash,
-        source_truth_hash,
+        int(taken_at_ms),
+        int(finished_at_ms),
+        int(committed["markets"]),
+        publication_id,
+        validation_hash,
     )
 
 
 def _compare_structure_identities(
+    con: sqlite3.Connection,
     legacy: _StructureIdentity,
     generation: _StructureIdentity | None,
     generation_error: str | None,
 ) -> StructureReadComparison:
     reasons: list[str] = []
+    receipt = None
     if generation is None:
         reasons.append(generation_error or "generation-unavailable")
     else:
-        if legacy.snapshot_id != generation.snapshot_id:
-            reasons.append("snapshot-identity-mismatch")
-        if legacy.market_count != generation.market_count:
-            reasons.append("market-count-mismatch")
-        if legacy.universe_hash != generation.universe_hash:
-            reasons.append("universe-hash-mismatch")
-        if legacy.source_truth_hash != generation.source_truth_hash:
-            reasons.append("source-truth-hash-mismatch")
+        receipt = con.execute(
+            "SELECT publication_id,legacy_snapshot_id,legacy_market_count,"
+            "generation_market_count,legacy_universe_hash,generation_universe_hash,"
+            "legacy_source_truth_hash,generation_source_truth_hash,"
+            "generation_validation_hash FROM structure_generation_comparison_receipts "
+            "WHERE generation_snapshot_id=?",
+            (generation.snapshot_id,),
+        ).fetchone()
+        if receipt is None:
+            reasons.append("comparison-receipt-missing")
+        elif (
+            receipt[0] != generation.publication_id
+            or int(receipt[1]) != legacy.snapshot_id
+        ):
+            reasons.append("comparison-receipt-identity-mismatch")
+        elif receipt[8] != generation.validation_hash:
+            reasons.append("comparison-receipt-validation-hash-mismatch")
+        else:
+            if int(receipt[2]) != int(receipt[3]):
+                reasons.append("market-count-mismatch")
+            if receipt[4] != receipt[5]:
+                reasons.append("universe-hash-mismatch")
+            if receipt[6] != receipt[7]:
+                reasons.append("source-truth-hash-mismatch")
     return StructureReadComparison(
         legacy.snapshot_id,
         generation.snapshot_id if generation is not None else None,
-        legacy.market_count,
-        generation.market_count if generation is not None else None,
-        legacy.universe_hash,
-        generation.universe_hash if generation is not None else None,
-        legacy.source_truth_hash,
-        generation.source_truth_hash if generation is not None else None,
+        int(receipt[2]) if receipt is not None else legacy.market_count,
+        int(receipt[3]) if receipt is not None else (
+            generation.market_count if generation is not None else None
+        ),
+        str(receipt[4]) if receipt is not None else None,
+        str(receipt[5]) if receipt is not None else None,
+        str(receipt[6]) if receipt is not None else None,
+        str(receipt[7]) if receipt is not None else None,
         tuple(reasons),
     )
 
@@ -407,12 +424,15 @@ def structure_read_transaction(
     mode: str = "legacy",
     snapshot_id: int | None = None,
     legacy_latest_snapshot: bool = False,
+    trace_callback: Callable[[str], None] | None = None,
 ) -> Iterator[StructureReadContext]:
     """Resolve and hold one Structure identity for a complete consumer operation."""
     if mode not in {"legacy", "compare", "generation"}:
         raise ValueError("invalid-structure-generation-read-mode")
     con = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True)
     con.execute("PRAGMA query_only=ON")
+    if trace_callback is not None:
+        con.set_trace_callback(trace_callback)
     try:
         con.execute("BEGIN")
         context = resolve_structure_read_context(
@@ -463,7 +483,7 @@ def resolve_structure_read_context(
             generation = _resolve_generation_structure(con, snapshot_id)
         except StructureGenerationReadError as exc:
             error = str(exc)
-        comparison = _compare_structure_identities(identity, generation, error)
+        comparison = _compare_structure_identities(con, identity, generation, error)
     return StructureReadContext(
         con,
         "legacy",
@@ -939,6 +959,11 @@ class SQLiteStore:
             _ensure_column("structure_publications", "certification_row_cursor", "TEXT")
             _ensure_column("structure_publications", "certification_hash", "TEXT")
             _ensure_column("structure_publications", "certification_counts_json", "TEXT")
+            _ensure_column("current_structure_generation", "validation_hash", "TEXT")
+            _ensure_column("current_structure_generation", "counts_json", "TEXT")
+            _ensure_column(
+                "current_structure_generation", "certification_component", "TEXT"
+            )
             _ensure_column("structure_sync_event_staging", "source_ordinal", "INTEGER")
             _ensure_column("structure_sync_market_staging", "source_ordinal", "INTEGER")
             _install_structure_generation_freeze_triggers(con)
@@ -1034,7 +1059,21 @@ class SQLiteStore:
                     "e.source_ordinal FROM structure_sync_event_staging e JOIN "
                     "json_each(e.payload_json,'$.markets') member "
                     "WHERE json_type(member.value,'$.id')='text'"
-                )
+                    )
+                pointer_columns = {
+                    str(row[1])
+                    for row in con.execute("PRAGMA table_info(current_structure_generation)")
+                }
+                for column in (
+                    "validation_hash",
+                    "counts_json",
+                    "certification_component",
+                ):
+                    if column not in pointer_columns:
+                        con.execute(
+                            f"ALTER TABLE current_structure_generation "
+                            f"ADD COLUMN {column} TEXT"
+                        )
                 _install_structure_generation_freeze_triggers(con)
                 return
         finally:
@@ -1494,6 +1533,9 @@ class SQLiteStore:
             self._db_path,
             mode=structure_generation_read_mode,
             snapshot_id=snapshot_id,
+            legacy_latest_snapshot=(
+                structure_generation_read_mode == "legacy" and snapshot_id is not None
+            ),
         ) as read:
             snapshot = read.connection.execute(
                 "SELECT id,taken_at_ms,finished_at_ms,mode,is_valid,market_count,"
@@ -2619,11 +2661,15 @@ class SQLiteStore:
             counts_json = json.dumps(actual, sort_keys=True, separators=(",", ":"))
             con.execute(
                 "UPDATE structure_publications SET status='ready',"
-                "committed_counts_json=?,validation_hash=?,certified_at_ms=?,"
+                "committed_counts_json=?,validation_hash=?,"
+                "certification_component='bounded-complete',certification_hash=?,"
+                "certification_counts_json=?,certified_at_ms=?,"
                 "checkpoint_at_ms=? WHERE publication_id=?",
                 (
                     counts_json,
                     validation_hash,
+                    validation_hash,
+                    counts_json,
                     certified_at_ms,
                     certified_at_ms,
                     publication_id,
@@ -2646,7 +2692,8 @@ class SQLiteStore:
             con.execute("BEGIN IMMEDIATE")
             publication = con.execute(
                 "SELECT snapshot_id,window_id,status,expected_counts_json,"
-                "committed_counts_json,validation_hash,certification_component "
+                "committed_counts_json,validation_hash,certification_component,"
+                "certification_hash "
                 "FROM structure_publications "
                 "WHERE publication_id=?",
                 (publication_id,),
@@ -2661,16 +2708,14 @@ class SQLiteStore:
                 if window_id.startswith("backfill:")
                 else publication[6] == "bounded-complete"
             )
-            if authenticated_frozen_receipt:
-                actual = committed
-                if actual != expected:
-                    raise ValueError("structure-publication-count-mismatch")
-            else:
-                actual = self._generation_counts(con, snapshot_id)
-                if actual != expected or committed != actual:
-                    raise ValueError("structure-publication-count-mismatch")
-                if publication[5] != self._generation_hash(con, snapshot_id):
-                    raise ValueError("structure-publication-hash-mismatch")
+            if not authenticated_frozen_receipt:
+                raise ValueError("structure-publication-receipt-missing")
+            actual = committed
+            if actual != expected:
+                raise ValueError("structure-publication-count-mismatch")
+            if publication[5] != publication[7]:
+                raise ValueError("structure-publication-hash-mismatch")
+            counts_json = json.dumps(actual, sort_keys=True, separators=(",", ":"))
             con.execute(
                 "UPDATE snapshots SET finished_at_ms=?,market_count=?,"
                 "market_view_published=1,is_valid=1,snapshot_status='ok' WHERE id=?",
@@ -2678,10 +2723,21 @@ class SQLiteStore:
             )
             con.execute(
                 "INSERT INTO current_structure_generation(id,snapshot_id,publication_id,"
-                "switched_at_ms) VALUES (1,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                "validation_hash,counts_json,certification_component,switched_at_ms) "
+                "VALUES (1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
                 "snapshot_id=excluded.snapshot_id,publication_id=excluded.publication_id,"
+                "validation_hash=excluded.validation_hash,"
+                "counts_json=excluded.counts_json,"
+                "certification_component=excluded.certification_component,"
                 "switched_at_ms=excluded.switched_at_ms",
-                (snapshot_id, publication_id, now_ms),
+                (
+                    snapshot_id,
+                    publication_id,
+                    publication[5],
+                    counts_json,
+                    publication[6],
+                    now_ms,
+                ),
             )
             con.execute(
                 "UPDATE structure_publications SET status='published',published_at_ms=?,"
@@ -2762,6 +2818,87 @@ class SQLiteStore:
                 ).fetchone()
                 if marker != ("writing", "backfill-frozen"):
                     raise ValueError("structure-backfill-freeze-race")
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def _ensure_backfill_comparison_receipt(
+        self,
+        publication_id: str,
+        snapshot_id: int,
+        created_at_ms: int,
+    ) -> None:
+        """Build the one-time dual-read receipt outside every hot read path."""
+        with sqlite3.connect(self._db_path) as read_con:
+            # Pin publication metadata and both streamed universes to one
+            # read snapshot before publishing the durable comparison receipt.
+            read_con.execute("BEGIN")
+            publication = read_con.execute(
+                "SELECT committed_counts_json,validation_hash,status,"
+                "certification_component FROM structure_publications "
+                "WHERE publication_id=? AND snapshot_id=?",
+                (publication_id, snapshot_id),
+            ).fetchone()
+            if (
+                publication is None
+                or publication[2] != "ready"
+                or publication[3] != "backfill-authenticated"
+                or not isinstance(publication[1], str)
+            ):
+                raise ValueError("structure-backfill-receipt-not-authenticated")
+            counts = json.loads(str(publication[0]))
+            legacy_universe_hash, legacy_source_truth_hash = _structure_universe_hash(
+                read_con,
+                snapshot_id=snapshot_id,
+                generation=False,
+            )
+            generation_universe_hash, generation_source_truth_hash = (
+                _structure_universe_hash(
+                    read_con,
+                    snapshot_id=snapshot_id,
+                    generation=True,
+                )
+            )
+            receipt = (
+                snapshot_id,
+                publication_id,
+                snapshot_id,
+                int(counts["markets"]),
+                int(counts["markets"]),
+                legacy_universe_hash,
+                generation_universe_hash,
+                legacy_source_truth_hash,
+                generation_source_truth_hash,
+                str(publication[1]),
+                created_at_ms,
+            )
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute(
+                "INSERT OR IGNORE INTO structure_generation_comparison_receipts("
+                "generation_snapshot_id,publication_id,legacy_snapshot_id,"
+                "legacy_market_count,generation_market_count,legacy_universe_hash,"
+                "generation_universe_hash,legacy_source_truth_hash,"
+                "generation_source_truth_hash,generation_validation_hash,created_at_ms) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                receipt,
+            )
+            durable = con.execute(
+                "SELECT generation_snapshot_id,publication_id,legacy_snapshot_id,"
+                "legacy_market_count,generation_market_count,legacy_universe_hash,"
+                "generation_universe_hash,legacy_source_truth_hash,"
+                "generation_source_truth_hash,generation_validation_hash,created_at_ms "
+                "FROM structure_generation_comparison_receipts "
+                "WHERE generation_snapshot_id=?",
+                (snapshot_id,),
+            ).fetchone()
+            if durable != receipt:
+                raise ValueError("structure-backfill-comparison-receipt-mismatch")
             con.execute("COMMIT")
         except BaseException:
             if con.in_transaction:
@@ -3063,6 +3200,11 @@ class SQLiteStore:
                     raise
                 finally:
                     certify_con.close()
+            self._ensure_backfill_comparison_receipt(
+                publish_id,
+                snapshot_id,
+                finished_at_ms,
+            )
             self.publish_structure_generation(publish_id, finished_at_ms)
             return BackfillCheckpoint(snapshot_id, copied_rows, cursor, True)
         return BackfillCheckpoint(snapshot_id, copied_rows, cursor, False)
