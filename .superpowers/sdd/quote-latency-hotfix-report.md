@@ -23,14 +23,24 @@ task.
   between projection and admission fails closed.
 - Each new quote run stores an immutable source receipt and rejection projection. Certification and
   serving reconstruct from run-bound legs plus that receipt, eliminating the third Structure scan.
-  Historical runs without the new receipt retain a compatibility fallback.
+  Historical runs without the new receipt retain a compatibility fallback; unreleased draft receipts
+  that did not seal full leg/quote identity are quarantined and cannot regain trust through fallback.
 - Durable attempts expose `universe → admission → fetch → transform → persist → certify → projection`
   checkpoints, phase timings, target count, Structure receipt, failure, and outcome. Parent and child
   exchange a strict attempt identity; cancel/nonzero exits record failure. Strict health warns after a
   phase is stalled for 45 seconds and fails after 120 seconds.
 - CLOB fetch has a 100-second stage budget and the child has a 120-second absolute budget measured
-  from attempt start. The parent reserves shutdown time, terminate/kill/reaps, stops lease renewal,
-  fails the collecting run and attempt, and lets the worker retry without clearing the old feed.
+  from attempt start. A stable exit code plus strict attempt-bound JSON error envelope carries the
+  controlled fetch timeout to the parent; malformed or forged envelopes fail closed. The parent uses
+  one monotonic terminate/kill/reap deadline, stops lease renewal, fails the collecting run and
+  attempt, and retries timeouts immediately without clearing the old feed. Cancellation cleanup never
+  masks the original `CancelledError`.
+- Settings share one timing source of truth and reject any cadence + child + publish-reserve budget
+  that is not strictly below the 300-second freshness SLA, or any fetch + shutdown budget that is not
+  strictly below the child hard limit. The formerly legal 240-second cadence is rejected with the
+  production defaults.
+- Attempt admission closes parent-orphaned collecting attempts and bounds terminal attempt evidence
+  even during continuous failure-only periods.
 - The previous certified opportunity feed remains the serving authority while a new attempt collects;
   it is replaced only after certification/projection, while its existing freshness limits remain in
   force.
@@ -52,10 +62,10 @@ task.
 
 ## Final verification
 
-- Full M1 (`tests/perception/ tests/m1-perception/`): `3065 passed, 1 skipped, 1 xfailed`
+- Full M1 (`tests/perception/ tests/m1-perception/`): `3072 passed, 1 skipped, 1 xfailed`
   (exit 0).
 - Focused publication-boundary regressions: 4 passed.
-- Core Quote store/collector exact gate: 182 passed.
+- Final expanded exact gate: 199 passed.
 - Worker/collector/health expanded gate: 95 passed.
 - CLI and Make contract tests: pass.
 - Changed-file Ruff, `git diff --check`, and `make planning-status`: pass.
@@ -71,4 +81,8 @@ after the certified feed is published. Attempt evidence read failures make stric
 than masquerading as `never-attempted`. The broad snapshot publication trigger that could clear an
 unrelated legacy dirty fence is removed and migrated away.
 
-The final frozen-source exact gate and the final full M1 gate both pass after these remediations.
+Later review rounds also closed failure-only attempt retention, orphan recovery, cleanup-error
+masking, explicit reap, child fetch-timeout propagation, immediate retry, strict timing configuration,
+and the shared shutdown deadline. Independent review of source SHA `674c4d3` returned
+`APPROVE — no findings`. The final frozen-source exact gate and the final full M1 gate both pass after
+these remediations. No production mutation or deployment was performed.
