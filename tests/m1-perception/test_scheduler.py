@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -672,7 +673,7 @@ async def test_structure_rechecks_quote_priority_after_lock_acquisition(
 
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
-    active_checks = iter((False, True, False, False))
+    active_checks = iter((False, True, False, False, False))
     quote_runtime = MagicMock()
     quote_runtime.pipeline_active.side_effect = lambda: next(active_checks)
     quote_runtime.pipeline_due.return_value = False
@@ -711,6 +712,8 @@ async def test_structure_rechecks_quote_priority_after_lock_acquisition(
     assert attempts[0]["failure_kind"] == "structure-checkpoint"
     assert child_calls == 1
     assert scheduler._failure_counter == 0
+    assert getattr(scheduler, "_active_attempt_id", None) is None
+    assert scheduler._admitted_timeout_s is None
     sleep.assert_awaited_once_with(5.0)
 
 
@@ -745,6 +748,183 @@ async def test_structure_child_failure_closes_attempt_and_releases_slot(
     assert attempt["last_stage"] == "gamma-markets"
     assert attempt["elapsed_ms"] == 75_001
     assert producer_lock.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_publication_lookup_precedes_attempt_and_rechecks_quote_after_lookup(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    """Slow publication-state I/O is queue time, never attempt runtime."""
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import IsolatedStructureCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    lookup_entered = threading.Event()
+    release_lookup = threading.Event()
+    lookup_calls = 0
+
+    def blocking_publication_lookup():
+        nonlocal lookup_calls
+        lookup_calls += 1
+        if lookup_calls == 1:
+            lookup_entered.set()
+            assert release_lookup.wait(timeout=2)
+        return SimpleNamespace(status="writing")
+
+    store.get_latest_structure_publication = blocking_publication_lookup  # type: ignore[method-assign]
+
+    class Runtime:
+        active = False
+
+        def pipeline_active(self) -> bool:
+            return self.active
+
+        def pipeline_due(self, _interval_s: float) -> bool:
+            return False
+
+    runtime = Runtime()
+    child_started = asyncio.Event()
+    wall_s = 1_000.0
+
+    async def run_snapshot():
+        child_started.set()
+        running = store.get_latest_snapshot_attempt()
+        assert running is not None
+        assert running["started_at_ms"] == int(wall_s * 1_000)
+        return IsolatedStructureCheckpoint(
+            window_id="window-lookup",
+            stage="markets",
+            pages_processed=1,
+            elapsed_ms=5,
+        )
+
+    async def defer_sleep(delay_s: float) -> None:
+        assert delay_s == 5.0
+        assert producer_lock.locked() is False
+        assert scheduler._tick_lock.locked() is False
+        runtime.active = False
+
+    monkeypatch.setattr(scheduler_module.time, "time", lambda: wall_s)
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", defer_sleep)
+    producer_lock = asyncio.Lock()
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+        producer_lock=producer_lock,
+        quote_worker_runtime=runtime,
+    )
+    scheduler._run_snapshot = run_snapshot  # type: ignore[method-assign]
+
+    tick = asyncio.create_task(scheduler._tick())
+    assert await asyncio.to_thread(lookup_entered.wait, 1)
+    assert store.get_latest_snapshot_attempt() is None
+
+    runtime.active = True
+    wall_s = 1_100.0
+    release_lookup.set()
+    await asyncio.wait_for(child_started.wait(), timeout=1)
+    await tick
+
+    receipt = store.get_latest_structure_defer()
+    attempt = store.get_latest_snapshot_attempt()
+    assert receipt is not None
+    assert receipt["reason"] == "quote-pipeline-active"
+    assert attempt is not None
+    assert attempt["outcome"] == "cancelled"
+    assert attempt["started_at_ms"] == 1_100_000
+    assert lookup_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ticks_serialize_attempt_ownership(
+    daemon_settings_for_test,
+) -> None:
+    from polyarb.daemon.scheduler import IsolatedStructureCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    first_child_started = asyncio.Event()
+    release_first_child = asyncio.Event()
+    child_calls = 0
+
+    async def run_snapshot():
+        nonlocal child_calls
+        child_calls += 1
+        if child_calls == 1:
+            first_child_started.set()
+            await release_first_child.wait()
+        return IsolatedStructureCheckpoint(
+            window_id=f"window-{child_calls}",
+            stage="markets",
+            pages_processed=1,
+            elapsed_ms=5,
+        )
+
+    producer_lock = asyncio.Lock()
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+        producer_lock=producer_lock,
+    )
+    scheduler._run_snapshot = run_snapshot  # type: ignore[method-assign]
+
+    first = asyncio.create_task(scheduler._tick())
+    await first_child_started.wait()
+    second = asyncio.create_task(scheduler._tick())
+    await asyncio.sleep(0)
+
+    assert len(store.get_snapshot_attempts(limit=10)) == 1
+    release_first_child.set()
+    await asyncio.gather(first, second)
+
+    attempts = store.get_snapshot_attempts(limit=10)
+    assert len(attempts) == 2
+    assert {attempt["outcome"] for attempt in attempts} == {"cancelled"}
+    assert {attempt["id"] for attempt in attempts} == {1, 2}
+    assert producer_lock.locked() is False
+    assert getattr(scheduler, "_active_attempt_id", None) is None
+    assert scheduler._admitted_timeout_s is None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_admission_closes_local_attempt_ownership(
+    daemon_settings_for_test,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    child_started = asyncio.Event()
+
+    async def run_snapshot():
+        child_started.set()
+        await asyncio.Event().wait()
+
+    producer_lock = asyncio.Lock()
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+        producer_lock=producer_lock,
+    )
+    scheduler._run_snapshot = run_snapshot  # type: ignore[method-assign]
+    tick = asyncio.create_task(scheduler._tick())
+    await child_started.wait()
+
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+
+    attempt = store.get_latest_snapshot_attempt()
+    assert attempt is not None
+    assert attempt["outcome"] == "cancelled"
+    assert attempt["failure_kind"] == "scheduler-cancelled"
+    assert producer_lock.locked() is False
+    assert getattr(scheduler, "_active_attempt_id", None) is None
+    assert scheduler._admitted_timeout_s is None
 
 
 async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics() -> None:

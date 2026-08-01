@@ -373,7 +373,8 @@ class SnapshotScheduler:
         self._quote_worker_runtime = quote_worker_runtime
         self._checkpoint_pending = False
         self._producer_slot_owned = False
-        self._active_attempt_id: int | None = None
+        self._admitted_timeout_s: float | None = None
+        self._tick_lock = asyncio.Lock()
 
         # Restore state from DB (test_counter_persists_across_restart)
         self._failure_counter = 0
@@ -516,6 +517,21 @@ class SnapshotScheduler:
         except Exception:
             logger.warning("could not persist scheduler state to DB")
 
+    async def _resolve_structure_timeout_s(self) -> float:
+        publication = await asyncio.to_thread(
+            self._sqlite_store.get_latest_structure_publication
+        )
+        try:
+            publication_status = (
+                publication.status if publication is not None else None
+            )
+        except AttributeError:
+            publication_status = None
+        return min(
+            self._effective_timeout_s,
+            structure_attempt_slot_budget_s(publication_status),
+        )
+
     async def _run_snapshot(self) -> object:
         """Run a snapshot and return a result with .status attribute.
 
@@ -523,20 +539,10 @@ class SnapshotScheduler:
         Real prod wires it to the orchestrator in Plan 04.
         """
         async def run_in_slot() -> object:
-            publication = await asyncio.to_thread(
-                self._sqlite_store.get_latest_structure_publication
-            )
-            try:
-                publication_status = (
-                    publication.status if publication is not None else None
-                )
-            except AttributeError:
-                publication_status = None
-            attempt_timeout_s = min(
-                self._effective_timeout_s,
-                structure_attempt_slot_budget_s(publication_status),
-            )
-            return await run_snapshot_in_subprocess(timeout_s=attempt_timeout_s)
+            timeout_s = self._admitted_timeout_s
+            if timeout_s is None:
+                timeout_s = await self._resolve_structure_timeout_s()
+            return await run_snapshot_in_subprocess(timeout_s=timeout_s)
 
         if self._producer_lock is None or self._producer_slot_owned:
             return await run_in_slot()
@@ -575,40 +581,51 @@ class SnapshotScheduler:
                 f"kind={type(error).__name__} reason={reason}"
             )
 
-    async def _admit_and_run_snapshot(self, *, queued_at_ms: int) -> tuple[int, object]:
-        """Give Quote priority, then start attempt truth inside the acquired slot."""
-        while True:
-            reason = self._quote_priority_reason()
-            if reason is not None:
-                await self._record_structure_defer(
-                    reason=reason,
-                    queued_at_ms=queued_at_ms,
-                )
-                await asyncio.sleep(STRUCTURE_DEFER_RETRY_DELAY_S)
-                continue
+    def _release_producer_slot(self) -> None:
+        if not self._producer_slot_owned:
+            return
+        self._producer_slot_owned = False
+        if self._producer_lock is not None:
+            self._producer_lock.release()
 
-            if self._producer_lock is not None:
-                await self._producer_lock.acquire()
-                self._producer_slot_owned = True
-            try:
+    async def _admit_snapshot(self, *, queued_at_ms: int) -> int | None:
+        """Return one attempt id while retaining ownership of its producer slot."""
+        reason = self._quote_priority_reason()
+        if reason is not None:
+            await self._record_structure_defer(
+                reason=reason,
+                queued_at_ms=queued_at_ms,
+            )
+            return None
+
+        if self._producer_lock is not None:
+            await self._producer_lock.acquire()
+            self._producer_slot_owned = True
+        admitted = False
+        try:
+            reason = self._quote_priority_reason()
+            if reason is None:
+                timeout_s = await self._resolve_structure_timeout_s()
+                # Quote can become active while publication state is read.
+                # This final check is the admission boundary: the attempt
+                # insert below is synchronous and the caller's next await is
+                # the already-budgeted child itself.
                 reason = self._quote_priority_reason()
-                if reason is not None:
-                    await self._record_structure_defer(
-                        reason=reason,
-                        queued_at_ms=queued_at_ms,
-                    )
-                else:
-                    attempt_id = await asyncio.to_thread(
-                        self._sqlite_store.begin_snapshot_attempt,
-                        started_at_ms=int(time.time() * 1_000),
-                    )
-                    self._active_attempt_id = attempt_id
-                    return attempt_id, await self._run_snapshot()
-            finally:
-                self._producer_slot_owned = False
-                if self._producer_lock is not None and self._producer_lock.locked():
-                    self._producer_lock.release()
-            await asyncio.sleep(STRUCTURE_DEFER_RETRY_DELAY_S)
+            if reason is None:
+                self._admitted_timeout_s = timeout_s
+                attempt_id = self._sqlite_store.begin_snapshot_attempt(
+                    started_at_ms=int(time.time() * 1_000),
+                )
+                admitted = True
+                return attempt_id
+            await self._record_structure_defer(
+                reason=reason,
+                queued_at_ms=queued_at_ms,
+            )
+            return None
+        finally:
+            if not admitted:
+                self._release_producer_slot()
 
     async def _on_recovering(self) -> None:
         """Alert once when repeated failures require active recovery.
@@ -665,6 +682,20 @@ class SnapshotScheduler:
             )
 
     async def _tick(self) -> None:
+        """Serialize scheduler entry so one task owns attempt truth at a time."""
+        queued_at_ms = int(time.time() * 1_000)
+        while True:
+            async with self._tick_lock:
+                try:
+                    completed = await self._tick_once(queued_at_ms=queued_at_ms)
+                finally:
+                    self._release_producer_slot()
+                    self._admitted_timeout_s = None
+            if completed:
+                return
+            await asyncio.sleep(STRUCTURE_DEFER_RETRY_DELAY_S)
+
+    async def _tick_once(self, *, queued_at_ms: int) -> bool:
         """Execute one scheduler tick.
 
         If RECOVERING: run the same bounded producer step, update evidence, and
@@ -680,14 +711,16 @@ class SnapshotScheduler:
             self.state = SchedulerState.RECOVERING
 
         self._checkpoint_pending = False
-        self._active_attempt_id = None
         attempt_id: int | None = None
-        queued_at_ms = int(time.time() * 1_000)
 
         try:
-            attempt_id, result = await self._admit_and_run_snapshot(
-                queued_at_ms=queued_at_ms
-            )
+            attempt_id = await self._admit_snapshot(queued_at_ms=queued_at_ms)
+            if attempt_id is None:
+                return False
+            try:
+                result = await self._run_snapshot()
+            finally:
+                self._release_producer_slot()
             if isinstance(result, IsolatedStructureCheckpoint):
                 last_stage = (
                     "gamma-events"
@@ -709,7 +742,7 @@ class SnapshotScheduler:
                     f"failure_counter={self._failure_counter}"
                 )
                 self._persist_counter()
-                return
+                return True
             result_status = getattr(result, "status", None)
 
             if result_status in (SnapshotStatus.OK, SnapshotStatus.DEGRADED):
@@ -822,7 +855,6 @@ class SnapshotScheduler:
         except asyncio.CancelledError:
             # F-04: cancellation must propagate so run() can stop in <1s.
             # Do NOT count as a failure — this is a graceful shutdown signal.
-            attempt_id = attempt_id or self._active_attempt_id
             if attempt_id is not None:
                 await self._finish_attempt(
                     attempt_id=attempt_id,
@@ -833,7 +865,6 @@ class SnapshotScheduler:
             logger.info("scheduler tick cancelled mid-flight; propagating CancelledError")
             raise
         except Exception as error:
-            attempt_id = attempt_id or self._active_attempt_id
             if attempt_id is not None:
                 await self._finish_attempt(
                     attempt_id=attempt_id,
@@ -849,8 +880,6 @@ class SnapshotScheduler:
                 f"failure_counter={self._failure_counter}/{self.FAILURE_THRESHOLD}"
             )
 
-        self._active_attempt_id = None
-
         # Persist counter before recovery-state check
         self._persist_counter()
         self._restore_effective_schedule()
@@ -864,6 +893,7 @@ class SnapshotScheduler:
             self.state = SchedulerState.RECOVERING
             self._persist_counter()
             await self._on_recovering()
+        return True
 
     def unpause(self) -> None:
         """Manually unpause the scheduler (called via /scan or SSH).
