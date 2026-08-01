@@ -102,3 +102,35 @@ Review-fix verification:
 - Reviewer reproducer and focused/expanded suites: all passed.
 - Full M1 gate: **2997 passed, 1 skipped, 1 xfailed** in 522.59 seconds.
 - Ruff, docs contract, planning no-drift, and diff checks passed.
+
+## Second review hardening
+
+The second review identified four Important authority/recovery gaps. They are
+closed without deploying or changing production read mode:
+
+- A missing comparison receipt is recoverable only for the exact pre-Task5
+  state: the current pointer receipt digest is NULL, its validation hash/counts/
+  certification facts still agree with the publication, and that same
+  generation has active bounded comparison progress. Health warns only while
+  that repair checkpoint is inside the Structure SLA and fails after it; digest
+  or identity mismatches remain fail-closed.
+- Cleanup retention is now a database invariant, not only an API selection
+  rule. A progress INSERT rejects the current generation and either member of
+  the fixed current+rollback floor. Every component DELETE independently
+  rechecks the same invariant, including two newer complete, certified,
+  unreclaimed publications, so authorization cannot outlive a later floor
+  change.
+- Active comparison lookup has a partial checkpoint/publication index and a
+  bounded non-negative checkpoint predicate. Its EXPLAIN contract is an index
+  SEARCH with no table scan or temporary B-tree.
+- The pre-composite cleanup migration no longer silently drops diagnostics.
+  Existing blocked progress becomes an append-only blocked observation with
+  its original reason; invalid snapshot/publication binding becomes an explicit
+  `cleanup-progress-migration-invalid-binding` observation. Only the newest
+  valid unblocked row can acquire the single progress slot.
+
+Second-review verification:
+
+- Focused four-gap regression: 7 tests passed.
+- Expanded publication/readers/health/migration/schema regression: passed.
+- Full M1 gate: **3003 passed, 1 skipped, 1 xfailed** in 508.59 seconds.

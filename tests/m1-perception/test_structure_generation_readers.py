@@ -509,6 +509,7 @@ def test_generation_history_queries_are_bounded_and_indexed(tmp_path: Path) -> N
             retain_generations=2,
             pressure_probe_limit=8,
         )
+        assert "active_comparison" in plans
     for plan in plans.values():
         detail = " ".join(plan).upper()
         assert "SCAN " not in detail
@@ -586,6 +587,165 @@ def test_cleanup_progress_v1_migrates_to_composite_single_slot_authority(
             "SELECT receipt_digest FROM structure_generation_comparison_receipts "
             "WHERE generation_snapshot_id=1"
         ).fetchone()[0]
+
+
+def test_pre_task5_missing_receipt_health_is_warn_only_for_fresh_active_repair(
+    tmp_path: Path,
+) -> None:
+    from polyarb.http.health import _structure_generation_health_checks
+
+    path = tmp_path / "pre-task5-health.db"
+    SQLiteStore(path).init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="old", point_current=True)
+    _downgrade_to_pre_task5_pointer(path)
+    with sqlite3.connect(path) as con:
+        con.execute("DROP TRIGGER trg_structure_comparison_receipt_delete")
+        con.execute("DELETE FROM structure_generation_comparison_receipts")
+    SQLiteStore(path).init_schema()
+    with sqlite3.connect(path) as con:
+        checkpoint_ms = int(
+            con.execute(
+                "SELECT checkpoint_at_ms FROM structure_generation_comparison_progress"
+            ).fetchone()[0]
+        )
+    status = SQLiteStore(path).structure_generation_status(retain_generations=2)
+    assert status["comparison_recoverable_missing_receipt"] is True
+    fresh = _structure_generation_health_checks(
+        status,
+        now_ms=checkpoint_ms + 99_000,
+        read_mode="generation",
+        publication_sla_s=100,
+        pressure_warn_count=4,
+        pressure_fail_count=8,
+    )
+    stale = _structure_generation_health_checks(
+        status,
+        now_ms=checkpoint_ms + 101_000,
+        read_mode="generation",
+        publication_sla_s=100,
+        pressure_warn_count=4,
+        pressure_fail_count=8,
+    )
+    assert fresh["snapshot:structure_generation_comparison"][0]["status"] == "warn"
+    assert stale["snapshot:structure_generation_comparison"][0]["status"] == "fail"
+
+
+@pytest.mark.parametrize("protected_snapshot_id", [3, 2])
+def test_cleanup_database_authority_rejects_current_and_rollback_floor(
+    tmp_path: Path,
+    protected_snapshot_id: int,
+) -> None:
+    path = tmp_path / f"protected-{protected_snapshot_id}.db"
+    SQLiteStore(path).init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="one", point_current=False)
+    _seed_structure_revision(path, snapshot_id=2, market_suffix="two", point_current=False)
+    _seed_structure_revision(path, snapshot_id=3, market_suffix="three", point_current=True)
+    with sqlite3.connect(path) as con:
+        con.execute("PRAGMA foreign_keys=ON")
+        publication_id, digest = con.execute(
+            "SELECT publication_id,receipt_digest FROM "
+            "structure_generation_comparison_receipts WHERE generation_snapshot_id=?",
+            (protected_snapshot_id,),
+        ).fetchone()
+        with pytest.raises(sqlite3.IntegrityError, match="cleanup-retention-floor"):
+            con.execute(
+                "INSERT INTO structure_generation_cleanup_progress("
+                "generation_snapshot_id,publication_id,phase,rows_deleted,started_at_ms,"
+                "checkpoint_at_ms,blocked_reason,authorization_digest) "
+                "VALUES (?,?,'events',0,1000,1000,NULL,?)",
+                (protected_snapshot_id, publication_id, digest),
+            )
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_events WHERE snapshot_id=?",
+            (protected_snapshot_id,),
+        ).fetchone() == (1,)
+
+
+def test_cleanup_delete_rechecks_floor_after_authorization(tmp_path: Path) -> None:
+    path = tmp_path / "cleanup-floor-recheck.db"
+    SQLiteStore(path).init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="one", point_current=False)
+    _seed_structure_revision(path, snapshot_id=2, market_suffix="two", point_current=False)
+    _seed_structure_revision(path, snapshot_id=3, market_suffix="three", point_current=True)
+    with sqlite3.connect(path) as con:
+        pub1, digest1 = con.execute(
+            "SELECT publication_id,receipt_digest FROM "
+            "structure_generation_comparison_receipts WHERE generation_snapshot_id=1"
+        ).fetchone()
+        con.execute(
+            "INSERT INTO structure_generation_cleanup_progress("
+            "generation_snapshot_id,publication_id,phase,rows_deleted,started_at_ms,"
+            "checkpoint_at_ms,blocked_reason,authorization_digest) "
+            "VALUES (1,?,'events',0,1000,1000,NULL,?)",
+            (pub1, digest1),
+        )
+        pub2, counts2, hash2 = con.execute(
+            "SELECT publication_id,committed_counts_json,validation_hash FROM "
+            "structure_publications WHERE snapshot_id=2"
+        ).fetchone()
+        cleanup_digest = sqlite_store_module._generation_cleanup_digest(
+            generation_snapshot_id=2,
+            publication_id=str(pub2),
+            component_counts_json=str(counts2),
+            generation_validation_hash=str(hash2),
+            reclaimed_at_ms=2_000,
+        )
+        con.execute(
+            "INSERT INTO structure_generation_cleanup_receipts VALUES (?,?,?,?,?,?)",
+            (2, pub2, counts2, hash2, 2_000, cleanup_digest),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="structure-generation-frozen"):
+            con.execute("DELETE FROM structure_generation_events WHERE snapshot_id=1")
+
+
+@pytest.mark.parametrize(
+    ("old_publication_id", "old_blocked_reason", "expected_reason"),
+    [
+        ("test-publication-1", "prior-auth-failure", "prior-auth-failure"),
+        (
+            "test-publication-2",
+            None,
+            "cleanup-progress-migration-invalid-binding",
+        ),
+    ],
+)
+def test_cleanup_progress_v1_migration_preserves_blocked_and_invalid_diagnostics(
+    tmp_path: Path,
+    old_publication_id: str,
+    old_blocked_reason: str | None,
+    expected_reason: str,
+) -> None:
+    path = tmp_path / f"cleanup-v1-blocked-{old_publication_id}.db"
+    SQLiteStore(path).init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="one", point_current=False)
+    _seed_structure_revision(path, snapshot_id=2, market_suffix="two", point_current=True)
+    with sqlite3.connect(path) as con:
+        for component in sqlite_store_module._STRUCTURE_COMPONENTS:
+            con.execute(
+                f"DROP TRIGGER trg_structure_generation_{component}_frozen_delete"
+            )
+        con.execute("DROP TABLE structure_generation_cleanup_progress")
+        con.execute(
+            "CREATE TABLE structure_generation_cleanup_progress("
+            "generation_snapshot_id INTEGER PRIMARY KEY,publication_id TEXT UNIQUE,"
+            "phase TEXT,rows_deleted INTEGER,started_at_ms INTEGER,"
+            "checkpoint_at_ms INTEGER,blocked_reason TEXT)"
+        )
+        con.execute(
+            "INSERT INTO structure_generation_cleanup_progress VALUES "
+            "(1,?,'events',0,1000,1001,?)",
+            (old_publication_id, old_blocked_reason),
+        )
+    SQLiteStore(path).init_schema()
+    with sqlite3.connect(path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_cleanup_progress"
+        ).fetchone() == (0,)
+        observation = con.execute(
+            "SELECT state,reason FROM structure_generation_cleanup_observations "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert observation == ("blocked", expected_reason)
 
 
 def test_read_mode_defaults_legacy_and_rejects_unknown(monkeypatch) -> None:

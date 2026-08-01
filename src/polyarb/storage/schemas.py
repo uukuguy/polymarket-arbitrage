@@ -2560,6 +2560,11 @@ CREATE TABLE IF NOT EXISTS structure_generation_comparison_progress (
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0)
 );
+CREATE INDEX IF NOT EXISTS idx_structure_comparison_progress_active
+ON structure_generation_comparison_progress(
+    checkpoint_at_ms DESC,publication_id DESC
+)
+WHERE phase!='sealed';
 
 -- Append-only authorization/evidence for bounded reclamation of old immutable
 -- generation bulk rows. Publication, comparison receipt, snapshot, and legacy
@@ -2595,8 +2600,6 @@ CREATE TABLE IF NOT EXISTS structure_generation_cleanup_observations (
     reason TEXT,
     observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
     observation_digest TEXT NOT NULL CHECK(length(observation_digest)=64),
-    FOREIGN KEY(generation_snapshot_id,publication_id)
-        REFERENCES structure_publications(snapshot_id,publication_id),
     CHECK((state='blocked' AND reason IS NOT NULL) OR
           (state='authorized' AND reason IS NULL))
 );

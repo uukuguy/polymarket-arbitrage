@@ -480,7 +480,14 @@ def _structure_generation_health_checks(
             0.0,
             (now_ms - int(comparison["checkpoint_at_ms"])) / 1_000,
         )
-    if status.get("pointer_snapshot_id") is not None and not status.get(
+    repair_checkpoint = status.get("comparison_repair_checkpoint_at_ms")
+    if status.get("comparison_recoverable_missing_receipt") and isinstance(
+        repair_checkpoint, int
+    ):
+        repair_age_s = max(0.0, (now_ms - repair_checkpoint) / 1_000)
+        comparison_status = "fail" if repair_age_s > publication_sla_s else "warn"
+        comparison_value = "repairing-missing-receipt"
+    elif status.get("pointer_snapshot_id") is not None and not status.get(
         "comparison_authenticated", False
     ):
         comparison_status = "fail"

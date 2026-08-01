@@ -108,24 +108,75 @@ def _migrate_structure_cleanup_progress_binding(con: sqlite3.Connection) -> None
         "length(authorization_digest)=64),FOREIGN KEY(generation_snapshot_id,"
         "publication_id) REFERENCES structure_publications(snapshot_id,publication_id))"
     )
-    con.execute(
-        "INSERT INTO structure_generation_cleanup_progress("
-        "generation_snapshot_id,publication_id,phase,rows_deleted,started_at_ms,"
-        "checkpoint_at_ms,blocked_reason,authorization_digest) SELECT "
-        "v.generation_snapshot_id,v.publication_id,v.phase,v.rows_deleted,"
-        "v.started_at_ms,v.checkpoint_at_ms,v.blocked_reason,cr.receipt_digest FROM "
-        "structure_generation_cleanup_progress_v1 v JOIN structure_publications p "
-        "ON p.snapshot_id=v.generation_snapshot_id AND p.publication_id=v.publication_id "
-        "JOIN structure_generation_comparison_receipts cr ON "
-        "cr.generation_snapshot_id=v.generation_snapshot_id AND "
-        "cr.publication_id=v.publication_id WHERE v.blocked_reason IS NULL "
-        "ORDER BY v.checkpoint_at_ms DESC LIMIT 1"
-    )
+    rows = con.execute(
+        "SELECT generation_snapshot_id,publication_id,phase,rows_deleted,started_at_ms,"
+        "checkpoint_at_ms,blocked_reason FROM structure_generation_cleanup_progress_v1 "
+        "ORDER BY checkpoint_at_ms DESC,generation_snapshot_id DESC"
+    ).fetchall()
+    migrated = False
+    for row in rows:
+        snapshot_id = int(row[0])
+        publication_id = str(row[1])
+        receipt = con.execute(
+            "SELECT cr.receipt_digest FROM structure_publications p JOIN "
+            "structure_generation_comparison_receipts cr ON "
+            "cr.generation_snapshot_id=p.snapshot_id AND "
+            "cr.publication_id=p.publication_id WHERE p.snapshot_id=? AND "
+            "p.publication_id=?",
+            (snapshot_id, publication_id),
+        ).fetchone()
+        blocked_reason = None if row[6] is None else str(row[6])
+        if blocked_reason is not None:
+            reason = blocked_reason
+        elif receipt is None:
+            reason = "cleanup-progress-migration-invalid-binding"
+        elif migrated:
+            reason = "cleanup-progress-migration-superseded"
+        else:
+            con.execute(
+                "INSERT INTO structure_generation_cleanup_progress("
+                "generation_snapshot_id,publication_id,phase,rows_deleted,started_at_ms,"
+                "checkpoint_at_ms,blocked_reason,authorization_digest) "
+                "VALUES (?,?,?,?,?,?,NULL,?)",
+                (*row[:6], str(receipt[0])),
+            )
+            migrated = True
+            continue
+        _append_generation_cleanup_observation(
+            con,
+            generation_snapshot_id=snapshot_id,
+            publication_id=publication_id,
+            state="blocked",
+            reason=reason,
+            observed_at_ms=int(row[5]),
+        )
     con.execute("DROP TABLE structure_generation_cleanup_progress_v1")
 
 
 def _install_structure_generation_freeze_triggers(con: sqlite3.Connection) -> None:
     """Reject every generation-row mutation after certification starts."""
+    newer_floor = (
+        "EXISTS (SELECT 1 FROM structure_publications newer WHERE "
+        "newer.status='published' AND newer.published_at_ms>=0 AND "
+        "newer.expected_counts_json=newer.committed_counts_json AND "
+        "newer.certification_component IN "
+        "('bounded-complete','backfill-authenticated') AND "
+        "(newer.published_at_ms>p.published_at_ms OR "
+        "(newer.published_at_ms=p.published_at_ms AND newer.snapshot_id>p.snapshot_id)) "
+        "AND NOT EXISTS (SELECT 1 FROM structure_generation_cleanup_receipts reclaimed "
+        "WHERE reclaimed.generation_snapshot_id=newer.snapshot_id) ORDER BY "
+        "newer.published_at_ms,newer.snapshot_id LIMIT 1 OFFSET 1)"
+    )
+    con.execute("DROP TRIGGER IF EXISTS trg_structure_cleanup_progress_retention_floor")
+    con.execute(
+        "CREATE TRIGGER trg_structure_cleanup_progress_retention_floor BEFORE INSERT ON "
+        "structure_generation_cleanup_progress WHEN EXISTS (SELECT 1 FROM "
+        "structure_publications p WHERE p.snapshot_id=NEW.generation_snapshot_id AND "
+        "p.publication_id=NEW.publication_id AND (EXISTS (SELECT 1 FROM "
+        "current_structure_generation current WHERE "
+        "current.snapshot_id=p.snapshot_id) OR NOT "
+        f"{newer_floor})) BEGIN SELECT RAISE(ABORT,'cleanup-retention-floor'); END"
+    )
     for component in _STRUCTURE_COMPONENTS:
         table = f"structure_generation_{component}"
         for operation, reference in (("insert", "NEW"), ("delete", "OLD")):
@@ -134,12 +185,7 @@ def _install_structure_generation_freeze_triggers(con: sqlite3.Connection) -> No
             # it transactionally so only an authenticated cleanup receipt can
             # authorize removal of old frozen bulk rows.
             if operation == "delete":
-                installed = con.execute(
-                    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
-                    (trigger,),
-                ).fetchone()
-                if installed is not None and "authorization_digest" not in str(installed[0]):
-                    con.execute(f"DROP TRIGGER {trigger}")  # noqa: S608
+                con.execute(f"DROP TRIGGER IF EXISTS {trigger}")  # noqa: S608
             cleanup_guard = (
                 " AND NOT EXISTS (SELECT 1 FROM "
                 "structure_generation_cleanup_progress r JOIN structure_publications p "
@@ -154,7 +200,10 @@ def _install_structure_generation_freeze_triggers(con: sqlite3.Connection) -> No
                 "cr.generation_validation_hash=p.validation_hash AND "
                 "p.status='published' AND p.expected_counts_json=p.committed_counts_json "
                 "AND p.certification_component IN "
-                "('bounded-complete','backfill-authenticated'))"
+                "('bounded-complete','backfill-authenticated') AND NOT EXISTS (SELECT 1 "
+                "FROM current_structure_generation current WHERE "
+                "current.snapshot_id=p.snapshot_id) AND "
+                f"{newer_floor})"
                 if operation == "delete"
                 else ""
             )
@@ -3775,7 +3824,8 @@ class SQLiteStore:
             comparison = con.execute(
                 "SELECT cp.generation_snapshot_id,cp.phase,cp.row_cursor_json,"
                 "cp.checkpoint_at_ms,NULL FROM structure_generation_comparison_progress cp "
-                "WHERE cp.phase!='sealed' ORDER BY cp.checkpoint_at_ms DESC,"
+                "WHERE cp.phase!='sealed' AND cp.checkpoint_at_ms>=0 "
+                "ORDER BY cp.checkpoint_at_ms DESC,"
                 "cp.publication_id DESC LIMIT 1"
             ).fetchone()
             if comparison is None:
@@ -3806,6 +3856,7 @@ class SQLiteStore:
                 "structure_generation_cleanup_observations ORDER BY id DESC LIMIT 1"
             ).fetchone()
             pointer_receipt = None
+            pointer_repair_progress = None
             if pointer is not None:
                 pointer_receipt = con.execute(
                     "SELECT publication_id,legacy_snapshot_id,legacy_market_count,"
@@ -3817,8 +3868,16 @@ class SQLiteStore:
                     "generation_snapshot_id=?",
                     (int(pointer[0]),),
                 ).fetchone()
+                pointer_repair_progress = con.execute(
+                    "SELECT phase,checkpoint_at_ms FROM "
+                    "structure_generation_comparison_progress WHERE "
+                    "generation_snapshot_id=? AND phase!='sealed'",
+                    (int(pointer[0]),),
+                ).fetchone()
         count_agrees = hash_agrees = False
         comparison_authenticated = pointer is None
+        comparison_recoverable_missing_receipt = False
+        comparison_repair_checkpoint_at_ms = None
         comparison_mismatch_reasons: list[str] = []
         pointer_snapshot_id = pointer_publication_id = switched_at_ms = None
         if pointer is not None:
@@ -3830,6 +3889,16 @@ class SQLiteStore:
             count_agrees = count_agrees and pointer[4] == pointer[10]
             if pointer_receipt is None:
                 comparison_mismatch_reasons.append("comparison-receipt-missing")
+                comparison_recoverable_missing_receipt = bool(
+                    pointer[5] is None
+                    and count_agrees
+                    and hash_agrees
+                    and pointer_repair_progress is not None
+                )
+                if pointer_repair_progress is not None:
+                    comparison_repair_checkpoint_at_ms = int(
+                        pointer_repair_progress[1]
+                    )
             else:
                 expected_digest = _comparison_receipt_digest(
                     generation_snapshot_id=pointer_snapshot_id,
@@ -3888,6 +3957,10 @@ class SQLiteStore:
             "generation_count_agrees": count_agrees,
             "generation_hash_agrees": hash_agrees,
             "comparison_authenticated": comparison_authenticated,
+            "comparison_recoverable_missing_receipt": (
+                comparison_recoverable_missing_receipt
+            ),
+            "comparison_repair_checkpoint_at_ms": comparison_repair_checkpoint_at_ms,
             "comparison_mismatch_reasons": comparison_mismatch_reasons,
             "publication": None
             if publication is None
@@ -3937,6 +4010,13 @@ class SQLiteStore:
     ) -> dict[str, tuple[str, ...]]:
         """Expose stable SQLite planner evidence for bounded operator queries."""
         queries = {
+            "active_comparison": (
+                "SELECT generation_snapshot_id,phase,row_cursor_json,checkpoint_at_ms "
+                "FROM structure_generation_comparison_progress WHERE phase!='sealed' "
+                "AND checkpoint_at_ms>=0 "
+                "ORDER BY checkpoint_at_ms DESC,publication_id DESC LIMIT 1",
+                (),
+            ),
             "pressure": (
                 "SELECT p.snapshot_id FROM structure_publications p WHERE "
                 "p.status='published' AND p.published_at_ms>=0 AND NOT EXISTS (SELECT 1 FROM "
