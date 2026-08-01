@@ -443,19 +443,28 @@ async def test_health_binds_liveness_to_latest_exact_child(tmp_path) -> None:
             stop,
         )
     )
-    await asyncio.sleep(1.2)
-    latest = store.latest_producer_heartbeat_ms("candidate")
-    assert latest is not None
-    liveness = read_producer_liveness_health(
-        store.db_path,
-        "candidate",
-        now_ms=latest + 1,
-        stall_timeout_ms=2_000,
-    )
-    assert liveness.state == "running"
-    assert liveness.evidence_consistent is True
-    stop.set()
-    await task
+    try:
+        startup_deadline = time.monotonic() + 5
+        latest = await asyncio.to_thread(
+            store.latest_producer_heartbeat_ms, "candidate"
+        )
+        while latest is None and time.monotonic() < startup_deadline:
+            await asyncio.sleep(0.02)
+            latest = await asyncio.to_thread(
+                store.latest_producer_heartbeat_ms, "candidate"
+            )
+        assert latest is not None
+        liveness = read_producer_liveness_health(
+            store.db_path,
+            "candidate",
+            now_ms=latest + 1,
+            stall_timeout_ms=2_000,
+        )
+        assert liveness.state == "running"
+        assert liveness.evidence_consistent is True
+    finally:
+        stop.set()
+        await task
 
 
 @pytest.mark.asyncio
@@ -481,23 +490,31 @@ async def test_parent_cannot_forge_heartbeat_from_database_hash(tmp_path) -> Non
     task = asyncio.create_task(
         supervisor.run(ProducerSpec(component="candidate", timeout_s=2), stop)
     )
-    await asyncio.sleep(1.0)
-    with store._connect() as con:
-        row = con.execute(
-            "SELECT supervisor_run_id,attempt,child_auth_hash "
-            "FROM neg_risk_producer_child_starts WHERE component='candidate'"
-        ).fetchone()
-    assert row["child_auth_hash"]
-    with pytest.raises(PermissionError, match="heartbeat-authority"):
-        store.record_producer_heartbeat(
-            "candidate",
-            observed_at_ms=int(asyncio.get_running_loop().time() * 1_000),
-            supervisor_run_id=row["supervisor_run_id"],
-            attempt=row["attempt"],
-            _preimage=row["child_auth_hash"],
-        )
-    stop.set()
-    await task
+    try:
+        startup_deadline = time.monotonic() + 5
+        row = None
+        while row is None and time.monotonic() < startup_deadline:
+            with store._connect() as con:
+                row = con.execute(
+                    "SELECT supervisor_run_id,attempt,child_auth_hash "
+                    "FROM neg_risk_producer_child_starts "
+                    "WHERE component='candidate' AND child_auth_hash IS NOT NULL"
+                ).fetchone()
+            if row is None:
+                await asyncio.sleep(0.02)
+        assert row is not None
+        assert row["child_auth_hash"]
+        with pytest.raises(PermissionError, match="heartbeat-authority"):
+            store.record_producer_heartbeat(
+                "candidate",
+                observed_at_ms=int(asyncio.get_running_loop().time() * 1_000),
+                supervisor_run_id=row["supervisor_run_id"],
+                attempt=row["attempt"],
+                _preimage=row["child_auth_hash"],
+            )
+    finally:
+        stop.set()
+        await task
 
 
 def test_liveness_replays_and_rejects_corrupt_old_attempt(tmp_path) -> None:

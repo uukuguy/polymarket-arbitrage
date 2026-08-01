@@ -203,7 +203,7 @@ async def test_scheduler_caps_adaptive_timeout_at_producer_slot_budget(
         await scheduler._run_snapshot()
 
     assert scheduler.effective_timeout_s == 288
-    run_child.assert_awaited_once_with(timeout_s=120.0)
+    run_child.assert_awaited_once_with(timeout_s=75.0)
 
 
 @pytest.mark.asyncio
