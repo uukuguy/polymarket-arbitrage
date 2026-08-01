@@ -585,7 +585,7 @@ def test_health_uses_effective_snapshot_timeout_and_surfaces_schedule(
     assert schedule["status"] == "pass"
     assert schedule["output"] == (
         "configured_timeout_s=240 effective_timeout_s=288 "
-        "producer_slot_budget_s=120 attempt_timeout_s=120 "
+        "producer_slot_budget_s=180 attempt_timeout_s=180 "
         "configured_cadence_s=3600 effective_cadence_s=348 "
         "success_samples=10 success_p95_s=236 reason=timeout-backoff"
     )

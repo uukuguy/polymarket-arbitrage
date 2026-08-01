@@ -74,7 +74,7 @@ SNAPSHOT_SUBPROCESS_TIMEOUT_S = 240.0
 # A longer adaptive snapshot timeout may improve completion probability, but
 # it must never let one Structure child monopolize that lane past the amount
 # production can absorb without violating the 300-second Quote hard SLA.
-STRUCTURE_PRODUCER_SLOT_BUDGET_S = 120.0
+STRUCTURE_PRODUCER_SLOT_BUDGET_S = 180.0
 STRUCTURE_SLICE_MAX_PAGES = 80
 RECOVERY_RETRY_DELAY_S = 5.0
 MAX_RECOVERY_RETRY_DELAY_S = 60.0

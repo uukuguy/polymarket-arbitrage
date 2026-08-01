@@ -481,7 +481,7 @@ async def test_snapshot_waits_for_shared_producer_slot(
     await running
 
     assert calls == 1
-    assert observed_timeout_s == 120
+    assert observed_timeout_s == 180
 
 
 async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics() -> None:
