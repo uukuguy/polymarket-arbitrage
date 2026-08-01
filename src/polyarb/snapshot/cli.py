@@ -89,121 +89,170 @@ def structure_generation_status() -> None:
 
 @app.command(name="structure-generation-backfill")
 def structure_generation_backfill(
-    max_rows: int = typer.Option(500, "--max-rows", min=1, max=5_000),
+    max_rows: int = typer.Option(500, "--max-rows", min=1, max=500),
+    max_chunks: int = typer.Option(1, "--max-chunks", min=1, max=10),
+    max_elapsed_seconds: float = typer.Option(
+        30.0,
+        "--max-elapsed-seconds",
+        min=1.0,
+        max=60.0,
+    ),
 ) -> None:
-    """Advance exactly one bounded legacy-to-generation backfill chunk."""
+    """Advance a bounded batch of legacy-to-generation backfill chunks."""
+    store = None
+    started_at: float | None = None
+    chunks_attempted = 0
+    chunks_succeeded = 0
+    chunks_deferred = 0
+    copied_rows = 0
+    elapsed_seconds = 0.0
+    final_progress: dict[str, object] | None = None
+    stop_reason = "max-chunks"
+    exit_code = 0
     try:
         _settings, store = _generation_store(
             initialize=False,
             writer_timeout_s=0.25,
         )
         store.init_structure_sync_schema()
-        latest = store.get_latest_structure_sync()
-        if (
-            latest is not None
-            and latest["status"] == "complete"
-            and store.get_structure_publication_progress(str(latest["id"])) is None
-        ):
-            migration = store.advance_structure_event_market_backfill(
-                window_id=str(latest["id"]),
-                max_events=max_rows,
-                max_relationships=max_rows,
-                now_ms=int(time.time() * 1_000),
-            )
-            if (
-                int(migration["events_processed"]) > 0
-                or int(migration["relationships_processed"]) > 0
-                or not migration["completed"]
-            ):
-                rotated_to = None
-                if migration["blocked"]:
-                    try:
-                        successor = store.rotate_blocked_structure_sync_window(
-                            window_id=str(latest["id"]),
-                            rotated_at_ms=int(time.time() * 1_000),
-                        )
-                    except sqlite3.OperationalError as error:
-                        if not _is_sqlite_writer_busy(error):
-                            raise
-                        print(
-                            json.dumps(
-                                {
-                                    "event_cursor": migration["event_cursor"],
-                                    "member_offset": migration["member_offset"],
-                                    "blocked": True,
-                                    "blocked_reason": migration["blocked_reason"],
-                                    "complete": False,
-                                    "copied_rows": migration[
-                                        "relationships_processed"
-                                    ],
-                                    "defer_reason": None,
-                                    "deferred": False,
-                                    "events_processed": migration[
-                                        "events_processed"
-                                    ],
-                                    "mutated": True,
-                                    "phase": "event-market-bootstrap",
-                                    "rotated_to_window_id": None,
-                                    "rotation_pending": True,
-                                    "window_id": str(latest["id"]),
-                                },
-                                sort_keys=True,
-                            )
-                        )
-                        raise typer.Exit(code=1) from error
-                    rotated_to = successor["id"]
-                print(
-                    json.dumps(
-                        {
-                            "event_cursor": migration["event_cursor"],
-                            "member_offset": migration["member_offset"],
-                            "blocked": migration["blocked"],
-                            "blocked_reason": migration["blocked_reason"],
-                            "complete": migration["completed"],
-                            "copied_rows": migration["relationships_processed"],
-                            "defer_reason": None,
-                            "deferred": False,
-                            "events_processed": migration["events_processed"],
-                            "phase": "event-market-bootstrap",
-                            "rotated_to_window_id": rotated_to,
-                            "window_id": str(latest["id"]),
-                        },
-                        sort_keys=True,
+        started_at = time.monotonic()
+        for _chunk_index in range(max_chunks):
+            chunks_attempted += 1
+            try:
+                final_progress, chunk_exit_code = (
+                    _advance_structure_generation_backfill_chunk(
+                        store,
+                        max_rows=max_rows,
                     )
                 )
-                if migration["blocked"]:
-                    raise typer.Exit(code=1)
-                return
-        result = store.backfill_current_structure_generation(max_rows=max_rows)
-    except sqlite3.OperationalError as error:
-        if not _is_sqlite_writer_busy(error):
-            raise
-        print(
-            json.dumps(
-                {
+            except sqlite3.OperationalError as error:
+                if not _is_sqlite_writer_busy(error):
+                    raise
+                chunks_deferred += 1
+                final_progress = {
                     "complete": False,
                     "copied_rows": 0,
                     "defer_reason": "writer-busy",
                     "deferred": True,
                     "phase": "operator-admission",
-                },
-                sort_keys=True,
+                }
+                stop_reason = "writer-busy"
+                elapsed_seconds = time.monotonic() - started_at
+                break
+
+            chunk_copied_rows = int(final_progress["copied_rows"])
+            copied_rows += chunk_copied_rows
+            elapsed_seconds = time.monotonic() - started_at
+            if chunk_exit_code != 0:
+                exit_code = chunk_exit_code
+                stop_reason = "blocked"
+                break
+            chunks_succeeded += 1
+            phase_complete = bool(final_progress["complete"])
+            bootstrap_complete = (
+                final_progress.get("phase") == "event-market-bootstrap"
             )
-        )
-        return
+            if phase_complete and not bootstrap_complete:
+                stop_reason = "complete"
+                break
+            if elapsed_seconds >= max_elapsed_seconds:
+                stop_reason = "max-elapsed-seconds"
+                break
+    except sqlite3.OperationalError as error:
+        if not _is_sqlite_writer_busy(error):
+            raise
+        chunks_deferred = 1
+        final_progress = {
+            "complete": False,
+            "copied_rows": 0,
+            "defer_reason": "writer-busy",
+            "deferred": True,
+            "phase": "operator-admission",
+        }
+        stop_reason = "writer-busy"
+        if started_at is not None:
+            elapsed_seconds = time.monotonic() - started_at
     print(
         json.dumps(
             {
-                "complete": result.complete,
-                "copied_rows": result.copied_rows,
-                "cursor": result.cursor,
-                "defer_reason": None,
-                "deferred": False,
-                "snapshot_id": result.snapshot_id,
+                "chunks_attempted": chunks_attempted,
+                "chunks_deferred": chunks_deferred,
+                "chunks_succeeded": chunks_succeeded,
+                "copied_rows": copied_rows,
+                "elapsed_seconds": round(elapsed_seconds, 6),
+                "final_progress": final_progress,
+                "stop_reason": stop_reason,
             },
             sort_keys=True,
         )
     )
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
+
+
+def _advance_structure_generation_backfill_chunk(
+    store,
+    *,
+    max_rows: int,
+) -> tuple[dict[str, object], int]:
+    """Advance one nonblocking chunk and preserve its failure truth."""
+    latest = store.get_latest_structure_sync()
+    if (
+        latest is not None
+        and latest["status"] == "complete"
+        and store.get_structure_publication_progress(str(latest["id"])) is None
+    ):
+        migration = store.advance_structure_event_market_backfill(
+            window_id=str(latest["id"]),
+            max_events=max_rows,
+            max_relationships=max_rows,
+            now_ms=int(time.time() * 1_000),
+        )
+        if (
+            int(migration["events_processed"]) > 0
+            or int(migration["relationships_processed"]) > 0
+            or not migration["completed"]
+        ):
+            rotated_to = None
+            rotation_pending = False
+            if migration["blocked"]:
+                try:
+                    successor = store.rotate_blocked_structure_sync_window(
+                        window_id=str(latest["id"]),
+                        rotated_at_ms=int(time.time() * 1_000),
+                    )
+                except sqlite3.OperationalError as error:
+                    if not _is_sqlite_writer_busy(error):
+                        raise
+                    rotation_pending = True
+                else:
+                    rotated_to = successor["id"]
+            payload: dict[str, object] = {
+                "event_cursor": migration["event_cursor"],
+                "member_offset": migration["member_offset"],
+                "blocked": migration["blocked"],
+                "blocked_reason": migration["blocked_reason"],
+                "complete": migration["completed"],
+                "copied_rows": migration["relationships_processed"],
+                "defer_reason": None,
+                "deferred": False,
+                "events_processed": migration["events_processed"],
+                "phase": "event-market-bootstrap",
+                "rotated_to_window_id": rotated_to,
+                "window_id": str(latest["id"]),
+            }
+            if rotation_pending:
+                payload.update({"mutated": True, "rotation_pending": True})
+            return payload, 1 if migration["blocked"] else 0
+    result = store.backfill_current_structure_generation(max_rows=max_rows)
+    return {
+        "complete": result.complete,
+        "copied_rows": result.copied_rows,
+        "cursor": result.cursor,
+        "defer_reason": None,
+        "deferred": False,
+        "snapshot_id": result.snapshot_id,
+    }, 0
 
 
 @app.command(name="structure-generation-compare")

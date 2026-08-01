@@ -162,7 +162,13 @@ def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
 
     assert elapsed < 1.0
     assert deferred.exit_code == 0, deferred.output
-    assert json.loads(deferred.stdout) == {
+    deferred_payload = json.loads(deferred.stdout)
+    assert deferred_payload["chunks_attempted"] == 0
+    assert deferred_payload["chunks_deferred"] == 1
+    assert deferred_payload["chunks_succeeded"] == 0
+    assert deferred_payload["copied_rows"] == 0
+    assert deferred_payload["stop_reason"] == "writer-busy"
+    assert deferred_payload["final_progress"] == {
         "complete": False,
         "copied_rows": 0,
         "defer_reason": "writer-busy",
@@ -185,24 +191,82 @@ def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
         ).fetchone() == ("complete", None)
 
     result = CliRunner().invoke(
-        app, ["structure-generation-backfill", "--max-rows", "2"]
+        app,
+        [
+            "structure-generation-backfill",
+            "--max-rows",
+            "2",
+            "--max-chunks",
+            "2",
+        ],
     )
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout) == {
+    payload = json.loads(result.stdout)
+    assert payload["chunks_attempted"] == 2
+    assert payload["chunks_deferred"] == 0
+    assert payload["chunks_succeeded"] == 2
+    assert payload["copied_rows"] == 3
+    assert payload["stop_reason"] == "max-chunks"
+    assert payload["final_progress"] == {
         "blocked": False,
         "blocked_reason": None,
-        "complete": False,
-        "copied_rows": 2,
+        "complete": True,
+        "copied_rows": 1,
         "defer_reason": None,
         "deferred": False,
-        "event_cursor": "event-1",
-        "events_processed": 2,
+        "event_cursor": "event-2",
+        "events_processed": 1,
         "member_offset": 0,
         "phase": "event-market-bootstrap",
         "rotated_to_window_id": None,
         "window_id": window["id"],
     }
+
+    generation_batches = []
+    for _attempt in range(5):
+        continued = CliRunner().invoke(
+            app,
+            [
+                "structure-generation-backfill",
+                "--max-rows",
+                "500",
+                "--max-chunks",
+                "10",
+            ],
+        )
+        assert continued.exit_code == 0, continued.output
+        generation_batches.append(json.loads(continued.stdout))
+        if generation_batches[-1]["stop_reason"] == "complete":
+            break
+
+    assert generation_batches[-1]["stop_reason"] == "complete"
+    replay = CliRunner().invoke(
+        app,
+        ["structure-generation-backfill", "--max-chunks", "10"],
+    )
+    assert replay.exit_code == 0, replay.output
+    replay_payload = json.loads(replay.stdout)
+    assert replay_payload["chunks_attempted"] == 1
+    assert replay_payload["chunks_succeeded"] == 1
+    assert replay_payload["copied_rows"] == 0
+    assert replay_payload["final_progress"]["complete"] is True
+    assert replay_payload["stop_reason"] == "complete"
+
+
+def test_generation_backfill_cli_rejects_unsafe_batch_bounds() -> None:
+    runner = CliRunner()
+
+    assert runner.invoke(
+        app, ["structure-generation-backfill", "--max-rows", "501"]
+    ).exit_code == 2
+    assert runner.invoke(
+        app, ["structure-generation-backfill", "--max-chunks", "11"]
+    ).exit_code == 2
+    assert runner.invoke(
+        app,
+        ["structure-generation-backfill", "--max-elapsed-seconds", "61"],
+    ).exit_code == 2
 
 
 def test_generation_backfill_cli_defers_writer_busy_from_later_phase(
@@ -233,7 +297,13 @@ def test_generation_backfill_cli_defers_writer_busy_from_later_phase(
     )
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout) == {
+    payload = json.loads(result.stdout)
+    assert payload["chunks_attempted"] == 1
+    assert payload["chunks_deferred"] == 1
+    assert payload["chunks_succeeded"] == 0
+    assert payload["copied_rows"] == 0
+    assert payload["stop_reason"] == "writer-busy"
+    assert payload["final_progress"] == {
         "complete": False,
         "copied_rows": 0,
         "defer_reason": "writer-busy",
@@ -303,7 +373,13 @@ def test_generation_backfill_cli_never_defers_after_blocked_progress_commit(
     result = CliRunner().invoke(app, ["structure-generation-backfill"])
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == {
+    payload = json.loads(result.stdout)
+    assert payload["chunks_attempted"] == 1
+    assert payload["chunks_deferred"] == 0
+    assert payload["chunks_succeeded"] == 0
+    assert payload["copied_rows"] == 0
+    assert payload["stop_reason"] == "blocked"
+    assert payload["final_progress"] == {
         "blocked": True,
         "blocked_reason": "invalid-event-json:broken-event",
         "complete": False,
@@ -319,6 +395,187 @@ def test_generation_backfill_cli_never_defers_after_blocked_progress_commit(
         "rotation_pending": True,
         "window_id": "window-1",
     }
+
+
+def test_generation_backfill_cli_batches_ten_chunks_with_one_store_init(
+    monkeypatch,
+) -> None:
+    from polyarb.snapshot import cli as cli_module
+
+    class BatchStore:
+        def __init__(self) -> None:
+            self.init_calls = 0
+            self.backfill_calls: list[int] = []
+
+        def init_structure_sync_schema(self) -> None:
+            self.init_calls += 1
+
+        def get_latest_structure_sync(self):
+            return None
+
+        def backfill_current_structure_generation(self, *, max_rows):
+            self.backfill_calls.append(max_rows)
+            return SimpleNamespace(
+                complete=False,
+                copied_rows=max_rows,
+                cursor=f"cursor-{len(self.backfill_calls)}",
+                snapshot_id=42,
+            )
+
+    store = BatchStore()
+    generation_store_calls = 0
+
+    def generation_store(**_kwargs):
+        nonlocal generation_store_calls
+        generation_store_calls += 1
+        return SimpleNamespace(), store
+
+    monkeypatch.setattr(cli_module, "_generation_store", generation_store)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "structure-generation-backfill",
+            "--max-rows",
+            "500",
+            "--max-chunks",
+            "10",
+            "--max-elapsed-seconds",
+            "60",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert generation_store_calls == 1
+    assert store.init_calls == 1
+    assert store.backfill_calls == [500] * 10
+    payload = json.loads(result.stdout)
+    assert payload == {
+        "chunks_attempted": 10,
+        "chunks_deferred": 0,
+        "chunks_succeeded": 10,
+        "copied_rows": 5_000,
+        "elapsed_seconds": payload["elapsed_seconds"],
+        "final_progress": {
+            "complete": False,
+            "copied_rows": 500,
+            "cursor": "cursor-10",
+            "defer_reason": None,
+            "deferred": False,
+            "snapshot_id": 42,
+        },
+        "stop_reason": "max-chunks",
+    }
+    assert 0 <= payload["elapsed_seconds"] <= 60
+
+
+def test_generation_backfill_cli_stops_immediately_after_writer_defer(
+    monkeypatch,
+) -> None:
+    from polyarb.snapshot import cli as cli_module
+
+    class DeferredStore:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def init_structure_sync_schema(self) -> None:
+            return None
+
+        def get_latest_structure_sync(self):
+            return None
+
+        def backfill_current_structure_generation(self, *, max_rows):
+            self.calls += 1
+            if self.calls == 2:
+                error = sqlite3.OperationalError("database is locked")
+                error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+                raise error
+            return SimpleNamespace(
+                complete=False,
+                copied_rows=max_rows,
+                cursor="cursor-1",
+                snapshot_id=42,
+            )
+
+    store = DeferredStore()
+    monkeypatch.setattr(
+        cli_module,
+        "_generation_store",
+        lambda **_kwargs: (SimpleNamespace(), store),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["structure-generation-backfill", "--max-chunks", "10"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert store.calls == 2
+    payload = json.loads(result.stdout)
+    assert payload["chunks_attempted"] == 2
+    assert payload["chunks_succeeded"] == 1
+    assert payload["chunks_deferred"] == 1
+    assert payload["copied_rows"] == 500
+    assert payload["stop_reason"] == "writer-busy"
+    assert payload["final_progress"] == {
+        "complete": False,
+        "copied_rows": 0,
+        "defer_reason": "writer-busy",
+        "deferred": True,
+        "phase": "operator-admission",
+    }
+
+
+def test_generation_backfill_cli_stops_at_elapsed_deadline(monkeypatch) -> None:
+    from polyarb.snapshot import cli as cli_module
+
+    class TimedStore:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def init_structure_sync_schema(self) -> None:
+            return None
+
+        def get_latest_structure_sync(self):
+            return None
+
+        def backfill_current_structure_generation(self, *, max_rows):
+            self.calls += 1
+            return SimpleNamespace(
+                complete=False,
+                copied_rows=max_rows,
+                cursor="cursor-1",
+                snapshot_id=42,
+            )
+
+    store = TimedStore()
+    ticks = iter((100.0, 131.0, 131.0))
+    monkeypatch.setattr(cli_module.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        cli_module,
+        "_generation_store",
+        lambda **_kwargs: (SimpleNamespace(), store),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "structure-generation-backfill",
+            "--max-chunks",
+            "10",
+            "--max-elapsed-seconds",
+            "30",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert store.calls == 1
+    payload = json.loads(result.stdout)
+    assert payload["chunks_attempted"] == 1
+    assert payload["chunks_succeeded"] == 1
+    assert payload["copied_rows"] == 500
+    assert payload["stop_reason"] == "max-elapsed-seconds"
+    assert payload["elapsed_seconds"] == 31.0
 
 
 def test_snapshot_cli_json_contract(monkeypatch) -> None:

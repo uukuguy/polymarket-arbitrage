@@ -128,6 +128,28 @@ def test_make_structure_generation_operator_surfaces_are_wired(
     assert expected in result.stdout
 
 
+def test_make_structure_generation_backfill_exposes_bounded_batch_controls() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "structure-generation-backfill",
+            "max_rows=500",
+            "max_chunks=10",
+            "max_elapsed_seconds=60",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '--max-rows "500"' in result.stdout
+    assert '--max-chunks "10"' in result.stdout
+    assert '--max-elapsed-seconds "60"' in result.stdout
+
+
 def test_structure_generation_status_cli_prints_stable_json(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
