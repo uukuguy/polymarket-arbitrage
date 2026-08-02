@@ -1741,6 +1741,15 @@ async def test_contract_supersession_checkpoint_preserves_existing_failure_count
     warning.assert_called_once()
     assert "publication contract superseded" in warning.call_args.args[0].lower()
 
+    scheduler._run_snapshot = AsyncMock(
+        return_value=_FakeResult(SnapshotStatus.OK, snapshot_id=847)
+    )
+    with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()):
+        await scheduler._tick()
+
+    assert scheduler._failure_counter == 0
+    assert store.get_scheduler_state()["failure_counter"] == 0
+
 
 @pytest.mark.asyncio
 async def test_successful_tick_calls_heartbeat_ok(

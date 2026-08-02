@@ -1450,6 +1450,145 @@ def test_publication_step_returns_controlled_contract_supersession_checkpoint(
     )
 
 
+def test_fresh_source_window_reserves_847_only_after_846_supersession(
+    settings_for_test,
+) -> None:
+    """N retires 846; N+1 collects distinct truth before 847 can exist."""
+    from polyarb.perception.structure_contract import (
+        STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+    )
+
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    _publish_generation(
+        store,
+        snapshot_id=845,
+        market_id="serving-market",
+        now_ms=1_000,
+    )
+    stale = _begin_generation(
+        store,
+        snapshot_id=846,
+        market_id="stale-market",
+        now_ms=2_000,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_publications SET normalization_contract_version=NULL "
+            "WHERE publication_id=?",
+            (stale.publication_id,),
+        )
+
+    retired = run_structure_publication_step(
+        settings_for_test,
+        stale.window_id,
+        max_rows=1,
+        max_elapsed_s=60,
+        store=store,
+    )
+    assert isinstance(retired, StructurePublicationCheckpoint)
+    assert retired.stage == "superseded"
+
+    successor = store.begin_or_resume_structure_sync(started_at_ms=3_000)
+    assert successor["id"] != stale.window_id
+    assert successor["status"] == "open"
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute("SELECT 1 FROM snapshots WHERE id=847").fetchone() is None
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_market_staging WHERE window_id=?",
+            (successor["id"],),
+        ).fetchone() == (0,)
+
+    fresh_window_id = str(successor["id"])
+    store.commit_structure_event_page(
+        window_id=fresh_window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[
+            {
+                "id": "event-1",
+                "slug": "event-1",
+                "title": "Generation publication event",
+                "active": True,
+                "closed": False,
+                "negRisk": True,
+                "enableNegRisk": True,
+                "negRiskAugmented": False,
+                "negRiskMarketID": "group-1",
+                "markets": [
+                    {
+                        "id": "serving-market",
+                        "active": True,
+                        "closed": False,
+                        "negRiskOther": False,
+                    }
+                ],
+            }
+        ],
+        finished_at_ms=3_100,
+    )
+    store.commit_structure_market_page(
+        window_id=fresh_window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        markets=[
+            {
+                "id": "serving-market",
+                "conditionId": "condition-serving-market",
+                "slug": "serving-market",
+                "question": "Will serving-market publish?",
+                "clobTokenIds": '["yes-serving-market","no-serving-market"]',
+                "event_id": "event-1",
+                "negRisk": True,
+                "negRiskMarketID": "group-1",
+                "active": True,
+                "closed": False,
+            }
+        ],
+        finished_at_ms=3_200,
+    )
+    assert store.advance_structure_event_market_backfill(
+        window_id=fresh_window_id,
+        max_events=10,
+        max_relationships=10,
+        now_ms=3_300,
+    )["completed"] is True
+    assert store.current_structure_generation()["snapshot_id"] == 845
+
+    terminal = None
+    for _ in range(80):
+        terminal = run_structure_publication_step(
+            settings_for_test,
+            fresh_window_id,
+            max_rows=1,
+            max_elapsed_s=60,
+            store=store,
+        )
+        if not isinstance(terminal, StructurePublicationCheckpoint):
+            break
+    else:
+        raise AssertionError("fresh 847 never published")
+
+    assert terminal is not None
+    assert terminal.snapshot_id == 847
+    assert store.current_structure_generation()["snapshot_id"] == 847
+    assert store.current_generation_market_ids() == ("serving-market",)
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT window_id,normalization_contract_version "
+            "FROM structure_publications WHERE snapshot_id=847"
+        ).fetchone() == (
+            fresh_window_id,
+            STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+        )
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_markets "
+            "WHERE snapshot_id=847 AND market_id='stale-market'"
+        ).fetchone() == (0,)
+
+
 def test_bounded_certification_resumes_every_primary_key_checkpoint(
     tmp_path: Path,
 ) -> None:
