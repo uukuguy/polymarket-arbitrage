@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import sqlite3
 import time
 from pathlib import Path
@@ -2592,6 +2593,190 @@ def test_membership_certification_restarts_across_500_row_boundary(
         (1, '["event-500","market-500"]'),
     ]
     assert chunk.component == "group_truth"
+
+
+def test_source_certification_prefetches_each_500_row_chunk_in_o1_queries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, publication = _begin_large_generation(
+        store_path=tmp_path / "state.db", event_count=500
+    )
+    for component in (
+        "events", "event_tags", "memberships", "group_truth", "markets", "issues"
+    ):
+        _normalize_component_to_done(store, publication, component)
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_000)
+    now_ms = 1_001
+    while store.structure_certification_checkpoint(publication.publication_id)[0] != (
+        "source_events"
+    ):
+        store.advance_structure_certification_chunk(
+            publication.publication_id, max_rows=500, now_ms=now_ms
+        )
+        now_ms += 1
+
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+    with real_connect(store.db_path) as limit_con:
+        assert limit_con.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) >= 504
+
+    def traced_connect(*args, **kwargs):
+        con = real_connect(*args, **kwargs)
+        con.set_trace_callback(statements.append)
+        return con
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+    started = time.monotonic()
+    event_chunk = store.advance_structure_certification_chunk(
+        publication.publication_id, max_rows=500, now_ms=now_ms
+    )
+    event_elapsed = time.monotonic() - started
+    event_selects = [
+        statement for statement in statements if statement.lstrip().upper().startswith("SELECT")
+    ]
+    assert event_chunk.rows_processed == 500
+    assert event_elapsed < 10.0
+    assert len(event_selects) <= 10
+
+    statements.clear()
+    now_ms += 1
+    store.advance_structure_certification_chunk(
+        publication.publication_id, max_rows=500, now_ms=now_ms
+    )
+    statements.clear()
+    now_ms += 1
+    started = time.monotonic()
+    market_chunk = store.advance_structure_certification_chunk(
+        publication.publication_id, max_rows=500, now_ms=now_ms
+    )
+    market_elapsed = time.monotonic() - started
+    market_selects = [
+        statement for statement in statements if statement.lstrip().upper().startswith("SELECT")
+    ]
+    assert market_chunk.rows_processed == 500
+    assert market_elapsed < 10.0
+    assert len(market_selects) <= 8
+
+
+def test_bulk_source_certification_matches_per_event_reference_projection(
+    tmp_path: Path,
+) -> None:
+    rng = random.Random(848)
+    store = SQLiteStore(tmp_path / "differential.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    events: list[dict[str, object]] = []
+    markets: list[dict[str, object]] = []
+    for event_index in range(100):
+        event_id = f"event-{event_index:03d}"
+        group_id = f"group-{event_index:03d}"
+        embedded: list[dict[str, object]] = []
+        for member_index in range(rng.randint(1, 6)):
+            market_id = f"market-{event_index:03d}-{member_index}"
+            shape = rng.choice(("both", "event-only", "closed-event-only"))
+            active, closed = (True, False) if shape != "closed-event-only" else (True, True)
+            embedded.append({
+                "id": market_id,
+                "active": active,
+                "closed": closed,
+                "negRiskOther": False,
+            })
+            if shape == "both":
+                markets.append({
+                    "id": market_id,
+                    "conditionId": f"condition-{market_id}",
+                    "slug": market_id,
+                    "question": f"Will {market_id}?",
+                    "clobTokenIds": f'["yes-{market_id}","no-{market_id}"]',
+                    "active": active,
+                    "closed": closed,
+                    "negRisk": True,
+                    "negRiskMarketID": group_id,
+                })
+        events.append({
+            "id": event_id,
+            "slug": event_id,
+            "negRisk": True,
+            "enableNegRisk": True,
+            "negRiskAugmented": False,
+            "negRiskMarketID": group_id,
+            "markets": embedded,
+        })
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=events, finished_at_ms=101,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=markets, finished_at_ms=102,
+    )
+    while not store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
+    )["completed"]:
+        pass
+    publication = store.begin_structure_publication(
+        window_id=window["id"],
+        snapshot_metadata={
+            "snapshot_id": 1, "taken_at_ms": 1_000, "mode": "full",
+            "data_product": "structure", "expected_counts": COMPONENT_COUNTS,
+        },
+        now_ms=104,
+    )
+    for component in (
+        "events", "event_tags", "memberships", "group_truth", "markets", "issues"
+    ):
+        _normalize_component_to_done(store, publication, component)
+
+    with sqlite3.connect(store.db_path) as con:
+        for raw_event in events:
+            event_id = str(raw_event["id"])
+            anti_join = frozenset(
+                str(row[0])
+                for row in con.execute(
+                    "SELECT relation.market_id FROM "
+                    "structure_sync_event_market_staging relation LEFT JOIN "
+                    "structure_sync_market_staging market ON "
+                    "market.window_id=relation.window_id AND "
+                    "market.market_id=relation.market_id WHERE "
+                    "relation.window_id=? AND relation.event_id=? "
+                    "AND market.market_id IS NULL ORDER BY relation.market_id",
+                    (window["id"], event_id),
+                ).fetchall()
+            )
+            expected_members, expected_truths = (
+                structure_publication_module.project_event_structure(raw_event, anti_join)
+            )
+            actual_members = con.execute(
+                "SELECT market_id FROM structure_generation_memberships "
+                "WHERE snapshot_id=1 AND event_id=? ORDER BY market_id",
+                (event_id,),
+            ).fetchall()
+            actual_truths = con.execute(
+                "SELECT expected_member_count,active_named_count,membership_hash "
+                "FROM structure_generation_group_truth WHERE snapshot_id=1 "
+                "AND event_id=? ORDER BY neg_risk_market_id",
+                (event_id,),
+            ).fetchall()
+            assert actual_members == [(member.market_id,) for member in expected_members]
+            assert actual_truths == [
+                (
+                    truth.expected_member_count,
+                    truth.active_named_count,
+                    truth.membership_hash,
+                )
+                for truth in expected_truths
+            ]
+
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=200)
+    for offset in range(30):
+        chunk = store.advance_structure_certification_chunk(
+            publication.publication_id, max_rows=500, now_ms=201 + offset
+        )
+        if chunk.component == "comparison":
+            break
+    else:
+        raise AssertionError("bulk source certification did not reach comparison")
 
 
 def test_certification_keysets_legacy_null_source_ordinals(tmp_path: Path) -> None:

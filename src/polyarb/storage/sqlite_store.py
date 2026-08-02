@@ -4016,24 +4016,83 @@ class SQLiteStore:
                 )
                 from polyarb.snapshot.normalizer import normalize_events
 
-                for source_event in rows:
-                    raw = json.loads(str(source_event[2]))
-                    events, tags, _mapping, members, truths = normalize_events([raw])
-                    event_only_rows = read_con.execute(
-                        "SELECT relation.market_id FROM "
+                event_ids = [str(source_event[1]) for source_event in rows]
+                placeholders = ",".join("?" for _ in event_ids)
+                event_only_by_event: dict[str, set[str]] = {}
+                event_only_evidence: dict[str, tuple[object, ...]] = {}
+                actual_events: dict[str, tuple[object, ...]] = {}
+                actual_tags: dict[str, list[tuple[object, ...]]] = {}
+                actual_memberships: dict[str, list[tuple[object, ...]]] = {}
+                actual_truths: dict[str, list[tuple[object, ...]]] = {}
+                if event_ids:
+                    evidence_rows = read_con.execute(
+                        "SELECT relation.event_id,relation.market_id,"
+                        "relation.source_ordinal,issue.layer,issue.category,issue.detail,"
+                        "issue.raw_payload,generated_market.market_id,"
+                        "generated_member.market_id FROM "
                         "structure_sync_event_market_staging relation LEFT JOIN "
-                        "structure_sync_market_staging market ON "
-                        "market.window_id=relation.window_id AND "
-                        "market.market_id=relation.market_id WHERE "
-                        "relation.window_id=? AND relation.event_id=? "
-                        "AND market.market_id IS NULL AND 1=(SELECT "
+                        "structure_sync_market_staging source_market ON "
+                        "source_market.window_id=relation.window_id AND "
+                        "source_market.market_id=relation.market_id LEFT JOIN "
+                        "structure_generation_issues issue ON issue.snapshot_id=? AND "
+                        "issue.market_id=relation.market_id LEFT JOIN "
+                        "structure_generation_markets generated_market ON "
+                        "generated_market.snapshot_id=? AND "
+                        "generated_market.market_id=relation.market_id LEFT JOIN "
+                        "structure_generation_memberships generated_member ON "
+                        "generated_member.snapshot_id=? AND "
+                        "generated_member.market_id=relation.market_id WHERE "
+                        "relation.window_id=? AND source_market.market_id IS NULL "
+                        f"AND relation.event_id IN ({placeholders}) AND 1=(SELECT "
                         "COUNT(DISTINCT other.event_id) FROM "
                         "structure_sync_event_market_staging other WHERE "
                         "other.window_id=relation.window_id AND "
-                        "other.market_id=relation.market_id) ORDER BY relation.market_id",
-                        (window_id, source_event[1]),
+                        "other.market_id=relation.market_id) ORDER BY "
+                        "relation.event_id,relation.market_id",
+                        (snapshot_id, snapshot_id, snapshot_id, window_id, *event_ids),
                     ).fetchall()
-                    event_only_ids = frozenset(str(row[0]) for row in event_only_rows)
+                    for evidence in evidence_rows:
+                        event_id = str(evidence[0])
+                        market_id = str(evidence[1])
+                        event_only_by_event.setdefault(event_id, set()).add(market_id)
+                        event_only_evidence[market_id] = tuple(evidence[2:])
+                    for actual in read_con.execute(
+                        f"SELECT {','.join(EVENTS_COLUMN_ORDER)} FROM "
+                        "structure_generation_events WHERE snapshot_id=? "
+                        f"AND id IN ({placeholders}) ORDER BY id",
+                        (snapshot_id, *event_ids),
+                    ):
+                        actual_events[str(actual[0])] = tuple(actual)
+                    for actual in read_con.execute(
+                        f"SELECT {','.join(EVENT_TAGS_COLUMN_ORDER)} FROM "
+                        "structure_generation_event_tags WHERE snapshot_id=? "
+                        f"AND event_id IN ({placeholders}) ORDER BY event_id,tag_id",
+                        (snapshot_id, *event_ids),
+                    ):
+                        actual_tags.setdefault(str(actual[0]), []).append(tuple(actual))
+                    for actual in read_con.execute(
+                        "SELECT snapshot_id,event_id,neg_risk_market_id,market_id,"
+                        "member_kind,active,closed FROM "
+                        "structure_generation_memberships WHERE snapshot_id=? "
+                        f"AND event_id IN ({placeholders}) ORDER BY event_id,market_id",
+                        (snapshot_id, *event_ids),
+                    ):
+                        actual_memberships.setdefault(str(actual[1]), []).append(tuple(actual))
+                    for actual in read_con.execute(
+                        "SELECT snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
+                        "expected_member_count,active_named_count,membership_hash,quality,"
+                        "reason FROM structure_generation_group_truth WHERE snapshot_id=? "
+                        f"AND event_id IN ({placeholders}) ORDER BY "
+                        "event_id,neg_risk_market_id",
+                        (snapshot_id, *event_ids),
+                    ):
+                        actual_truths.setdefault(str(actual[1]), []).append(tuple(actual))
+                for source_event in rows:
+                    raw = json.loads(str(source_event[2]))
+                    events, tags, _mapping, members, truths = normalize_events([raw])
+                    event_only_ids = frozenset(
+                        event_only_by_event.get(str(source_event[1]), ())
+                    )
                     members, truths = project_event_structure(raw, event_only_ids)
                     authenticated_event_only_ids = frozenset(
                         event_only_id
@@ -4046,43 +4105,37 @@ class SQLiteStore:
                         is not None
                     )
                     for event_only_id in authenticated_event_only_ids:
-                        issue = read_con.execute(
-                            "SELECT layer,category,detail,raw_payload FROM "
-                            "structure_generation_issues WHERE snapshot_id=? "
-                            "AND market_id=?",
-                            (snapshot_id, event_only_id),
-                        ).fetchone()
-                        if issue is None or not self._structure_quarantine_evidence_matches(
-                            read_con,
-                            publication_id=publication_id,
-                            snapshot_id=snapshot_id,
+                        evidence = event_only_evidence.get(event_only_id)
+                        expected_issue = event_only_member_quarantine_issue(
+                            raw,
+                            event_source_ordinal=int(source_event[0]),
                             market_id=event_only_id,
-                            layer=issue[0],
-                            category=issue[1],
-                            detail=issue[2],
-                            raw_payload=issue[3],
+                        )
+                        if (
+                            evidence is None
+                            or expected_issue is None
+                            or evidence[0] != int(source_event[0])
+                            or evidence[1:5]
+                            != (
+                                expected_issue["layer"],
+                                expected_issue["category"],
+                                expected_issue["detail"],
+                                expected_issue["raw_payload"],
+                            )
+                            or evidence[5] is not None
+                            or evidence[6] is not None
                         ):
                             raise ValueError("source-truth-invalid")
                     if len(events) != 1:
                         raise ValueError("source-truth-invalid")
                     events[0]["fetched_at_ms"] = taken_at_ms
-                    actual_event = read_con.execute(
-                        f"SELECT {','.join(EVENTS_COLUMN_ORDER)} FROM "
-                        "structure_generation_events WHERE snapshot_id=? AND id=?",
-                        (snapshot_id, source_event[1]),
-                    ).fetchone()
+                    actual_event = actual_events.get(str(source_event[1]))
                     if actual_event != _event_row_to_tuple(events[0], snapshot_id):
                         raise ValueError("source-truth-invalid")
                     expected_tags = sorted(
                         _event_tag_row_to_tuple(tag, snapshot_id) for tag in tags
                     )
-                    actual_tags = read_con.execute(
-                        f"SELECT {','.join(EVENT_TAGS_COLUMN_ORDER)} FROM "
-                        "structure_generation_event_tags WHERE snapshot_id=? "
-                        "AND event_id=? ORDER BY tag_id",
-                        (snapshot_id, source_event[1]),
-                    ).fetchall()
-                    if actual_tags != expected_tags:
+                    if actual_tags.get(str(source_event[1]), []) != expected_tags:
                         raise ValueError("source-truth-invalid")
                     for generated_component, expected_rows in (
                         ("memberships", members),
@@ -4118,73 +4171,80 @@ class SQLiteStore:
                                 generated_component, canonical_row, snapshot_id, 0
                             )
                             expected_values.append(values)
+                        actual_values = (
+                            actual_memberships.get(str(source_event[1]), [])
+                            if generated_component == "memberships"
+                            else actual_truths.get(str(source_event[1]), [])
+                        )
                         if columns is None:
-                            unexpected = read_con.execute(
-                                f"SELECT 1 FROM "
-                                f"{self._structure_component_table(generated_component)} "
-                                "WHERE snapshot_id=? AND event_id=? LIMIT 1",
-                                (snapshot_id, source_event[1]),
-                            ).fetchone()
-                            if unexpected is not None:
+                            if actual_values:
                                 raise ValueError("source-truth-invalid")
                             continue
-                        actual_values = read_con.execute(
-                            f"SELECT {','.join(columns)} FROM "
-                            f"{self._structure_component_table(generated_component)} "
-                            "WHERE snapshot_id=? AND event_id=? ORDER BY "
-                            + (
-                                "market_id"
-                                if generated_component == "memberships"
-                                else "neg_risk_market_id"
-                            ),
-                            (snapshot_id, source_event[1]),
-                        ).fetchall()
                         if actual_values != sorted(expected_values):
                             raise ValueError("source-truth-invalid")
             elif component == "source_markets":
+                from polyarb.perception.structure_publication import market_quarantine_issue
                 from polyarb.snapshot.normalizer import normalize_market
 
+                market_ids = [str(source_market[1]) for source_market in rows]
+                placeholders = ",".join("?" for _ in market_ids)
+                parents: dict[str, list[str]] = {}
+                generated_markets: dict[str, tuple[object, ...]] = {}
+                generated_issues: dict[str, tuple[object, ...]] = {}
+                if market_ids:
+                    for parent in read_con.execute(
+                        "SELECT market_id,event_id FROM "
+                        "structure_sync_event_market_staging WHERE window_id=? "
+                        f"AND market_id IN ({placeholders}) ORDER BY "
+                        "market_id,source_ordinal,event_id",
+                        (window_id, *market_ids),
+                    ):
+                        parents.setdefault(str(parent[0]), []).append(str(parent[1]))
+                    for generated in read_con.execute(
+                        f"SELECT {','.join(MARKETS_COLUMN_ORDER)} FROM "
+                        "structure_generation_markets WHERE snapshot_id=? "
+                        f"AND market_id IN ({placeholders}) ORDER BY market_id",
+                        (snapshot_id, *market_ids),
+                    ):
+                        generated_markets[str(generated[0])] = tuple(generated)
+                    for issue in read_con.execute(
+                        "SELECT market_id,layer,category,detail,raw_payload FROM "
+                        "structure_generation_issues WHERE snapshot_id=? "
+                        f"AND market_id IN ({placeholders}) ORDER BY market_id",
+                        (snapshot_id, *market_ids),
+                    ):
+                        generated_issues[str(issue[0])] = tuple(issue[1:])
                 for source_market in rows:
                     raw = json.loads(str(source_market[2]))
-                    parent = read_con.execute(
-                        "SELECT event_id FROM structure_sync_event_market_staging "
-                        "WHERE window_id=? AND market_id=? ORDER BY "
-                        "source_ordinal,event_id LIMIT 1",
-                        (window_id, source_market[1]),
-                    ).fetchone()
+                    market_id = str(source_market[1])
+                    event_ids = parents.get(market_id, [])
                     normalized = normalize_market(
                         raw,
                         (
-                            {str(source_market[1]): str(parent[0])}
-                            if parent is not None
+                            {market_id: event_ids[0]}
+                            if event_ids
                             else {}
                         ),
                     )
                     if normalized is None:
                         raise ValueError("source-truth-invalid")
                     normalized["fetched_at_ms"] = taken_at_ms
-                    generated = read_con.execute(
-                        f"SELECT {','.join(MARKETS_COLUMN_ORDER)} "
-                        "FROM structure_generation_markets WHERE snapshot_id=? "
-                        "AND market_id=?",
-                        (snapshot_id, source_market[1]),
-                    ).fetchone()
+                    generated = generated_markets.get(market_id)
                     if generated is None:
-                        issue = read_con.execute(
-                            "SELECT layer,category,detail,raw_payload FROM "
-                            "structure_generation_issues WHERE snapshot_id=? "
-                            "AND market_id=?",
-                            (snapshot_id, source_market[1]),
-                        ).fetchone()
-                        if issue is not None and self._structure_quarantine_evidence_matches(
-                            read_con,
-                            publication_id=publication_id,
-                            snapshot_id=snapshot_id,
-                            market_id=str(source_market[1]),
-                            layer=issue[0],
-                            category=issue[1],
-                            detail=issue[2],
-                            raw_payload=issue[3],
+                        issue = generated_issues.get(market_id)
+                        expected_issue = market_quarantine_issue(
+                            market_id, raw, tuple(event_ids)
+                        )
+                        if (
+                            issue is not None
+                            and expected_issue is not None
+                            and issue
+                            == (
+                                expected_issue["layer"],
+                                expected_issue["category"],
+                                expected_issue["detail"],
+                                expected_issue["raw_payload"],
+                            )
                         ):
                             continue
                     if generated != _row_to_tuple(normalized, snapshot_id):
