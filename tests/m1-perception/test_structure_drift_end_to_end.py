@@ -552,9 +552,43 @@ _V1_PROGRESS_COLUMNS = (
     "created_at_ms",
     "checkpoint_at_ms",
 )
+_DRIFT_RECEIPT_V2_DIGEST_FIELDS = (
+    "comparison_id",
+    "hash_algorithm",
+    "legacy_snapshot_id",
+    "legacy_taken_at_ms",
+    "legacy_finished_at_ms",
+    "legacy_market_count",
+    "legacy_universe_hash",
+    "legacy_source_truth_hash",
+    "generation_snapshot_id",
+    "publication_id",
+    "window_id",
+    "published_snapshot_id",
+    "normalization_contract_version",
+    "exact_receipt_digest",
+    "pointer_validation_hash",
+    "generation_certification_hash",
+    "source_event_count",
+    "source_market_count",
+    "source_event_hash",
+    "source_market_hash",
+    "source_identity_hash",
+    "projection_universe_hash",
+    "projection_group_truth_hash",
+    "generation_universe_hash",
+    "generation_group_truth_hash",
+    "class_counts_json",
+    "class_digests_json",
+    "legacy_reconstruction_root",
+    "generation_reconstruction_root",
+    "overlap_conflict_count",
+    "unclassified_count",
+    "created_at_ms",
+)
 _V1_RECEIPT_COLUMNS = tuple(
     field
-    for field in sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
+    for field in _DRIFT_RECEIPT_V2_DIGEST_FIELDS
     if field != "hash_algorithm"
 ) + ("receipt_digest",)
 
@@ -804,7 +838,7 @@ def test_v2_insert_failure_rolls_back_v1_supersession(tmp_path: Path) -> None:
 
 
 def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> None:
-    digest_fields = sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
+    digest_fields = _DRIFT_RECEIPT_V2_DIGEST_FIELDS
     with sqlite3.connect(store.db_path) as con:
         progress = con.execute(
             "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,"
@@ -901,7 +935,7 @@ def _rewrite_drift_receipt(
     comparison_id: str,
     **changes: object,
 ) -> None:
-    digest_fields = sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
+    digest_fields = _DRIFT_RECEIPT_V2_DIGEST_FIELDS
     with sqlite3.connect(store.db_path) as con:
         con.execute("DROP TRIGGER trg_structure_drift_receipt_update")
         row = con.execute(
@@ -982,6 +1016,25 @@ def test_sealed_v1_receipt_cannot_authorize_v2_progress(tmp_path: Path) -> None:
         comparison_id,
         hash_algorithm="serializable-sha256-v1",
     )
+
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is False
+    assert status["reason"] == "structure-drift-receipt-invalid"
+
+
+def test_receipt_algorithm_substitution_without_digest_rewrite_fails(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    _install_sealed_drift_authority(store, comparison_id)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_drift_receipt_update")
+        con.execute(
+            "UPDATE structure_generation_drift_receipts SET "
+            "hash_algorithm='serializable-sha256-v1' WHERE comparison_id=?",
+            (comparison_id,),
+        )
 
     status = store.structure_generation_drift_status()
     assert status["authorized"] is False
