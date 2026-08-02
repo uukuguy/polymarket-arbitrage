@@ -400,6 +400,178 @@ def _reshape_as_production_845_848(store: SQLiteStore) -> None:
     store.init_schema()
 
 
+def test_drift_v2_schema_binds_algorithm_reason_and_member_scan_indexes(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "drift-v2-schema.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        progress_columns = {
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_progress)"
+            )
+        }
+        receipt_columns = {
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_receipts)"
+            )
+        }
+        indexes = {
+            str(row[0])
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+
+    assert {"hash_algorithm", "terminal_reason"} <= progress_columns
+    assert "hash_algorithm" in receipt_columns
+    assert "idx_structure_generation_memberships_drift_scan" in indexes
+    assert "idx_event_market_memberships_drift_scan" in indexes
+
+
+_V1_PROGRESS_COLUMNS = (
+    "comparison_id",
+    "legacy_snapshot_id",
+    "generation_snapshot_id",
+    "publication_id",
+    "window_id",
+    "normalization_contract_version",
+    "exact_receipt_digest",
+    "pointer_validation_hash",
+    "generation_certification_hash",
+    "source_event_count",
+    "source_market_count",
+    "source_event_hash",
+    "source_market_hash",
+    "source_identity_hash",
+    "phase",
+    "row_cursor_json",
+    "digest_state_json",
+    "class_counts_json",
+    "class_digests_json",
+    "created_at_ms",
+    "checkpoint_at_ms",
+)
+_V1_RECEIPT_COLUMNS = tuple(
+    field
+    for field in sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
+    if field != "hash_algorithm"
+) + ("receipt_digest",)
+
+
+def _downgrade_drift_tables_to_v1_shape(store: SQLiteStore) -> None:
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP INDEX IF EXISTS idx_structure_drift_progress_active")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_receipt_update")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_receipt_delete")
+        progress_columns = ",".join(_V1_PROGRESS_COLUMNS)
+        receipt_columns = ",".join(_V1_RECEIPT_COLUMNS)
+        con.execute(
+            "CREATE TABLE structure_generation_drift_progress_v1 AS SELECT "
+            f"{progress_columns} FROM structure_generation_drift_progress"
+        )
+        con.execute("DROP TABLE structure_generation_drift_progress")
+        con.execute(
+            "ALTER TABLE structure_generation_drift_progress_v1 "
+            "RENAME TO structure_generation_drift_progress"
+        )
+        con.execute(
+            "CREATE TABLE structure_generation_drift_receipts_v1 AS SELECT "
+            f"{receipt_columns} FROM structure_generation_drift_receipts"
+        )
+        con.execute("DROP TABLE structure_generation_drift_receipts")
+        con.execute(
+            "ALTER TABLE structure_generation_drift_receipts_v1 "
+            "RENAME TO structure_generation_drift_receipts"
+        )
+
+
+def test_drift_v2_migration_rolls_back_injected_crash_and_reinitializes(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    _downgrade_drift_tables_to_v1_shape(store)
+    with sqlite3.connect(store.db_path) as con:
+        immutable_before = {
+            table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in (
+                "snapshots",
+                "structure_publications",
+                "current_structure_generation",
+                "structure_sync_event_staging",
+                "structure_sync_market_staging",
+                "markets",
+            )
+        }
+        migrate = getattr(
+            sqlite_store_module, "_migrate_structure_drift_hash_v2"
+        )
+
+        def fail_after_progress_rename(step: str) -> None:
+            if step == "after-progress-rename":
+                raise RuntimeError("injected-after-progress-rename")
+
+        with pytest.raises(RuntimeError, match="injected-after-progress-rename"):
+            migrate(con, fault_hook=fail_after_progress_rename)
+        assert "hash_algorithm" not in {
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_progress)"
+            )
+        }
+
+    store.init_schema()
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        migrated = con.execute(
+            "SELECT comparison_id,hash_algorithm,phase,terminal_reason "
+            "FROM structure_generation_drift_progress"
+        ).fetchall()
+        immutable_after = {
+            table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in immutable_before
+        }
+    assert migrated == [
+        (comparison_id, "serializable-sha256-v1", "source-events", None)
+    ]
+    assert immutable_after == immutable_before
+
+
+def test_drift_v2_migration_writer_lock_leaves_v1_schema_reinitializable(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    store.initialize_structure_drift_comparison(now_ms=3_000)
+    _downgrade_drift_tables_to_v1_shape(store)
+    blocker = sqlite3.connect(store.db_path, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            SQLiteStore(store.db_path, writer_timeout_s=0.01).init_schema()
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+    with sqlite3.connect(store.db_path) as con:
+        assert "hash_algorithm" not in {
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_progress)"
+            )
+        }
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_progress"
+        ).fetchone() == (1,)
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT hash_algorithm FROM structure_generation_drift_progress"
+        ).fetchone() == ("serializable-sha256-v1",)
+
+
 def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

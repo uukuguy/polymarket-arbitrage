@@ -679,6 +679,10 @@ CREATE INDEX IF NOT EXISTS idx_event_market_memberships_quote_projection
   ON event_market_memberships(snapshot_id,neg_risk_market_id,event_id,market_id);
 CREATE INDEX IF NOT EXISTS idx_event_market_memberships_quote_projection_v2
   ON event_market_memberships(snapshot_id,neg_risk_market_id,market_id,event_id);
+CREATE INDEX IF NOT EXISTS idx_event_market_memberships_drift_scan
+  ON event_market_memberships(
+    snapshot_id,market_id,event_id,neg_risk_market_id,member_kind,active,closed
+  );
 
 CREATE TABLE IF NOT EXISTS neg_risk_group_truth (
   snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
@@ -2922,6 +2926,10 @@ CREATE INDEX IF NOT EXISTS idx_structure_generation_memberships_quote_projection
 ON structure_generation_memberships(
     snapshot_id,neg_risk_market_id,market_id,event_id
 );
+CREATE INDEX IF NOT EXISTS idx_structure_generation_memberships_drift_scan
+ON structure_generation_memberships(
+    snapshot_id,market_id,event_id,neg_risk_market_id,member_kind,active,closed
+);
 CREATE TABLE IF NOT EXISTS structure_generation_group_truth (
     snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
     event_id TEXT NOT NULL,
@@ -3053,6 +3061,7 @@ WHERE phase!='sealed';
 -- the bounded CAS state machine; sealed receipts are append-only evidence.
 CREATE TABLE IF NOT EXISTS structure_generation_drift_progress (
     comparison_id TEXT PRIMARY KEY,
+    hash_algorithm TEXT NOT NULL DEFAULT 'serializable-sha256-v1',
     legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
     generation_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
     publication_id TEXT NOT NULL REFERENCES structure_publications(publication_id),
@@ -3077,6 +3086,7 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_progress (
         'source-events','source-markets','generation-members',
         'legacy-members','fresh-group-truth','sealed','stale'
     )),
+    terminal_reason TEXT,
     row_cursor_json TEXT,
     digest_state_json TEXT NOT NULL,
     class_counts_json TEXT NOT NULL,
@@ -3086,7 +3096,7 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_progress (
     UNIQUE(
         legacy_snapshot_id,generation_snapshot_id,publication_id,window_id,
         normalization_contract_version,exact_receipt_digest,
-        pointer_validation_hash,generation_certification_hash
+        pointer_validation_hash,generation_certification_hash,hash_algorithm
     )
 );
 CREATE INDEX IF NOT EXISTS idx_structure_drift_progress_active
@@ -3095,6 +3105,7 @@ WHERE phase NOT IN ('sealed','stale');
 
 CREATE TABLE IF NOT EXISTS structure_generation_drift_receipts (
     comparison_id TEXT PRIMARY KEY,
+    hash_algorithm TEXT NOT NULL DEFAULT 'serializable-sha256-v1',
     legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
     legacy_taken_at_ms INTEGER NOT NULL CHECK(legacy_taken_at_ms >= 0),
     legacy_finished_at_ms INTEGER NOT NULL CHECK(legacy_finished_at_ms >= 0),
@@ -3135,7 +3146,8 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_receipts (
     UNIQUE(
         legacy_snapshot_id,generation_snapshot_id,publication_id,window_id,
         normalization_contract_version,exact_receipt_digest,
-        pointer_validation_hash,generation_certification_hash,source_identity_hash
+        pointer_validation_hash,generation_certification_hash,source_identity_hash,
+        hash_algorithm
     )
 );
 CREATE TRIGGER IF NOT EXISTS trg_structure_drift_receipt_update

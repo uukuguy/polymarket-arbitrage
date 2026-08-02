@@ -338,6 +338,192 @@ def _migrate_structure_cleanup_progress_binding(con: sqlite3.Connection) -> None
     con.execute("DROP TABLE structure_generation_cleanup_progress_v1")
 
 
+def _migrate_structure_drift_hash_v2(
+    con: sqlite3.Connection,
+    *,
+    fault_hook: Callable[[str], None] | None = None,
+) -> None:
+    """Rebuild the small drift authority tables with explicit hash versions."""
+    progress_columns = {
+        str(row[1])
+        for row in con.execute(
+            "PRAGMA table_info(structure_generation_drift_progress)"
+        )
+    }
+    receipt_columns = {
+        str(row[1])
+        for row in con.execute(
+            "PRAGMA table_info(structure_generation_drift_receipts)"
+        )
+    }
+    if not progress_columns or not receipt_columns:
+        return
+    if {"hash_algorithm", "terminal_reason"} <= progress_columns and (
+        "hash_algorithm" in receipt_columns
+    ):
+        return
+    con.execute("SAVEPOINT structure_drift_hash_v2_migration")
+    try:
+        con.execute("DROP INDEX IF EXISTS idx_structure_drift_progress_active")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_receipt_update")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_receipt_delete")
+        con.execute(
+            "ALTER TABLE structure_generation_drift_progress "
+            "RENAME TO structure_generation_drift_progress_v1"
+        )
+        if fault_hook is not None:
+            fault_hook("after-progress-rename")
+        con.execute(
+            "CREATE TABLE structure_generation_drift_progress("
+            "comparison_id TEXT PRIMARY KEY,hash_algorithm TEXT NOT NULL,"
+            "legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),"
+            "generation_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),"
+            "publication_id TEXT NOT NULL REFERENCES structure_publications(publication_id),"
+            "window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),"
+            "normalization_contract_version TEXT NOT NULL,"
+            "exact_receipt_digest TEXT NOT NULL CHECK(length(exact_receipt_digest)=64),"
+            "pointer_validation_hash TEXT NOT NULL CHECK(length(pointer_validation_hash)=64),"
+            "generation_certification_hash TEXT NOT NULL "
+            "CHECK(length(generation_certification_hash)=64),"
+            "source_event_count INTEGER NOT NULL CHECK(source_event_count>=0),"
+            "source_market_count INTEGER NOT NULL CHECK(source_market_count>=0),"
+            "source_event_hash TEXT CHECK(source_event_hash IS NULL OR "
+            "length(source_event_hash)=64),source_market_hash TEXT CHECK("
+            "source_market_hash IS NULL OR length(source_market_hash)=64),"
+            "source_identity_hash TEXT CHECK(source_identity_hash IS NULL OR "
+            "length(source_identity_hash)=64),phase TEXT NOT NULL CHECK(phase IN "
+            "('source-events','source-markets','generation-members','legacy-members',"
+            "'fresh-group-truth','sealed','stale')),terminal_reason TEXT,"
+            "row_cursor_json TEXT,digest_state_json TEXT NOT NULL,"
+            "class_counts_json TEXT NOT NULL,class_digests_json TEXT NOT NULL,"
+            "created_at_ms INTEGER NOT NULL CHECK(created_at_ms>=0),"
+            "checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms>=0),"
+            "UNIQUE(legacy_snapshot_id,generation_snapshot_id,publication_id,window_id,"
+            "normalization_contract_version,exact_receipt_digest,"
+            "pointer_validation_hash,generation_certification_hash,hash_algorithm))"
+        )
+        con.execute(
+            "INSERT INTO structure_generation_drift_progress("
+            "comparison_id,hash_algorithm,legacy_snapshot_id,generation_snapshot_id,"
+            "publication_id,window_id,normalization_contract_version,"
+            "exact_receipt_digest,pointer_validation_hash,"
+            "generation_certification_hash,source_event_count,source_market_count,"
+            "source_event_hash,source_market_hash,source_identity_hash,phase,"
+            "terminal_reason,row_cursor_json,digest_state_json,class_counts_json,"
+            "class_digests_json,created_at_ms,checkpoint_at_ms) SELECT "
+            "comparison_id,'serializable-sha256-v1',legacy_snapshot_id,"
+            "generation_snapshot_id,publication_id,window_id,"
+            "normalization_contract_version,exact_receipt_digest,"
+            "pointer_validation_hash,generation_certification_hash,"
+            "source_event_count,source_market_count,source_event_hash,"
+            "source_market_hash,source_identity_hash,phase,CASE WHEN phase IN "
+            "('sealed','stale') THEN 'legacy-terminal-reason-unspecified' ELSE NULL END,"
+            "row_cursor_json,digest_state_json,class_counts_json,class_digests_json,"
+            "created_at_ms,checkpoint_at_ms FROM "
+            "structure_generation_drift_progress_v1"
+        )
+        if fault_hook is not None:
+            fault_hook("after-progress-copy")
+        con.execute("DROP TABLE structure_generation_drift_progress_v1")
+        con.execute(
+            "CREATE INDEX idx_structure_drift_progress_active ON "
+            "structure_generation_drift_progress(checkpoint_at_ms DESC,comparison_id) "
+            "WHERE phase NOT IN ('sealed','stale')"
+        )
+
+        con.execute(
+            "ALTER TABLE structure_generation_drift_receipts "
+            "RENAME TO structure_generation_drift_receipts_v1"
+        )
+        if fault_hook is not None:
+            fault_hook("after-receipt-rename")
+        con.execute(
+            "CREATE TABLE structure_generation_drift_receipts("
+            "comparison_id TEXT PRIMARY KEY,hash_algorithm TEXT NOT NULL,"
+            "legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),"
+            "legacy_taken_at_ms INTEGER NOT NULL CHECK(legacy_taken_at_ms>=0),"
+            "legacy_finished_at_ms INTEGER NOT NULL CHECK(legacy_finished_at_ms>=0),"
+            "legacy_market_count INTEGER NOT NULL CHECK(legacy_market_count>=0),"
+            "legacy_universe_hash TEXT NOT NULL CHECK(length(legacy_universe_hash)=64),"
+            "legacy_source_truth_hash TEXT NOT NULL CHECK(length(legacy_source_truth_hash)=64),"
+            "generation_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),"
+            "publication_id TEXT NOT NULL REFERENCES structure_publications(publication_id),"
+            "window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),"
+            "published_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),"
+            "normalization_contract_version TEXT NOT NULL,"
+            "exact_receipt_digest TEXT NOT NULL CHECK(length(exact_receipt_digest)=64),"
+            "pointer_validation_hash TEXT NOT NULL CHECK(length(pointer_validation_hash)=64),"
+            "generation_certification_hash TEXT NOT NULL "
+            "CHECK(length(generation_certification_hash)=64),"
+            "source_event_count INTEGER NOT NULL CHECK(source_event_count>=0),"
+            "source_market_count INTEGER NOT NULL CHECK(source_market_count>=0),"
+            "source_event_hash TEXT NOT NULL CHECK(length(source_event_hash)=64),"
+            "source_market_hash TEXT NOT NULL CHECK(length(source_market_hash)=64),"
+            "source_identity_hash TEXT NOT NULL CHECK(length(source_identity_hash)=64),"
+            "projection_universe_hash TEXT NOT NULL "
+            "CHECK(length(projection_universe_hash)=64),"
+            "projection_group_truth_hash TEXT NOT NULL "
+            "CHECK(length(projection_group_truth_hash)=64),"
+            "generation_universe_hash TEXT NOT NULL "
+            "CHECK(length(generation_universe_hash)=64),"
+            "generation_group_truth_hash TEXT NOT NULL "
+            "CHECK(length(generation_group_truth_hash)=64),"
+            "class_counts_json TEXT NOT NULL,class_digests_json TEXT NOT NULL,"
+            "legacy_reconstruction_root TEXT NOT NULL "
+            "CHECK(length(legacy_reconstruction_root)=64),"
+            "generation_reconstruction_root TEXT NOT NULL "
+            "CHECK(length(generation_reconstruction_root)=64),"
+            "overlap_conflict_count INTEGER NOT NULL CHECK(overlap_conflict_count=0),"
+            "unclassified_count INTEGER NOT NULL CHECK(unclassified_count=0),"
+            "created_at_ms INTEGER NOT NULL CHECK(created_at_ms>=0),"
+            "receipt_digest TEXT NOT NULL CHECK(length(receipt_digest)=64),"
+            "CHECK(published_snapshot_id=generation_snapshot_id),"
+            "UNIQUE(legacy_snapshot_id,generation_snapshot_id,publication_id,window_id,"
+            "normalization_contract_version,exact_receipt_digest,"
+            "pointer_validation_hash,generation_certification_hash,"
+            "source_identity_hash,hash_algorithm))"
+        )
+        receipt_copy_columns = (
+            "comparison_id,legacy_snapshot_id,legacy_taken_at_ms,legacy_finished_at_ms,"
+            "legacy_market_count,legacy_universe_hash,legacy_source_truth_hash,"
+            "generation_snapshot_id,publication_id,window_id,published_snapshot_id,"
+            "normalization_contract_version,exact_receipt_digest,"
+            "pointer_validation_hash,generation_certification_hash,source_event_count,"
+            "source_market_count,source_event_hash,source_market_hash,"
+            "source_identity_hash,projection_universe_hash,"
+            "projection_group_truth_hash,generation_universe_hash,"
+            "generation_group_truth_hash,class_counts_json,class_digests_json,"
+            "legacy_reconstruction_root,generation_reconstruction_root,"
+            "overlap_conflict_count,unclassified_count,created_at_ms,receipt_digest"
+        )
+        con.execute(
+            "INSERT INTO structure_generation_drift_receipts("
+            "comparison_id,hash_algorithm," + receipt_copy_columns.removeprefix(
+                "comparison_id,"
+            ) + ") SELECT comparison_id,'serializable-sha256-v1'," +
+            receipt_copy_columns.removeprefix("comparison_id,") +
+            " FROM structure_generation_drift_receipts_v1"
+        )
+        con.execute("DROP TABLE structure_generation_drift_receipts_v1")
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_receipt_update BEFORE UPDATE ON "
+            "structure_generation_drift_receipts BEGIN SELECT "
+            "RAISE(ABORT,'structure-drift-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_receipt_delete BEFORE DELETE ON "
+            "structure_generation_drift_receipts BEGIN SELECT "
+            "RAISE(ABORT,'structure-drift-receipt-sealed'); END"
+        )
+        if fault_hook is not None:
+            fault_hook("before-release")
+        con.execute("RELEASE SAVEPOINT structure_drift_hash_v2_migration")
+    except BaseException:
+        con.execute("ROLLBACK TO SAVEPOINT structure_drift_hash_v2_migration")
+        con.execute("RELEASE SAVEPOINT structure_drift_hash_v2_migration")
+        raise
+
+
 def _install_structure_generation_freeze_triggers(con: sqlite3.Connection) -> None:
     """Reject every generation-row mutation after certification starts."""
     newer_floor = (
@@ -1857,6 +2043,9 @@ class SQLiteStore:
             _migrate_structure_recovery_authority(con)
             _migrate_structure_event_market_progress(con)
             con.executescript(STRUCTURE_GENERATIONS_DDL)
+            _migrate_structure_drift_hash_v2(con)
+            con.execute("ANALYZE idx_structure_generation_memberships_drift_scan")
+            con.execute("ANALYZE idx_event_market_memberships_drift_scan")
             con.execute(
                 "CREATE VIEW IF NOT EXISTS current_structure_markets AS "
                 "SELECT markets.* FROM structure_generation_markets markets "
@@ -3591,6 +3780,12 @@ class SQLiteStore:
             f"{prefix}memberships" if generation else "event_market_memberships"
         )
         market_table = f"{prefix}markets"
+        cursor_clause = "" if after_market_id is None else "AND m.market_id>? "
+        parameters = (
+            (snapshot_id, limit)
+            if after_market_id is None
+            else (snapshot_id, after_market_id, limit)
+        )
         with sqlite3.connect(self._db_path) as con:
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
@@ -3606,9 +3801,10 @@ class SQLiteStore:
                 "AND t.neg_risk_type='standard' AND t.quality='complete-supported' "
                 "AND m.member_kind='named' AND m.active=1 AND m.closed=0 "
                 "AND k.active=1 AND k.closed=0 AND k.incomplete=0 "
-                "AND trim(k.yes_token_id)!='' AND (? IS NULL OR m.market_id>?) "
-                "ORDER BY m.market_id LIMIT ?",
-                (snapshot_id, after_market_id, after_market_id, limit),
+                "AND trim(k.yes_token_id)!='' "
+                + cursor_clause
+                + "ORDER BY m.market_id LIMIT ?",
+                parameters,
             ).fetchall()
         return [
             StructuralMemberIdentity(

@@ -413,6 +413,30 @@ def test_source_chunks_resume_on_exact_keyset_boundary(tmp_path: Path) -> None:
     assert [row[0] for row in final_markets] == ["market-500"]
 
 
+def test_member_resume_uses_ordered_market_id_range_without_nullable_or(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "member-range.db")
+    store.init_schema()
+    statements: list[str] = []
+
+    store.fetch_structure_drift_member_chunk(
+        snapshot_id=1,
+        generation=True,
+        after_market_id="market-050",
+        limit=500,
+        trace_callback=statements.append,
+    )
+
+    member_select = next(
+        statement
+        for statement in statements
+        if "structure_generation_memberships m" in statement
+    )
+    assert "m.market_id>'market-050'" in member_select
+    assert "IS NULL OR m.market_id>" not in member_select
+
+
 def test_fresh_member_evidence_is_bulk_raw_derived_and_issue_independent(
     tmp_path: Path,
 ) -> None:
