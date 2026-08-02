@@ -732,6 +732,21 @@ class SnapshotScheduler:
         except (AttributeError, OSError, sqlite3.Error, TypeError, ValueError):
             logger.warning("could not recover structure drift attempt evidence")
 
+    def _finish_structure_drift_attempt(self, **evidence: object) -> bool:
+        """Bound terminal evidence without leaking ledger faults to snapshot state."""
+        try:
+            self._sqlite_store.finish_structure_drift_attempt(
+                **evidence,
+                writer_timeout_s=0.25,
+            )
+            return True
+        except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+            logger.error(
+                "structure drift terminal evidence unavailable "
+                f"kind={type(error).__name__} attempt_id={evidence.get('attempt_id')}"
+            )
+            return False
+
     @property
     def effective_timeout_s(self) -> int:
         return self._effective_timeout_s
@@ -1066,8 +1081,9 @@ class SnapshotScheduler:
                         else None
                     ),
                     started_at_ms=attempt_started_at_ms,
+                    stale_before_ms=attempt_started_at_ms - 90_000,
                 )
-            except sqlite3.OperationalError as error:
+            except (OSError, sqlite3.Error, TypeError, ValueError) as error:
                 logger.warning(
                     "structure drift admission evidence unavailable "
                     f"kind={type(error).__name__}; child not spawned"
@@ -1083,7 +1099,7 @@ class SnapshotScheduler:
                     terminate_timeout_s=15.0,
                 )
             except asyncio.CancelledError:
-                self._sqlite_store.finish_structure_drift_attempt(
+                self._finish_structure_drift_attempt(
                     attempt_id=attempt_id,
                     outcome="cancelled",
                     finished_at_ms=int(time.time() * 1_000),
@@ -1101,7 +1117,7 @@ class SnapshotScheduler:
                     if "sqlite-busy" in error_text
                     else "structure-drift-child-failed"
                 )
-                self._sqlite_store.finish_structure_drift_attempt(
+                self._finish_structure_drift_attempt(
                     attempt_id=attempt_id,
                     outcome="failed",
                     finished_at_ms=int(time.time() * 1_000),
@@ -1123,7 +1139,7 @@ class SnapshotScheduler:
                 )
                 return True
             except OSError as error:
-                self._sqlite_store.finish_structure_drift_attempt(
+                self._finish_structure_drift_attempt(
                     attempt_id=attempt_id,
                     outcome="failed",
                     finished_at_ms=int(time.time() * 1_000),
@@ -1143,7 +1159,7 @@ class SnapshotScheduler:
                     if checkpoint.defer_reason == "writer-busy"
                     else "structure-drift-identity-stale"
                 )
-                self._sqlite_store.finish_structure_drift_attempt(
+                self._finish_structure_drift_attempt(
                     attempt_id=attempt_id,
                     outcome="deferred",
                     finished_at_ms=int(time.time() * 1_000),
@@ -1159,7 +1175,7 @@ class SnapshotScheduler:
                     queued_at_ms=queued_at_ms,
                 )
                 return True
-            self._sqlite_store.finish_structure_drift_attempt(
+            self._finish_structure_drift_attempt(
                 attempt_id=attempt_id,
                 outcome="succeeded" if checkpoint.ready else "checkpointed",
                 finished_at_ms=int(time.time() * 1_000),

@@ -1774,12 +1774,12 @@ class SQLiteStore:
         self._db_path = Path(db_path)
         self._writer_timeout_s = float(writer_timeout_s)
 
-    def _connect_writer(self) -> sqlite3.Connection:
+    def _connect_writer(self, *, timeout_s: float | None = None) -> sqlite3.Connection:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(
             self._db_path,
             isolation_level=None,
-            timeout=self._writer_timeout_s,
+            timeout=self._writer_timeout_s if timeout_s is None else timeout_s,
         )
         con.execute("PRAGMA foreign_keys=ON")
         return con
@@ -8781,6 +8781,7 @@ class SQLiteStore:
         identity: Mapping[str, object],
         progress_id: str | None,
         started_at_ms: int,
+        stale_before_ms: int | None = None,
     ) -> int:
         """Append parent ownership before spawning one drift child."""
         if started_at_ms < 0 or (progress_id is not None and not progress_id):
@@ -8791,6 +8792,26 @@ class SQLiteStore:
         identity_digest = hashlib.sha256(identity_json.encode()).hexdigest()
         con = self._connect_writer()
         try:
+            con.execute("BEGIN IMMEDIATE")
+            running = con.execute(
+                "SELECT id,started_at_ms FROM structure_drift_attempts "
+                "WHERE outcome='running' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if running is not None:
+                if stale_before_ms is None or int(running[1]) > stale_before_ms:
+                    raise ValueError("structure-drift-attempt-owner-running")
+                con.execute(
+                    "UPDATE structure_drift_attempts SET finished_at_ms=?,outcome='failed',"
+                    "elapsed_ms=MAX(0,?-started_at_ms),chunks_processed=0,rows_processed=0,"
+                    "failure_kind='parent-stale-orphan',stderr_bytes=0,stderr_sha256=?,"
+                    "stderr_safe_marker=NULL WHERE id=? AND outcome='running'",
+                    (
+                        started_at_ms,
+                        started_at_ms,
+                        hashlib.sha256(b"").hexdigest(),
+                        int(running[0]),
+                    ),
+                )
             cur = con.execute(
                 "INSERT INTO structure_drift_attempts("
                 "identity_json,identity_digest,progress_id,started_at_ms,outcome) "
@@ -8798,7 +8819,13 @@ class SQLiteStore:
                 (identity_json, identity_digest, progress_id, started_at_ms),
             )
             assert cur.lastrowid is not None
-            return int(cur.lastrowid)
+            attempt_id = int(cur.lastrowid)
+            con.execute("COMMIT")
+            return attempt_id
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
         finally:
             con.close()
 
@@ -8817,6 +8844,7 @@ class SQLiteStore:
         stderr_bytes: int | None = None,
         stderr_sha256: str | None = None,
         stderr_safe_marker: str | None = None,
+        writer_timeout_s: float | None = None,
     ) -> None:
         """Terminalize one parent-owned drift attempt exactly once."""
         if outcome not in {
@@ -8850,9 +8878,19 @@ class SQLiteStore:
             diagnostic_bytes < 0
             or re.fullmatch(r"[0-9a-f]{64}", diagnostic_digest) is None
             or (safe_marker is not None and len(safe_marker) > 256)
+            or (
+                safe_marker is not None
+                and (
+                    not safe_marker.isascii()
+                    or _STRUCTURE_DRIFT_SAFE_MARKER_RE.fullmatch(
+                        safe_marker.encode("ascii")
+                    )
+                    is None
+                )
+            )
         ):
             raise ValueError("invalid-structure-drift-attempt-stderr")
-        con = self._connect_writer()
+        con = self._connect_writer(timeout_s=writer_timeout_s)
         try:
             con.execute("BEGIN IMMEDIATE")
             cur = con.execute(

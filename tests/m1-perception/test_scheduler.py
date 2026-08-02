@@ -208,6 +208,60 @@ def test_structure_drift_attempt_schema_migrates_legacy_database(
     assert store.recover_orphaned_structure_drift_attempts(recovered_at_ms=10) == 1
 
 
+def test_structure_drift_attempt_rejects_fresh_owner_and_recovers_stale(
+    tmp_path: Path,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "owner.db")
+    store.init_schema()
+    first = store.begin_structure_drift_attempt(
+        identity={"generation_snapshot_id": 848}, progress_id=None, started_at_ms=1_000
+    )
+    with pytest.raises(ValueError, match="owner-running"):
+        store.begin_structure_drift_attempt(
+            identity={"generation_snapshot_id": 848},
+            progress_id=None,
+            started_at_ms=1_050,
+            stale_before_ms=900,
+        )
+    second = store.begin_structure_drift_attempt(
+        identity={"generation_snapshot_id": 848},
+        progress_id=None,
+        started_at_ms=2_000,
+        stale_before_ms=1_500,
+    )
+    assert second != first
+
+
+@pytest.mark.parametrize(
+    "marker",
+    ("raw secret", "structure-drift stage=none chunks=0 rows=0秘密"),
+)
+def test_structure_drift_attempt_rejects_untrusted_explicit_marker(
+    tmp_path: Path, marker: str,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "marker.db")
+    store.init_schema()
+    attempt_id = store.begin_structure_drift_attempt(
+        identity={}, progress_id=None, started_at_ms=1
+    )
+    with pytest.raises(ValueError, match="stderr"):
+        store.finish_structure_drift_attempt(
+            attempt_id=attempt_id,
+            outcome="failed",
+            finished_at_ms=2,
+            last_phase=None,
+            chunks_processed=0,
+            rows_processed=0,
+            elapsed_ms=1,
+            failure_kind="invalid-json",
+            stderr_safe_marker=marker,
+        )
+
+
 def test_recovery_retry_delay_is_exponential_and_bounded() -> None:
     from polyarb.daemon.scheduler import recovery_retry_delay_s
 
@@ -1658,6 +1712,84 @@ async def test_structure_drift_cancellation_releases_shared_producer_lock(
     assert attempt is not None
     assert attempt["outcome"] == "cancelled"
     assert attempt["failure_kind"] == "scheduler-cancelled"
+
+
+@pytest.mark.asyncio
+async def test_structure_drift_terminal_write_failure_is_isolated_and_blocks_respawn(
+    daemon_settings_for_test, monkeypatch
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import IsolatedStructureDriftCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    store.structure_generation_drift_status = MagicMock(
+        return_value={
+            "authorized": False,
+            "phase": None,
+            "reason": "structure-drift-progress-missing",
+        }
+    )
+    child = AsyncMock(
+        return_value=IsolatedStructureDriftCheckpoint(
+            phase="source-events", rows_processed=1, chunks_processed=1,
+            ready=False, deferred=False, defer_reason=None,
+            stop_reason="max-chunks", elapsed_ms=1,
+        )
+    )
+    monkeypatch.setattr(scheduler_module, "run_structure_drift_in_subprocess", child)
+    original_finish = store.finish_structure_drift_attempt
+    store.finish_structure_drift_attempt = MagicMock(
+        side_effect=sqlite3.OperationalError("database is locked")
+    )
+    lock = asyncio.Lock()
+    scheduler = SnapshotScheduler(settings=settings, sqlite_store=store, producer_lock=lock)
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is True
+    assert await scheduler._tick_once(queued_at_ms=2_000) is True
+    assert child.await_count == 1
+    assert scheduler._failure_counter == 0
+    assert lock.locked() is False
+    store.finish_structure_drift_attempt = original_finish
+
+
+@pytest.mark.asyncio
+async def test_structure_drift_cancel_survives_terminal_write_failure(
+    daemon_settings_for_test, monkeypatch
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    store.structure_generation_drift_status = MagicMock(
+        return_value={
+            "authorized": False,
+            "phase": None,
+            "reason": "structure-drift-progress-missing",
+        }
+    )
+    monkeypatch.setattr(
+        scheduler_module, "run_structure_drift_in_subprocess",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    store.finish_structure_drift_attempt = MagicMock(
+        side_effect=sqlite3.OperationalError("database is locked")
+    )
+    lock = asyncio.Lock()
+    scheduler = SnapshotScheduler(settings=settings, sqlite_store=store, producer_lock=lock)
+
+    with pytest.raises(asyncio.CancelledError):
+        await scheduler._tick_once(queued_at_ms=1_000)
+    assert scheduler._failure_counter == 0
+    assert lock.locked() is False
 
 
 @pytest.mark.asyncio
