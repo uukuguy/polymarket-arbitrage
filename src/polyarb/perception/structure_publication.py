@@ -127,7 +127,7 @@ def normalize_structure_component_chunk(
     if progress is None or progress.publication.publication_id != publication.publication_id:
         raise ValueError("structure-publication-not-found")
     if component == "issues":
-        rows = store.fetch_structure_duplicate_market_chunk(
+        rows = store.fetch_structure_market_parent_group_chunk(
             window_id=publication.window_id,
             after_market_id=after_source_key,
             limit=max_source_rows,
@@ -146,6 +146,14 @@ def normalize_structure_component_chunk(
         )
         if component == "group_truth"
         else set()
+    )
+    market_event_ids = (
+        store.structure_event_ids_for_markets(
+            publication.publication_id,
+            [str(source_key) for source_key, _raw in rows],
+        )
+        if component == "markets"
+        else {}
     )
     taken_at_ms = store.structure_publication_taken_at_ms(publication.publication_id)
     canonical: list[dict[str, object]] = []
@@ -169,22 +177,21 @@ def normalize_structure_component_chunk(
                     canonical.append(row)
         elif component == "markets":
             market_id = str(raw.get("id") or "")
-            event_id = store.structure_event_id_for_market(
-                publication.publication_id, market_id
-            )
+            event_id = market_event_ids.get(market_id)
             normalized = normalize_market(raw, {market_id: event_id} if event_id else {})
             if normalized is not None:
                 normalized["fetched_at_ms"] = taken_at_ms
                 canonical.append(normalized)
         elif component == "issues":
-            canonical.append(
-                {
-                    "layer": 1,
-                    "category": "api_jitter",
-                    "market_id": _source_key,
-                    "detail": f"market-id-conflict-across-events:{raw}"[:200],
-                }
-            )
+            if "," in str(raw):
+                canonical.append(
+                    {
+                        "layer": 1,
+                        "category": "api_jitter",
+                        "market_id": _source_key,
+                        "detail": f"market-id-conflict-across-events:{raw}"[:200],
+                    }
+                )
     sort_keys = {
         "events": lambda row: (str(row["id"]),),
         "event_tags": lambda row: (str(row["event_id"]), str(row["tag_id"])),

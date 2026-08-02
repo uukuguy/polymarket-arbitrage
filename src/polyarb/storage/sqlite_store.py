@@ -3032,6 +3032,46 @@ class SQLiteStore:
                 ).fetchone()
         return None if row is None else str(row[0])
 
+    def structure_event_ids_for_markets(
+        self,
+        publication_id: str,
+        market_ids: list[str],
+    ) -> dict[str, str]:
+        """Resolve one bounded market chunk's parents with fixed SQL/connection cost."""
+        if (
+            not publication_id
+            or len(market_ids) > 500
+            or any(not isinstance(market_id, str) or not market_id for market_id in market_ids)
+        ):
+            raise ValueError("invalid-structure-market-parent-chunk")
+        if not market_ids:
+            return {}
+        placeholders = ",".join("?" for _ in market_ids)
+        resolved: dict[str, str] = {}
+        with sqlite3.connect(self._db_path) as con:
+            staged = con.execute(
+                "SELECT mine.market_id,mine.event_id FROM structure_publications p JOIN "
+                "structure_sync_event_market_staging mine ON mine.window_id=p.window_id "
+                f"WHERE p.publication_id=? AND mine.market_id IN ({placeholders}) "
+                "ORDER BY mine.market_id,mine.source_ordinal,mine.event_id",
+                (publication_id, *market_ids),
+            )
+            for market_id, event_id in staged:
+                resolved.setdefault(str(market_id), str(event_id))
+            missing = [market_id for market_id in market_ids if market_id not in resolved]
+            if missing:
+                missing_placeholders = ",".join("?" for _ in missing)
+                memberships = con.execute(
+                    "SELECT m.market_id,m.event_id FROM structure_publications p JOIN "
+                    "structure_generation_memberships m ON m.snapshot_id=p.snapshot_id "
+                    f"WHERE p.publication_id=? AND m.market_id IN ({missing_placeholders}) "
+                    "ORDER BY m.market_id,m.event_id",
+                    (publication_id, *missing),
+                )
+                for market_id, event_id in memberships:
+                    resolved.setdefault(str(market_id), str(event_id))
+        return resolved
+
     def structure_event_has_duplicate_market(
         self, publication_id: str, event_id: str
     ) -> bool:
@@ -3084,6 +3124,32 @@ class SQLiteStore:
                 "ORDER BY market_id,source_ordinal,event_id) GROUP BY market_id "
                 "HAVING COUNT(DISTINCT event_id)>1 ORDER BY market_id LIMIT ?",
                 (window_id, after_market_id, after_market_id, limit),
+            ).fetchall()
+        return [(str(row[0]), str(row[1])) for row in rows]
+
+    def fetch_structure_market_parent_group_chunk(
+        self,
+        *,
+        window_id: str,
+        after_market_id: str | None,
+        limit: int,
+    ) -> list[tuple[str, str]]:
+        """Read at most one keyset chunk of parent groups, including non-duplicates."""
+        if not window_id or not 1 <= limit <= 500:
+            raise ValueError("invalid-structure-market-parent-group-chunk")
+        with sqlite3.connect(self._db_path) as con:
+            rows = con.execute(
+                "WITH market_keys AS (SELECT market_id FROM "
+                "structure_sync_event_market_staging WHERE window_id=? "
+                "AND (? IS NULL OR market_id>?) GROUP BY market_id "
+                "ORDER BY market_id LIMIT ?), ordered AS (SELECT relation.market_id," 
+                "relation.event_id FROM structure_sync_event_market_staging relation "
+                "JOIN market_keys ON market_keys.market_id=relation.market_id "
+                "WHERE relation.window_id=? ORDER BY relation.market_id," 
+                "relation.source_ordinal,relation.event_id) SELECT market_id," 
+                "GROUP_CONCAT(event_id,',') FROM ordered GROUP BY market_id "
+                "ORDER BY market_id",
+                (window_id, after_market_id, after_market_id, limit, window_id),
             ).fetchall()
         return [(str(row[0]), str(row[1])) for row in rows]
 

@@ -300,6 +300,119 @@ def test_publication_slice_with_insufficient_remaining_time_is_zero_chunk(
     assert after == before
 
 
+def test_market_500_row_chunk_bulk_resolves_parents_with_o1_connections(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store, publication = _begin_large_generation(store_path=tmp_path / "state.db")
+    market_ids = [f"market-{index:03d}" for index in range(500)]
+    expected = {
+        market_id: event_id
+        for market_id in market_ids
+        if (event_id := store.structure_event_id_for_market(
+            publication.publication_id, market_id
+        )) is not None
+    }
+    assert expected["market-000"] == "event-000"
+
+    actual = store.structure_event_ids_for_markets(
+        publication.publication_id, market_ids
+    )
+    assert actual == expected
+
+    for component in ("events", "event_tags", "memberships", "group_truth"):
+        _normalize_component_to_done(store, publication, component)
+    real_connect = sqlite3.connect
+    connect_count = 0
+
+    def counted_connect(*args, **kwargs):
+        nonlocal connect_count
+        connect_count += 1
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", counted_connect)
+    started = time.monotonic()
+    chunk = normalize_structure_component_chunk(
+        store, publication, "markets", None, 500
+    )
+    elapsed_s = time.monotonic() - started
+
+    assert chunk.source_rows == 500
+    assert connect_count <= 6
+    assert elapsed_s < 10.0
+
+
+def test_non_market_normalizers_keep_500_row_chunks_o1_in_sqlite_connections(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store, publication = _begin_large_generation(store_path=tmp_path / "state.db")
+    real_connect = sqlite3.connect
+
+    for component in ("events", "event_tags", "memberships", "group_truth"):
+        connect_count = 0
+
+        def counted_connect(*args, **kwargs):
+            nonlocal connect_count
+            connect_count += 1
+            return real_connect(*args, **kwargs)
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(sqlite3, "connect", counted_connect)
+            started = time.monotonic()
+            first = normalize_structure_component_chunk(
+                store, publication, component, None, 500
+            )
+            elapsed_s = time.monotonic() - started
+        assert first.source_rows == 500
+        assert connect_count <= 6
+        assert elapsed_s < 10.0
+        completed = normalize_structure_component_chunk(
+            store, publication, component, first.cursor, 500
+        )
+        assert completed.completed is True
+
+
+def test_issues_checkpoint_advances_500_source_keys_when_no_duplicates(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    store, publication = _begin_large_generation(
+        store_path=tmp_path / "state.db", event_count=501
+    )
+    for component in (
+        "events", "event_tags", "memberships", "group_truth", "markets"
+    ):
+        _normalize_component_to_done(store, publication, component)
+
+    real_connect = sqlite3.connect
+    connect_count = 0
+
+    def counted_connect(*args, **kwargs):
+        nonlocal connect_count
+        connect_count += 1
+        return real_connect(*args, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(sqlite3, "connect", counted_connect)
+        started = time.monotonic()
+        first = normalize_structure_component_chunk(
+            store, publication, "issues", None, 500
+        )
+        elapsed_s = time.monotonic() - started
+    second = normalize_structure_component_chunk(
+        store, publication, "issues", first.cursor, 500
+    )
+
+    assert first.source_rows == 500
+    assert first.canonical_rows == 0
+    assert first.completed is False
+    assert first.cursor == "market-499"
+    assert connect_count <= 5
+    assert elapsed_s < 10.0
+    assert second.source_rows == 1
+    assert second.canonical_rows == 0
+    assert second.completed is True
+    assert second.cursor == "market-500"
+
+
 def test_normalization_chunk_never_fetches_more_than_raw_row_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -549,6 +662,86 @@ def _complete_window(store: SQLiteStore, market_id: str, *, now_ms: int) -> str:
     )
     assert bootstrap["completed"] is True
     return window_id
+
+
+def _begin_large_generation(
+    *,
+    store_path: Path,
+    event_count: int = 500,
+):
+    store = SQLiteStore(store_path)
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    events = [
+        {
+            "id": f"event-{index:03d}",
+            "negRisk": True,
+            "enableNegRisk": True,
+            "negRiskMarketID": f"group-{index:03d}",
+            "markets": [
+                {
+                    "id": f"market-{index:03d}",
+                    "active": True,
+                    "closed": False,
+                }
+            ],
+        }
+        for index in range(event_count)
+    ]
+    markets = [
+        {
+            "id": f"market-{index:03d}",
+            "active": True,
+            "closed": False,
+        }
+        for index in range(event_count)
+    ]
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=events, finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=markets, finished_at_ms=300,
+    )
+    now_ms = 400
+    while True:
+        bootstrap = store.advance_structure_event_market_backfill(
+            window_id=window["id"],
+            max_events=500,
+            max_relationships=500,
+            now_ms=now_ms,
+        )
+        now_ms += 1
+        if bootstrap["completed"]:
+            break
+    publication = store.begin_structure_publication(
+        window_id=window["id"],
+        snapshot_metadata={
+            "snapshot_id": 1,
+            "taken_at_ms": now_ms,
+            "mode": "full",
+            "data_product": "structure",
+            "expected_counts": COMPONENT_COUNTS,
+        },
+        now_ms=now_ms,
+    )
+    return store, publication
+
+
+def _normalize_component_to_done(
+    store: SQLiteStore,
+    publication,
+    component: str,
+) -> None:
+    cursor = None
+    while True:
+        chunk = normalize_structure_component_chunk(
+            store, publication, component, cursor, 500
+        )
+        if chunk.completed:
+            return
+        cursor = chunk.cursor
 
 
 def _begin_generation(
