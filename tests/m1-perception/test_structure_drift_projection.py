@@ -10,7 +10,6 @@ import pytest
 
 from polyarb.perception.market_truth import membership_hash
 from polyarb.perception.structure_drift import (
-    FreshProjectionCursor,
     StructuralMemberIdentity,
     classify_structure_member_drift,
     hash_legacy_compatible_projection,
@@ -18,7 +17,7 @@ from polyarb.perception.structure_drift import (
     project_legacy_compatible_market,
 )
 from polyarb.perception.structure_publication import event_only_member_quarantine_issue
-from polyarb.storage.row_chain_sha256 import RowChainSHA256
+from polyarb.storage.row_chain_sha256 import ROW_CHAIN_DOMAINS, RowChainSHA256
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -56,6 +55,12 @@ def _published_source_store(
     event_only_members: tuple[tuple[str, bool], ...] = (),
     global_relation_conflict: bool = False,
     duplicate_market_identity: bool = False,
+    duplicate_event_only_identity: bool = False,
+    null_event_source_ordinal: bool = False,
+    certified_event_only_conflict: bool = False,
+    raw_market_overrides: dict[str, object] | None = None,
+    raw_event_overrides: dict[str, object] | None = None,
+    raw_member_overrides: dict[str, object] | None = None,
 ) -> SQLiteStore:
     store = SQLiteStore(tmp_path / "drift-source.db")
     store.init_schema()
@@ -95,6 +100,10 @@ def _published_source_store(
                     }
                 ],
             }
+            if index == 0 and raw_event_overrides:
+                raw_event.update(raw_event_overrides)
+            if index == 0 and raw_member_overrides:
+                raw_event["markets"][0].update(raw_member_overrides)
             if index == 0:
                 if duplicate_market_identity:
                     raw_event["markets"].append(dict(raw_event["markets"][0]))
@@ -117,6 +126,8 @@ def _published_source_store(
                     }
                     for market_id, _certified in event_only_members
                 )
+                if duplicate_event_only_identity and event_only_members:
+                    raw_event["markets"].append(dict(raw_event["markets"][-1]))
             raw_market = {
                 "id": market_id,
                 "conditionId": f"condition-{index:03d}",
@@ -126,8 +137,15 @@ def _published_source_store(
                 "negRisk": True,
                 "negRiskMarketID": f"group-{index:03d}",
             }
+            if index == 0 and raw_market_overrides:
+                raw_market.update(raw_market_overrides)
             event_rows.append(
-                ("window-1", event_id, json.dumps(raw_event), index + 1)
+                (
+                    "window-1",
+                    event_id,
+                    json.dumps(raw_event),
+                    None if index == 0 and null_event_source_ordinal else index + 1,
+                )
             )
             relation_rows.append(("window-1", market_id, event_id, index + 1))
             if index == 0:
@@ -137,6 +155,10 @@ def _published_source_store(
                 )
             if index == 1 and global_relation_conflict:
                 relation_rows.append(("window-1", "market-000", event_id, index + 1))
+            if index == 1 and certified_event_only_conflict:
+                relation_rows.append(
+                    ("window-1", "event-only-certified", event_id, index + 1)
+                )
             market_rows.append(
                 ("window-1", market_id, json.dumps(raw_market), index + 1)
             )
@@ -244,15 +266,9 @@ def test_projection_union_excludes_only_certified_event_only_member(
     ]
     assert chunk.diagnostics[0].envelope.market_id == "event-only-uncertified"
     assert chunk.candidates_processed == 3
-    assert chunk.cursor == FreshProjectionCursor(
-        stream="event-only",
-        market_id=None,
-        event_id="event-000",
-        source_ordinal=1,
-        member_ordinal=2,
-    )
+    assert chunk.cursor is None
     selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
-    assert len(selects) <= 6
+    assert len(selects) <= 8
     assert not any(" WHERE relation.market_id='" in sql for sql in selects)
     with sqlite3.connect(store.db_path) as con:
         plans = "\n".join(
@@ -316,6 +332,190 @@ def test_projection_duplicate_market_identity_fails_closed(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("limit", [1, 17, 500])
+def test_event_only_keyset_is_complete_with_adversarial_order_and_null_ordinal(
+    tmp_path: Path,
+    limit: int,
+) -> None:
+    event_only = tuple(
+        (f"event-only-{(index * 283) % 503:04d}", False)
+        for index in range(503)
+    )
+    case_path = tmp_path / str(limit)
+    case_path.mkdir()
+    store = _published_source_store(
+        case_path,
+        event_count=1,
+        event_only_members=event_only,
+        null_event_source_ordinal=True,
+    )
+
+    cursor = None
+    seen: list[str] = []
+    traced_selects: list[str] = []
+    event_member_cursors: list[int] = []
+    for _ in range(600):
+        statements: list[str] = []
+        chunk = store.fetch_structure_drift_fresh_projection_chunk(
+            publication_id="publication-1",
+            generation_snapshot_id=1,
+            cursor=cursor,
+            limit=limit,
+            trace_callback=statements.append if limit == 500 else None,
+        )
+        selects = [
+            sql for sql in statements if sql.lstrip().upper().startswith("SELECT")
+        ]
+        assert len(selects) <= 10
+        traced_selects.extend(selects)
+        seen.extend(item.envelope.market_id for item in chunk.diagnostics)
+        cursor = chunk.cursor
+        if cursor is None:
+            break
+        if cursor.stream == "event-only":
+            assert cursor.source_ordinal == 1
+            assert cursor.member_ordinal is not None
+            event_member_cursors.append(cursor.member_ordinal)
+    else:
+        pytest.fail("fresh projection cursor did not terminate")
+
+    assert len(seen) == 503
+    assert len(set(seen)) == 503
+    assert set(seen) == {market_id for market_id, _certified in event_only}
+    assert event_member_cursors == sorted(set(event_member_cursors))
+    if traced_selects:
+        assert not any(" WHERE relation.market_id='" in sql for sql in traced_selects)
+        with sqlite3.connect(store.db_path) as con:
+            plans = "\n".join(
+                str(row[3])
+                for sql in traced_selects
+                for row in con.execute("EXPLAIN QUERY PLAN " + sql)
+            )
+        assert "USE TEMP B-TREE FOR ORDER BY" not in plans
+
+
+def test_event_only_exact_full_page_returns_terminal_cursor(tmp_path: Path) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=1,
+        event_only_members=tuple(
+            (f"event-only-{index:04d}", False) for index in range(499)
+        ),
+        null_event_source_ordinal=True,
+    )
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+    )
+    assert chunk.candidates_processed == 500
+    assert chunk.cursor is None
+
+
+def test_certified_event_only_global_conflict_wins_before_quarantine(
+    tmp_path: Path,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=2,
+        event_only_members=(("event-only-certified", True),),
+        certified_event_only_conflict=True,
+    )
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+    )
+    matching = [
+        item
+        for item in chunk.diagnostics
+        if item.envelope.market_id == "event-only-certified"
+    ]
+    assert [item.code for item in matching] == ["conflicting-event-membership"]
+
+
+def test_event_only_duplicate_precedes_uncertified_quarantine(tmp_path: Path) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=1,
+        event_only_members=(("event-only-duplicate", False),),
+        duplicate_event_only_identity=True,
+    )
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+    )
+    matching = [
+        item
+        for item in chunk.diagnostics
+        if item.envelope.market_id == "event-only-duplicate"
+    ]
+    assert [item.code for item in matching] == ["duplicate-market-identity"]
+
+
+@pytest.mark.parametrize(
+    ("market_overrides", "event_overrides", "member_overrides", "code"),
+    [
+        ({"conditionId": None}, None, None, "active-open-projection-missing"),
+        (
+            {"clobTokenIds": json.dumps([None, "no-0"])},
+            None,
+            None,
+            "active-open-projection-missing",
+        ),
+        (
+            {"clobTokenIds": json.dumps(["yes-0", None])},
+            None,
+            None,
+            "active-open-projection-missing",
+        ),
+        (None, {"id": None}, None, "invalid-event-membership"),
+        (None, {"negRiskMarketID": None}, None, "invalid-event-membership"),
+        (None, None, {"active": None}, "invalid-event-membership"),
+        (None, None, {"closed": None}, "invalid-event-membership"),
+    ],
+)
+def test_projection_missing_identity_fields_fail_closed_with_nullable_envelope(
+    tmp_path: Path,
+    market_overrides: dict[str, object] | None,
+    event_overrides: dict[str, object] | None,
+    member_overrides: dict[str, object] | None,
+    code: str,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=1,
+        raw_market_overrides=market_overrides,
+        raw_event_overrides=event_overrides,
+        raw_member_overrides=member_overrides,
+    )
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+    )
+    assert chunk.members == ()
+    assert chunk.diagnostics[0].code == code
+    envelope = chunk.diagnostics[0].envelope
+    if market_overrides and "conditionId" in market_overrides:
+        assert envelope.condition_id is None
+    if market_overrides and "clobTokenIds" in market_overrides:
+        assert envelope.yes_token_id is None or envelope.no_token_id is None
+    if event_overrides and "id" in event_overrides:
+        assert envelope.event_id is None
+    if event_overrides and "negRiskMarketID" in event_overrides:
+        assert envelope.group_id is None
+    if member_overrides and "active" in member_overrides:
+        assert envelope.active is None
+    if member_overrides and "closed" in member_overrides:
+        assert envelope.closed is None
+
+
+@pytest.mark.parametrize("limit", [1, 17, 500])
 def test_global_relation_conflict_wins_across_projection_chunks(
     tmp_path: Path,
     limit: int,
@@ -338,12 +538,16 @@ def test_global_relation_conflict_wins_across_projection_chunks(
         )
         diagnostics.extend(chunk.diagnostics)
         members.extend(chunk.members)
-        if chunk.candidates_processed < limit:
+        if chunk.cursor is None:
             break
         cursor = chunk.cursor
-        assert cursor is not None
 
     assert diagnostics[0].code == "conflicting-event-membership"
+    assert {
+        item.envelope.market_id
+        for item in diagnostics
+        if item.code == "conflicting-event-membership"
+    } == {"inactive-a", "market-000"}
     assert {item.market_id for item in members} == {"market-001"}
 
 
@@ -369,7 +573,7 @@ def test_global_relation_projection_root_is_chunk_invariant(tmp_path: Path) -> N
             )
             projected.extend(chunk.members)
             diagnostics.extend(chunk.diagnostics)
-            if chunk.candidates_processed < limit:
+            if chunk.cursor is None:
                 break
             cursor = chunk.cursor
         digest = RowChainSHA256.new("projection-member")
@@ -390,6 +594,36 @@ def test_global_relation_projection_root_is_chunk_invariant(tmp_path: Path) -> N
                 )
             )
         results.append((digest.hexdigest(), tuple(item.code for item in diagnostics)))
+    assert all(result == results[0] for result in results)
+
+
+def test_production_complete_projection_commitment_is_chunk_invariant(
+    tmp_path: Path,
+) -> None:
+    results = []
+    for limit in (1, 17, 500):
+        case_path = tmp_path / f"commitment-{limit}"
+        case_path.mkdir()
+        store = _published_source_store(case_path, event_count=30)
+        commitment = None
+        for _ in range(100):
+            commitment = store.advance_structure_drift_fresh_projection_commitment(
+                publication_id="publication-1",
+                generation_snapshot_id=1,
+                commitment=commitment,
+                limit=limit,
+            )
+            if commitment.complete:
+                break
+        else:
+            pytest.fail("fresh projection commitment did not complete")
+        assert commitment.member_count == 30
+        assert commitment.diagnostic_count == 0
+        assert json.loads(commitment.diagnostic_digest_state)["domain"] == (
+            "diagnostic/unclassified"
+        )
+        assert "projection-diagnostic" not in ROW_CHAIN_DOMAINS
+        results.append((commitment.member_count, commitment.root))
     assert all(result == results[0] for result in results)
 
 

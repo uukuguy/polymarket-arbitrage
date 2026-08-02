@@ -75,6 +75,7 @@ from polyarb.validator.layers import determine_snapshot_status
 if TYPE_CHECKING:
     from polyarb.perception.structure_drift import (
         FreshProjectionChunk,
+        FreshProjectionCommitment,
         FreshProjectionCursor,
     )
 
@@ -4192,60 +4193,177 @@ class SQLiteStore:
                 )
                 remaining -= len(market_rows)
 
-            if remaining and (cursor is None or cursor.stream == "market"):
-                event_cursor: tuple[str, int, int] | None = None
-            elif isinstance(cursor, FreshProjectionCursor) and cursor.stream == "event-only":
-                event_cursor = (
-                    str(cursor.event_id),
-                    int(cursor.source_ordinal),
-                    int(cursor.member_ordinal),
-                )
-            else:
-                event_cursor = None
-
-            if remaining and (cursor is None or cursor.stream in {"market", "event-only"}):
-                base_sql = (
-                    "SELECT event.event_id,COALESCE(event.source_ordinal,event.rowid),"
-                    "CAST(member.key AS INTEGER),relation.market_id,event.payload_json "
-                    "FROM structure_sync_event_staging event JOIN json_each("
-                    "event.payload_json,'$.markets') member JOIN "
-                    "structure_sync_event_market_staging relation ON "
-                    "relation.window_id=event.window_id AND "
-                    "relation.event_id=event.event_id AND relation.market_id="
-                    "json_extract(member.value,'$.id') LEFT JOIN "
-                    "structure_sync_market_staging market ON "
-                    "market.window_id=relation.window_id AND "
-                    "market.market_id=relation.market_id WHERE event.window_id=? "
-                    "AND market.market_id IS NULL "
-                )
-                if event_cursor is None:
-                    event_rows = con.execute(
-                        base_sql + "LIMIT ?",
-                        (window_id, remaining),
-                    ).fetchall()
+            event_cursor = (
+                cursor
+                if isinstance(cursor, FreshProjectionCursor)
+                and cursor.stream == "event-only"
+                else None
+            )
+            scan_cursor: FreshProjectionCursor | None = None
+            projection_complete = False
+            if remaining:
+                event_rows: list[tuple[object, ...]] = []
+                if event_cursor is not None:
+                    current = con.execute(
+                        "SELECT event_id,COALESCE(source_ordinal,rowid),payload_json "
+                        "FROM structure_sync_event_staging WHERE window_id=? "
+                        "AND event_id=?",
+                        (window_id, event_cursor.event_id),
+                    ).fetchone()
+                    if current is not None:
+                        if int(current[1]) != int(event_cursor.source_ordinal):
+                            raise ValueError(
+                                "invalid-structure-drift-fresh-projection-cursor"
+                            )
+                        event_rows.append(current)
+                    event_rows.extend(
+                        con.execute(
+                            "SELECT event_id,COALESCE(source_ordinal,rowid),"
+                            "payload_json FROM structure_sync_event_staging "
+                            "WHERE window_id=? AND event_id>? ORDER BY event_id LIMIT ?",
+                            (
+                                window_id,
+                                event_cursor.event_id,
+                                500 - len(event_rows),
+                            ),
+                        ).fetchall()
+                    )
                 else:
                     event_rows = con.execute(
-                        base_sql
-                        + "AND (event.event_id,event.source_ordinal,CAST(member.key AS INTEGER))"
-                        "> (?,?,?) LIMIT ?",
-                        (window_id, *event_cursor, remaining),
+                        "SELECT event_id,COALESCE(source_ordinal,rowid),payload_json "
+                        "FROM structure_sync_event_staging WHERE window_id=? "
+                        "ORDER BY event_id LIMIT 500",
+                        (window_id,),
                     ).fetchall()
-                event_rows = sorted(
-                    event_rows,
-                    key=lambda row: (str(row[0]), int(row[1]), int(row[2])),
-                )
-                candidates.extend(
+
+                scanned: list[dict[str, object]] = []
+                scan_budget = limit
+                exhausted_loaded_events = True
+                for event_id_raw, source_ordinal_raw, payload_json in event_rows:
+                    event_id = str(event_id_raw)
+                    source_ordinal = int(source_ordinal_raw)
+                    raw_event = json.loads(str(payload_json))
+                    raw_members = raw_event.get("markets")
+                    members_payload = raw_members if isinstance(raw_members, list) else []
+                    start = (
+                        int(event_cursor.member_ordinal) + 1
+                        if event_cursor is not None
+                        and event_id == event_cursor.event_id
+                        else 0
+                    )
+                    if start >= len(members_payload):
+                        scan_cursor = FreshProjectionCursor(
+                            stream="event-only",
+                            market_id=None,
+                            event_id=event_id,
+                            source_ordinal=source_ordinal,
+                            member_ordinal=len(members_payload) - 1,
+                        )
+                        continue
+                    end = min(len(members_payload), start + scan_budget)
+                    identity_ordinals: dict[str, list[int]] = {}
+                    for ordinal, raw_member in enumerate(members_payload):
+                        if isinstance(raw_member, dict) and isinstance(
+                            raw_member.get("id"), str
+                        ):
+                            identity_ordinals.setdefault(
+                                str(raw_member["id"]), []
+                            ).append(ordinal)
+                    for member_ordinal in range(start, end):
+                        raw_member = members_payload[member_ordinal]
+                        market_id = (
+                            str(raw_member["id"])
+                            if isinstance(raw_member, dict)
+                            and isinstance(raw_member.get("id"), str)
+                            else ""
+                        )
+                        scanned.append(
+                            {
+                                "event_id": event_id,
+                                "source_ordinal": source_ordinal,
+                                "member_ordinal": member_ordinal,
+                                "market_id": market_id,
+                                "raw_event": raw_event,
+                                "identity_ordinals": tuple(
+                                    identity_ordinals.get(market_id, ())
+                                ),
+                            }
+                        )
+                    scan_budget -= end - start
+                    scan_cursor = FreshProjectionCursor(
+                        stream="event-only",
+                        market_id=None,
+                        event_id=event_id,
+                        source_ordinal=source_ordinal,
+                        member_ordinal=end - 1,
+                    )
+                    if scan_budget == 0:
+                        exhausted_loaded_events = end == len(members_payload)
+                        if end < len(members_payload):
+                            exhausted_loaded_events = False
+                        break
+
+                scanned_market_ids = sorted(
                     {
-                        "kind": "event-only",
-                        "event_id": str(event_id),
-                        "source_ordinal": int(source_ordinal),
-                        "member_ordinal": int(member_ordinal),
-                        "market_id": str(market_id),
-                        "raw_event": json.loads(str(payload_json)),
+                        str(item["market_id"])
+                        for item in scanned
+                        if item["market_id"]
                     }
-                    for event_id, source_ordinal, member_ordinal, market_id, payload_json
-                    in event_rows
                 )
+                present_market_ids: set[str] = set()
+                if scanned_market_ids:
+                    scan_placeholders = ",".join("?" for _ in scanned_market_ids)
+                    present_market_ids = {
+                        str(row[0])
+                        for row in con.execute(
+                            "SELECT market_id FROM structure_sync_market_staging "
+                            f"WHERE window_id=? AND market_id IN ({scan_placeholders})",
+                            (window_id, *scanned_market_ids),
+                        )
+                    }
+                seen_event_only: set[tuple[str, str]] = set()
+                event_only_candidates: list[dict[str, object]] = []
+                for item in scanned:
+                    market_id = str(item["market_id"])
+                    ordinals = item["identity_ordinals"]
+                    assert isinstance(ordinals, tuple)
+                    if (
+                        not market_id
+                        or market_id in present_market_ids
+                        or (str(item["event_id"]), market_id) in seen_event_only
+                        or (ordinals and int(item["member_ordinal"]) != min(ordinals))
+                    ):
+                        continue
+                    seen_event_only.add((str(item["event_id"]), market_id))
+                    event_only_candidates.append(
+                        {
+                            "kind": "event-only",
+                            **item,
+                            "duplicate_identity": len(ordinals) > 1,
+                        }
+                    )
+                accepted_event_only = event_only_candidates[:remaining]
+                candidates.extend(accepted_event_only)
+                if len(event_only_candidates) > remaining:
+                    last_accepted = accepted_event_only[-1]
+                    scan_cursor = FreshProjectionCursor(
+                        stream="event-only",
+                        market_id=None,
+                        event_id=str(last_accepted["event_id"]),
+                        source_ordinal=int(last_accepted["source_ordinal"]),
+                        member_ordinal=int(last_accepted["member_ordinal"]),
+                    )
+                    exhausted_loaded_events = False
+
+                if scan_cursor is None:
+                    projection_complete = True
+                elif exhausted_loaded_events:
+                    more = con.execute(
+                        "SELECT 1 FROM structure_sync_event_staging "
+                        "WHERE window_id=? AND event_id>? LIMIT 1",
+                        (window_id, scan_cursor.event_id),
+                    ).fetchone()
+                    projection_complete = more is None
 
             market_ids = [str(item["market_id"]) for item in candidates]
             relations: dict[str, list[str]] = {}
@@ -4268,7 +4386,13 @@ class SQLiteStore:
                     events[str(event_id)] = json.loads(str(payload_json))
 
                 group_market_ids: set[str] = set(market_ids)
-                for raw_event in events.values():
+                candidate_events = [
+                    item["raw_event"]
+                    for item in candidates
+                    if isinstance(item.get("raw_event"), dict)
+                ]
+                for raw_event in (*events.values(), *candidate_events):
+                    assert isinstance(raw_event, dict)
                     raw_members = raw_event.get("markets")
                     if isinstance(raw_members, list):
                         group_market_ids.update(
@@ -4278,16 +4402,22 @@ class SQLiteStore:
                             and isinstance(member.get("id"), str)
                             and member["id"]
                         )
-                group_placeholders = ",".join("?" for _ in group_market_ids)
-                relation_counts = {
-                    str(market_id): int(count)
-                    for market_id, count in con.execute(
-                        "SELECT market_id,COUNT(DISTINCT event_id) FROM "
-                        "structure_sync_event_market_staging WHERE window_id=? "
-                        f"AND market_id IN ({group_placeholders}) GROUP BY market_id",
-                        (window_id, *sorted(group_market_ids)),
+                sorted_group_market_ids = sorted(group_market_ids)
+                for offset in range(0, len(sorted_group_market_ids), 500):
+                    group_batch = sorted_group_market_ids[offset : offset + 500]
+                    group_placeholders = ",".join("?" for _ in group_batch)
+                    relation_counts.update(
+                        {
+                            str(market_id): int(count)
+                            for market_id, count in con.execute(
+                                "SELECT market_id,COUNT(DISTINCT event_id) FROM "
+                                "structure_sync_event_market_staging WHERE "
+                                f"window_id=? AND market_id IN ({group_placeholders}) "
+                                "GROUP BY market_id",
+                                (window_id, *group_batch),
+                            )
+                        }
                     )
-                }
                 for row in con.execute(
                     "SELECT market_id,layer,category,detail,raw_payload FROM "
                     "structure_generation_issues WHERE snapshot_id=? "
@@ -4303,19 +4433,6 @@ class SQLiteStore:
                 if candidate["kind"] == "event-only":
                     raw_event = candidate["raw_event"]
                     assert isinstance(raw_event, dict)
-                    expected = event_only_member_quarantine_issue(
-                        raw_event,
-                        event_source_ordinal=int(candidate["source_ordinal"]),
-                        market_id=market_id,
-                    )
-                    certified = expected is not None and (
-                        expected["layer"],
-                        expected["category"],
-                        expected["detail"],
-                        expected["raw_payload"],
-                    ) in issues.get(market_id, ())
-                    if certified:
-                        continue
                     raw_members = raw_event.get("markets")
                     raw_member = (
                         raw_members[int(candidate["member_ordinal"])]
@@ -4383,6 +4500,20 @@ class SQLiteStore:
                         and isinstance(raw_event.get("negRiskMarketID"), str)
                         else None
                     )
+                    expected = event_only_member_quarantine_issue(
+                        raw_event,
+                        event_source_ordinal=int(candidate["source_ordinal"]),
+                        market_id=market_id,
+                    )
+                    certified = expected is not None and (
+                        expected["layer"],
+                        expected["category"],
+                        expected["detail"],
+                        expected["raw_payload"],
+                    ) in issues.get(market_id, ())
+                    duplicate_identity = candidate.get("duplicate_identity") is True
+                    if certified and not global_conflict and not duplicate_identity:
+                        continue
                     evidence = FreshMemberEvidence(
                         source_present=True,
                         current_active=envelope.active is True,
@@ -4394,7 +4525,8 @@ class SQLiteStore:
                         absent_from_event_catalog=False,
                         absent_from_market_catalog=True,
                         identity_revalidated=True,
-                        uncertified_event_only_member=True,
+                        duplicate_market_identity=duplicate_identity,
+                        uncertified_event_only_member=not certified,
                         group_truth=group_evidence,
                         source_ordinal=envelope.source_ordinal,
                         member_ordinal=envelope.member_ordinal,
@@ -4463,6 +4595,67 @@ class SQLiteStore:
                     taken_at_ms=0,
                 )
                 row = projected.row
+                strict_condition = raw_market.get("conditionId")
+                if not (
+                    isinstance(strict_condition, str)
+                    and strict_condition
+                    and strict_condition.strip() == strict_condition
+                ):
+                    strict_condition = None
+                raw_tokens: object = raw_market.get("clobTokenIds")
+                if isinstance(raw_tokens, str):
+                    try:
+                        raw_tokens = json.loads(raw_tokens)
+                    except json.JSONDecodeError:
+                        raw_tokens = None
+                strict_yes_token = (
+                    raw_tokens[0]
+                    if isinstance(raw_tokens, list)
+                    and len(raw_tokens) > 0
+                    and isinstance(raw_tokens[0], str)
+                    and raw_tokens[0]
+                    else None
+                )
+                strict_no_token = (
+                    raw_tokens[1]
+                    if isinstance(raw_tokens, list)
+                    and len(raw_tokens) > 1
+                    and isinstance(raw_tokens[1], str)
+                    and raw_tokens[1]
+                    else None
+                )
+                condition_id = (
+                    str(row["condition_id"])
+                    if row is not None
+                    and isinstance(row.get("condition_id"), str)
+                    and row["condition_id"]
+                    and strict_condition == row["condition_id"]
+                    else None
+                )
+                yes_token_id = (
+                    str(row["yes_token_id"])
+                    if row is not None
+                    and isinstance(row.get("yes_token_id"), str)
+                    and row["yes_token_id"]
+                    and strict_yes_token == row["yes_token_id"]
+                    else None
+                )
+                no_token_id = (
+                    str(row["no_token_id"])
+                    if row is not None
+                    and isinstance(row.get("no_token_id"), str)
+                    and row["no_token_id"]
+                    and strict_no_token == row["no_token_id"]
+                    else None
+                )
+                market_identity_valid = (
+                    row is not None
+                    and condition_id is not None
+                    and yes_token_id is not None
+                    and no_token_id is not None
+                    and type(row.get("neg_risk")) is bool
+                    and type(row.get("incomplete")) is bool
+                )
                 member = (
                     StructuralMemberIdentity(
                         event_id=source_member.event_id,
@@ -4471,13 +4664,13 @@ class SQLiteStore:
                         member_kind=source_member.member_kind,
                         active=source_member.active,
                         closed=source_member.closed,
-                        condition_id=str(row.get("condition_id") or ""),
-                        yes_token_id=str(row.get("yes_token_id") or ""),
-                        no_token_id=str(row.get("no_token_id") or ""),
-                        neg_risk=row.get("neg_risk") is True,
-                        incomplete=row.get("incomplete") is True,
+                        condition_id=condition_id,
+                        yes_token_id=yes_token_id,
+                        no_token_id=no_token_id,
+                        neg_risk=bool(row["neg_risk"]),
+                        incomplete=bool(row["incomplete"]),
                     )
-                    if source_member is not None and row is not None
+                    if source_member is not None and market_identity_valid
                     else None
                 )
                 group_evidence = (
@@ -4523,7 +4716,7 @@ class SQLiteStore:
                     duplicate_market_identity=(
                         len(exact_members) > 1 or raw_identity_count > 1
                     ),
-                    identity_revalidated=member is not None,
+                    identity_revalidated=True,
                     invalid_event_membership=source_member is None,
                 )
                 eligible = (
@@ -4539,19 +4732,63 @@ class SQLiteStore:
                 if eligible:
                     members.append(member)
                 else:
+                    raw_source_event = raw_events[0] if raw_events else {}
+                    raw_source_members = raw_source_event.get("markets")
+                    raw_source_member = next(
+                        (
+                            item
+                            for item in raw_source_members
+                            if isinstance(item, dict) and item.get("id") == market_id
+                        ),
+                        {},
+                    ) if isinstance(raw_source_members, list) else {}
                     diagnostic_member = member or StructureDriftCandidateEnvelope(
                         side="generation-only",
-                        event_id=(None if source_member is None else source_member.event_id),
-                        group_id=(None if source_member is None else source_member.group_id),
+                        event_id=(
+                            str(raw_source_event["id"])
+                            if isinstance(raw_source_event.get("id"), str)
+                            and raw_source_event["id"]
+                            else None
+                        ),
+                        group_id=(
+                            str(raw_source_event["negRiskMarketID"])
+                            if isinstance(
+                                raw_source_event.get("negRiskMarketID"), str
+                            )
+                            and raw_source_event["negRiskMarketID"]
+                            else None
+                        ),
                         market_id=market_id,
-                        member_kind=(None if source_member is None else source_member.member_kind),
-                        active=(None if source_member is None else source_member.active),
-                        closed=(None if source_member is None else source_member.closed),
-                        condition_id=(None if row is None else str(row.get("condition_id") or "")),
-                        yes_token_id=(None if row is None else str(row.get("yes_token_id") or "")),
-                        no_token_id=(None if row is None else str(row.get("no_token_id") or "")),
-                        neg_risk=(None if row is None else row.get("neg_risk") is True),
-                        incomplete=(None if row is None else row.get("incomplete") is True),
+                        member_kind=(
+                            source_member.member_kind
+                            if source_member is not None
+                            else None
+                        ),
+                        active=(
+                            raw_source_member.get("active")
+                            if type(raw_source_member.get("active")) is bool
+                            else None
+                        ),
+                        closed=(
+                            raw_source_member.get("closed")
+                            if type(raw_source_member.get("closed")) is bool
+                            else None
+                        ),
+                        condition_id=condition_id,
+                        yes_token_id=yes_token_id,
+                        no_token_id=no_token_id,
+                        neg_risk=(
+                            row.get("neg_risk")
+                            if row is not None
+                            and type(row.get("neg_risk")) is bool
+                            else None
+                        ),
+                        incomplete=(
+                            row.get("incomplete")
+                            if row is not None
+                            and type(row.get("incomplete")) is bool
+                            else None
+                        ),
                         source_ordinal=None,
                         member_ordinal=None,
                         raw_event_hash=None,
@@ -4572,8 +4809,8 @@ class SQLiteStore:
                         )
                     )
 
-            next_cursor = cursor
-            if candidates:
+            next_cursor = None if projection_complete else scan_cursor
+            if next_cursor is None and not projection_complete and candidates:
                 last = candidates[-1]
                 next_cursor = (
                     FreshProjectionCursor(
@@ -4599,6 +4836,41 @@ class SQLiteStore:
                 diagnostics=tuple(diagnostics),
                 candidates_processed=len(candidates),
             )
+
+    def advance_structure_drift_fresh_projection_commitment(
+        self,
+        *,
+        publication_id: str,
+        generation_snapshot_id: int,
+        commitment: FreshProjectionCommitment | None,
+        limit: int,
+        trace_callback: Callable[[str], None] | None = None,
+    ) -> FreshProjectionCommitment:
+        """Advance one bounded complete-projection count/root commitment."""
+        from polyarb.perception.structure_drift import (
+            FreshProjectionCommitment,
+            advance_fresh_projection_commitment,
+        )
+
+        current = commitment or FreshProjectionCommitment.initial(
+            publication_id=publication_id,
+            generation_snapshot_id=generation_snapshot_id,
+        )
+        if (
+            current.publication_id != publication_id
+            or current.generation_snapshot_id != generation_snapshot_id
+        ):
+            raise ValueError("fresh-projection-commitment-identity-mismatch")
+        if current.complete:
+            return current
+        chunk = self.fetch_structure_drift_fresh_projection_chunk(
+            publication_id=publication_id,
+            generation_snapshot_id=generation_snapshot_id,
+            cursor=current.cursor,
+            limit=limit,
+            trace_callback=trace_callback,
+        )
+        return advance_fresh_projection_commitment(current, chunk)
 
     def fetch_structure_drift_member_chunk(
         self,

@@ -88,6 +88,118 @@ class FreshProjectionChunk:
 
 
 @dataclass(frozen=True)
+class FreshProjectionCommitment:
+    publication_id: str
+    generation_snapshot_id: int
+    cursor: FreshProjectionCursor | None
+    candidates_processed: int
+    member_count: int
+    member_digest_state: str
+    diagnostic_count: int
+    diagnostic_digest_state: str
+    complete: bool
+
+    @classmethod
+    def initial(
+        cls,
+        *,
+        publication_id: str,
+        generation_snapshot_id: int,
+    ) -> FreshProjectionCommitment:
+        if not publication_id or generation_snapshot_id < 1:
+            raise ValueError("invalid-fresh-projection-commitment-identity")
+        return cls(
+            publication_id=publication_id,
+            generation_snapshot_id=generation_snapshot_id,
+            cursor=None,
+            candidates_processed=0,
+            member_count=0,
+            member_digest_state=RowChainSHA256.new("projection-member").to_json(),
+            diagnostic_count=0,
+            diagnostic_digest_state=RowChainSHA256.new(
+                "diagnostic/unclassified"
+            ).to_json(),
+            complete=False,
+        )
+
+    @property
+    def root(self) -> str:
+        return RowChainSHA256.from_json(
+            self.member_digest_state,
+            expected_domain="projection-member",
+        ).hexdigest()
+
+    @property
+    def diagnostic_root(self) -> str:
+        return RowChainSHA256.from_json(
+            self.diagnostic_digest_state,
+            expected_domain="diagnostic/unclassified",
+        ).hexdigest()
+
+    def matches_generation(self, *, count: int, root: str) -> bool:
+        return (
+            self.complete
+            and self.diagnostic_count == 0
+            and type(count) is int
+            and count >= 0
+            and isinstance(root, str)
+            and len(root) == 64
+            and self.member_count == count
+            and self.root == root
+        )
+
+
+def advance_fresh_projection_commitment(
+    commitment: FreshProjectionCommitment,
+    chunk: FreshProjectionChunk,
+) -> FreshProjectionCommitment:
+    """Advance a bounded canonical projection commitment without retaining rows."""
+    if commitment.complete:
+        raise ValueError("fresh-projection-commitment-complete")
+    member_digest = RowChainSHA256.from_json(
+        commitment.member_digest_state,
+        expected_domain="projection-member",
+    )
+    if member_digest.count != commitment.member_count:
+        raise ValueError("fresh-projection-member-state-count-mismatch")
+    for member in chunk.members:
+        member_digest.update(_member_tuple(member))
+    diagnostic_digest = RowChainSHA256.from_json(
+        commitment.diagnostic_digest_state,
+        expected_domain="diagnostic/unclassified",
+    )
+    if diagnostic_digest.count != commitment.diagnostic_count:
+        raise ValueError("fresh-projection-diagnostic-state-count-mismatch")
+    if not 0 <= chunk.candidates_processed <= 500:
+        raise ValueError("invalid-fresh-projection-chunk-count")
+    for diagnostic in chunk.diagnostics:
+        envelope = diagnostic.envelope
+        diagnostic_digest.update(
+            (
+                diagnostic.code,
+                *envelope.identity_fields.values(),
+                envelope.source_ordinal,
+                envelope.member_ordinal,
+                envelope.raw_event_hash,
+                envelope.raw_market_hash,
+            )
+        )
+    return FreshProjectionCommitment(
+        publication_id=commitment.publication_id,
+        generation_snapshot_id=commitment.generation_snapshot_id,
+        cursor=chunk.cursor,
+        candidates_processed=(
+            commitment.candidates_processed + chunk.candidates_processed
+        ),
+        member_count=commitment.member_count + len(chunk.members),
+        member_digest_state=member_digest.to_json(),
+        diagnostic_count=commitment.diagnostic_count + len(chunk.diagnostics),
+        diagnostic_digest_state=diagnostic_digest.to_json(),
+        complete=chunk.cursor is None,
+    )
+
+
+@dataclass(frozen=True)
 class FreshGroupEvidence:
     event_id: str
     group_id: str

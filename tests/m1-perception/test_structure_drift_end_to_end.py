@@ -17,6 +17,7 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V2,
 )
 from polyarb.perception.structure_drift import (
+    FreshProjectionCommitment,
     _member_tuple,
     project_legacy_compatible_event,
     project_legacy_compatible_market,
@@ -721,19 +722,14 @@ def _drift_store(
 
 def test_complete_projection_detects_generation_omission(tmp_path: Path) -> None:
     store = _drift_store(tmp_path, omit_generation_market_id="addition")
-    cursor = None
-    projected = []
-    while True:
-        chunk = store.fetch_structure_drift_fresh_projection_chunk(
+    commitment: FreshProjectionCommitment | None = None
+    while commitment is None or not commitment.complete:
+        commitment = store.advance_structure_drift_fresh_projection_commitment(
             publication_id="publication-2",
             generation_snapshot_id=2,
-            cursor=cursor,
+            commitment=commitment,
             limit=1,
         )
-        projected.extend(chunk.members)
-        if chunk.candidates_processed < 1:
-            break
-        cursor = chunk.cursor
 
     generation = store.fetch_structure_drift_member_chunk(
         snapshot_id=2,
@@ -741,17 +737,19 @@ def test_complete_projection_detects_generation_omission(tmp_path: Path) -> None
         after_market_id=None,
         limit=500,
     )
-    projection_digest = RowChainSHA256.new("projection-member")
-    generation_digest = RowChainSHA256.new("generation-member")
-    for member in sorted(projected, key=_member_tuple):
-        projection_digest.update(_member_tuple(member))
+    generation_digest = RowChainSHA256.new("projection-member")
     for member in generation:
         generation_digest.update(_member_tuple(member))
 
-    assert {member.market_id for member in projected} == {"addition", "shared"}
     assert {member.market_id for member in generation} == {"shared"}
-    assert len(projected) != len(generation)
-    assert projection_digest.hexdigest() != generation_digest.hexdigest()
+    assert commitment.complete is True
+    assert commitment.member_count == 2
+    assert commitment.member_count != len(generation)
+    assert commitment.root != generation_digest.hexdigest()
+    assert commitment.matches_generation(
+        count=len(generation),
+        root=generation_digest.hexdigest(),
+    ) is False
 
 
 def _reshape_as_production_845_848(store: SQLiteStore) -> None:
