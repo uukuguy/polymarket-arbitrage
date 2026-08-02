@@ -3822,12 +3822,13 @@ class SQLiteStore:
         }
         with sqlite3.connect(self._db_path) as read_con:
             publication = read_con.execute(
-                "SELECT snapshot_id,window_id,status,expected_counts_json,"
+                "SELECT p.snapshot_id,p.window_id,p.status,p.expected_counts_json,"
                 "committed_counts_json,certification_component,"
                 "certification_row_cursor,certification_hash,"
-                "certification_counts_json,s.taken_at_ms "
+                "certification_counts_json,s.taken_at_ms,window.status "
                 "FROM structure_publications p JOIN snapshots s ON "
-                "s.id=p.snapshot_id WHERE p.publication_id=?",
+                "s.id=p.snapshot_id JOIN structure_sync_windows window ON "
+                "window.id=p.window_id WHERE p.publication_id=?",
                 (publication_id,),
             ).fetchone()
             if publication is None or publication[2] != "writing":
@@ -3852,6 +3853,8 @@ class SQLiteStore:
                 )
             if component not in certification_components:
                 raise ValueError("unknown-structure-certification-component")
+            if component in _STRUCTURE_SOURCE_COMPONENTS and publication[10] != "complete":
+                raise ValueError("source-truth-invalid")
             cursor = None if publication[6] is None else str(publication[6])
             prior_hash = str(publication[7] or ("0" * 64))
             scanned_counts = {
@@ -4030,7 +4033,9 @@ class SQLiteStore:
                         "relation.source_ordinal,issue.layer,issue.category,issue.detail,"
                         "issue.raw_payload,generated_market.market_id,"
                         "generated_member.market_id FROM "
-                        "structure_sync_event_market_staging relation LEFT JOIN "
+                        "structure_sync_event_market_staging relation JOIN "
+                        "structure_sync_windows source_window ON "
+                        "source_window.id=relation.window_id LEFT JOIN "
                         "structure_sync_market_staging source_market ON "
                         "source_market.window_id=relation.window_id AND "
                         "source_market.market_id=relation.market_id LEFT JOIN "
@@ -4042,7 +4047,8 @@ class SQLiteStore:
                         "structure_generation_memberships generated_member ON "
                         "generated_member.snapshot_id=? AND "
                         "generated_member.market_id=relation.market_id WHERE "
-                        "relation.window_id=? AND source_market.market_id IS NULL "
+                        "relation.window_id=? AND source_window.status='complete' "
+                        "AND source_market.market_id IS NULL "
                         f"AND relation.event_id IN ({placeholders}) AND 1=(SELECT "
                         "COUNT(DISTINCT other.event_id) FROM "
                         "structure_sync_event_market_staging other WHERE "

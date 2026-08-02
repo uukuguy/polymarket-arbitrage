@@ -2779,6 +2779,65 @@ def test_bulk_source_certification_matches_per_event_reference_projection(
         raise AssertionError("bulk source certification did not reach comparison")
 
 
+@pytest.mark.parametrize("drift_status", ("failed", "published"))
+def test_bulk_event_only_evidence_rejects_post_seal_window_status_drift(
+    tmp_path: Path,
+    drift_status: str,
+) -> None:
+    store = SQLiteStore(tmp_path / "window-drift.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=[{
+            "id": "event-1", "slug": "event-1", "negRisk": True,
+            "enableNegRisk": True, "negRiskAugmented": False,
+            "negRiskMarketID": "group-1", "markets": [{
+                "id": "event-only", "active": True, "closed": False,
+                "negRiskOther": False,
+            }],
+        }], finished_at_ms=101,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=[], finished_at_ms=102,
+    )
+    assert store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
+    )["completed"] is True
+    publication = store.begin_structure_publication(
+        window_id=window["id"],
+        snapshot_metadata={
+            "snapshot_id": 1, "taken_at_ms": 1_000, "mode": "full",
+            "data_product": "structure", "expected_counts": COMPONENT_COUNTS,
+        },
+        now_ms=104,
+    )
+    for component in (
+        "events", "event_tags", "memberships", "group_truth", "markets", "issues"
+    ):
+        _normalize_component_to_done(store, publication, component)
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=200)
+    now_ms = 201
+    while store.structure_certification_checkpoint(publication.publication_id)[0] != (
+        "source_events"
+    ):
+        store.advance_structure_certification_chunk(
+            publication.publication_id, max_rows=500, now_ms=now_ms
+        )
+        now_ms += 1
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_sync_windows SET status=?,failure_reason='drift' "
+            "WHERE id=?",
+            (drift_status, window["id"]),
+        )
+    with pytest.raises(ValueError, match="source-truth-invalid"):
+        store.advance_structure_certification_chunk(
+            publication.publication_id, max_rows=500, now_ms=now_ms
+        )
+
+
 def test_certification_keysets_legacy_null_source_ordinals(tmp_path: Path) -> None:
     """Legacy NULL ordinals must not make certification skip the remaining source."""
     store = SQLiteStore(tmp_path / "null-ordinal.db")
