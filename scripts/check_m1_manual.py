@@ -38,6 +38,7 @@ M1_MAKE_TARGETS = {
     "structure-generation-status",
     "structure-generation-backfill",
     "structure-generation-compare",
+    "structure-generation-drift-compare",
     "structure-generation-cleanup",
     "overview",
     "list-recipes",
