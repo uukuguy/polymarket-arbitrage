@@ -595,6 +595,14 @@ async def test_snapshot_subprocess_accepts_exact_contract_supersession_checkpoin
     assert result.cursor is None
 
 
+def test_shared_publication_stage_vocabulary_includes_supersession() -> None:
+    from polyarb.perception.structure_contract import (
+        STRUCTURE_PUBLICATION_CHECKPOINT_STAGES,
+    )
+
+    assert "superseded" in STRUCTURE_PUBLICATION_CHECKPOINT_STAGES
+
+
 @pytest.mark.asyncio
 async def test_actual_child_pipe_carries_contract_supersession_to_parent() -> None:
     from polyarb.daemon.scheduler import (

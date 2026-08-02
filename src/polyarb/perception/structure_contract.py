@@ -27,6 +27,7 @@ STRUCTURE_PUBLICATION_CHECKPOINT_STAGES = (
     "normalizing",
     "certifying",
     "ready",
+    "superseded",
 )
 STRUCTURE_PUBLICATION_MAX_ROWS = 500
 STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S = 10.0
