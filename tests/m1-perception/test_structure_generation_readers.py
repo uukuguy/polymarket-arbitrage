@@ -413,6 +413,161 @@ def test_drift_progress_protects_published_source_window_from_retention(
         ).fetchone() == ("published", 1)
 
 
+def test_drift_initialization_pins_current_authenticated_identity_once(
+    generation_db: Path,
+) -> None:
+    with sqlite3.connect(generation_db) as con:
+        # Snapshot 2 is the fresh generation; snapshot 1 remains the latest
+        # complete legacy identity because generation 2 owns no legacy coverage.
+        con.execute("DELETE FROM snapshot_source_coverage WHERE snapshot_id=2")
+        con.execute(
+            "UPDATE structure_publications SET normalization_contract_version='contract-v1',"
+            "certification_counts_json=? WHERE publication_id='test-publication-2'",
+            (
+                json.dumps(
+                    {
+                        "events": 1,
+                        "event_tags": 0,
+                        "memberships": 2,
+                        "group_truth": 1,
+                        "markets": 2,
+                        "issues": 0,
+                        "source_events": 0,
+                        "source_markets": 0,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
+        legacy_universe, legacy_truth = sqlite_store_module._structure_universe_hash(
+            con,
+            snapshot_id=1,
+            generation=False,
+        )
+        generation_universe, generation_truth = (
+            sqlite_store_module._structure_universe_hash(
+                con,
+                snapshot_id=2,
+                generation=True,
+            )
+        )
+        validation_hash = str(
+            con.execute(
+                "SELECT validation_hash FROM structure_publications "
+                "WHERE publication_id='test-publication-2'"
+            ).fetchone()[0]
+        )
+        created_at_ms = 2_001
+        receipt_digest = sqlite_store_module._comparison_receipt_digest(
+            generation_snapshot_id=2,
+            publication_id="test-publication-2",
+            legacy_snapshot_id=1,
+            legacy_market_count=2,
+            generation_market_count=2,
+            legacy_universe_hash=legacy_universe,
+            generation_universe_hash=generation_universe,
+            legacy_source_truth_hash=legacy_truth,
+            generation_source_truth_hash=generation_truth,
+            generation_validation_hash=validation_hash,
+            created_at_ms=created_at_ms,
+        )
+        con.execute("DROP TRIGGER trg_structure_comparison_receipt_delete")
+        con.execute(
+            "DELETE FROM structure_generation_comparison_receipts "
+            "WHERE generation_snapshot_id=2"
+        )
+        con.execute(
+            "INSERT INTO structure_generation_comparison_receipts("
+            "generation_snapshot_id,publication_id,legacy_snapshot_id,"
+            "legacy_market_count,generation_market_count,legacy_universe_hash,"
+            "generation_universe_hash,legacy_source_truth_hash,"
+            "generation_source_truth_hash,generation_validation_hash,created_at_ms,"
+            "receipt_digest) VALUES (2,'test-publication-2',1,2,2,?,?,?,?,?,?,?)",
+            (
+                legacy_universe,
+                generation_universe,
+                legacy_truth,
+                generation_truth,
+                validation_hash,
+                created_at_ms,
+                receipt_digest,
+            ),
+        )
+        counts_json = str(
+            con.execute(
+                "SELECT committed_counts_json FROM structure_publications "
+                "WHERE publication_id='test-publication-2'"
+            ).fetchone()[0]
+        )
+        con.execute(
+            "UPDATE current_structure_generation SET snapshot_id=2,"
+            "publication_id='test-publication-2',validation_hash=?,counts_json=?,"
+            "certification_component='bounded-complete',comparison_receipt_digest=?,"
+            "switched_at_ms=2001 WHERE id=1",
+            (validation_hash, counts_json, receipt_digest),
+        )
+
+    store = SQLiteStore(generation_db)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    assert store.initialize_structure_drift_comparison(now_ms=3_001) == comparison_id
+    with sqlite3.connect(generation_db) as con:
+        row = con.execute(
+            "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,window_id,"
+            "normalization_contract_version,exact_receipt_digest,"
+            "pointer_validation_hash,generation_certification_hash,source_event_count,"
+            "source_market_count,source_event_hash,source_market_hash,"
+            "source_identity_hash,phase,created_at_ms FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        assert row == (
+            1,
+            2,
+            "test-publication-2",
+            "test-window-2",
+            "contract-v1",
+            receipt_digest,
+            validation_hash,
+            validation_hash,
+            0,
+            0,
+            None,
+            None,
+            None,
+            "source-events",
+            3_000,
+        )
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_progress"
+        ).fetchone() == (1,)
+
+    events = store.advance_structure_drift_comparison_chunk(
+        comparison_id,
+        max_rows=500,
+        now_ms=3_002,
+    )
+    assert events.component == "source-markets"
+    assert events.rows_processed == 0
+    markets = store.advance_structure_drift_comparison_chunk(
+        comparison_id,
+        max_rows=500,
+        now_ms=3_003,
+    )
+    assert markets.component == "generation-members"
+    assert markets.rows_processed == 0
+    with sqlite3.connect(generation_db) as con:
+        source = con.execute(
+            "SELECT source_event_hash,source_market_hash,source_identity_hash,phase "
+            "FROM structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+    empty_hash = hashlib.sha256(b"[]").hexdigest()
+    assert source[0:2] == (empty_hash, empty_hash)
+    assert len(str(source[2])) == 64
+    assert source[3] == "generation-members"
+
+
 def test_generation_operations_report_pressure_and_reclaim_one_safe_chain(
     tmp_path: Path,
 ) -> None:

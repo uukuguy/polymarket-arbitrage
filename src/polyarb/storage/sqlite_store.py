@@ -3471,6 +3471,390 @@ class SQLiteStore:
             for row in rows
         ]
 
+    def initialize_structure_drift_comparison(self, *, now_ms: int) -> str:
+        """Pin one current exact-receipt identity for bounded drift comparison."""
+        if now_ms < 0:
+            raise ValueError("invalid-structure-drift-comparison-time")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT current.snapshot_id,current.publication_id,"
+                "current.validation_hash,current.comparison_receipt_digest,"
+                "publication.window_id,publication.normalization_contract_version,"
+                "publication.validation_hash,publication.certification_hash,"
+                "publication.certification_counts_json,publication.status,window.status,"
+                "window.published_snapshot_id,receipt.legacy_snapshot_id,"
+                "receipt.legacy_market_count,receipt.generation_market_count,"
+                "receipt.legacy_universe_hash,receipt.generation_universe_hash,"
+                "receipt.legacy_source_truth_hash,receipt.generation_source_truth_hash,"
+                "receipt.generation_validation_hash,receipt.created_at_ms,"
+                "receipt.receipt_digest FROM current_structure_generation current JOIN "
+                "structure_publications publication ON "
+                "publication.publication_id=current.publication_id AND "
+                "publication.snapshot_id=current.snapshot_id JOIN "
+                "structure_sync_windows window ON window.id=publication.window_id JOIN "
+                "structure_generation_comparison_receipts receipt ON "
+                "receipt.generation_snapshot_id=current.snapshot_id AND "
+                "receipt.publication_id=current.publication_id WHERE current.id=1"
+            ).fetchone()
+            if (
+                row is None
+                or row[3] != row[21]
+                or row[5] is None
+                or not str(row[5])
+                or row[6] != row[2]
+                or not isinstance(row[7], str)
+                or len(row[7]) != 64
+                or row[9] != "published"
+                or row[10] != "published"
+                or row[11] != row[0]
+                or row[19] != row[2]
+            ):
+                raise ValueError("structure-drift-current-identity-invalid")
+            legacy_identity = self._comparison_legacy_identity(con)
+            if legacy_identity is None or legacy_identity[0] != int(row[12]):
+                raise ValueError("structure-drift-legacy-identity-invalid")
+            authenticated_exact_digest = _comparison_receipt_digest(
+                generation_snapshot_id=int(row[0]),
+                publication_id=str(row[1]),
+                legacy_snapshot_id=int(row[12]),
+                legacy_market_count=int(row[13]),
+                generation_market_count=int(row[14]),
+                legacy_universe_hash=str(row[15]),
+                generation_universe_hash=str(row[16]),
+                legacy_source_truth_hash=str(row[17]),
+                generation_source_truth_hash=str(row[18]),
+                generation_validation_hash=str(row[19]),
+                created_at_ms=int(row[20]),
+            )
+            if authenticated_exact_digest != row[21]:
+                raise ValueError("structure-drift-exact-receipt-invalid")
+            if (
+                int(row[13]) == int(row[14])
+                and row[15] == row[16]
+                and row[17] == row[18]
+            ):
+                raise ValueError("structure-drift-exact-already-matches")
+            try:
+                certification_counts = json.loads(str(row[8]))
+                source_event_count = certification_counts["source_events"]
+                source_market_count = certification_counts["source_markets"]
+            except (KeyError, TypeError, json.JSONDecodeError) as error:
+                raise ValueError("structure-drift-source-counts-invalid") from error
+            if (
+                type(source_event_count) is not int
+                or source_event_count < 0
+                or type(source_market_count) is not int
+                or source_market_count < 0
+            ):
+                raise ValueError("structure-drift-source-counts-invalid")
+            identity = (
+                *legacy_identity,
+                int(row[0]),
+                str(row[1]),
+                str(row[4]),
+                str(row[5]),
+                str(row[21]),
+                str(row[2]),
+                str(row[7]),
+                source_event_count,
+                source_market_count,
+            )
+            comparison_id = hashlib.sha256(
+                json.dumps(identity, separators=(",", ":")).encode()
+            ).hexdigest()
+            active = con.execute(
+                "SELECT comparison_id FROM structure_generation_drift_progress "
+                "WHERE phase NOT IN ('sealed','stale') LIMIT 1"
+            ).fetchone()
+            if active is not None and active[0] != comparison_id:
+                raise ValueError("structure-drift-active-identity-mismatch")
+            source_state = SerializableSHA256.new()
+            source_state.update(b"[")
+            group_state = SerializableSHA256.new()
+            group_state.update(b"[")
+            con.execute(
+                "INSERT OR IGNORE INTO structure_generation_drift_progress("
+                "comparison_id,legacy_snapshot_id,generation_snapshot_id,publication_id,"
+                "window_id,normalization_contract_version,exact_receipt_digest,"
+                "pointer_validation_hash,generation_certification_hash,"
+                "source_event_count,source_market_count,source_event_hash,"
+                "source_market_hash,source_identity_hash,phase,row_cursor_json,"
+                "digest_state_json,class_counts_json,class_digests_json,created_at_ms,"
+                "checkpoint_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,"
+                "'source-events',NULL,?,?,?, ?,?)",
+                (
+                    comparison_id,
+                    int(row[12]),
+                    int(row[0]),
+                    str(row[1]),
+                    str(row[4]),
+                    str(row[5]),
+                    str(row[21]),
+                    str(row[2]),
+                    str(row[7]),
+                    source_event_count,
+                    source_market_count,
+                    source_state.to_json(),
+                    json.dumps(
+                        {"phase_row_count": 0, "source_group_truth_count": 0},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    json.dumps(
+                        {"source_group_truth_state": group_state.to_json()},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    now_ms,
+                    now_ms,
+                ),
+            )
+            con.execute("COMMIT")
+            return comparison_id
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def advance_structure_drift_comparison_chunk(
+        self,
+        comparison_id: str,
+        *,
+        max_rows: int,
+        now_ms: int,
+    ) -> StructureCertificationChunk:
+        """Advance one source projection chunk under immutable identity CAS."""
+        from polyarb.perception.structure_drift import project_legacy_compatible_event
+
+        if (
+            not comparison_id
+            or not 1 <= max_rows <= STRUCTURE_PUBLICATION_MAX_ROWS
+            or now_ms < 0
+        ):
+            raise ValueError("invalid-structure-drift-comparison-chunk")
+        # Recompute the complete current identity before reading a source chunk.
+        if self.initialize_structure_drift_comparison(now_ms=now_ms) != comparison_id:
+            raise ValueError("structure-drift-current-identity-invalid")
+        with sqlite3.connect(self._db_path) as read_con:
+            progress = read_con.execute(
+                "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,"
+                "window_id,normalization_contract_version,exact_receipt_digest,"
+                "pointer_validation_hash,generation_certification_hash,"
+                "source_event_count,source_market_count,source_event_hash,"
+                "source_market_hash,source_identity_hash,phase,row_cursor_json,"
+                "digest_state_json,class_counts_json,class_digests_json,checkpoint_at_ms "
+                "FROM structure_generation_drift_progress WHERE comparison_id=?",
+                (comparison_id,),
+            ).fetchone()
+            if progress is None or progress[13] not in {"source-events", "source-markets"}:
+                raise ValueError("structure-drift-source-phase-invalid")
+            phase = str(progress[13])
+            cursor = None if progress[14] is None else json.loads(str(progress[14]))
+            digest = SerializableSHA256.from_json(str(progress[15]))
+            counts = json.loads(str(progress[16]))
+            digests = json.loads(str(progress[17]))
+            phase_count = counts.get("phase_row_count")
+            if type(phase_count) is not int or phase_count < 0:
+                raise ValueError("structure-drift-progress-invalid")
+            if phase == "source-events":
+                rows = self.fetch_structure_drift_event_source_chunk(
+                    publication_id=str(progress[2]),
+                    generation_snapshot_id=int(progress[1]),
+                    after_event_id=cursor,
+                    limit=max_rows,
+                )
+                group_state_value = digests.get("source_group_truth_state")
+                group_count = counts.get("source_group_truth_count")
+                if not isinstance(group_state_value, str) or type(group_count) is not int:
+                    raise ValueError("structure-drift-progress-invalid")
+                group_digest = SerializableSHA256.from_json(group_state_value)
+                for ordinal, event_id, raw, market_ids in rows:
+                    if phase_count:
+                        digest.update(b",")
+                    digest.update(
+                        json.dumps(
+                            (ordinal, event_id, raw),
+                            ensure_ascii=True,
+                            separators=(",", ":"),
+                        ).encode()
+                    )
+                    phase_count += 1
+                    projection = project_legacy_compatible_event(
+                        raw,
+                        event_source_ordinal=ordinal,
+                        complete_market_ids=market_ids,
+                    )
+                    for truth in projection.truths:
+                        if group_count:
+                            group_digest.update(b",")
+                        group_digest.update(
+                            json.dumps(
+                                (
+                                    truth.event_id,
+                                    truth.group_id,
+                                    truth.neg_risk_type,
+                                    truth.expected_member_count,
+                                    truth.active_named_count,
+                                    truth.membership_hash,
+                                    truth.quality,
+                                    truth.reason,
+                                ),
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ).encode()
+                        )
+                        group_count += 1
+                counts["source_group_truth_count"] = group_count
+                digests["source_group_truth_state"] = group_digest.to_json()
+                next_cursor = None if not rows else rows[-1][1]
+            else:
+                market_rows = self.fetch_structure_drift_market_source_chunk(
+                    publication_id=str(progress[2]),
+                    generation_snapshot_id=int(progress[1]),
+                    after_market_id=cursor,
+                    limit=max_rows,
+                )
+                rows = market_rows
+                for market_id, raw, event_ids, _taken_at_ms in market_rows:
+                    if phase_count:
+                        digest.update(b",")
+                    digest.update(
+                        json.dumps(
+                            (market_id, raw, event_ids),
+                            ensure_ascii=True,
+                            separators=(",", ":"),
+                        ).encode()
+                    )
+                    phase_count += 1
+                next_cursor = None if not rows else rows[-1][0]
+            counts["phase_row_count"] = phase_count
+            prior_checkpoint = int(progress[18])
+        writer = self._connect_writer()
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+            current = writer.execute(
+                "SELECT current.snapshot_id,current.publication_id,"
+                "current.validation_hash,current.comparison_receipt_digest,"
+                "publication.window_id,publication.normalization_contract_version,"
+                "publication.certification_hash,publication.status,window.status,"
+                "window.published_snapshot_id FROM current_structure_generation current "
+                "JOIN structure_publications publication ON "
+                "publication.publication_id=current.publication_id AND "
+                "publication.snapshot_id=current.snapshot_id JOIN "
+                "structure_sync_windows window ON window.id=publication.window_id "
+                "WHERE current.id=1"
+            ).fetchone()
+            legacy = self._comparison_legacy_identity(writer)
+            if (
+                current is None
+                or legacy is None
+                or legacy[0] != int(progress[0])
+                or current[0] != int(progress[1])
+                or current[1] != progress[2]
+                or current[2] != progress[6]
+                or current[3] != progress[5]
+                or current[4] != progress[3]
+                or current[5] != progress[4]
+                or current[6] != progress[7]
+                or current[7] != "published"
+                or current[8] != "published"
+                or current[9] != int(progress[1])
+            ):
+                raise ValueError("structure-drift-current-identity-invalid")
+            if rows:
+                changed = writer.execute(
+                    "UPDATE structure_generation_drift_progress SET row_cursor_json=?,"
+                    "digest_state_json=?,class_counts_json=?,class_digests_json=?,"
+                    "checkpoint_at_ms=? WHERE comparison_id=? AND phase=? AND "
+                    "checkpoint_at_ms=?",
+                    (
+                        json.dumps(next_cursor),
+                        digest.to_json(),
+                        json.dumps(counts, sort_keys=True, separators=(",", ":")),
+                        json.dumps(digests, sort_keys=True, separators=(",", ":")),
+                        now_ms,
+                        comparison_id,
+                        phase,
+                        prior_checkpoint,
+                    ),
+                )
+                next_phase = phase
+            else:
+                expected_count = int(progress[8] if phase == "source-events" else progress[9])
+                if phase_count != expected_count:
+                    raise ValueError("structure-drift-source-count-mismatch")
+                digest.update(b"]")
+                final_hash = digest.hexdigest()
+                next_digest = SerializableSHA256.new()
+                next_digest.update(b"[")
+                counts["phase_row_count"] = 0
+                if phase == "source-events":
+                    group_digest = SerializableSHA256.from_json(
+                        str(digests.pop("source_group_truth_state"))
+                    )
+                    group_digest.update(b"]")
+                    digests["source_group_truth_hash"] = group_digest.hexdigest()
+                    next_phase = "source-markets"
+                    source_event_hash = final_hash
+                    source_market_hash = None
+                    source_identity_hash = None
+                else:
+                    next_phase = "generation-members"
+                    source_event_hash = str(progress[10])
+                    source_market_hash = final_hash
+                    source_identity_hash = hashlib.sha256(
+                        json.dumps(
+                            (
+                                int(progress[8]),
+                                source_event_hash,
+                                int(progress[9]),
+                                source_market_hash,
+                            ),
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest()
+                changed = writer.execute(
+                    "UPDATE structure_generation_drift_progress SET phase=?,"
+                    "row_cursor_json=NULL,digest_state_json=?,class_counts_json=?,"
+                    "class_digests_json=?,source_event_hash=COALESCE(?,source_event_hash),"
+                    "source_market_hash=COALESCE(?,source_market_hash),"
+                    "source_identity_hash=COALESCE(?,source_identity_hash),"
+                    "checkpoint_at_ms=? WHERE comparison_id=? AND phase=? AND "
+                    "checkpoint_at_ms=?",
+                    (
+                        next_phase,
+                        next_digest.to_json(),
+                        json.dumps(counts, sort_keys=True, separators=(",", ":")),
+                        json.dumps(digests, sort_keys=True, separators=(",", ":")),
+                        source_event_hash,
+                        source_market_hash,
+                        source_identity_hash,
+                        now_ms,
+                        comparison_id,
+                        phase,
+                        prior_checkpoint,
+                    ),
+                )
+            if changed.rowcount != 1:
+                raise StructurePublicationCursorError("structure-drift-cursor-mismatch")
+            writer.execute("COMMIT")
+        except BaseException:
+            if writer.in_transaction:
+                writer.execute("ROLLBACK")
+            raise
+        finally:
+            writer.close()
+        return StructureCertificationChunk(
+            next_phase,
+            None if not rows else json.dumps(next_cursor),
+            len(rows),
+            False,
+        )
+
     def fetch_structure_drift_fresh_evidence(
         self,
         *,
