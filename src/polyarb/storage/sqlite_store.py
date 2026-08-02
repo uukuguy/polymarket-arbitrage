@@ -3532,6 +3532,66 @@ class SQLiteStore:
             for row in rows
         ]
 
+    def fetch_structure_drift_group_truth_chunk(
+        self,
+        *,
+        publication_id: str,
+        generation_snapshot_id: int,
+        after_key: tuple[str, str] | None,
+        limit: int,
+        trace_callback: Callable[[str], None] | None = None,
+    ) -> list[tuple[object, ...]]:
+        """Read one authenticated generation group-truth keyset."""
+        if (
+            not publication_id
+            or generation_snapshot_id < 1
+            or not 1 <= limit <= STRUCTURE_PUBLICATION_MAX_ROWS
+            or (
+                after_key is not None
+                and (len(after_key) != 2 or not after_key[0] or not after_key[1])
+            )
+        ):
+            raise ValueError("invalid-structure-drift-group-truth-chunk")
+        after_event_id = None if after_key is None else after_key[0]
+        after_group_id = None if after_key is None else after_key[1]
+        with sqlite3.connect(self._db_path) as con:
+            if trace_callback is not None:
+                con.set_trace_callback(trace_callback)
+            identity = con.execute(
+                "SELECT p.status,p.validation_hash,p.certification_hash,window.status,"
+                "window.published_snapshot_id FROM structure_publications p JOIN "
+                "structure_sync_windows window ON window.id=p.window_id WHERE "
+                "p.publication_id=? AND p.snapshot_id=?",
+                (publication_id, generation_snapshot_id),
+            ).fetchone()
+            if (
+                identity is None
+                or identity[0] != "published"
+                or not isinstance(identity[1], str)
+                or len(identity[1]) != 64
+                or not isinstance(identity[2], str)
+                or len(identity[2]) != 64
+                or identity[3] != "published"
+                or identity[4] != generation_snapshot_id
+            ):
+                raise ValueError("structure-drift-source-identity-mismatch")
+            rows = con.execute(
+                "SELECT event_id,neg_risk_market_id,neg_risk_type,"
+                "expected_member_count,active_named_count,membership_hash,quality,"
+                "reason FROM structure_generation_group_truth WHERE snapshot_id=? AND "
+                "(? IS NULL OR event_id>? OR (event_id=? AND "
+                "neg_risk_market_id>?)) ORDER BY event_id,neg_risk_market_id LIMIT ?",
+                (
+                    generation_snapshot_id,
+                    after_event_id,
+                    after_event_id,
+                    after_event_id,
+                    after_group_id,
+                    limit,
+                ),
+            ).fetchall()
+        return [tuple(row) for row in rows]
+
     def initialize_structure_drift_comparison(self, *, now_ms: int) -> str:
         """Pin one current exact-receipt identity for bounded drift comparison."""
         if now_ms < 0:
@@ -3711,6 +3771,12 @@ class SQLiteStore:
             "legacy-members",
         }:
             return self._advance_structure_drift_member_chunk(
+                comparison_id,
+                max_rows=max_rows,
+                now_ms=now_ms,
+            )
+        if phase_row is not None and phase_row[0] == "fresh-group-truth":
+            return self._advance_structure_drift_group_truth_chunk(
                 comparison_id,
                 max_rows=max_rows,
                 now_ms=now_ms,
@@ -3929,6 +3995,171 @@ class SQLiteStore:
             None if not rows else json.dumps(next_cursor),
             len(rows),
             False,
+        )
+
+    def _advance_structure_drift_group_truth_chunk(
+        self,
+        comparison_id: str,
+        *,
+        max_rows: int,
+        now_ms: int,
+    ) -> StructureCertificationChunk:
+        """Hash fresh generation truth and fail closed on any exact mismatch."""
+        with sqlite3.connect(self._db_path) as read_con:
+            progress = read_con.execute(
+                "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,"
+                "window_id,normalization_contract_version,exact_receipt_digest,"
+                "pointer_validation_hash,generation_certification_hash,phase,"
+                "row_cursor_json,digest_state_json,class_counts_json,"
+                "class_digests_json,checkpoint_at_ms FROM "
+                "structure_generation_drift_progress WHERE comparison_id=?",
+                (comparison_id,),
+            ).fetchone()
+        if progress is None or progress[8] != "fresh-group-truth":
+            raise ValueError("structure-drift-group-truth-phase-invalid")
+        cursor_value = None if progress[9] is None else json.loads(str(progress[9]))
+        if cursor_value is None:
+            cursor = None
+        elif (
+            isinstance(cursor_value, list)
+            and len(cursor_value) == 2
+            and all(isinstance(value, str) and value for value in cursor_value)
+        ):
+            cursor = (cursor_value[0], cursor_value[1])
+        else:
+            raise ValueError("structure-drift-progress-invalid")
+        counts = json.loads(str(progress[11]))
+        digests = json.loads(str(progress[12]))
+        if counts.get("fresh_group_truth_complete") == 1:
+            raise ValueError("structure-drift-group-truth-already-complete")
+        phase_count = counts.get("phase_row_count")
+        if type(phase_count) is not int or phase_count < 0:
+            raise ValueError("structure-drift-progress-invalid")
+        digest = SerializableSHA256.from_json(str(progress[10]))
+        rows = self.fetch_structure_drift_group_truth_chunk(
+            publication_id=str(progress[2]),
+            generation_snapshot_id=int(progress[1]),
+            after_key=cursor,
+            limit=max_rows,
+        )
+        for row in rows:
+            if phase_count:
+                digest.update(b",")
+            digest.update(
+                json.dumps(
+                    row,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode()
+            )
+            phase_count += 1
+        counts["phase_row_count"] = phase_count
+        next_cursor = None if not rows else (str(rows[-1][0]), str(rows[-1][1]))
+        prior_checkpoint = int(progress[13])
+
+        writer = self._connect_writer()
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+            current = writer.execute(
+                "SELECT current.snapshot_id,current.publication_id,"
+                "current.validation_hash,current.comparison_receipt_digest,"
+                "publication.window_id,publication.normalization_contract_version,"
+                "publication.certification_hash,publication.status,window.status,"
+                "window.published_snapshot_id FROM current_structure_generation current "
+                "JOIN structure_publications publication ON "
+                "publication.publication_id=current.publication_id AND "
+                "publication.snapshot_id=current.snapshot_id JOIN "
+                "structure_sync_windows window ON window.id=publication.window_id "
+                "WHERE current.id=1"
+            ).fetchone()
+            legacy = self._comparison_legacy_identity(writer)
+            if (
+                current is None
+                or legacy is None
+                or legacy[0] != int(progress[0])
+                or current[0] != int(progress[1])
+                or current[1] != progress[2]
+                or current[2] != progress[6]
+                or current[3] != progress[5]
+                or current[4] != progress[3]
+                or current[5] != progress[4]
+                or current[6] != progress[7]
+                or current[7] != "published"
+                or current[8] != "published"
+                or current[9] != int(progress[1])
+            ):
+                raise ValueError("structure-drift-current-identity-invalid")
+            if rows:
+                changed = writer.execute(
+                    "UPDATE structure_generation_drift_progress SET row_cursor_json=?,"
+                    "digest_state_json=?,class_counts_json=?,checkpoint_at_ms=? "
+                    "WHERE comparison_id=? AND phase='fresh-group-truth' AND "
+                    "checkpoint_at_ms=?",
+                    (
+                        json.dumps(next_cursor),
+                        digest.to_json(),
+                        json.dumps(counts, sort_keys=True, separators=(",", ":")),
+                        now_ms,
+                        comparison_id,
+                        prior_checkpoint,
+                    ),
+                )
+                next_phase = "fresh-group-truth"
+                ready = False
+            else:
+                digest.update(b"]")
+                generation_hash = digest.hexdigest()
+                digests["generation_group_truth_hash"] = generation_hash
+                source_hash = digests.get("source_group_truth_hash")
+                conflict_count = counts.get("class_count:overlap-conflict", 0)
+                unclassified_count = counts.get("class_count:unclassified", 0)
+                if (
+                    not isinstance(source_hash, str)
+                    or len(source_hash) != 64
+                    or type(conflict_count) is not int
+                    or conflict_count < 0
+                    or type(unclassified_count) is not int
+                    or unclassified_count < 0
+                ):
+                    raise ValueError("structure-drift-progress-invalid")
+                authorized = (
+                    generation_hash == source_hash
+                    and conflict_count == 0
+                    and unclassified_count == 0
+                )
+                counts["fresh_group_truth_complete"] = 1
+                counts["phase_row_count"] = 0
+                next_phase = "fresh-group-truth" if authorized else "stale"
+                changed = writer.execute(
+                    "UPDATE structure_generation_drift_progress SET phase=?,"
+                    "row_cursor_json=NULL,digest_state_json=?,class_counts_json=?,"
+                    "class_digests_json=?,checkpoint_at_ms=? WHERE comparison_id=? "
+                    "AND phase='fresh-group-truth' AND checkpoint_at_ms=?",
+                    (
+                        next_phase,
+                        digest.to_json(),
+                        json.dumps(counts, sort_keys=True, separators=(",", ":")),
+                        json.dumps(digests, sort_keys=True, separators=(",", ":")),
+                        now_ms,
+                        comparison_id,
+                        prior_checkpoint,
+                    ),
+                )
+                ready = authorized
+            if changed.rowcount != 1:
+                raise StructurePublicationCursorError("structure-drift-cursor-mismatch")
+            writer.execute("COMMIT")
+        except BaseException:
+            if writer.in_transaction:
+                writer.execute("ROLLBACK")
+            raise
+        finally:
+            writer.close()
+        return StructureCertificationChunk(
+            next_phase,
+            None if not rows else json.dumps(next_cursor),
+            len(rows),
+            ready,
         )
 
     def _advance_structure_drift_member_chunk(

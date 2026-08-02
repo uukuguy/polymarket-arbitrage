@@ -625,6 +625,57 @@ def test_drift_initialization_pins_current_authenticated_identity_once(
     )
     assert checkpoint_at_ms == 3_009
 
+    fresh_truth = store.advance_structure_drift_comparison_chunk(
+        comparison_id,
+        max_rows=1,
+        now_ms=3_010,
+    )
+    assert fresh_truth.component == "fresh-group-truth"
+    assert fresh_truth.rows_processed == 1
+    truth_done = store.advance_structure_drift_comparison_chunk(
+        comparison_id,
+        max_rows=1,
+        now_ms=3_011,
+    )
+    assert truth_done.component == "stale"
+    with sqlite3.connect(generation_db) as con:
+        phase, class_digests_json = con.execute(
+            "SELECT phase,class_digests_json FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+    final_digests = json.loads(class_digests_json)
+    assert phase == "stale"
+    assert len(final_digests["generation_group_truth_hash"]) == 64
+    assert (
+        final_digests["generation_group_truth_hash"]
+        != final_digests["source_group_truth_hash"]
+    )
+
+
+def test_drift_group_truth_reader_is_bounded_and_keyset_stable(
+    generation_db: Path,
+) -> None:
+    store = SQLiteStore(generation_db)
+    statements: list[str] = []
+    first = store.fetch_structure_drift_group_truth_chunk(
+        publication_id="test-publication-2",
+        generation_snapshot_id=2,
+        after_key=None,
+        limit=1,
+        trace_callback=statements.append,
+    )
+    assert len(first) == 1
+    assert sum(
+        statement.lstrip().upper().startswith("SELECT") for statement in statements
+    ) == 2
+    assert store.fetch_structure_drift_group_truth_chunk(
+        publication_id="test-publication-2",
+        generation_snapshot_id=2,
+        after_key=(str(first[0][0]), str(first[0][1])),
+        limit=1,
+    ) == []
+
 
 def test_generation_operations_report_pressure_and_reclaim_one_safe_chain(
     tmp_path: Path,
