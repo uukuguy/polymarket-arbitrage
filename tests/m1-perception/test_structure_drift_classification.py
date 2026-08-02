@@ -316,3 +316,9 @@ def test_legacy_and_generation_member_loaders_are_bounded_keysets(
         limit=500,
     )
     assert [row.market_id for row in tail] == ["market-500"]
+    overlap = store.fetch_structure_drift_members_by_id(
+        snapshot_id=1,
+        generation=False,
+        market_ids=[row.market_id for row in generation],
+    )
+    assert overlap == generation

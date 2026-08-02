@@ -3471,6 +3471,67 @@ class SQLiteStore:
             for row in rows
         ]
 
+    def fetch_structure_drift_members_by_id(
+        self,
+        *,
+        snapshot_id: int,
+        generation: bool,
+        market_ids: list[str],
+    ) -> list[object]:
+        """Bulk-read eligible members for one bounded overlap classification."""
+        if (
+            snapshot_id < 1
+            or type(generation) is not bool
+            or len(market_ids) > STRUCTURE_PUBLICATION_MAX_ROWS
+            or any(not market_id for market_id in market_ids)
+        ):
+            raise ValueError("invalid-structure-drift-member-lookup")
+        if not market_ids:
+            return []
+        # Reuse the canonical row conversion while replacing only its keyset SQL.
+        from polyarb.perception.structure_drift import StructuralMemberIdentity
+
+        prefix = "structure_generation_" if generation else ""
+        truth_table = f"{prefix}group_truth" if generation else "neg_risk_group_truth"
+        membership_table = (
+            f"{prefix}memberships" if generation else "event_market_memberships"
+        )
+        market_table = f"{prefix}markets"
+        placeholders = ",".join("?" for _ in market_ids)
+        with sqlite3.connect(self._db_path) as con:
+            rows = con.execute(
+                "SELECT m.event_id,m.neg_risk_market_id,m.market_id,m.member_kind,"
+                "m.active,m.closed,k.condition_id,k.yes_token_id,k.no_token_id,"
+                f"k.neg_risk,k.incomplete FROM {truth_table} t JOIN "
+                f"{membership_table} m ON m.snapshot_id=t.snapshot_id AND "
+                "m.event_id=t.event_id AND m.neg_risk_market_id=t.neg_risk_market_id "
+                f"JOIN {market_table} k ON k.snapshot_id=m.snapshot_id AND "
+                "k.market_id=m.market_id AND k.event_id=m.event_id AND "
+                "k.neg_risk_market_id=m.neg_risk_market_id WHERE t.snapshot_id=? "
+                "AND t.neg_risk_type='standard' AND t.quality='complete-supported' "
+                "AND m.member_kind='named' AND m.active=1 AND m.closed=0 "
+                "AND k.active=1 AND k.closed=0 AND k.incomplete=0 "
+                "AND trim(k.yes_token_id)!='' "
+                f"AND m.market_id IN ({placeholders}) ORDER BY m.market_id",
+                (snapshot_id, *market_ids),
+            ).fetchall()
+        return [
+            StructuralMemberIdentity(
+                event_id=str(row[0]),
+                group_id=str(row[1]),
+                market_id=str(row[2]),
+                member_kind=str(row[3]),
+                active=bool(row[4]),
+                closed=bool(row[5]),
+                condition_id=str(row[6] or ""),
+                yes_token_id=str(row[7] or ""),
+                no_token_id=str(row[8] or ""),
+                neg_risk=bool(row[9]),
+                incomplete=bool(row[10]),
+            )
+            for row in rows
+        ]
+
     def initialize_structure_drift_comparison(self, *, now_ms: int) -> str:
         """Pin one current exact-receipt identity for bounded drift comparison."""
         if now_ms < 0:
