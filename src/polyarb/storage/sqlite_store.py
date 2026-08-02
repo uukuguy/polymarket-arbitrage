@@ -3267,6 +3267,150 @@ class SQLiteStore:
             for market_id, item in grouped.items()
         ]
 
+    def fetch_structure_drift_event_source_chunk(
+        self,
+        *,
+        publication_id: str,
+        generation_snapshot_id: int,
+        after_event_id: str | None,
+        limit: int,
+        trace_callback: Callable[[str], None] | None = None,
+    ) -> list[tuple[int, str, dict[str, object], frozenset[str]]]:
+        """Read one independently projected event-source chunk from a sealed window."""
+        if (
+            not publication_id
+            or generation_snapshot_id < 1
+            or not 1 <= limit <= STRUCTURE_PUBLICATION_MAX_ROWS
+        ):
+            raise ValueError("invalid-structure-drift-event-source-chunk")
+        with sqlite3.connect(self._db_path) as con:
+            if trace_callback is not None:
+                con.set_trace_callback(trace_callback)
+            con.execute("BEGIN")
+            identity = con.execute(
+                "SELECT p.window_id,p.status,p.normalization_contract_version,"
+                "p.validation_hash,p.certification_hash,window.status,"
+                "window.published_snapshot_id FROM structure_publications p JOIN "
+                "structure_sync_windows window ON window.id=p.window_id "
+                "WHERE p.publication_id=? AND p.snapshot_id=?",
+                (publication_id, generation_snapshot_id),
+            ).fetchone()
+            if (
+                identity is None
+                or identity[1] != "published"
+                or not isinstance(identity[2], str)
+                or not identity[2]
+                or not isinstance(identity[3], str)
+                or len(identity[3]) != 64
+                or not isinstance(identity[4], str)
+                or len(identity[4]) != 64
+                or identity[5] != "published"
+                or identity[6] != generation_snapshot_id
+            ):
+                raise ValueError("structure-drift-source-identity-mismatch")
+            window_id = str(identity[0])
+            rows = con.execute(
+                "SELECT COALESCE(source_ordinal,rowid),event_id,payload_json FROM "
+                "structure_sync_event_staging WHERE window_id=? AND "
+                "(? IS NULL OR event_id>?) ORDER BY event_id LIMIT ?",
+                (window_id, after_event_id, after_event_id, limit),
+            ).fetchall()
+            event_ids = [str(row[1]) for row in rows]
+            catalog_by_event: dict[str, set[str]] = {}
+            if event_ids:
+                placeholders = ",".join("?" for _ in event_ids)
+                for event_id, market_id in con.execute(
+                    "SELECT relation.event_id,relation.market_id FROM "
+                    "structure_sync_event_market_staging relation JOIN "
+                    "structure_sync_market_staging market ON "
+                    "market.window_id=relation.window_id AND "
+                    "market.market_id=relation.market_id WHERE relation.window_id=? "
+                    f"AND relation.event_id IN ({placeholders}) ORDER BY "
+                    "relation.event_id,relation.source_ordinal,relation.market_id",
+                    (window_id, *event_ids),
+                ):
+                    catalog_by_event.setdefault(str(event_id), set()).add(str(market_id))
+            result = [
+                (
+                    int(row[0]),
+                    str(row[1]),
+                    json.loads(str(row[2])),
+                    frozenset(catalog_by_event.get(str(row[1]), ())),
+                )
+                for row in rows
+            ]
+            con.execute("COMMIT")
+            return result
+
+    def fetch_structure_drift_market_source_chunk(
+        self,
+        *,
+        publication_id: str,
+        generation_snapshot_id: int,
+        after_market_id: str | None,
+        limit: int,
+        trace_callback: Callable[[str], None] | None = None,
+    ) -> list[tuple[str, dict[str, object], tuple[str, ...], int]]:
+        """Read one independently projected market-source chunk from a sealed window."""
+        if (
+            not publication_id
+            or generation_snapshot_id < 1
+            or not 1 <= limit <= STRUCTURE_PUBLICATION_MAX_ROWS
+        ):
+            raise ValueError("invalid-structure-drift-market-source-chunk")
+        with sqlite3.connect(self._db_path) as con:
+            if trace_callback is not None:
+                con.set_trace_callback(trace_callback)
+            con.execute("BEGIN")
+            identity = con.execute(
+                "SELECT p.window_id,p.status,p.normalization_contract_version,"
+                "p.validation_hash,p.certification_hash,window.status,"
+                "window.published_snapshot_id,s.taken_at_ms FROM "
+                "structure_publications p JOIN structure_sync_windows window ON "
+                "window.id=p.window_id JOIN snapshots s ON s.id=p.snapshot_id "
+                "WHERE p.publication_id=? AND p.snapshot_id=?",
+                (publication_id, generation_snapshot_id),
+            ).fetchone()
+            if (
+                identity is None
+                or identity[1] != "published"
+                or not isinstance(identity[2], str)
+                or not identity[2]
+                or not isinstance(identity[3], str)
+                or len(identity[3]) != 64
+                or not isinstance(identity[4], str)
+                or len(identity[4]) != 64
+                or identity[5] != "published"
+                or identity[6] != generation_snapshot_id
+            ):
+                raise ValueError("structure-drift-source-identity-mismatch")
+            window_id = str(identity[0])
+            rows = con.execute(
+                "WITH market_keys AS (SELECT market_id,payload_json FROM "
+                "structure_sync_market_staging WHERE window_id=? AND "
+                "(? IS NULL OR market_id>?) ORDER BY market_id LIMIT ?) "
+                "SELECT market_keys.market_id,market_keys.payload_json,relation.event_id "
+                "FROM market_keys LEFT JOIN structure_sync_event_market_staging relation "
+                "ON relation.window_id=? AND relation.market_id=market_keys.market_id "
+                "ORDER BY market_keys.market_id,relation.source_ordinal,relation.event_id",
+                (window_id, after_market_id, after_market_id, limit, window_id),
+            ).fetchall()
+            grouped: dict[str, tuple[dict[str, object], list[str]]] = {}
+            for market_id, payload_json, event_id in rows:
+                key = str(market_id)
+                item = grouped.get(key)
+                if item is None:
+                    item = (json.loads(str(payload_json)), [])
+                    grouped[key] = item
+                if event_id is not None:
+                    item[1].append(str(event_id))
+            result = [
+                (market_id, raw, tuple(event_ids), int(identity[7]))
+                for market_id, (raw, event_ids) in grouped.items()
+            ]
+            con.execute("COMMIT")
+            return result
+
     def structure_event_only_market_ids(
         self,
         publication_id: str,

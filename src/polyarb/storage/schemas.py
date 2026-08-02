@@ -3031,9 +3031,15 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_progress (
         CHECK(length(generation_certification_hash)=64),
     source_event_count INTEGER NOT NULL CHECK(source_event_count >= 0),
     source_market_count INTEGER NOT NULL CHECK(source_market_count >= 0),
-    source_event_hash TEXT NOT NULL CHECK(length(source_event_hash)=64),
-    source_market_hash TEXT NOT NULL CHECK(length(source_market_hash)=64),
-    source_identity_hash TEXT NOT NULL CHECK(length(source_identity_hash)=64),
+    source_event_hash TEXT CHECK(
+        source_event_hash IS NULL OR length(source_event_hash)=64
+    ),
+    source_market_hash TEXT CHECK(
+        source_market_hash IS NULL OR length(source_market_hash)=64
+    ),
+    source_identity_hash TEXT CHECK(
+        source_identity_hash IS NULL OR length(source_identity_hash)=64
+    ),
     phase TEXT NOT NULL CHECK(phase IN (
         'source-events','source-markets','generation-members',
         'legacy-members','fresh-group-truth','sealed','stale'
@@ -3047,7 +3053,7 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_progress (
     UNIQUE(
         legacy_snapshot_id,generation_snapshot_id,publication_id,window_id,
         normalization_contract_version,exact_receipt_digest,
-        pointer_validation_hash,generation_certification_hash,source_identity_hash
+        pointer_validation_hash,generation_certification_hash
     )
 );
 CREATE INDEX IF NOT EXISTS idx_structure_drift_progress_active
