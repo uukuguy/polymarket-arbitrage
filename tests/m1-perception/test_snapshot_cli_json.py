@@ -104,6 +104,44 @@ def test_structure_drift_internal_child_keeps_partial_commit_at_post_deadline(
     assert fake.calls == 1
 
 
+def test_structure_drift_internal_child_fails_fast_on_oversized_source_event(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import polyarb.storage.sqlite_store as store_module
+
+    class FakeStore:
+        calls = 0
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def advance_current_structure_drift_chunk(self, **_kwargs):
+            self.calls += 1
+            raise ValueError("structure-drift-source-event-workload-oversized")
+
+    fake = FakeStore()
+    monkeypatch.setattr(store_module, "SQLiteStore", lambda *_a, **_k: fake)
+    started = time.monotonic()
+    result = CliRunner().invoke(
+        app,
+        [
+            "structure-generation-drift-advance",
+            "--db-path",
+            str(tmp_path / "state.db"),
+        ],
+    )
+
+    assert time.monotonic() - started < 1.0
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "failed": True,
+        "failure_kind": "source-event-workload-oversized",
+    }
+    assert "structure-drift stage=" not in result.output
+    assert fake.calls == 1
+
+
 def test_structure_sync_cli_returns_certified_snapshot_json(monkeypatch) -> None:
     monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
     monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")

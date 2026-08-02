@@ -11,9 +11,10 @@ child 每行块最多 500、每 slice 最多 100 块或 45 秒，每块独立 CA
 hard timeout 后 TERM，15 秒仍不退出则 KILL。
 parent 在 spawn 前先取得专用 attempt ownership；任何 child 都必须有 terminal evidence。重启会回收 orphan，
 而该账本独立于普通 Structure snapshot attempts，不能影响 adaptive cadence/timeout。
-全局 chunk 上限仍是 500，但 `source-events` 每块最多 100 events：一个 event 会展开 embedded markets 和
-group-truth hashing，按普通“行数”估算会严重低估工作量。phase cap 只改变 checkpoint 频率，不改变 cursor、
-串流顺序或最终 digest。
+全局 chunk 上限仍是 500，但 `source-events` 先看最多 100 events，再按累计 embedded/catalog member workload
+≤500 和 payload ≤512 KiB 取稳定前缀：一个 event 会展开 embedded markets 和 group-truth hashing，普通“行数”
+会严重低估工作量。正常 event 至少取 1 条；单 event 自身超限时必须 fail closed 并报警，不能用“防饿死”
+为由执行一个可能超过 75 秒的 chunk。prefix 只改变 checkpoint 频率，不改变 cursor、串流顺序或最终 digest。
 
 ## 代码地图
 

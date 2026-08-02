@@ -379,7 +379,18 @@ def structure_generation_drift_advance(
             defer_reason = "writer-busy"
             stop_reason = "writer-busy"
             break
-        except ValueError:
+        except ValueError as error:
+            if str(error) == "structure-drift-source-event-workload-oversized":
+                print(
+                    json.dumps(
+                        {
+                            "failed": True,
+                            "failure_kind": "source-event-workload-oversized",
+                        },
+                        sort_keys=True,
+                    )
+                )
+                raise typer.Exit(code=1) from error
             deferred = True
             defer_reason = "identity-stale"
             stop_reason = "identity-stale"

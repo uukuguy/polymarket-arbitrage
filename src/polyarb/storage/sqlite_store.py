@@ -35,6 +35,8 @@ from polyarb.perception.market_truth import (
 from polyarb.perception.structure_contract import (
     STRUCTURE_CERTIFICATION_COMPONENTS,
     STRUCTURE_COMPONENTS,
+    STRUCTURE_DRIFT_SOURCE_EVENT_MAX_MEMBER_WORK,
+    STRUCTURE_DRIFT_SOURCE_EVENT_MAX_PAYLOAD_BYTES,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
     STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
     STRUCTURE_PUBLICATION_MAX_ROWS,
@@ -86,6 +88,33 @@ _STRUCTURE_DRIFT_SAFE_MARKER_RE = re.compile(
     re.MULTILINE,
 )
 _STRUCTURE_DRIFT_ATTEMPT_RETENTION = 100
+
+
+def _structure_drift_event_prefix_size(
+    workloads: list[tuple[int, int, int]],
+) -> int:
+    """Choose a stable non-empty prefix under payload and member-work budgets."""
+    selected = 0
+    payload_bytes = 0
+    member_work = 0
+    for event_payload_bytes, embedded_count, relation_count in workloads:
+        if selected == 0 and (
+            event_payload_bytes > STRUCTURE_DRIFT_SOURCE_EVENT_MAX_PAYLOAD_BYTES
+            or max(embedded_count, relation_count)
+            > STRUCTURE_DRIFT_SOURCE_EVENT_MAX_MEMBER_WORK
+        ):
+            raise ValueError("structure-drift-source-event-workload-oversized")
+        next_payload = payload_bytes + event_payload_bytes
+        next_member_work = member_work + max(embedded_count, relation_count)
+        if selected and (
+            next_payload > STRUCTURE_DRIFT_SOURCE_EVENT_MAX_PAYLOAD_BYTES
+            or next_member_work > STRUCTURE_DRIFT_SOURCE_EVENT_MAX_MEMBER_WORK
+        ):
+            break
+        selected += 1
+        payload_bytes = next_payload
+        member_work = next_member_work
+    return selected
 
 _VALID_MODES = ("subset", "full")
 # Structure publication and Quote collection share one WAL database. Their
@@ -3389,12 +3418,57 @@ class SQLiteStore:
                 raise ValueError("structure-drift-source-identity-mismatch")
             window_id = str(identity[0])
             rows = con.execute(
-                "SELECT COALESCE(source_ordinal,rowid),event_id,payload_json FROM "
+                "SELECT COALESCE(source_ordinal,rowid),event_id,"
+                "length(CAST(payload_json AS BLOB)) FROM "
                 "structure_sync_event_staging WHERE window_id=? AND "
                 "(? IS NULL OR event_id>?) ORDER BY event_id LIMIT ?",
                 (window_id, after_event_id, after_event_id, limit),
             ).fetchall()
+            if rows:
+                payload_prefix = _structure_drift_event_prefix_size(
+                    [(int(row[2]), 0, 0) for row in rows]
+                )
+                rows = rows[:payload_prefix]
             event_ids = [str(row[1]) for row in rows]
+            raw_by_event: dict[str, dict[str, object]] = {}
+            relation_counts: dict[str, int] = {}
+            if event_ids:
+                placeholders = ",".join("?" for _ in event_ids)
+                raw_by_event = {
+                    str(event_id): json.loads(str(payload_json))
+                    for event_id, payload_json in con.execute(
+                        "SELECT event_id,payload_json FROM "
+                        "structure_sync_event_staging WHERE window_id=? "
+                        f"AND event_id IN ({placeholders})",
+                        (window_id, *event_ids),
+                    )
+                }
+                relation_counts = {
+                    str(event_id): int(count)
+                    for event_id, count in con.execute(
+                        "SELECT relation.event_id,COUNT(*) FROM "
+                        "structure_sync_event_market_staging relation JOIN "
+                        "structure_sync_market_staging market ON "
+                        "market.window_id=relation.window_id AND "
+                        "market.market_id=relation.market_id WHERE relation.window_id=? "
+                        f"AND relation.event_id IN ({placeholders}) "
+                        "GROUP BY relation.event_id",
+                        (window_id, *event_ids),
+                    )
+                }
+                workloads = []
+                for row in rows:
+                    raw = raw_by_event[str(row[1])]
+                    embedded = raw.get("markets") if isinstance(raw, dict) else None
+                    workloads.append(
+                        (
+                            int(row[2]),
+                            len(embedded) if isinstance(embedded, list) else 0,
+                            relation_counts.get(str(row[1]), 0),
+                        )
+                    )
+                rows = rows[: _structure_drift_event_prefix_size(workloads)]
+                event_ids = [str(row[1]) for row in rows]
             catalog_by_event: dict[str, set[str]] = {}
             if event_ids:
                 placeholders = ",".join("?" for _ in event_ids)
@@ -3415,7 +3489,7 @@ class SQLiteStore:
                 (
                     int(row[0]),
                     str(row[1]),
-                    json.loads(str(row[2])),
+                    raw_by_event[str(row[1])],
                     frozenset(catalog_by_event.get(str(row[1]), ())),
                 )
                 for row in rows

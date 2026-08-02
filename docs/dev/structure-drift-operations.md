@@ -20,9 +20,10 @@ make structure-generation-drift-compare
 - `structure_generation_drift_max_chunks_per_tick=100`
 - `structure_generation_drift_slice_s=45`
 
-`max_rows=500` 是全局上限；`source-events` phase 在内部进一步限制为每 chunk 100 events，避免 dense embedded
-markets 让单个不可抢占 CAS chunk 越过 parent 75 秒边界。其它 phase 仍可使用 500 行，slice 总边界仍是
-100 chunks / 45 秒。
+`max_rows=500` 是全局上限；`source-events` phase 先取最多 100 events，再选择累计 member workload ≤500、
+payload ≤512 KiB 的稳定非空前缀。正常单 event 至少推进 1 条；单 event 自身超过任一绝对上限则立即以
+`source-event-workload-oversized` fail closed、0 progress，并由 attempt health 报警，不允许硬跑到 timeout。
+其它 phase 仍可使用 500 行，slice 总边界仍是 100 chunks / 45 秒。
 
 scheduler 在 `_tick_lock` 内先检查 Quote，再取得共享 producer lock 并复查 Quote，之后才 spawn child。不要直接运行
 隐藏的 `structure-generation-drift-advance`；它是 parent-owned subprocess protocol，不是 operator surface。

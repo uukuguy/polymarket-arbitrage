@@ -901,6 +901,38 @@ async def test_structure_drift_child_invalid_json_is_bounded_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_structure_drift_child_reports_oversized_event_without_progress() -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_structure_drift_in_subprocess,
+    )
+
+    process = _FakeProcess(
+        {"failed": True, "failure_kind": "source-event-workload-oversized"},
+        returncode=1,
+        stderr=b"",
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(
+        SnapshotSubprocessError,
+        match="structure-drift-source-event-workload-oversized",
+    ) as raised:
+        await run_structure_drift_in_subprocess(
+            db_path="/tmp/drift.db",
+            max_rows=500,
+            max_chunks=100,
+            max_elapsed_s=45.0,
+            spawn=spawn,
+        )
+    assert raised.value.chunks_processed == 0
+    assert raised.value.rows_processed == 0
+    assert raised.value.stderr_tail is None
+
+
+@pytest.mark.asyncio
 async def test_snapshot_subprocess_accepts_cooperative_checkpoint() -> None:
     from polyarb.daemon.scheduler import (
         IsolatedStructureCheckpoint,
@@ -1864,6 +1896,7 @@ async def test_structure_drift_cancel_survives_terminal_write_failure(
         "structure-drift-timeout",
         "structure-drift-signal-sigkill-possible-oom",
         "structure-drift-invalid-json",
+        "structure-drift-source-event-workload-oversized",
     ),
 )
 async def test_structure_drift_parent_terminalizes_child_failures(

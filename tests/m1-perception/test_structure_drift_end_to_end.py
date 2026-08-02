@@ -610,7 +610,17 @@ def test_source_event_phase_adapts_global_500_row_budget(tmp_path: Path) -> None
         observed_limits.append(int(kwargs["limit"]))
         after = kwargs["after_event_id"]
         eligible = [row for row in dense_rows if after is None or row[1] > after]
-        return eligible[: int(kwargs["limit"])]
+        candidates = eligible[: int(kwargs["limit"])]
+        workloads = [
+            (
+                len(json.dumps(row[2]).encode()),
+                len(row[2]["markets"]),
+                len(row[3]),
+            )
+            for row in candidates
+        ]
+        prefix = sqlite_store_module._structure_drift_event_prefix_size(workloads)
+        return candidates[:prefix]
 
     capped.fetch_structure_drift_event_source_chunk = observed_fetch  # type: ignore[method-assign]
     chunked.fetch_structure_drift_event_source_chunk = observed_fetch  # type: ignore[method-assign]
@@ -626,12 +636,12 @@ def test_source_event_phase_adapts_global_500_row_budget(tmp_path: Path) -> None
     for index in range(5):
         chunked.advance_structure_drift_comparison_chunk(
             chunked_id,
-            max_rows=20,
+            max_rows=2,
             now_ms=3_001 + index,
         )
 
     assert observed_limits[0] == 100
-    assert chunk.rows_processed == 100
+    assert chunk.rows_processed == 10
     assert elapsed_s < 15.0
     with sqlite3.connect(capped.db_path) as capped_con, sqlite3.connect(
         chunked.db_path
@@ -643,6 +653,48 @@ def test_source_event_phase_adapts_global_500_row_budget(tmp_path: Path) -> None
         assert capped_con.execute(query).fetchone() == chunked_con.execute(
             query
         ).fetchone()
+
+
+def test_source_event_workload_prefix_bounds_normal_and_rejects_oversized() -> None:
+    select = sqlite_store_module._structure_drift_event_prefix_size
+
+    assert select([(12_000, 23, 23)] * 100) == 21
+    assert select([(300_000, 1, 1), (300_000, 1, 1)]) == 1
+    with pytest.raises(
+        ValueError, match="structure-drift-source-event-workload-oversized"
+    ):
+        select([(2_000_000, 50_000, 50_000), (1, 1, 1)])
+
+
+def test_source_event_fetch_selects_metadata_before_payload_materialization(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    statements: list[str] = []
+
+    rows = store.fetch_structure_drift_event_source_chunk(
+        publication_id="publication-2",
+        generation_snapshot_id=2,
+        after_event_id=None,
+        limit=100,
+        trace_callback=statements.append,
+    )
+
+    metadata_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if "length(CAST(payload_json AS BLOB))" in statement
+    )
+    payload_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if "SELECT event_id,payload_json" in statement
+    )
+    assert metadata_index < payload_index
+    assert "SELECT COALESCE(source_ordinal,rowid),event_id,payload_json" not in statements[
+        metadata_index
+    ]
+    assert len(rows) == 3
 
 
 @pytest.mark.asyncio

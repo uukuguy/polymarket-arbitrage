@@ -376,6 +376,14 @@ async def run_structure_drift_in_subprocess(
             "sqlite-busy" if b"database is locked" in stderr.lower() else "invalid-json"
         )
         raise drift_error(f"structure-drift-{reason}", stderr) from error
+    if payload == {
+        "failed": True,
+        "failure_kind": "source-event-workload-oversized",
+    } and process.returncode == 1:
+        raise drift_error(
+            "structure-drift-source-event-workload-oversized",
+            stderr,
+        )
     expected_keys = {
         "checkpointed",
         "chunks_processed",
