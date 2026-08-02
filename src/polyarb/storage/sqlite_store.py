@@ -3142,11 +3142,11 @@ class SQLiteStore:
                 "WITH market_keys AS (SELECT market_id FROM "
                 "structure_sync_event_market_staging WHERE window_id=? "
                 "AND (? IS NULL OR market_id>?) GROUP BY market_id "
-                "ORDER BY market_id LIMIT ?), ordered AS (SELECT relation.market_id," 
+                "ORDER BY market_id LIMIT ?), ordered AS (SELECT relation.market_id,"
                 "relation.event_id FROM structure_sync_event_market_staging relation "
                 "JOIN market_keys ON market_keys.market_id=relation.market_id "
-                "WHERE relation.window_id=? ORDER BY relation.market_id," 
-                "relation.source_ordinal,relation.event_id) SELECT market_id," 
+                "WHERE relation.window_id=? ORDER BY relation.market_id,"
+                "relation.source_ordinal,relation.event_id) SELECT market_id,"
                 "GROUP_CONCAT(event_id,',') FROM ordered GROUP BY market_id "
                 "ORDER BY market_id",
                 (window_id, after_market_id, after_market_id, limit, window_id),
