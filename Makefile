@@ -202,7 +202,7 @@ patch-gsd-worktree-cleanup:
 # M1-perception Phase 01: market snapshot tool
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v sync-structure-local archive-markets-local snapshot-status snapshot-attempt-status snapshot-fresh snapshots-purge snapshot-cache-purge structure-generation-status structure-generation-backfill structure-generation-compare structure-generation-cleanup
+.PHONY: snapshot-markets snapshot-markets-v snapshot-markets-full snapshot-markets-full-v sync-structure-local archive-markets-local snapshot-status snapshot-attempt-status snapshot-fresh snapshots-purge snapshot-cache-purge structure-generation-status structure-generation-backfill structure-generation-compare structure-generation-drift-compare structure-generation-cleanup
 
 ## snapshot-markets: Capture snapshot (subset, liquidity > $1k, ~15-30 min). Quiet, cron-friendly. Auto-loads .env for Supabase+R2 mirror.
 snapshot-markets:
@@ -251,6 +251,10 @@ structure-generation-backfill:
 ## structure-generation-compare: Read the authenticated legacy/generation comparison; exits nonzero unless PASS.
 structure-generation-compare:
 	@uv run python -m polyarb.snapshot structure-generation-compare
+
+## structure-generation-drift-compare: Read exact or sealed drift-safe authorization; never advances comparison state.
+structure-generation-drift-compare:
+	@uv run python -m polyarb.snapshot structure-generation-drift-compare
 
 ## structure-generation-cleanup: Advance one bounded evidence cleanup phase; preserves current + rollback floor and immutable proof skeleton.
 structure-generation-cleanup:

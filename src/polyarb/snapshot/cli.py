@@ -330,6 +330,18 @@ def structure_generation_compare() -> None:
         raise typer.Exit(code=1)
 
 
+@app.command(name="structure-generation-drift-compare")
+def structure_generation_drift_compare() -> None:
+    """Read the current exact or sealed drift-safe authorization."""
+    from polyarb.storage.sqlite_store import compare_current_structure_drift
+
+    settings = load_settings()
+    result = compare_current_structure_drift(settings.db_path)
+    print(json.dumps(result, sort_keys=True))
+    if result.get("authorized") is not True:
+        raise typer.Exit(code=1)
+
+
 @app.command(name="structure-generation-cleanup")
 def structure_generation_cleanup(
     max_rows: int = typer.Option(500, "--max-rows", min=1),

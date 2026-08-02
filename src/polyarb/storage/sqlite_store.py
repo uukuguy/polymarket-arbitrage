@@ -1370,6 +1370,11 @@ def compare_current_structure_generation(
         return read.comparison
 
 
+def compare_current_structure_drift(db_path: Path | str) -> dict[str, object]:
+    """Read and authenticate the current exact or drift-safe authorization."""
+    return SQLiteStore(Path(db_path)).structure_generation_drift_status()
+
+
 @dataclass(frozen=True)
 class StructurePublicationState:
     publication_id: str
@@ -4751,6 +4756,201 @@ class SQLiteStore:
             }
             con.execute("COMMIT")
             return result
+
+    def structure_generation_drift_status(self) -> dict[str, object]:
+        """Authenticate current drift evidence without advancing or mutating it."""
+        if not self._db_path.exists():
+            return {
+                "authorization_mode": "unavailable",
+                "authorized": False,
+                "available": False,
+                "reason": "structure-drift-database-unavailable",
+            }
+        with sqlite3.connect(self._db_path) as con:
+            current = con.execute(
+                "SELECT current.snapshot_id,current.publication_id,"
+                "current.validation_hash,current.comparison_receipt_digest,"
+                "publication.window_id,publication.normalization_contract_version,"
+                "publication.certification_hash,publication.status,window.status,"
+                "window.published_snapshot_id FROM current_structure_generation current "
+                "JOIN structure_publications publication ON "
+                "publication.publication_id=current.publication_id AND "
+                "publication.snapshot_id=current.snapshot_id JOIN "
+                "structure_sync_windows window ON window.id=publication.window_id "
+                "WHERE current.id=1"
+            ).fetchone()
+            legacy = self._comparison_legacy_identity(con)
+            if current is None or legacy is None:
+                return {
+                    "authorization_mode": "unavailable",
+                    "authorized": False,
+                    "available": False,
+                    "reason": "structure-drift-current-unavailable",
+                }
+            identity_valid = (
+                current[7] == "published"
+                and current[8] == "published"
+                and current[9] == current[0]
+                and current[2] is not None
+                and current[2] == current[6]
+                and isinstance(current[5], str)
+                and bool(current[5])
+            )
+            exact = con.execute(
+                "SELECT legacy_snapshot_id,legacy_market_count,"
+                "generation_market_count,legacy_universe_hash,"
+                "generation_universe_hash,legacy_source_truth_hash,"
+                "generation_source_truth_hash,generation_validation_hash,"
+                "created_at_ms,receipt_digest FROM "
+                "structure_generation_comparison_receipts WHERE "
+                "generation_snapshot_id=? AND publication_id=?",
+                (int(current[0]), str(current[1])),
+            ).fetchone()
+            exact_valid = False
+            exact_matches = False
+            if exact is not None:
+                exact_digest = _comparison_receipt_digest(
+                    generation_snapshot_id=int(current[0]),
+                    publication_id=str(current[1]),
+                    legacy_snapshot_id=int(exact[0]),
+                    legacy_market_count=int(exact[1]),
+                    generation_market_count=int(exact[2]),
+                    legacy_universe_hash=str(exact[3]),
+                    generation_universe_hash=str(exact[4]),
+                    legacy_source_truth_hash=str(exact[5]),
+                    generation_source_truth_hash=str(exact[6]),
+                    generation_validation_hash=str(exact[7]),
+                    created_at_ms=int(exact[8]),
+                )
+                exact_valid = (
+                    identity_valid
+                    and exact_digest == exact[9]
+                    and exact[9] == current[3]
+                    and int(exact[0]) == int(legacy[0])
+                    and exact[7] == current[2]
+                )
+                exact_matches = exact_valid and (
+                    int(exact[1]) == int(exact[2])
+                    and exact[3] == exact[4]
+                    and exact[5] == exact[6]
+                )
+            base: dict[str, object] = {
+                "available": True,
+                "generation_snapshot_id": int(current[0]),
+                "legacy_snapshot_id": int(legacy[0]),
+                "publication_id": str(current[1]),
+                "window_id": str(current[4]),
+            }
+            if exact_matches:
+                return {
+                    **base,
+                    "authorization_mode": "exact",
+                    "authorized": True,
+                    "phase": "exact",
+                    "reason": None,
+                }
+            progress = con.execute(
+                "SELECT comparison_id,phase,class_counts_json,class_digests_json "
+                "FROM structure_generation_drift_progress WHERE "
+                "legacy_snapshot_id=? AND generation_snapshot_id=? AND "
+                "publication_id=? AND window_id=? AND "
+                "normalization_contract_version=? AND exact_receipt_digest=? AND "
+                "pointer_validation_hash=? AND generation_certification_hash=? "
+                "ORDER BY checkpoint_at_ms DESC LIMIT 1",
+                (
+                    int(legacy[0]),
+                    int(current[0]),
+                    str(current[1]),
+                    str(current[4]),
+                    str(current[5]),
+                    str(current[3]),
+                    str(current[2]),
+                    str(current[6]),
+                ),
+            ).fetchone()
+            if progress is None:
+                return {
+                    **base,
+                    "authorization_mode": "none",
+                    "authorized": False,
+                    "phase": None,
+                    "reason": (
+                        "structure-drift-exact-receipt-invalid"
+                        if not exact_valid
+                        else "structure-drift-progress-missing"
+                    ),
+                }
+            try:
+                progress_counts = json.loads(str(progress[2]))
+                progress_digests = json.loads(str(progress[3]))
+            except (TypeError, json.JSONDecodeError):
+                return {
+                    **base,
+                    "authorization_mode": "none",
+                    "authorized": False,
+                    "phase": str(progress[1]),
+                    "reason": "structure-drift-progress-invalid",
+                }
+            receipt_row = con.execute(
+                "SELECT "
+                + ",".join(_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS)
+                + ",receipt_digest FROM structure_generation_drift_receipts "
+                "WHERE comparison_id=?",
+                (str(progress[0]),),
+            ).fetchone()
+            class_counts = {
+                key.removeprefix("class_count:"): value
+                for key, value in progress_counts.items()
+                if key.startswith("class_count:") and type(value) is int
+            }
+            if progress[1] != "sealed" or receipt_row is None:
+                return {
+                    **base,
+                    "authorization_mode": "none",
+                    "authorized": False,
+                    "class_counts": class_counts,
+                    "phase": str(progress[1]),
+                    "reason": (
+                        "structure-drift-stale"
+                        if progress[1] == "stale"
+                        else "structure-drift-incomplete"
+                    ),
+                }
+            receipt_payload = dict(
+                zip(
+                    _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS,
+                    receipt_row[:-1],
+                    strict=True,
+                )
+            )
+            expected_receipt_digest = _structure_drift_receipt_digest(receipt_payload)
+            receipt_valid = (
+                receipt_row[-1] == expected_receipt_digest
+                and receipt_payload["comparison_id"] == progress[0]
+                and receipt_payload["legacy_snapshot_id"] == legacy[0]
+                and receipt_payload["generation_snapshot_id"] == current[0]
+                and receipt_payload["publication_id"] == current[1]
+                and receipt_payload["window_id"] == current[4]
+                and receipt_payload["published_snapshot_id"] == current[0]
+                and receipt_payload["normalization_contract_version"] == current[5]
+                and receipt_payload["exact_receipt_digest"] == current[3]
+                and receipt_payload["pointer_validation_hash"] == current[2]
+                and receipt_payload["generation_certification_hash"] == current[6]
+                and receipt_payload["overlap_conflict_count"] == 0
+                and receipt_payload["unclassified_count"] == 0
+                and progress_digests.get("receipt_digest") == receipt_row[-1]
+            )
+            return {
+                **base,
+                "authorization_mode": (
+                    "drift-safe-sealed" if receipt_valid else "none"
+                ),
+                "authorized": receipt_valid,
+                "class_counts": class_counts,
+                "phase": str(progress[1]),
+                "reason": None if receipt_valid else "structure-drift-receipt-invalid",
+                "receipt_digest": str(receipt_row[-1]),
+            }
 
     def structure_event_only_market_ids(
         self,

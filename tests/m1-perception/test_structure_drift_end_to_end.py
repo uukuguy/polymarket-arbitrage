@@ -4,8 +4,10 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from typer.testing import CliRunner
 
 import polyarb.storage.sqlite_store as sqlite_store_module
 from polyarb.perception.structure_drift import (
@@ -325,6 +327,7 @@ def _drift_store(tmp_path: Path) -> SQLiteStore:
 
 def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _drift_store(tmp_path)
     comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
@@ -398,6 +401,23 @@ def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
         "shared": 1,
         "unclassified": 0,
     }
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is True
+    assert status["authorization_mode"] == "drift-safe-sealed"
+    assert status["phase"] == "sealed"
+    assert status["receipt_digest"] == row[field_count]
+    from polyarb.snapshot import cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module,
+        "load_settings",
+        lambda: SimpleNamespace(db_path=store.db_path),
+    )
+    cli_result = CliRunner().invoke(
+        cli_module.app, ["structure-generation-drift-compare"]
+    )
+    assert cli_result.exit_code == 0, cli_result.stdout
+    assert json.loads(cli_result.stdout)["authorization_mode"] == "drift-safe-sealed"
     substituted = dict(payload)
     substituted["projection_universe_hash"] = "f" * 64
     assert sqlite_store_module._structure_drift_receipt_digest(substituted) != row[
@@ -415,6 +435,15 @@ def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
                 "DELETE FROM structure_generation_drift_receipts WHERE comparison_id=?",
                 (comparison_id,),
             )
+        con.execute("DROP TRIGGER trg_structure_drift_receipt_update")
+        con.execute(
+            "UPDATE structure_generation_drift_receipts SET "
+            "projection_universe_hash=? WHERE comparison_id=?",
+            ("f" * 64, comparison_id),
+        )
+    tampered_status = store.structure_generation_drift_status()
+    assert tampered_status["authorized"] is False
+    assert tampered_status["reason"] == "structure-drift-receipt-invalid"
 
 
 def test_drift_pointer_race_fails_before_next_checkpoint(tmp_path: Path) -> None:
@@ -435,3 +464,6 @@ def test_drift_pointer_race_fails_before_next_checkpoint(tmp_path: Path) -> None
             "WHERE comparison_id=?",
             (comparison_id,),
         ).fetchone() == ("source-events", 3_000)
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is False
+    assert status["authorization_mode"] == "none"

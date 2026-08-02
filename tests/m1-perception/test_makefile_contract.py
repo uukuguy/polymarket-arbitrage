@@ -111,6 +111,10 @@ def test_make_explicit_data_product_targets_are_wired(
         ("structure-generation-status", "structure-generation-status"),
         ("structure-generation-backfill", "structure-generation-backfill"),
         ("structure-generation-compare", "structure-generation-compare"),
+        (
+            "structure-generation-drift-compare",
+            "structure-generation-drift-compare",
+        ),
         ("structure-generation-cleanup", "structure-generation-cleanup"),
     ],
 )
@@ -223,6 +227,31 @@ def test_structure_generation_compare_cli_fails_with_stable_json_when_unavailabl
         "matches": False,
         "mismatch_reasons": ["legacy-structure-unavailable"],
     }
+
+
+def test_structure_generation_drift_compare_is_read_only_and_unavailable_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from polyarb.snapshot import cli as cli_module
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    path = tmp_path / "empty-drift.db"
+    SQLiteStore(path).init_schema()
+    monkeypatch.setattr(
+        cli_module,
+        "load_settings",
+        lambda: SimpleNamespace(db_path=path),
+    )
+    before = path.read_bytes()
+    result = runner.invoke(app, ["structure-generation-drift-compare"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "authorization_mode": "unavailable",
+        "authorized": False,
+        "available": False,
+        "reason": "structure-drift-current-unavailable",
+    }
+    assert path.read_bytes() == before
 
 
 def test_structure_generation_cleanup_cli_is_bounded_and_idempotent_on_empty_db(
