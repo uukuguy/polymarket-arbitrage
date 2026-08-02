@@ -57,6 +57,7 @@
 | 43 | [Structure 分页恢复](43-Structure分页恢复.md) | opaque cursor 页面事务 / 超时续跑 / RECOVERING 不停产 / complete-window 原子发布 / point reconciliation |
 | 44 | [M1 生产恢复边界](44-M1生产恢复边界.md) | Quote 成功与 housekeeping 分界 / PostgreSQL→SQLite 类型适配 / L2 depth 继承 / 60-240-300 时钟 / 双缓冲政策门 |
 | 45 | [Quote 投影与阶段收据](45-Quote投影与阶段收据.md) | 目标索引投影 / Structure revision fence / run-bound source receipt / 采集阶段 checkpoint / 原子发布边界 |
+| 46 | [Structure 漂移安全切换](46-Structure漂移安全切换.md) | 同窗 raw/gen 双 root / 完整 temporal 分类 / scheduler child slice / Quote 优先 / sealed receipt |
 
 ## Phase 02.1 教学增量（2026-05）
 

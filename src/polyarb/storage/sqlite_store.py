@@ -51,6 +51,7 @@ from polyarb.storage.schemas import (
     SCHEDULER_STATE_DDL,
     SNAPSHOT_ATTEMPTS_DDL,
     STRUCTURE_DEFER_RECEIPTS_DDL,
+    STRUCTURE_DRIFT_ATTEMPTS_DDL,
     STRUCTURE_GENERATIONS_DDL,
     STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL,
     STRUCTURE_SYNC_WINDOWS_DDL,
@@ -77,6 +78,13 @@ _SNAPSHOT_ATTEMPT_STDERR_TAIL_RE = re.compile(
     r"sqlite-busy|structure-child-error|structure-publication-not-writing))"
     r"|structure-publication-superseded publication_id=[0-9a-f]{32}"
 )
+_STRUCTURE_DRIFT_SAFE_MARKER_RE = re.compile(
+    rb"^structure-drift stage=(?:source-events|source-markets|generation-members|"
+    rb"legacy-members|fresh-group-truth|sealed|stale|exact|none) "
+    rb"chunks=(?:0|[1-9][0-9]*) rows=(?:0|[1-9][0-9]*)$",
+    re.MULTILINE,
+)
+_STRUCTURE_DRIFT_ATTEMPT_RETENTION = 100
 
 _VALID_MODES = ("subset", "full")
 # Structure publication and Quote collection share one WAL database. Their
@@ -122,8 +130,7 @@ def _migrate_structure_event_market_progress(con: sqlite3.Connection) -> None:
     )
     for column, ddl in additions:
         con.execute(
-            "ALTER TABLE structure_sync_event_market_backfill_progress "
-            f"ADD COLUMN {column} {ddl}"
+            f"ALTER TABLE structure_sync_event_market_backfill_progress ADD COLUMN {column} {ddl}"
         )
     con.execute(
         "UPDATE structure_sync_event_market_backfill_progress SET "
@@ -229,7 +236,9 @@ def _migrate_structure_cleanup_progress_binding(con: sqlite3.Connection) -> None
     """Rebuild the pre-review progress table with one-slot composite authority."""
     columns = {
         str(row[1])
-        for row in con.execute("PRAGMA table_info(structure_generation_cleanup_progress)")
+        for row in con.execute(
+            "PRAGMA table_info(structure_generation_cleanup_progress)"
+        )
     }
     if not columns or "slot" in columns:
         return
@@ -751,21 +760,36 @@ def _repair_current_structure_generation_authentication(
 ) -> None:
     """Repair only NULL authentication fields on a provable legacy pointer."""
     required = {
-        "snapshots": {"id", "market_count", "data_product", "market_view_published", "is_valid"},
+        "snapshots": {
+            "id",
+            "market_count",
+            "data_product",
+            "market_view_published",
+            "is_valid",
+        },
         "structure_publications": {
-            "publication_id", "snapshot_id", "window_id", "status",
-            "expected_counts_json", "committed_counts_json", "validation_hash",
-            "certification_component", "certification_hash",
+            "publication_id",
+            "snapshot_id",
+            "window_id",
+            "status",
+            "expected_counts_json",
+            "committed_counts_json",
+            "validation_hash",
+            "certification_component",
+            "certification_hash",
         },
         "current_structure_generation": {
-            "id", "snapshot_id", "publication_id", "validation_hash", "counts_json",
-            "certification_component", "comparison_receipt_digest",
+            "id",
+            "snapshot_id",
+            "publication_id",
+            "validation_hash",
+            "counts_json",
+            "certification_component",
+            "comparison_receipt_digest",
         },
     }
     for table, columns in required.items():
-        existing = {
-            str(info[1]) for info in con.execute(f"PRAGMA table_info({table})")
-        }
+        existing = {str(info[1]) for info in con.execute(f"PRAGMA table_info({table})")}
         if not columns <= existing:
             return
     row = con.execute(
@@ -1267,9 +1291,9 @@ def _compare_structure_identities(
         legacy.snapshot_id,
         generation.snapshot_id if generation is not None else None,
         int(receipt[2]) if receipt is not None else legacy.market_count,
-        int(receipt[3]) if receipt is not None else (
-            generation.market_count if generation is not None else None
-        ),
+        int(receipt[3])
+        if receipt is not None
+        else (generation.market_count if generation is not None else None),
         str(receipt[4]) if receipt is not None else None,
         str(receipt[5]) if receipt is not None else None,
         str(receipt[6]) if receipt is not None else None,
@@ -1458,9 +1482,7 @@ def _backfill_structure_snapshot_statuses(con: sqlite3.Connection) -> None:
 
     for snapshot_id, (is_valid, issues) in snapshots.items():
         status = (
-            SnapshotStatus.FAILED
-            if not is_valid
-            else determine_snapshot_status(issues)
+            SnapshotStatus.FAILED if not is_valid else determine_snapshot_status(issues)
         )
         con.execute(
             "UPDATE snapshots SET snapshot_status=? WHERE id=?",
@@ -1799,6 +1821,7 @@ class SQLiteStore:
             # Parent-observed outcomes for isolated scheduler snapshot children.
             con.executescript(SNAPSHOT_ATTEMPTS_DDL)
             con.executescript(STRUCTURE_DEFER_RECEIPTS_DDL)
+            con.executescript(STRUCTURE_DRIFT_ATTEMPTS_DDL)
             con.executescript(STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL)
             con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
             _migrate_structure_recovery_authority(con)
@@ -1889,6 +1912,27 @@ class SQLiteStore:
             _ensure_column("snapshot_attempts", "stderr_bytes", "INTEGER")
             _ensure_column("snapshot_attempts", "stderr_sha256", "TEXT")
             _ensure_column("snapshot_attempts", "stderr_tail", "TEXT")
+            _ensure_column(
+                "structure_drift_attempts",
+                "identity_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+            _ensure_column(
+                "structure_drift_attempts",
+                "identity_digest",
+                "TEXT NOT NULL DEFAULT "
+                "'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'",
+            )
+            _ensure_column("structure_drift_attempts", "progress_id", "TEXT")
+            _ensure_column("structure_drift_attempts", "finished_at_ms", "INTEGER")
+            _ensure_column("structure_drift_attempts", "last_phase", "TEXT")
+            _ensure_column("structure_drift_attempts", "chunks_processed", "INTEGER")
+            _ensure_column("structure_drift_attempts", "rows_processed", "INTEGER")
+            _ensure_column("structure_drift_attempts", "elapsed_ms", "INTEGER")
+            _ensure_column("structure_drift_attempts", "failure_kind", "TEXT")
+            _ensure_column("structure_drift_attempts", "stderr_bytes", "INTEGER")
+            _ensure_column("structure_drift_attempts", "stderr_sha256", "TEXT")
+            _ensure_column("structure_drift_attempts", "stderr_safe_marker", "TEXT")
             _ensure_column("structure_publications", "write_prior_cursor", "TEXT")
             _ensure_column(
                 "structure_publications", "normalization_contract_version", "TEXT"
@@ -1896,7 +1940,9 @@ class SQLiteStore:
             _ensure_column("structure_publications", "certification_component", "TEXT")
             _ensure_column("structure_publications", "certification_row_cursor", "TEXT")
             _ensure_column("structure_publications", "certification_hash", "TEXT")
-            _ensure_column("structure_publications", "certification_counts_json", "TEXT")
+            _ensure_column(
+                "structure_publications", "certification_counts_json", "TEXT"
+            )
             _ensure_column("current_structure_generation", "validation_hash", "TEXT")
             _ensure_column("current_structure_generation", "counts_json", "TEXT")
             _ensure_column(
@@ -1963,8 +2009,7 @@ class SQLiteStore:
         try:
             has_snapshot_schema = (
                 con.execute(
-                    "SELECT 1 FROM sqlite_master "
-                    "WHERE type='table' AND name='snapshots'"
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='snapshots'"
                 ).fetchone()
                 is not None
             )
@@ -2000,13 +2045,18 @@ class SQLiteStore:
                     "structure_sync_market_staging",
                 ):
                     columns = {
-                        str(row[1]) for row in con.execute(f"PRAGMA table_info({table})")
+                        str(row[1])
+                        for row in con.execute(f"PRAGMA table_info({table})")
                     }
                     if "source_ordinal" not in columns:
-                        con.execute(f"ALTER TABLE {table} ADD COLUMN source_ordinal INTEGER")
+                        con.execute(
+                            f"ALTER TABLE {table} ADD COLUMN source_ordinal INTEGER"
+                        )
                 pointer_columns = {
                     str(row[1])
-                    for row in con.execute("PRAGMA table_info(current_structure_generation)")
+                    for row in con.execute(
+                        "PRAGMA table_info(current_structure_generation)"
+                    )
                 }
                 for column in (
                     "validation_hash",
@@ -2016,8 +2066,7 @@ class SQLiteStore:
                 ):
                     if column not in pointer_columns:
                         con.execute(
-                            f"ALTER TABLE current_structure_generation "
-                            f"ADD COLUMN {column} TEXT"
+                            f"ALTER TABLE current_structure_generation ADD COLUMN {column} TEXT"
                         )
                 receipt_columns = {
                     str(row[1])
@@ -2064,9 +2113,7 @@ class SQLiteStore:
         if (
             not window_id
             or not 1 <= max_events <= STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS
-            or not 1
-            <= max_relationships
-            <= STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS
+            or not 1 <= max_relationships <= STRUCTURE_EVENT_MARKET_BACKFILL_MAX_EVENTS
             or not STRUCTURE_EVENT_PAYLOAD_MAX_BYTES
             <= max_payload_bytes
             <= STRUCTURE_BOOTSTRAP_PAYLOAD_MAX_BYTES
@@ -2202,7 +2249,9 @@ class SQLiteStore:
                         raise ValueError(f"invalid-event-member-offset:{event_id}")
                     checked: list[str] = []
                     for member in members:
-                        market_id = member.get("id") if isinstance(member, dict) else None
+                        market_id = (
+                            member.get("id") if isinstance(member, dict) else None
+                        )
                         if not isinstance(market_id, str) or not market_id:
                             raise ValueError(f"invalid-event-market:{event_id}")
                         checked.append(market_id)
@@ -2289,11 +2338,14 @@ class SQLiteStore:
             relationships_processed = len(parent_rows)
             completed = False
             if next_member_offset == 0:
-                completed = con.execute(
-                    "SELECT 1 FROM structure_sync_event_staging "
-                    "WHERE window_id=? AND event_id>? LIMIT 1",
-                    (window_id, next_event_cursor),
-                ).fetchone() is None
+                completed = (
+                    con.execute(
+                        "SELECT 1 FROM structure_sync_event_staging "
+                        "WHERE window_id=? AND event_id>? LIMIT 1",
+                        (window_id, next_event_cursor),
+                    ).fetchone()
+                    is None
+                )
             con.execute(
                 "UPDATE structure_sync_event_market_backfill_progress SET "
                 "event_cursor=?,member_offset=?,events_processed=?,"
@@ -2311,11 +2363,14 @@ class SQLiteStore:
             )
             if completed:
                 recovery_root = str(identity[2])
-                has_rotation = con.execute(
-                    "SELECT 1 FROM structure_bootstrap_rotation_observations "
-                    "WHERE recovery_root_window_id=? LIMIT 1",
-                    (recovery_root,),
-                ).fetchone() is not None
+                has_rotation = (
+                    con.execute(
+                        "SELECT 1 FROM structure_bootstrap_rotation_observations "
+                        "WHERE recovery_root_window_id=? LIMIT 1",
+                        (recovery_root,),
+                    ).fetchone()
+                    is not None
+                )
                 if has_rotation:
                     receipt_digest = _bootstrap_recovery_digest(
                         recovery_root_window_id=recovery_root,
@@ -2349,7 +2404,9 @@ class SQLiteStore:
                         now_ms,
                         receipt_digest,
                     ):
-                        raise ValueError("structure-bootstrap-recovery-receipt-conflict")
+                        raise ValueError(
+                            "structure-bootstrap-recovery-receipt-conflict"
+                        )
             con.execute("COMMIT")
             return {
                 "completed": completed,
@@ -2493,7 +2550,9 @@ class SQLiteStore:
                 con.executemany(EVENTS_INSERT_SQL, event_tuples)
 
             # ── Amendment 01: event_tags (FK references events.id) ─────────
-            event_tag_tuples = [_event_tag_row_to_tuple(r, snapshot_id) for r in event_tag_rows]
+            event_tag_tuples = [
+                _event_tag_row_to_tuple(r, snapshot_id) for r in event_tag_rows
+            ]
             if event_tag_tuples:
                 con.executemany(EVENT_TAGS_INSERT_SQL, event_tag_tuples)
 
@@ -2655,7 +2714,9 @@ class SQLiteStore:
 
             # ── event_tags (FK references events.id) ───────────────────────
             if event_tag_rows:
-                event_tag_tuples = [_event_tag_row_to_tuple(r, snapshot_id) for r in event_tag_rows]
+                event_tag_tuples = [
+                    _event_tag_row_to_tuple(r, snapshot_id) for r in event_tag_rows
+                ]
                 con.executemany(EVENT_TAGS_INSERT_SQL, event_tag_tuples)
 
             # ── markets streamed in batches ────────────────────────────────
@@ -2938,8 +2999,7 @@ class SQLiteStore:
             window_id=str(row[2]),
             status=str(row[3]),
             committed_counts={
-                str(key): int(value)
-                for key, value in json.loads(str(row[4])).items()
+                str(key): int(value) for key, value in json.loads(str(row[4])).items()
             },
         )
 
@@ -2978,8 +3038,7 @@ class SQLiteStore:
         for component in _STRUCTURE_COMPONENTS:
             table = cls._structure_component_table(component)
             rows = con.execute(
-                f"SELECT * FROM {table} WHERE snapshot_id=? "
-                f"ORDER BY {order_by[component]}",  # noqa: S608 - internal constants
+                f"SELECT * FROM {table} WHERE snapshot_id=? ORDER BY {order_by[component]}",  # noqa: S608 - internal constants
                 (snapshot_id,),
             )
             digest.update(component.encode())
@@ -2998,7 +3057,9 @@ class SQLiteStore:
     def next_structure_snapshot_id(self) -> int:
         """Reserve-by-CAS is performed by begin; this only proposes an id."""
         with sqlite3.connect(self._db_path) as con:
-            return int(con.execute("SELECT COALESCE(MAX(id),0)+1 FROM snapshots").fetchone()[0])
+            return int(
+                con.execute("SELECT COALESCE(MAX(id),0)+1 FROM snapshots").fetchone()[0]
+            )
 
     def get_structure_publication_progress(
         self, window_id: str
@@ -3041,7 +3102,9 @@ class SQLiteStore:
         """Read at most ``limit`` completed raw rows using stable keyset order."""
         if source not in {"events", "markets"} or limit < 1:
             raise ValueError("invalid-structure-staging-chunk")
-        table = f"structure_sync_{source[:-1] if source == 'events' else 'market'}_staging"
+        table = (
+            f"structure_sync_{source[:-1] if source == 'events' else 'market'}_staging"
+        )
         key = "event_id" if source == "events" else "market_id"
         with sqlite3.connect(self._db_path) as con:
             status = con.execute(
@@ -3147,7 +3210,10 @@ class SQLiteStore:
         if (
             not publication_id
             or len(market_ids) > 500
-            or any(not isinstance(market_id, str) or not market_id for market_id in market_ids)
+            or any(
+                not isinstance(market_id, str) or not market_id
+                for market_id in market_ids
+            )
         ):
             raise ValueError("invalid-structure-market-parent-chunk")
         if not market_ids:
@@ -3164,7 +3230,9 @@ class SQLiteStore:
             )
             for market_id, event_id in staged:
                 resolved.setdefault(str(market_id), str(event_id))
-            missing = [market_id for market_id in market_ids if market_id not in resolved]
+            missing = [
+                market_id for market_id in market_ids if market_id not in resolved
+            ]
             if missing:
                 missing_placeholders = ",".join("?" for _ in missing)
                 memberships = con.execute(
@@ -3182,15 +3250,18 @@ class SQLiteStore:
         self, publication_id: str, event_id: str
     ) -> bool:
         with sqlite3.connect(self._db_path) as con:
-            return con.execute(
-                "SELECT 1 FROM structure_publications p JOIN "
-                "structure_sync_event_market_staging mine ON "
-                "mine.window_id=p.window_id JOIN structure_sync_event_market_staging "
-                "other ON other.window_id=mine.window_id AND "
-                "other.market_id=mine.market_id AND other.event_id!=mine.event_id "
-                "WHERE p.publication_id=? AND mine.event_id=? LIMIT 1",
-                (publication_id, event_id),
-            ).fetchone() is not None
+            return (
+                con.execute(
+                    "SELECT 1 FROM structure_publications p JOIN "
+                    "structure_sync_event_market_staging mine ON "
+                    "mine.window_id=p.window_id JOIN structure_sync_event_market_staging "
+                    "other ON other.window_id=mine.window_id AND "
+                    "other.market_id=mine.market_id AND other.event_id!=mine.event_id "
+                    "WHERE p.publication_id=? AND mine.event_id=? LIMIT 1",
+                    (publication_id, event_id),
+                ).fetchone()
+                is not None
+            )
 
     def structure_events_with_duplicate_markets(
         self,
@@ -3201,7 +3272,9 @@ class SQLiteStore:
         if (
             not publication_id
             or len(event_ids) > 500
-            or any(not isinstance(event_id, str) or not event_id for event_id in event_ids)
+            or any(
+                not isinstance(event_id, str) or not event_id for event_id in event_ids
+            )
         ):
             raise ValueError("invalid-structure-duplicate-event-chunk")
         if not event_ids:
@@ -3334,7 +3407,9 @@ class SQLiteStore:
                     "relation.event_id,relation.source_ordinal,relation.market_id",
                     (window_id, *event_ids),
                 ):
-                    catalog_by_event.setdefault(str(event_id), set()).add(str(market_id))
+                    catalog_by_event.setdefault(str(event_id), set()).add(
+                        str(market_id)
+                    )
             result = [
                 (
                     int(row[0]),
@@ -3767,8 +3842,7 @@ class SQLiteStore:
             raise ValueError("structure-drift-current-identity-invalid")
         with sqlite3.connect(self._db_path) as phase_con:
             phase_row = phase_con.execute(
-                "SELECT phase FROM structure_generation_drift_progress "
-                "WHERE comparison_id=?",
+                "SELECT phase FROM structure_generation_drift_progress WHERE comparison_id=?",
                 (comparison_id,),
             ).fetchone()
         if phase_row is not None and phase_row[0] in {
@@ -3797,7 +3871,10 @@ class SQLiteStore:
                 "FROM structure_generation_drift_progress WHERE comparison_id=?",
                 (comparison_id,),
             ).fetchone()
-            if progress is None or progress[13] not in {"source-events", "source-markets"}:
+            if progress is None or progress[13] not in {
+                "source-events",
+                "source-markets",
+            }:
                 raise ValueError("structure-drift-source-phase-invalid")
             phase = str(progress[13])
             cursor = None if progress[14] is None else json.loads(str(progress[14]))
@@ -3816,7 +3893,10 @@ class SQLiteStore:
                 )
                 group_state_value = digests.get("source_group_truth_state")
                 group_count = counts.get("source_group_truth_count")
-                if not isinstance(group_state_value, str) or type(group_count) is not int:
+                if (
+                    not isinstance(group_state_value, str)
+                    or type(group_count) is not int
+                ):
                     raise ValueError("structure-drift-progress-invalid")
                 group_digest = SerializableSHA256.from_json(group_state_value)
                 for ordinal, event_id, raw, market_ids in rows:
@@ -3931,7 +4011,9 @@ class SQLiteStore:
                 )
                 next_phase = phase
             else:
-                expected_count = int(progress[8] if phase == "source-events" else progress[9])
+                expected_count = int(
+                    progress[8] if phase == "source-events" else progress[9]
+                )
                 if phase_count != expected_count:
                     raise ValueError("structure-drift-source-count-mismatch")
                 digest.update(b"]")
@@ -4013,6 +4095,7 @@ class SQLiteStore:
         from polyarb.perception.structure_drift import (
             reconstruction_root_from_class_commitments,
         )
+
         with sqlite3.connect(self._db_path) as read_con:
             progress = read_con.execute(
                 "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,"
@@ -4221,9 +4304,7 @@ class SQLiteStore:
                         + final_class_counts["fresh-addition"]
                     )
                     legacy_scan_count = counts.get("legacy_member_scan_count")
-                    generation_scan_count = counts.get(
-                        "generation_member_scan_count"
-                    )
+                    generation_scan_count = counts.get("generation_member_scan_count")
                     if (
                         exact is None
                         or type(legacy_scan_count) is not int
@@ -4232,7 +4313,9 @@ class SQLiteStore:
                         or generation_scan_count != reconstructed_generation_count
                         or reconstructed_generation_count != generation_count
                     ):
-                        raise ValueError("structure-drift-reconstruction-count-mismatch")
+                        raise ValueError(
+                            "structure-drift-reconstruction-count-mismatch"
+                        )
                     class_counts_json = json.dumps(
                         final_class_counts,
                         sort_keys=True,
@@ -4260,7 +4343,9 @@ class SQLiteStore:
                         "pointer_validation_hash": str(progress[6]),
                         "generation_certification_hash": str(progress[7]),
                         "source_event_count": int(counts.get("source_event_count", 0)),
-                        "source_market_count": int(counts.get("source_market_count", 0)),
+                        "source_market_count": int(
+                            counts.get("source_market_count", 0)
+                        ),
                         "source_event_hash": "",
                         "source_market_hash": "",
                         "source_identity_hash": "",
@@ -4284,12 +4369,9 @@ class SQLiteStore:
                         "structure_generation_drift_progress WHERE comparison_id=?",
                         (comparison_id,),
                     ).fetchone()
-                    if (
-                        stored_source is None
-                        or any(
-                            not isinstance(value, str) or len(value) != 64
-                            for value in stored_source[2:]
-                        )
+                    if stored_source is None or any(
+                        not isinstance(value, str) or len(value) != 64
+                        for value in stored_source[2:]
                     ):
                         raise ValueError("structure-drift-progress-invalid")
                     receipt_payload["source_event_count"] = int(stored_source[0])
@@ -4421,18 +4503,14 @@ class SQLiteStore:
                 projection_digest = SerializableSHA256.new()
                 projection_digest.update(b"[")
             elif isinstance(projection_state_value, str):
-                projection_digest = SerializableSHA256.from_json(
-                    projection_state_value
-                )
+                projection_digest = SerializableSHA256.from_json(projection_state_value)
             else:
                 raise ValueError("structure-drift-progress-invalid")
             if generation_state_value is None:
                 generation_digest = SerializableSHA256.new()
                 generation_digest.update(b"[")
             elif isinstance(generation_state_value, str):
-                generation_digest = SerializableSHA256.from_json(
-                    generation_state_value
-                )
+                generation_digest = SerializableSHA256.from_json(generation_state_value)
             else:
                 raise ValueError("structure-drift-progress-invalid")
             for member in classified_rows:
@@ -4613,9 +4691,7 @@ class SQLiteStore:
                 next_phase = phase
             else:
                 next_phase = (
-                    "legacy-members"
-                    if generation_phase
-                    else "fresh-group-truth"
+                    "legacy-members" if generation_phase else "fresh-group-truth"
                 )
                 if generation_phase:
                     projection_digest = SerializableSHA256.from_json(
@@ -4626,12 +4702,8 @@ class SQLiteStore:
                     )
                     projection_digest.update(b"]")
                     generation_digest.update(b"]")
-                    digests["projection_member_root"] = (
-                        projection_digest.hexdigest()
-                    )
-                    digests["generation_member_root"] = (
-                        generation_digest.hexdigest()
-                    )
+                    digests["projection_member_root"] = projection_digest.hexdigest()
+                    digests["generation_member_root"] = generation_digest.hexdigest()
                     counts["generation_member_scan_count"] = phase_count
                 else:
                     counts["legacy_member_scan_count"] = phase_count
@@ -4724,9 +4796,7 @@ class SQLiteStore:
                     (window_id, *market_ids),
                 )
             }
-            event_sources: dict[
-                str, list[tuple[str, int, dict[str, object]]]
-            ] = {}
+            event_sources: dict[str, list[tuple[str, int, dict[str, object]]]] = {}
             for market_id, event_id, source_ordinal, payload_json in con.execute(
                 "SELECT relation.market_id,relation.event_id,"
                 "COALESCE(event.source_ordinal,event.rowid),event.payload_json FROM "
@@ -4840,6 +4910,10 @@ class SQLiteStore:
                 "legacy_snapshot_id": int(legacy[0]),
                 "publication_id": str(current[1]),
                 "window_id": str(current[4]),
+                "normalization_contract_version": str(current[5]),
+                "exact_receipt_digest": str(current[3]),
+                "pointer_validation_hash": str(current[2]),
+                "generation_certification_hash": str(current[6]),
             }
             if exact_matches:
                 return {
@@ -4850,7 +4924,8 @@ class SQLiteStore:
                     "reason": None,
                 }
             progress = con.execute(
-                "SELECT comparison_id,phase,class_counts_json,class_digests_json "
+                "SELECT comparison_id,phase,class_counts_json,class_digests_json,"
+                "checkpoint_at_ms "
                 "FROM structure_generation_drift_progress WHERE "
                 "legacy_snapshot_id=? AND generation_snapshot_id=? AND "
                 "publication_id=? AND window_id=? AND "
@@ -4883,11 +4958,17 @@ class SQLiteStore:
             try:
                 progress_counts = json.loads(str(progress[2]))
                 progress_digests = json.loads(str(progress[3]))
-            except (TypeError, json.JSONDecodeError):
+                if not isinstance(progress_counts, dict) or not isinstance(
+                    progress_digests, dict
+                ):
+                    raise ValueError("structure-drift-progress-invalid")
+            except (TypeError, ValueError, json.JSONDecodeError):
                 return {
                     **base,
                     "authorization_mode": "none",
                     "authorized": False,
+                    "progress_id": str(progress[0]),
+                    "checkpoint_at_ms": int(progress[4]),
                     "phase": str(progress[1]),
                     "reason": "structure-drift-progress-invalid",
                 }
@@ -4908,7 +4989,9 @@ class SQLiteStore:
                     **base,
                     "authorization_mode": "none",
                     "authorized": False,
+                    "progress_id": str(progress[0]),
                     "class_counts": class_counts,
+                    "checkpoint_at_ms": int(progress[4]),
                     "phase": str(progress[1]),
                     "reason": (
                         "structure-drift-stale"
@@ -4946,11 +5029,35 @@ class SQLiteStore:
                     "drift-safe-sealed" if receipt_valid else "none"
                 ),
                 "authorized": receipt_valid,
+                "progress_id": str(progress[0]),
                 "class_counts": class_counts,
+                "checkpoint_at_ms": int(progress[4]),
                 "phase": str(progress[1]),
                 "reason": None if receipt_valid else "structure-drift-receipt-invalid",
                 "receipt_digest": str(receipt_row[-1]),
             }
+
+    def advance_current_structure_drift_chunk(
+        self,
+        *,
+        max_rows: int,
+        now_ms: int,
+    ) -> StructureCertificationChunk | None:
+        """Advance at most one pending current-identity chunk for the scheduler."""
+        status = self.structure_generation_drift_status()
+        if status.get("authorized") is True or status.get("phase") == "stale":
+            return None
+        if status.get("reason") not in {
+            "structure-drift-progress-missing",
+            "structure-drift-incomplete",
+        }:
+            return None
+        comparison_id = self.initialize_structure_drift_comparison(now_ms=now_ms)
+        return self.advance_structure_drift_comparison_chunk(
+            comparison_id,
+            max_rows=max_rows,
+            now_ms=now_ms,
+        )
 
     def structure_event_only_market_ids(
         self,
@@ -4961,7 +5068,9 @@ class SQLiteStore:
         if (
             not publication_id
             or len(event_ids) > 500
-            or any(not isinstance(event_id, str) or not event_id for event_id in event_ids)
+            or any(
+                not isinstance(event_id, str) or not event_id for event_id in event_ids
+            )
         ):
             raise ValueError("invalid-structure-event-only-chunk")
         if not event_ids:
@@ -5031,9 +5140,14 @@ class SQLiteStore:
                     )
                     assert source is not None
                     result.append(
-                        (market_id, {"source_kind": "market", "raw": json.loads(
-                            str(source[0])
-                        ), "event_ids": event_ids})
+                        (
+                            market_id,
+                            {
+                                "source_kind": "market",
+                                "raw": json.loads(str(source[0])),
+                                "event_ids": event_ids,
+                            },
+                        )
                     )
                     continue
                 source = con.execute(
@@ -5046,9 +5160,14 @@ class SQLiteStore:
                 ).fetchone()
                 assert source is not None
                 result.append(
-                    (market_id, {"source_kind": "event_only", "raw_event": json.loads(
-                        str(source[0])
-                    ), "event_source_ordinal": int(source[1])})
+                    (
+                        market_id,
+                        {
+                            "source_kind": "event_only",
+                            "raw_event": json.loads(str(source[0])),
+                            "event_source_ordinal": int(source[1]),
+                        },
+                    )
                 )
         return result
 
@@ -5075,8 +5194,7 @@ class SQLiteStore:
                     for key, value in json.loads(str(row[3])).items()
                 }
             counts = {
-                str(key): int(value)
-                for key, value in json.loads(str(row[4])).items()
+                str(key): int(value) for key, value in json.loads(str(row[4])).items()
             }
             encoded = json.dumps(counts, sort_keys=True, separators=(",", ":"))
             window = con.execute(
@@ -5204,9 +5322,7 @@ class SQLiteStore:
             )
             if phase.endswith("universe"):
                 membership_table = (
-                    f"{prefix}memberships"
-                    if generation
-                    else "event_market_memberships"
+                    f"{prefix}memberships" if generation else "event_market_memberships"
                 )
                 market_table = f"{prefix}markets"
                 clause = ""
@@ -5359,8 +5475,14 @@ class SQLiteStore:
                         "WHERE publication_id=? AND phase=? AND row_cursor_json IS ? "
                         "AND digest_state_json=? AND checkpoint_at_ms=?",
                         (
-                            digest.to_json(), phase_count, final_hash, now_ms,
-                            publication_id, phase, prior_cursor, prior_state,
+                            digest.to_json(),
+                            phase_count,
+                            final_hash,
+                            now_ms,
+                            publication_id,
+                            phase,
+                            prior_cursor,
+                            prior_state,
                             prior_checkpoint,
                         ),
                     )
@@ -5417,8 +5539,14 @@ class SQLiteStore:
                         "AND phase=? AND row_cursor_json IS ? AND digest_state_json=? "
                         "AND checkpoint_at_ms=?",
                         (
-                            next_phase, next_digest.to_json(), final_hash, now_ms,
-                            publication_id, phase, prior_cursor, prior_state,
+                            next_phase,
+                            next_digest.to_json(),
+                            final_hash,
+                            now_ms,
+                            publication_id,
+                            phase,
+                            prior_cursor,
+                            prior_state,
                             prior_checkpoint,
                         ),
                     )
@@ -5491,8 +5619,7 @@ class SQLiteStore:
                 market_id=market_id,
             )
             generated_market = con.execute(
-                "SELECT 1 FROM structure_generation_markets WHERE snapshot_id=? "
-                "AND market_id=?",
+                "SELECT 1 FROM structure_generation_markets WHERE snapshot_id=? AND market_id=?",
                 (snapshot_id, market_id),
             ).fetchone()
             generated_membership = con.execute(
@@ -5521,8 +5648,7 @@ class SQLiteStore:
             market_id, json.loads(str(source[0])), event_ids
         )
         generated = con.execute(
-            "SELECT 1 FROM structure_generation_markets WHERE snapshot_id=? "
-            "AND market_id=?",
+            "SELECT 1 FROM structure_generation_markets WHERE snapshot_id=? AND market_id=?",
             (snapshot_id, market_id),
         ).fetchone()
         return bool(
@@ -5583,7 +5709,10 @@ class SQLiteStore:
                 )
             if component not in certification_components:
                 raise ValueError("unknown-structure-certification-component")
-            if component in _STRUCTURE_SOURCE_COMPONENTS and publication[10] != "complete":
+            if (
+                component in _STRUCTURE_SOURCE_COMPONENTS
+                and publication[10] != "complete"
+            ):
                 raise ValueError("source-truth-invalid")
             cursor = None if publication[6] is None else str(publication[6])
             prior_hash = str(publication[7] or ("0" * 64))
@@ -5600,10 +5729,7 @@ class SQLiteStore:
                 window_id if component in _STRUCTURE_SOURCE_COMPONENTS else snapshot_id
             ]
             if cursor_values is not None:
-                clause = (
-                    f" AND ({','.join(keys)}) > "
-                    f"({','.join('?' for _ in keys)})"
-                )
+                clause = f" AND ({','.join(keys)}) > ({','.join('?' for _ in keys)})"
                 parameters.extend(cursor_values)
             parameters.append(max_rows)
             if component in _STRUCTURE_SOURCE_COMPONENTS:
@@ -5654,8 +5780,7 @@ class SQLiteStore:
                     ]
                     if (
                         truth[7] == "incomplete-source"
-                        or
-                        len(members) != int(truth[4])
+                        or len(members) != int(truth[4])
                         or sum(
                             member.member_kind == "named" and member.active
                             for member in members
@@ -5716,7 +5841,11 @@ class SQLiteStore:
                         (publication_id, market[1]),
                     ).fetchone()
                     if source is None or (
-                        source[0], source[1], source[2], source[3], source[4]
+                        source[0],
+                        source[1],
+                        source[2],
+                        source[3],
+                        source[4],
                     ) != (market[17], market[18], market[15], market[16], market[22]):
                         raise ValueError("source-truth-invalid")
                     if (market[17] == 1 or market[18] is not None) and read_con.execute(
@@ -5813,7 +5942,9 @@ class SQLiteStore:
                         f"AND event_id IN ({placeholders}) ORDER BY event_id,market_id",
                         (snapshot_id, *event_ids),
                     ):
-                        actual_memberships.setdefault(str(actual[1]), []).append(tuple(actual))
+                        actual_memberships.setdefault(str(actual[1]), []).append(
+                            tuple(actual)
+                        )
                     for actual in read_con.execute(
                         "SELECT snapshot_id,event_id,neg_risk_market_id,neg_risk_type,"
                         "expected_member_count,active_named_count,membership_hash,quality,"
@@ -5822,7 +5953,9 @@ class SQLiteStore:
                         "event_id,neg_risk_market_id",
                         (snapshot_id, *event_ids),
                     ):
-                        actual_truths.setdefault(str(actual[1]), []).append(tuple(actual))
+                        actual_truths.setdefault(str(actual[1]), []).append(
+                            tuple(actual)
+                        )
                 for source_event in rows:
                     raw = json.loads(str(source_event[2]))
                     events, tags, _mapping, members, truths = normalize_events([raw])
@@ -5919,7 +6052,9 @@ class SQLiteStore:
                         if actual_values != sorted(expected_values):
                             raise ValueError("source-truth-invalid")
             elif component == "source_markets":
-                from polyarb.perception.structure_publication import market_quarantine_issue
+                from polyarb.perception.structure_publication import (
+                    market_quarantine_issue,
+                )
                 from polyarb.snapshot.normalizer import normalize_market
 
                 market_ids = [str(source_market[1]) for source_market in rows]
@@ -5956,11 +6091,7 @@ class SQLiteStore:
                     event_ids = parents.get(market_id, [])
                     normalized = normalize_market(
                         raw,
-                        (
-                            {market_id: event_ids[0]}
-                            if event_ids
-                            else {}
-                        ),
+                        ({market_id: event_ids[0]} if event_ids else {}),
                     )
                     if normalized is None:
                         raise ValueError("source-truth-invalid")
@@ -6043,11 +6174,18 @@ class SQLiteStore:
                 "AND certification_component IS ? AND certification_row_cursor IS ? "
                 "AND COALESCE(certification_hash,?)=?",
                 (
-                    next_component, next_cursor, next_hash,
-                    comparison_start, next_hash,
+                    next_component,
+                    next_cursor,
+                    next_hash,
+                    comparison_start,
+                    next_hash,
                     json.dumps(scanned_counts, sort_keys=True, separators=(",", ":")),
-                    now_ms, publication_id,
-                    publication[5], publication[6], "0" * 64, prior_hash,
+                    now_ms,
+                    publication_id,
+                    publication[5],
+                    publication[6],
+                    "0" * 64,
+                    prior_hash,
                 ),
             )
             if cur.rowcount != 1:
@@ -6166,11 +6304,7 @@ class SQLiteStore:
                 "structure_sync_event_market_backfill_progress WHERE window_id=?",
                 (window_id,),
             ).fetchone()
-            if (
-                bootstrap is None
-                or bootstrap[0] is None
-                or bootstrap[1] is not None
-            ):
+            if bootstrap is None or bootstrap[0] is None or bootstrap[1] is not None:
                 raise ValueError("structure-bootstrap-incomplete")
             existing = con.execute(
                 "SELECT publication_id,snapshot_id,window_id,status,"
@@ -6182,9 +6316,12 @@ class SQLiteStore:
                     raise ValueError("structure-publication-window-conflict")
                 con.execute("COMMIT")
                 return self._publication_state(existing)
-            if con.execute(
-                "SELECT 1 FROM snapshots WHERE id=?", (snapshot_id,)
-            ).fetchone() is not None:
+            if (
+                con.execute(
+                    "SELECT 1 FROM snapshots WHERE id=?", (snapshot_id,)
+                ).fetchone()
+                is not None
+            ):
                 raise ValueError("structure-publication-snapshot-conflict")
             con.execute(
                 "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
@@ -6257,8 +6394,7 @@ class SQLiteStore:
             if status == "failed" and row[4] == reason:
                 pointer_is_candidate = (
                     con.execute(
-                        "SELECT 1 FROM current_structure_generation WHERE id=1 "
-                        "AND snapshot_id=?",
+                        "SELECT 1 FROM current_structure_generation WHERE id=1 AND snapshot_id=?",
                         (snapshot_id,),
                     ).fetchone()
                     is not None
@@ -6282,8 +6418,7 @@ class SQLiteStore:
                 raise ValueError("structure-publication-contract-not-reconcilable")
             pointer_is_candidate = (
                 con.execute(
-                    "SELECT 1 FROM current_structure_generation WHERE id=1 "
-                    "AND snapshot_id=?",
+                    "SELECT 1 FROM current_structure_generation WHERE id=1 AND snapshot_id=?",
                     (snapshot_id,),
                 ).fetchone()
                 is not None
@@ -6360,25 +6495,47 @@ class SQLiteStore:
             raise ValueError(f"invalid-structure-component-row:{component}")
         columns_by_component = {
             "events": (
-                "id", "slug", "title", "ticker", "active", "closed",
-                "liquidity_usd", "volume_usd", "end_time_ms", "fetched_at_ms",
+                "id",
+                "slug",
+                "title",
+                "ticker",
+                "active",
+                "closed",
+                "liquidity_usd",
+                "volume_usd",
+                "end_time_ms",
+                "fetched_at_ms",
                 "page_fetched_at_ms",
             ),
             "event_tags": ("event_id", "tag_id", "tag_label", "tag_slug"),
             "memberships": (
-                "event_id", "neg_risk_market_id", "market_id", "member_kind",
-                "active", "closed",
+                "event_id",
+                "neg_risk_market_id",
+                "market_id",
+                "member_kind",
+                "active",
+                "closed",
             ),
             "group_truth": (
-                "event_id", "neg_risk_market_id", "neg_risk_type",
-                "expected_member_count", "active_named_count", "membership_hash",
-                "quality", "reason",
+                "event_id",
+                "neg_risk_market_id",
+                "neg_risk_type",
+                "expected_member_count",
+                "active_named_count",
+                "membership_hash",
+                "quality",
+                "reason",
             ),
             "markets": tuple(
                 column for column in MARKETS_COLUMN_ORDER if column != "snapshot_id"
             ),
             "issues": (
-                "issue_index", "layer", "category", "market_id", "detail", "raw_payload"
+                "issue_index",
+                "layer",
+                "category",
+                "market_id",
+                "detail",
+                "raw_payload",
             ),
         }
         columns = columns_by_component[component]
@@ -6439,11 +6596,12 @@ class SQLiteStore:
                     "events": ("snapshot_id", "id"),
                     "event_tags": ("snapshot_id", "event_id", "tag_id"),
                     "memberships": (
-                        "snapshot_id", "event_id", "neg_risk_market_id", "market_id"
+                        "snapshot_id",
+                        "event_id",
+                        "neg_risk_market_id",
+                        "market_id",
                     ),
-                    "group_truth": (
-                        "snapshot_id", "event_id", "neg_risk_market_id"
-                    ),
+                    "group_truth": ("snapshot_id", "event_id", "neg_risk_market_id"),
                     "markets": ("snapshot_id", "market_id"),
                     "issues": ("snapshot_id", "issue_index"),
                 }[component]
@@ -6486,8 +6644,7 @@ class SQLiteStore:
                 )
                 placeholders = ",".join("?" for _ in columns)
                 con.execute(
-                    f"INSERT INTO {table}({','.join(columns)}) "
-                    f"VALUES ({placeholders})",  # noqa: S608 - internal schema
+                    f"INSERT INTO {table}({','.join(columns)}) VALUES ({placeholders})",  # noqa: S608 - internal schema
                     values,
                 )
             counts[component] = int(counts[component]) + len(materialized)
@@ -6616,7 +6773,10 @@ class SQLiteStore:
                     )
                     for market_id, member_kind, active, closed in member_rows
                 ]
-                if membership_hash(str(event_id), str(group_id), durable_members) != stored_hash:
+                if (
+                    membership_hash(str(event_id), str(group_id), durable_members)
+                    != stored_hash
+                ):
                     hash_invalid = True
                     break
             if invalid_truth is not None or orphan is not None or hash_invalid:
@@ -6959,9 +7119,7 @@ class SQLiteStore:
                     )
                 )
                 if comparison_recoverable_missing_receipt:
-                    comparison_repair_checkpoint_at_ms = int(
-                        pointer_repair_progress[4]
-                    )
+                    comparison_repair_checkpoint_at_ms = int(pointer_repair_progress[4])
             else:
                 expected_digest = _comparison_receipt_digest(
                     generation_snapshot_id=pointer_snapshot_id,
@@ -7016,7 +7174,10 @@ class SQLiteStore:
         rotation_status = None
         if bootstrap_rotation is not None:
             valid_types = (
-                all(isinstance(bootstrap_rotation[index], str) for index in (0, 1, 2, 4, 6, 8))
+                all(
+                    isinstance(bootstrap_rotation[index], str)
+                    for index in (0, 1, 2, 4, 6, 8)
+                )
                 and all(
                     type(bootstrap_rotation[index]) is int
                     and int(bootstrap_rotation[index]) >= 0
@@ -7058,7 +7219,9 @@ class SQLiteStore:
                     window_checkpoint_at_ms=int(bootstrap_recovery[1]),
                     completed_at_ms=int(bootstrap_recovery[2]),
                 )
-                recovery_authenticated = bootstrap_recovery[3] == expected_recovery_digest
+                recovery_authenticated = (
+                    bootstrap_recovery[3] == expected_recovery_digest
+                )
             recovered = authenticated and recovery_authenticated
             rotation_status = {
                 "recovery_root_window_id": str(bootstrap_rotation[0]),
@@ -7066,17 +7229,20 @@ class SQLiteStore:
                 "event_cursor": str(bootstrap_rotation[2]),
                 "member_offset": (
                     int(bootstrap_rotation[3])
-                    if type(bootstrap_rotation[3]) is int else 0
+                    if type(bootstrap_rotation[3]) is int
+                    else 0
                 ),
                 "blocked_reason": str(bootstrap_rotation[4]),
                 "checkpoint_at_ms": (
                     int(bootstrap_rotation[5])
-                    if type(bootstrap_rotation[5]) is int else 0
+                    if type(bootstrap_rotation[5]) is int
+                    else 0
                 ),
                 "successor_window_id": str(bootstrap_rotation[6]),
                 "rotated_at_ms": (
                     int(bootstrap_rotation[7])
-                    if type(bootstrap_rotation[7]) is int else 0
+                    if type(bootstrap_rotation[7]) is int
+                    else 0
                 ),
                 "observation_digest": str(bootstrap_rotation[8]),
                 "authenticated": authenticated,
@@ -7358,10 +7524,13 @@ class SQLiteStore:
                     json.loads(str(publication[2])).get("markets", -1)
                 ):
                     blocked_reason = "generation-count-contract-mismatch"
-                elif con.execute(
-                    "SELECT 1 FROM current_structure_generation WHERE snapshot_id=?",
-                    (snapshot_id,),
-                ).fetchone() is not None:
+                elif (
+                    con.execute(
+                        "SELECT 1 FROM current_structure_generation WHERE snapshot_id=?",
+                        (snapshot_id,),
+                    ).fetchone()
+                    is not None
+                ):
                     blocked_reason = "generation-became-current"
                 if blocked_reason is not None:
                     _append_generation_cleanup_observation(
@@ -7398,7 +7567,10 @@ class SQLiteStore:
                 )
                 active = (snapshot_id, publication_id, "events", 0)
             snapshot_id, publication_id, phase, prior_deleted = (
-                int(active[0]), str(active[1]), str(active[2]), int(active[3])
+                int(active[0]),
+                str(active[1]),
+                str(active[2]),
+                int(active[3]),
             )
             active_auth_error = _active_generation_cleanup_authentication_error(
                 con,
@@ -7420,10 +7592,14 @@ class SQLiteStore:
                     "reclaimed_generation_ids": [],
                     "retained_generation_ids": retained_ids,
                 }
-            if snapshot_id in retained_ids or con.execute(
-                "SELECT 1 FROM current_structure_generation WHERE snapshot_id=?",
-                (snapshot_id,),
-            ).fetchone() is not None:
+            if (
+                snapshot_id in retained_ids
+                or con.execute(
+                    "SELECT 1 FROM current_structure_generation WHERE snapshot_id=?",
+                    (snapshot_id,),
+                ).fetchone()
+                is not None
+            ):
                 con.execute(
                     "UPDATE structure_generation_cleanup_progress SET blocked_reason=?,"
                     "checkpoint_at_ms=? WHERE generation_snapshot_id=?",
@@ -7526,11 +7702,15 @@ class SQLiteStore:
             pointer = con.execute(
                 "SELECT snapshot_id FROM current_structure_generation WHERE id=1"
             ).fetchone()
-            rows = [] if pointer is None else con.execute(
-                "SELECT market_id FROM structure_generation_markets "
-                "WHERE snapshot_id=? ORDER BY market_id",
-                (int(pointer[0]),),
-            ).fetchall()
+            rows = (
+                []
+                if pointer is None
+                else con.execute(
+                    "SELECT market_id FROM structure_generation_markets "
+                    "WHERE snapshot_id=? ORDER BY market_id",
+                    (int(pointer[0]),),
+                ).fetchall()
+            )
             con.execute("COMMIT")
             return tuple(str(row[0]) for row in rows)
         finally:
@@ -7555,11 +7735,16 @@ class SQLiteStore:
                     "WHERE publication_id=?",
                     (publication_id,),
                 ).fetchone()
-                if marker is None or marker[0] != "writing" or marker[1] not in {
-                    "backfill-frozen",
-                    *_STRUCTURE_COMPONENTS,
-                    "comparison",
-                }:
+                if (
+                    marker is None
+                    or marker[0] != "writing"
+                    or marker[1]
+                    not in {
+                        "backfill-frozen",
+                        *_STRUCTURE_COMPONENTS,
+                        "comparison",
+                    }
+                ):
                     raise ValueError("structure-backfill-freeze-race")
             con.execute("COMMIT")
         except BaseException:
@@ -7698,7 +7883,7 @@ class SQLiteStore:
                         publication_id,
                         window_id,
                         snapshot_id,
-                    json.dumps(expected, sort_keys=True, separators=(",", ":")),
+                        json.dumps(expected, sort_keys=True, separators=(",", ":")),
                         json.dumps(zero_counts, sort_keys=True, separators=(",", ":")),
                         snapshot_id,
                     ),
@@ -7748,9 +7933,18 @@ class SQLiteStore:
                     "events": (
                         "events",
                         (
-                            "snapshot_id", "id", "slug", "title", "ticker", "active",
-                            "closed", "liquidity_usd", "volume_usd", "end_time_ms",
-                            "fetched_at_ms", "page_fetched_at_ms",
+                            "snapshot_id",
+                            "id",
+                            "slug",
+                            "title",
+                            "ticker",
+                            "active",
+                            "closed",
+                            "liquidity_usd",
+                            "volume_usd",
+                            "end_time_ms",
+                            "fetched_at_ms",
+                            "page_fetched_at_ms",
                         ),
                         ("id",),
                     ),
@@ -7762,17 +7956,28 @@ class SQLiteStore:
                     "memberships": (
                         "event_market_memberships",
                         (
-                            "snapshot_id", "event_id", "neg_risk_market_id", "market_id",
-                            "member_kind", "active", "closed",
+                            "snapshot_id",
+                            "event_id",
+                            "neg_risk_market_id",
+                            "market_id",
+                            "member_kind",
+                            "active",
+                            "closed",
                         ),
                         ("event_id", "neg_risk_market_id", "market_id"),
                     ),
                     "group_truth": (
                         "neg_risk_group_truth",
                         (
-                            "snapshot_id", "event_id", "neg_risk_market_id",
-                            "neg_risk_type", "expected_member_count", "active_named_count",
-                            "membership_hash", "quality", "reason",
+                            "snapshot_id",
+                            "event_id",
+                            "neg_risk_market_id",
+                            "neg_risk_type",
+                            "expected_member_count",
+                            "active_named_count",
+                            "membership_hash",
+                            "quality",
+                            "reason",
                         ),
                         ("event_id", "neg_risk_market_id"),
                     ),
@@ -7784,8 +7989,13 @@ class SQLiteStore:
                     "issues": (
                         "validation_issues",
                         (
-                            "snapshot_id", "id", "layer", "category", "market_id",
-                            "detail", "raw_payload",
+                            "snapshot_id",
+                            "id",
+                            "layer",
+                            "category",
+                            "market_id",
+                            "detail",
+                            "raw_payload",
                         ),
                         ("id",),
                     ),
@@ -7814,8 +8024,13 @@ class SQLiteStore:
                         destination = self._structure_component_table(component)
                         destination_columns = (
                             (
-                                "snapshot_id", "issue_index", "layer", "category",
-                                "market_id", "detail", "raw_payload",
+                                "snapshot_id",
+                                "issue_index",
+                                "layer",
+                                "category",
+                                "market_id",
+                                "detail",
+                                "raw_payload",
                             )
                             if component == "issues"
                             else columns
@@ -7842,7 +8057,9 @@ class SQLiteStore:
                             f"({','.join('?' for _ in key_columns)}) LIMIT 1",  # noqa: S608
                             (snapshot_id, *next_values),
                         ).fetchone()
-                        if more is None and component_index + 1 < len(_STRUCTURE_COMPONENTS):
+                        if more is None and component_index + 1 < len(
+                            _STRUCTURE_COMPONENTS
+                        ):
                             expected[component] = int(committed[component])
                             component_index += 1
                             component = _STRUCTURE_COMPONENTS[component_index]
@@ -7894,7 +8111,8 @@ class SQLiteStore:
             with sqlite3.connect(self._db_path) as read_con:
                 finished_at_ms = int(
                     read_con.execute(
-                        "SELECT finished_at_ms FROM snapshots WHERE id=?", (snapshot_id,)
+                        "SELECT finished_at_ms FROM snapshots WHERE id=?",
+                        (snapshot_id,),
                     ).fetchone()[0]
                 )
             if needs_certification:
@@ -7924,7 +8142,9 @@ class SQLiteStore:
             return BackfillCheckpoint(snapshot_id, copied_rows, cursor, True)
         return BackfillCheckpoint(snapshot_id, copied_rows, cursor, False)
 
-    def begin_or_resume_structure_sync(self, *, started_at_ms: int) -> dict[str, object]:
+    def begin_or_resume_structure_sync(
+        self, *, started_at_ms: int
+    ) -> dict[str, object]:
         """Return the sole resumable Structure window, creating it atomically."""
         if started_at_ms < 0:
             raise ValueError("invalid-structure-sync-start")
@@ -8238,8 +8458,7 @@ class SQLiteStore:
                     to_delete,
                 )
                 con.execute(
-                    "DELETE FROM structure_sync_event_staging "
-                    f"WHERE window_id IN ({placeholders})",
+                    f"DELETE FROM structure_sync_event_staging WHERE window_id IN ({placeholders})",
                     to_delete,
                 )
                 con.execute(
@@ -8261,7 +8480,9 @@ class SQLiteStore:
             con.close()
         return len(to_delete), to_delete
 
-    def read_complete_structure_sync(self, window_id: object) -> tuple[list[dict], list[dict]]:
+    def read_complete_structure_sync(
+        self, window_id: object
+    ) -> tuple[list[dict], list[dict]]:
         """Return staged facts only after both source traversals completed."""
         if not isinstance(window_id, str) or not window_id:
             raise ValueError("invalid-structure-sync-window")
@@ -8276,23 +8497,23 @@ class SQLiteStore:
                 json.loads(str(item[0]))
                 for item in con.execute(
                     "SELECT payload_json FROM structure_sync_event_staging "
-                    "WHERE window_id=? ORDER BY event_id", (window_id,)
+                    "WHERE window_id=? ORDER BY event_id",
+                    (window_id,),
                 ).fetchall()
             ]
             markets = [
                 json.loads(str(item[0]))
                 for item in con.execute(
                     "SELECT payload_json FROM structure_sync_market_staging "
-                    "WHERE window_id=? ORDER BY market_id", (window_id,)
+                    "WHERE window_id=? ORDER BY market_id",
+                    (window_id,),
                 ).fetchall()
             ]
             return events, markets
         finally:
             con.close()
 
-    def get_complete_structure_sync_counts(
-        self, window_id: object
-    ) -> tuple[int, int]:
+    def get_complete_structure_sync_counts(self, window_id: object) -> tuple[int, int]:
         """Validate a completed window and return its staged row counts."""
         if not isinstance(window_id, str) or not window_id:
             raise ValueError("invalid-structure-sync-window")
@@ -8305,15 +8526,13 @@ class SQLiteStore:
                 raise ValueError("structure-sync-window-not-complete")
             event_count = int(
                 con.execute(
-                    "SELECT COUNT(*) FROM structure_sync_event_staging "
-                    "WHERE window_id=?",
+                    "SELECT COUNT(*) FROM structure_sync_event_staging WHERE window_id=?",
                     (window_id,),
                 ).fetchone()[0]
             )
             market_count = int(
                 con.execute(
-                    "SELECT COUNT(*) FROM structure_sync_market_staging "
-                    "WHERE window_id=?",
+                    "SELECT COUNT(*) FROM structure_sync_market_staging WHERE window_id=?",
                     (window_id,),
                 ).fetchone()[0]
             )
@@ -8366,8 +8585,15 @@ class SQLiteStore:
     @staticmethod
     def _structure_sync_window_row(row: tuple[object, ...]) -> dict[str, object]:
         keys = (
-            "id", "status", "event_cursor", "market_cursor", "started_at_ms",
-            "checkpoint_at_ms", "event_pages", "market_pages", "failure_reason",
+            "id",
+            "status",
+            "event_cursor",
+            "market_cursor",
+            "started_at_ms",
+            "checkpoint_at_ms",
+            "event_pages",
+            "market_pages",
+            "failure_reason",
             "published_snapshot_id",
         )
         return dict(zip(keys, row, strict=True))
@@ -8392,7 +8618,9 @@ class SQLiteStore:
             event_id = event.get("id") if isinstance(event, dict) else None
             if not isinstance(event_id, str) or not event_id:
                 raise ValueError("invalid-structure-event")
-            serialized.append((event_id, json.dumps(event, sort_keys=True), requested_cursor))
+            serialized.append(
+                (event_id, json.dumps(event, sort_keys=True), requested_cursor)
+            )
         con = self._connect_writer()
         try:
             con.execute("BEGIN IMMEDIATE")
@@ -8473,7 +8701,9 @@ class SQLiteStore:
             market_id = market.get("id") if isinstance(market, dict) else None
             if not isinstance(market_id, str) or not market_id:
                 raise ValueError("invalid-structure-market")
-            serialized.append((market_id, json.dumps(market, sort_keys=True), requested_cursor))
+            serialized.append(
+                (market_id, json.dumps(market, sort_keys=True), requested_cursor)
+            )
         con = self._connect_writer()
         try:
             con.execute("BEGIN IMMEDIATE")
@@ -8537,14 +8767,198 @@ class SQLiteStore:
         con = self._connect_writer()
         try:
             cur = con.execute(
-                "INSERT INTO snapshot_attempts(started_at_ms,outcome) "
-                "VALUES (?, 'running')",
+                "INSERT INTO snapshot_attempts(started_at_ms,outcome) VALUES (?, 'running')",
                 (started_at_ms,),
             )
             assert cur.lastrowid is not None
             return int(cur.lastrowid)
         finally:
             con.close()
+
+    def begin_structure_drift_attempt(
+        self,
+        *,
+        identity: Mapping[str, object],
+        progress_id: str | None,
+        started_at_ms: int,
+    ) -> int:
+        """Append parent ownership before spawning one drift child."""
+        if started_at_ms < 0 or (progress_id is not None and not progress_id):
+            raise ValueError("invalid-structure-drift-attempt")
+        identity_json = json.dumps(
+            dict(identity), sort_keys=True, separators=(",", ":")
+        )
+        identity_digest = hashlib.sha256(identity_json.encode()).hexdigest()
+        con = self._connect_writer()
+        try:
+            cur = con.execute(
+                "INSERT INTO structure_drift_attempts("
+                "identity_json,identity_digest,progress_id,started_at_ms,outcome) "
+                "VALUES(?,?,?,?,'running')",
+                (identity_json, identity_digest, progress_id, started_at_ms),
+            )
+            assert cur.lastrowid is not None
+            return int(cur.lastrowid)
+        finally:
+            con.close()
+
+    def finish_structure_drift_attempt(
+        self,
+        *,
+        attempt_id: int,
+        outcome: str,
+        finished_at_ms: int,
+        last_phase: str | None,
+        chunks_processed: int,
+        rows_processed: int,
+        elapsed_ms: int,
+        failure_kind: str | None,
+        stderr: bytes = b"",
+        stderr_bytes: int | None = None,
+        stderr_sha256: str | None = None,
+        stderr_safe_marker: str | None = None,
+    ) -> None:
+        """Terminalize one parent-owned drift attempt exactly once."""
+        if outcome not in {
+            "succeeded",
+            "checkpointed",
+            "deferred",
+            "failed",
+            "cancelled",
+        }:
+            raise ValueError("invalid-structure-drift-attempt-outcome")
+        if min(finished_at_ms, chunks_processed, rows_processed, elapsed_ms) < 0:
+            raise ValueError("invalid-structure-drift-attempt-metrics")
+        if failure_kind is not None and (not failure_kind or len(failure_kind) > 64):
+            raise ValueError("invalid-structure-drift-attempt-failure")
+        markers = [*_STRUCTURE_DRIFT_SAFE_MARKER_RE.finditer(stderr)]
+        derived_safe_marker = (
+            max(markers, key=lambda marker: marker.start()).group(0).decode("ascii")
+            if markers
+            else None
+        )
+        diagnostic_bytes = len(stderr) if stderr_bytes is None else stderr_bytes
+        diagnostic_digest = (
+            hashlib.sha256(stderr).hexdigest()
+            if stderr_sha256 is None
+            else stderr_sha256
+        )
+        safe_marker = (
+            derived_safe_marker if stderr_safe_marker is None else stderr_safe_marker
+        )
+        if (
+            diagnostic_bytes < 0
+            or re.fullmatch(r"[0-9a-f]{64}", diagnostic_digest) is None
+            or (safe_marker is not None and len(safe_marker) > 256)
+        ):
+            raise ValueError("invalid-structure-drift-attempt-stderr")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            cur = con.execute(
+                "UPDATE structure_drift_attempts SET finished_at_ms=?,outcome=?,"
+                "last_phase=?,chunks_processed=?,rows_processed=?,elapsed_ms=?,"
+                "failure_kind=?,stderr_bytes=?,stderr_sha256=?,stderr_safe_marker=? "
+                "WHERE id=? AND outcome='running' AND finished_at_ms IS NULL",
+                (
+                    finished_at_ms,
+                    outcome,
+                    last_phase,
+                    chunks_processed,
+                    rows_processed,
+                    elapsed_ms,
+                    failure_kind,
+                    diagnostic_bytes,
+                    diagnostic_digest,
+                    safe_marker,
+                    attempt_id,
+                ),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("structure-drift-attempt-already-terminal")
+            con.execute(
+                "DELETE FROM structure_drift_attempts WHERE outcome!='running' "
+                "AND id NOT IN (SELECT id FROM structure_drift_attempts "
+                "WHERE outcome!='running' ORDER BY id DESC LIMIT ?)",
+                (_STRUCTURE_DRIFT_ATTEMPT_RETENTION,),
+            )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def recover_orphaned_structure_drift_attempts(self, *, recovered_at_ms: int) -> int:
+        """Close children whose parent disappeared before terminal evidence."""
+        if recovered_at_ms < 0:
+            raise ValueError("invalid-structure-drift-recovery-time")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            cur = con.execute(
+                "UPDATE structure_drift_attempts SET finished_at_ms=?,outcome='failed',"
+                "elapsed_ms=MAX(0,?-started_at_ms),chunks_processed=0,rows_processed=0,"
+                "failure_kind='parent-restarted-orphan',stderr_bytes=0,"
+                "stderr_sha256=?,stderr_safe_marker=NULL "
+                "WHERE outcome='running' AND finished_at_ms IS NULL",
+                (recovered_at_ms, recovered_at_ms, hashlib.sha256(b"").hexdigest()),
+            )
+            recovered = int(cur.rowcount)
+            con.execute(
+                "DELETE FROM structure_drift_attempts WHERE outcome!='running' "
+                "AND id NOT IN (SELECT id FROM structure_drift_attempts "
+                "WHERE outcome!='running' ORDER BY id DESC LIMIT ?)",
+                (_STRUCTURE_DRIFT_ATTEMPT_RETENTION,),
+            )
+            con.execute("COMMIT")
+            return recovered
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def get_latest_structure_drift_attempt(self) -> dict[str, object] | None:
+        """Return bounded latest parent evidence for health and operators."""
+        try:
+            with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as con:
+                row = con.execute(
+                    "SELECT id,identity_json,identity_digest,progress_id,started_at_ms,"
+                    "finished_at_ms,outcome,last_phase,chunks_processed,rows_processed,"
+                    "elapsed_ms,failure_kind,stderr_bytes,stderr_sha256,"
+                    "stderr_safe_marker FROM structure_drift_attempts "
+                    "ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        keys = (
+            "id",
+            "identity_json",
+            "identity_digest",
+            "progress_id",
+            "started_at_ms",
+            "finished_at_ms",
+            "outcome",
+            "last_phase",
+            "chunks_processed",
+            "rows_processed",
+            "elapsed_ms",
+            "failure_kind",
+            "stderr_bytes",
+            "stderr_sha256",
+            "stderr_safe_marker",
+        )
+        result = dict(zip(keys, row, strict=True))
+        try:
+            result["identity"] = json.loads(str(result.pop("identity_json")))
+        except json.JSONDecodeError:
+            result["identity"] = None
+        return result
 
     def record_structure_defer(
         self,
@@ -8621,12 +9035,8 @@ class SQLiteStore:
         """Close one running attempt exactly once with a bounded outcome."""
         if outcome not in {"succeeded", "failed", "cancelled"}:
             raise ValueError(f"invalid terminal snapshot attempt outcome: {outcome}")
-        if (
-            chunks_processed is not None
-            and (
-                isinstance(chunks_processed, bool)
-                or not 0 <= chunks_processed <= 100
-            )
+        if chunks_processed is not None and (
+            isinstance(chunks_processed, bool) or not 0 <= chunks_processed <= 100
         ):
             raise ValueError("invalid snapshot attempt chunks_processed")
         if stderr_bytes is not None and (
@@ -8635,9 +9045,10 @@ class SQLiteStore:
             or not 0 <= stderr_bytes <= _SNAPSHOT_ATTEMPT_STDERR_MAX_BYTES
         ):
             raise ValueError("invalid snapshot attempt stderr_bytes")
-        if stderr_sha256 is not None and re.fullmatch(
-            r"[0-9a-f]{64}", stderr_sha256
-        ) is None:
+        if (
+            stderr_sha256 is not None
+            and re.fullmatch(r"[0-9a-f]{64}", stderr_sha256) is None
+        ):
             raise ValueError("invalid snapshot attempt stderr_sha256")
         if (stderr_bytes is None) != (stderr_sha256 is None):
             raise ValueError("incomplete snapshot attempt stderr diagnostic")
@@ -9055,8 +9466,7 @@ class SQLiteStore:
                     to_delete,
                 )
                 con.execute(
-                    "DELETE FROM neg_risk_group_truth "
-                    f"WHERE snapshot_id IN ({id_placeholders})",
+                    f"DELETE FROM neg_risk_group_truth WHERE snapshot_id IN ({id_placeholders})",
                     to_delete,
                 )
                 con.execute(

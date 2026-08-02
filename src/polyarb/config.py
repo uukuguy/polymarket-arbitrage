@@ -79,23 +79,15 @@ class Settings(BaseSettings):
     # production qualification gate. These are controller inputs, not hidden
     # timing constants.
     opportunity_first_watcher_enabled: bool = False
-    candidate_high_interval_s: float = Field(
-        default=15.0, gt=0, allow_inf_nan=False
-    )
-    candidate_normal_interval_s: float = Field(
-        default=60.0, gt=0, allow_inf_nan=False
-    )
+    candidate_high_interval_s: float = Field(default=15.0, gt=0, allow_inf_nan=False)
+    candidate_normal_interval_s: float = Field(default=60.0, gt=0, allow_inf_nan=False)
     candidate_explore_interval_s: float = Field(
         default=300.0, gt=0, allow_inf_nan=False
     )
-    candidate_quote_hard_stale_s: float = Field(
-        default=90.0, gt=0, allow_inf_nan=False
-    )
+    candidate_quote_hard_stale_s: float = Field(default=90.0, gt=0, allow_inf_nan=False)
     candidate_cycle_max_groups: int = Field(default=12, ge=2)
     candidate_reserved_non_high_slots: int = Field(default=3, ge=1)
-    candidate_group_timeout_s: float = Field(
-        default=30.0, gt=0, allow_inf_nan=False
-    )
+    candidate_group_timeout_s: float = Field(default=30.0, gt=0, allow_inf_nan=False)
     candidate_high_burst_groups: int = Field(default=1, ge=1)
     # Production acceptance requires normal candidates to be quoted or
     # explicitly stale within 120s. Operators may tighten, never relax, it.
@@ -105,15 +97,9 @@ class Settings(BaseSettings):
         le=120,
         allow_inf_nan=False,
     )
-    candidate_supervisor_retry_s: float = Field(
-        default=1.0, gt=0, allow_inf_nan=False
-    )
-    candidate_scheduler_poll_s: float = Field(
-        default=1.0, gt=0, allow_inf_nan=False
-    )
-    candidate_selection_budget_s: float = Field(
-        default=6.0, gt=0, allow_inf_nan=False
-    )
+    candidate_supervisor_retry_s: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    candidate_scheduler_poll_s: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    candidate_selection_budget_s: float = Field(default=6.0, gt=0, allow_inf_nan=False)
     candidate_source_max_groups: int = Field(default=500, ge=1, le=500)
     candidate_terminal_write_budget_s: float = Field(
         default=5.0, ge=5.0, allow_inf_nan=False
@@ -127,9 +113,7 @@ class Settings(BaseSettings):
     # exactly one bounded Gamma event page and persists its opaque cursor.
     opportunity_discovery_enabled: bool = False
     discovery_page_limit: int = Field(default=100, ge=1, le=100)
-    discovery_interval_s: float = Field(
-        default=30.0, gt=0, allow_inf_nan=False
-    )
+    discovery_interval_s: float = Field(default=30.0, gt=0, allow_inf_nan=False)
     discovery_candidate_max_wait_s: float = Field(
         default=60.0, gt=0, le=60, allow_inf_nan=False
     )
@@ -138,9 +122,7 @@ class Settings(BaseSettings):
     # universe-sized Structure scheduler remain dark until qualification.
     opportunity_reconciliation_enabled: bool = False
     reconciliation_page_limit: int = Field(default=100, ge=1, le=100)
-    reconciliation_interval_s: float = Field(
-        default=60.0, gt=0, allow_inf_nan=False
-    )
+    reconciliation_interval_s: float = Field(default=60.0, gt=0, allow_inf_nan=False)
     reconciliation_checkpoint_warn_s: float = Field(
         default=900.0, gt=0, allow_inf_nan=False
     )
@@ -180,6 +162,19 @@ class Settings(BaseSettings):
     structure_generation_pressure_warn_count: int = Field(default=4, ge=2)
     structure_generation_pressure_fail_count: int = Field(default=8, ge=3)
     structure_generation_cleanup_max_rows: int = Field(default=500, ge=1)
+    structure_generation_drift_compare_enabled: bool = False
+    structure_generation_drift_max_rows: int = Field(default=500, ge=1, le=500)
+    structure_generation_drift_max_chunks_per_tick: int = Field(
+        default=100,
+        ge=1,
+        le=100,
+    )
+    structure_generation_drift_slice_s: float = Field(
+        default=45.0,
+        gt=0,
+        le=45,
+        allow_inf_nan=False,
+    )
     market_map_max_age_s: int = Field(default=1800, gt=0)
     neg_risk_opportunity_retention_days: int = Field(default=30, ge=1)
 
@@ -249,7 +244,9 @@ class Settings(BaseSettings):
     #
     # POLYARB_SUPABASE_URL  = REST URL (https://<ref>.supabase.co) — supabase-py
     # POLYARB_SUPABASE_DB_DSN = Postgres DSN (postgresql://postgres:...) — alembic ONLY
-    supabase_url: str = Field(default="", description="Supabase REST URL — supabase-py SDK")
+    supabase_url: str = Field(
+        default="", description="Supabase REST URL — supabase-py SDK"
+    )
     supabase_db_dsn: SecretStr = Field(
         default=SecretStr(""),
         description="Supabase Postgres DSN — used ONLY by alembic (not supabase-py)",
@@ -400,7 +397,9 @@ class Settings(BaseSettings):
     l3_market_book_fresh_s: int = Field(default=120, gt=0)
     l3_market_ohlc_fresh_s: int = Field(default=120, gt=0)
 
-    model_config = SettingsConfigDict(env_prefix="POLYARB_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="POLYARB_", env_file=".env", extra="ignore"
+    )
 
     @model_validator(mode="after")
     def _require_secret_in_prod(self) -> Settings:
@@ -421,23 +420,18 @@ class Settings(BaseSettings):
                 "POLYARB_UPSTREAM_FAULT_CONTROL_SECRET must be set when "
                 "upstream fault control is enabled"
             )
-        if (
-            self.upstream_fault_control_enabled
-            and hmac.compare_digest(fault_secret, secret_val)
+        if self.upstream_fault_control_enabled and hmac.compare_digest(
+            fault_secret, secret_val
         ):
             raise ValueError("fault control secret must be distinct")
-        source_private_key = (
-            self.upstream_fault_source_private_key.get_secret_value()
-        )
+        source_private_key = self.upstream_fault_source_private_key.get_secret_value()
         source_key = None
         if source_private_key:
             try:
                 _source_kid, source_key = load_private_key(source_private_key)
             except ValueError as exc:
                 raise ValueError("invalid fault source private key") from exc
-            if os.getenv(
-                "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY", ""
-            ):
+            if os.getenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY", ""):
                 raise ValueError(
                     "fault source process must not hold evaluator private key"
                 )
@@ -446,65 +440,45 @@ class Settings(BaseSettings):
             not self.upstream_fault_control_enabled or not evaluator_public_key
         ):
             raise ValueError(
-                "fault evaluator public key and fault control must be enabled "
-                "for finalization"
+                "fault evaluator public key and fault control must be enabled for finalization"
             )
         if self.upstream_fault_finalizer_enabled:
             if source_key is not None:
                 raise ValueError(
                     "fault finalizer process must not hold source private key"
                 )
-            if os.getenv(
-                "POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY", ""
-            ):
+            if os.getenv("POLYARB_UPSTREAM_FAULT_EVALUATOR_PRIVATE_KEY", ""):
                 raise ValueError(
                     "fault finalizer process must not hold evaluator private key"
                 )
             try:
-                _evaluator_kid, _evaluator_key = load_public_key(
-                    evaluator_public_key
-                )
+                _evaluator_kid, _evaluator_key = load_public_key(evaluator_public_key)
             except ValueError as exc:
                 raise ValueError("invalid fault evaluator public key") from exc
         if self.candidate_high_interval_s > self.candidate_quote_hard_stale_s:
             raise ValueError(
-                "candidate_high_interval_s must not exceed "
-                "candidate_quote_hard_stale_s"
+                "candidate_high_interval_s must not exceed candidate_quote_hard_stale_s"
             )
-        if (
-            self.candidate_reserved_non_high_slots
-            >= self.candidate_cycle_max_groups
-        ):
+        if self.candidate_reserved_non_high_slots >= self.candidate_cycle_max_groups:
             raise ValueError(
-                "candidate_reserved_non_high_slots must be less than "
-                "candidate_cycle_max_groups"
+                "candidate_reserved_non_high_slots must be less than candidate_cycle_max_groups"
             )
-        if (
-            self.candidate_reserved_non_high_slots * 5
-            < self.candidate_cycle_max_groups
-        ):
+        if self.candidate_reserved_non_high_slots * 5 < self.candidate_cycle_max_groups:
             raise ValueError(
-                "candidate_reserved_non_high_slots must reserve at least "
-                "20 percent of each cycle"
+                "candidate_reserved_non_high_slots must reserve at least 20 percent of each cycle"
             )
         if self.candidate_high_burst_groups > (
-            self.candidate_cycle_max_groups
-            - self.candidate_reserved_non_high_slots
+            self.candidate_cycle_max_groups - self.candidate_reserved_non_high_slots
         ):
             raise ValueError(
                 "candidate_high_burst_groups exceeds the cycle high capacity"
             )
-        if (
-            self.candidate_high_burst_groups
-            > self.candidate_high_clob_workers
-        ):
+        if self.candidate_high_burst_groups > self.candidate_high_clob_workers:
             raise ValueError(
-                "candidate_high_burst_groups must not exceed "
-                "candidate_high_clob_workers"
+                "candidate_high_burst_groups must not exceed candidate_high_clob_workers"
             )
         if (
-            self.candidate_high_burst_groups
-            * self.candidate_group_timeout_s
+            self.candidate_high_burst_groups * self.candidate_group_timeout_s
             >= self.candidate_lower_lane_max_wait_s
         ):
             raise ValueError(
@@ -521,8 +495,7 @@ class Settings(BaseSettings):
             )
         if self.producer_stall_detection_s >= self.producer_stall_timeout_s:
             raise ValueError(
-                "producer_stall_detection_s must be less than "
-                "producer_stall_timeout_s"
+                "producer_stall_detection_s must be less than producer_stall_timeout_s"
             )
         if (
             self.opportunity_resource_controller_enabled
@@ -546,8 +519,7 @@ class Settings(BaseSettings):
                 "must stay strictly below the Quote age SLA"
             )
         if (
-            self.neg_risk_quote_fetch_timeout_s
-            + self.neg_risk_quote_shutdown_reserve_s
+            self.neg_risk_quote_fetch_timeout_s + self.neg_risk_quote_shutdown_reserve_s
             >= self.neg_risk_quote_child_hard_limit_s
         ):
             raise ValueError(
@@ -575,16 +547,10 @@ class Settings(BaseSettings):
         selection_ms = math.ceil(self.candidate_selection_budget_s * 1_000)
         poll_ms = math.ceil(self.candidate_scheduler_poll_s * 1_000)
         timeout_ms = math.ceil(self.candidate_group_timeout_s * 1_000)
-        terminal_ms = math.ceil(
-            self.candidate_terminal_write_budget_s * 1_000
-        )
-        start_write_ms = math.ceil(
-            self.candidate_attempt_start_write_budget_s * 1_000
-        )
+        terminal_ms = math.ceil(self.candidate_terminal_write_budget_s * 1_000)
+        start_write_ms = math.ceil(self.candidate_attempt_start_write_budget_s * 1_000)
         capacity = 0
-        for candidate_capacity in range(
-            1, self.candidate_reserved_non_high_slots + 1
-        ):
+        for candidate_capacity in range(1, self.candidate_reserved_non_high_slots + 1):
             bound = (
                 poll_ms
                 + selection_ms
@@ -605,20 +571,11 @@ class Settings(BaseSettings):
         return (
             math.ceil(self.candidate_scheduler_poll_s * 1_000)
             + math.ceil(self.candidate_selection_budget_s * 1_000)
-            + capacity
-            * math.ceil(
-                self.candidate_attempt_start_write_budget_s * 1_000
-            )
-            + (
-                self.candidate_high_burst_groups
-                + capacity
-                - 1
-            )
+            + capacity * math.ceil(self.candidate_attempt_start_write_budget_s * 1_000)
+            + (self.candidate_high_burst_groups + capacity - 1)
             * (
                 math.ceil(self.candidate_group_timeout_s * 1_000)
-                + math.ceil(
-                    self.candidate_terminal_write_budget_s * 1_000
-                )
+                + math.ceil(self.candidate_terminal_write_budget_s * 1_000)
             )
         )
 
@@ -634,7 +591,9 @@ class Settings(BaseSettings):
         try:
             resolved.relative_to(project_root)
         except ValueError as e:
-            raise ValueError(f"path {v} resolves outside project root {project_root}") from e
+            raise ValueError(
+                f"path {v} resolves outside project root {project_root}"
+            ) from e
         return resolved
 
 

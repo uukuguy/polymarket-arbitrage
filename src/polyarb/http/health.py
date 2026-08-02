@@ -47,6 +47,7 @@ Source: datatracker.ietf.org/doc/html/draft-inadarei-api-health-check-06
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import sqlite3
 import time
@@ -294,7 +295,9 @@ def read_reconciliation_health(path: Path, now_ms: int) -> ReconciliationHealth:
     try:
         from polyarb.perception.store import OpportunityPerceptionStore
 
-        window = OpportunityPerceptionStore(path, read_only=True).current_reconciliation()
+        window = OpportunityPerceptionStore(
+            path, read_only=True
+        ).current_reconciliation()
         if window is None:
             return empty
     except (sqlite3.Error, TypeError, ValueError):
@@ -357,7 +360,9 @@ def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
     latest_id, published, completed, market_items, event_items = latest
     coverage_complete = completed == 1 and published == 1
     complete_id = complete[0] if complete is not None else None
-    complete_age = max(0.0, now_s - complete[1] / 1000.0) if complete is not None else None
+    complete_age = (
+        max(0.0, now_s - complete[1] / 1000.0) if complete is not None else None
+    )
     complete_finished_age = (
         max(0.0, now_s - complete[2] / 1000.0)
         if complete is not None and isinstance(complete[2], (int, float))
@@ -479,7 +484,9 @@ def _structure_generation_health_checks(
             if active
             and checkpoint_age_s is not None
             and checkpoint_age_s > publication_sla_s
-            else "warn" if active else "pass"
+            else "warn"
+            if active
+            else "pass"
         )
         if quarantine_count > 0 and publication_status == "pass":
             publication_status = "warn"
@@ -495,8 +502,7 @@ def _structure_generation_health_checks(
     if status.get("pointer_snapshot_id") is None and read_mode == "generation":
         publication_status = "fail"
     if status.get("pointer_snapshot_id") is not None and not (
-        status.get("generation_count_agrees")
-        and status.get("generation_hash_agrees")
+        status.get("generation_count_agrees") and status.get("generation_hash_agrees")
     ):
         publication_status = "fail"
 
@@ -532,7 +538,10 @@ def _structure_generation_health_checks(
     elif isinstance(comparison, dict) and comparison.get("receipt_present"):
         comparison_status = "pass"
         comparison_value = "sealed"
-    elif isinstance(comparison, dict) and comparison.get("phase") not in {None, "sealed"}:
+    elif isinstance(comparison, dict) and comparison.get("phase") not in {
+        None,
+        "sealed",
+    }:
         comparison_status = "warn"
         comparison_value = str(comparison.get("phase"))
     else:
@@ -548,9 +557,7 @@ def _structure_generation_health_checks(
     )
 
     retained = int(status.get("retained_generation_count_lower_bound") or 0)
-    reclaimable = int(
-        status.get("reclaimable_generation_count_lower_bound") or 0
-    )
+    reclaimable = int(status.get("reclaimable_generation_count_lower_bound") or 0)
     cleanup = status.get("cleanup")
     blocked_reason = (
         cleanup.get("blocked_reason") if isinstance(cleanup, dict) else None
@@ -612,6 +619,104 @@ def _structure_generation_health_checks(
     }
 
 
+def _structure_drift_health_check(
+    status: dict[str, Any] | None,
+    *,
+    enabled: bool,
+    now_ms: int,
+    publication_sla_s: int,
+) -> dict[str, list[dict[str, Any]]]:
+    """Project bounded stored drift state without scanning source or universes."""
+    if not enabled:
+        severity = "pass"
+        observed: object = "disabled"
+        output = "enabled=false"
+    elif status is None:
+        severity = "fail"
+        observed = None
+        output = "enabled=true reason=structure-drift-status-unavailable"
+    else:
+        authorized = status.get("authorized") is True
+        phase = status.get("phase")
+        reason = status.get("reason")
+        checkpoint = status.get("checkpoint_at_ms")
+        checkpoint_age_s = (
+            max(0.0, (now_ms - checkpoint) / 1_000)
+            if isinstance(checkpoint, int)
+            else None
+        )
+        stale_checkpoint = (
+            checkpoint_age_s is not None and checkpoint_age_s > publication_sla_s
+        )
+        latest_attempt = status.get("latest_attempt")
+        attempt_outcome = (
+            latest_attempt.get("outcome") if isinstance(latest_attempt, dict) else None
+        )
+        attempt_started = (
+            latest_attempt.get("started_at_ms")
+            if isinstance(latest_attempt, dict)
+            else None
+        )
+        attempt_age_s = (
+            max(0.0, (now_ms - attempt_started) / 1_000)
+            if isinstance(attempt_started, int)
+            else None
+        )
+        attempt_failed = attempt_outcome == "failed" or (
+            attempt_outcome == "running"
+            and attempt_age_s is not None
+            and attempt_age_s > 90.0
+        )
+        attempt_id = (
+            latest_attempt.get("id") if isinstance(latest_attempt, dict) else None
+        )
+        attempt_failure = (
+            latest_attempt.get("failure_kind")
+            if isinstance(latest_attempt, dict)
+            else None
+        )
+        severity = (
+            "pass"
+            if authorized and not attempt_failed
+            else "fail"
+            if attempt_failed
+            or phase == "stale"
+            or reason
+            in {
+                "structure-drift-receipt-invalid",
+                "structure-drift-exact-receipt-invalid",
+                "structure-drift-progress-invalid",
+            }
+            or stale_checkpoint
+            else "warn"
+        )
+        observed = status.get("authorization_mode")
+        output = (
+            f"enabled=true authorized={str(authorized).lower()} phase={phase} "
+            f"legacy_snapshot_id={status.get('legacy_snapshot_id')} "
+            f"generation_snapshot_id={status.get('generation_snapshot_id')} "
+            f"publication_id={status.get('publication_id')} "
+            f"window_id={status.get('window_id')} "
+            f"checkpoint_age_seconds={checkpoint_age_s} reason={reason} "
+            f"latest_attempt_id={attempt_id} "
+            f"latest_attempt_outcome={attempt_outcome} "
+            f"latest_attempt_failure={attempt_failure} "
+            f"class_counts={json.dumps(status.get('class_counts', {}), sort_keys=True)}"
+        )
+    return {
+        "snapshot:structure_generation_drift": [
+            {
+                "componentId": "structure-generation-drift",
+                "componentType": "datastore",
+                "observedValue": observed,
+                "status": severity,
+                "output": output,
+                "time": _utc_now_iso(),
+            }
+        ]
+    }
+
+
 def _opportunity_read_health_checks(
     registry: Any,
     *,
@@ -658,15 +763,12 @@ def _opportunity_read_health_checks(
             "componentId": f"opportunity-{stage.replace('_', '-')}-read",
             "componentType": "component",
             "observedValue": (
-                round(failure_age_s, 1)
-                if failure_age_s is not None
-                else None
+                round(failure_age_s, 1) if failure_age_s is not None else None
             ),
             "observedUnit": "s",
             "status": health_status,
             "output": (
-                f"status={status} consecutive_failures={failures} "
-                f"error_kind={error_kind}"
+                f"status={status} consecutive_failures={failures} error_kind={error_kind}"
             ),
             "time": timestamp,
         }
@@ -704,11 +806,13 @@ def _build_health_checks(
 
     try:
         volume = shutil.disk_usage(store.db_path.parent)
-        free_percent = (
-            100.0 * volume.free / volume.total if volume.total > 0 else 0.0
-        )
+        free_percent = 100.0 * volume.free / volume.total if volume.total > 0 else 0.0
         volume_status = (
-            "pass" if free_percent >= 20.0 else "warn" if free_percent >= 10.0 else "fail"
+            "pass"
+            if free_percent >= 20.0
+            else "warn"
+            if free_percent >= 10.0
+            else "fail"
         )
         volume_output = f"free_bytes={volume.free} total_bytes={volume.total}"
     except OSError as error:
@@ -728,8 +832,12 @@ def _build_health_checks(
         }
     ]
 
-    recovery_enabled = bool(getattr(settings, "opportunity_producer_supervisor_enabled", False))
-    resource_enabled = bool(getattr(settings, "opportunity_resource_controller_enabled", False))
+    recovery_enabled = bool(
+        getattr(settings, "opportunity_producer_supervisor_enabled", False)
+    )
+    resource_enabled = bool(
+        getattr(settings, "opportunity_resource_controller_enabled", False)
+    )
     incident_evidence = read_incident_evidence_health(store.db_path)
     incident_evidence_status = (
         "pass" if incident_evidence.evidence_consistent else "fail"
@@ -759,10 +867,7 @@ def _build_health_checks(
             "componentType": "component",
             "observedValue": resource_evidence.sequence,
             "status": resource_evidence_status,
-            "output": (
-                "evidence_consistent="
-                f"{resource_evidence.evidence_consistent}"
-            ),
+            "output": (f"evidence_consistent={resource_evidence.evidence_consistent}"),
             "time": _utc_now_iso(),
         }
     ]
@@ -779,7 +884,9 @@ def _build_health_checks(
             incident_status = (
                 "fail"
                 if any(
-                    scope == "candidate" or scope == "http" or scope.startswith("candidate:")
+                    scope == "candidate"
+                    or scope == "http"
+                    or scope.startswith("candidate:")
                     for scope in recovery.scopes
                 )
                 else "warn"
@@ -817,11 +924,10 @@ def _build_health_checks(
             now_ms=int(now_s * 1_000),
             stall_timeout_ms=stall_timeout_ms,
         )
-        unhealthy = (
-            not liveness.evidence_consistent
-            or liveness.state
-            not in {"starting", "running"}
-        )
+        unhealthy = not liveness.evidence_consistent or liveness.state not in {
+            "starting",
+            "running",
+        }
         liveness_status = (
             ("fail" if component == "candidate" else "warn")
             if recovery_enabled and unhealthy
@@ -832,9 +938,7 @@ def _build_health_checks(
             {
                 "componentId": f"perception-{component}-producer",
                 "componentType": "component",
-                "observedValue": (
-                    liveness.state if recovery_enabled else "disabled"
-                ),
+                "observedValue": (liveness.state if recovery_enabled else "disabled"),
                 "status": liveness_status,
                 "output": (
                     f"age_seconds={liveness.age_seconds} "
@@ -849,13 +953,17 @@ def _build_health_checks(
         or recovery.resource_mode
         in {"unavailable", "idle", "protect-hot-path", "empty-candidate-exploration"}
     ):
-        resource_status = "fail" if recovery.resource_mode in {"unavailable", "idle"} else "warn"
+        resource_status = (
+            "fail" if recovery.resource_mode in {"unavailable", "idle"} else "warn"
+        )
     overall = _severity(overall, resource_status)
     checks["perception:resource_mode"] = [
         {
             "componentId": "perception-resource-controller",
             "componentType": "component",
-            "observedValue": (recovery.resource_mode if resource_enabled else "disabled"),
+            "observedValue": (
+                recovery.resource_mode if resource_enabled else "disabled"
+            ),
             "status": resource_status,
             "output": f"reason={recovery.resource_reason}",
             "time": _utc_now_iso(),
@@ -865,7 +973,9 @@ def _build_health_checks(
     # Full Reconciliation is calibration evidence, never Candidate availability.
     # Its scoped checks read the same checkpoint rows the worker mutates but do
     # not feed `overall`; Task 5 owns incident escalation for a stalled window.
-    reconciliation_enabled = bool(getattr(settings, "opportunity_reconciliation_enabled", False))
+    reconciliation_enabled = bool(
+        getattr(settings, "opportunity_reconciliation_enabled", False)
+    )
     reconciliation = read_reconciliation_health(store.db_path, int(now_s * 1_000))
     progress_value = reconciliation.progress if reconciliation_enabled else "disabled"
     progress_status = (
@@ -891,16 +1001,24 @@ def _build_health_checks(
             "time": _utc_now_iso(),
         }
     ]
-    checkpoint_age = reconciliation.checkpoint_age_seconds if reconciliation_enabled else None
-    checkpoint_warn_s = float(getattr(settings, "reconciliation_checkpoint_warn_s", 900.0))
+    checkpoint_age = (
+        reconciliation.checkpoint_age_seconds if reconciliation_enabled else None
+    )
+    checkpoint_warn_s = float(
+        getattr(settings, "reconciliation_checkpoint_warn_s", 900.0)
+    )
     checkpoint_status = (
-        "warn" if checkpoint_age is not None and checkpoint_age > checkpoint_warn_s else "pass"
+        "warn"
+        if checkpoint_age is not None and checkpoint_age > checkpoint_warn_s
+        else "pass"
     )
     checks["perception:reconciliation_checkpoint_age_seconds"] = [
         {
             "componentId": "perception-reconciliation",
             "componentType": "datastore",
-            "observedValue": (None if checkpoint_age is None else round(checkpoint_age, 1)),
+            "observedValue": (
+                None if checkpoint_age is None else round(checkpoint_age, 1)
+            ),
             "observedUnit": "s",
             "status": checkpoint_status,
             "output": f"next_cursor={reconciliation.next_cursor}",
@@ -955,7 +1073,9 @@ def _build_health_checks(
     # Archive is P1 research/audit.  A failure remains visible, but it must
     # not make strict health fail or pause the Structure → Quote → M2 path.
     archive = read_archive_health(store.db_path, now_s)
-    archive_attempt_status = "pass" if archive.latest_status == "local_complete" else "warn"
+    archive_attempt_status = (
+        "pass" if archive.latest_status == "local_complete" else "warn"
+    )
     checks["archive:last_attempt"] = [
         {
             "componentId": "market-archive",
@@ -1071,9 +1191,7 @@ def _build_health_checks(
     sync_window = store.get_latest_structure_sync()
     publication = store.get_latest_structure_publication()
     publication_status = publication.status if publication is not None else None
-    producer_slot_budget_s = int(
-        structure_attempt_slot_budget_s(publication_status)
-    )
+    producer_slot_budget_s = int(structure_attempt_slot_budget_s(publication_status))
     attempt_timeout_s = min(effective_timeout_s, producer_slot_budget_s)
 
     checks["snapshot:schedule"] = [
@@ -1149,8 +1267,7 @@ def _build_health_checks(
         diagnostic_parts = []
         failure_kind = latest_attempt["failure_kind"]
         is_structure_checkpoint = (
-            attempt_value == "cancelled"
-            and failure_kind == "structure-checkpoint"
+            attempt_value == "cancelled" and failure_kind == "structure-checkpoint"
         )
         if failure_kind is not None and not is_structure_checkpoint:
             diagnostic_parts.append(str(failure_kind))
@@ -1193,7 +1310,9 @@ def _build_health_checks(
 
     scheduler_state = store.get_scheduler_state()
     failure_counter = (
-        int(scheduler_state.get("failure_counter", 0)) if scheduler_state is not None else 0
+        int(scheduler_state.get("failure_counter", 0))
+        if scheduler_state is not None
+        else 0
     )
     from polyarb.daemon.scheduler import SnapshotScheduler
 
@@ -1291,13 +1410,45 @@ def _build_health_checks(
     for entries in generation_checks.values():
         overall = _severity(overall, str(entries[0]["status"]))
 
+    drift_enabled = bool(
+        getattr(settings, "structure_generation_drift_compare_enabled", False)
+    )
+    drift_status: dict[str, Any] | None = None
+    if drift_enabled:
+        try:
+            drift_status = store.structure_generation_drift_status()
+            drift_status = {
+                **drift_status,
+                "latest_attempt": store.get_latest_structure_drift_attempt(),
+            }
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            drift_status = None
+    drift_checks = _structure_drift_health_check(
+        drift_status,
+        enabled=drift_enabled,
+        now_ms=int(now_s * 1_000),
+        publication_sla_s=int(
+            getattr(settings, "structure_publication_sla_s", 25 * 3600)
+        ),
+    )
+    checks.update(drift_checks)
+    overall = _severity(
+        overall,
+        str(drift_checks["snapshot:structure_generation_drift"][0]["status"]),
+    )
+
     # ── Check 3: Supabase mirror age (only if mirror enabled) ────────────
     # supabase:mirror_age_seconds — seconds since last successful Supabase push.
     # Uses supabase_mirror_at_ms column added in Plan 03.
     # warn if > 25h (cron interval 12h + 13h buffer); fail if > 48h.
     if settings.supabase_mirror_enabled:
-        if last_snapshot is not None and last_snapshot.get("supabase_mirror_at_ms") is not None:
-            mirror_age_s: float | None = now_s - last_snapshot["supabase_mirror_at_ms"] / 1000.0
+        if (
+            last_snapshot is not None
+            and last_snapshot.get("supabase_mirror_at_ms") is not None
+        ):
+            mirror_age_s: float | None = (
+                now_s - last_snapshot["supabase_mirror_at_ms"] / 1000.0
+            )
             if mirror_age_s < _MIRROR_WARN_S:
                 mirror_status = "pass"
             elif mirror_age_s < _MIRROR_FAIL_S:
@@ -1313,7 +1464,9 @@ def _build_health_checks(
             {
                 "componentId": "supabase-mirror",
                 "componentType": "datastore",
-                "observedValue": round(mirror_age_s, 1) if mirror_age_s is not None else None,
+                "observedValue": round(mirror_age_s, 1)
+                if mirror_age_s is not None
+                else None,
                 "observedUnit": "s",
                 "status": mirror_status,
                 "time": _utc_now_iso(),
@@ -1352,7 +1505,9 @@ def _build_health_checks(
         )
 
         runtime_snapshot = (
-            quote_worker_runtime.snapshot() if quote_worker_runtime is not None else None
+            quote_worker_runtime.snapshot()
+            if quote_worker_runtime is not None
+            else None
         )
         quote_run = (
             quote_worker_runtime.certified_projection()
@@ -1372,14 +1527,10 @@ def _build_health_checks(
             )
             availability = decide_feed_availability(
                 source_snapshot_id=quote_run.universe_snapshot_id,
-                latest_structure_snapshot_id=(
-                    market_truth.last_complete_snapshot_id
-                ),
+                latest_structure_snapshot_id=(market_truth.last_complete_snapshot_id),
                 quote_age_seconds=quote_age_s,
                 universe_age_seconds=universe_age_s,
-                handoff_age_seconds=(
-                    market_truth.last_complete_finished_age_seconds
-                ),
+                handoff_age_seconds=(market_truth.last_complete_finished_age_seconds),
             )
             if not availability.available:
                 quote_status = "fail"
@@ -1400,7 +1551,9 @@ def _build_health_checks(
             {
                 "componentId": "neg-risk-quote-worker",
                 "componentType": "component",
-                "observedValue": (round(quote_age_s, 1) if quote_age_s is not None else None),
+                "observedValue": (
+                    round(quote_age_s, 1) if quote_age_s is not None else None
+                ),
                 "observedUnit": "s",
                 "status": quote_status,
                 "output": quote_output,
@@ -1451,13 +1604,17 @@ def _build_health_checks(
         quote_attempt_error: Exception | None = None
         try:
             quote_attempt = NegRiskQuoteStore(store.db_path).latest_collection_attempt()
-        except Exception as error:  # fail closed on lock/I/O/corruption/invalid evidence
+        except (
+            Exception
+        ) as error:  # fail closed on lock/I/O/corruption/invalid evidence
             quote_attempt = None
             quote_attempt_error = error
         if quote_attempt_error is not None:
             attempt_status = "fail"
             attempt_age_s = None
-            attempt_output = f"attempt-evidence-unavailable:{type(quote_attempt_error).__name__}"
+            attempt_output = (
+                f"attempt-evidence-unavailable:{type(quote_attempt_error).__name__}"
+            )
         elif quote_attempt is None:
             attempt_status = "pass"
             attempt_age_s = None
@@ -1524,12 +1681,8 @@ def _build_health_body(
         "bootId": boot_id,
         "qualificationPolicy": {
             "candidateQuoteHardStaleS": settings.candidate_quote_hard_stale_s,
-            "candidateLowerLaneMaxWaitS": (
-                settings.candidate_lower_lane_max_wait_s
-            ),
-            "discoveryCandidateMaxWaitS": (
-                settings.discovery_candidate_max_wait_s
-            ),
+            "candidateLowerLaneMaxWaitS": (settings.candidate_lower_lane_max_wait_s),
+            "discoveryCandidateMaxWaitS": (settings.discovery_candidate_max_wait_s),
             "producerStallDetectionS": settings.producer_stall_detection_s,
         },
         "serviceId": "polyarb-l1",

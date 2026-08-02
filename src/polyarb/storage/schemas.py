@@ -2646,6 +2646,39 @@ CREATE INDEX IF NOT EXISTS idx_structure_defer_receipts_observed_at
 ON structure_defer_receipts(observed_at_ms DESC);
 """
 
+# Parent-owned evidence for the separate drift-maintenance child.  It is
+# deliberately independent of snapshot_attempts so maintenance outcomes never
+# feed the adaptive Structure publication schedule.
+STRUCTURE_DRIFT_ATTEMPTS_DDL = """
+CREATE TABLE IF NOT EXISTS structure_drift_attempts (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity_json      TEXT NOT NULL,
+    identity_digest    TEXT NOT NULL CHECK(length(identity_digest) = 64),
+    progress_id        TEXT,
+    started_at_ms      INTEGER NOT NULL CHECK(started_at_ms >= 0),
+    finished_at_ms     INTEGER,
+    outcome            TEXT NOT NULL CHECK(outcome IN (
+        'running','succeeded','checkpointed','deferred','failed','cancelled'
+    )),
+    last_phase         TEXT,
+    chunks_processed   INTEGER CHECK(chunks_processed IS NULL OR chunks_processed >= 0),
+    rows_processed     INTEGER CHECK(rows_processed IS NULL OR rows_processed >= 0),
+    elapsed_ms         INTEGER CHECK(elapsed_ms IS NULL OR elapsed_ms >= 0),
+    failure_kind       TEXT,
+    stderr_bytes       INTEGER CHECK(stderr_bytes IS NULL OR stderr_bytes >= 0),
+    stderr_sha256      TEXT CHECK(stderr_sha256 IS NULL OR length(stderr_sha256) = 64),
+    stderr_safe_marker TEXT CHECK(
+        stderr_safe_marker IS NULL OR length(stderr_safe_marker) <= 256
+    ),
+    CHECK(
+        (outcome='running' AND finished_at_ms IS NULL)
+        OR (outcome!='running' AND finished_at_ms IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_structure_drift_attempts_started
+ON structure_drift_attempts(started_at_ms DESC,id DESC);
+"""
+
 STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL = """
 CREATE TABLE IF NOT EXISTS structure_schedule_adjustments (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,

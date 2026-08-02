@@ -33,6 +33,7 @@ import hashlib
 import json
 import re
 import signal
+import sqlite3
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -110,6 +111,7 @@ def structure_attempt_slot_budget_s(publication_status: object) -> float:
         else STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S
     )
 
+
 _SNAPSHOT_STAGE_MARKER_RE = re.compile(
     rb"^snapshot-stage stage="
     rb"(gamma-events|gamma-markets|membership-recheck|validate|persist) "
@@ -136,6 +138,12 @@ _STRUCTURE_SUPERSESSION_MARKER_RE = re.compile(
     rb"^structure-publication-superseded publication_id=[0-9a-f]{32}$",
     re.MULTILINE,
 )
+_STRUCTURE_DRIFT_MARKER_RE = re.compile(
+    rb"^structure-drift stage=(?:source-events|source-markets|generation-members|"
+    rb"legacy-members|fresh-group-truth|sealed|stale|exact|none) "
+    rb"chunks=(?:0|[1-9][0-9]*) rows=(?:0|[1-9][0-9]*)$",
+    re.MULTILINE,
+)
 
 
 def _parse_last_snapshot_stage(stderr: bytes) -> str | None:
@@ -160,6 +168,7 @@ def _safe_stderr_tail(stderr: bytes) -> str | None:
     matches.extend(_STRUCTURE_PROGRESS_MARKER_RE.finditer(stderr))
     matches.extend(_STRUCTURE_FAILURE_MARKER_RE.finditer(stderr))
     matches.extend(_STRUCTURE_SUPERSESSION_MARKER_RE.finditer(stderr))
+    matches.extend(_STRUCTURE_DRIFT_MARKER_RE.finditer(stderr))
     if not matches:
         return None
     tail = max(matches, key=lambda match: match.start()).group(0).decode("ascii")
@@ -195,6 +204,186 @@ class IsolatedStructurePublicationCheckpoint:
     chunks_processed: int = 1
 
 
+@dataclass(frozen=True)
+class IsolatedStructureDriftCheckpoint:
+    phase: str | None
+    rows_processed: int
+    chunks_processed: int
+    ready: bool
+    deferred: bool
+    defer_reason: str | None
+    stop_reason: str
+    elapsed_ms: int
+    stderr: bytes = b""
+
+
+async def run_structure_drift_in_subprocess(
+    *,
+    db_path: object,
+    max_rows: int,
+    max_chunks: int,
+    max_elapsed_s: float,
+    spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (
+        asyncio.create_subprocess_exec
+    ),
+    timeout_s: float = 75.0,
+    terminate_timeout_s: float = 15.0,
+) -> IsolatedStructureDriftCheckpoint:
+    """Run one cooperative drift slice outside the scheduler event loop."""
+    process = await spawn(
+        sys.executable,
+        "-m",
+        "polyarb.snapshot",
+        "structure-generation-drift-advance",
+        "--db-path",
+        str(db_path),
+        "--max-rows",
+        str(max_rows),
+        "--max-chunks",
+        str(max_chunks),
+        "--max-elapsed-seconds",
+        str(max_elapsed_s),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    started = time.monotonic()
+    communicate_task = asyncio.create_task(process.communicate())
+
+    async def terminate_then_kill() -> tuple[bytes, bytes]:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(communicate_task),
+                timeout=terminate_timeout_s,
+            )
+        except TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            return await asyncio.shield(communicate_task)
+
+    def elapsed_ms() -> int:
+        return max(0, int((time.monotonic() - started) * 1_000))
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communicate_task),
+            timeout=timeout_s,
+        )
+    except asyncio.CancelledError:
+        await terminate_then_kill()
+        raise
+    except TimeoutError as error:
+        _, stderr = await terminate_then_kill()
+        raise SnapshotSubprocessError(
+            "structure-drift-timeout",
+            last_stage="structure-drift",
+            elapsed_ms=elapsed_ms(),
+            stderr=stderr,
+        ) from error
+    if process.returncode is not None and process.returncode < 0:
+        signal_number = -process.returncode
+        try:
+            signal_name = signal.Signals(signal_number).name.lower()
+        except ValueError:
+            signal_name = str(signal_number)
+        suffix = "-possible-oom" if signal_number == signal.SIGKILL else ""
+        raise SnapshotSubprocessError(
+            f"structure-drift-signal-{signal_name}{suffix}",
+            last_stage="structure-drift",
+            elapsed_ms=elapsed_ms(),
+            stderr=stderr,
+        )
+    try:
+        payload = json.loads(stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        reason = (
+            "sqlite-busy" if b"database is locked" in stderr.lower() else "invalid-json"
+        )
+        raise SnapshotSubprocessError(
+            f"structure-drift-{reason}",
+            last_stage="structure-drift",
+            elapsed_ms=elapsed_ms(),
+            stderr=stderr,
+        ) from error
+    expected_keys = {
+        "checkpointed",
+        "chunks_processed",
+        "defer_reason",
+        "deferred",
+        "elapsed_ms",
+        "kind",
+        "phase",
+        "ready",
+        "rows_processed",
+        "stop_reason",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        raise SnapshotSubprocessError("structure-drift-invalid-json")
+    phase = payload["phase"]
+    defer_reason = payload["defer_reason"]
+    allowed_phases = {
+        None,
+        "source-events",
+        "source-markets",
+        "generation-members",
+        "legacy-members",
+        "fresh-group-truth",
+        "sealed",
+        "stale",
+        "exact",
+    }
+    allowed_stop_reasons = {
+        "complete",
+        "identity-stale",
+        "max-chunks",
+        "max-elapsed-seconds",
+        "not-pending",
+        "stale",
+        "writer-busy",
+    }
+    if (
+        payload["checkpointed"] is not True
+        or payload["kind"] != "structure-drift"
+        or phase not in allowed_phases
+        or isinstance(payload["rows_processed"], bool)
+        or not isinstance(payload["rows_processed"], int)
+        or payload["rows_processed"] < 0
+        or payload["rows_processed"] > max_rows * max_chunks
+        or isinstance(payload["chunks_processed"], bool)
+        or not isinstance(payload["chunks_processed"], int)
+        or not 0 <= payload["chunks_processed"] <= max_chunks
+        or not isinstance(payload["ready"], bool)
+        or not isinstance(payload["deferred"], bool)
+        or (defer_reason is not None and not isinstance(defer_reason, str))
+        or payload["stop_reason"] not in allowed_stop_reasons
+        or isinstance(payload["elapsed_ms"], bool)
+        or not isinstance(payload["elapsed_ms"], int)
+        or payload["elapsed_ms"] < 0
+        or (
+            bool(payload["deferred"])
+            != (defer_reason in {"writer-busy", "identity-stale"})
+        )
+        or process.returncode != 0
+    ):
+        raise SnapshotSubprocessError("structure-drift-invalid-json")
+    return IsolatedStructureDriftCheckpoint(
+        phase=phase,
+        rows_processed=int(payload["rows_processed"]),
+        chunks_processed=int(payload["chunks_processed"]),
+        ready=bool(payload["ready"]),
+        deferred=bool(payload["deferred"]),
+        defer_reason=defer_reason,
+        stop_reason=str(payload["stop_reason"]),
+        elapsed_ms=int(payload["elapsed_ms"]),
+        stderr=stderr,
+    )
+
+
 async def run_snapshot_in_subprocess(
     *,
     spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (
@@ -219,10 +408,7 @@ async def run_snapshot_in_subprocess(
         stderr=asyncio.subprocess.PIPE,
     )
     started = time.monotonic()
-    logger.info(
-        "isolated snapshot started "
-        f"pid={getattr(process, 'pid', None)}"
-    )
+    logger.info(f"isolated snapshot started pid={getattr(process, 'pid', None)}")
     # Own one pipe-reader task for the child lifetime.  A timeout/cancellation
     # must not cancel the reader and then attempt a second communicate(), which
     # can leave the original child alive after the scheduler records failure.
@@ -271,8 +457,7 @@ async def run_snapshot_in_subprocess(
         raise
     except TimeoutError as error:
         logger.error(
-            "isolated snapshot timed out "
-            f"pid={getattr(process, 'pid', None)} timeout_s={timeout_s}"
+            f"isolated snapshot timed out pid={getattr(process, 'pid', None)} timeout_s={timeout_s}"
         )
         _, stderr = await terminate_then_kill()
         raise subprocess_error("timeout", stderr=stderr) from error
@@ -307,9 +492,7 @@ async def run_snapshot_in_subprocess(
         payload = json.loads(stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         reason = (
-            "sqlite-busy"
-            if b"database is locked" in stderr.lower()
-            else "invalid-json"
+            "sqlite-busy" if b"database is locked" in stderr.lower() else "invalid-json"
         )
         logger.warning(
             "isolated snapshot returned invalid output "
@@ -334,7 +517,8 @@ async def run_snapshot_in_subprocess(
         failure_kind = payload.get("failure_kind")
         if (
             set(payload) != {"failed", "failure_kind"}
-            or failure_kind not in {
+            or failure_kind
+            not in {
                 "generation-count-mismatch",
                 "generation-incomplete",
                 "generation-validation-issues",
@@ -530,11 +714,23 @@ class SnapshotScheduler:
         self.state = SchedulerState.RUNNING
         self._request_now_event = asyncio.Event()
         self._restore_state()
+        self._recover_structure_drift_attempts()
         self._effective_timeout_s = int(SNAPSHOT_SUBPROCESS_TIMEOUT_S)
-        self._effective_cadence_s = int(
-            getattr(settings, "scheduler_interval_s", 300)
-        )
+        self._effective_cadence_s = int(getattr(settings, "scheduler_interval_s", 300))
         self._restore_effective_schedule()
+
+    def _recover_structure_drift_attempts(self) -> None:
+        """Terminalize parent-owned drift children left running by a restart."""
+        try:
+            recovered = self._sqlite_store.recover_orphaned_structure_drift_attempts(
+                recovered_at_ms=int(time.time() * 1_000)
+            )
+            if recovered:
+                logger.warning(
+                    f"recovered orphaned structure drift attempts count={recovered}"
+                )
+        except (AttributeError, OSError, sqlite3.Error, TypeError, ValueError):
+            logger.warning("could not recover structure drift attempt evidence")
 
     @property
     def effective_timeout_s(self) -> int:
@@ -561,6 +757,17 @@ class SnapshotScheduler:
         return bool(
             getattr(self._settings, "structure_sync_enabled", False)
             or self.legacy_reconciliation_enabled
+        )
+
+    @property
+    def structure_drift_compare_enabled(self) -> bool:
+        """Keep the drift-safe maintenance writer explicitly default-off."""
+        return bool(
+            getattr(
+                self._settings,
+                "structure_generation_drift_compare_enabled",
+                False,
+            )
         )
 
     def _restore_effective_schedule(self) -> None:
@@ -628,8 +835,7 @@ class SnapshotScheduler:
             )
         except Exception as error:  # noqa: BLE001 - static config remains safe fallback
             logger.warning(
-                "could not restore adaptive structure schedule "
-                f"kind={type(error).__name__}"
+                f"could not restore adaptive structure schedule kind={type(error).__name__}"
             )
 
     def _restore_state(self) -> None:
@@ -671,9 +877,7 @@ class SnapshotScheduler:
             self._sqlite_store.get_latest_structure_publication
         )
         try:
-            publication_status = (
-                publication.status if publication is not None else None
-            )
+            publication_status = publication.status if publication is not None else None
         except AttributeError:
             publication_status = None
         return min(
@@ -687,6 +891,7 @@ class SnapshotScheduler:
         This method is injectable — tests replace it with AsyncMock.
         Real prod wires it to the orchestrator in Plan 04.
         """
+
         async def run_in_slot() -> object:
             timeout_s = self._admitted_timeout_s
             if timeout_s is None:
@@ -704,9 +909,7 @@ class SnapshotScheduler:
             return None
         if runtime.pipeline_active():
             return "quote-pipeline-active"
-        interval_s = float(
-            getattr(self._settings, "neg_risk_quote_interval_s", 120.0)
-        )
+        interval_s = float(getattr(self._settings, "neg_risk_quote_interval_s", 120.0))
         if runtime.pipeline_due(interval_s):
             return "quote-pipeline-due"
         return None
@@ -775,6 +978,206 @@ class SnapshotScheduler:
         finally:
             if not admitted:
                 self._release_producer_slot()
+
+    async def _maybe_advance_structure_drift(
+        self,
+        *,
+        queued_at_ms: int,
+    ) -> bool | None:
+        """Own one pending drift chunk before starting a new Structure child."""
+        if not self.structure_drift_compare_enabled:
+            return None
+        try:
+            status = await asyncio.to_thread(
+                self._sqlite_store.structure_generation_drift_status
+            )
+        except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+            await self._record_structure_defer(
+                reason="structure-drift-status-unavailable",
+                queued_at_ms=queued_at_ms,
+            )
+            logger.warning(
+                f"structure drift status unavailable kind={type(error).__name__}"
+            )
+            return True
+        if status.get("authorized") is True or status.get("phase") == "stale":
+            return None
+        if status.get("reason") not in {
+            "structure-drift-progress-missing",
+            "structure-drift-incomplete",
+        }:
+            return None
+        reason = self._quote_priority_reason()
+        if reason is not None:
+            await self._record_structure_defer(
+                reason=f"structure-drift:{reason}",
+                queued_at_ms=queued_at_ms,
+            )
+            return False
+        if self._producer_lock is not None:
+            await self._producer_lock.acquire()
+            self._producer_slot_owned = True
+        try:
+            reason = self._quote_priority_reason()
+            if reason is not None:
+                await self._record_structure_defer(
+                    reason=f"structure-drift:{reason}",
+                    queued_at_ms=queued_at_ms,
+                )
+                return False
+            max_rows = int(
+                getattr(self._settings, "structure_generation_drift_max_rows", 500)
+            )
+            max_chunks = int(
+                getattr(
+                    self._settings,
+                    "structure_generation_drift_max_chunks_per_tick",
+                    100,
+                )
+            )
+            slice_s = float(
+                getattr(self._settings, "structure_generation_drift_slice_s", 45.0)
+            )
+            # Final admission check immediately precedes the only writer call.
+            reason = self._quote_priority_reason()
+            if reason is not None:
+                await self._record_structure_defer(
+                    reason=f"structure-drift:{reason}",
+                    queued_at_ms=queued_at_ms,
+                )
+                return False
+            identity_keys = (
+                "legacy_snapshot_id",
+                "generation_snapshot_id",
+                "publication_id",
+                "window_id",
+                "normalization_contract_version",
+                "exact_receipt_digest",
+                "pointer_validation_hash",
+                "generation_certification_hash",
+            )
+            attempt_started_at_ms = int(time.time() * 1_000)
+            try:
+                attempt_id = self._sqlite_store.begin_structure_drift_attempt(
+                    identity={key: status.get(key) for key in identity_keys},
+                    progress_id=(
+                        str(status["progress_id"])
+                        if status.get("progress_id") is not None
+                        else None
+                    ),
+                    started_at_ms=attempt_started_at_ms,
+                )
+            except sqlite3.OperationalError as error:
+                logger.warning(
+                    "structure drift admission evidence unavailable "
+                    f"kind={type(error).__name__}; child not spawned"
+                )
+                return True
+            try:
+                checkpoint = await run_structure_drift_in_subprocess(
+                    db_path=self._settings.db_path,
+                    max_rows=max_rows,
+                    max_chunks=max_chunks,
+                    max_elapsed_s=slice_s,
+                    timeout_s=75.0,
+                    terminate_timeout_s=15.0,
+                )
+            except asyncio.CancelledError:
+                self._sqlite_store.finish_structure_drift_attempt(
+                    attempt_id=attempt_id,
+                    outcome="cancelled",
+                    finished_at_ms=int(time.time() * 1_000),
+                    last_phase=None,
+                    chunks_processed=0,
+                    rows_processed=0,
+                    elapsed_ms=max(0, int(time.time() * 1_000) - attempt_started_at_ms),
+                    failure_kind="scheduler-cancelled",
+                )
+                raise
+            except SnapshotSubprocessError as error:
+                error_text = str(error)
+                reason = (
+                    "structure-drift-writer-busy"
+                    if "sqlite-busy" in error_text
+                    else "structure-drift-child-failed"
+                )
+                self._sqlite_store.finish_structure_drift_attempt(
+                    attempt_id=attempt_id,
+                    outcome="failed",
+                    finished_at_ms=int(time.time() * 1_000),
+                    last_phase=error.last_stage,
+                    chunks_processed=error.chunks_processed or 0,
+                    rows_processed=0,
+                    elapsed_ms=error.elapsed_ms,
+                    failure_kind=error_text.removeprefix("snapshot-subprocess-")[:64],
+                    stderr_bytes=error.stderr_bytes,
+                    stderr_sha256=error.stderr_sha256,
+                    stderr_safe_marker=error.stderr_tail,
+                )
+                await self._record_structure_defer(
+                    reason=reason,
+                    queued_at_ms=queued_at_ms,
+                )
+                logger.warning(
+                    f"structure drift child failed kind={error_text} elapsed_ms={error.elapsed_ms}"
+                )
+                return True
+            except OSError as error:
+                self._sqlite_store.finish_structure_drift_attempt(
+                    attempt_id=attempt_id,
+                    outcome="failed",
+                    finished_at_ms=int(time.time() * 1_000),
+                    last_phase=None,
+                    chunks_processed=0,
+                    rows_processed=0,
+                    elapsed_ms=max(0, int(time.time() * 1_000) - attempt_started_at_ms),
+                    failure_kind=f"spawn-{type(error).__name__}"[:64],
+                )
+                logger.warning(
+                    f"structure drift child spawn failed kind={type(error).__name__}"
+                )
+                return True
+            if checkpoint.deferred:
+                defer_reason = (
+                    "structure-drift-writer-busy"
+                    if checkpoint.defer_reason == "writer-busy"
+                    else "structure-drift-identity-stale"
+                )
+                self._sqlite_store.finish_structure_drift_attempt(
+                    attempt_id=attempt_id,
+                    outcome="deferred",
+                    finished_at_ms=int(time.time() * 1_000),
+                    last_phase=checkpoint.phase,
+                    chunks_processed=checkpoint.chunks_processed,
+                    rows_processed=checkpoint.rows_processed,
+                    elapsed_ms=checkpoint.elapsed_ms,
+                    failure_kind=checkpoint.defer_reason,
+                    stderr=checkpoint.stderr,
+                )
+                await self._record_structure_defer(
+                    reason=defer_reason,
+                    queued_at_ms=queued_at_ms,
+                )
+                return True
+            self._sqlite_store.finish_structure_drift_attempt(
+                attempt_id=attempt_id,
+                outcome="succeeded" if checkpoint.ready else "checkpointed",
+                finished_at_ms=int(time.time() * 1_000),
+                last_phase=checkpoint.phase,
+                chunks_processed=checkpoint.chunks_processed,
+                rows_processed=checkpoint.rows_processed,
+                elapsed_ms=checkpoint.elapsed_ms,
+                failure_kind=None,
+                stderr=checkpoint.stderr,
+            )
+            logger.info(
+                "structure drift slice checkpointed "
+                f"phase={checkpoint.phase} rows={checkpoint.rows_processed} "
+                f"chunks={checkpoint.chunks_processed} stop={checkpoint.stop_reason}"
+            )
+            return True
+        finally:
+            self._release_producer_slot()
 
     async def _on_recovering(self) -> None:
         """Alert once when repeated failures require active recovery.
@@ -871,6 +1274,11 @@ class SnapshotScheduler:
         attempt_id: int | None = None
 
         try:
+            drift_completed = await self._maybe_advance_structure_drift(
+                queued_at_ms=queued_at_ms
+            )
+            if drift_completed is not None:
+                return drift_completed
             attempt_id = await self._admit_snapshot(queued_at_ms=queued_at_ms)
             if attempt_id is None:
                 return False
@@ -985,7 +1393,9 @@ class SnapshotScheduler:
                         parquet_root=self._settings.parquet_root,
                     )
                     if deleted:
-                        logger.info(f"snapshot retention deleted {deleted} expired snapshots")
+                        logger.info(
+                            f"snapshot retention deleted {deleted} expired snapshots"
+                        )
                 except Exception as e:  # noqa: BLE001
                     # Retention is fail-soft relative to a valid fresh snapshot,
                     # but its failure remains visible in production logs.
@@ -997,8 +1407,7 @@ class SnapshotScheduler:
                     )
                     if deleted_failed:
                         logger.info(
-                            "structure staging retention deleted "
-                            f"{deleted_failed} failed window"
+                            f"structure staging retention deleted {deleted_failed} failed window"
                         )
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"failed structure staging retention failed: {e!r}")
@@ -1044,7 +1453,9 @@ class SnapshotScheduler:
                     snapshot_id=None,
                     failure_kind="scheduler-cancelled",
                 )
-            logger.info("scheduler tick cancelled mid-flight; propagating CancelledError")
+            logger.info(
+                "scheduler tick cancelled mid-flight; propagating CancelledError"
+            )
             raise
         except Exception as error:
             if attempt_id is not None:
@@ -1103,7 +1514,9 @@ class SnapshotScheduler:
         self._request_now_event.set()
         return True
 
-    async def _wait_for_next_tick(self, stop_event: asyncio.Event, delay_s: float) -> bool:
+    async def _wait_for_next_tick(
+        self, stop_event: asyncio.Event, delay_s: float
+    ) -> bool:
         """Wait for stop, cadence, or one coalesced requested normal cycle."""
         if self._request_now_event.is_set():
             self._request_now_event.clear()

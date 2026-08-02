@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sqlite3
@@ -54,6 +55,7 @@ def _drift_store(tmp_path: Path) -> SQLiteStore:
             for market_id, active in main_members
         ],
     }
+
     def single_event(
         event_id: str, group_id: str, market_id: str, *, active: bool = True
     ) -> dict[str, object]:
@@ -149,10 +151,10 @@ def _drift_store(tmp_path: Path) -> SQLiteStore:
                 ).encode()
             ).hexdigest()
             con.execute(
-            "INSERT INTO neg_risk_group_truth(snapshot_id,event_id,neg_risk_market_id,"
-            "neg_risk_type,expected_member_count,active_named_count,membership_hash,"
+                "INSERT INTO neg_risk_group_truth(snapshot_id,event_id,neg_risk_market_id,"
+                "neg_risk_type,expected_member_count,active_named_count,membership_hash,"
                 "quality) VALUES (1,?,?,'standard',1,1,?,"
-            "'complete-supported')",
+                "'complete-supported')",
                 (event_id, group_id, legacy_hash),
             )
         con.executemany(
@@ -247,8 +249,7 @@ def _drift_store(tmp_path: Path) -> SQLiteStore:
             relations,
         )
         con.execute(
-            "UPDATE structure_sync_windows SET status='events_complete' "
-            "WHERE id='window-2'"
+            "UPDATE structure_sync_windows SET status='events_complete' WHERE id='window-2'"
         )
         con.executemany(
             "INSERT INTO structure_sync_market_staging(window_id,market_id,payload_json,"
@@ -323,6 +324,79 @@ def _drift_store(tmp_path: Path) -> SQLiteStore:
             (cert, exact_digest),
         )
     return store
+
+
+def _reshape_as_production_845_848(store: SQLiteStore) -> None:
+    """Retain fixture semantics while matching the production identity topology."""
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("PRAGMA foreign_keys=OFF")
+        for (trigger_name,) in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger'"
+        ).fetchall():
+            con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute("UPDATE snapshots SET id=845 WHERE id=1")
+        con.execute("UPDATE snapshots SET id=848 WHERE id=2")
+        con.execute("UPDATE snapshot_source_coverage SET snapshot_id=845")
+        for table in (
+            "event_market_memberships",
+            "neg_risk_group_truth",
+            "markets",
+        ):
+            con.execute(f"UPDATE {table} SET snapshot_id=845 WHERE snapshot_id=1")
+        for table in (
+            "structure_generation_memberships",
+            "structure_generation_group_truth",
+            "structure_generation_markets",
+        ):
+            con.execute(f"UPDATE {table} SET snapshot_id=848 WHERE snapshot_id=2")
+        con.execute(
+            "UPDATE structure_sync_windows SET id='window-97b',"
+            "published_snapshot_id=848 WHERE id='window-2'"
+        )
+        for table in (
+            "structure_sync_event_staging",
+            "structure_sync_event_market_staging",
+            "structure_sync_market_staging",
+        ):
+            con.execute(
+                f"UPDATE {table} SET window_id='window-97b' WHERE window_id='window-2'"
+            )
+        con.execute(
+            "UPDATE structure_publications SET publication_id='publication-848',"
+            "window_id='window-97b',snapshot_id=848 WHERE "
+            "publication_id='publication-2'"
+        )
+        receipt = con.execute(
+            "SELECT legacy_market_count,generation_market_count,legacy_universe_hash,"
+            "generation_universe_hash,legacy_source_truth_hash,"
+            "generation_source_truth_hash,generation_validation_hash,created_at_ms "
+            "FROM structure_generation_comparison_receipts"
+        ).fetchone()
+        exact_digest = sqlite_store_module._comparison_receipt_digest(
+            generation_snapshot_id=848,
+            publication_id="publication-848",
+            legacy_snapshot_id=845,
+            legacy_market_count=int(receipt[0]),
+            generation_market_count=int(receipt[1]),
+            legacy_universe_hash=str(receipt[2]),
+            generation_universe_hash=str(receipt[3]),
+            legacy_source_truth_hash=str(receipt[4]),
+            generation_source_truth_hash=str(receipt[5]),
+            generation_validation_hash=str(receipt[6]),
+            created_at_ms=int(receipt[7]),
+        )
+        con.execute(
+            "UPDATE structure_generation_comparison_receipts SET "
+            "generation_snapshot_id=848,publication_id='publication-848',"
+            "legacy_snapshot_id=845,receipt_digest=?",
+            (exact_digest,),
+        )
+        con.execute(
+            "UPDATE current_structure_generation SET snapshot_id=848,"
+            "publication_id='publication-848',comparison_receipt_digest=? WHERE id=1",
+            (exact_digest,),
+        )
+    store.init_schema()
 
 
 def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
@@ -420,9 +494,10 @@ def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
     assert json.loads(cli_result.stdout)["authorization_mode"] == "drift-safe-sealed"
     substituted = dict(payload)
     substituted["projection_universe_hash"] = "f" * 64
-    assert sqlite_store_module._structure_drift_receipt_digest(substituted) != row[
-        field_count
-    ]
+    assert (
+        sqlite_store_module._structure_drift_receipt_digest(substituted)
+        != row[field_count]
+    )
     with sqlite3.connect(store.db_path) as con:
         with pytest.raises(sqlite3.IntegrityError, match="receipt-sealed"):
             con.execute(
@@ -467,3 +542,184 @@ def test_drift_pointer_race_fails_before_next_checkpoint(tmp_path: Path) -> None
     status = store.structure_generation_drift_status()
     assert status["authorized"] is False
     assert status["authorization_mode"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_actual_drift_child_parser_resumes_committed_chunk(
+    tmp_path: Path,
+) -> None:
+    from polyarb.daemon.scheduler import run_structure_drift_in_subprocess
+
+    store = _drift_store(tmp_path)
+    first = await run_structure_drift_in_subprocess(
+        db_path=store.db_path,
+        max_rows=1,
+        max_chunks=1,
+        max_elapsed_s=5.0,
+        timeout_s=10.0,
+    )
+    second = await run_structure_drift_in_subprocess(
+        db_path=store.db_path,
+        max_rows=1,
+        max_chunks=1,
+        max_elapsed_s=5.0,
+        timeout_s=10.0,
+    )
+
+    assert first.chunks_processed == 1
+    assert second.chunks_processed == 1
+    with sqlite3.connect(store.db_path) as con:
+        phase, counts_json = con.execute(
+            "SELECT phase,class_counts_json FROM structure_generation_drift_progress"
+        ).fetchone()
+    assert phase == "source-events"
+    assert json.loads(counts_json)["phase_row_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_actual_drift_child_defers_on_real_sqlite_writer_contention(
+    tmp_path: Path,
+) -> None:
+    from polyarb.daemon.scheduler import run_structure_drift_in_subprocess
+
+    store = _drift_store(tmp_path)
+    blocker = sqlite3.connect(store.db_path, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        checkpoint = await run_structure_drift_in_subprocess(
+            db_path=store.db_path,
+            max_rows=1,
+            max_chunks=100,
+            max_elapsed_s=45.0,
+            timeout_s=10.0,
+        )
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+    assert checkpoint.deferred is True
+    assert checkpoint.defer_reason == "writer-busy"
+    assert checkpoint.chunks_processed == 0
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_progress"
+        ).fetchone() == (0,)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_records_actual_drift_child_checkpoint(tmp_path: Path) -> None:
+    from polyarb.daemon.scheduler import SnapshotScheduler
+
+    store = _drift_store(tmp_path)
+    settings = SimpleNamespace(
+        db_path=store.db_path,
+        scheduler_interval_s=3600,
+        structure_generation_drift_compare_enabled=True,
+        structure_generation_drift_max_rows=1,
+        structure_generation_drift_max_chunks_per_tick=1,
+        structure_generation_drift_slice_s=5.0,
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+
+    assert await scheduler._maybe_advance_structure_drift(queued_at_ms=1_000) is True
+
+    attempt = store.get_latest_structure_drift_attempt()
+    assert attempt is not None
+    assert attempt["outcome"] == "checkpointed"
+    assert attempt["chunks_processed"] == 1
+    assert attempt["rows_processed"] == 1
+    assert attempt["stderr_safe_marker"].startswith("structure-drift stage=")
+
+
+@pytest.mark.asyncio
+async def test_scheduler_never_spawns_unledgered_child_when_attempt_db_is_busy(
+    tmp_path: Path,
+) -> None:
+    from polyarb.daemon.scheduler import SnapshotScheduler
+
+    seeded = _drift_store(tmp_path)
+    store = SQLiteStore(seeded.db_path, writer_timeout_s=0.01)
+    settings = SimpleNamespace(
+        db_path=store.db_path,
+        scheduler_interval_s=3600,
+        structure_generation_drift_compare_enabled=True,
+        structure_generation_drift_max_rows=1,
+        structure_generation_drift_max_chunks_per_tick=1,
+        structure_generation_drift_slice_s=5.0,
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+    blocker = sqlite3.connect(store.db_path, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        assert (
+            await scheduler._maybe_advance_structure_drift(queued_at_ms=1_000) is True
+        )
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_drift_attempts"
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_progress"
+        ).fetchone() == (0,)
+
+
+@pytest.mark.asyncio
+async def test_production_shaped_845_848_children_resume_to_sealed(
+    tmp_path: Path,
+) -> None:
+    from polyarb.daemon.scheduler import run_structure_drift_in_subprocess
+
+    store = _drift_store(tmp_path)
+    _reshape_as_production_845_848(store)
+    with sqlite3.connect(store.db_path) as con:
+        immutable_before = con.execute(
+            "SELECT snapshot_id,publication_id,validation_hash,"
+            "comparison_receipt_digest FROM current_structure_generation WHERE id=1"
+        ).fetchone()
+    process_count = 0
+    total_chunks = 0
+    while process_count < 20:
+        checkpoint = await run_structure_drift_in_subprocess(
+            db_path=store.db_path,
+            max_rows=1,
+            max_chunks=3,
+            max_elapsed_s=5.0,
+            timeout_s=10.0,
+        )
+        process_count += 1
+        total_chunks += checkpoint.chunks_processed
+        if checkpoint.ready:
+            break
+    else:
+        pytest.fail("production-shaped drift children did not seal")
+
+    status = store.structure_generation_drift_status()
+    assert process_count > 1
+    assert total_chunks > 3
+    assert status["authorized"] is True
+    assert status["authorization_mode"] == "drift-safe-sealed"
+    assert status["legacy_snapshot_id"] == 845
+    assert status["generation_snapshot_id"] == 848
+    assert status["window_id"] == "window-97b"
+    with sqlite3.connect(store.db_path) as con:
+        immutable_after = con.execute(
+            "SELECT snapshot_id,publication_id,validation_hash,"
+            "comparison_receipt_digest FROM current_structure_generation WHERE id=1"
+        ).fetchone()
+        receipt_count = con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_receipts"
+        ).fetchone()[0]
+    assert immutable_after == immutable_before
+    assert receipt_count == 1

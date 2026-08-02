@@ -17,6 +17,93 @@ from polyarb.snapshot.cli import app
 from polyarb.storage.sqlite_store import SQLiteStore, StructureMembershipInvalidError
 
 
+def test_structure_drift_internal_child_caps_slice_at_100_chunks(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import polyarb.storage.sqlite_store as store_module
+    from polyarb.storage.sqlite_store import StructureCertificationChunk
+
+    class FakeStore:
+        calls = 0
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def advance_current_structure_drift_chunk(self, **_kwargs):
+            self.calls += 1
+            return StructureCertificationChunk(
+                "generation-members", "cursor", 500, False
+            )
+
+    fake = FakeStore()
+    monkeypatch.setattr(store_module, "SQLiteStore", lambda *_a, **_k: fake)
+    result = CliRunner().invoke(
+        app,
+        [
+            "structure-generation-drift-advance",
+            "--db-path",
+            str(tmp_path / "state.db"),
+            "--max-rows",
+            "500",
+            "--max-chunks",
+            "100",
+            "--max-elapsed-seconds",
+            "45",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.splitlines()[-1])
+    assert payload["chunks_processed"] == 100
+    assert payload["rows_processed"] == 50_000
+    assert payload["stop_reason"] == "max-chunks"
+    assert fake.calls == 100
+
+
+def test_structure_drift_internal_child_keeps_partial_commit_at_post_deadline(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import polyarb.storage.sqlite_store as store_module
+    from polyarb.snapshot import cli as cli_module
+    from polyarb.storage.sqlite_store import StructureCertificationChunk
+
+    class FakeStore:
+        calls = 0
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def advance_current_structure_drift_chunk(self, **_kwargs):
+            self.calls += 1
+            return StructureCertificationChunk("source-events", "cursor", 500, False)
+
+    fake = FakeStore()
+    clock = iter((0.0, 0.0, 46.0, 46.0))
+    monkeypatch.setattr(store_module, "SQLiteStore", lambda *_a, **_k: fake)
+    monkeypatch.setattr(cli_module.time, "monotonic", lambda: next(clock))
+    result = CliRunner().invoke(
+        app,
+        [
+            "structure-generation-drift-advance",
+            "--db-path",
+            str(tmp_path / "state.db"),
+            "--max-chunks",
+            "100",
+            "--max-elapsed-seconds",
+            "45",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.splitlines()[-1])
+    assert payload["chunks_processed"] == 1
+    assert payload["rows_processed"] == 500
+    assert payload["stop_reason"] == "max-elapsed-seconds"
+    assert fake.calls == 1
+
+
 def test_structure_sync_cli_returns_certified_snapshot_json(monkeypatch) -> None:
     monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
     monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
@@ -61,7 +148,9 @@ def test_structure_sync_cli_returns_bounded_failure_json(monkeypatch) -> None:
     assert "membership-invalid" in result.output
 
 
-def test_structure_sync_cli_emits_bounded_membership_failure_evidence(monkeypatch) -> None:
+def test_structure_sync_cli_emits_bounded_membership_failure_evidence(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
     monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
     error = StructureMembershipInvalidError(
@@ -220,7 +309,9 @@ def test_structure_sync_cli_reports_publication_checkpoint_and_row_budget(
     assert run.await_args.kwargs["max_publication_rows"] == 17
 
 
-def test_structure_sync_cli_emits_controlled_supersession_checkpoint(monkeypatch) -> None:
+def test_structure_sync_cli_emits_controlled_supersession_checkpoint(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
     monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
     checkpoint = StructurePublicationCheckpoint(
@@ -270,20 +361,26 @@ def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
     monkeypatch, tmp_path
 ) -> None:
     from polyarb.snapshot import cli as cli_module
+
     db_path = tmp_path / "state.db"
     store = SQLiteStore(db_path)
     store.init_schema()
     window = store.begin_or_resume_structure_sync(started_at_ms=100)
     store.commit_structure_event_page(
-        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
         completed=True,
         events=[
             {"id": f"event-{index}", "markets": [{"id": f"market-{index}"}]}
             for index in range(3)
-        ], finished_at_ms=200,
+        ],
+        finished_at_ms=200,
     )
     store.commit_structure_market_page(
-        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
         completed=True,
         markets=[{"id": f"market-{index}"} for index in range(3)],
         finished_at_ms=300,
@@ -331,8 +428,8 @@ def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
     }
     with sqlite3.connect(db_path) as con:
         assert con.execute(
-            "SELECT COUNT(*) FROM structure_sync_event_market_backfill_progress "
-            "WHERE window_id=?", (window["id"],),
+            "SELECT COUNT(*) FROM structure_sync_event_market_backfill_progress WHERE window_id=?",
+            (window["id"],),
         ).fetchone() == (0,)
         assert con.execute(
             "SELECT COUNT(*) FROM structure_sync_event_market_staging WHERE window_id=?",
@@ -411,16 +508,25 @@ def test_generation_backfill_cli_prioritizes_bounded_event_market_bootstrap(
 def test_generation_backfill_cli_rejects_unsafe_batch_bounds() -> None:
     runner = CliRunner()
 
-    assert runner.invoke(
-        app, ["structure-generation-backfill", "--max-rows", "501"]
-    ).exit_code == 2
-    assert runner.invoke(
-        app, ["structure-generation-backfill", "--max-chunks", "101"]
-    ).exit_code == 2
-    assert runner.invoke(
-        app,
-        ["structure-generation-backfill", "--max-elapsed-seconds", "61"],
-    ).exit_code == 2
+    assert (
+        runner.invoke(
+            app, ["structure-generation-backfill", "--max-rows", "501"]
+        ).exit_code
+        == 2
+    )
+    assert (
+        runner.invoke(
+            app, ["structure-generation-backfill", "--max-chunks", "101"]
+        ).exit_code
+        == 2
+    )
+    assert (
+        runner.invoke(
+            app,
+            ["structure-generation-backfill", "--max-elapsed-seconds", "61"],
+        ).exit_code
+        == 2
+    )
 
 
 def test_generation_backfill_cli_defers_writer_busy_from_later_phase(
@@ -925,7 +1031,9 @@ def test_snapshot_cli_structure_product_forces_full_gamma(monkeypatch) -> None:
     run_snapshot = AsyncMock(return_value=result_object)
 
     with patch("polyarb.snapshot.cli.run_snapshot", new=run_snapshot):
-        result = CliRunner().invoke(app, ["snapshot", "--product", "structure", "--json"])
+        result = CliRunner().invoke(
+            app, ["snapshot", "--product", "structure", "--json"]
+        )
 
     assert result.exit_code == 0
     assert run_snapshot.await_args.kwargs["mode"] == "full"

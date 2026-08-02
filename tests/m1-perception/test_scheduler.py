@@ -71,6 +71,143 @@ def test_structure_sync_enablement_reads_production_env(
     assert scheduler.structure_sync_enabled is True
 
 
+def test_structure_drift_scheduler_defaults_are_bounded_and_off() -> None:
+    from polyarb.config import Settings
+
+    settings = Settings(_env_file=None)
+    assert settings.structure_generation_drift_compare_enabled is False
+    assert settings.structure_generation_drift_max_rows == 500
+    assert settings.structure_generation_drift_max_chunks_per_tick == 100
+    assert settings.structure_generation_drift_slice_s == 45.0
+
+
+def test_structure_drift_scheduler_enablement_reads_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.config import Settings
+
+    monkeypatch.setenv("POLYARB_STRUCTURE_GENERATION_DRIFT_COMPARE_ENABLED", "true")
+    assert Settings(_env_file=None).structure_generation_drift_compare_enabled is True
+
+
+def test_structure_drift_attempt_lifecycle_recovery_and_retention(
+    tmp_path: Path,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "attempts.db")
+    store.init_schema()
+    identity = {
+        "legacy_snapshot_id": 845,
+        "generation_snapshot_id": 848,
+        "publication_id": "publication-848",
+        "window_id": "window-97b",
+    }
+    orphan_id = store.begin_structure_drift_attempt(
+        identity=identity,
+        progress_id="progress-orphan",
+        started_at_ms=1_000,
+    )
+    assert store.recover_orphaned_structure_drift_attempts(recovered_at_ms=2_000) == 1
+    assert (
+        store.get_latest_structure_drift_attempt()["failure_kind"]
+        == "parent-restarted-orphan"
+    )
+
+    attempt_id = store.begin_structure_drift_attempt(
+        identity=identity,
+        progress_id="progress-current",
+        started_at_ms=3_000,
+    )
+    store.finish_structure_drift_attempt(
+        attempt_id=attempt_id,
+        outcome="checkpointed",
+        finished_at_ms=3_100,
+        last_phase="legacy-members",
+        chunks_processed=2,
+        rows_processed=1_000,
+        elapsed_ms=100,
+        failure_kind=None,
+        stderr=b"structure-drift stage=legacy-members chunks=2 rows=1000",
+    )
+    latest = store.get_latest_structure_drift_attempt()
+    assert latest is not None
+    assert latest["id"] == attempt_id
+    assert latest["identity"] == identity
+    assert latest["progress_id"] == "progress-current"
+    assert latest["outcome"] == "checkpointed"
+    assert latest["stderr_bytes"] == 55
+    assert (
+        latest["stderr_sha256"]
+        == hashlib.sha256(
+            b"structure-drift stage=legacy-members chunks=2 rows=1000"
+        ).hexdigest()
+    )
+    assert latest["stderr_safe_marker"] == (
+        "structure-drift stage=legacy-members chunks=2 rows=1000"
+    )
+    with pytest.raises(ValueError, match="already-terminal"):
+        store.finish_structure_drift_attempt(
+            attempt_id=attempt_id,
+            outcome="failed",
+            finished_at_ms=3_200,
+            last_phase=None,
+            chunks_processed=0,
+            rows_processed=0,
+            elapsed_ms=200,
+            failure_kind="invalid-json",
+            stderr=b"unsafe secret",
+        )
+    assert orphan_id != attempt_id
+    for index in range(105):
+        retained_id = store.begin_structure_drift_attempt(
+            identity=identity,
+            progress_id=None,
+            started_at_ms=4_000 + index,
+        )
+        store.finish_structure_drift_attempt(
+            attempt_id=retained_id,
+            outcome="checkpointed",
+            finished_at_ms=5_000 + index,
+            last_phase="source-events",
+            chunks_processed=1,
+            rows_processed=1,
+            elapsed_ms=1,
+            failure_kind=None,
+        )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_drift_attempts"
+        ).fetchone() == (100,)
+
+
+def test_structure_drift_attempt_schema_migrates_legacy_database(
+    tmp_path: Path,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "CREATE TABLE structure_drift_attempts("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,started_at_ms INTEGER NOT NULL,"
+            "outcome TEXT NOT NULL)"
+        )
+        con.execute(
+            "INSERT INTO structure_drift_attempts(started_at_ms,outcome) VALUES(1,'running')"
+        )
+    store = SQLiteStore(db_path)
+    store.init_schema()
+    columns = {
+        row[1]
+        for row in sqlite3.connect(db_path).execute(
+            "PRAGMA table_info(structure_drift_attempts)"
+        )
+    }
+    assert {"identity_json", "progress_id", "stderr_safe_marker"} <= columns
+    assert store.recover_orphaned_structure_drift_attempts(recovered_at_ms=10) == 1
+
+
 def test_recovery_retry_delay_is_exponential_and_bounded() -> None:
     from polyarb.daemon.scheduler import recovery_retry_delay_s
 
@@ -116,9 +253,7 @@ class _FakeProcess:
         stderr: bytes = b"bounded stderr",
     ) -> None:
         self.stdout = (
-            payload
-            if isinstance(payload, bytes)
-            else json.dumps(payload).encode()
+            payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         )
         self.returncode = returncode
         self.block = block
@@ -150,7 +285,9 @@ def _seed_snapshot(store: Any, snapshot_id: int) -> None:
         )
 
 
-def test_snapshot_attempt_lifecycle_is_append_only(daemon_settings_for_test: Any) -> None:
+def test_snapshot_attempt_lifecycle_is_append_only(
+    daemon_settings_for_test: Any,
+) -> None:
     """A terminal scheduler attempt keeps its original OOM classification."""
     from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -183,14 +320,18 @@ def test_snapshot_attempt_lifecycle_is_append_only(daemon_settings_for_test: Any
     }
 
 
-def test_snapshot_attempt_diagnostic_columns_migrate_legacy_rows(tmp_path: Path) -> None:
+def test_snapshot_attempt_diagnostic_columns_migrate_legacy_rows(
+    tmp_path: Path,
+) -> None:
     """Fresh and pre-diagnostic attempt tables expose nullable diagnostic columns."""
     from polyarb.storage.sqlite_store import SQLiteStore
 
     fresh_db = tmp_path / "fresh.db"
     SQLiteStore(fresh_db).init_schema()
     with sqlite3.connect(fresh_db) as con:
-        fresh_columns = {row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")}
+        fresh_columns = {
+            row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")
+        }
     diagnostic_columns = {
         "elapsed_ms",
         "last_stage",
@@ -219,7 +360,9 @@ def test_snapshot_attempt_diagnostic_columns_migrate_legacy_rows(tmp_path: Path)
     legacy_store.init_schema()
 
     with sqlite3.connect(legacy_db) as con:
-        legacy_columns = {row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")}
+        legacy_columns = {
+            row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")
+        }
         historical_diagnostics = con.execute(
             "SELECT last_stage,elapsed_ms,chunks_processed,stderr_bytes,stderr_sha256,"
             "stderr_tail "
@@ -373,9 +516,7 @@ async def test_scheduler_discards_oversized_tail_but_finishes_attempt(
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
-    child_stderr = (
-        b"snapshot-stage stage=persist state=start elapsed_ms=" + b"1" * 300
-    )
+    child_stderr = b"snapshot-stage stage=persist state=start elapsed_ms=" + b"1" * 300
     scheduler._run_snapshot = AsyncMock(
         side_effect=SnapshotSubprocessError(
             "structure-child-error",
@@ -504,6 +645,156 @@ async def test_snapshot_pipeline_runs_in_isolated_subprocess(
 
 
 @pytest.mark.asyncio
+async def test_structure_drift_child_parser_accepts_bounded_slice() -> None:
+    from polyarb.daemon.scheduler import run_structure_drift_in_subprocess
+
+    process = _FakeProcess(
+        {
+            "checkpointed": True,
+            "chunks_processed": 100,
+            "defer_reason": None,
+            "deferred": False,
+            "elapsed_ms": 44_999,
+            "kind": "structure-drift",
+            "phase": "legacy-members",
+            "ready": False,
+            "rows_processed": 50_000,
+            "stop_reason": "max-chunks",
+        },
+        returncode=0,
+    )
+    calls = []
+
+    async def spawn(*args, **kwargs):
+        calls.append((args, kwargs))
+        return process
+
+    result = await run_structure_drift_in_subprocess(
+        db_path="/tmp/drift.db",
+        max_rows=500,
+        max_chunks=100,
+        max_elapsed_s=45.0,
+        spawn=spawn,
+    )
+
+    assert result.rows_processed == 50_000
+    assert result.chunks_processed == 100
+    assert calls[0][0][1:] == (
+        "-m",
+        "polyarb.snapshot",
+        "structure-generation-drift-advance",
+        "--db-path",
+        "/tmp/drift.db",
+        "--max-rows",
+        "500",
+        "--max-chunks",
+        "100",
+        "--max-elapsed-seconds",
+        "45.0",
+    )
+
+
+@pytest.mark.asyncio
+async def test_structure_drift_child_cancel_terminates_then_kills() -> None:
+    from polyarb.daemon.scheduler import run_structure_drift_in_subprocess
+
+    process = _FakeProcess({}, returncode=0, block=True)
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    task = asyncio.create_task(
+        run_structure_drift_in_subprocess(
+            db_path="/tmp/drift.db",
+            max_rows=500,
+            max_chunks=100,
+            max_elapsed_s=45.0,
+            spawn=spawn,
+            terminate_timeout_s=0.001,
+        )
+    )
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert process.terminated is True
+    assert process.killed is True
+
+
+@pytest.mark.asyncio
+async def test_structure_drift_child_sigkill_is_possible_oom() -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_structure_drift_in_subprocess,
+    )
+
+    process = _FakeProcess({}, returncode=-signal.SIGKILL)
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(
+        SnapshotSubprocessError,
+        match="structure-drift-signal-sigkill-possible-oom",
+    ):
+        await run_structure_drift_in_subprocess(
+            db_path="/tmp/drift.db",
+            max_rows=500,
+            max_chunks=100,
+            max_elapsed_s=45.0,
+            spawn=spawn,
+        )
+
+
+@pytest.mark.asyncio
+async def test_structure_drift_child_timeout_reaps_before_failure() -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_structure_drift_in_subprocess,
+    )
+
+    process = _FakeProcess({}, returncode=0, block=True)
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(SnapshotSubprocessError, match="structure-drift-timeout"):
+        await run_structure_drift_in_subprocess(
+            db_path="/tmp/drift.db",
+            max_rows=500,
+            max_chunks=100,
+            max_elapsed_s=45.0,
+            spawn=spawn,
+            timeout_s=0.001,
+            terminate_timeout_s=0.001,
+        )
+    assert process.terminated is True
+    assert process.killed is True
+
+
+@pytest.mark.asyncio
+async def test_structure_drift_child_invalid_json_is_bounded_failure() -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_structure_drift_in_subprocess,
+    )
+
+    process = _FakeProcess(b"not-json", returncode=1, stderr=b"unsafe secret")
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(SnapshotSubprocessError, match="structure-drift-invalid-json"):
+        await run_structure_drift_in_subprocess(
+            db_path="/tmp/drift.db",
+            max_rows=500,
+            max_chunks=100,
+            max_elapsed_s=45.0,
+            spawn=spawn,
+        )
+
+
+@pytest.mark.asyncio
 async def test_snapshot_subprocess_accepts_cooperative_checkpoint() -> None:
     from polyarb.daemon.scheduler import (
         IsolatedStructureCheckpoint,
@@ -568,7 +859,9 @@ async def test_snapshot_subprocess_accepts_publication_checkpoint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_snapshot_subprocess_accepts_exact_contract_supersession_checkpoint() -> None:
+async def test_snapshot_subprocess_accepts_exact_contract_supersession_checkpoint() -> (
+    None
+):
     from polyarb.daemon.scheduler import (
         IsolatedStructurePublicationCheckpoint,
         run_snapshot_in_subprocess,
@@ -587,8 +880,7 @@ async def test_snapshot_subprocess_accepts_exact_contract_supersession_checkpoin
         },
         returncode=0,
         stderr=(
-            b"structure-publication-superseded "
-            b"publication_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            b"structure-publication-superseded publication_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
         ),
     )
 
@@ -662,7 +954,10 @@ async def test_snapshot_subprocess_rejects_nonzero_supersession_work(
     rows_processed: int,
     cursor: str | None,
 ) -> None:
-    from polyarb.daemon.scheduler import SnapshotSubprocessError, run_snapshot_in_subprocess
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
 
     process = _FakeProcess(
         {
@@ -679,13 +974,18 @@ async def test_snapshot_subprocess_rejects_nonzero_supersession_work(
     async def spawn(*_args, **_kwargs):
         return process
 
-    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-invalid-json"):
+    with pytest.raises(
+        SnapshotSubprocessError, match="snapshot-subprocess-invalid-json"
+    ):
         await run_snapshot_in_subprocess(spawn=spawn)
 
 
 @pytest.mark.asyncio
 async def test_snapshot_timeout_recovers_last_committed_publication_chunk() -> None:
-    from polyarb.daemon.scheduler import SnapshotSubprocessError, run_snapshot_in_subprocess
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
 
     process = _FakeProcess(
         b"",
@@ -791,7 +1091,9 @@ async def test_snapshot_subprocess_rejects_invalid_publication_checkpoint_pair(
     async def spawn(*_args, **_kwargs):
         return process
 
-    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-invalid-json"):
+    with pytest.raises(
+        SnapshotSubprocessError, match="snapshot-subprocess-invalid-json"
+    ):
         await run_snapshot_in_subprocess(spawn=spawn)
 
 
@@ -816,9 +1118,7 @@ def test_snapshot_stage_parser_keeps_only_final_allowlisted_marker() -> None:
 def test_snapshot_stderr_tail_discards_oversized_allowlisted_marker() -> None:
     from polyarb.daemon.scheduler import _safe_stderr_tail
 
-    stderr = (
-        b"snapshot-stage stage=persist state=start elapsed_ms=" + b"1" * 300
-    )
+    stderr = b"snapshot-stage stage=persist state=start elapsed_ms=" + b"1" * 300
 
     assert _safe_stderr_tail(stderr) is None
 
@@ -1015,7 +1315,9 @@ async def test_ready_structure_publication_uses_pointer_switch_hard_budget(
 
     monkeypatch.setattr(scheduler_module, "run_snapshot_in_subprocess", run_snapshot)
     store = MagicMock()
-    store.get_latest_structure_publication.return_value = SimpleNamespace(status="ready")
+    store.get_latest_structure_publication.return_value = SimpleNamespace(
+        status="ready"
+    )
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
     scheduler._effective_timeout_s = 240
 
@@ -1109,6 +1411,312 @@ async def test_structure_rechecks_quote_priority_after_lock_acquisition(
     assert getattr(scheduler, "_active_attempt_id", None) is None
     assert scheduler._admitted_timeout_s is None
     sleep.assert_awaited_once_with(5.0)
+
+
+@pytest.mark.asyncio
+async def test_pending_structure_drift_slice_precedes_snapshot_child(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import IsolatedStructureDriftCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    store.structure_generation_drift_status = MagicMock(
+        return_value={
+            "authorized": False,
+            "phase": "generation-members",
+            "reason": "structure-drift-incomplete",
+        }
+    )
+    child = AsyncMock(
+        return_value=IsolatedStructureDriftCheckpoint(
+            phase="legacy-members",
+            rows_processed=50_000,
+            chunks_processed=100,
+            ready=False,
+            deferred=False,
+            defer_reason=None,
+            stop_reason="max-chunks",
+            elapsed_ms=4_000,
+        )
+    )
+    monkeypatch.setattr(scheduler_module, "run_structure_drift_in_subprocess", child)
+    producer_lock = asyncio.Lock()
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=producer_lock,
+    )
+    scheduler._run_snapshot = AsyncMock()
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is True
+
+    scheduler._run_snapshot.assert_not_awaited()
+    child.assert_awaited_once_with(
+        db_path=settings.db_path,
+        max_rows=500,
+        max_chunks=100,
+        max_elapsed_s=45.0,
+        timeout_s=75.0,
+        terminate_timeout_s=15.0,
+    )
+    assert producer_lock.locked() is False
+    assert scheduler._failure_counter == 0
+    assert store.get_latest_structure_drift_attempt()["outcome"] == "checkpointed"
+
+
+@pytest.mark.asyncio
+async def test_structure_drift_rechecks_quote_after_shared_lock(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    store.structure_generation_drift_status = MagicMock(
+        return_value={
+            "authorized": False,
+            "phase": "source-events",
+            "reason": "structure-drift-incomplete",
+        }
+    )
+    active = iter((False, True))
+    runtime = MagicMock()
+    runtime.pipeline_active.side_effect = lambda: next(active)
+    runtime.pipeline_due.return_value = False
+    child = AsyncMock()
+    monkeypatch.setattr(scheduler_module, "run_structure_drift_in_subprocess", child)
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+        quote_worker_runtime=runtime,
+    )
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is False
+
+    child.assert_not_awaited()
+    receipt = store.get_latest_structure_defer()
+    assert receipt is not None
+    assert receipt["reason"] == "structure-drift:quote-pipeline-active"
+    assert scheduler._failure_counter == 0
+
+
+@pytest.mark.asyncio
+async def test_structure_drift_quote_due_wins_next_slice_admission(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import IsolatedStructureDriftCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    store.structure_generation_drift_status = MagicMock(
+        return_value={
+            "authorized": False,
+            "phase": "generation-members",
+            "reason": "structure-drift-incomplete",
+        }
+    )
+    runtime = MagicMock()
+    runtime.pipeline_active.return_value = False
+    runtime.pipeline_due.side_effect = (False, False, False, True)
+    child = AsyncMock(
+        return_value=IsolatedStructureDriftCheckpoint(
+            phase="generation-members",
+            rows_processed=50_000,
+            chunks_processed=100,
+            ready=False,
+            deferred=False,
+            defer_reason=None,
+            stop_reason="max-chunks",
+            elapsed_ms=40_000,
+        )
+    )
+    monkeypatch.setattr(scheduler_module, "run_structure_drift_in_subprocess", child)
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+        quote_worker_runtime=runtime,
+    )
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is True
+    assert await scheduler._tick_once(queued_at_ms=2_000) is False
+    child.assert_awaited_once()
+    receipt = store.get_latest_structure_defer()
+    assert receipt is not None
+    assert receipt["reason"] == "structure-drift:quote-pipeline-due"
+
+
+@pytest.mark.asyncio
+async def test_request_now_reaches_same_structure_drift_child_path(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import IsolatedStructureDriftCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    store.structure_generation_drift_status = MagicMock(
+        return_value={
+            "authorized": False,
+            "phase": "legacy-members",
+            "reason": "structure-drift-incomplete",
+        }
+    )
+    stop_event = asyncio.Event()
+
+    async def child(**_kwargs):
+        stop_event.set()
+        return IsolatedStructureDriftCheckpoint(
+            phase="fresh-group-truth",
+            rows_processed=500,
+            chunks_processed=1,
+            ready=False,
+            deferred=False,
+            defer_reason=None,
+            stop_reason="max-chunks",
+            elapsed_ms=10,
+        )
+
+    child_mock = AsyncMock(side_effect=child)
+    monkeypatch.setattr(
+        scheduler_module, "run_structure_drift_in_subprocess", child_mock
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+    assert scheduler.request_now() is True
+
+    await scheduler.run(stop_event)
+
+    child_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_structure_drift_cancellation_releases_shared_producer_lock(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    store.structure_generation_drift_status = MagicMock(
+        return_value={
+            "authorized": False,
+            "phase": "source-markets",
+            "reason": "structure-drift-incomplete",
+        }
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "run_structure_drift_in_subprocess",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    producer_lock = asyncio.Lock()
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=producer_lock,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await scheduler._tick_once(queued_at_ms=1_000)
+
+    assert producer_lock.locked() is False
+    assert scheduler._failure_counter == 0
+    attempt = store.get_latest_structure_drift_attempt()
+    assert attempt is not None
+    assert attempt["outcome"] == "cancelled"
+    assert attempt["failure_kind"] == "scheduler-cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_kind",
+    (
+        "structure-drift-timeout",
+        "structure-drift-signal-sigkill-possible-oom",
+        "structure-drift-invalid-json",
+    ),
+)
+async def test_structure_drift_parent_terminalizes_child_failures(
+    daemon_settings_for_test,
+    monkeypatch,
+    failure_kind: str,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import SnapshotSubprocessError
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    store.structure_generation_drift_status = MagicMock(
+        return_value={
+            "authorized": False,
+            "phase": "source-events",
+            "reason": "structure-drift-incomplete",
+            "progress_id": "progress-1",
+        }
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "run_structure_drift_in_subprocess",
+        AsyncMock(
+            side_effect=SnapshotSubprocessError(
+                failure_kind,
+                last_stage="structure-drift",
+                elapsed_ms=75_000,
+                stderr=b"unsafe secret",
+            )
+        ),
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is True
+
+    attempt = store.get_latest_structure_drift_attempt()
+    assert attempt is not None
+    assert attempt["outcome"] == "failed"
+    assert attempt["failure_kind"] == failure_kind
+    assert attempt["stderr_safe_marker"] is None
+    assert scheduler._failure_counter == 0
 
 
 @pytest.mark.asyncio
@@ -1321,7 +1929,9 @@ async def test_cancellation_after_admission_closes_local_attempt_ownership(
     assert scheduler._admitted_timeout_s is None
 
 
-async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics() -> None:
+async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics() -> (
+    None
+):
     """Timeout data arrives only from the child communicate result after reaping."""
     from polyarb.daemon.scheduler import (
         SnapshotSubprocessError,
@@ -1333,15 +1943,16 @@ async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics()
         returncode=0,
         block=True,
         stderr=(
-            b"arbitrary child error\n"
-            b"snapshot-stage stage=gamma-markets state=start elapsed_ms=17"
+            b"arbitrary child error\nsnapshot-stage stage=gamma-markets state=start elapsed_ms=17"
         ),
     )
 
     async def spawn(*_args, **_kwargs):
         return process
 
-    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-timeout") as raised:
+    with pytest.raises(
+        SnapshotSubprocessError, match="snapshot-subprocess-timeout"
+    ) as raised:
         await run_snapshot_in_subprocess(
             spawn=spawn,
             timeout_s=0.01,
@@ -1439,8 +2050,13 @@ async def test_snapshot_subprocess_accepts_bounded_child_failure_contract() -> N
 
 
 @pytest.mark.asyncio
-async def test_snapshot_subprocess_accepts_allowlisted_membership_evidence_marker() -> None:
-    from polyarb.daemon.scheduler import SnapshotSubprocessError, run_snapshot_in_subprocess
+async def test_snapshot_subprocess_accepts_allowlisted_membership_evidence_marker() -> (
+    None
+):
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
 
     fingerprint = "a" * 64
     stderr = (
@@ -1663,7 +2279,9 @@ async def test_no_pause_after_degraded_then_ok(
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
 
     # Tick 1: DEGRADED
-    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.DEGRADED))
+    scheduler._run_snapshot = AsyncMock(
+        return_value=_FakeResult(SnapshotStatus.DEGRADED)
+    )
     await scheduler._tick()
     assert scheduler._failure_counter == 0  # DEGRADED does not count as failure
     assert scheduler.state == SchedulerState.RUNNING
@@ -1711,7 +2329,9 @@ async def test_degraded_does_not_count_as_failure(
     store.init_schema()
 
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
-    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.DEGRADED))
+    scheduler._run_snapshot = AsyncMock(
+        return_value=_FakeResult(SnapshotStatus.DEGRADED)
+    )
 
     for _ in range(5):  # More than FAILURE_THRESHOLD
         await scheduler._tick()
@@ -1934,7 +2554,9 @@ async def test_degraded_tick_also_calls_heartbeat_ok(
     store.init_schema()
 
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
-    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.DEGRADED))
+    scheduler._run_snapshot = AsyncMock(
+        return_value=_FakeResult(SnapshotStatus.DEGRADED)
+    )
 
     with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()) as hb_mock:
         await scheduler._tick()
@@ -1981,7 +2603,9 @@ async def test_counter_persists_across_restart(
     pre_shutdown_counter = threshold - 1  # one short of trigger
 
     # First instance: run threshold-1 failures, then "shut down"
-    scheduler1 = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler1 = SnapshotScheduler(
+        settings=daemon_settings_for_test, sqlite_store=store
+    )
     scheduler1._run_snapshot = AsyncMock(side_effect=RuntimeError("failed"))
 
     for _ in range(pre_shutdown_counter):
@@ -1991,7 +2615,9 @@ async def test_counter_persists_across_restart(
     assert scheduler1.state == SchedulerState.RUNNING
 
     # Second instance reads from DB → restores counter
-    scheduler2 = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler2 = SnapshotScheduler(
+        settings=daemon_settings_for_test, sqlite_store=store
+    )
 
     assert scheduler2._failure_counter == pre_shutdown_counter, (
         f"Expected restored counter={pre_shutdown_counter}, "
@@ -2033,4 +2659,6 @@ async def test_failure_threshold_enters_recovering_and_a_later_success_self_heal
 
     assert scheduler.state == SchedulerState.RUNNING
     assert scheduler._failure_counter == 0
-    assert scheduler._run_snapshot.await_count == SnapshotScheduler.FAILURE_THRESHOLD + 1
+    assert (
+        scheduler._run_snapshot.await_count == SnapshotScheduler.FAILURE_THRESHOLD + 1
+    )

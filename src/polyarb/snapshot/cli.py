@@ -71,8 +71,7 @@ def _structure_failure_marker(error: Exception, failure_kind: str) -> str:
 
     if isinstance(error, StructureMembershipInvalidError):
         marker += (
-            f" membership_kind={error.membership_kind}"
-            f" key_sha256={error.key_sha256}"
+            f" membership_kind={error.membership_kind} key_sha256={error.key_sha256}"
         )
     return marker
 
@@ -188,9 +187,7 @@ def structure_generation_backfill(
                 break
             chunks_succeeded += 1
             phase_complete = bool(final_progress["complete"])
-            bootstrap_complete = (
-                final_progress.get("phase") == "event-market-bootstrap"
-            )
+            bootstrap_complete = final_progress.get("phase") == "event-market-bootstrap"
             if phase_complete and not bootstrap_complete:
                 stop_reason = "complete"
                 break
@@ -342,6 +339,93 @@ def structure_generation_drift_compare() -> None:
         raise typer.Exit(code=1)
 
 
+@app.command(name="structure-generation-drift-advance", hidden=True)
+def structure_generation_drift_advance(
+    db_path: Path = typer.Option(..., "--db-path"),
+    max_rows: int = typer.Option(500, "--max-rows", min=1, max=500),
+    max_chunks: int = typer.Option(100, "--max-chunks", min=1, max=100),
+    max_elapsed_seconds: float = typer.Option(
+        45.0,
+        "--max-elapsed-seconds",
+        min=1.0,
+        max=45.0,
+    ),
+) -> None:
+    """Internal scheduler child: advance one cooperative bounded drift slice."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(db_path, writer_timeout_s=0.25)
+    started = time.monotonic()
+    chunks = 0
+    rows_processed = 0
+    phase: str | None = None
+    ready = False
+    deferred = False
+    defer_reason: str | None = None
+    stop_reason = "max-chunks"
+    for _index in range(max_chunks):
+        if time.monotonic() - started >= max_elapsed_seconds:
+            stop_reason = "max-elapsed-seconds"
+            break
+        try:
+            chunk = store.advance_current_structure_drift_chunk(
+                max_rows=max_rows,
+                now_ms=int(time.time() * 1_000),
+            )
+        except sqlite3.OperationalError as error:
+            if not _is_sqlite_writer_busy(error):
+                raise
+            deferred = True
+            defer_reason = "writer-busy"
+            stop_reason = "writer-busy"
+            break
+        except ValueError:
+            deferred = True
+            defer_reason = "identity-stale"
+            stop_reason = "identity-stale"
+            break
+        if chunk is None:
+            status = store.structure_generation_drift_status()
+            phase_value = status.get("phase")
+            phase = None if phase_value is None else str(phase_value)
+            ready = status.get("authorized") is True
+            stop_reason = "complete" if ready else "not-pending"
+            break
+        chunks += 1
+        rows_processed += chunk.rows_processed
+        phase = chunk.component
+        ready = chunk.ready
+        print(
+            f"structure-drift stage={phase} chunks={chunks} rows={rows_processed}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if ready or phase in {"sealed", "stale"}:
+            stop_reason = "complete" if ready else "stale"
+            break
+        if time.monotonic() - started >= max_elapsed_seconds:
+            stop_reason = "max-elapsed-seconds"
+            break
+    elapsed_ms = max(0, int((time.monotonic() - started) * 1_000))
+    print(
+        json.dumps(
+            {
+                "checkpointed": True,
+                "chunks_processed": chunks,
+                "defer_reason": defer_reason,
+                "deferred": deferred,
+                "elapsed_ms": elapsed_ms,
+                "kind": "structure-drift",
+                "phase": phase,
+                "ready": ready,
+                "rows_processed": rows_processed,
+                "stop_reason": stop_reason,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 @app.command(name="structure-generation-cleanup")
 def structure_generation_cleanup(
     max_rows: int = typer.Option(500, "--max-rows", min=1),
@@ -400,7 +484,9 @@ def structure_sync(
         )
     except Exception as error:  # noqa: BLE001 - process boundary owns the protocol
         failure_kind = _structure_failure_kind(error)
-        print(_structure_failure_marker(error, failure_kind), file=sys.stderr, flush=True)
+        print(
+            _structure_failure_marker(error, failure_kind), file=sys.stderr, flush=True
+        )
         if json_output:
             print(
                 json.dumps(
@@ -414,8 +500,7 @@ def structure_sync(
     if isinstance(result, StructurePublicationCheckpoint):
         if result.stage == "superseded":
             print(
-                "structure-publication-superseded "
-                f"publication_id={result.publication_id}",
+                f"structure-publication-superseded publication_id={result.publication_id}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -591,7 +676,9 @@ def snapshots_purge_cmd(
     older_than_days: int = typer.Option(
         7, "--older-than-days", help="Delete snapshots older than N days."
     ),
-    keep_last: int = typer.Option(5, "--keep-last", help="Always keep the last M snapshots."),
+    keep_last: int = typer.Option(
+        5, "--keep-last", help="Always keep the last M snapshots."
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would be deleted without doing it."
     ),
@@ -622,7 +709,9 @@ def snapshots_purge_cmd(
         print(f"DRY-RUN: would delete {len(ids)} snapshots (ids={ids})")
     else:
         print(f"OK | deleted {n} old snapshots (ids={ids})")
-        print(f"  kept most recent {keep_last}, deleted everything older than {older_than_days}d")
+        print(
+            f"  kept most recent {keep_last}, deleted everything older than {older_than_days}d"
+        )
 
 
 if __name__ == "__main__":

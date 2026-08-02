@@ -46,7 +46,9 @@ def test_opportunity_authority_read_health_warns_then_fails_and_recovers() -> No
     )
     assert transient["quote_feed:source_truth_read"][0]["status"] == "warn"
     assert transient["quote_feed:lifecycle_read"][0]["status"] == "warn"
-    assert "error_kind=timeout" in transient["quote_feed:source_truth_read"][0]["output"]
+    assert (
+        "error_kind=timeout" in transient["quote_feed:source_truth_read"][0]["output"]
+    )
 
     source_token = registry.begin_source_attempt(101.0)
     registry.mark_source_fallback(source_token, 101.0, "timeout")
@@ -113,7 +115,10 @@ def test_health_endpoint_exposes_opportunity_authority_read_fallback(
 
     assert checks["quote_feed:source_truth_read"][0]["status"] == "warn"
     assert checks["quote_feed:lifecycle_read"][0]["status"] == "warn"
-    assert "status=last-known-authenticated" in checks["quote_feed:source_truth_read"][0]["output"]
+    assert (
+        "status=last-known-authenticated"
+        in checks["quote_feed:source_truth_read"][0]["output"]
+    )
     assert "error_kind=saturated" in checks["quote_feed:lifecycle_read"][0]["output"]
 
 
@@ -174,12 +179,14 @@ def test_cold_start_health_registers_opportunity_read_checks(
 
     assert checks["quote_feed:source_truth_read"][0]["status"] == "pass"
     assert checks["quote_feed:lifecycle_read"][0]["status"] == "pass"
-    assert "status=never-attempted" in checks["quote_feed:source_truth_read"][0][
-        "output"
-    ]
+    assert (
+        "status=never-attempted" in checks["quote_feed:source_truth_read"][0]["output"]
+    )
 
 
-def test_structure_generation_health_exposes_stalled_publication_and_cleanup_pressure() -> None:
+def test_structure_generation_health_exposes_stalled_publication_and_cleanup_pressure() -> (
+    None
+):
     builder = getattr(health_module, "_structure_generation_health_checks", None)
     assert callable(builder), "generation health builder is not implemented"
     checks = builder(
@@ -222,9 +229,10 @@ def test_structure_generation_health_exposes_stalled_publication_and_cleanup_pre
     assert "stage=writing" in checks["snapshot:structure_generation"][0]["output"]
     assert checks["snapshot:structure_generation_comparison"][0]["status"] == "fail"
     assert checks["snapshot:structure_generation_evidence"][0]["status"] == "fail"
-    assert "blocked_reason=generation-entered-retention-floor" in checks[
-        "snapshot:structure_generation_evidence"
-    ][0]["output"]
+    assert (
+        "blocked_reason=generation-entered-retention-floor"
+        in checks["snapshot:structure_generation_evidence"][0]["output"]
+    )
 
 
 def test_structure_generation_health_fails_stale_active_comparison() -> None:
@@ -325,6 +333,77 @@ def test_structure_generation_health_exposes_bootstrap_progress(
     assert "stage=event-market-bootstrap" in check["output"]
     assert "event_cursor=event-42" in check["output"]
     assert "member_offset=3" in check["output"]
+
+
+def test_structure_drift_health_is_disabled_warn_pending_and_fail_stale() -> None:
+    disabled = health_module._structure_drift_health_check(
+        None,
+        enabled=False,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+    assert disabled["status"] == "pass"
+    assert disabled["observedValue"] == "disabled"
+
+    pending = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "none",
+            "authorized": False,
+            "checkpoint_at_ms": 9_000,
+            "class_counts": {"shared": 500},
+            "generation_snapshot_id": 848,
+            "legacy_snapshot_id": 845,
+            "phase": "generation-members",
+            "publication_id": "publication-848",
+            "reason": "structure-drift-incomplete",
+            "window_id": "window-97b",
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+    assert pending["status"] == "warn"
+    assert "generation_snapshot_id=848" in pending["output"]
+    assert 'class_counts={"shared": 500}' in pending["output"]
+
+    stale = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "none",
+            "authorized": False,
+            "checkpoint_at_ms": 9_000,
+            "class_counts": {"unclassified": 1},
+            "generation_snapshot_id": 848,
+            "legacy_snapshot_id": 845,
+            "phase": "stale",
+            "publication_id": "publication-848",
+            "reason": "structure-drift-stale",
+            "window_id": "window-97b",
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+    assert stale["status"] == "fail"
+
+    failed_attempt = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "drift-safe-sealed",
+            "authorized": True,
+            "phase": "sealed",
+            "reason": None,
+            "latest_attempt": {
+                "id": 7,
+                "outcome": "failed",
+                "failure_kind": "structure-drift-signal-sigkill-possible-oom",
+                "started_at_ms": 9_500,
+            },
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+    assert failed_attempt["status"] == "fail"
+    assert "latest_attempt_id=7" in failed_attempt["output"]
 
 
 @pytest.mark.parametrize(
@@ -533,7 +612,9 @@ def test_fail_when_very_stale(
     """Snapshot taken 26h ago → status=fail, HTTP 503."""
     now_ms = int(time.time() * 1000)
     twenty_six_hours_ago_ms = now_ms - int(26 * 3600 * 1000)
-    _insert_snapshot(daemon_settings_for_test.db_path, taken_at_ms=twenty_six_hours_ago_ms)
+    _insert_snapshot(
+        daemon_settings_for_test.db_path, taken_at_ms=twenty_six_hours_ago_ms
+    )
 
     resp = http_test_client.get("/health")
     assert resp.status_code == 503
@@ -835,7 +916,9 @@ def test_health_omits_stage_for_historical_attempt_without_diagnostics(
         failure_kind="snapshot-status-failed",
     )
 
-    attempt = http_test_client.get("/health").json()["checks"]["snapshot:latest_attempt"][0]
+    attempt = http_test_client.get("/health").json()["checks"][
+        "snapshot:latest_attempt"
+    ][0]
 
     assert attempt["output"] == "snapshot-status-failed"
     assert "stage=" not in attempt["output"]
@@ -964,9 +1047,9 @@ def test_health_surfaces_restart_visible_quote_priority_defer(
         observed_at_ms=now_ms - 1_000,
     )
 
-    defer = http_test_client.get("/health").json()["checks"][
-        "snapshot:producer_defer"
-    ][0]
+    defer = http_test_client.get("/health").json()["checks"]["snapshot:producer_defer"][
+        0
+    ]
 
     assert defer["observedValue"] == "quote-pipeline-active"
     assert defer["status"] == "warn"
@@ -1027,11 +1110,17 @@ def test_health_surfaces_resumable_structure_window_progress(
     store = SQLiteStore(daemon_settings_for_test.db_path)
     window = store.begin_or_resume_structure_sync(started_at_ms=now_ms - 1_000)
     store.commit_structure_event_page(
-        window_id=window["id"], requested_cursor=None, next_cursor="opaque-2",
-        completed=False, events=[], finished_at_ms=now_ms,
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor="opaque-2",
+        completed=False,
+        events=[],
+        finished_at_ms=now_ms,
     )
 
-    check = http_test_client.get("/health").json()["checks"]["snapshot:structure_sync"][0]
+    check = http_test_client.get("/health").json()["checks"]["snapshot:structure_sync"][
+        0
+    ]
 
     assert check["observedValue"] == "open"
     assert check["status"] == "warn"
@@ -1099,8 +1188,7 @@ def test_resource_evidence_health_has_no_capability_gate(
     perception.init_schema()
     with perception._connect() as con:
         con.execute(
-            "INSERT INTO neg_risk_resource_samples(observed_at_ms,sample_json) "
-            "VALUES(1,'not-json')"
+            "INSERT INTO neg_risk_resource_samples(observed_at_ms,sample_json) VALUES(1,'not-json')"
         )
     daemon_settings_for_test.opportunity_producer_supervisor_enabled = True
     daemon_settings_for_test.opportunity_first_watcher_enabled = False
@@ -1146,8 +1234,7 @@ def test_health_incident_evidence_fails_on_restored_trigger_checkpoint_tamper(
         ).fetchone()[0]
         con.execute(f'DROP TRIGGER "{trigger_name}"')
         con.execute(
-            "UPDATE neg_risk_incident_authority_checkpoint "
-            "SET prefix_hash='sha256:forged'"
+            "UPDATE neg_risk_incident_authority_checkpoint SET prefix_hash='sha256:forged'"
         )
         con.execute(trigger_sql)
 
@@ -1199,8 +1286,7 @@ def test_health_resource_evidence_fails_on_checkpoint_tamper(
         ).fetchone()[0]
         con.execute(f'DROP TRIGGER "{trigger_name}"')
         con.execute(
-            "UPDATE neg_risk_resource_authority_checkpoint "
-            "SET last_decision_digest='sha256:forged'"
+            "UPDATE neg_risk_resource_authority_checkpoint SET last_decision_digest='sha256:forged'"
         )
         con.execute(trigger_sql)
     daemon_settings_for_test.opportunity_resource_controller_enabled = True
@@ -1294,7 +1380,9 @@ def test_healthz_returns_200_when_failed(
     """Snapshot 26h ago (underlying fail) → /healthz STILL HTTP 200 (key D-05 differentiator)."""
     now_ms = int(time.time() * 1000)
     twenty_six_hours_ago_ms = now_ms - int(26 * 3600 * 1000)
-    _insert_snapshot(daemon_settings_for_test.db_path, taken_at_ms=twenty_six_hours_ago_ms)
+    _insert_snapshot(
+        daemon_settings_for_test.db_path, taken_at_ms=twenty_six_hours_ago_ms
+    )
 
     resp = http_test_client.get("/healthz")
     # KEY: NOT 503 — Fly probe sees 200, proxy keeps routing traffic.
@@ -1308,7 +1396,9 @@ def test_healthz_body_has_status_field_and_content_type(
     """GET /healthz body has status field + application/health+json content-type (D-06)."""
     now_ms = int(time.time() * 1000)
     twenty_six_hours_ago_ms = now_ms - int(26 * 3600 * 1000)
-    _insert_snapshot(daemon_settings_for_test.db_path, taken_at_ms=twenty_six_hours_ago_ms)
+    _insert_snapshot(
+        daemon_settings_for_test.db_path, taken_at_ms=twenty_six_hours_ago_ms
+    )
 
     resp = http_test_client.get("/healthz")
     assert resp.status_code == 200
