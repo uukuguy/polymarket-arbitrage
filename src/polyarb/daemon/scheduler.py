@@ -125,11 +125,11 @@ _STRUCTURE_PROGRESS_MARKER_RE = re.compile(
 )
 _STRUCTURE_FAILURE_MARKER_RE = re.compile(
     rb"^structure-sync-failure failure_kind="
-    rb"(generation-count-mismatch|generation-incomplete|generation-validation-issues|"
-    rb"membership-invalid|source-truth-invalid|sqlite-busy|structure-child-error|"
-    rb"structure-publication-not-writing)"
-    rb"(?: membership_kind=(?:active-market-missing|group-truth|market-identity|"
-    rb"terminal-invariant) key_sha256=[0-9a-f]{64})?$",
+    rb"(?:membership-invalid(?: membership_kind=(?:active-market-missing|group-truth|"
+    rb"market-identity|terminal-invariant) key_sha256=[0-9a-f]{64})?|"
+    rb"generation-count-mismatch|generation-incomplete|generation-validation-issues|"
+    rb"source-truth-invalid|sqlite-busy|structure-child-error|"
+    rb"structure-publication-not-writing)$",
     re.MULTILINE,
 )
 _STRUCTURE_SUPERSESSION_MARKER_RE = re.compile(

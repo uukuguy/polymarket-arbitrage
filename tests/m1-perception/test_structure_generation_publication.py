@@ -927,12 +927,14 @@ def test_duplicate_parent_event_only_candidate_remains_membership_invalid(
     ("event_active", "event_closed", "market_active", "market_closed"),
     ((True, False, False, True), (False, True, True, False)),
 )
+@pytest.mark.parametrize("certification_path", ("bounded", "legacy"))
 def test_both_present_status_mismatch_remains_membership_invalid(
     tmp_path: Path,
     event_active: bool,
     event_closed: bool,
     market_active: bool,
     market_closed: bool,
+    certification_path: str,
 ) -> None:
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()
@@ -973,11 +975,24 @@ def test_both_present_status_mismatch_remains_membership_invalid(
         "events", "event_tags", "memberships", "group_truth", "markets", "issues"
     ):
         _normalize_component_to_done(store, publication, component)
-    store.seal_structure_publication_counts(publication.publication_id, now_ms=200)
-    with pytest.raises(ValueError, match="membership-invalid"):
-        for offset in range(20):
-            store.advance_structure_certification_chunk(
-                publication.publication_id, max_rows=500, now_ms=201 + offset
+    if certification_path == "bounded":
+        store.seal_structure_publication_counts(publication.publication_id, now_ms=200)
+        with pytest.raises(ValueError, match="membership-invalid"):
+            for offset in range(20):
+                store.advance_structure_certification_chunk(
+                    publication.publication_id, max_rows=500, now_ms=201 + offset
+                )
+    else:
+        with pytest.raises(ValueError, match="membership-invalid"):
+            store.certify_structure_generation(
+                publication_id=publication.publication_id,
+                receipt={
+                    "source_coverage": {
+                        "completed": True, "event_items": 1, "market_items": 1,
+                    },
+                    "validation_hash": "a" * 64,
+                    "certified_at_ms": 200,
+                },
             )
 
 

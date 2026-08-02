@@ -70,12 +70,11 @@ _SNAPSHOT_ATTEMPT_STDERR_TAIL_RE = re.compile(
     r"stage=(?:normalizing|certifying|ready) "
     r"component=(?:[a-z][a-z_-]{0,31}|none) "
     r"chunks=(?:100|[1-9][0-9]?) rows=(?:0|[1-9][0-9]*)|"
-    r"structure-sync-failure failure_kind=(?:generation-count-mismatch|"
-    r"generation-incomplete|generation-validation-issues|membership-invalid|"
-    r"source-truth-invalid|sqlite-busy|structure-child-error|"
-    r"structure-publication-not-writing)(?: membership_kind=(?:"
-    r"active-market-missing|group-truth|market-identity|terminal-invariant) "
-    r"key_sha256=[0-9a-f]{64})?)"
+    r"structure-sync-failure failure_kind=(?:membership-invalid(?: "
+    r"membership_kind=(?:active-market-missing|group-truth|market-identity|"
+    r"terminal-invariant) key_sha256=[0-9a-f]{64})?|generation-count-mismatch|"
+    r"generation-incomplete|generation-validation-issues|source-truth-invalid|"
+    r"sqlite-busy|structure-child-error|structure-publication-not-writing))"
     r"|structure-publication-superseded publication_id=[0-9a-f]{32}"
 )
 
@@ -4792,7 +4791,8 @@ class SQLiteStore:
                 "(SELECT 1 FROM structure_generation_markets k WHERE "
                 "k.snapshot_id=m.snapshot_id AND k.market_id=m.market_id AND "
                 "(k.event_id IS NOT m.event_id OR k.neg_risk_market_id IS NOT "
-                "m.neg_risk_market_id))) LIMIT 1",
+                "m.neg_risk_market_id OR k.active IS NOT m.active OR "
+                "k.closed IS NOT m.closed))) LIMIT 1",
                 (snapshot_id,),
             ).fetchone()
             hash_invalid = False

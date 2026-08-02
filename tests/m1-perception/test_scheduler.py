@@ -1452,6 +1452,16 @@ async def test_snapshot_subprocess_accepts_allowlisted_membership_evidence_marke
     assert raised.value.stderr_tail == stderr.decode().strip()
 
 
+def test_safe_tail_rejects_membership_evidence_on_non_membership_failure() -> None:
+    from polyarb.daemon.scheduler import _safe_stderr_tail
+
+    forged = (
+        b"structure-sync-failure failure_kind=sqlite-busy "
+        b"membership_kind=group-truth key_sha256=" + b"a" * 64
+    )
+    assert _safe_stderr_tail(forged) is None
+
+
 @pytest.mark.asyncio
 async def test_snapshot_subprocess_classifies_sigkill_as_possible_oom() -> None:
     from polyarb.daemon.scheduler import (
