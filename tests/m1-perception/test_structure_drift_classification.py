@@ -294,6 +294,62 @@ def test_v2_fresh_addition_authorized_path_blocking_precedes_classification(
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("event_id", "event-2", id="event-id"),
+        pytest.param("group_id", "group-2", id="group-id"),
+    ],
+)
+def test_v2_fresh_addition_truth_identity_mismatch_is_invalid_event_membership(
+    field: str,
+    value: str,
+) -> None:
+    member = _member()
+    evidence = _v2_evidence(member)
+    assert evidence.group_truth is not None
+    mismatched_truth = replace(evidence.group_truth, **{field: value})
+    mismatched_evidence = replace(evidence, group_truth=mismatched_truth)
+    diagnostic = diagnose_unresolved_member(
+        side="generation-only",
+        member=member,
+        evidence=mismatched_evidence,
+        authorized_removal_reasons=(),
+    )
+    assert diagnostic.code == "invalid-event-membership"
+    assert diagnostic.predicate_bits[6] is True
+    result = classify_structure_member_drift(
+        legacy=(),
+        generation=(member,),
+        evidence={"market-1": mismatched_evidence},
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V2,
+    )
+    assert result.fresh_addition_count == 0
+    assert result.unclassified == (member,)
+    assert result.diagnostic_counts == {"invalid-event-membership": 1}
+    assert result.diagnostics[0].predicate_bits[6] is True
+
+
+def test_v2_legacy_truth_identity_mismatch_blocks_current_nontradable() -> None:
+    member = _member()
+    evidence = _v2_evidence(member)
+    assert evidence.group_truth is not None
+    mismatched_evidence = replace(
+        evidence,
+        current_active=False,
+        group_truth=replace(evidence.group_truth, group_id="group-2"),
+    )
+    result = classify_structure_member_drift(
+        legacy=(member,),
+        generation=(),
+        evidence={"market-1": mismatched_evidence},
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V2,
+    )
+    assert result.legacy_removal_counts == {}
+    assert result.unclassified == (member,)
+    assert result.diagnostic_counts == {"invalid-event-membership": 1}
+
+
+@pytest.mark.parametrize(
     ("evidence_changes", "expected_code"),
     [
         (

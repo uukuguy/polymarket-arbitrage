@@ -367,6 +367,8 @@ def _is_fresh_addition(
             or (
                 evidence.projected_member == member
                 and truth is not None
+                and truth.event_id == member.event_id
+                and truth.group_id == member.group_id
                 and truth.neg_risk_type == "standard"
                 and truth.quality == "complete-supported"
                 and not truth.global_relation_conflict
@@ -456,6 +458,16 @@ def _diagnostic_predicates(
     authorized_removal_reasons: tuple[str, ...],
 ) -> tuple[bool, ...]:
     truth = None if evidence is None else evidence.group_truth
+    truth_identity_mismatch = truth is not None and (
+        (
+            member.event_id is not None
+            and truth.event_id != member.event_id
+        )
+        or (
+            member.group_id is not None
+            and truth.group_id != member.group_id
+        )
+    )
     active_open_projection_required = (
         evidence is not None
         and evidence.source_present
@@ -474,7 +486,8 @@ def _diagnostic_predicates(
         and evidence.absent_from_market_catalog,
         truth is not None and truth.global_relation_conflict,
         evidence is not None and evidence.invalid_neg_risk_classification,
-        evidence is not None and evidence.invalid_event_membership,
+        evidence is not None
+        and (evidence.invalid_event_membership or truth_identity_mismatch),
         evidence is not None and evidence.uncertified_event_only_member,
         truth is not None
         and truth.quality == "incomplete-source"
