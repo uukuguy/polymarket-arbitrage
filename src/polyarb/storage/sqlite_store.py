@@ -3738,14 +3738,17 @@ class SQLiteStore:
         if source is None:
             event_source = con.execute(
                 "SELECT event.payload_json,relation.source_ordinal,p.window_id "
-                "FROM structure_publications p JOIN "
+                "FROM structure_publications p JOIN structure_sync_windows window "
+                "ON window.id=p.window_id JOIN "
                 "structure_sync_event_market_staging relation "
                 "ON relation.window_id=p.window_id JOIN "
                 "structure_sync_event_staging event ON event.window_id=relation.window_id "
                 "AND event.event_id=relation.event_id LEFT JOIN "
                 "structure_sync_market_staging market ON market.window_id=p.window_id "
                 "AND market.market_id=relation.market_id WHERE p.publication_id=? "
-                "AND relation.market_id=? AND market.market_id IS NULL "
+                "AND relation.market_id=? AND window.status='complete' "
+                "AND market.market_id IS NULL AND "
+                "COALESCE(event.source_ordinal,event.rowid)=relation.source_ordinal "
                 "AND 1=(SELECT COUNT(DISTINCT other.event_id) FROM "
                 "structure_sync_event_market_staging other WHERE "
                 "other.window_id=p.window_id AND other.market_id=relation.market_id)",
@@ -4007,7 +4010,10 @@ class SQLiteStore:
                     ):
                         raise ValueError("generation-validation-issues")
             elif component == "source_events":
-                from polyarb.perception.structure_publication import project_event_structure
+                from polyarb.perception.structure_publication import (
+                    event_only_member_quarantine_issue,
+                    project_event_structure,
+                )
                 from polyarb.snapshot.normalizer import normalize_events
 
                 for source_event in rows:
@@ -4029,7 +4035,17 @@ class SQLiteStore:
                     ).fetchall()
                     event_only_ids = frozenset(str(row[0]) for row in event_only_rows)
                     members, truths = project_event_structure(raw, event_only_ids)
-                    for event_only_id in event_only_ids:
+                    authenticated_event_only_ids = frozenset(
+                        event_only_id
+                        for event_only_id in event_only_ids
+                        if event_only_member_quarantine_issue(
+                            raw,
+                            event_source_ordinal=int(source_event[0]),
+                            market_id=event_only_id,
+                        )
+                        is not None
+                    )
+                    for event_only_id in authenticated_event_only_ids:
                         issue = read_con.execute(
                             "SELECT layer,category,detail,raw_payload FROM "
                             "structure_generation_issues WHERE snapshot_id=? "

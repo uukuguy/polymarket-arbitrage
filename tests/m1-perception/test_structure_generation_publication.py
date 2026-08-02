@@ -826,6 +826,8 @@ def test_event_only_active_member_is_quarantined_with_recomputed_group_truth(
 def test_event_only_quarantine_evidence_is_exact_and_forgery_fails() -> None:
     raw_event = {
         "id": "event-1",
+        "active": True,
+        "closed": False,
         "negRisk": True,
         "enableNegRisk": True,
         "negRiskMarketID": "group-1",
@@ -851,6 +853,25 @@ def test_event_only_quarantine_evidence_is_exact_and_forgery_fails() -> None:
             changed[0], event_source_ordinal=changed[1], market_id="event-only"
         )
         assert forged is None or forged["raw_payload"] != baseline
+
+
+def test_event_projection_does_not_filter_non_active_open_anti_join_candidate() -> None:
+    raw_event = {
+        "id": "event-1",
+        "negRisk": True,
+        "enableNegRisk": True,
+        "negRiskAugmented": False,
+        "negRiskMarketID": "group-1",
+        "markets": [{
+            "id": "closed-event-only", "active": True, "closed": True,
+            "negRiskOther": False,
+        }],
+    }
+    members, truths = structure_publication_module.project_event_structure(
+        raw_event, frozenset({"closed-event-only"})
+    )
+    assert [member.market_id for member in members] == ["closed-event-only"]
+    assert truths[0].expected_member_count == 1
 
 
 def test_duplicate_parent_event_only_candidate_remains_membership_invalid(

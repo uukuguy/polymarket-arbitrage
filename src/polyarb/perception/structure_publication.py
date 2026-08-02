@@ -101,7 +101,11 @@ def event_only_member_quarantine_issue(
     if len(matches) != 1:
         return None
     member_ordinal, member = matches[0]
-    if not (member.get("active") is True and member.get("closed") is False):
+    if not (
+        member.get("active") is True
+        and member.get("closed") is False
+        and type(member.get("negRiskOther")) is bool
+    ):
         return None
     envelope = {
         "event_id": event_id,
@@ -133,8 +137,16 @@ def project_event_structure(
 ) -> tuple[list[EventMember], list[GroupTruth]]:
     """Remove only pre-authenticated event-only members and repair group truth."""
     _events, _tags, _mapping, members, truths = normalize_events([raw_event])
+    authenticated_ids = {
+        market_id
+        for market_id in quarantined_market_ids
+        if event_only_member_quarantine_issue(
+            raw_event, event_source_ordinal=0, market_id=market_id
+        )
+        is not None
+    }
     filtered = [
-        member for member in members if member.market_id not in quarantined_market_ids
+        member for member in members if member.market_id not in authenticated_ids
     ]
     projected_truths: list[GroupTruth] = []
     for truth in truths:
