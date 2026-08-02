@@ -1357,6 +1357,8 @@ def _backfill_structure_snapshot_statuses(con: sqlite3.Connection) -> None:
         "FROM snapshots s "
         "LEFT JOIN validation_issues vi ON vi.snapshot_id=s.id "
         "WHERE s.data_product='structure' "
+        "AND NOT EXISTS (SELECT 1 FROM structure_publications p "
+        "WHERE p.snapshot_id=s.id AND p.status IN ('writing','ready')) "
         "ORDER BY s.id,vi.id"
     ).fetchall()
     if not rows:
@@ -4228,24 +4230,29 @@ class SQLiteStore:
                 )
             if status not in {"writing", "ready"}:
                 raise ValueError("structure-publication-contract-not-reconcilable")
-            if stored_version == current_version:
-                con.execute("COMMIT")
-                return StructurePublicationContractReconciliation(
-                    publication_id, True, False
-                )
-            if (
-                row[5] != "structure"
-                or row[6] != "building"
-                or int(row[7]) != 0
-                or int(row[8]) != 0
-                or row[9] != "complete"
-                or con.execute(
+            pointer_is_candidate = (
+                con.execute(
                     "SELECT 1 FROM current_structure_generation WHERE id=1 "
                     "AND snapshot_id=?",
                     (snapshot_id,),
                 ).fetchone()
                 is not None
-            ):
+            )
+            common_unsafe = (
+                row[5] != "structure"
+                or int(row[7]) != 0
+                or int(row[8]) != 0
+                or row[9] != "complete"
+                or pointer_is_candidate
+            )
+            if stored_version == current_version:
+                if common_unsafe or row[6] != "building":
+                    raise ValueError("structure-publication-supersession-unsafe")
+                con.execute("COMMIT")
+                return StructurePublicationContractReconciliation(
+                    publication_id, True, False
+                )
+            if common_unsafe or row[6] not in {"building", "failed"}:
                 raise ValueError("structure-publication-supersession-unsafe")
             publication_change = con.execute(
                 "UPDATE structure_publications SET status='failed',failure_reason=?,"
@@ -4254,13 +4261,15 @@ class SQLiteStore:
                 "AND normalization_contract_version IS ?",
                 (reason, now_ms, publication_id, stored_version),
             )
-            snapshot_change = con.execute(
-                "UPDATE snapshots SET snapshot_status='failed',finished_at_ms=? "
-                "WHERE id=? AND data_product='structure' "
-                "AND snapshot_status='building' AND is_valid=0 "
-                "AND market_view_published=0",
-                (now_ms, snapshot_id),
-            )
+            snapshot_change_count = 1
+            if row[6] == "building":
+                snapshot_change_count = con.execute(
+                    "UPDATE snapshots SET snapshot_status='failed',finished_at_ms=? "
+                    "WHERE id=? AND data_product='structure' "
+                    "AND snapshot_status='building' AND is_valid=0 "
+                    "AND market_view_published=0",
+                    (now_ms, snapshot_id),
+                ).rowcount
             window_change = con.execute(
                 "UPDATE structure_sync_windows SET status='failed',failure_reason=?,"
                 "checkpoint_at_ms=? WHERE id=? AND status='complete'",
@@ -4268,7 +4277,7 @@ class SQLiteStore:
             )
             if (
                 publication_change.rowcount != 1
-                or snapshot_change.rowcount != 1
+                or snapshot_change_count != 1
                 or window_change.rowcount != 1
             ):
                 raise ValueError("structure-publication-supersession-race")

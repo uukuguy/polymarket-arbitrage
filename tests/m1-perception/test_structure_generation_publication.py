@@ -1589,6 +1589,319 @@ def test_fresh_source_window_reserves_847_only_after_846_supersession(
         ).fetchone() == (0,)
 
 
+@pytest.mark.parametrize("publication_status", ("writing", "ready"))
+def test_active_snapshot_status_backfill_does_not_fail_building_generation(
+    tmp_path: Path,
+    publication_status: str,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store,
+        snapshot_id=846,
+        market_id="candidate-market",
+        now_ms=2_000,
+    )
+    if publication_status == "ready":
+        with sqlite3.connect(store.db_path) as con:
+            con.execute(
+                "UPDATE structure_publications SET status='ready' WHERE publication_id=?",
+                (publication.publication_id,),
+            )
+
+    store.init_schema()
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT snapshot_status,is_valid,market_view_published FROM snapshots "
+            "WHERE id=846"
+        ).fetchone() == ("building", 0, 0)
+        assert con.execute(
+            "SELECT status FROM structure_publications WHERE publication_id=?",
+            (publication.publication_id,),
+        ).fetchone() == (publication_status,)
+
+
+def test_existing_split_contract_state_repairs_without_rewriting_snapshot_evidence(
+    settings_for_test,
+) -> None:
+    from polyarb.perception.structure_contract import (
+        STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+    )
+
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    _publish_generation(
+        store,
+        snapshot_id=845,
+        market_id="serving-market",
+        now_ms=1_000,
+    )
+    publication = _begin_generation(
+        store,
+        snapshot_id=846,
+        market_id="candidate-market",
+        now_ms=2_000,
+    )
+    _normalize_component_to_done(store, publication, "events")
+    historical_finished_at_ms = 1_754_000_066_000
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE snapshots SET snapshot_status='failed',finished_at_ms=? WHERE id=846",
+            (historical_finished_at_ms,),
+        )
+        con.execute(
+            "UPDATE structure_publications SET normalization_contract_version=NULL "
+            "WHERE publication_id=?",
+            (publication.publication_id,),
+        )
+        generation_before = con.execute(
+            "SELECT * FROM structure_generation_events WHERE snapshot_id=846"
+        ).fetchall()
+
+    result = run_structure_publication_step(
+        settings_for_test,
+        publication.window_id,
+        max_rows=1,
+        max_elapsed_s=60,
+        store=store,
+    )
+
+    assert isinstance(result, StructurePublicationCheckpoint)
+    assert result.stage == "superseded"
+    replay = run_structure_publication_step(
+        settings_for_test,
+        publication.window_id,
+        max_rows=1,
+        max_elapsed_s=60,
+        store=store,
+    )
+    assert replay == result
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT status,failure_reason FROM structure_publications "
+            "WHERE publication_id=?",
+            (publication.publication_id,),
+        ).fetchone() == ("failed", "publication-contract-superseded")
+        assert con.execute(
+            "SELECT snapshot_status,finished_at_ms,is_valid,market_view_published "
+            "FROM snapshots WHERE id=846"
+        ).fetchone() == ("failed", historical_finished_at_ms, 0, 0)
+        assert con.execute(
+            "SELECT status,failure_reason FROM structure_sync_windows WHERE id=?",
+            (publication.window_id,),
+        ).fetchone() == ("failed", "publication-contract-superseded")
+        assert con.execute(
+            "SELECT snapshot_id FROM current_structure_generation WHERE id=1"
+        ).fetchone() == (845,)
+        assert con.execute(
+            "SELECT * FROM structure_generation_events WHERE snapshot_id=846"
+        ).fetchall() == generation_before
+
+    successor = store.begin_or_resume_structure_sync(started_at_ms=1_754_012_000_001)
+    assert successor["id"] != publication.window_id
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute("SELECT 1 FROM snapshots WHERE id=847").fetchone() is None
+    fresh_window_id = _complete_window(
+        store,
+        "serving-market",
+        now_ms=1_754_012_000_002,
+    )
+    assert fresh_window_id == successor["id"]
+    run_structure_publication_step(
+        settings_for_test,
+        fresh_window_id,
+        max_rows=1,
+        max_elapsed_s=60,
+        store=store,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT snapshot_id,normalization_contract_version "
+            "FROM structure_publications WHERE window_id=?",
+            (fresh_window_id,),
+        ).fetchone() == (847, STRUCTURE_NORMALIZATION_CONTRACT_VERSION)
+        assert con.execute(
+            "SELECT snapshot_id FROM current_structure_generation WHERE id=1"
+        ).fetchone() == (845,)
+
+
+def test_contract_supersession_rolls_back_every_row_on_late_window_failure(
+    tmp_path: Path,
+) -> None:
+    from polyarb.perception.structure_contract import (
+        STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+    )
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store,
+        snapshot_id=846,
+        market_id="candidate-market",
+        now_ms=2_000,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_publications SET normalization_contract_version=NULL "
+            "WHERE publication_id=?",
+            (publication.publication_id,),
+        )
+        con.execute(
+            "CREATE TRIGGER reject_supersession_window_update "
+            "BEFORE UPDATE OF status ON structure_sync_windows "
+            "WHEN NEW.status='failed' BEGIN "
+            "SELECT RAISE(ABORT,'injected-late-window-failure'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected-late-window-failure"):
+        store.reconcile_structure_publication_contract(
+            publication.window_id,
+            STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+            now_ms=2_100,
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT status,failure_reason FROM structure_publications "
+            "WHERE publication_id=?",
+            (publication.publication_id,),
+        ).fetchone() == ("writing", None)
+        assert con.execute(
+            "SELECT snapshot_status,finished_at_ms FROM snapshots WHERE id=846"
+        ).fetchone() == ("building", 2_003)
+        assert con.execute(
+            "SELECT status,failure_reason FROM structure_sync_windows WHERE id=?",
+            (publication.window_id,),
+        ).fetchone() == ("complete", None)
+
+
+@pytest.mark.parametrize(
+    "unsafe_case",
+    (
+        "snapshot-valid",
+        "snapshot-published",
+        "pointer-candidate",
+        "window-not-complete",
+        "current-contract",
+        "unexpected-failure-reason",
+    ),
+)
+def test_other_partial_contract_states_remain_fail_closed(
+    tmp_path: Path,
+    unsafe_case: str,
+) -> None:
+    from polyarb.perception.structure_contract import (
+        STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+    )
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    _publish_generation(
+        store,
+        snapshot_id=845,
+        market_id="serving-market",
+        now_ms=1_000,
+    )
+    publication = _begin_generation(
+        store,
+        snapshot_id=846,
+        market_id="candidate-market",
+        now_ms=2_000,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE snapshots SET snapshot_status='failed' WHERE id=846"
+        )
+        con.execute(
+            "UPDATE structure_publications SET normalization_contract_version=NULL "
+            "WHERE publication_id=?",
+            (publication.publication_id,),
+        )
+        if unsafe_case == "snapshot-valid":
+            con.execute("UPDATE snapshots SET is_valid=1 WHERE id=846")
+        elif unsafe_case == "snapshot-published":
+            con.execute("UPDATE snapshots SET market_view_published=1 WHERE id=846")
+        elif unsafe_case == "pointer-candidate":
+            con.execute(
+                "UPDATE current_structure_generation SET snapshot_id=?,publication_id=? "
+                "WHERE id=1",
+                (846, publication.publication_id),
+            )
+        elif unsafe_case == "window-not-complete":
+            con.execute(
+                "UPDATE structure_sync_windows SET status='failed',"
+                "failure_reason='different-failure' WHERE id=?",
+                (publication.window_id,),
+            )
+        elif unsafe_case == "current-contract":
+            con.execute(
+                "UPDATE structure_publications SET normalization_contract_version=? "
+                "WHERE publication_id=?",
+                (STRUCTURE_NORMALIZATION_CONTRACT_VERSION, publication.publication_id),
+            )
+        elif unsafe_case == "unexpected-failure-reason":
+            con.execute(
+                "UPDATE structure_publications SET status='failed',"
+                "failure_reason='different-failure' WHERE publication_id=?",
+                (publication.publication_id,),
+            )
+        before = {
+            "publication": con.execute(
+                "SELECT status,failure_reason,normalization_contract_version "
+                "FROM structure_publications WHERE publication_id=?",
+                (publication.publication_id,),
+            ).fetchone(),
+            "snapshot": con.execute(
+                "SELECT snapshot_status,is_valid,market_view_published,finished_at_ms "
+                "FROM snapshots WHERE id=846"
+            ).fetchone(),
+            "window": con.execute(
+                "SELECT status,failure_reason FROM structure_sync_windows WHERE id=?",
+                (publication.window_id,),
+            ).fetchone(),
+            "pointer": con.execute(
+                "SELECT snapshot_id,publication_id FROM current_structure_generation "
+                "WHERE id=1"
+            ).fetchone(),
+        }
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "structure-publication-supersession-unsafe|"
+            "structure-publication-contract-not-reconcilable"
+        ),
+    ):
+        store.reconcile_structure_publication_contract(
+            publication.window_id,
+            STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+            now_ms=2_100,
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        after = {
+            "publication": con.execute(
+                "SELECT status,failure_reason,normalization_contract_version "
+                "FROM structure_publications WHERE publication_id=?",
+                (publication.publication_id,),
+            ).fetchone(),
+            "snapshot": con.execute(
+                "SELECT snapshot_status,is_valid,market_view_published,finished_at_ms "
+                "FROM snapshots WHERE id=846"
+            ).fetchone(),
+            "window": con.execute(
+                "SELECT status,failure_reason FROM structure_sync_windows WHERE id=?",
+                (publication.window_id,),
+            ).fetchone(),
+            "pointer": con.execute(
+                "SELECT snapshot_id,publication_id FROM current_structure_generation "
+                "WHERE id=1"
+            ).fetchone(),
+        }
+    assert after == before
+
+
 def test_bounded_certification_resumes_every_primary_key_checkpoint(
     tmp_path: Path,
 ) -> None:
