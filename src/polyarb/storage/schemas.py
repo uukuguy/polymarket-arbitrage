@@ -2813,6 +2813,7 @@ CREATE TABLE IF NOT EXISTS structure_publications (
     status TEXT NOT NULL CHECK(status IN (
         'normalizing','writing','ready','published','failed'
     )),
+    normalization_contract_version TEXT,
     normalization_component TEXT,
     normalization_source_cursor TEXT,
     write_component TEXT,

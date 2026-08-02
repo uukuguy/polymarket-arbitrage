@@ -35,6 +35,7 @@ from polyarb.perception.market_truth import (
 from polyarb.perception.structure_contract import (
     STRUCTURE_CERTIFICATION_COMPONENTS,
     STRUCTURE_COMPONENTS,
+    STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
     STRUCTURE_PUBLICATION_MAX_ROWS,
     STRUCTURE_SOURCE_COMPONENTS,
 )
@@ -1319,6 +1320,13 @@ class StructurePublicationProgress:
 
 
 @dataclass(frozen=True)
+class StructurePublicationContractReconciliation:
+    publication_id: str
+    compatible: bool
+    superseded: bool
+
+
+@dataclass(frozen=True)
 class StructureCertificationChunk:
     component: str | None
     cursor: str | None
@@ -1807,6 +1815,9 @@ class SQLiteStore:
             _ensure_column("snapshot_attempts", "stderr_sha256", "TEXT")
             _ensure_column("snapshot_attempts", "stderr_tail", "TEXT")
             _ensure_column("structure_publications", "write_prior_cursor", "TEXT")
+            _ensure_column(
+                "structure_publications", "normalization_contract_version", "TEXT"
+            )
             _ensure_column("structure_publications", "certification_component", "TEXT")
             _ensure_column("structure_publications", "certification_row_cursor", "TEXT")
             _ensure_column("structure_publications", "certification_hash", "TEXT")
@@ -1899,6 +1910,7 @@ class SQLiteStore:
                 }
                 for column, ddl in (
                     ("write_prior_cursor", "TEXT"),
+                    ("normalization_contract_version", "TEXT"),
                     ("certification_component", "TEXT"),
                     ("certification_row_cursor", "TEXT"),
                     ("certification_hash", "TEXT"),
@@ -4147,12 +4159,14 @@ class SQLiteStore:
             publication_id = uuid.uuid4().hex
             con.execute(
                 "INSERT INTO structure_publications(publication_id,window_id,snapshot_id,"
-                "status,expected_counts_json,committed_counts_json,created_at_ms,"
-                "checkpoint_at_ms) VALUES (?,?,?,'writing',?,?,?,?)",
+                "status,normalization_contract_version,expected_counts_json,"
+                "committed_counts_json,created_at_ms,checkpoint_at_ms) "
+                "VALUES (?,?,?,'writing',?,?,?,?,?)",
                 (
                     publication_id,
                     window_id,
                     snapshot_id,
+                    STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
                     expected_json,
                     counts_json,
                     now_ms,
@@ -4162,6 +4176,104 @@ class SQLiteStore:
             con.execute("COMMIT")
             return StructurePublicationState(
                 publication_id, snapshot_id, window_id, "writing", counts
+            )
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def reconcile_structure_publication_contract(
+        self,
+        window_id: str,
+        current_version: str,
+        now_ms: int,
+    ) -> StructurePublicationContractReconciliation:
+        """Fail one incompatible unpublished generation and its source atomically."""
+        if not window_id or not current_version or now_ms < 0:
+            raise ValueError("invalid-structure-publication-contract")
+        reason = "publication-contract-superseded"
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT p.publication_id,p.snapshot_id,p.status,"
+                "p.normalization_contract_version,p.failure_reason,s.data_product,"
+                "s.snapshot_status,s.is_valid,s.market_view_published,w.status,"
+                "w.failure_reason FROM structure_publications p "
+                "JOIN snapshots s ON s.id=p.snapshot_id "
+                "JOIN structure_sync_windows w ON w.id=p.window_id "
+                "WHERE p.window_id=?",
+                (window_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("structure-publication-not-found")
+            publication_id = str(row[0])
+            snapshot_id = int(row[1])
+            status = str(row[2])
+            stored_version = None if row[3] is None else str(row[3])
+            if status == "published":
+                con.execute("COMMIT")
+                return StructurePublicationContractReconciliation(
+                    publication_id, True, False
+                )
+            if status == "failed" and row[4] == reason:
+                if row[6] != "failed" or row[9] != "failed" or row[10] != reason:
+                    raise ValueError("structure-publication-supersession-incomplete")
+                con.execute("COMMIT")
+                return StructurePublicationContractReconciliation(
+                    publication_id, False, True
+                )
+            if status not in {"writing", "ready"}:
+                raise ValueError("structure-publication-contract-not-reconcilable")
+            if stored_version == current_version:
+                con.execute("COMMIT")
+                return StructurePublicationContractReconciliation(
+                    publication_id, True, False
+                )
+            if (
+                row[5] != "structure"
+                or row[6] != "building"
+                or int(row[7]) != 0
+                or int(row[8]) != 0
+                or row[9] != "complete"
+                or con.execute(
+                    "SELECT 1 FROM current_structure_generation WHERE id=1 "
+                    "AND snapshot_id=?",
+                    (snapshot_id,),
+                ).fetchone()
+                is not None
+            ):
+                raise ValueError("structure-publication-supersession-unsafe")
+            publication_change = con.execute(
+                "UPDATE structure_publications SET status='failed',failure_reason=?,"
+                "checkpoint_at_ms=? WHERE publication_id=? "
+                "AND status IN ('writing','ready') "
+                "AND normalization_contract_version IS ?",
+                (reason, now_ms, publication_id, stored_version),
+            )
+            snapshot_change = con.execute(
+                "UPDATE snapshots SET snapshot_status='failed',finished_at_ms=? "
+                "WHERE id=? AND data_product='structure' "
+                "AND snapshot_status='building' AND is_valid=0 "
+                "AND market_view_published=0",
+                (now_ms, snapshot_id),
+            )
+            window_change = con.execute(
+                "UPDATE structure_sync_windows SET status='failed',failure_reason=?,"
+                "checkpoint_at_ms=? WHERE id=? AND status='complete'",
+                (reason, now_ms, window_id),
+            )
+            if (
+                publication_change.rowcount != 1
+                or snapshot_change.rowcount != 1
+                or window_change.rowcount != 1
+            ):
+                raise ValueError("structure-publication-supersession-race")
+            con.execute("COMMIT")
+            return StructurePublicationContractReconciliation(
+                publication_id, False, True
             )
         except BaseException:
             if con.in_transaction:

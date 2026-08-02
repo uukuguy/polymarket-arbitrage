@@ -1296,6 +1296,125 @@ def _publish_generation(
     return publication
 
 
+@pytest.mark.parametrize("stored_contract", (None, "legacy-contract-v1"))
+def test_incompatible_publication_contract_is_atomically_superseded_and_idempotent(
+    tmp_path: Path,
+    stored_contract: str | None,
+) -> None:
+    """Production-shaped 846 must retire without touching serving truth or rows."""
+    from polyarb.perception.structure_contract import (
+        STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+    )
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    _publish_generation(
+        store,
+        snapshot_id=845,
+        market_id="serving-market",
+        now_ms=1_000,
+    )
+    publication = _begin_generation(
+        store,
+        snapshot_id=846,
+        market_id="candidate-market",
+        now_ms=2_000,
+    )
+    for component in structure_publication_module.STRUCTURE_COMPONENTS:
+        _normalize_component_to_done(store, publication, component)
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=2_100)
+
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_publications SET normalization_contract_version=? "
+            "WHERE publication_id=?",
+            (stored_contract, publication.publication_id),
+        )
+        generation_before = {
+            component: con.execute(
+                f"SELECT * FROM structure_generation_{component} "
+                "WHERE snapshot_id=846 ORDER BY rowid"
+            ).fetchall()
+            for component in structure_publication_module.STRUCTURE_COMPONENTS
+        }
+
+    first = store.reconcile_structure_publication_contract(
+        window_id=publication.window_id,
+        current_version=STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+        now_ms=2_200,
+    )
+    second = store.reconcile_structure_publication_contract(
+        window_id=publication.window_id,
+        current_version=STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+        now_ms=2_201,
+    )
+
+    assert first == second
+    assert first.publication_id == publication.publication_id
+    assert first.compatible is False
+    assert first.superseded is True
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT status,failure_reason FROM structure_publications "
+            "WHERE publication_id=?",
+            (publication.publication_id,),
+        ).fetchone() == ("failed", "publication-contract-superseded")
+        assert con.execute(
+            "SELECT snapshot_status,is_valid,market_view_published FROM snapshots "
+            "WHERE id=846"
+        ).fetchone() == ("failed", 0, 0)
+        assert con.execute(
+            "SELECT status,failure_reason FROM structure_sync_windows WHERE id=?",
+            (publication.window_id,),
+        ).fetchone() == ("failed", "publication-contract-superseded")
+        assert con.execute(
+            "SELECT snapshot_id FROM current_structure_generation WHERE id=1"
+        ).fetchone() == (845,)
+        generation_after = {
+            component: con.execute(
+                f"SELECT * FROM structure_generation_{component} "
+                "WHERE snapshot_id=846 ORDER BY rowid"
+            ).fetchall()
+            for component in structure_publication_module.STRUCTURE_COMPONENTS
+        }
+    assert generation_after == generation_before
+
+
+def test_matching_publication_contract_resumes_without_mutation(tmp_path: Path) -> None:
+    from polyarb.perception.structure_contract import (
+        STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+    )
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store,
+        snapshot_id=1,
+        market_id="candidate-market",
+        now_ms=1_000,
+    )
+
+    result = store.reconcile_structure_publication_contract(
+        window_id=publication.window_id,
+        current_version=STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+        now_ms=1_100,
+    )
+
+    assert result.publication_id == publication.publication_id
+    assert result.compatible is True
+    assert result.superseded is False
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT status,normalization_contract_version,checkpoint_at_ms "
+            "FROM structure_publications WHERE publication_id=?",
+            (publication.publication_id,),
+        ).fetchone() == (
+            "writing",
+            STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+            1_003,
+        )
+
+
 def test_bounded_certification_resumes_every_primary_key_checkpoint(
     tmp_path: Path,
 ) -> None:
@@ -1862,6 +1981,7 @@ def test_worker_entry_migrates_pre_task3_structure_schema(tmp_path: Path) -> Non
         }
     assert {
         "write_prior_cursor",
+        "normalization_contract_version",
         "certification_component",
         "certification_row_cursor",
         "certification_hash",

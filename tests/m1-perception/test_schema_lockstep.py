@@ -702,3 +702,20 @@ def test_scheduler_state_table_present_in_schema_and_executable() -> None:
     row = con.execute("SELECT name FROM sqlite_master WHERE name='scheduler_state'").fetchone()
     assert row is not None, "scheduler_state table not created by SCHEDULER_STATE_DDL"
     con.close()
+
+
+def test_structure_publication_schema_persists_normalization_contract_version() -> None:
+    """A publication must carry the semantic contract that produced its rows."""
+    from polyarb.storage.schemas import STRUCTURE_GENERATIONS_DDL
+
+    con = sqlite3.connect(":memory:")
+    con.execute("PRAGMA foreign_keys=OFF")
+    con.executescript(STRUCTURE_GENERATIONS_DDL)
+
+    columns = {
+        str(row[1]): str(row[2])
+        for row in con.execute("PRAGMA table_info(structure_publications)")
+    }
+    con.close()
+
+    assert columns["normalization_contract_version"] == "TEXT"
