@@ -12,11 +12,187 @@ import pytest
 from typer.testing import CliRunner
 
 import polyarb.storage.sqlite_store as sqlite_store_module
+from polyarb.perception.structure_contract import (
+    STRUCTURE_DRIFT_CLASSIFIER_V1,
+    STRUCTURE_DRIFT_CLASSIFIER_V2,
+)
 from polyarb.perception.structure_drift import (
     project_legacy_compatible_event,
     project_legacy_compatible_market,
 )
 from polyarb.storage.sqlite_store import SQLiteStore
+
+_CLASSIFIER_PROGRESS_FIELDS = {
+    "classifier_contract_version",
+    "diagnostic_counts_json",
+    "diagnostic_digest_state_json",
+    "diagnostic_root",
+    "diagnostic_samples_json",
+    "diagnostic_samples_digest",
+}
+_TERMINAL_RECEIPT_FIELDS = (
+    "comparison_id",
+    "hash_algorithm",
+    "classifier_contract_version",
+    "legacy_snapshot_id",
+    "generation_snapshot_id",
+    "publication_id",
+    "window_id",
+    "normalization_contract_version",
+    "exact_receipt_digest",
+    "pointer_validation_hash",
+    "generation_certification_hash",
+    "source_identity_hash",
+    "terminal_reason",
+    "class_counts_json",
+    "class_digests_json",
+    "diagnostic_counts_json",
+    "diagnostic_root",
+    "diagnostic_samples_json",
+    "diagnostic_samples_digest",
+    "created_at_ms",
+    "checkpoint_at_ms",
+)
+
+
+def test_classifier_schema_versions_authority_and_seals_terminal_receipts(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "classifier-schema.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        progress = {
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_progress)"
+            )
+        }
+        authorization = {
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_receipts)"
+            )
+        }
+        terminal = tuple(
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_terminal_receipts)"
+            )
+        )
+        terminal_triggers = {
+            str(row[0]): str(row[1])
+            for row in con.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND "
+                "tbl_name='structure_generation_drift_terminal_receipts'"
+            )
+        }
+    assert _CLASSIFIER_PROGRESS_FIELDS <= progress
+    assert "classifier_contract_version" in authorization
+    assert set(_TERMINAL_RECEIPT_FIELDS) | {"receipt_digest"} == set(terminal)
+    assert set(terminal_triggers) == {
+        "trg_structure_drift_terminal_receipt_update",
+        "trg_structure_drift_terminal_receipt_delete",
+    }
+    assert all(
+        "structure-drift-terminal-receipt-sealed" in sql
+        for sql in terminal_triggers.values()
+    )
+
+
+def test_classifier_contract_changes_comparison_identity() -> None:
+    identity = tuple(range(12))
+    v1_id = sqlite_store_module._structure_drift_comparison_id(
+        identity, classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V1
+    )
+    v2_id = sqlite_store_module._structure_drift_comparison_id(
+        identity, classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2
+    )
+    assert v1_id != v2_id
+
+
+def test_terminal_receipt_digest_has_independent_fixed_field_oracle() -> None:
+    payload = {
+        field: index if field.endswith("_ms") or field.endswith("_id") else field
+        for index, field in enumerate(_TERMINAL_RECEIPT_FIELDS)
+    }
+    payload["legacy_snapshot_id"] = 1
+    payload["generation_snapshot_id"] = 2
+    values = tuple(payload[field] for field in _TERMINAL_RECEIPT_FIELDS)
+    expected = hashlib.sha256(
+        json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert sqlite_store_module._structure_drift_terminal_receipt_digest(payload) == expected
+    for field in (
+        "classifier_contract_version",
+        "terminal_reason",
+        "diagnostic_counts_json",
+        "diagnostic_root",
+        "diagnostic_samples_json",
+        "diagnostic_samples_digest",
+    ):
+        changed = {**payload, field: f"changed-{field}"}
+        assert (
+            sqlite_store_module._structure_drift_terminal_receipt_digest(changed)
+            != expected
+        )
+
+
+def test_terminal_receipt_schema_rejects_update_and_delete(tmp_path: Path) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    with sqlite3.connect(store.db_path) as con:
+        row = con.execute(
+            "SELECT hash_algorithm,classifier_contract_version,legacy_snapshot_id,"
+            "generation_snapshot_id,publication_id,window_id,"
+            "normalization_contract_version,exact_receipt_digest,"
+            "pointer_validation_hash,generation_certification_hash FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        values: tuple[object, ...] = (
+            comparison_id,
+            *row,
+            "a" * 64,
+            "drift-unclassified",
+            "{}",
+            "{}",
+            "{}",
+            "b" * 64,
+            "{}",
+            hashlib.sha256(b"{}").hexdigest(),
+            3_001,
+            3_002,
+        )
+        payload = dict(zip(_TERMINAL_RECEIPT_FIELDS, values, strict=True))
+        receipt_digest = sqlite_store_module._structure_drift_terminal_receipt_digest(
+            payload
+        )
+        con.execute(
+            "INSERT INTO structure_generation_drift_terminal_receipts("
+            + ",".join(_TERMINAL_RECEIPT_FIELDS)
+            + ",receipt_digest) VALUES ("
+            + ",".join("?" for _ in range(len(values) + 1))
+            + ")",
+            (*values, receipt_digest),
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="structure-drift-terminal-receipt-sealed",
+        ):
+            con.execute(
+                "UPDATE structure_generation_drift_terminal_receipts SET "
+                "checkpoint_at_ms=3003 WHERE comparison_id=?",
+                (comparison_id,),
+            )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="structure-drift-terminal-receipt-sealed",
+        ):
+            con.execute(
+                "DELETE FROM structure_generation_drift_terminal_receipts "
+                "WHERE comparison_id=?",
+                (comparison_id,),
+            )
 
 
 def _raw_market(
@@ -605,6 +781,7 @@ _V1_PROGRESS_COLUMNS = (
 _DRIFT_RECEIPT_V2_DIGEST_FIELDS = (
     "comparison_id",
     "hash_algorithm",
+    "classifier_contract_version",
     "legacy_snapshot_id",
     "legacy_taken_at_ms",
     "legacy_finished_at_ms",
@@ -634,6 +811,10 @@ _DRIFT_RECEIPT_V2_DIGEST_FIELDS = (
     "generation_source_group_truth_comparison_root",
     "class_counts_json",
     "class_digests_json",
+    "diagnostic_counts_json",
+    "diagnostic_root",
+    "diagnostic_samples_json",
+    "diagnostic_samples_digest",
     "legacy_reconstruction_root",
     "generation_reconstruction_root",
     "overlap_conflict_count",
@@ -650,6 +831,11 @@ _V1_RECEIPT_COLUMNS = tuple(
         "generation_projection_member_comparison_root",
         "generation_source_group_truth_comparison_count",
         "generation_source_group_truth_comparison_root",
+        "classifier_contract_version",
+        "diagnostic_counts_json",
+        "diagnostic_root",
+        "diagnostic_samples_json",
+        "diagnostic_samples_digest",
     }
 ) + ("receipt_digest",)
 
@@ -679,6 +865,132 @@ def _downgrade_drift_tables_to_v1_shape(store: SQLiteStore) -> None:
             "ALTER TABLE structure_generation_drift_receipts_v1 "
             "RENAME TO structure_generation_drift_receipts"
         )
+
+
+def _downgrade_to_classifier_v1_shape(store: SQLiteStore) -> None:
+    _downgrade_drift_tables_to_v1_shape(store)
+    with sqlite3.connect(store.db_path) as con:
+        sqlite_store_module._migrate_structure_drift_hash_v2(con)
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_update")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_delete")
+        con.execute("DROP TABLE IF EXISTS structure_generation_drift_terminal_receipts")
+
+
+def _authority_signature(path: Path) -> dict[str, tuple[tuple[object, ...], ...]]:
+    names = (
+        "structure_generation_drift_progress",
+        "structure_generation_drift_receipts",
+        "structure_generation_drift_terminal_receipts",
+    )
+    with sqlite3.connect(path) as con:
+        signature = {
+            f"columns:{name}": tuple(con.execute(f"PRAGMA table_info({name})"))
+            for name in names
+        }
+        for kind in ("index", "trigger"):
+            signature[kind] = tuple(
+                (str(row[0]), str(row[1]), " ".join(str(row[2]).split()))
+                for row in con.execute(
+                    "SELECT name,tbl_name,sql FROM sqlite_master WHERE type=? AND "
+                    "tbl_name IN (?,?,?) ORDER BY name",
+                    (kind, *names),
+                )
+            )
+    return signature
+
+
+def _classifier_migration_business_rows(
+    path: Path,
+) -> dict[str, tuple[tuple[object, ...], ...]]:
+    tables = (
+        "snapshots",
+        "structure_publications",
+        "current_structure_generation",
+        "structure_sync_event_staging",
+        "structure_sync_market_staging",
+        "markets",
+        "events",
+        "structure_generation_events",
+        "structure_generation_markets",
+        "structure_generation_memberships",
+        "structure_generation_group_truth",
+    )
+    with sqlite3.connect(path) as con:
+        return {table: tuple(con.execute(f"SELECT * FROM {table}")) for table in tables}
+
+
+def test_classifier_migration_historical_classifier_label_matches_fresh_schema(
+    tmp_path: Path,
+) -> None:
+    migrated = _drift_store(tmp_path)
+    comparison_id = migrated.initialize_structure_drift_comparison(now_ms=3_000)
+    _install_sealed_drift_authority(migrated, comparison_id)
+    _downgrade_to_classifier_v1_shape(migrated)
+    business_before = _classifier_migration_business_rows(migrated.db_path)
+    migrated.init_schema()
+    migrated.init_schema()
+    fresh = SQLiteStore(tmp_path / "fresh-classifier.db")
+    fresh.init_schema()
+    assert _authority_signature(migrated.db_path) == _authority_signature(fresh.db_path)
+    assert _classifier_migration_business_rows(migrated.db_path) == business_before
+    with sqlite3.connect(migrated.db_path) as con:
+        assert con.execute(
+            "SELECT classifier_contract_version FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone() == (STRUCTURE_DRIFT_CLASSIFIER_V1,)
+        assert con.execute(
+            "SELECT classifier_contract_version FROM "
+            "structure_generation_drift_receipts WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone() == (STRUCTURE_DRIFT_CLASSIFIER_V1,)
+
+
+@pytest.mark.parametrize(
+    "fault_point",
+    (
+        "after-progress-rename",
+        "after-authorization-receipt-rename",
+        "after-terminal-table-create",
+    ),
+)
+def test_classifier_migration_rollback_restores_authority_and_business_rows(
+    tmp_path: Path,
+    fault_point: str,
+) -> None:
+    store = _drift_store(tmp_path)
+    store.initialize_structure_drift_comparison(now_ms=3_000)
+    _downgrade_to_classifier_v1_shape(store)
+    with sqlite3.connect(store.db_path) as con:
+        before_signature = _authority_signature(store.db_path)
+        business_tables = (
+            "snapshots",
+            "structure_publications",
+            "current_structure_generation",
+            "structure_sync_event_staging",
+            "structure_sync_market_staging",
+            "markets",
+        )
+        before_counts = {
+            table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in business_tables
+        }
+
+        def inject(step: str) -> None:
+            if step == fault_point:
+                raise RuntimeError(f"injected-{fault_point}")
+
+        with pytest.raises(RuntimeError, match=f"injected-{fault_point}"):
+            sqlite_store_module._migrate_structure_drift_classifier_v2(
+                con, fault_hook=inject
+            )
+        assert _authority_signature(store.db_path) == before_signature
+        assert {
+            table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in business_tables
+        } == before_counts
+    store.init_schema()
+    store.init_schema()
 
 
 def test_drift_v2_migration_rolls_back_injected_crash_and_reinitializes(
@@ -937,6 +1249,7 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
         payload: dict[str, object] = {
             "comparison_id": comparison_id,
             "hash_algorithm": "row-chain-sha256-v2",
+            "classifier_contract_version": STRUCTURE_DRIFT_CLASSIFIER_V2,
             "legacy_snapshot_id": int(progress[0]),
             "legacy_taken_at_ms": int(exact[0]),
             "legacy_finished_at_ms": int(exact[1]),
@@ -970,6 +1283,10 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
                 sort_keys=True,
                 separators=(",", ":"),
             ),
+            "diagnostic_counts_json": "{}",
+            "diagnostic_root": "d" * 64,
+            "diagnostic_samples_json": "{}",
+            "diagnostic_samples_digest": hashlib.sha256(b"{}").hexdigest(),
             "legacy_reconstruction_root": "8" * 64,
             "generation_reconstruction_root": "9" * 64,
             "overlap_conflict_count": 0,
@@ -1124,7 +1441,7 @@ def test_sealed_v1_receipt_cannot_authorize_v2_progress(tmp_path: Path) -> None:
     _rewrite_drift_receipt(
         store,
         comparison_id,
-        hash_algorithm="serializable-sha256-v1",
+        classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V1,
     )
 
     status = store.structure_generation_drift_status()

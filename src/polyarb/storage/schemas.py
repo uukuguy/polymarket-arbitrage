@@ -3062,6 +3062,7 @@ WHERE phase!='sealed';
 CREATE TABLE IF NOT EXISTS structure_generation_drift_progress (
     comparison_id TEXT PRIMARY KEY,
     hash_algorithm TEXT NOT NULL DEFAULT 'serializable-sha256-v1',
+    classifier_contract_version TEXT NOT NULL DEFAULT 'structure-drift-classifier-v1',
     legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
     generation_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
     publication_id TEXT NOT NULL REFERENCES structure_publications(publication_id),
@@ -3091,12 +3092,20 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_progress (
     digest_state_json TEXT NOT NULL,
     class_counts_json TEXT NOT NULL,
     class_digests_json TEXT NOT NULL,
+    diagnostic_counts_json TEXT NOT NULL DEFAULT '{}',
+    diagnostic_digest_state_json TEXT NOT NULL DEFAULT '{}',
+    diagnostic_root TEXT CHECK(diagnostic_root IS NULL OR length(diagnostic_root)=64),
+    diagnostic_samples_json TEXT NOT NULL DEFAULT '{}',
+    diagnostic_samples_digest TEXT NOT NULL DEFAULT
+        '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a'
+        CHECK(length(diagnostic_samples_digest)=64),
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
     UNIQUE(
         legacy_snapshot_id,generation_snapshot_id,publication_id,window_id,
         normalization_contract_version,exact_receipt_digest,
-        pointer_validation_hash,generation_certification_hash,hash_algorithm
+        pointer_validation_hash,generation_certification_hash,hash_algorithm,
+        classifier_contract_version
     )
 );
 CREATE INDEX IF NOT EXISTS idx_structure_drift_progress_active
@@ -3106,6 +3115,7 @@ WHERE phase NOT IN ('sealed','stale');
 CREATE TABLE IF NOT EXISTS structure_generation_drift_receipts (
     comparison_id TEXT PRIMARY KEY,
     hash_algorithm TEXT NOT NULL DEFAULT 'serializable-sha256-v1',
+    classifier_contract_version TEXT NOT NULL DEFAULT 'structure-drift-classifier-v1',
     legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
     legacy_taken_at_ms INTEGER NOT NULL CHECK(legacy_taken_at_ms >= 0),
     legacy_finished_at_ms INTEGER NOT NULL CHECK(legacy_finished_at_ms >= 0),
@@ -3144,6 +3154,14 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_receipts (
               length(generation_source_group_truth_comparison_root)=64),
     class_counts_json TEXT NOT NULL,
     class_digests_json TEXT NOT NULL,
+    diagnostic_counts_json TEXT NOT NULL DEFAULT '{}',
+    diagnostic_root TEXT NOT NULL DEFAULT
+        '41ebbc84508b35ea8687e89d89f6b61a5640e5faf9b6ee83a50a2aa625256d7c'
+        CHECK(length(diagnostic_root)=64),
+    diagnostic_samples_json TEXT NOT NULL DEFAULT '{}',
+    diagnostic_samples_digest TEXT NOT NULL DEFAULT
+        '44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a'
+        CHECK(length(diagnostic_samples_digest)=64),
     legacy_reconstruction_root TEXT NOT NULL
         CHECK(length(legacy_reconstruction_root)=64),
     generation_reconstruction_root TEXT NOT NULL
@@ -3157,7 +3175,7 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_receipts (
         legacy_snapshot_id,generation_snapshot_id,publication_id,window_id,
         normalization_contract_version,exact_receipt_digest,
         pointer_validation_hash,generation_certification_hash,source_identity_hash,
-        hash_algorithm
+        hash_algorithm,classifier_contract_version
     )
 );
 CREATE TRIGGER IF NOT EXISTS trg_structure_drift_receipt_update
@@ -3166,6 +3184,37 @@ BEGIN SELECT RAISE(ABORT,'structure-drift-receipt-sealed'); END;
 CREATE TRIGGER IF NOT EXISTS trg_structure_drift_receipt_delete
 BEFORE DELETE ON structure_generation_drift_receipts
 BEGIN SELECT RAISE(ABORT,'structure-drift-receipt-sealed'); END;
+
+CREATE TABLE IF NOT EXISTS structure_generation_drift_terminal_receipts (
+    comparison_id TEXT PRIMARY KEY,
+    hash_algorithm TEXT NOT NULL,
+    classifier_contract_version TEXT NOT NULL,
+    legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    generation_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    publication_id TEXT NOT NULL REFERENCES structure_publications(publication_id),
+    window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
+    normalization_contract_version TEXT NOT NULL,
+    exact_receipt_digest TEXT NOT NULL CHECK(length(exact_receipt_digest)=64),
+    pointer_validation_hash TEXT NOT NULL CHECK(length(pointer_validation_hash)=64),
+    generation_certification_hash TEXT NOT NULL CHECK(length(generation_certification_hash)=64),
+    source_identity_hash TEXT NOT NULL CHECK(length(source_identity_hash)=64),
+    terminal_reason TEXT NOT NULL,
+    class_counts_json TEXT NOT NULL,
+    class_digests_json TEXT NOT NULL,
+    diagnostic_counts_json TEXT NOT NULL,
+    diagnostic_root TEXT NOT NULL CHECK(length(diagnostic_root)=64),
+    diagnostic_samples_json TEXT NOT NULL,
+    diagnostic_samples_digest TEXT NOT NULL CHECK(length(diagnostic_samples_digest)=64),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms>=0),
+    checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms>=0),
+    receipt_digest TEXT NOT NULL CHECK(length(receipt_digest)=64)
+);
+CREATE TRIGGER IF NOT EXISTS trg_structure_drift_terminal_receipt_update
+BEFORE UPDATE ON structure_generation_drift_terminal_receipts
+BEGIN SELECT RAISE(ABORT,'structure-drift-terminal-receipt-sealed'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_drift_terminal_receipt_delete
+BEFORE DELETE ON structure_generation_drift_terminal_receipts
+BEGIN SELECT RAISE(ABORT,'structure-drift-terminal-receipt-sealed'); END;
 
 -- Append-only authorization/evidence for bounded reclamation of old immutable
 -- generation bulk rows. Publication, comparison receipt, snapshot, and legacy

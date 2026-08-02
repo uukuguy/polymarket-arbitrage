@@ -35,6 +35,8 @@ from polyarb.perception.market_truth import (
 from polyarb.perception.structure_contract import (
     STRUCTURE_CERTIFICATION_COMPONENTS,
     STRUCTURE_COMPONENTS,
+    STRUCTURE_DRIFT_CLASSIFIER_V1,
+    STRUCTURE_DRIFT_CLASSIFIER_V2,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_MEMBER_WORK,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_PAYLOAD_BYTES,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
@@ -453,7 +455,7 @@ def _migrate_structure_drift_hash_v2(
             fault_hook("after-progress-copy")
         con.execute("DROP TABLE structure_generation_drift_progress_v1")
         con.execute(
-            "CREATE INDEX idx_structure_drift_progress_active ON "
+            "CREATE INDEX IF NOT EXISTS idx_structure_drift_progress_active ON "
             "structure_generation_drift_progress(checkpoint_at_ms DESC,comparison_id) "
             "WHERE phase NOT IN ('sealed','stale')"
         )
@@ -544,12 +546,12 @@ def _migrate_structure_drift_hash_v2(
         )
         con.execute("DROP TABLE structure_generation_drift_receipts_v1")
         con.execute(
-            "CREATE TRIGGER trg_structure_drift_receipt_update BEFORE UPDATE ON "
+            "CREATE TRIGGER IF NOT EXISTS trg_structure_drift_receipt_update BEFORE UPDATE ON "
             "structure_generation_drift_receipts BEGIN SELECT "
             "RAISE(ABORT,'structure-drift-receipt-sealed'); END"
         )
         con.execute(
-            "CREATE TRIGGER trg_structure_drift_receipt_delete BEFORE DELETE ON "
+            "CREATE TRIGGER IF NOT EXISTS trg_structure_drift_receipt_delete BEFORE DELETE ON "
             "structure_generation_drift_receipts BEGIN SELECT "
             "RAISE(ABORT,'structure-drift-receipt-sealed'); END"
         )
@@ -559,6 +561,212 @@ def _migrate_structure_drift_hash_v2(
     except BaseException:
         con.execute("ROLLBACK TO SAVEPOINT structure_drift_hash_v2_migration")
         con.execute("RELEASE SAVEPOINT structure_drift_hash_v2_migration")
+        raise
+
+
+def _migrate_structure_drift_classifier_v2(
+    con: sqlite3.Connection,
+    *,
+    fault_hook: Callable[[str], None] | None = None,
+) -> None:
+    """Version drift authority without touching any source or serving row."""
+    progress_info = con.execute(
+        "PRAGMA table_info(structure_generation_drift_progress)"
+    ).fetchall()
+    receipt_info = con.execute(
+        "PRAGMA table_info(structure_generation_drift_receipts)"
+    ).fetchall()
+    if not progress_info or not receipt_info:
+        return
+    if "classifier_contract_version" in {str(row[1]) for row in progress_info}:
+        return
+    progress_sql = str(
+        con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND "
+            "name='structure_generation_drift_progress'"
+        ).fetchone()[0]
+    )
+    receipt_sql = str(
+        con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND "
+            "name='structure_generation_drift_receipts'"
+        ).fetchone()[0]
+    )
+    empty_json = "{}"
+    empty_samples_digest = hashlib.sha256(empty_json.encode()).hexdigest()
+    diagnostic_state = RowChainSHA256.new("diagnostic/unclassified")
+    empty_diagnostic_root = diagnostic_state.hexdigest()
+    con.execute("SAVEPOINT structure_drift_classifier_v2_migration")
+    try:
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_update")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_delete")
+        con.execute("DROP TABLE IF EXISTS structure_generation_drift_terminal_receipts")
+        con.execute("DROP INDEX IF EXISTS idx_structure_drift_progress_active")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_receipt_update")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_receipt_delete")
+        con.execute(
+            "ALTER TABLE structure_generation_drift_progress "
+            "RENAME TO structure_generation_drift_progress_classifier_v1"
+        )
+        if fault_hook is not None:
+            fault_hook("after-progress-rename")
+        progress_create = progress_sql.replace(
+            "structure_generation_drift_progress",
+            "structure_generation_drift_progress",
+            1,
+        ).replace(
+            "hash_algorithm TEXT NOT NULL DEFAULT 'serializable-sha256-v1',",
+            "hash_algorithm TEXT NOT NULL DEFAULT 'serializable-sha256-v1',"
+            "classifier_contract_version TEXT NOT NULL DEFAULT "
+            "'structure-drift-classifier-v1',",
+            1,
+        ).replace(
+            "class_digests_json TEXT NOT NULL,",
+            "class_digests_json TEXT NOT NULL,diagnostic_counts_json TEXT NOT NULL "
+            "DEFAULT '{}',diagnostic_digest_state_json TEXT NOT NULL DEFAULT '{}',"
+            "diagnostic_root TEXT CHECK("
+            "diagnostic_root IS NULL OR length(diagnostic_root)=64),"
+            "diagnostic_samples_json TEXT NOT NULL DEFAULT '{}',"
+            "diagnostic_samples_digest TEXT NOT NULL DEFAULT "
+            "'44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a' "
+            "CHECK(length(diagnostic_samples_digest)=64),",
+            1,
+        ).replace(
+            "generation_certification_hash,hash_algorithm))",
+            "generation_certification_hash,hash_algorithm,"
+            "classifier_contract_version))",
+            1,
+        )
+        con.execute(progress_create)
+        old_progress_columns = [str(row[1]) for row in progress_info]
+        con.execute(
+            "INSERT INTO structure_generation_drift_progress("
+            + ",".join(old_progress_columns)
+            + ",classifier_contract_version,diagnostic_counts_json,"
+            "diagnostic_digest_state_json,diagnostic_root,diagnostic_samples_json,"
+            "diagnostic_samples_digest) SELECT "
+            + ",".join(old_progress_columns)
+            + ",?,?,?,?,?,? FROM structure_generation_drift_progress_classifier_v1",
+            (
+                STRUCTURE_DRIFT_CLASSIFIER_V1,
+                empty_json,
+                diagnostic_state.to_json(),
+                None,
+                empty_json,
+                empty_samples_digest,
+            ),
+        )
+        con.execute("DROP TABLE structure_generation_drift_progress_classifier_v1")
+        con.execute(
+            "CREATE INDEX idx_structure_drift_progress_active ON "
+            "structure_generation_drift_progress(checkpoint_at_ms DESC,comparison_id) "
+            "WHERE phase NOT IN ('sealed','stale')"
+        )
+        con.execute(
+            "ALTER TABLE structure_generation_drift_receipts "
+            "RENAME TO structure_generation_drift_receipts_classifier_v1"
+        )
+        if fault_hook is not None:
+            fault_hook("after-authorization-receipt-rename")
+        receipt_create = receipt_sql.replace(
+            "hash_algorithm TEXT NOT NULL DEFAULT 'serializable-sha256-v1',",
+            "hash_algorithm TEXT NOT NULL DEFAULT 'serializable-sha256-v1',"
+            "classifier_contract_version TEXT NOT NULL DEFAULT "
+            "'structure-drift-classifier-v1',",
+            1,
+        ).replace(
+            "class_digests_json TEXT NOT NULL,",
+            "class_digests_json TEXT NOT NULL,diagnostic_counts_json TEXT NOT NULL "
+            "DEFAULT '{}',diagnostic_root TEXT NOT NULL DEFAULT "
+            "'41ebbc84508b35ea8687e89d89f6b61a5640e5faf9b6ee83a50a2aa625256d7c' "
+            "CHECK(length(diagnostic_root)=64),diagnostic_samples_json TEXT NOT NULL "
+            "DEFAULT '{}',diagnostic_samples_digest TEXT NOT NULL DEFAULT "
+            "'44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a' "
+            "CHECK(length(diagnostic_samples_digest)=64),",
+            1,
+        ).replace(
+            "source_identity_hash,hash_algorithm))",
+            "source_identity_hash,hash_algorithm,classifier_contract_version))",
+            1,
+        )
+        con.execute(receipt_create)
+        old_receipt_columns = [str(row[1]) for row in receipt_info]
+        con.execute(
+            "INSERT INTO structure_generation_drift_receipts("
+            + ",".join(old_receipt_columns)
+            + ",classifier_contract_version,diagnostic_counts_json,diagnostic_root,"
+            "diagnostic_samples_json,diagnostic_samples_digest) SELECT "
+            + ",".join(old_receipt_columns)
+            + ",?,?,?,?,? FROM structure_generation_drift_receipts_classifier_v1",
+            (
+                STRUCTURE_DRIFT_CLASSIFIER_V1,
+                empty_json,
+                empty_diagnostic_root,
+                empty_json,
+                empty_samples_digest,
+            ),
+        )
+        for row in con.execute(
+            "SELECT " + ",".join(_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS) + " FROM "
+            "structure_generation_drift_receipts"
+        ).fetchall():
+            payload = dict(zip(_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS, row, strict=True))
+            con.execute(
+                "UPDATE structure_generation_drift_receipts SET receipt_digest=? "
+                "WHERE comparison_id=?",
+                (_structure_drift_receipt_digest(payload), str(payload["comparison_id"])),
+            )
+        con.execute("DROP TABLE structure_generation_drift_receipts_classifier_v1")
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_receipt_update BEFORE UPDATE ON "
+            "structure_generation_drift_receipts BEGIN SELECT "
+            "RAISE(ABORT,'structure-drift-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_receipt_delete BEFORE DELETE ON "
+            "structure_generation_drift_receipts BEGIN SELECT "
+            "RAISE(ABORT,'structure-drift-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TABLE structure_generation_drift_terminal_receipts("
+            "comparison_id TEXT PRIMARY KEY,hash_algorithm TEXT NOT NULL,"
+            "classifier_contract_version TEXT NOT NULL,legacy_snapshot_id INTEGER "
+            "NOT NULL REFERENCES snapshots(id),generation_snapshot_id INTEGER NOT NULL "
+            "REFERENCES snapshots(id),publication_id TEXT NOT NULL REFERENCES "
+            "structure_publications(publication_id),window_id TEXT NOT NULL REFERENCES "
+            "structure_sync_windows(id),normalization_contract_version TEXT NOT NULL,"
+            "exact_receipt_digest TEXT NOT NULL CHECK(length(exact_receipt_digest)=64),"
+            "pointer_validation_hash TEXT NOT NULL CHECK(length(pointer_validation_hash)=64),"
+            "generation_certification_hash TEXT NOT NULL CHECK(length("
+            "generation_certification_hash)=64),source_identity_hash TEXT NOT NULL "
+            "CHECK(length(source_identity_hash)=64),terminal_reason TEXT NOT NULL,"
+            "class_counts_json TEXT NOT NULL,class_digests_json TEXT NOT NULL,"
+            "diagnostic_counts_json TEXT NOT NULL,diagnostic_root TEXT NOT NULL "
+            "CHECK(length(diagnostic_root)=64),diagnostic_samples_json TEXT NOT NULL,"
+            "diagnostic_samples_digest TEXT NOT NULL CHECK(length("
+            "diagnostic_samples_digest)=64),created_at_ms INTEGER NOT NULL CHECK("
+            "created_at_ms>=0),checkpoint_at_ms INTEGER NOT NULL CHECK("
+            "checkpoint_at_ms>=0),receipt_digest TEXT NOT NULL CHECK(length("
+            "receipt_digest)=64))"
+        )
+        con.execute(
+            "CREATE TRIGGER IF NOT EXISTS "
+            "trg_structure_drift_terminal_receipt_update BEFORE UPDATE "
+            "ON structure_generation_drift_terminal_receipts BEGIN SELECT RAISE(ABORT,"
+            "'structure-drift-terminal-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER IF NOT EXISTS "
+            "trg_structure_drift_terminal_receipt_delete BEFORE DELETE "
+            "ON structure_generation_drift_terminal_receipts BEGIN SELECT RAISE(ABORT,"
+            "'structure-drift-terminal-receipt-sealed'); END"
+        )
+        if fault_hook is not None:
+            fault_hook("after-terminal-table-create")
+        con.execute("RELEASE SAVEPOINT structure_drift_classifier_v2_migration")
+    except BaseException:
+        con.execute("ROLLBACK TO SAVEPOINT structure_drift_classifier_v2_migration")
+        con.execute("RELEASE SAVEPOINT structure_drift_classifier_v2_migration")
         raise
 
 
@@ -693,6 +901,7 @@ def _comparison_receipt_digest(
 _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS = (
     "comparison_id",
     "hash_algorithm",
+    "classifier_contract_version",
     "legacy_snapshot_id",
     "legacy_taken_at_ms",
     "legacy_finished_at_ms",
@@ -722,6 +931,10 @@ _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS = (
     "generation_source_group_truth_comparison_root",
     "class_counts_json",
     "class_digests_json",
+    "diagnostic_counts_json",
+    "diagnostic_root",
+    "diagnostic_samples_json",
+    "diagnostic_samples_digest",
     "legacy_reconstruction_root",
     "generation_reconstruction_root",
     "overlap_conflict_count",
@@ -737,6 +950,61 @@ def _structure_drift_receipt_digest(payload: Mapping[str, object]) -> str:
     values = tuple(payload[field] for field in _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS)
     return hashlib.sha256(
         json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+_STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS = (
+    "comparison_id",
+    "hash_algorithm",
+    "classifier_contract_version",
+    "legacy_snapshot_id",
+    "generation_snapshot_id",
+    "publication_id",
+    "window_id",
+    "normalization_contract_version",
+    "exact_receipt_digest",
+    "pointer_validation_hash",
+    "generation_certification_hash",
+    "source_identity_hash",
+    "terminal_reason",
+    "class_counts_json",
+    "class_digests_json",
+    "diagnostic_counts_json",
+    "diagnostic_root",
+    "diagnostic_samples_json",
+    "diagnostic_samples_digest",
+    "created_at_ms",
+    "checkpoint_at_ms",
+)
+
+
+def _structure_drift_terminal_receipt_digest(payload: Mapping[str, object]) -> str:
+    """Authenticate every field in one immutable stale terminal receipt."""
+    if set(payload) != set(_STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS):
+        raise ValueError("invalid-structure-drift-terminal-receipt-fields")
+    values = tuple(
+        payload[field] for field in _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS
+    )
+    return hashlib.sha256(
+        json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _structure_drift_comparison_id(
+    identity: tuple[object, ...], *, classifier_contract_version: str
+) -> str:
+    """Bind comparison identity to the classifier semantics that interpret it."""
+    if classifier_contract_version not in {
+        STRUCTURE_DRIFT_CLASSIFIER_V1,
+        STRUCTURE_DRIFT_CLASSIFIER_V2,
+    }:
+        raise ValueError("invalid-structure-drift-classifier-contract")
+    return hashlib.sha256(
+        json.dumps(
+            (*identity, classifier_contract_version),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
 
 
@@ -2085,8 +2353,9 @@ class SQLiteStore:
             con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
             _migrate_structure_recovery_authority(con)
             _migrate_structure_event_market_progress(con)
-            con.executescript(STRUCTURE_GENERATIONS_DDL)
             _migrate_structure_drift_hash_v2(con)
+            _migrate_structure_drift_classifier_v2(con)
+            con.executescript(STRUCTURE_GENERATIONS_DDL)
             con.execute("ANALYZE idx_structure_generation_memberships_drift_scan")
             con.execute("ANALYZE idx_event_market_memberships_drift_scan")
             con.execute(
@@ -4084,9 +4353,10 @@ class SQLiteStore:
                 source_market_count,
                 ROW_CHAIN_SHA256_V2,
             )
-            comparison_id = hashlib.sha256(
-                json.dumps(identity, separators=(",", ":")).encode()
-            ).hexdigest()
+            comparison_id = _structure_drift_comparison_id(
+                identity,
+                classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+            )
             active = con.execute(
                 "SELECT comparison_id,hash_algorithm FROM "
                 "structure_generation_drift_progress "
@@ -4112,18 +4382,22 @@ class SQLiteStore:
             group_state = RowChainSHA256.new("source-group-truth")
             con.execute(
                 "INSERT OR IGNORE INTO structure_generation_drift_progress("
-                "comparison_id,hash_algorithm,legacy_snapshot_id,"
+                "comparison_id,hash_algorithm,classifier_contract_version,"
+                "legacy_snapshot_id,"
                 "generation_snapshot_id,publication_id,"
                 "window_id,normalization_contract_version,exact_receipt_digest,"
                 "pointer_validation_hash,generation_certification_hash,"
                 "source_event_count,source_market_count,source_event_hash,"
                 "source_market_hash,source_identity_hash,phase,row_cursor_json,"
-                "digest_state_json,class_counts_json,class_digests_json,created_at_ms,"
-                "checkpoint_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,"
-                "'source-events',NULL,?,?,?, ?,?)",
+                "digest_state_json,class_counts_json,class_digests_json,"
+                "diagnostic_counts_json,diagnostic_digest_state_json,diagnostic_root,"
+                "diagnostic_samples_json,diagnostic_samples_digest,created_at_ms,"
+                "checkpoint_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,"
+                "'source-events',NULL,?,?,?,?,?,NULL,?,?,?,?)",
                 (
                     comparison_id,
                     ROW_CHAIN_SHA256_V2,
+                    STRUCTURE_DRIFT_CLASSIFIER_V2,
                     int(row[12]),
                     int(row[0]),
                     str(row[1]),
@@ -4145,6 +4419,10 @@ class SQLiteStore:
                         sort_keys=True,
                         separators=(",", ":"),
                     ),
+                    "{}",
+                    RowChainSHA256.new("diagnostic/unclassified").to_json(),
+                    "{}",
+                    hashlib.sha256(b"{}").hexdigest(),
                     now_ms,
                     now_ms,
                 ),
@@ -4699,6 +4977,7 @@ class SQLiteStore:
                     receipt_payload: dict[str, object] = {
                         "comparison_id": comparison_id,
                         "hash_algorithm": ROW_CHAIN_SHA256_V2,
+                        "classifier_contract_version": STRUCTURE_DRIFT_CLASSIFIER_V2,
                         "legacy_snapshot_id": int(progress[0]),
                         "legacy_taken_at_ms": int(exact[4]),
                         "legacy_finished_at_ms": int(exact[5]),
@@ -4738,6 +5017,12 @@ class SQLiteStore:
                         ),
                         "class_counts_json": class_counts_json,
                         "class_digests_json": class_digests_json,
+                        "diagnostic_counts_json": "{}",
+                        "diagnostic_root": RowChainSHA256.new(
+                            "diagnostic/unclassified"
+                        ).hexdigest(),
+                        "diagnostic_samples_json": "{}",
+                        "diagnostic_samples_digest": hashlib.sha256(b"{}").hexdigest(),
                         "legacy_reconstruction_root": legacy_root,
                         "generation_reconstruction_root": (
                             generation_reconstruction_root
@@ -5324,13 +5609,13 @@ class SQLiteStore:
                 "SELECT comparison_id,phase,class_counts_json,class_digests_json,"
                 "checkpoint_at_ms,hash_algorithm,source_event_count,"
                 "source_market_count,source_event_hash,source_market_hash,"
-                "source_identity_hash "
+                "source_identity_hash,classifier_contract_version "
                 "FROM structure_generation_drift_progress WHERE "
                 "legacy_snapshot_id=? AND generation_snapshot_id=? AND "
                 "publication_id=? AND window_id=? AND "
                 "normalization_contract_version=? AND exact_receipt_digest=? AND "
                 "pointer_validation_hash=? AND generation_certification_hash=? AND "
-                "hash_algorithm=? "
+                "hash_algorithm=? AND classifier_contract_version=? "
                 "ORDER BY checkpoint_at_ms DESC LIMIT 1",
                 (
                     int(legacy[0]),
@@ -5342,6 +5627,7 @@ class SQLiteStore:
                     str(current[2]),
                     str(current[6]),
                     ROW_CHAIN_SHA256_V2,
+                    STRUCTURE_DRIFT_CLASSIFIER_V2,
                 ),
             ).fetchone()
             if progress is None:
@@ -5518,6 +5804,8 @@ class SQLiteStore:
                 and receipt_payload["comparison_id"] == progress[0]
                 and receipt_payload["hash_algorithm"] == progress[5]
                 and receipt_payload["hash_algorithm"] == ROW_CHAIN_SHA256_V2
+                and receipt_payload["classifier_contract_version"] == progress[11]
+                and progress[11] == STRUCTURE_DRIFT_CLASSIFIER_V2
                 and receipt_payload["legacy_snapshot_id"] == legacy[0]
                 and receipt_payload["generation_snapshot_id"] == current[0]
                 and receipt_payload["publication_id"] == current[1]
