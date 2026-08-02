@@ -572,6 +572,111 @@ def test_drift_v2_migration_writer_lock_leaves_v1_schema_reinitializable(
         ).fetchone() == ("serializable-sha256-v1",)
 
 
+def test_active_v1_progress_is_atomically_superseded_by_cursor_zero_v2(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    store.initialize_structure_drift_comparison(now_ms=3_000)
+    v1_comparison_id = "b" * 64
+    with sqlite3.connect(store.db_path) as con:
+        v1_state = sqlite_store_module.SerializableSHA256.new()
+        v1_state.update(b"[")
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET comparison_id=?,"
+            "hash_algorithm='serializable-sha256-v1',digest_state_json=?",
+            (v1_comparison_id, v1_state.to_json()),
+        )
+        data_plane_before = {
+            table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in (
+                "current_structure_generation",
+                "structure_publications",
+                "structure_sync_event_staging",
+                "structure_sync_market_staging",
+                "events",
+                "event_market_memberships",
+                "neg_risk_group_truth",
+                "markets",
+            )
+        }
+
+    v2_comparison_id = store.initialize_structure_drift_comparison(now_ms=3_001)
+
+    with sqlite3.connect(store.db_path) as con:
+        progress = {
+            str(row[1]): row
+            for row in con.execute(
+            "SELECT comparison_id,hash_algorithm,phase,terminal_reason,"
+            "row_cursor_json,digest_state_json FROM "
+            "structure_generation_drift_progress"
+            )
+        }
+        data_plane_after = {
+            table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in data_plane_before
+        }
+    assert v2_comparison_id != v1_comparison_id
+    assert progress["serializable-sha256-v1"][:5] == (
+        v1_comparison_id,
+        "serializable-sha256-v1",
+        "stale",
+        "drift-hash-algorithm-superseded",
+        None,
+    )
+    assert progress["row-chain-sha256-v2"][:5] == (
+        v2_comparison_id,
+        "row-chain-sha256-v2",
+        "source-events",
+        None,
+        None,
+    )
+    v2_state = json.loads(str(progress["row-chain-sha256-v2"][5]))
+    assert v2_state["algorithm"] == "row-chain-sha256-v2"
+    assert v2_state["domain"] == "source-event"
+    assert v2_state["count"] == 0
+    assert data_plane_after == data_plane_before
+    status = store.structure_generation_drift_status()
+    assert status["progress_id"] == v2_comparison_id
+    assert status["phase"] == "source-events"
+    assert status["hash_algorithm"] == "row-chain-sha256-v2"
+
+
+def test_v2_insert_failure_rolls_back_v1_supersession(tmp_path: Path) -> None:
+    store = _drift_store(tmp_path)
+    store.initialize_structure_drift_comparison(now_ms=3_000)
+    v1_comparison_id = "c" * 64
+    with sqlite3.connect(store.db_path) as con:
+        v1_state = sqlite_store_module.SerializableSHA256.new()
+        v1_state.update(b"[")
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET comparison_id=?,"
+            "hash_algorithm='serializable-sha256-v1',digest_state_json=?",
+            (v1_comparison_id, v1_state.to_json()),
+        )
+        con.execute(
+            "CREATE TRIGGER reject_v2_progress BEFORE INSERT ON "
+            "structure_generation_drift_progress WHEN "
+            "NEW.hash_algorithm='row-chain-sha256-v2' BEGIN SELECT "
+            "RAISE(ABORT,'injected-v2-insert-failure'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected-v2-insert-failure"):
+        store.initialize_structure_drift_comparison(now_ms=3_001)
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT comparison_id,hash_algorithm,phase,terminal_reason FROM "
+            "structure_generation_drift_progress"
+        ).fetchall() == [
+            (
+                v1_comparison_id,
+                "serializable-sha256-v1",
+                "source-events",
+                None,
+            )
+        ]
+
+
 def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

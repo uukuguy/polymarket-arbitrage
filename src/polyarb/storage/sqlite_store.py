@@ -42,6 +42,10 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_PUBLICATION_MAX_ROWS,
     STRUCTURE_SOURCE_COMPONENTS,
 )
+from polyarb.storage.row_chain_sha256 import (
+    ROW_CHAIN_SHA256_V2,
+    RowChainSHA256,
+)
 from polyarb.storage.schemas import (
     DDL,
     EVENT_TAGS_COLUMN_ORDER,
@@ -4033,32 +4037,48 @@ class SQLiteStore:
                 str(row[7]),
                 source_event_count,
                 source_market_count,
+                ROW_CHAIN_SHA256_V2,
             )
             comparison_id = hashlib.sha256(
                 json.dumps(identity, separators=(",", ":")).encode()
             ).hexdigest()
             active = con.execute(
-                "SELECT comparison_id FROM structure_generation_drift_progress "
+                "SELECT comparison_id,hash_algorithm FROM "
+                "structure_generation_drift_progress "
                 "WHERE phase NOT IN ('sealed','stale') LIMIT 1"
             ).fetchone()
+            if active is not None and active[1] == "serializable-sha256-v1":
+                superseded = con.execute(
+                    "UPDATE structure_generation_drift_progress SET phase='stale',"
+                    "terminal_reason='drift-hash-algorithm-superseded',"
+                    "checkpoint_at_ms=? WHERE comparison_id=? AND "
+                    "hash_algorithm='serializable-sha256-v1' AND phase NOT IN "
+                    "('sealed','stale')",
+                    (now_ms, str(active[0])),
+                )
+                if superseded.rowcount != 1:
+                    raise StructurePublicationCursorError(
+                        "structure-drift-cursor-mismatch"
+                    )
+                active = None
             if active is not None and active[0] != comparison_id:
                 raise ValueError("structure-drift-active-identity-mismatch")
-            source_state = SerializableSHA256.new()
-            source_state.update(b"[")
-            group_state = SerializableSHA256.new()
-            group_state.update(b"[")
+            source_state = RowChainSHA256.new("source-event")
+            group_state = RowChainSHA256.new("source-group-truth")
             con.execute(
                 "INSERT OR IGNORE INTO structure_generation_drift_progress("
-                "comparison_id,legacy_snapshot_id,generation_snapshot_id,publication_id,"
+                "comparison_id,hash_algorithm,legacy_snapshot_id,"
+                "generation_snapshot_id,publication_id,"
                 "window_id,normalization_contract_version,exact_receipt_digest,"
                 "pointer_validation_hash,generation_certification_hash,"
                 "source_event_count,source_market_count,source_event_hash,"
                 "source_market_hash,source_identity_hash,phase,row_cursor_json,"
                 "digest_state_json,class_counts_json,class_digests_json,created_at_ms,"
-                "checkpoint_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,"
+                "checkpoint_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,"
                 "'source-events',NULL,?,?,?, ?,?)",
                 (
                     comparison_id,
+                    ROW_CHAIN_SHA256_V2,
                     int(row[12]),
                     int(row[0]),
                     str(row[1]),
@@ -5197,12 +5217,13 @@ class SQLiteStore:
                 }
             progress = con.execute(
                 "SELECT comparison_id,phase,class_counts_json,class_digests_json,"
-                "checkpoint_at_ms "
+                "checkpoint_at_ms,hash_algorithm "
                 "FROM structure_generation_drift_progress WHERE "
                 "legacy_snapshot_id=? AND generation_snapshot_id=? AND "
                 "publication_id=? AND window_id=? AND "
                 "normalization_contract_version=? AND exact_receipt_digest=? AND "
-                "pointer_validation_hash=? AND generation_certification_hash=? "
+                "pointer_validation_hash=? AND generation_certification_hash=? AND "
+                "hash_algorithm=? "
                 "ORDER BY checkpoint_at_ms DESC LIMIT 1",
                 (
                     int(legacy[0]),
@@ -5213,6 +5234,7 @@ class SQLiteStore:
                     str(current[3]),
                     str(current[2]),
                     str(current[6]),
+                    ROW_CHAIN_SHA256_V2,
                 ),
             ).fetchone()
             if progress is None:
@@ -5240,6 +5262,7 @@ class SQLiteStore:
                     "authorization_mode": "none",
                     "authorized": False,
                     "progress_id": str(progress[0]),
+                    "hash_algorithm": str(progress[5]),
                     "checkpoint_at_ms": int(progress[4]),
                     "phase": str(progress[1]),
                     "reason": "structure-drift-progress-invalid",
@@ -5262,6 +5285,7 @@ class SQLiteStore:
                     "authorization_mode": "none",
                     "authorized": False,
                     "progress_id": str(progress[0]),
+                    "hash_algorithm": str(progress[5]),
                     "class_counts": class_counts,
                     "checkpoint_at_ms": int(progress[4]),
                     "phase": str(progress[1]),
@@ -5302,6 +5326,7 @@ class SQLiteStore:
                 ),
                 "authorized": receipt_valid,
                 "progress_id": str(progress[0]),
+                "hash_algorithm": str(progress[5]),
                 "class_counts": class_counts,
                 "checkpoint_at_ms": int(progress[4]),
                 "phase": str(progress[1]),
