@@ -29,6 +29,7 @@ Source: RESEARCH.md §Architecture Patterns §2.5, CONTEXT.md D-13
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import signal
@@ -67,11 +68,15 @@ class SnapshotSubprocessError(RuntimeError):
         last_stage: str | None = None,
         elapsed_ms: int = 0,
         chunks_processed: int | None = None,
+        stderr: bytes = b"",
     ) -> None:
         super().__init__(f"snapshot-subprocess-{reason}")
         self.last_stage = last_stage
         self.elapsed_ms = max(0, elapsed_ms)
         self.chunks_processed = chunks_processed
+        self.stderr_bytes = len(stderr)
+        self.stderr_sha256 = hashlib.sha256(stderr).hexdigest()
+        self.stderr_tail = _safe_stderr_tail(stderr)
 
 
 SNAPSHOT_SUBPROCESS_TIMEOUT_S = 240.0
@@ -134,6 +139,15 @@ def _parse_last_structure_chunks(stderr: bytes) -> int | None:
     for marker in _STRUCTURE_PROGRESS_MARKER_RE.finditer(stderr):
         chunks_processed = int(marker.group(1))
     return chunks_processed
+
+
+def _safe_stderr_tail(stderr: bytes) -> str | None:
+    """Retain only the final allowlisted marker, never arbitrary child output."""
+    matches = [*_SNAPSHOT_STAGE_MARKER_RE.finditer(stderr)]
+    matches.extend(_STRUCTURE_PROGRESS_MARKER_RE.finditer(stderr))
+    if not matches:
+        return None
+    return max(matches, key=lambda match: match.start()).group(0).decode("ascii")
 
 
 @dataclass(frozen=True)
@@ -228,6 +242,7 @@ async def run_snapshot_in_subprocess(
             last_stage=_parse_last_snapshot_stage(stderr),
             elapsed_ms=elapsed_ms(),
             chunks_processed=_parse_last_structure_chunks(stderr),
+            stderr=stderr,
         )
 
     try:
@@ -269,6 +284,7 @@ async def run_snapshot_in_subprocess(
             last_stage=last_stage,
             elapsed_ms=process_elapsed_ms,
             chunks_processed=_parse_last_structure_chunks(stderr),
+            stderr=stderr,
         )
 
     try:
@@ -288,12 +304,39 @@ async def run_snapshot_in_subprocess(
             reason,
             last_stage=last_stage,
             elapsed_ms=process_elapsed_ms,
+            chunks_processed=_parse_last_structure_chunks(stderr),
+            stderr=stderr,
         ) from error
     if not isinstance(payload, dict):
         raise SnapshotSubprocessError(
             "invalid-json",
             last_stage=last_stage,
             elapsed_ms=process_elapsed_ms,
+            stderr=stderr,
+        )
+    if payload.get("failed") is True:
+        failure_kind = payload.get("failure_kind")
+        if (
+            set(payload) != {"failed", "failure_kind"}
+            or failure_kind not in {
+                "generation-count-mismatch",
+                "generation-incomplete",
+                "generation-validation-issues",
+                "membership-invalid",
+                "source-truth-invalid",
+                "sqlite-busy",
+                "structure-child-error",
+                "structure-publication-not-writing",
+            }
+            or process.returncode != 1
+        ):
+            failure_kind = "invalid-json"
+        raise SnapshotSubprocessError(
+            str(failure_kind),
+            last_stage=last_stage,
+            elapsed_ms=process_elapsed_ms,
+            chunks_processed=_parse_last_structure_chunks(stderr),
+            stderr=stderr,
         )
     if payload.get("checkpointed") is True:
         publication_id = payload.get("publication_id")
@@ -324,6 +367,7 @@ async def run_snapshot_in_subprocess(
                     "invalid-json",
                     last_stage=last_stage,
                     elapsed_ms=process_elapsed_ms,
+                    stderr=stderr,
                 )
             logger.info(
                 "isolated Structure publication checkpointed "
@@ -356,6 +400,7 @@ async def run_snapshot_in_subprocess(
                 "invalid-json",
                 last_stage=last_stage,
                 elapsed_ms=process_elapsed_ms,
+                stderr=stderr,
             )
         logger.info(
             "isolated snapshot checkpointed "
@@ -376,6 +421,7 @@ async def run_snapshot_in_subprocess(
             "invalid-json",
             last_stage=last_stage,
             elapsed_ms=process_elapsed_ms,
+            stderr=stderr,
         ) from error
     is_valid = payload.get("is_valid")
     snapshot_id = payload.get("snapshot_id")
@@ -399,6 +445,7 @@ async def run_snapshot_in_subprocess(
             "invalid-json",
             last_stage=last_stage,
             elapsed_ms=process_elapsed_ms,
+            stderr=stderr,
         )
     logger.info(
         "isolated snapshot complete "
@@ -740,6 +787,9 @@ class SnapshotScheduler:
         last_stage: str | None = None,
         elapsed_ms: int | None = None,
         chunks_processed: int | None = None,
+        stderr_bytes: int | None = None,
+        stderr_sha256: str | None = None,
+        stderr_tail: str | None = None,
     ) -> None:
         """Best-effort terminal record; scheduler behavior remains primary truth."""
         try:
@@ -753,6 +803,9 @@ class SnapshotScheduler:
                 last_stage=last_stage,
                 elapsed_ms=elapsed_ms,
                 chunks_processed=chunks_processed,
+                stderr_bytes=stderr_bytes,
+                stderr_sha256=stderr_sha256,
+                stderr_tail=stderr_tail,
             )
         except Exception as error:  # noqa: BLE001 - operational evidence is fail-soft
             logger.warning(
@@ -966,6 +1019,9 @@ class SnapshotScheduler:
                     last_stage=getattr(error, "last_stage", None),
                     elapsed_ms=getattr(error, "elapsed_ms", None),
                     chunks_processed=getattr(error, "chunks_processed", None),
+                    stderr_bytes=getattr(error, "stderr_bytes", None),
+                    stderr_sha256=getattr(error, "stderr_sha256", None),
+                    stderr_tail=getattr(error, "stderr_tail", None),
                 )
             self._failure_counter += 1
             logger.exception(

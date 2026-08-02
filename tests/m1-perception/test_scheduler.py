@@ -14,6 +14,7 @@ FAILURE_THRESHOLD 3 → 5 to absorb DNS jitter via tenacity retry):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import signal
 import sqlite3
@@ -175,6 +176,9 @@ def test_snapshot_attempt_lifecycle_is_append_only(daemon_settings_for_test: Any
         "last_stage": None,
         "elapsed_ms": None,
         "chunks_processed": 9,
+        "stderr_bytes": None,
+        "stderr_sha256": None,
+        "stderr_tail": None,
     }
 
 
@@ -186,7 +190,15 @@ def test_snapshot_attempt_diagnostic_columns_migrate_legacy_rows(tmp_path: Path)
     SQLiteStore(fresh_db).init_schema()
     with sqlite3.connect(fresh_db) as con:
         fresh_columns = {row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")}
-    assert {"elapsed_ms", "last_stage", "chunks_processed"} <= fresh_columns
+    diagnostic_columns = {
+        "elapsed_ms",
+        "last_stage",
+        "chunks_processed",
+        "stderr_bytes",
+        "stderr_sha256",
+        "stderr_tail",
+    }
+    assert diagnostic_columns <= fresh_columns
 
     legacy_db = tmp_path / "legacy.db"
     with sqlite3.connect(legacy_db) as con:
@@ -208,11 +220,12 @@ def test_snapshot_attempt_diagnostic_columns_migrate_legacy_rows(tmp_path: Path)
     with sqlite3.connect(legacy_db) as con:
         legacy_columns = {row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")}
         historical_diagnostics = con.execute(
-            "SELECT last_stage, elapsed_ms, chunks_processed "
+            "SELECT last_stage,elapsed_ms,chunks_processed,stderr_bytes,stderr_sha256,"
+            "stderr_tail "
             "FROM snapshot_attempts WHERE id = 1"
         ).fetchone()
-    assert {"elapsed_ms", "last_stage", "chunks_processed"} <= legacy_columns
-    assert historical_diagnostics == (None, None, None)
+    assert diagnostic_columns <= legacy_columns
+    assert historical_diagnostics == (None, None, None, None, None, None)
 
 
 def test_snapshot_attempt_terminal_row_cannot_be_rewritten(
@@ -255,12 +268,18 @@ async def test_scheduler_persists_sigkill_attempt_failure(
     store = SQLiteStore(daemon_settings_for_test.db_path)
     store.init_schema()
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    child_stderr = (
+        b"sensitive arbitrary output\n"
+        b"structure-publication-progress stage=certifying "
+        b"component=memberships chunks=7 rows=3500\n"
+    )
     scheduler._run_snapshot = AsyncMock(
         side_effect=SnapshotSubprocessError(
             "timeout",
             last_stage="persist",
             elapsed_ms=245_012,
             chunks_processed=7,
+            stderr=child_stderr,
         )
     )
 
@@ -276,6 +295,12 @@ async def test_scheduler_persists_sigkill_attempt_failure(
         "last_stage": "persist",
         "elapsed_ms": 245_012,
         "chunks_processed": 7,
+        "stderr_bytes": len(child_stderr),
+        "stderr_sha256": hashlib.sha256(child_stderr).hexdigest(),
+        "stderr_tail": (
+            "structure-publication-progress stage=certifying "
+            "component=memberships chunks=7 rows=3500"
+        ),
     }
 
 
@@ -1161,6 +1186,43 @@ async def test_snapshot_subprocess_classifies_sqlite_writer_contention() -> None
         match="snapshot-subprocess-sqlite-busy",
     ):
         await run_snapshot_in_subprocess(spawn=spawn)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_accepts_bounded_child_failure_contract() -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    stderr = (
+        b"arbitrary secret-bearing diagnostic\n"
+        b"structure-publication-progress stage=certifying component=memberships "
+        b"chunks=1 rows=500\n"
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return _FakeProcess(
+            {"failed": True, "failure_kind": "membership-invalid"},
+            returncode=1,
+            stderr=stderr,
+        )
+
+    with pytest.raises(
+        SnapshotSubprocessError,
+        match="snapshot-subprocess-membership-invalid",
+    ) as raised:
+        await run_snapshot_in_subprocess(spawn=spawn)
+
+    error = raised.value
+    assert error.stderr_bytes == len(stderr)
+    assert len(error.stderr_sha256) == 64
+    assert error.stderr_tail == (
+        "structure-publication-progress stage=certifying component=memberships "
+        "chunks=1 rows=500"
+    )
+    assert "secret" not in error.stderr_tail
+    assert error.chunks_processed == 1
 
 
 @pytest.mark.asyncio

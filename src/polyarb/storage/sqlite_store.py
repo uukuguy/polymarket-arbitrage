@@ -1787,6 +1787,9 @@ class SQLiteStore:
             _ensure_column("snapshot_attempts", "last_stage", "TEXT")
             _ensure_column("snapshot_attempts", "elapsed_ms", "INTEGER")
             _ensure_column("snapshot_attempts", "chunks_processed", "INTEGER")
+            _ensure_column("snapshot_attempts", "stderr_bytes", "INTEGER")
+            _ensure_column("snapshot_attempts", "stderr_sha256", "TEXT")
+            _ensure_column("snapshot_attempts", "stderr_tail", "TEXT")
             _ensure_column("structure_publications", "write_prior_cursor", "TEXT")
             _ensure_column("structure_publications", "certification_component", "TEXT")
             _ensure_column("structure_publications", "certification_row_cursor", "TEXT")
@@ -3669,16 +3672,28 @@ class SQLiteStore:
                     ):
                         raise ValueError("membership-invalid")
             elif component == "memberships" and not is_backfill:
-                for member in rows:
-                    aligned = read_con.execute(
-                        "SELECT 1 FROM structure_generation_events e JOIN "
-                        "structure_generation_markets k ON k.snapshot_id=e.snapshot_id "
-                        "WHERE e.snapshot_id=? AND e.id=? AND k.market_id=? "
-                        "AND k.event_id=? AND k.neg_risk_market_id=?",
-                        (snapshot_id, member[1], member[3], member[1], member[2]),
-                    ).fetchone()
-                    if aligned is None:
-                        raise ValueError("membership-invalid")
+                # /events is the authority for structural membership, including
+                # inactive/closed reserved outcomes intentionally absent from the
+                # active /markets stream.  Source-event certification later proves
+                # these flags came from the durable raw payload.  Validate this
+                # whole bounded chunk in one anti-join: active-open members must
+                # exist, and any market that does exist must retain group identity.
+                invalid = read_con.execute(
+                    "WITH membership_chunk AS ("
+                    "SELECT event_id,neg_risk_market_id,market_id,active,closed "
+                    "FROM structure_generation_memberships WHERE snapshot_id=?"
+                    f"{clause} ORDER BY {','.join(keys)} LIMIT ?) "
+                    "SELECT 1 FROM membership_chunk m LEFT JOIN "
+                    "structure_generation_events e ON e.snapshot_id=? AND e.id=m.event_id "
+                    "LEFT JOIN structure_generation_markets k ON k.snapshot_id=? "
+                    "AND k.market_id=m.market_id WHERE e.id IS NULL OR "
+                    "(k.market_id IS NULL AND m.active=1 AND m.closed=0) OR "
+                    "(k.market_id IS NOT NULL AND (k.event_id IS NOT m.event_id OR "
+                    "k.neg_risk_market_id IS NOT m.neg_risk_market_id)) LIMIT 1",
+                    (*parameters, snapshot_id, snapshot_id),
+                ).fetchone()
+                if invalid is not None:
+                    raise ValueError("membership-invalid")
             elif component == "markets" and not is_backfill:
                 for market in rows:
                     source = read_con.execute(
@@ -4280,9 +4295,13 @@ class SQLiteStore:
                 "AND t.event_id=m.event_id AND "
                 "t.neg_risk_market_id=m.neg_risk_market_id) OR NOT EXISTS (SELECT 1 "
                 "FROM structure_generation_events e WHERE e.snapshot_id=m.snapshot_id "
-                "AND e.id=m.event_id) OR NOT EXISTS (SELECT 1 FROM "
-                "structure_generation_markets k WHERE k.snapshot_id=m.snapshot_id "
-                "AND k.market_id=m.market_id)) LIMIT 1",
+                "AND e.id=m.event_id) OR ((m.active=1 AND m.closed=0) AND NOT EXISTS "
+                "(SELECT 1 FROM structure_generation_markets k WHERE "
+                "k.snapshot_id=m.snapshot_id AND k.market_id=m.market_id)) OR EXISTS "
+                "(SELECT 1 FROM structure_generation_markets k WHERE "
+                "k.snapshot_id=m.snapshot_id AND k.market_id=m.market_id AND "
+                "(k.event_id IS NOT m.event_id OR k.neg_risk_market_id IS NOT "
+                "m.neg_risk_market_id))) LIMIT 1",
                 (snapshot_id,),
             ).fetchone()
             hash_invalid = False
@@ -6294,6 +6313,9 @@ class SQLiteStore:
         last_stage: str | None = None,
         elapsed_ms: int | None = None,
         chunks_processed: int | None = None,
+        stderr_bytes: int | None = None,
+        stderr_sha256: str | None = None,
+        stderr_tail: str | None = None,
     ) -> None:
         """Close one running attempt exactly once with a bounded outcome."""
         if outcome not in {"succeeded", "failed", "cancelled"}:
@@ -6306,12 +6328,19 @@ class SQLiteStore:
             )
         ):
             raise ValueError("invalid snapshot attempt chunks_processed")
+        if stderr_bytes is not None and stderr_bytes < 0:
+            raise ValueError("invalid snapshot attempt stderr_bytes")
+        if stderr_sha256 is not None and len(stderr_sha256) != 64:
+            raise ValueError("invalid snapshot attempt stderr_sha256")
+        if stderr_tail is not None and len(stderr_tail) > 256:
+            raise ValueError("invalid snapshot attempt stderr_tail")
         con = self._connect_writer()
         try:
             cur = con.execute(
                 "UPDATE snapshot_attempts "
                 "SET finished_at_ms=?, outcome=?, snapshot_id=?, failure_kind=?, "
-                "last_stage=?, elapsed_ms=?, chunks_processed=? "
+                "last_stage=?, elapsed_ms=?, chunks_processed=?,stderr_bytes=?,"
+                "stderr_sha256=?,stderr_tail=? "
                 "WHERE id=? AND outcome='running'",
                 (
                     finished_at_ms,
@@ -6321,6 +6350,9 @@ class SQLiteStore:
                     last_stage,
                     elapsed_ms,
                     chunks_processed,
+                    stderr_bytes,
+                    stderr_sha256,
+                    stderr_tail,
                     attempt_id,
                 ),
             )
@@ -6339,7 +6371,8 @@ class SQLiteStore:
         try:
             row = con.execute(
                 "SELECT id,started_at_ms,finished_at_ms,outcome,snapshot_id,failure_kind,"
-                "last_stage,elapsed_ms,chunks_processed "
+                "last_stage,elapsed_ms,chunks_processed,stderr_bytes,stderr_sha256,"
+                "stderr_tail "
                 "FROM snapshot_attempts ORDER BY id DESC LIMIT 1"
             ).fetchone()
             if row is None:
@@ -6354,6 +6387,9 @@ class SQLiteStore:
                 "last_stage": row[6],
                 "elapsed_ms": row[7],
                 "chunks_processed": row[8],
+                "stderr_bytes": row[9],
+                "stderr_sha256": row[10],
+                "stderr_tail": row[11],
             }
         finally:
             con.close()
@@ -6369,7 +6405,8 @@ class SQLiteStore:
         try:
             rows = con.execute(
                 "SELECT id,started_at_ms,finished_at_ms,outcome,snapshot_id,"
-                "failure_kind,last_stage,elapsed_ms,chunks_processed "
+                "failure_kind,last_stage,elapsed_ms,chunks_processed,stderr_bytes,"
+                "stderr_sha256,stderr_tail "
                 "FROM snapshot_attempts ORDER BY id DESC LIMIT ?",
                 (bounded_limit,),
             ).fetchall()
@@ -6383,6 +6420,9 @@ class SQLiteStore:
                 "last_stage",
                 "elapsed_ms",
                 "chunks_processed",
+                "stderr_bytes",
+                "stderr_sha256",
+                "stderr_tail",
             )
             return [dict(zip(keys, row, strict=True)) for row in rows]
         finally:

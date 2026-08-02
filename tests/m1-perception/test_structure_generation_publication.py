@@ -715,12 +715,14 @@ def _begin_large_generation(
             "id": f"event-{index:03d}",
             "negRisk": True,
             "enableNegRisk": True,
+            "negRiskAugmented": False,
             "negRiskMarketID": f"group-{index:03d}",
             "markets": [
                 {
                     "id": f"market-{index:03d}",
                     "active": True,
                     "closed": False,
+                    "negRiskOther": False,
                 }
             ],
         }
@@ -747,6 +749,8 @@ def _begin_large_generation(
             "id": f"market-{index:03d}",
             "active": True,
             "closed": False,
+            "negRisk": True,
+            "negRiskMarketID": f"group-{index:03d}",
         }
         for index in range(event_count)
     ]
@@ -1030,6 +1034,56 @@ def test_bounded_certification_resumes_every_primary_key_checkpoint(
     assert "count(" not in pointer_sql
     assert "from structure_generation_markets" not in pointer_sql
     assert "from event_market_memberships" not in pointer_sql
+
+
+def test_membership_certification_restarts_across_500_row_boundary(
+    tmp_path: Path,
+) -> None:
+    store, publication = _begin_large_generation(
+        store_path=tmp_path / "state.db", event_count=501
+    )
+    for component in (
+        "events",
+        "event_tags",
+        "memberships",
+        "group_truth",
+        "markets",
+        "issues",
+    ):
+        _normalize_component_to_done(store, publication, component)
+    counts = {
+        "events": 501,
+        "event_tags": 0,
+        "memberships": 501,
+        "group_truth": 501,
+        "markets": 501,
+        "issues": 0,
+    }
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_publications SET expected_counts_json=? "
+            "WHERE publication_id=?",
+            (json.dumps(counts, sort_keys=True), publication.publication_id),
+        )
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_000)
+
+    observed = []
+    for offset in range(10):
+        chunk = SQLiteStore(store.db_path).advance_structure_certification_chunk(
+            publication.publication_id,
+            max_rows=500,
+            now_ms=1_001 + offset,
+        )
+        if chunk.component == "memberships" and chunk.rows_processed:
+            observed.append(chunk)
+        if chunk.component == "group_truth":
+            break
+
+    assert [(item.rows_processed, item.cursor) for item in observed] == [
+        (500, '["event-499","market-499"]'),
+        (1, '["event-500","market-500"]'),
+    ]
+    assert chunk.component == "group_truth"
 
 
 def test_certification_keysets_legacy_null_source_ordinals(tmp_path: Path) -> None:
@@ -1535,6 +1589,161 @@ def test_bounded_certification_rejects_stale_membership_hash(tmp_path: Path) -> 
             store.advance_structure_certification_chunk(
                 publication.publication_id,
                 max_rows=1,
+                now_ms=1_011 + offset,
+            )
+
+
+def test_membership_certification_allows_inactive_member_absent_from_active_stream(
+    tmp_path: Path,
+) -> None:
+    """Event structure retains inactive members that /markets intentionally omits."""
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window_id = _complete_window(store, "market-active", now_ms=1_000)
+    active = EventMember(
+        "event-1", "group-1", "market-active", "named", True, False
+    )
+    inactive = EventMember(
+        "event-1", "group-1", "market-inactive", "inactive-reserved", False, False
+    )
+    counts = {**COMPONENT_COUNTS, "memberships": 2}
+    publication = store.begin_structure_publication(
+        window_id=window_id,
+        snapshot_metadata={
+            "snapshot_id": 1,
+            "taken_at_ms": 1_000,
+            "mode": "full",
+            "data_product": "structure",
+            "expected_counts": counts,
+        },
+        now_ms=1_003,
+    )
+    chunks = (
+        ("events", (_event(1),), "event-1"),
+        (
+            "memberships",
+            (
+                _membership(1, "market-active"),
+                {
+                    **_membership(1, "market-inactive"),
+                    "member_kind": "inactive-reserved",
+                    "active": 0,
+                },
+            ),
+            "event-1:market-inactive",
+        ),
+        (
+            "group_truth",
+            (
+                {
+                    **_group_truth(1),
+                    "expected_member_count": 2,
+                    "membership_hash": membership_hash(
+                        "event-1", "group-1", [active, inactive]
+                    ),
+                    "quality": "complete-unsupported",
+                    "reason": "standard-neg-risk-has-non-tradable-members",
+                },
+            ),
+            "group-1",
+        ),
+        ("markets", (_market("market-active", 1),), "market-active"),
+        ("issues", (), "issues|done"),
+    )
+    cursor = None
+    for offset, (component, rows, next_cursor) in enumerate(chunks):
+        store.append_structure_publication_chunk(
+            publication.publication_id,
+            component,
+            rows,
+            expected_prior_cursor=cursor,
+            next_cursor=next_cursor,
+            now_ms=1_004 + offset,
+        )
+        cursor = next_cursor
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
+
+    for offset in range(10):
+        chunk = store.advance_structure_certification_chunk(
+            publication.publication_id, max_rows=500, now_ms=1_011 + offset
+        )
+        if chunk.component == "group_truth":
+            break
+
+    assert chunk.component == "group_truth"
+
+
+def test_membership_certification_rejects_active_open_member_without_market(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store, snapshot_id=1, market_id="market-active", now_ms=1_000
+    )
+    _append_generation_truth(
+        store,
+        publication,
+        snapshot_id=1,
+        market_id="market-active",
+        now_ms=1_004,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_generation_markets SET market_id='different-market' "
+            "WHERE snapshot_id=1"
+        )
+
+    with pytest.raises(ValueError, match="membership-invalid"):
+        store.certify_structure_generation(
+            publication_id=publication.publication_id,
+            receipt={
+                "source_coverage": {
+                    "completed": True,
+                    "event_items": 1,
+                    "market_items": 1,
+                },
+                "validation_hash": "a" * 64,
+                "certified_at_ms": 1_010,
+            },
+        )
+
+
+def test_membership_certification_rejects_existing_market_identity_mismatch(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store, snapshot_id=1, market_id="market-active", now_ms=1_000
+    )
+    _append_generation_truth(
+        store,
+        publication,
+        snapshot_id=1,
+        market_id="market-active",
+        now_ms=1_004,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_generation_markets SET neg_risk_market_id='wrong-group' "
+            "WHERE snapshot_id=1"
+        )
+    store.append_structure_publication_chunk(
+        publication.publication_id,
+        "issues",
+        (),
+        expected_prior_cursor="market-active",
+        next_cursor="issues|done",
+        now_ms=1_009,
+    )
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
+
+    with pytest.raises(ValueError, match="membership-invalid"):
+        for offset in range(10):
+            SQLiteStore(store.db_path).advance_structure_certification_chunk(
+                publication.publication_id,
+                max_rows=500,
                 now_ms=1_011 + offset,
             )
 

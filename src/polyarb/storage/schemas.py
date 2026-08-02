@@ -2620,6 +2620,9 @@ CREATE TABLE IF NOT EXISTS snapshot_attempts (
     chunks_processed INTEGER CHECK(
         chunks_processed IS NULL OR chunks_processed BETWEEN 0 AND 100
     ),
+    stderr_bytes   INTEGER CHECK(stderr_bytes IS NULL OR stderr_bytes >= 0),
+    stderr_sha256  TEXT CHECK(stderr_sha256 IS NULL OR length(stderr_sha256) = 64),
+    stderr_tail    TEXT CHECK(stderr_tail IS NULL OR length(stderr_tail) <= 256),
     CHECK(
         (outcome = 'running' AND finished_at_ms IS NULL
          AND snapshot_id IS NULL AND failure_kind IS NULL)

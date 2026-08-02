@@ -42,6 +42,28 @@ def _is_sqlite_writer_busy(error: sqlite3.OperationalError) -> bool:
     }
 
 
+_STRUCTURE_FAILURE_KINDS = frozenset(
+    {
+        "generation-count-mismatch",
+        "generation-incomplete",
+        "generation-validation-issues",
+        "membership-invalid",
+        "source-truth-invalid",
+        "structure-publication-not-writing",
+    }
+)
+
+
+def _structure_failure_kind(error: Exception) -> str:
+    """Map arbitrary exceptions to a bounded, non-secret child protocol value."""
+    if isinstance(error, sqlite3.OperationalError) and _is_sqlite_writer_busy(error):
+        return "sqlite-busy"
+    message = str(error)
+    if isinstance(error, ValueError) and message in _STRUCTURE_FAILURE_KINDS:
+        return message
+    return "structure-child-error"
+
+
 def _generation_store(
     *,
     initialize: bool = True,
@@ -342,14 +364,27 @@ def structure_sync(
     if low_priority:
         os.nice(10)
     settings = load_settings()
-    result = asyncio.run(
-        run_structure_sync_until_published(
-            settings,
-            max_pages=max_pages,
-            max_elapsed_s=max_elapsed_seconds,
-            max_publication_rows=max_publication_rows,
+    try:
+        result = asyncio.run(
+            run_structure_sync_until_published(
+                settings,
+                max_pages=max_pages,
+                max_elapsed_s=max_elapsed_seconds,
+                max_publication_rows=max_publication_rows,
+            )
         )
-    )
+    except Exception as error:  # noqa: BLE001 - process boundary owns the protocol
+        failure_kind = _structure_failure_kind(error)
+        if json_output:
+            print(
+                json.dumps(
+                    {"failed": True, "failure_kind": failure_kind},
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(f"FAILED | failure_kind={failure_kind}")
+        raise typer.Exit(code=1) from None
     if isinstance(result, StructurePublicationCheckpoint):
         if json_output:
             print(

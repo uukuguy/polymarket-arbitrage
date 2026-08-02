@@ -37,6 +37,44 @@ def test_structure_sync_cli_returns_certified_snapshot_json(monkeypatch) -> None
     assert json.loads(result.stdout)["snapshot_id"] == 800
 
 
+def test_structure_sync_cli_returns_bounded_failure_json(monkeypatch) -> None:
+    """Exceptions must not become an unbounded Rich traceback and empty stdout."""
+    monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
+    monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
+    with patch(
+        "polyarb.snapshot.cli.run_structure_sync_until_published",
+        new=AsyncMock(side_effect=ValueError("membership-invalid")),
+    ):
+        result = CliRunner().invoke(app, ["structure-sync", "--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "failed": True,
+        "failure_kind": "membership-invalid",
+    }
+    assert len(result.stdout.encode()) <= 128
+    assert "membership-invalid" in result.output
+
+
+def test_structure_sync_cli_redacts_unexpected_exception(monkeypatch) -> None:
+    monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
+    monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
+    secret = "credential=must-not-leak"
+    with patch(
+        "polyarb.snapshot.cli.run_structure_sync_until_published",
+        new=AsyncMock(side_effect=RuntimeError(secret)),
+    ):
+        result = CliRunner().invoke(app, ["structure-sync", "--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "failed": True,
+        "failure_kind": "structure-child-error",
+    }
+    assert secret not in result.stdout
+    assert secret not in result.output
+
+
 def test_structure_sync_cli_returns_cooperative_checkpoint_json(monkeypatch) -> None:
     monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
     monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
