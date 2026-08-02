@@ -63,6 +63,7 @@ class FreshMemberEvidence:
     market_side_quarantine: bool
     absent_from_event_catalog: bool
     absent_from_market_catalog: bool
+    projected_member: StructuralMemberIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,29 @@ class StructureMemberDriftResult:
     @property
     def authorized(self) -> bool:
         return not self.overlap_conflicts and not self.unclassified
+
+
+def reconstruction_root_from_class_commitments(
+    *,
+    class_counts: Mapping[str, int],
+    class_digests: Mapping[str, str],
+    tags: tuple[str, ...],
+) -> str:
+    """Bind one reconstructed universe to its complete tagged partitions."""
+    commitments: list[tuple[str, int, str]] = []
+    for tag in sorted(tags):
+        count = class_counts.get(tag, 0)
+        digest = class_digests.get(tag)
+        if type(count) is not int or count < 0:
+            raise ValueError("invalid-structure-drift-class-count")
+        if count == 0:
+            if digest is not None:
+                raise ValueError("unexpected-empty-structure-drift-class-digest")
+            continue
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise ValueError("invalid-structure-drift-class-digest")
+        commitments.append((tag, count, digest))
+    return _canonical_list_hash(commitments)
 
 
 def project_legacy_compatible_event(
@@ -259,7 +283,7 @@ def build_fresh_member_evidence(
                 current_closed = matches[0].get("closed") is True
                 break
 
-    projector_matches = False
+    projected_member = None
     if raw_market is not None and len(event_sources) == 1 and market_issue is None:
         event_id, _source_ordinal, raw_event = event_sources[0]
         projected_market = project_legacy_compatible_market(
@@ -275,24 +299,21 @@ def build_fresh_member_evidence(
             None,
         )
         row = projected_market.row
-        projector_matches = bool(
-            row is not None
-            and source_member is not None
-            and source_member.event_id == member.event_id
-            and source_member.group_id == member.group_id
-            and source_member.member_kind == member.member_kind
-            and source_member.active == member.active
-            and source_member.closed == member.closed
-            and row.get("condition_id") == member.condition_id
-            and row.get("yes_token_id") == member.yes_token_id
-            and row.get("no_token_id") == member.no_token_id
-            and row.get("neg_risk") == member.neg_risk
-            and row.get("incomplete") == member.incomplete
-            and row.get("event_id") == member.event_id
-            and row.get("neg_risk_market_id") == member.group_id
-            and row.get("active") == member.active
-            and row.get("closed") == member.closed
-        )
+        if row is not None and source_member is not None:
+            projected_member = StructuralMemberIdentity(
+                event_id=source_member.event_id,
+                group_id=source_member.group_id,
+                market_id=source_member.market_id,
+                member_kind=source_member.member_kind,
+                active=source_member.active,
+                closed=source_member.closed,
+                condition_id=str(row.get("condition_id") or ""),
+                yes_token_id=str(row.get("yes_token_id") or ""),
+                no_token_id=str(row.get("no_token_id") or ""),
+                neg_risk=row.get("neg_risk") is True,
+                incomplete=row.get("incomplete") is True,
+            )
+    projector_matches = projected_member == member
     return FreshMemberEvidence(
         source_present=raw_market is not None or bool(event_sources),
         current_active=current_active,
@@ -303,6 +324,7 @@ def build_fresh_member_evidence(
         market_side_quarantine=market_issue is not None,
         absent_from_event_catalog=not event_sources,
         absent_from_market_catalog=raw_market is None,
+        projected_member=projected_member,
     )
 
 
@@ -384,17 +406,8 @@ def classify_structure_member_drift(
         for tag, rows in classes.items()
         if rows
     }
-    legacy_tagged = [
-        ("shared", *_member_tuple(member)) for member in frozen_shared
-    ]
-    generation_tagged = list(legacy_tagged)
-    generation_tagged.extend(
-        ("fresh-addition", *_member_tuple(member)) for member in frozen_additions
-    )
-    for reason, rows in frozen_removals.items():
-        legacy_tagged.extend((reason, *_member_tuple(member)) for member in rows)
-    legacy_tagged.sort()
-    generation_tagged.sort()
+    class_counts = {tag: len(rows) for tag, rows in classes.items() if rows}
+    removal_tags = tuple(frozen_removals)
     return StructureMemberDriftResult(
         len(legacy),
         len(generation),
@@ -404,8 +417,16 @@ def classify_structure_member_drift(
         tuple(conflicts),
         tuple(unclassified),
         class_digests,
-        _canonical_list_hash(legacy_tagged),
-        _canonical_list_hash(generation_tagged),
+        reconstruction_root_from_class_commitments(
+            class_counts=class_counts,
+            class_digests=class_digests,
+            tags=("shared", *removal_tags),
+        ),
+        reconstruction_root_from_class_commitments(
+            class_counts=class_counts,
+            class_digests=class_digests,
+            tags=("shared", "fresh-addition"),
+        ),
     )
 
 

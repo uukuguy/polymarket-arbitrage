@@ -587,6 +587,22 @@ def test_drift_initialization_pins_current_authenticated_identity_once(
         now_ms=3_006,
     )
     assert generation_done.component == "legacy-members"
+    with sqlite3.connect(generation_db) as con:
+        generation_counts_json, generation_digests_json = con.execute(
+            "SELECT class_counts_json,class_digests_json FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+    generation_counts = json.loads(generation_counts_json)
+    generation_digests = json.loads(generation_digests_json)
+    assert generation_counts["projection_member_count"] == 0
+    assert generation_counts["generation_member_count"] == 2
+    assert len(generation_digests["projection_member_root"]) == 64
+    assert len(generation_digests["generation_member_root"]) == 64
+    assert (
+        generation_digests["projection_member_root"]
+        != generation_digests["generation_member_root"]
+    )
     legacy = store.advance_structure_drift_comparison_chunk(
         comparison_id,
         max_rows=1,

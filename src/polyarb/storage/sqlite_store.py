@@ -4220,6 +4220,89 @@ class SQLiteStore:
                 generation=classified_rows,
                 evidence=evidence,
             )
+            projection_count = counts.get("projection_member_count", 0)
+            generation_count = counts.get("generation_member_count", 0)
+            if (
+                type(projection_count) is not int
+                or projection_count < 0
+                or type(generation_count) is not int
+                or generation_count < 0
+            ):
+                raise ValueError("structure-drift-progress-invalid")
+            projection_state_value = digests.get("projection_member_state")
+            generation_state_value = digests.get("generation_member_state")
+            if projection_state_value is None:
+                projection_digest = SerializableSHA256.new()
+                projection_digest.update(b"[")
+            elif isinstance(projection_state_value, str):
+                projection_digest = SerializableSHA256.from_json(
+                    projection_state_value
+                )
+            else:
+                raise ValueError("structure-drift-progress-invalid")
+            if generation_state_value is None:
+                generation_digest = SerializableSHA256.new()
+                generation_digest.update(b"[")
+            elif isinstance(generation_state_value, str):
+                generation_digest = SerializableSHA256.from_json(
+                    generation_state_value
+                )
+            else:
+                raise ValueError("structure-drift-progress-invalid")
+            for member in classified_rows:
+                actual_tuple = (
+                    member.event_id,
+                    member.group_id,
+                    member.market_id,
+                    member.member_kind,
+                    member.active,
+                    member.closed,
+                    member.condition_id,
+                    member.yes_token_id,
+                    member.no_token_id,
+                    member.neg_risk,
+                    member.incomplete,
+                )
+                if generation_count:
+                    generation_digest.update(b",")
+                generation_digest.update(
+                    json.dumps(
+                        actual_tuple,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode()
+                )
+                generation_count += 1
+                expected = evidence[member.market_id].projected_member
+                if expected is None:
+                    continue
+                expected_tuple = (
+                    expected.event_id,
+                    expected.group_id,
+                    expected.market_id,
+                    expected.member_kind,
+                    expected.active,
+                    expected.closed,
+                    expected.condition_id,
+                    expected.yes_token_id,
+                    expected.no_token_id,
+                    expected.neg_risk,
+                    expected.incomplete,
+                )
+                if projection_count:
+                    projection_digest.update(b",")
+                projection_digest.update(
+                    json.dumps(
+                        expected_tuple,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode()
+                )
+                projection_count += 1
+            counts["projection_member_count"] = projection_count
+            counts["generation_member_count"] = generation_count
+            digests["projection_member_state"] = projection_digest.to_json()
+            digests["generation_member_state"] = generation_digest.to_json()
         else:
             generation_ids = {
                 str(getattr(member, "market_id")) for member in counterpart
@@ -4348,6 +4431,21 @@ class SQLiteStore:
                     if generation_phase
                     else "fresh-group-truth"
                 )
+                if generation_phase:
+                    projection_digest = SerializableSHA256.from_json(
+                        str(digests.pop("projection_member_state"))
+                    )
+                    generation_digest = SerializableSHA256.from_json(
+                        str(digests.pop("generation_member_state"))
+                    )
+                    projection_digest.update(b"]")
+                    generation_digest.update(b"]")
+                    digests["projection_member_root"] = (
+                        projection_digest.hexdigest()
+                    )
+                    digests["generation_member_root"] = (
+                        generation_digest.hexdigest()
+                    )
                 counts["phase_row_count"] = 0
                 changed = writer.execute(
                     "UPDATE structure_generation_drift_progress SET phase=?,"
