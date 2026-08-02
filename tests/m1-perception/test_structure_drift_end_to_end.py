@@ -92,6 +92,7 @@ def test_classifier_schema_versions_authority_and_seals_terminal_receipts(
     assert set(terminal_triggers) == {
         "trg_structure_drift_terminal_receipt_update",
         "trg_structure_drift_terminal_receipt_delete",
+        "trg_structure_drift_terminal_receipt_insert",
     }
     assert all(
         "structure-drift-terminal-receipt-sealed" in sql
@@ -175,6 +176,33 @@ def test_terminal_receipt_schema_rejects_update_and_delete(tmp_path: Path) -> No
             + ")",
             (*values, receipt_digest),
         )
+        sealed_row = con.execute(
+            "SELECT * FROM structure_generation_drift_terminal_receipts "
+            "WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        for statement in (
+            "INSERT INTO structure_generation_drift_terminal_receipts("
+            + ",".join(_TERMINAL_RECEIPT_FIELDS)
+            + ",receipt_digest) VALUES ("
+            + ",".join("?" for _ in range(len(values) + 1))
+            + ")",
+            "INSERT OR REPLACE INTO structure_generation_drift_terminal_receipts("
+            + ",".join(_TERMINAL_RECEIPT_FIELDS)
+            + ",receipt_digest) VALUES ("
+            + ",".join("?" for _ in range(len(values) + 1))
+            + ")",
+        ):
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="structure-drift-terminal-receipt-sealed",
+            ):
+                con.execute(statement, (*values, "f" * 64))
+        assert con.execute(
+            "SELECT * FROM structure_generation_drift_terminal_receipts "
+            "WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone() == sealed_row
         with pytest.raises(
             sqlite3.IntegrityError,
             match="structure-drift-terminal-receipt-sealed",
@@ -193,6 +221,187 @@ def test_terminal_receipt_schema_rejects_update_and_delete(tmp_path: Path) -> No
                 "WHERE comparison_id=?",
                 (comparison_id,),
             )
+
+
+def _terminal_receipt_payload(
+    con: sqlite3.Connection,
+    comparison_id: str,
+) -> dict[str, object]:
+    row = con.execute(
+        "SELECT hash_algorithm,classifier_contract_version,legacy_snapshot_id,"
+        "generation_snapshot_id,publication_id,window_id,"
+        "normalization_contract_version,exact_receipt_digest,"
+        "pointer_validation_hash,generation_certification_hash FROM "
+        "structure_generation_drift_progress WHERE comparison_id=?",
+        (comparison_id,),
+    ).fetchone()
+    diagnostic_samples_json = (
+        '{"other-zero-removal-reason":[{"market_id":"m1"}]}'
+    )
+    values: tuple[object, ...] = (
+        comparison_id,
+        *row,
+        "a" * 64,
+        "drift-unclassified",
+        '{"unclassified":1}',
+        '{"unclassified":"' + "c" * 64 + '"}',
+        '{"other-zero-removal-reason":1}',
+        "b" * 64,
+        diagnostic_samples_json,
+        hashlib.sha256(diagnostic_samples_json.encode()).hexdigest(),
+        3_001,
+        3_002,
+    )
+    return dict(zip(_TERMINAL_RECEIPT_FIELDS, values, strict=True))
+
+
+def _insert_terminal_receipt(
+    con: sqlite3.Connection,
+    payload: dict[str, object],
+) -> str:
+    receipt_digest = sqlite_store_module._structure_drift_terminal_receipt_digest(
+        payload
+    )
+    con.execute(
+        "INSERT INTO structure_generation_drift_terminal_receipts("
+        + ",".join(_TERMINAL_RECEIPT_FIELDS)
+        + ",receipt_digest) VALUES ("
+        + ",".join("?" for _ in range(len(payload) + 1))
+        + ")",
+        (*(payload[field] for field in _TERMINAL_RECEIPT_FIELDS), receipt_digest),
+    )
+    return receipt_digest
+
+
+@pytest.mark.parametrize(
+    "tamper_field",
+    (*_TERMINAL_RECEIPT_FIELDS, "receipt_digest", "missing"),
+)
+def test_terminal_receipt_status_tamper_fails_closed(
+    tmp_path: Path,
+    tamper_field: str,
+) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    with sqlite3.connect(store.db_path) as con:
+        payload = _terminal_receipt_payload(con, comparison_id)
+        _insert_terminal_receipt(con, payload)
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET phase='stale',"
+            "terminal_reason='drift-unclassified',class_counts_json=?,"
+            "class_digests_json=?,diagnostic_counts_json=?,diagnostic_root=?,"
+            "diagnostic_samples_json=?,diagnostic_samples_digest=?,"
+            "source_identity_hash=?,checkpoint_at_ms=3002 WHERE comparison_id=?",
+            (
+                payload["class_counts_json"],
+                payload["class_digests_json"],
+                payload["diagnostic_counts_json"],
+                payload["diagnostic_root"],
+                payload["diagnostic_samples_json"],
+                payload["diagnostic_samples_digest"],
+                payload["source_identity_hash"],
+                comparison_id,
+            ),
+        )
+        if tamper_field == "missing":
+            con.execute("DROP TRIGGER trg_structure_drift_terminal_receipt_delete")
+            con.execute(
+                "DELETE FROM structure_generation_drift_terminal_receipts "
+                "WHERE comparison_id=?",
+                (comparison_id,),
+            )
+        else:
+            con.execute("DROP TRIGGER trg_structure_drift_terminal_receipt_update")
+            replacement: object = (
+                9_999
+                if tamper_field.endswith("_ms")
+                or tamper_field in {"legacy_snapshot_id", "generation_snapshot_id"}
+                else "e" * 64
+            )
+            con.execute(
+                f"UPDATE structure_generation_drift_terminal_receipts SET "
+                f"{tamper_field}=? WHERE comparison_id=?",  # noqa: S608 - fixed test tuple
+                (replacement, comparison_id),
+            )
+    status = store.structure_generation_drift_status()
+    assert status["reason"] == "structure-drift-terminal-receipt-invalid"
+    assert "class_counts" not in status
+    assert "diagnostic_counts" not in status
+    assert "diagnostic_samples" not in status
+
+
+def test_valid_terminal_receipt_status_exposes_authenticated_evidence(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    with sqlite3.connect(store.db_path) as con:
+        payload = _terminal_receipt_payload(con, comparison_id)
+        receipt_digest = _insert_terminal_receipt(con, payload)
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET phase='stale',"
+            "terminal_reason=?,class_counts_json=?,class_digests_json=?,"
+            "diagnostic_counts_json=?,diagnostic_root=?,diagnostic_samples_json=?,"
+            "diagnostic_samples_digest=?,source_identity_hash=?,checkpoint_at_ms=? "
+            "WHERE comparison_id=?",
+            (
+                payload["terminal_reason"],
+                payload["class_counts_json"],
+                payload["class_digests_json"],
+                payload["diagnostic_counts_json"],
+                payload["diagnostic_root"],
+                payload["diagnostic_samples_json"],
+                payload["diagnostic_samples_digest"],
+                payload["source_identity_hash"],
+                payload["checkpoint_at_ms"],
+                comparison_id,
+            ),
+        )
+    status = store.structure_generation_drift_status()
+    assert status["reason"] == "drift-unclassified"
+    assert status["terminal_receipt_digest"] == receipt_digest
+    assert status["diagnostic_counts"] == {"other-zero-removal-reason": 1}
+
+
+def test_mixed_terminal_receipt_with_valid_digest_fails_closed(tmp_path: Path) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    with sqlite3.connect(store.db_path) as con:
+        payload = _terminal_receipt_payload(con, comparison_id)
+        _insert_terminal_receipt(con, payload)
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET phase='stale',"
+            "terminal_reason=?,class_counts_json=?,class_digests_json=?,"
+            "diagnostic_counts_json=?,diagnostic_root=?,diagnostic_samples_json=?,"
+            "diagnostic_samples_digest=?,source_identity_hash=?,checkpoint_at_ms=? "
+            "WHERE comparison_id=?",
+            (
+                payload["terminal_reason"],
+                payload["class_counts_json"],
+                payload["class_digests_json"],
+                payload["diagnostic_counts_json"],
+                payload["diagnostic_root"],
+                payload["diagnostic_samples_json"],
+                payload["diagnostic_samples_digest"],
+                payload["source_identity_hash"],
+                payload["checkpoint_at_ms"],
+                comparison_id,
+            ),
+        )
+        mixed_payload = {**payload, "publication_id": "mixed-publication"}
+        mixed_digest = sqlite_store_module._structure_drift_terminal_receipt_digest(
+            mixed_payload
+        )
+        con.execute("DROP TRIGGER trg_structure_drift_terminal_receipt_update")
+        con.execute(
+            "UPDATE structure_generation_drift_terminal_receipts SET "
+            "publication_id=?,receipt_digest=? WHERE comparison_id=?",
+            (mixed_payload["publication_id"], mixed_digest, comparison_id),
+        )
+    status = store.structure_generation_drift_status()
+    assert status["reason"] == "structure-drift-terminal-receipt-invalid"
+    assert "class_counts" not in status
+    assert "diagnostic_samples" not in status
 
 
 def _raw_market(
@@ -889,7 +1098,7 @@ def _authority_signature(path: Path) -> dict[str, tuple[tuple[object, ...], ...]
         }
         for kind in ("index", "trigger"):
             signature[kind] = tuple(
-                (str(row[0]), str(row[1]), " ".join(str(row[2]).split()))
+                (str(row[0]), str(row[1]), "".join(str(row[2]).split()))
                 for row in con.execute(
                     "SELECT name,tbl_name,sql FROM sqlite_master WHERE type=? AND "
                     "tbl_name IN (?,?,?) ORDER BY name",
@@ -991,6 +1200,47 @@ def test_classifier_migration_rollback_restores_authority_and_business_rows(
         } == before_counts
     store.init_schema()
     store.init_schema()
+
+
+def test_migrated_active_classifier_v1_is_superseded_before_v2_initialization(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    store.initialize_structure_drift_comparison(now_ms=3_000)
+    _downgrade_to_classifier_v1_shape(store)
+    store.init_schema()
+    legacy_comparison_id = "e" * 64
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET comparison_id=?,"
+            "hash_algorithm='row-chain-sha256-v2' "
+            "WHERE classifier_contract_version=?",
+            (legacy_comparison_id, STRUCTURE_DRIFT_CLASSIFIER_V1),
+        )
+
+    v2_comparison_id = store.initialize_structure_drift_comparison(now_ms=3_001)
+
+    assert v2_comparison_id != legacy_comparison_id
+    with sqlite3.connect(store.db_path) as con:
+        rows = con.execute(
+            "SELECT comparison_id,classifier_contract_version,phase,terminal_reason "
+            "FROM structure_generation_drift_progress ORDER BY "
+            "classifier_contract_version"
+        ).fetchall()
+    assert rows == [
+        (
+            legacy_comparison_id,
+            STRUCTURE_DRIFT_CLASSIFIER_V1,
+            "stale",
+            "drift-classifier-contract-superseded",
+        ),
+        (
+            v2_comparison_id,
+            STRUCTURE_DRIFT_CLASSIFIER_V2,
+            "source-events",
+            None,
+        ),
+    ]
 
 
 def test_drift_v2_migration_rolls_back_injected_crash_and_reinitializes(

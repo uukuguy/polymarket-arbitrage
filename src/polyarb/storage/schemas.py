@@ -3215,6 +3215,13 @@ BEGIN SELECT RAISE(ABORT,'structure-drift-terminal-receipt-sealed'); END;
 CREATE TRIGGER IF NOT EXISTS trg_structure_drift_terminal_receipt_delete
 BEFORE DELETE ON structure_generation_drift_terminal_receipts
 BEGIN SELECT RAISE(ABORT,'structure-drift-terminal-receipt-sealed'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_drift_terminal_receipt_insert
+BEFORE INSERT ON structure_generation_drift_terminal_receipts
+WHEN EXISTS (
+    SELECT 1 FROM structure_generation_drift_terminal_receipts
+    WHERE comparison_id=NEW.comparison_id
+)
+BEGIN SELECT RAISE(ABORT,'structure-drift-terminal-receipt-sealed'); END;
 
 -- Append-only authorization/evidence for bounded reclamation of old immutable
 -- generation bulk rows. Publication, comparison receipt, snapshot, and legacy

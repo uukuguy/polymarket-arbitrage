@@ -600,6 +600,7 @@ def _migrate_structure_drift_classifier_v2(
     try:
         con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_update")
         con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_delete")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_insert")
         con.execute("DROP TABLE IF EXISTS structure_generation_drift_terminal_receipts")
         con.execute("DROP INDEX IF EXISTS idx_structure_drift_progress_active")
         con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_receipt_update")
@@ -759,6 +760,14 @@ def _migrate_structure_drift_classifier_v2(
             "CREATE TRIGGER IF NOT EXISTS "
             "trg_structure_drift_terminal_receipt_delete BEFORE DELETE "
             "ON structure_generation_drift_terminal_receipts BEGIN SELECT RAISE(ABORT,"
+            "'structure-drift-terminal-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER IF NOT EXISTS "
+            "trg_structure_drift_terminal_receipt_insert BEFORE INSERT "
+            "ON structure_generation_drift_terminal_receipts WHEN EXISTS (SELECT 1 "
+            "FROM structure_generation_drift_terminal_receipts WHERE "
+            "comparison_id=NEW.comparison_id) BEGIN SELECT RAISE(ABORT,"
             "'structure-drift-terminal-receipt-sealed'); END"
         )
         if fault_hook is not None:
@@ -4358,18 +4367,25 @@ class SQLiteStore:
                 classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
             )
             active = con.execute(
-                "SELECT comparison_id,hash_algorithm FROM "
+                "SELECT comparison_id,hash_algorithm,classifier_contract_version FROM "
                 "structure_generation_drift_progress "
                 "WHERE phase NOT IN ('sealed','stale') LIMIT 1"
             ).fetchone()
-            if active is not None and active[1] == "serializable-sha256-v1":
+            if active is not None and (
+                active[1] == "serializable-sha256-v1"
+                or active[2] != STRUCTURE_DRIFT_CLASSIFIER_V2
+            ):
+                superseded_reason = (
+                    "drift-hash-algorithm-superseded"
+                    if active[1] == "serializable-sha256-v1"
+                    else "drift-classifier-contract-superseded"
+                )
                 superseded = con.execute(
                     "UPDATE structure_generation_drift_progress SET phase='stale',"
-                    "terminal_reason='drift-hash-algorithm-superseded',"
+                    "terminal_reason=?,"
                     "checkpoint_at_ms=? WHERE comparison_id=? AND "
-                    "hash_algorithm='serializable-sha256-v1' AND phase NOT IN "
-                    "('sealed','stale')",
-                    (now_ms, str(active[0])),
+                    "phase NOT IN ('sealed','stale')",
+                    (superseded_reason, now_ms, str(active[0])),
                 )
                 if superseded.rowcount != 1:
                     raise StructurePublicationCursorError(
@@ -5609,7 +5625,9 @@ class SQLiteStore:
                 "SELECT comparison_id,phase,class_counts_json,class_digests_json,"
                 "checkpoint_at_ms,hash_algorithm,source_event_count,"
                 "source_market_count,source_event_hash,source_market_hash,"
-                "source_identity_hash,classifier_contract_version "
+                "source_identity_hash,classifier_contract_version,terminal_reason,"
+                "diagnostic_counts_json,diagnostic_root,diagnostic_samples_json,"
+                "diagnostic_samples_digest "
                 "FROM structure_generation_drift_progress WHERE "
                 "legacy_snapshot_id=? AND generation_snapshot_id=? AND "
                 "publication_id=? AND window_id=? AND "
@@ -5694,6 +5712,118 @@ class SQLiteStore:
                 tag: progress_counts.get(f"class_count:{tag}", 0)
                 for tag in class_tags
             }
+            if progress[1] == "stale":
+                terminal_row = con.execute(
+                    "SELECT "
+                    + ",".join(_STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS)
+                    + ",receipt_digest FROM "
+                    "structure_generation_drift_terminal_receipts WHERE "
+                    "comparison_id=?",
+                    (str(progress[0]),),
+                ).fetchone()
+                terminal_valid = False
+                terminal_payload: dict[str, object] = {}
+                diagnostic_counts: dict[str, object] = {}
+                diagnostic_samples: dict[str, object] = {}
+                if terminal_row is not None:
+                    terminal_payload = dict(
+                        zip(
+                            _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS,
+                            terminal_row[:-1],
+                            strict=True,
+                        )
+                    )
+                    try:
+                        terminal_class_counts = json.loads(
+                            str(terminal_payload["class_counts_json"])
+                        )
+                        terminal_class_digests = json.loads(
+                            str(terminal_payload["class_digests_json"])
+                        )
+                        diagnostic_counts = json.loads(
+                            str(terminal_payload["diagnostic_counts_json"])
+                        )
+                        diagnostic_samples = json.loads(
+                            str(terminal_payload["diagnostic_samples_json"])
+                        )
+                        terminal_shape_valid = all(
+                            isinstance(value, dict)
+                            for value in (
+                                terminal_class_counts,
+                                terminal_class_digests,
+                                diagnostic_counts,
+                                diagnostic_samples,
+                            )
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        terminal_shape_valid = False
+                    expected_terminal_digest = (
+                        _structure_drift_terminal_receipt_digest(terminal_payload)
+                    )
+                    terminal_valid = (
+                        terminal_shape_valid
+                        and terminal_row[-1] == expected_terminal_digest
+                        and terminal_payload["comparison_id"] == progress[0]
+                        and terminal_payload["hash_algorithm"] == progress[5]
+                        and terminal_payload["classifier_contract_version"]
+                        == progress[11]
+                        == STRUCTURE_DRIFT_CLASSIFIER_V2
+                        and terminal_payload["legacy_snapshot_id"] == legacy[0]
+                        and terminal_payload["generation_snapshot_id"] == current[0]
+                        and terminal_payload["publication_id"] == current[1]
+                        and terminal_payload["window_id"] == current[4]
+                        and terminal_payload["normalization_contract_version"]
+                        == current[5]
+                        and terminal_payload["exact_receipt_digest"] == current[3]
+                        and terminal_payload["pointer_validation_hash"] == current[2]
+                        and terminal_payload["generation_certification_hash"]
+                        == current[6]
+                        and terminal_payload["source_identity_hash"] == progress[10]
+                        and terminal_payload["terminal_reason"] == progress[12]
+                        and terminal_payload["class_counts_json"] == progress[2]
+                        and terminal_payload["class_digests_json"] == progress[3]
+                        and terminal_payload["diagnostic_counts_json"] == progress[13]
+                        and terminal_payload["diagnostic_root"] == progress[14]
+                        and terminal_payload["diagnostic_samples_json"] == progress[15]
+                        and terminal_payload["diagnostic_samples_digest"] == progress[16]
+                        and terminal_payload["checkpoint_at_ms"] == progress[4]
+                        and terminal_payload["diagnostic_samples_digest"]
+                        == hashlib.sha256(
+                            str(terminal_payload["diagnostic_samples_json"]).encode()
+                        ).hexdigest()
+                    )
+                if not terminal_valid:
+                    return {
+                        **base,
+                        "authorization_mode": "none",
+                        "authorized": False,
+                        "progress_id": str(progress[0]),
+                        "hash_algorithm": str(progress[5]),
+                        "classifier_contract_version": str(progress[11]),
+                        "checkpoint_at_ms": int(progress[4]),
+                        "phase": "stale",
+                        "reason": "structure-drift-terminal-receipt-invalid",
+                    }
+                return {
+                    **base,
+                    "authorization_mode": "none",
+                    "authorized": False,
+                    "progress_id": str(progress[0]),
+                    "hash_algorithm": str(progress[5]),
+                    "classifier_contract_version": str(progress[11]),
+                    "class_counts": terminal_class_counts,
+                    "class_digests": terminal_class_digests,
+                    "diagnostic_counts": diagnostic_counts,
+                    "diagnostic_root": str(terminal_payload["diagnostic_root"]),
+                    "diagnostic_samples": diagnostic_samples,
+                    "diagnostic_samples_digest": str(
+                        terminal_payload["diagnostic_samples_digest"]
+                    ),
+                    "terminal_receipt_digest": str(terminal_row[-1]),
+                    "checkpoint_at_ms": int(progress[4]),
+                    "phase": "stale",
+                    "reason": str(progress[12]),
+                }
             if progress[1] != "sealed" or receipt_row is None:
                 return {
                     **base,
