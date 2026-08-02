@@ -918,8 +918,19 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
             (progress[1], progress[2]),
         ).fetchone()
         source_hashes = ("1" * 64, "2" * 64, "3" * 64)
+        sealed_class_counts = {
+            "shared": 1,
+            "fresh-addition": 0,
+            "current-nontradable": 0,
+            "event-only-quarantine": 0,
+            "market-side-quarantine": 0,
+            "fresh-source-absent": 0,
+            "overlap-conflict": 0,
+            "unclassified": 0,
+        }
+        sealed_class_digests = {"shared": "a" * 64}
         class_counts_json = json.dumps(
-            {"overlap-conflict": 0, "unclassified": 0},
+            sealed_class_counts,
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -954,7 +965,11 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
             "generation_source_group_truth_comparison_count": 1,
             "generation_source_group_truth_comparison_root": "5" * 64,
             "class_counts_json": class_counts_json,
-            "class_digests_json": "{}",
+            "class_digests_json": json.dumps(
+                sealed_class_digests,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             "legacy_reconstruction_root": "8" * 64,
             "generation_reconstruction_root": "9" * 64,
             "overlap_conflict_count": 0,
@@ -992,9 +1007,17 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
                 *source_hashes,
                 json.dumps(
                     {
-                        "class_count:overlap-conflict": 0,
-                        "class_count:unclassified": 0,
+                        **{
+                            f"class_count:{tag}": count
+                            for tag, count in sealed_class_counts.items()
+                        },
+                        "projection_member_count": 1,
+                        "generation_member_count": 1,
                         "generation_projection_member_comparison_count": 1,
+                        "generation_member_scan_count": 1,
+                        "legacy_member_scan_count": 1,
+                        "source_group_truth_count": 1,
+                        "generation_group_truth_count": 1,
                         "generation_source_group_truth_comparison_count": 1,
                     }
                 ),
@@ -1007,6 +1030,9 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
                         "generation_group_truth_hash": "7" * 64,
                         "generation_projection_member_comparison_root": "4" * 64,
                         "generation_source_group_truth_comparison_root": "5" * 64,
+                        "sealed_class_digests": sealed_class_digests,
+                        "legacy_reconstruction_root": "8" * 64,
+                        "generation_reconstruction_root": "9" * 64,
                     }
                 ),
                 comparison_id,
@@ -1168,6 +1194,7 @@ def test_sealed_receipt_pointer_and_source_identity_drift_fail_closed(
     status = store.structure_generation_drift_status()
     assert status["authorized"] is False
     assert status["reason"] == "structure-drift-receipt-invalid"
+    assert status["class_counts"] == {}
 
 
 @pytest.mark.parametrize(
@@ -1181,6 +1208,26 @@ def test_sealed_receipt_pointer_and_source_identity_drift_fail_closed(
         ("generation_projection_member_comparison_root", "e" * 64),
         ("generation_source_group_truth_comparison_count", 2),
         ("generation_source_group_truth_comparison_root", "f" * 64),
+        (
+            "class_counts_json",
+            json.dumps(
+                {
+                    "shared": 2,
+                    "fresh-addition": 0,
+                    "current-nontradable": 0,
+                    "event-only-quarantine": 0,
+                    "market-side-quarantine": 0,
+                    "fresh-source-absent": 0,
+                    "overlap-conflict": 0,
+                    "unclassified": 0,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ),
+        ("class_digests_json", json.dumps({"shared": "0" * 64})),
+        ("legacy_reconstruction_root", "1" * 64),
+        ("generation_reconstruction_root", "2" * 64),
     ),
 )
 def test_sealed_receipt_audit_and_comparison_commitment_tamper_fails_closed(
@@ -1197,6 +1244,97 @@ def test_sealed_receipt_audit_and_comparison_commitment_tamper_fails_closed(
     status = store.structure_generation_drift_status()
     assert status["authorized"] is False
     assert status["reason"] == "structure-drift-receipt-invalid"
+    assert status["class_counts"] == {}
+
+
+@pytest.mark.parametrize(
+    "count_key",
+    (
+        "projection_member_count",
+        "generation_member_count",
+        "generation_projection_member_comparison_count",
+        "source_group_truth_count",
+        "generation_group_truth_count",
+        "generation_source_group_truth_comparison_count",
+    ),
+)
+def test_sealed_progress_audit_and_comparison_count_tamper_fails_closed(
+    tmp_path: Path,
+    count_key: str,
+) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    _install_sealed_drift_authority(store, comparison_id)
+    assert store.structure_generation_drift_status()["authorized"] is True
+    with sqlite3.connect(store.db_path) as con:
+        counts_json = con.execute(
+            "SELECT class_counts_json FROM structure_generation_drift_progress "
+            "WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()[0]
+        counts = json.loads(str(counts_json))
+        counts[count_key] = int(counts[count_key]) + 1_000
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET class_counts_json=? "
+            "WHERE comparison_id=?",
+            (
+                json.dumps(counts, sort_keys=True, separators=(",", ":")),
+                comparison_id,
+            ),
+        )
+
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is False
+    assert status["reason"] == "structure-drift-receipt-invalid"
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "class-count",
+        "class-digest",
+        "legacy-reconstruction",
+        "generation-reconstruction",
+    ),
+)
+def test_sealed_progress_class_and_reconstruction_tamper_fails_closed(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    _install_sealed_drift_authority(store, comparison_id)
+    assert store.structure_generation_drift_status()["authorized"] is True
+    with sqlite3.connect(store.db_path) as con:
+        counts_json, digests_json = con.execute(
+            "SELECT class_counts_json,class_digests_json FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        counts = json.loads(str(counts_json))
+        digests = json.loads(str(digests_json))
+        if tamper == "class-count":
+            counts["class_count:shared"] += 1
+        elif tamper == "class-digest":
+            digests["sealed_class_digests"]["shared"] = "b" * 64
+        elif tamper == "legacy-reconstruction":
+            digests["legacy_reconstruction_root"] = "c" * 64
+        else:
+            digests["generation_reconstruction_root"] = "d" * 64
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET class_counts_json=?,"
+            "class_digests_json=? WHERE comparison_id=?",
+            (
+                json.dumps(counts, sort_keys=True, separators=(",", ":")),
+                json.dumps(digests, sort_keys=True, separators=(",", ":")),
+                comparison_id,
+            ),
+        )
+
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is False
+    assert status["reason"] == "structure-drift-receipt-invalid"
+    assert status["class_counts"] == {}
 
 
 def test_exact_authorization_is_independent_of_drift_receipt_algorithm(

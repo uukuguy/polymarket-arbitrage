@@ -4537,6 +4537,7 @@ class SQLiteStore:
             else:
                 generation_hash = digest.hexdigest()
                 digests["generation_group_truth_hash"] = generation_hash
+                counts["generation_group_truth_count"] = phase_count
                 comparison_digest = RowChainSHA256.from_json(
                     str(
                         digests.pop(
@@ -5380,10 +5381,32 @@ class SQLiteStore:
                 "WHERE comparison_id=?",
                 (str(progress[0]),),
             ).fetchone()
-            class_counts = {
-                key.removeprefix("class_count:"): value
+            class_tags = (
+                "shared",
+                "fresh-addition",
+                "current-nontradable",
+                "event-only-quarantine",
+                "market-side-quarantine",
+                "fresh-source-absent",
+                "overlap-conflict",
+                "unclassified",
+            )
+            progress_class_items = {
+                key: value
                 for key, value in progress_counts.items()
-                if key.startswith("class_count:") and type(value) is int
+                if key.startswith("class_count:")
+            }
+            progress_class_shape_valid = (
+                set(progress_class_items)
+                <= {f"class_count:{tag}" for tag in class_tags}
+                and all(
+                    type(value) is int and value >= 0
+                    for value in progress_class_items.values()
+                )
+            )
+            class_counts = {
+                tag: progress_counts.get(f"class_count:{tag}", 0)
+                for tag in class_tags
             }
             if progress[1] != "sealed" or receipt_row is None:
                 return {
@@ -5409,6 +5432,87 @@ class SQLiteStore:
                 )
             )
             expected_receipt_digest = _structure_drift_receipt_digest(receipt_payload)
+            try:
+                receipt_class_counts = json.loads(
+                    str(receipt_payload["class_counts_json"])
+                )
+                receipt_class_digests = json.loads(
+                    str(receipt_payload["class_digests_json"])
+                )
+                sealed_class_digests = progress_digests.get(
+                    "sealed_class_digests"
+                )
+                class_evidence_valid = (
+                    progress_class_shape_valid
+                    and isinstance(receipt_class_counts, dict)
+                    and set(receipt_class_counts) == set(class_tags)
+                    and all(
+                        type(receipt_class_counts[tag]) is int
+                        and receipt_class_counts[tag] >= 0
+                        for tag in class_tags
+                    )
+                    and isinstance(receipt_class_digests, dict)
+                    and isinstance(sealed_class_digests, dict)
+                    and receipt_class_digests == sealed_class_digests
+                    and receipt_class_counts == class_counts
+                    and set(receipt_class_digests)
+                    == {
+                        tag
+                        for tag in class_tags
+                        if receipt_class_counts[tag] > 0
+                    }
+                    and all(
+                        isinstance(value, str) and len(value) == 64
+                        for value in receipt_class_digests.values()
+                    )
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                receipt_class_counts = {}
+                class_evidence_valid = False
+            member_comparison_count = receipt_payload[
+                "generation_projection_member_comparison_count"
+            ]
+            group_comparison_count = receipt_payload[
+                "generation_source_group_truth_comparison_count"
+            ]
+            member_counts_valid = (
+                type(member_comparison_count) is int
+                and member_comparison_count >= 0
+                and member_comparison_count
+                == progress_counts.get(
+                    "generation_projection_member_comparison_count"
+                )
+                == progress_counts.get("projection_member_count")
+                == progress_counts.get("generation_member_count")
+                == progress_counts.get("generation_member_scan_count")
+            )
+            group_counts_valid = (
+                type(group_comparison_count) is int
+                and group_comparison_count >= 0
+                and group_comparison_count
+                == progress_counts.get(
+                    "generation_source_group_truth_comparison_count"
+                )
+                == progress_counts.get("source_group_truth_count")
+                == progress_counts.get("generation_group_truth_count")
+            )
+            reconstruction_counts_valid = (
+                class_evidence_valid
+                and progress_counts.get("legacy_member_scan_count")
+                == receipt_class_counts.get("shared", -1)
+                + sum(
+                    receipt_class_counts.get(tag, -1)
+                    for tag in (
+                        "current-nontradable",
+                        "event-only-quarantine",
+                        "market-side-quarantine",
+                        "fresh-source-absent",
+                    )
+                )
+                and progress_counts.get("generation_member_scan_count")
+                == receipt_class_counts.get("shared", -1)
+                + receipt_class_counts.get("fresh-addition", -1)
+            )
             receipt_valid = (
                 receipt_row[-1] == expected_receipt_digest
                 and receipt_payload["comparison_id"] == progress[0]
@@ -5436,20 +5540,12 @@ class SQLiteStore:
                 == progress_digests.get("source_group_truth_hash")
                 and receipt_payload["generation_group_truth_hash"]
                 == progress_digests.get("generation_group_truth_hash")
-                and receipt_payload["generation_projection_member_comparison_count"]
-                == progress_counts.get(
-                    "generation_projection_member_comparison_count"
-                )
+                and member_counts_valid
                 and receipt_payload["generation_projection_member_comparison_root"]
                 == progress_digests.get(
                     "generation_projection_member_comparison_root"
                 )
-                and receipt_payload[
-                    "generation_source_group_truth_comparison_count"
-                ]
-                == progress_counts.get(
-                    "generation_source_group_truth_comparison_count"
-                )
+                and group_counts_valid
                 and receipt_payload[
                     "generation_source_group_truth_comparison_root"
                 ]
@@ -5462,8 +5558,18 @@ class SQLiteStore:
                 == receipt_payload[
                     "generation_source_group_truth_comparison_root"
                 ]
+                and class_evidence_valid
+                and reconstruction_counts_valid
+                and receipt_payload["legacy_reconstruction_root"]
+                == progress_digests.get("legacy_reconstruction_root")
+                and receipt_payload["generation_reconstruction_root"]
+                == progress_digests.get("generation_reconstruction_root")
                 and receipt_payload["overlap_conflict_count"] == 0
+                and receipt_payload["overlap_conflict_count"]
+                == receipt_class_counts.get("overlap-conflict")
                 and receipt_payload["unclassified_count"] == 0
+                and receipt_payload["unclassified_count"]
+                == receipt_class_counts.get("unclassified")
                 and progress_digests.get("receipt_digest") == receipt_row[-1]
             )
             return {
@@ -5474,7 +5580,7 @@ class SQLiteStore:
                 "authorized": receipt_valid,
                 "progress_id": str(progress[0]),
                 "hash_algorithm": str(progress[5]),
-                "class_counts": class_counts,
+                "class_counts": class_counts if receipt_valid else {},
                 "checkpoint_at_ms": int(progress[4]),
                 "phase": str(progress[1]),
                 "reason": None if receipt_valid else "structure-drift-receipt-invalid",
