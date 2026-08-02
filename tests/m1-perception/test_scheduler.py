@@ -278,6 +278,14 @@ def test_snapshot_attempt_terminal_row_cannot_be_rewritten(
         {"stderr_bytes": 1, "stderr_sha256": "G" * 64},
         {"stderr_bytes": 1, "stderr_sha256": "0" * 64, "stderr_tail": "secret"},
         {
+            "stderr_bytes": 128,
+            "stderr_sha256": "0" * 64,
+            "stderr_tail": (
+                "structure-sync-failure failure_kind=sqlite-busy "
+                "membership_kind=group-truth key_sha256=" + "a" * 64
+            ),
+        },
+        {
             "stderr_bytes": 1,
             "stderr_sha256": "0" * 64,
             "stderr_tail": "snapshot-stage stage=persist state=start elapsed_ms="
