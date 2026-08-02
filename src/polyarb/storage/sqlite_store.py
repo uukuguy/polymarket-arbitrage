@@ -660,6 +660,7 @@ def _comparison_receipt_digest(
 
 _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS = (
     "comparison_id",
+    "hash_algorithm",
     "legacy_snapshot_id",
     "legacy_taken_at_ms",
     "legacy_finished_at_ms",
@@ -4628,6 +4629,7 @@ class SQLiteStore:
                     )
                     receipt_payload: dict[str, object] = {
                         "comparison_id": comparison_id,
+                        "hash_algorithm": ROW_CHAIN_SHA256_V2,
                         "legacy_snapshot_id": int(progress[0]),
                         "legacy_taken_at_ms": int(exact[4]),
                         "legacy_finished_at_ms": int(exact[5]),
@@ -5225,7 +5227,9 @@ class SQLiteStore:
                 }
             progress = con.execute(
                 "SELECT comparison_id,phase,class_counts_json,class_digests_json,"
-                "checkpoint_at_ms,hash_algorithm "
+                "checkpoint_at_ms,hash_algorithm,source_event_count,"
+                "source_market_count,source_event_hash,source_market_hash,"
+                "source_identity_hash "
                 "FROM structure_generation_drift_progress WHERE "
                 "legacy_snapshot_id=? AND generation_snapshot_id=? AND "
                 "publication_id=? AND window_id=? AND "
@@ -5314,6 +5318,8 @@ class SQLiteStore:
             receipt_valid = (
                 receipt_row[-1] == expected_receipt_digest
                 and receipt_payload["comparison_id"] == progress[0]
+                and receipt_payload["hash_algorithm"] == progress[5]
+                and receipt_payload["hash_algorithm"] == ROW_CHAIN_SHA256_V2
                 and receipt_payload["legacy_snapshot_id"] == legacy[0]
                 and receipt_payload["generation_snapshot_id"] == current[0]
                 and receipt_payload["publication_id"] == current[1]
@@ -5323,6 +5329,11 @@ class SQLiteStore:
                 and receipt_payload["exact_receipt_digest"] == current[3]
                 and receipt_payload["pointer_validation_hash"] == current[2]
                 and receipt_payload["generation_certification_hash"] == current[6]
+                and receipt_payload["source_event_count"] == progress[6]
+                and receipt_payload["source_market_count"] == progress[7]
+                and receipt_payload["source_event_hash"] == progress[8]
+                and receipt_payload["source_market_hash"] == progress[9]
+                and receipt_payload["source_identity_hash"] == progress[10]
                 and receipt_payload["overlap_conflict_count"] == 0
                 and receipt_payload["unclassified_count"] == 0
                 and progress_digests.get("receipt_digest") == receipt_row[-1]

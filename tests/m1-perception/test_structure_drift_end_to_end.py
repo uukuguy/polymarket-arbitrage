@@ -803,6 +803,255 @@ def test_v2_insert_failure_rolls_back_v1_supersession(tmp_path: Path) -> None:
         ]
 
 
+def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> None:
+    digest_fields = sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
+    with sqlite3.connect(store.db_path) as con:
+        progress = con.execute(
+            "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,"
+            "window_id,normalization_contract_version,exact_receipt_digest,"
+            "pointer_validation_hash,generation_certification_hash FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        exact = con.execute(
+            "SELECT snapshot.taken_at_ms,snapshot.finished_at_ms,"
+            "receipt.legacy_market_count,receipt.legacy_universe_hash,"
+            "receipt.legacy_source_truth_hash FROM "
+            "structure_generation_comparison_receipts receipt JOIN snapshots snapshot "
+            "ON snapshot.id=receipt.legacy_snapshot_id WHERE "
+            "receipt.generation_snapshot_id=? AND receipt.publication_id=?",
+            (progress[1], progress[2]),
+        ).fetchone()
+        source_hashes = ("1" * 64, "2" * 64, "3" * 64)
+        class_counts_json = json.dumps(
+            {"overlap-conflict": 0, "unclassified": 0},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        payload: dict[str, object] = {
+            "comparison_id": comparison_id,
+            "hash_algorithm": "row-chain-sha256-v2",
+            "legacy_snapshot_id": int(progress[0]),
+            "legacy_taken_at_ms": int(exact[0]),
+            "legacy_finished_at_ms": int(exact[1]),
+            "legacy_market_count": int(exact[2]),
+            "legacy_universe_hash": str(exact[3]),
+            "legacy_source_truth_hash": str(exact[4]),
+            "generation_snapshot_id": int(progress[1]),
+            "publication_id": str(progress[2]),
+            "window_id": str(progress[3]),
+            "published_snapshot_id": int(progress[1]),
+            "normalization_contract_version": str(progress[4]),
+            "exact_receipt_digest": str(progress[5]),
+            "pointer_validation_hash": str(progress[6]),
+            "generation_certification_hash": str(progress[7]),
+            "source_event_count": 3,
+            "source_market_count": 4,
+            "source_event_hash": source_hashes[0],
+            "source_market_hash": source_hashes[1],
+            "source_identity_hash": source_hashes[2],
+            "projection_universe_hash": "4" * 64,
+            "projection_group_truth_hash": "5" * 64,
+            "generation_universe_hash": "6" * 64,
+            "generation_group_truth_hash": "7" * 64,
+            "class_counts_json": class_counts_json,
+            "class_digests_json": "{}",
+            "legacy_reconstruction_root": "8" * 64,
+            "generation_reconstruction_root": "9" * 64,
+            "overlap_conflict_count": 0,
+            "unclassified_count": 0,
+            "created_at_ms": 3_001,
+        }
+        receipt_digest = sqlite_store_module._structure_drift_receipt_digest(
+            {field: payload[field] for field in digest_fields}
+        )
+        insert_fields = (
+            digest_fields
+            if "hash_algorithm" in digest_fields
+            else ("hash_algorithm", *digest_fields)
+        )
+        con.execute(
+            "INSERT INTO structure_generation_drift_receipts("
+            + ",".join(insert_fields)
+            + ",receipt_digest) VALUES ("
+            + ",".join("?" for _ in range(len(insert_fields) + 1))
+            + ")",
+            (*(payload[field] for field in insert_fields), receipt_digest),
+        )
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET phase='sealed',"
+            "source_event_hash=?,source_market_hash=?,source_identity_hash=?,"
+            "class_counts_json=?,class_digests_json=? WHERE comparison_id=?",
+            (
+                *source_hashes,
+                json.dumps(
+                    {
+                        "class_count:overlap-conflict": 0,
+                        "class_count:unclassified": 0,
+                    }
+                ),
+                json.dumps({"receipt_digest": receipt_digest}),
+                comparison_id,
+            ),
+        )
+
+
+def _rewrite_drift_receipt(
+    store: SQLiteStore,
+    comparison_id: str,
+    **changes: object,
+) -> None:
+    digest_fields = sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_drift_receipt_update")
+        row = con.execute(
+            "SELECT " + ",".join(digest_fields) + " FROM "
+            "structure_generation_drift_receipts WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        assert row is not None
+        payload = dict(zip(digest_fields, row, strict=True))
+        payload.update({key: value for key, value in changes.items() if key in payload})
+        receipt_digest = hashlib.sha256(
+            json.dumps(
+                tuple(payload[field] for field in digest_fields),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        assignments = [f"{key}=?" for key in changes]
+        con.execute(
+            "UPDATE structure_generation_drift_receipts SET "
+            + ",".join((*assignments, "receipt_digest=?"))
+            + " WHERE comparison_id=?",
+            (*changes.values(), receipt_digest, comparison_id),
+        )
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET class_digests_json="
+            "json_set(class_digests_json,'$.receipt_digest',?) "
+            "WHERE comparison_id=?",
+            (receipt_digest, comparison_id),
+        )
+
+
+def _make_exact_receipt_authoritative(store: SQLiteStore) -> None:
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_comparison_receipt_update")
+        row = con.execute(
+            "SELECT generation_snapshot_id,publication_id,legacy_snapshot_id,"
+            "legacy_market_count,legacy_universe_hash,legacy_source_truth_hash,"
+            "generation_validation_hash,created_at_ms FROM "
+            "structure_generation_comparison_receipts"
+        ).fetchone()
+        assert row is not None
+        digest = sqlite_store_module._comparison_receipt_digest(
+            generation_snapshot_id=int(row[0]),
+            publication_id=str(row[1]),
+            legacy_snapshot_id=int(row[2]),
+            legacy_market_count=int(row[3]),
+            generation_market_count=int(row[3]),
+            legacy_universe_hash=str(row[4]),
+            generation_universe_hash=str(row[4]),
+            legacy_source_truth_hash=str(row[5]),
+            generation_source_truth_hash=str(row[5]),
+            generation_validation_hash=str(row[6]),
+            created_at_ms=int(row[7]),
+        )
+        con.execute(
+            "UPDATE structure_generation_comparison_receipts SET "
+            "generation_market_count=legacy_market_count,"
+            "generation_universe_hash=legacy_universe_hash,"
+            "generation_source_truth_hash=legacy_source_truth_hash,receipt_digest=?",
+            (digest,),
+        )
+        con.execute(
+            "UPDATE current_structure_generation SET comparison_receipt_digest=? "
+            "WHERE id=1",
+            (digest,),
+        )
+
+
+def test_sealed_v1_receipt_cannot_authorize_v2_progress(tmp_path: Path) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    _install_sealed_drift_authority(store, comparison_id)
+    assert store.structure_generation_drift_status()["authorized"] is True
+
+    _rewrite_drift_receipt(
+        store,
+        comparison_id,
+        hash_algorithm="serializable-sha256-v1",
+    )
+
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is False
+    assert status["reason"] == "structure-drift-receipt-invalid"
+
+
+def test_sealed_v1_progress_and_receipt_are_not_v2_authority(tmp_path: Path) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    _install_sealed_drift_authority(store, comparison_id)
+    _rewrite_drift_receipt(
+        store,
+        comparison_id,
+        hash_algorithm="serializable-sha256-v1",
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET "
+            "hash_algorithm='serializable-sha256-v1' WHERE comparison_id=?",
+            (comparison_id,),
+        )
+
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is False
+    assert status["authorization_mode"] == "none"
+    assert status["reason"] == "structure-drift-progress-missing"
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("pointer_validation_hash", "b" * 64),
+        ("source_identity_hash", "c" * 64),
+    ),
+)
+def test_sealed_receipt_pointer_and_source_identity_drift_fail_closed(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    _install_sealed_drift_authority(store, comparison_id)
+
+    _rewrite_drift_receipt(store, comparison_id, **{field: replacement})
+
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is False
+    assert status["reason"] == "structure-drift-receipt-invalid"
+
+
+def test_exact_authorization_is_independent_of_drift_receipt_algorithm(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    _install_sealed_drift_authority(store, comparison_id)
+    _rewrite_drift_receipt(
+        store,
+        comparison_id,
+        hash_algorithm="serializable-sha256-v1",
+    )
+    _make_exact_receipt_authoritative(store)
+
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is True
+    assert status["authorization_mode"] == "exact"
+    assert status["phase"] == "exact"
+
+
 def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
