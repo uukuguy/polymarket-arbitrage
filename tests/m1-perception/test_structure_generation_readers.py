@@ -567,6 +567,64 @@ def test_drift_initialization_pins_current_authenticated_identity_once(
     assert len(str(source[2])) == 64
     assert source[3] == "generation-members"
 
+    generated = store.advance_structure_drift_comparison_chunk(
+        comparison_id,
+        max_rows=1,
+        now_ms=3_004,
+    )
+    assert generated.component == "generation-members"
+    assert generated.rows_processed == 1
+    generated_again = store.advance_structure_drift_comparison_chunk(
+        comparison_id,
+        max_rows=1,
+        now_ms=3_005,
+    )
+    assert generated_again.component == "generation-members"
+    assert generated_again.rows_processed == 1
+    generation_done = store.advance_structure_drift_comparison_chunk(
+        comparison_id,
+        max_rows=1,
+        now_ms=3_006,
+    )
+    assert generation_done.component == "legacy-members"
+    legacy = store.advance_structure_drift_comparison_chunk(
+        comparison_id,
+        max_rows=1,
+        now_ms=3_007,
+    )
+    assert legacy.component == "legacy-members"
+    assert legacy.rows_processed == 1
+    legacy_again = store.advance_structure_drift_comparison_chunk(
+        comparison_id,
+        max_rows=1,
+        now_ms=3_008,
+    )
+    assert legacy_again.component == "legacy-members"
+    assert legacy_again.rows_processed == 1
+    legacy_done = store.advance_structure_drift_comparison_chunk(
+        comparison_id,
+        max_rows=1,
+        now_ms=3_009,
+    )
+    assert legacy_done.component == "fresh-group-truth"
+    with sqlite3.connect(generation_db) as con:
+        class_counts_json, class_digests_json, checkpoint_at_ms = con.execute(
+            "SELECT class_counts_json,class_digests_json,checkpoint_at_ms FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        class_counts = json.loads(class_counts_json)
+        class_digests = json.loads(class_digests_json)
+    assert class_counts["class_count:unclassified"] == 2
+    assert class_counts["class_count:fresh-source-absent"] == 2
+    assert sqlite_store_module.SerializableSHA256.from_json(
+        class_digests["class_state:unclassified"]
+    )
+    assert sqlite_store_module.SerializableSHA256.from_json(
+        class_digests["class_state:fresh-source-absent"]
+    )
+    assert checkpoint_at_ms == 3_009
+
 
 def test_generation_operations_report_pressure_and_reclaim_one_safe_chain(
     tmp_path: Path,
