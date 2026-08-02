@@ -397,8 +397,9 @@ def test_issues_checkpoint_advances_500_source_keys_when_no_duplicates(
             store, publication, "issues", None, 500
         )
         elapsed_s = time.monotonic() - started
+    reopened = SQLiteStore(store.db_path)
     second = normalize_structure_component_chunk(
-        store, publication, "issues", first.cursor, 500
+        reopened, publication, "issues", first.cursor, 500
     )
 
     assert first.source_rows == 500
@@ -411,6 +412,42 @@ def test_issues_checkpoint_advances_500_source_keys_when_no_duplicates(
     assert second.canonical_rows == 0
     assert second.completed is True
     assert second.cursor == "market-500"
+
+
+def test_issues_duplicates_cross_500_key_boundary_without_restart_loss(
+    tmp_path: Path,
+) -> None:
+    store, publication = _begin_large_generation(
+        store_path=tmp_path / "state.db",
+        event_count=501,
+        duplicate_market_indexes=(499, 500),
+    )
+    for component in (
+        "events", "event_tags", "memberships", "group_truth", "markets"
+    ):
+        _normalize_component_to_done(store, publication, component)
+
+    first = normalize_structure_component_chunk(
+        store, publication, "issues", None, 500
+    )
+    reopened = SQLiteStore(store.db_path)
+    second = normalize_structure_component_chunk(
+        reopened, publication, "issues", first.cursor, 500
+    )
+    with sqlite3.connect(store.db_path) as con:
+        issue_markets = con.execute(
+            "SELECT market_id FROM structure_generation_issues "
+            "WHERE snapshot_id=? ORDER BY issue_index",
+            (publication.snapshot_id,),
+        ).fetchall()
+
+    assert (first.source_rows, first.canonical_rows, first.cursor, first.completed) == (
+        500, 1, "market-499", False
+    )
+    assert (second.source_rows, second.canonical_rows, second.cursor, second.completed) == (
+        1, 1, "market-500", True
+    )
+    assert issue_markets == [("market-499",), ("market-500",)]
 
 
 def test_normalization_chunk_never_fetches_more_than_raw_row_budget(
@@ -668,6 +705,7 @@ def _begin_large_generation(
     *,
     store_path: Path,
     event_count: int = 500,
+    duplicate_market_indexes: tuple[int, ...] = (),
 ):
     store = SQLiteStore(store_path)
     store.init_schema()
@@ -688,6 +726,22 @@ def _begin_large_generation(
         }
         for index in range(event_count)
     ]
+    events.extend(
+        {
+            "id": f"event-duplicate-{index:03d}",
+            "negRisk": True,
+            "enableNegRisk": True,
+            "negRiskMarketID": f"group-duplicate-{index:03d}",
+            "markets": [
+                {
+                    "id": f"market-{index:03d}",
+                    "active": True,
+                    "closed": False,
+                }
+            ],
+        }
+        for index in duplicate_market_indexes
+    )
     markets = [
         {
             "id": f"market-{index:03d}",
