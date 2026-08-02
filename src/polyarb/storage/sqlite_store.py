@@ -18,7 +18,7 @@ import json
 import re
 import sqlite3
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -424,6 +424,51 @@ def _comparison_receipt_digest(
     )
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS = (
+    "comparison_id",
+    "legacy_snapshot_id",
+    "legacy_taken_at_ms",
+    "legacy_finished_at_ms",
+    "legacy_market_count",
+    "legacy_universe_hash",
+    "legacy_source_truth_hash",
+    "generation_snapshot_id",
+    "publication_id",
+    "window_id",
+    "published_snapshot_id",
+    "normalization_contract_version",
+    "exact_receipt_digest",
+    "pointer_validation_hash",
+    "generation_certification_hash",
+    "source_event_count",
+    "source_market_count",
+    "source_event_hash",
+    "source_market_hash",
+    "source_identity_hash",
+    "projection_universe_hash",
+    "projection_group_truth_hash",
+    "generation_universe_hash",
+    "generation_group_truth_hash",
+    "class_counts_json",
+    "class_digests_json",
+    "legacy_reconstruction_root",
+    "generation_reconstruction_root",
+    "overlap_conflict_count",
+    "unclassified_count",
+    "created_at_ms",
+)
+
+
+def _structure_drift_receipt_digest(payload: Mapping[str, object]) -> str:
+    """Authenticate every field in one sealed drift-safe authorization."""
+    if set(payload) != set(_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS):
+        raise ValueError("invalid-structure-drift-receipt-fields")
+    values = tuple(payload[field] for field in _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS)
+    return hashlib.sha256(
+        json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()
     ).hexdigest()
 
 
@@ -6434,6 +6479,12 @@ class SQLiteStore:
                     "SELECT id FROM structure_sync_windows "
                     "WHERE status='published' "
                     f"AND id NOT IN ({placeholders}) "
+                    "AND NOT EXISTS (SELECT 1 FROM "
+                    "structure_generation_drift_progress progress "
+                    "WHERE progress.window_id=structure_sync_windows.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM "
+                    "structure_generation_drift_receipts receipt "
+                    "WHERE receipt.window_id=structure_sync_windows.id) "
                     "ORDER BY checkpoint_at_ms,id LIMIT ?",
                     (*keep_ids, max_windows_per_run),
                 )

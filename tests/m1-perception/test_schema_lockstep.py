@@ -138,6 +138,8 @@ def test_structure_generation_tables_are_declared_and_created(tmp_path: Path) ->
         "structure_generation_issues",
         "structure_generation_comparison_receipts",
         "structure_generation_comparison_progress",
+        "structure_generation_drift_receipts",
+        "structure_generation_drift_progress",
         "current_structure_generation",
     }
     for table in expected:
@@ -172,6 +174,88 @@ def test_structure_generation_tables_are_declared_and_created(tmp_path: Path) ->
             )
         }
     assert "receipt_digest" in receipt_columns
+
+    with sqlite3.connect(store.db_path) as con:
+        drift_progress_columns = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_progress)"
+            )
+        }
+        drift_receipt_columns = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_receipts)"
+            )
+        }
+        drift_triggers = {
+            row[0]
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND name LIKE 'trg_structure_drift_receipt_%'"
+            )
+        }
+    assert {
+        "comparison_id",
+        "legacy_snapshot_id",
+        "generation_snapshot_id",
+        "publication_id",
+        "window_id",
+        "normalization_contract_version",
+        "exact_receipt_digest",
+        "pointer_validation_hash",
+        "generation_certification_hash",
+        "source_event_count",
+        "source_market_count",
+        "source_event_hash",
+        "source_market_hash",
+        "source_identity_hash",
+        "phase",
+        "row_cursor_json",
+        "digest_state_json",
+        "class_counts_json",
+        "class_digests_json",
+        "created_at_ms",
+        "checkpoint_at_ms",
+    } <= drift_progress_columns
+    assert {
+        "comparison_id",
+        "legacy_snapshot_id",
+        "legacy_taken_at_ms",
+        "legacy_finished_at_ms",
+        "legacy_market_count",
+        "legacy_universe_hash",
+        "legacy_source_truth_hash",
+        "generation_snapshot_id",
+        "publication_id",
+        "window_id",
+        "published_snapshot_id",
+        "normalization_contract_version",
+        "exact_receipt_digest",
+        "pointer_validation_hash",
+        "generation_certification_hash",
+        "source_event_count",
+        "source_market_count",
+        "source_event_hash",
+        "source_market_hash",
+        "source_identity_hash",
+        "projection_universe_hash",
+        "projection_group_truth_hash",
+        "generation_universe_hash",
+        "generation_group_truth_hash",
+        "class_counts_json",
+        "class_digests_json",
+        "legacy_reconstruction_root",
+        "generation_reconstruction_root",
+        "overlap_conflict_count",
+        "unclassified_count",
+        "created_at_ms",
+        "receipt_digest",
+    } <= drift_receipt_columns
+    assert drift_triggers == {
+        "trg_structure_drift_receipt_update",
+        "trg_structure_drift_receipt_delete",
+    }
 
 
 def _ddl_markets_columns() -> list[str]:

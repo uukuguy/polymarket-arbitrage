@@ -268,6 +268,151 @@ def generation_db(tmp_path: Path) -> Path:
     return path
 
 
+def test_drift_receipt_is_append_only(generation_db: Path) -> None:
+    digest = "a" * 64
+    with sqlite3.connect(generation_db) as con:
+        con.execute(
+            "INSERT INTO structure_generation_drift_receipts("
+            "comparison_id,legacy_snapshot_id,legacy_taken_at_ms,"
+            "legacy_finished_at_ms,legacy_market_count,legacy_universe_hash,"
+            "legacy_source_truth_hash,generation_snapshot_id,publication_id,window_id,"
+            "published_snapshot_id,normalization_contract_version,exact_receipt_digest,"
+            "pointer_validation_hash,generation_certification_hash,source_event_count,"
+            "source_market_count,source_event_hash,source_market_hash,source_identity_hash,"
+            "projection_universe_hash,"
+            "projection_group_truth_hash,generation_universe_hash,"
+            "generation_group_truth_hash,class_counts_json,class_digests_json,"
+            "legacy_reconstruction_root,generation_reconstruction_root,"
+            "overlap_conflict_count,unclassified_count,created_at_ms,receipt_digest) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "drift-1",
+                1,
+                1000,
+                1001,
+                2,
+                digest,
+                digest,
+                1,
+                "test-publication-1",
+                "test-window-1",
+                1,
+                "contract-v1",
+                digest,
+                digest,
+                digest,
+                1,
+                2,
+                digest,
+                digest,
+                digest,
+                digest,
+                digest,
+                digest,
+                digest,
+                "{}",
+                "{}",
+                digest,
+                digest,
+                0,
+                0,
+                1002,
+                digest,
+            ),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="structure-drift-receipt-sealed"):
+            con.execute(
+                "UPDATE structure_generation_drift_receipts SET created_at_ms=1003 "
+                "WHERE comparison_id='drift-1'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="structure-drift-receipt-sealed"):
+            con.execute(
+                "DELETE FROM structure_generation_drift_receipts "
+                "WHERE comparison_id='drift-1'"
+            )
+    deleted, window_ids = SQLiteStore(
+        generation_db
+    ).purge_published_structure_sync_windows(keep_last=1, max_windows_per_run=1)
+    assert deleted == 0
+    assert window_ids == []
+
+
+def test_drift_schema_initialization_does_not_create_progress(
+    generation_db: Path,
+) -> None:
+    SQLiteStore(generation_db).init_structure_sync_schema()
+    with sqlite3.connect(generation_db) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_progress"
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT snapshot_id,publication_id FROM current_structure_generation"
+        ).fetchall() == [(1, "test-publication-1")]
+
+
+def test_drift_receipt_digest_authenticates_every_field() -> None:
+    fields = sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
+    payload = {field: index for index, field in enumerate(fields)}
+    original = sqlite_store_module._structure_drift_receipt_digest(payload)
+    assert len(original) == 64
+    for field in fields:
+        changed = dict(payload)
+        changed[field] = f"changed-{field}"
+        assert sqlite_store_module._structure_drift_receipt_digest(changed) != original
+    with pytest.raises(ValueError, match="invalid-structure-drift-receipt-fields"):
+        sqlite_store_module._structure_drift_receipt_digest(
+            {**payload, "unexpected": "field"}
+        )
+
+
+def test_drift_progress_protects_published_source_window_from_retention(
+    generation_db: Path,
+) -> None:
+    digest = "a" * 64
+    with sqlite3.connect(generation_db) as con:
+        con.execute(
+            "INSERT INTO structure_generation_drift_progress("
+            "comparison_id,legacy_snapshot_id,generation_snapshot_id,publication_id,"
+            "window_id,normalization_contract_version,exact_receipt_digest,"
+            "pointer_validation_hash,generation_certification_hash,source_event_count,"
+            "source_market_count,source_event_hash,source_market_hash,source_identity_hash,"
+            "phase,row_cursor_json,"
+            "digest_state_json,class_counts_json,class_digests_json,created_at_ms,"
+            "checkpoint_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'source-events',NULL,"
+            "'{}','{}','{}',?,?)",
+            (
+                "drift-progress-1",
+                1,
+                1,
+                "test-publication-1",
+                "test-window-1",
+                "contract-v1",
+                digest,
+                digest,
+                digest,
+                1,
+                2,
+                digest,
+                digest,
+                digest,
+                1002,
+                1002,
+            ),
+        )
+
+    deleted, window_ids = SQLiteStore(
+        generation_db
+    ).purge_published_structure_sync_windows(keep_last=1, max_windows_per_run=1)
+
+    assert deleted == 0
+    assert window_ids == []
+    with sqlite3.connect(generation_db) as con:
+        assert con.execute(
+            "SELECT status,published_snapshot_id FROM structure_sync_windows "
+            "WHERE id='test-window-1'"
+        ).fetchone() == ("published", 1)
+
+
 def test_generation_operations_report_pressure_and_reclaim_one_safe_chain(
     tmp_path: Path,
 ) -> None:

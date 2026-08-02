@@ -3015,6 +3015,97 @@ ON structure_generation_comparison_progress(
 )
 WHERE phase!='sealed';
 
+-- Authenticated comparison between one stale legacy identity and one fresh,
+-- independently projected published generation.  Progress is mutable only by
+-- the bounded CAS state machine; sealed receipts are append-only evidence.
+CREATE TABLE IF NOT EXISTS structure_generation_drift_progress (
+    comparison_id TEXT PRIMARY KEY,
+    legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    generation_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    publication_id TEXT NOT NULL REFERENCES structure_publications(publication_id),
+    window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
+    normalization_contract_version TEXT NOT NULL,
+    exact_receipt_digest TEXT NOT NULL CHECK(length(exact_receipt_digest)=64),
+    pointer_validation_hash TEXT NOT NULL CHECK(length(pointer_validation_hash)=64),
+    generation_certification_hash TEXT NOT NULL
+        CHECK(length(generation_certification_hash)=64),
+    source_event_count INTEGER NOT NULL CHECK(source_event_count >= 0),
+    source_market_count INTEGER NOT NULL CHECK(source_market_count >= 0),
+    source_event_hash TEXT NOT NULL CHECK(length(source_event_hash)=64),
+    source_market_hash TEXT NOT NULL CHECK(length(source_market_hash)=64),
+    source_identity_hash TEXT NOT NULL CHECK(length(source_identity_hash)=64),
+    phase TEXT NOT NULL CHECK(phase IN (
+        'source-events','source-markets','generation-members',
+        'legacy-members','fresh-group-truth','sealed','stale'
+    )),
+    row_cursor_json TEXT,
+    digest_state_json TEXT NOT NULL,
+    class_counts_json TEXT NOT NULL,
+    class_digests_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
+    UNIQUE(
+        legacy_snapshot_id,generation_snapshot_id,publication_id,window_id,
+        normalization_contract_version,exact_receipt_digest,
+        pointer_validation_hash,generation_certification_hash,source_identity_hash
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_structure_drift_progress_active
+ON structure_generation_drift_progress(checkpoint_at_ms DESC,comparison_id)
+WHERE phase NOT IN ('sealed','stale');
+
+CREATE TABLE IF NOT EXISTS structure_generation_drift_receipts (
+    comparison_id TEXT PRIMARY KEY,
+    legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    legacy_taken_at_ms INTEGER NOT NULL CHECK(legacy_taken_at_ms >= 0),
+    legacy_finished_at_ms INTEGER NOT NULL CHECK(legacy_finished_at_ms >= 0),
+    legacy_market_count INTEGER NOT NULL CHECK(legacy_market_count >= 0),
+    legacy_universe_hash TEXT NOT NULL CHECK(length(legacy_universe_hash)=64),
+    legacy_source_truth_hash TEXT NOT NULL CHECK(length(legacy_source_truth_hash)=64),
+    generation_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    publication_id TEXT NOT NULL REFERENCES structure_publications(publication_id),
+    window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
+    published_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    normalization_contract_version TEXT NOT NULL,
+    exact_receipt_digest TEXT NOT NULL CHECK(length(exact_receipt_digest)=64),
+    pointer_validation_hash TEXT NOT NULL CHECK(length(pointer_validation_hash)=64),
+    generation_certification_hash TEXT NOT NULL
+        CHECK(length(generation_certification_hash)=64),
+    source_event_count INTEGER NOT NULL CHECK(source_event_count >= 0),
+    source_market_count INTEGER NOT NULL CHECK(source_market_count >= 0),
+    source_event_hash TEXT NOT NULL CHECK(length(source_event_hash)=64),
+    source_market_hash TEXT NOT NULL CHECK(length(source_market_hash)=64),
+    source_identity_hash TEXT NOT NULL CHECK(length(source_identity_hash)=64),
+    projection_universe_hash TEXT NOT NULL CHECK(length(projection_universe_hash)=64),
+    projection_group_truth_hash TEXT NOT NULL
+        CHECK(length(projection_group_truth_hash)=64),
+    generation_universe_hash TEXT NOT NULL CHECK(length(generation_universe_hash)=64),
+    generation_group_truth_hash TEXT NOT NULL
+        CHECK(length(generation_group_truth_hash)=64),
+    class_counts_json TEXT NOT NULL,
+    class_digests_json TEXT NOT NULL,
+    legacy_reconstruction_root TEXT NOT NULL
+        CHECK(length(legacy_reconstruction_root)=64),
+    generation_reconstruction_root TEXT NOT NULL
+        CHECK(length(generation_reconstruction_root)=64),
+    overlap_conflict_count INTEGER NOT NULL CHECK(overlap_conflict_count=0),
+    unclassified_count INTEGER NOT NULL CHECK(unclassified_count=0),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    receipt_digest TEXT NOT NULL CHECK(length(receipt_digest)=64),
+    CHECK(published_snapshot_id=generation_snapshot_id),
+    UNIQUE(
+        legacy_snapshot_id,generation_snapshot_id,publication_id,window_id,
+        normalization_contract_version,exact_receipt_digest,
+        pointer_validation_hash,generation_certification_hash,source_identity_hash
+    )
+);
+CREATE TRIGGER IF NOT EXISTS trg_structure_drift_receipt_update
+BEFORE UPDATE ON structure_generation_drift_receipts
+BEGIN SELECT RAISE(ABORT,'structure-drift-receipt-sealed'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_drift_receipt_delete
+BEFORE DELETE ON structure_generation_drift_receipts
+BEGIN SELECT RAISE(ABORT,'structure-drift-receipt-sealed'); END;
+
 -- Append-only authorization/evidence for bounded reclamation of old immutable
 -- generation bulk rows. Publication, comparison receipt, snapshot, and legacy
 -- truth remain as the authenticated audit skeleton.
