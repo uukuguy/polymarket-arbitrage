@@ -35,6 +35,40 @@ STRUCTURE_DRIFT_SOURCE_EVENT_MAX_MEMBER_WORK = 500
 STRUCTURE_DRIFT_SOURCE_EVENT_MAX_PAYLOAD_BYTES = 512 * 1024
 STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S = 10.0
 STRUCTURE_NORMALIZATION_CONTRACT_VERSION = "2026-08-02-event-only-quarantine-v2"
+STRUCTURE_DRIFT_CLASSIFIER_V1 = "structure-drift-classifier-v1"
+STRUCTURE_DRIFT_CLASSIFIER_V2 = "structure-drift-classifier-v2"
+STRUCTURE_DRIFT_CLASS_TAGS_V2 = (
+    "shared",
+    "fresh-addition",
+    "current-nontradable",
+    "event-only-quarantine",
+    "market-side-quarantine",
+    "fresh-source-absent",
+    "fresh-group-ineligible",
+    "overlap-conflict",
+    "unclassified",
+)
+STRUCTURE_DRIFT_DIAGNOSTIC_CODES = (
+    "duplicate-market-identity",
+    "evidence-missing",
+    "generation-addition-not-certified",
+    "generation-addition-source-absent",
+    "conflicting-event-membership",
+    "invalid-neg-risk-classification",
+    "invalid-event-membership",
+    "uncertified-event-only-member",
+    "group-incomplete-source",
+    "augmented-group",
+    "group-complete-unsupported-unknown-reason",
+    "generation-addition-event-only-quarantine",
+    "generation-addition-market-side-quarantine",
+    "generation-addition-current-nontradable",
+    "active-open-projection-missing",
+    "active-open-projection-mismatch",
+    "multiple-removal-reasons",
+    "other-zero-removal-reason",
+    "generation-addition-other",
+)
 
 
 def valid_structure_publication_checkpoint(

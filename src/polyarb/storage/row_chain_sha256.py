@@ -24,8 +24,10 @@ ROW_CHAIN_DOMAINS = frozenset(
         "class/event-only-quarantine",
         "class/market-side-quarantine",
         "class/fresh-source-absent",
+        "class/fresh-group-ineligible",
         "class/overlap-conflict",
         "class/unclassified",
+        "diagnostic/unclassified",
     }
 )
 

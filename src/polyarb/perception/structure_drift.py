@@ -6,9 +6,15 @@ import hashlib
 import json
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Literal
 
 from polyarb.perception.market_truth import EventMember, GroupTruth
+from polyarb.perception.structure_contract import (
+    STRUCTURE_DRIFT_CLASSIFIER_V1,
+    STRUCTURE_DRIFT_CLASSIFIER_V2,
+    STRUCTURE_DRIFT_DIAGNOSTIC_CODES,
+)
 from polyarb.perception.structure_publication import (
     event_only_member_quarantine_issue,
     market_quarantine_issue,
@@ -54,6 +60,17 @@ class StructuralMemberIdentity:
 
 
 @dataclass(frozen=True)
+class FreshGroupEvidence:
+    event_id: str
+    group_id: str
+    neg_risk_type: str
+    quality: str
+    reason: str | None
+    membership_hash: str
+    global_relation_conflict: bool
+
+
+@dataclass(frozen=True)
 class FreshMemberEvidence:
     source_present: bool
     current_active: bool
@@ -65,6 +82,62 @@ class FreshMemberEvidence:
     absent_from_event_catalog: bool
     absent_from_market_catalog: bool
     projected_member: StructuralMemberIdentity | None = None
+    event_source_count: int = 0
+    exact_source_member: StructuralMemberIdentity | None = None
+    group_truth: FreshGroupEvidence | None = None
+    duplicate_market_identity: bool = False
+    identity_revalidated: bool = True
+    invalid_neg_risk_classification: bool = False
+    invalid_event_membership: bool = False
+    uncertified_event_only_member: bool = False
+    source_ordinal: int | None = None
+    member_ordinal: int | None = None
+    raw_event_hash: str | None = None
+    raw_market_hash: str | None = None
+
+
+@dataclass(frozen=True)
+class StructureDriftCandidateEnvelope:
+    side: Literal["legacy-only", "generation-only"]
+    event_id: str | None
+    group_id: str | None
+    market_id: str
+    member_kind: str | None
+    active: bool | None
+    closed: bool | None
+    condition_id: str | None
+    yes_token_id: str | None
+    no_token_id: str | None
+    neg_risk: bool | None
+    incomplete: bool | None
+    source_ordinal: int | None
+    member_ordinal: int | None
+    raw_event_hash: str | None
+    raw_market_hash: str | None
+
+    @property
+    def identity_fields(self) -> Mapping[str, object]:
+        return {
+            "event_id": self.event_id,
+            "group_id": self.group_id,
+            "market_id": self.market_id,
+            "member_kind": self.member_kind,
+            "active": self.active,
+            "closed": self.closed,
+            "condition_id": self.condition_id,
+            "yes_token_id": self.yes_token_id,
+            "no_token_id": self.no_token_id,
+            "neg_risk": self.neg_risk,
+            "incomplete": self.incomplete,
+        }
+
+
+@dataclass(frozen=True)
+class StructureDriftDiagnostic:
+    side: Literal["legacy-only", "generation-only"]
+    code: str
+    envelope: StructureDriftCandidateEnvelope
+    predicate_bits: tuple[bool, ...]
 
 
 @dataclass(frozen=True)
@@ -79,6 +152,7 @@ class StructureMemberDriftResult:
     class_digests: Mapping[str, str]
     legacy_reconstruction_root: str
     generation_reconstruction_root: str
+    diagnostics: tuple[StructureDriftDiagnostic, ...] = ()
 
     @property
     def shared_count(self) -> int:
@@ -103,6 +177,10 @@ class StructureMemberDriftResult:
     @property
     def authorized(self) -> bool:
         return not self.overlap_conflicts and not self.unclassified
+
+    @property
+    def diagnostic_counts(self) -> dict[str, int]:
+        return dict(Counter(row.code for row in self.diagnostics))
 
 
 def reconstruction_root_from_class_commitments(
@@ -246,6 +324,161 @@ def _legacy_removal_reasons(evidence: FreshMemberEvidence) -> tuple[str, ...]:
     return tuple(reasons)
 
 
+def _is_fresh_group_ineligible(
+    member: StructuralMemberIdentity,
+    evidence: FreshMemberEvidence,
+) -> bool:
+    truth = evidence.group_truth
+    return (
+        evidence.generation_certified
+        and evidence.event_source_count == 1
+        and evidence.exact_source_member == member
+        and evidence.current_active
+        and not evidence.current_closed
+        and not evidence.event_only_quarantine
+        and not evidence.market_side_quarantine
+        and truth is not None
+        and truth.event_id == member.event_id
+        and truth.group_id == member.group_id
+        and truth.neg_risk_type == "standard"
+        and truth.quality == "complete-unsupported"
+        and truth.reason == "standard-neg-risk-has-non-tradable-members"
+        and not truth.global_relation_conflict
+    )
+
+
+def _is_fresh_addition(
+    member: StructuralMemberIdentity,
+    evidence: FreshMemberEvidence,
+    *,
+    classifier_v2: bool,
+) -> bool:
+    return (
+        evidence.source_present
+        and evidence.current_active
+        and not evidence.current_closed
+        and evidence.projector_matches
+        and evidence.generation_certified
+        and not evidence.event_only_quarantine
+        and not evidence.market_side_quarantine
+        and (not classifier_v2 or evidence.projected_member == member)
+    )
+
+
+def _candidate_envelope(
+    *,
+    side: Literal["legacy-only", "generation-only"],
+    member: StructuralMemberIdentity | StructureDriftCandidateEnvelope,
+    evidence: FreshMemberEvidence | None,
+) -> StructureDriftCandidateEnvelope:
+    if isinstance(member, StructureDriftCandidateEnvelope):
+        if member.side != side:
+            raise ValueError("structure-drift-candidate-side-mismatch")
+        return member
+    return StructureDriftCandidateEnvelope(
+        side=side,
+        event_id=member.event_id,
+        group_id=member.group_id,
+        market_id=member.market_id,
+        member_kind=member.member_kind,
+        active=member.active,
+        closed=member.closed,
+        condition_id=member.condition_id,
+        yes_token_id=member.yes_token_id,
+        no_token_id=member.no_token_id,
+        neg_risk=member.neg_risk,
+        incomplete=member.incomplete,
+        source_ordinal=None if evidence is None else evidence.source_ordinal,
+        member_ordinal=None if evidence is None else evidence.member_ordinal,
+        raw_event_hash=None if evidence is None else evidence.raw_event_hash,
+        raw_market_hash=None if evidence is None else evidence.raw_market_hash,
+    )
+
+
+def _duplicate_identity_evidence(
+    member: StructuralMemberIdentity,
+    evidence: FreshMemberEvidence | None,
+) -> FreshMemberEvidence:
+    if evidence is not None:
+        return replace(evidence, duplicate_market_identity=True)
+    return FreshMemberEvidence(
+        source_present=False,
+        current_active=member.active,
+        current_closed=member.closed,
+        projector_matches=False,
+        generation_certified=False,
+        event_only_quarantine=False,
+        market_side_quarantine=False,
+        absent_from_event_catalog=False,
+        absent_from_market_catalog=False,
+        duplicate_market_identity=True,
+        identity_revalidated=False,
+    )
+
+
+def diagnose_unresolved_member(
+    *,
+    side: Literal["legacy-only", "generation-only"],
+    member: StructuralMemberIdentity | StructureDriftCandidateEnvelope,
+    evidence: FreshMemberEvidence | None,
+    authorized_removal_reasons: tuple[str, ...],
+) -> StructureDriftDiagnostic:
+    """Assign exactly one unresolved code using the frozen first-match table."""
+    truth = None if evidence is None else evidence.group_truth
+    preceding_predicates = (
+        evidence is not None and evidence.duplicate_market_identity,
+        evidence is None or not evidence.identity_revalidated,
+        side == "generation-only" and evidence is not None and not evidence.generation_certified,
+        side == "generation-only"
+        and evidence is not None
+        and evidence.absent_from_event_catalog
+        and evidence.absent_from_market_catalog,
+        truth is not None and truth.global_relation_conflict,
+        evidence is not None and evidence.invalid_neg_risk_classification,
+        evidence is not None and evidence.invalid_event_membership,
+        evidence is not None and evidence.uncertified_event_only_member,
+        truth is not None
+        and truth.quality == "incomplete-source"
+        and not truth.global_relation_conflict,
+        truth is not None and truth.neg_risk_type == "augmented",
+        truth is not None
+        and truth.quality == "complete-unsupported"
+        and truth.neg_risk_type != "augmented"
+        and truth.reason != "standard-neg-risk-has-non-tradable-members",
+        side == "generation-only" and evidence is not None and evidence.event_only_quarantine,
+        side == "generation-only" and evidence is not None and evidence.market_side_quarantine,
+        side == "generation-only"
+        and evidence is not None
+        and (not evidence.current_active or evidence.current_closed),
+        evidence is not None and evidence.projected_member is None,
+        evidence is not None
+        and evidence.projected_member is not None
+        and isinstance(member, StructuralMemberIdentity)
+        and evidence.projected_member != member,
+        side == "legacy-only" and len(authorized_removal_reasons) > 1,
+        side == "legacy-only" and not authorized_removal_reasons,
+    )
+    predicates = (
+        *preceding_predicates,
+        side == "generation-only" and not any(preceding_predicates),
+    )
+    code = next(
+        code
+        for code, predicate in zip(STRUCTURE_DRIFT_DIAGNOSTIC_CODES, predicates, strict=True)
+        if predicate
+    )
+    return StructureDriftDiagnostic(
+        side=side,
+        code=code,
+        envelope=_candidate_envelope(
+            side=side,
+            member=member,
+            evidence=evidence,
+        ),
+        predicate_bits=predicates,
+    )
+
+
 def build_fresh_member_evidence(
     member: StructuralMemberIdentity,
     *,
@@ -339,8 +572,15 @@ def classify_structure_member_drift(
     legacy: tuple[StructuralMemberIdentity, ...],
     generation: tuple[StructuralMemberIdentity, ...],
     evidence: Mapping[str, FreshMemberEvidence],
+    classifier_contract: str = STRUCTURE_DRIFT_CLASSIFIER_V1,
 ) -> StructureMemberDriftResult:
     """Partition one complete member universe without count or age tolerance."""
+    if classifier_contract not in {
+        STRUCTURE_DRIFT_CLASSIFIER_V1,
+        STRUCTURE_DRIFT_CLASSIFIER_V2,
+    }:
+        raise ValueError("invalid-structure-drift-classifier-contract")
+    classifier_v2 = classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V2
     duplicate_ids = {
         market_id
         for counts in (
@@ -356,10 +596,27 @@ def classify_structure_member_drift(
     additions: list[StructuralMemberIdentity] = []
     removals: dict[str, list[StructuralMemberIdentity]] = {}
     conflicts: list[StructuralMemberIdentity] = []
+    diagnostics: list[StructureDriftDiagnostic] = []
     unclassified: list[StructuralMemberIdentity] = [
         generation_by_id.get(market_id) or legacy_by_id[market_id]
         for market_id in sorted(duplicate_ids)
     ]
+    if classifier_v2:
+        for member in unclassified:
+            member_evidence = _duplicate_identity_evidence(
+                member,
+                evidence.get(member.market_id),
+            )
+            diagnostics.append(
+                diagnose_unresolved_member(
+                    side=(
+                        "generation-only" if member.market_id in generation_by_id else "legacy-only"
+                    ),
+                    member=member,
+                    evidence=member_evidence,
+                    authorized_removal_reasons=(),
+                )
+            )
 
     for market_id in sorted(set(legacy_by_id) | set(generation_by_id)):
         if market_id in duplicate_ids:
@@ -371,33 +628,61 @@ def classify_structure_member_drift(
                 shared.append(generation_member)
             else:
                 conflicts.append(generation_member)
+                if classifier_v2:
+                    member_evidence = _duplicate_identity_evidence(
+                        generation_member,
+                        evidence.get(market_id),
+                    )
+                    diagnostics.append(
+                        diagnose_unresolved_member(
+                            side="generation-only",
+                            member=generation_member,
+                            evidence=member_evidence,
+                            authorized_removal_reasons=(),
+                        )
+                    )
             continue
         member_evidence = evidence.get(market_id)
         if generation_member is not None:
-            if (
-                member_evidence is not None
-                and member_evidence.source_present
-                and member_evidence.current_active
-                and not member_evidence.current_closed
-                and member_evidence.projector_matches
-                and member_evidence.generation_certified
-                and not member_evidence.event_only_quarantine
-                and not member_evidence.market_side_quarantine
+            if member_evidence is not None and _is_fresh_addition(
+                generation_member,
+                member_evidence,
+                classifier_v2=classifier_v2,
             ):
                 additions.append(generation_member)
             else:
                 unclassified.append(generation_member)
+                if classifier_v2:
+                    diagnostics.append(
+                        diagnose_unresolved_member(
+                            side="generation-only",
+                            member=generation_member,
+                            evidence=member_evidence,
+                            authorized_removal_reasons=(),
+                        )
+                    )
             continue
         assert legacy_member is not None
-        reasons = (
-            ()
-            if member_evidence is None
-            else _legacy_removal_reasons(member_evidence)
-        )
+        reasons = () if member_evidence is None else _legacy_removal_reasons(member_evidence)
+        if (
+            classifier_v2
+            and member_evidence is not None
+            and _is_fresh_group_ineligible(legacy_member, member_evidence)
+        ):
+            reasons = (*reasons, "fresh-group-ineligible")
         if len(reasons) == 1:
             removals.setdefault(reasons[0], []).append(legacy_member)
         else:
             unclassified.append(legacy_member)
+            if classifier_v2:
+                diagnostics.append(
+                    diagnose_unresolved_member(
+                        side="legacy-only",
+                        member=legacy_member,
+                        evidence=member_evidence,
+                        authorized_removal_reasons=reasons,
+                    )
+                )
 
     frozen_shared = tuple(shared)
     frozen_additions = tuple(additions)
@@ -407,11 +692,7 @@ def classify_structure_member_drift(
         "fresh-addition": frozen_additions,
         **frozen_removals,
     }
-    class_digests = {
-        tag: _tagged_member_hash(tag, rows)
-        for tag, rows in classes.items()
-        if rows
-    }
+    class_digests = {tag: _tagged_member_hash(tag, rows) for tag, rows in classes.items() if rows}
     class_counts = {tag: len(rows) for tag, rows in classes.items() if rows}
     removal_tags = tuple(frozen_removals)
     return StructureMemberDriftResult(
@@ -435,6 +716,7 @@ def classify_structure_member_drift(
             tags=("shared", "fresh-addition"),
             domain="generation-reconstruction",
         ),
+        tuple(diagnostics),
     )
 
 

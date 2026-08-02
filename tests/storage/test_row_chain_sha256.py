@@ -29,8 +29,10 @@ EXPECTED_DOMAINS = frozenset(
         "class/event-only-quarantine",
         "class/market-side-quarantine",
         "class/fresh-source-absent",
+        "class/fresh-group-ineligible",
         "class/overlap-conflict",
         "class/unclassified",
+        "diagnostic/unclassified",
     }
 )
 
@@ -66,6 +68,17 @@ def _partitioned_root(
 def test_row_chain_registry_and_algorithm_are_frozen() -> None:
     assert ROW_CHAIN_SHA256_V2 == "row-chain-sha256-v2"
     assert ROW_CHAIN_DOMAINS == EXPECTED_DOMAINS
+
+
+def test_domain_registry_adds_only_classifier_v2_domains() -> None:
+    old_domains = EXPECTED_DOMAINS - {
+        "class/fresh-group-ineligible",
+        "diagnostic/unclassified",
+    }
+    assert ROW_CHAIN_DOMAINS - old_domains == {
+        "class/fresh-group-ineligible",
+        "diagnostic/unclassified",
+    }
 
 
 @pytest.mark.parametrize("domain", sorted(EXPECTED_DOMAINS))

@@ -6,10 +6,20 @@ from pathlib import Path
 
 import pytest
 
+from polyarb.perception.structure_contract import (
+    STRUCTURE_DRIFT_CLASS_TAGS_V2,
+    STRUCTURE_DRIFT_CLASSIFIER_V1,
+    STRUCTURE_DRIFT_CLASSIFIER_V2,
+    STRUCTURE_DRIFT_DIAGNOSTIC_CODES,
+)
 from polyarb.perception.structure_drift import (
+    FreshGroupEvidence,
     FreshMemberEvidence,
     StructuralMemberIdentity,
+    StructureDriftCandidateEnvelope,
     classify_structure_member_drift,
+    diagnose_unresolved_member,
+    reconstruction_root_from_class_commitments,
 )
 from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -42,6 +52,384 @@ def _addition_evidence() -> FreshMemberEvidence:
         absent_from_event_catalog=False,
         absent_from_market_catalog=False,
     )
+
+
+def test_classifier_contract_vocabulary_is_frozen() -> None:
+    assert STRUCTURE_DRIFT_CLASSIFIER_V1 == "structure-drift-classifier-v1"
+    assert STRUCTURE_DRIFT_CLASSIFIER_V2 == "structure-drift-classifier-v2"
+    assert STRUCTURE_DRIFT_CLASS_TAGS_V2 == (
+        "shared",
+        "fresh-addition",
+        "current-nontradable",
+        "event-only-quarantine",
+        "market-side-quarantine",
+        "fresh-source-absent",
+        "fresh-group-ineligible",
+        "overlap-conflict",
+        "unclassified",
+    )
+    assert STRUCTURE_DRIFT_DIAGNOSTIC_CODES == (
+        "duplicate-market-identity",
+        "evidence-missing",
+        "generation-addition-not-certified",
+        "generation-addition-source-absent",
+        "conflicting-event-membership",
+        "invalid-neg-risk-classification",
+        "invalid-event-membership",
+        "uncertified-event-only-member",
+        "group-incomplete-source",
+        "augmented-group",
+        "group-complete-unsupported-unknown-reason",
+        "generation-addition-event-only-quarantine",
+        "generation-addition-market-side-quarantine",
+        "generation-addition-current-nontradable",
+        "active-open-projection-missing",
+        "active-open-projection-mismatch",
+        "multiple-removal-reasons",
+        "other-zero-removal-reason",
+        "generation-addition-other",
+    )
+
+
+def _v2_evidence(
+    member: StructuralMemberIdentity,
+    **changes: object,
+) -> FreshMemberEvidence:
+    truth = FreshGroupEvidence(
+        event_id="event-1",
+        group_id="group-1",
+        neg_risk_type="standard",
+        quality="complete-supported",
+        reason=None,
+        membership_hash="a" * 64,
+        global_relation_conflict=False,
+    )
+    base = FreshMemberEvidence(
+        source_present=True,
+        current_active=True,
+        current_closed=False,
+        projector_matches=True,
+        generation_certified=True,
+        event_only_quarantine=False,
+        market_side_quarantine=False,
+        absent_from_event_catalog=False,
+        absent_from_market_catalog=False,
+        projected_member=member,
+        event_source_count=1,
+        exact_source_member=member,
+        group_truth=truth,
+    )
+    return replace(base, **changes)
+
+
+def test_group_ineligible_active_sibling_is_classified_by_v2() -> None:
+    inactive = replace(_member("market-a"), active=False)
+    active = _member("market-b")
+    truth = FreshGroupEvidence(
+        event_id="event-1",
+        group_id="group-1",
+        neg_risk_type="standard",
+        quality="complete-unsupported",
+        reason="standard-neg-risk-has-non-tradable-members",
+        membership_hash="b" * 64,
+        global_relation_conflict=False,
+    )
+    result = classify_structure_member_drift(
+        legacy=(inactive, active),
+        generation=(),
+        evidence={
+            "market-a": replace(_v2_evidence(inactive), current_active=False, group_truth=truth),
+            "market-b": replace(_v2_evidence(active), group_truth=truth),
+        },
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V2,
+    )
+    assert result.legacy_removal_counts == {
+        "current-nontradable": 1,
+        "fresh-group-ineligible": 1,
+    }
+    assert result.unclassified == ()
+    assert result.diagnostics == ()
+    class_counts = {
+        "current-nontradable": 1,
+        "fresh-group-ineligible": 1,
+    }
+    assert result.legacy_reconstruction_root == reconstruction_root_from_class_commitments(
+        class_counts=class_counts,
+        class_digests=result.class_digests,
+        tags=("current-nontradable", "fresh-group-ineligible"),
+        domain="legacy-reconstruction",
+    )
+    assert result.generation_reconstruction_root == (
+        reconstruction_root_from_class_commitments(
+            class_counts=class_counts,
+            class_digests=result.class_digests,
+            tags=("shared", "fresh-addition"),
+            domain="generation-reconstruction",
+        )
+    )
+
+
+def test_group_ineligible_active_sibling_remains_unclassified_by_default_v1() -> None:
+    member = _member("market-b")
+    truth = FreshGroupEvidence(
+        event_id="event-1",
+        group_id="group-1",
+        neg_risk_type="standard",
+        quality="complete-unsupported",
+        reason="standard-neg-risk-has-non-tradable-members",
+        membership_hash="b" * 64,
+        global_relation_conflict=False,
+    )
+    result = classify_structure_member_drift(
+        legacy=(member,),
+        generation=(),
+        evidence={"market-b": replace(_v2_evidence(member), group_truth=truth)},
+    )
+    assert result.legacy_removal_counts == {}
+    assert result.unclassified == (member,)
+    assert result.diagnostics == ()
+
+
+def test_global_conflict_precedes_local_group_ineligible_reason() -> None:
+    member = _member("market-b")
+    truth = FreshGroupEvidence(
+        event_id="event-1",
+        group_id="group-1",
+        neg_risk_type="standard",
+        quality="incomplete-source",
+        reason="conflicting-event-membership",
+        membership_hash="b" * 64,
+        global_relation_conflict=True,
+    )
+    result = classify_structure_member_drift(
+        legacy=(member,),
+        generation=(),
+        evidence={"market-b": replace(_v2_evidence(member), group_truth=truth)},
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V2,
+    )
+    assert result.legacy_removal_counts == {}
+    assert result.unclassified == (member,)
+    assert result.diagnostic_counts == {"conflicting-event-membership": 1}
+    assert result.diagnostics[0].code == "conflicting-event-membership"
+
+
+@pytest.mark.parametrize(
+    ("side", "changes", "authorized_reasons", "expected"),
+    [
+        ("legacy-only", {"duplicate_market_identity": True}, (), "duplicate-market-identity"),
+        ("generation-only", {"identity_revalidated": False}, (), "evidence-missing"),
+        (
+            "generation-only",
+            {"generation_certified": False},
+            (),
+            "generation-addition-not-certified",
+        ),
+        (
+            "generation-only",
+            {
+                "source_present": False,
+                "absent_from_event_catalog": True,
+                "absent_from_market_catalog": True,
+            },
+            (),
+            "generation-addition-source-absent",
+        ),
+        (
+            "legacy-only",
+            {
+                "group_truth": replace(
+                    FreshGroupEvidence(
+                        "event-1",
+                        "group-1",
+                        "standard",
+                        "complete-supported",
+                        None,
+                        "a" * 64,
+                        False,
+                    ),
+                    global_relation_conflict=True,
+                )
+            },
+            (),
+            "conflicting-event-membership",
+        ),
+        (
+            "legacy-only",
+            {"invalid_neg_risk_classification": True},
+            (),
+            "invalid-neg-risk-classification",
+        ),
+        ("legacy-only", {"invalid_event_membership": True}, (), "invalid-event-membership"),
+        (
+            "legacy-only",
+            {"uncertified_event_only_member": True},
+            (),
+            "uncertified-event-only-member",
+        ),
+        (
+            "legacy-only",
+            {
+                "group_truth": FreshGroupEvidence(
+                    "event-1",
+                    "group-1",
+                    "standard",
+                    "incomplete-source",
+                    "missing-source-member",
+                    "a" * 64,
+                    False,
+                )
+            },
+            (),
+            "group-incomplete-source",
+        ),
+        (
+            "legacy-only",
+            {
+                "group_truth": FreshGroupEvidence(
+                    "event-1",
+                    "group-1",
+                    "augmented",
+                    "complete-unsupported",
+                    "augmented-neg-risk-not-supported",
+                    "a" * 64,
+                    False,
+                )
+            },
+            (),
+            "augmented-group",
+        ),
+        (
+            "legacy-only",
+            {
+                "group_truth": FreshGroupEvidence(
+                    "event-1",
+                    "group-1",
+                    "standard",
+                    "complete-unsupported",
+                    "unknown",
+                    "a" * 64,
+                    False,
+                )
+            },
+            (),
+            "group-complete-unsupported-unknown-reason",
+        ),
+        (
+            "generation-only",
+            {"event_only_quarantine": True},
+            (),
+            "generation-addition-event-only-quarantine",
+        ),
+        (
+            "generation-only",
+            {"market_side_quarantine": True},
+            (),
+            "generation-addition-market-side-quarantine",
+        ),
+        (
+            "generation-only",
+            {"current_active": False},
+            (),
+            "generation-addition-current-nontradable",
+        ),
+        ("legacy-only", {"projected_member": None}, (), "active-open-projection-missing"),
+        (
+            "legacy-only",
+            {"projected_member": replace(_member(), condition_id="different")},
+            (),
+            "active-open-projection-mismatch",
+        ),
+        ("legacy-only", {}, ("one", "two"), "multiple-removal-reasons"),
+        ("legacy-only", {}, (), "other-zero-removal-reason"),
+        ("generation-only", {}, (), "generation-addition-other"),
+    ],
+)
+def test_diagnostic_total_and_exclusive(
+    side: str,
+    changes: dict[str, object],
+    authorized_reasons: tuple[str, ...],
+    expected: str,
+) -> None:
+    member = _member()
+    evidence = _v2_evidence(member, **changes)
+    diagnostic = diagnose_unresolved_member(
+        side=side,
+        member=member,
+        evidence=evidence,
+        authorized_removal_reasons=authorized_reasons,
+    )
+    assert diagnostic.code == expected
+    assert diagnostic.side == side
+    assert diagnostic.envelope.identity_fields["market_id"] == "market-1"
+    assert len(diagnostic.predicate_bits) == len(STRUCTURE_DRIFT_DIAGNOSTIC_CODES)
+    assert sum(diagnostic.predicate_bits) >= 1
+    if side == "generation-only" and expected != "generation-addition-other":
+        assert diagnostic.predicate_bits[-1] is False
+
+
+def test_diagnostic_precedence_uses_first_matching_predicate() -> None:
+    member = _member()
+    evidence = _v2_evidence(
+        member,
+        invalid_event_membership=True,
+        market_side_quarantine=True,
+        current_active=False,
+    )
+    diagnostic = diagnose_unresolved_member(
+        side="generation-only",
+        member=member,
+        evidence=evidence,
+        authorized_removal_reasons=(),
+    )
+    assert diagnostic.code == "invalid-event-membership"
+    assert diagnostic.predicate_bits[6] is True
+    assert diagnostic.predicate_bits[12] is True
+    assert diagnostic.predicate_bits[13] is True
+
+
+def test_nullable_envelope_is_canonical() -> None:
+    envelope = StructureDriftCandidateEnvelope(
+        side="generation-only",
+        event_id=None,
+        group_id=None,
+        market_id="market-1",
+        member_kind=None,
+        active=None,
+        closed=None,
+        condition_id=None,
+        yes_token_id=None,
+        no_token_id=None,
+        neg_risk=None,
+        incomplete=None,
+        source_ordinal=3,
+        member_ordinal=4,
+        raw_event_hash=None,
+        raw_market_hash=None,
+    )
+    assert envelope.identity_fields == {
+        "event_id": None,
+        "group_id": None,
+        "market_id": "market-1",
+        "member_kind": None,
+        "active": None,
+        "closed": None,
+        "condition_id": None,
+        "yes_token_id": None,
+        "no_token_id": None,
+        "neg_risk": None,
+        "incomplete": None,
+    }
+    diagnostic = diagnose_unresolved_member(
+        side="generation-only",
+        member=envelope,
+        evidence=replace(
+            _v2_evidence(_member()),
+            invalid_event_membership=True,
+        ),
+        authorized_removal_reasons=(),
+    )
+    assert diagnostic.code == "invalid-event-membership"
+    assert diagnostic.envelope is envelope
 
 
 def test_shared_structural_identity_is_exact() -> None:
