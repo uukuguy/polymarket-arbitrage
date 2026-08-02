@@ -923,6 +923,64 @@ def test_duplicate_parent_event_only_candidate_remains_membership_invalid(
             )
 
 
+@pytest.mark.parametrize(
+    ("event_active", "event_closed", "market_active", "market_closed"),
+    ((True, False, False, True), (False, True, True, False)),
+)
+def test_both_present_status_mismatch_remains_membership_invalid(
+    tmp_path: Path,
+    event_active: bool,
+    event_closed: bool,
+    market_active: bool,
+    market_closed: bool,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=[{
+            "id": "event-1", "slug": "event-1", "negRisk": True,
+            "enableNegRisk": True, "negRiskAugmented": False,
+            "negRiskMarketID": "group-1", "markets": [{
+                "id": "both-present", "active": event_active,
+                "closed": event_closed, "negRiskOther": False,
+            }],
+        }], finished_at_ms=101,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=[{
+            "id": "both-present", "conditionId": "condition-1",
+            "slug": "both-present", "question": "Both present?",
+            "clobTokenIds": '["yes","no"]', "active": market_active,
+            "closed": market_closed, "negRisk": True,
+            "negRiskMarketID": "group-1",
+        }], finished_at_ms=102,
+    )
+    assert store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
+    )["completed"] is True
+    publication = store.begin_structure_publication(
+        window_id=window["id"],
+        snapshot_metadata={
+            "snapshot_id": 1, "taken_at_ms": 1_000, "mode": "full",
+            "data_product": "structure", "expected_counts": COMPONENT_COUNTS,
+        },
+        now_ms=104,
+    )
+    for component in (
+        "events", "event_tags", "memberships", "group_truth", "markets", "issues"
+    ):
+        _normalize_component_to_done(store, publication, component)
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=200)
+    with pytest.raises(ValueError, match="membership-invalid"):
+        for offset in range(20):
+            store.advance_structure_certification_chunk(
+                publication.publication_id, max_rows=500, now_ms=201 + offset
+            )
+
+
 def test_event_only_issue_source_keyset_is_bounded_at_500(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()

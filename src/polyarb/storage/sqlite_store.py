@@ -3955,7 +3955,8 @@ class SQLiteStore:
                     "AND k.market_id=m.market_id WHERE e.id IS NULL OR "
                     "(k.market_id IS NULL AND m.active=1 AND m.closed=0) OR "
                     "(k.market_id IS NOT NULL AND (k.event_id IS NOT m.event_id OR "
-                    "k.neg_risk_market_id IS NOT m.neg_risk_market_id)) LIMIT 1",
+                    "k.neg_risk_market_id IS NOT m.neg_risk_market_id OR "
+                    "k.active IS NOT m.active OR k.closed IS NOT m.closed)) LIMIT 1",
                     (*parameters, snapshot_id, snapshot_id),
                 ).fetchone()
                 if invalid is not None:
