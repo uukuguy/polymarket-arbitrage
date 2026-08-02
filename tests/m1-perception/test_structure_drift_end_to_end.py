@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -574,6 +575,74 @@ async def test_actual_drift_child_parser_resumes_committed_chunk(
         ).fetchone()
     assert phase == "source-events"
     assert json.loads(counts_json)["phase_row_count"] == 2
+
+
+def test_source_event_phase_adapts_global_500_row_budget(tmp_path: Path) -> None:
+    dense_rows = []
+    for ordinal in range(1, 101):
+        event_id = f"dense-event-{ordinal:04d}"
+        member_ids = [f"dense-market-{ordinal:04d}-{index:03d}" for index in range(50)]
+        dense_rows.append(
+            (
+                ordinal,
+                event_id,
+                {
+                    "id": event_id,
+                    "active": True,
+                    "closed": False,
+                    "negRisk": True,
+                    "enableNegRisk": True,
+                    "negRiskMarketID": f"dense-group-{ordinal:04d}",
+                    "markets": [
+                        {"id": market_id, "active": True, "closed": False}
+                        for market_id in member_ids
+                    ],
+                },
+                frozenset(member_ids),
+            )
+        )
+
+    capped = _drift_store(tmp_path / "capped")
+    chunked = _drift_store(tmp_path / "chunked")
+    observed_limits: list[int] = []
+
+    def observed_fetch(**kwargs):
+        observed_limits.append(int(kwargs["limit"]))
+        after = kwargs["after_event_id"]
+        eligible = [row for row in dense_rows if after is None or row[1] > after]
+        return eligible[: int(kwargs["limit"])]
+
+    capped.fetch_structure_drift_event_source_chunk = observed_fetch  # type: ignore[method-assign]
+    chunked.fetch_structure_drift_event_source_chunk = observed_fetch  # type: ignore[method-assign]
+    capped_id = capped.initialize_structure_drift_comparison(now_ms=3_000)
+    chunked_id = chunked.initialize_structure_drift_comparison(now_ms=3_000)
+    started = time.monotonic()
+    chunk = capped.advance_structure_drift_comparison_chunk(
+        capped_id,
+        max_rows=500,
+        now_ms=3_001,
+    )
+    elapsed_s = time.monotonic() - started
+    for index in range(5):
+        chunked.advance_structure_drift_comparison_chunk(
+            chunked_id,
+            max_rows=20,
+            now_ms=3_001 + index,
+        )
+
+    assert observed_limits[0] == 100
+    assert chunk.rows_processed == 100
+    assert elapsed_s < 15.0
+    with sqlite3.connect(capped.db_path) as capped_con, sqlite3.connect(
+        chunked.db_path
+    ) as chunked_con:
+        query = (
+            "SELECT row_cursor_json,digest_state_json,class_counts_json,"
+            "class_digests_json FROM structure_generation_drift_progress"
+        )
+        assert capped_con.execute(query).fetchone() == chunked_con.execute(
+            query
+        ).fetchone()
 
 
 @pytest.mark.asyncio

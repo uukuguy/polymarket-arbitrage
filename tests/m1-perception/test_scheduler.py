@@ -807,12 +807,19 @@ async def test_structure_drift_child_timeout_reaps_before_failure() -> None:
         run_structure_drift_in_subprocess,
     )
 
-    process = _FakeProcess({}, returncode=0, block=True)
+    process = _FakeProcess(
+        {},
+        returncode=0,
+        block=True,
+        stderr=b"structure-drift stage=source-events chunks=1 rows=500\n",
+    )
 
     async def spawn(*_args, **_kwargs):
         return process
 
-    with pytest.raises(SnapshotSubprocessError, match="structure-drift-timeout"):
+    with pytest.raises(
+        SnapshotSubprocessError, match="structure-drift-timeout"
+    ) as raised:
         await run_structure_drift_in_subprocess(
             db_path="/tmp/drift.db",
             max_rows=500,
@@ -824,6 +831,9 @@ async def test_structure_drift_child_timeout_reaps_before_failure() -> None:
         )
     assert process.terminated is True
     assert process.killed is True
+    assert raised.value.last_stage == "source-events"
+    assert raised.value.chunks_processed == 1
+    assert raised.value.rows_processed == 500
 
 
 @pytest.mark.asyncio
@@ -1829,9 +1839,21 @@ async def test_structure_drift_parent_terminalizes_child_failures(
         AsyncMock(
             side_effect=SnapshotSubprocessError(
                 failure_kind,
-                last_stage="structure-drift",
+                last_stage=(
+                    "source-events"
+                    if failure_kind == "structure-drift-timeout"
+                    else "structure-drift"
+                ),
                 elapsed_ms=75_000,
-                stderr=b"unsafe secret",
+                chunks_processed=(
+                    1 if failure_kind == "structure-drift-timeout" else 0
+                ),
+                rows_processed=(500 if failure_kind == "structure-drift-timeout" else 0),
+                stderr=(
+                    b"structure-drift stage=source-events chunks=1 rows=500"
+                    if failure_kind == "structure-drift-timeout"
+                    else b"unsafe secret"
+                ),
             )
         ),
     )
@@ -1847,7 +1869,14 @@ async def test_structure_drift_parent_terminalizes_child_failures(
     assert attempt is not None
     assert attempt["outcome"] == "failed"
     assert attempt["failure_kind"] == failure_kind
-    assert attempt["stderr_safe_marker"] is None
+    if failure_kind == "structure-drift-timeout":
+        assert attempt["chunks_processed"] == 1
+        assert attempt["rows_processed"] == 500
+        assert attempt["stderr_safe_marker"] == (
+            "structure-drift stage=source-events chunks=1 rows=500"
+        )
+    else:
+        assert attempt["stderr_safe_marker"] is None
     assert scheduler._failure_counter == 0
 
 

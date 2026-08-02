@@ -69,12 +69,14 @@ class SnapshotSubprocessError(RuntimeError):
         last_stage: str | None = None,
         elapsed_ms: int = 0,
         chunks_processed: int | None = None,
+        rows_processed: int | None = None,
         stderr: bytes = b"",
     ) -> None:
         super().__init__(f"snapshot-subprocess-{reason}")
         self.last_stage = last_stage
         self.elapsed_ms = max(0, elapsed_ms)
         self.chunks_processed = chunks_processed
+        self.rows_processed = rows_processed
         self.stderr_bytes = len(stderr)
         self.stderr_sha256 = hashlib.sha256(stderr).hexdigest()
         self.stderr_tail = _safe_stderr_tail(stderr)
@@ -139,9 +141,9 @@ _STRUCTURE_SUPERSESSION_MARKER_RE = re.compile(
     re.MULTILINE,
 )
 _STRUCTURE_DRIFT_MARKER_RE = re.compile(
-    rb"^structure-drift stage=(?:source-events|source-markets|generation-members|"
+    rb"^structure-drift stage=(?P<phase>source-events|source-markets|generation-members|"
     rb"legacy-members|fresh-group-truth|sealed|stale|exact|none) "
-    rb"chunks=(?:0|[1-9][0-9]*) rows=(?:0|[1-9][0-9]*)$",
+    rb"chunks=(?P<chunks>0|[1-9][0-9]*) rows=(?P<rows>0|[1-9][0-9]*)$",
     re.MULTILINE,
 )
 
@@ -173,6 +175,18 @@ def _safe_stderr_tail(stderr: bytes) -> str | None:
         return None
     tail = max(matches, key=lambda match: match.start()).group(0).decode("ascii")
     return tail if len(tail) <= 256 else None
+
+
+def _parse_last_structure_drift_marker(
+    stderr: bytes,
+) -> tuple[str | None, int, int]:
+    """Return only the last post-CAS drift marker as committed parent evidence."""
+    matches = [*_STRUCTURE_DRIFT_MARKER_RE.finditer(stderr)]
+    if not matches:
+        return None, 0, 0
+    marker = matches[-1]
+    phase = marker.group("phase").decode("ascii")
+    return phase, int(marker.group("chunks")), int(marker.group("rows"))
 
 
 @dataclass(frozen=True)
@@ -269,6 +283,17 @@ async def run_structure_drift_in_subprocess(
     def elapsed_ms() -> int:
         return max(0, int((time.monotonic() - started) * 1_000))
 
+    def drift_error(reason: str, stderr: bytes) -> SnapshotSubprocessError:
+        phase, chunks, rows = _parse_last_structure_drift_marker(stderr)
+        return SnapshotSubprocessError(
+            reason,
+            last_stage=phase or "structure-drift",
+            elapsed_ms=elapsed_ms(),
+            chunks_processed=chunks,
+            rows_processed=rows,
+            stderr=stderr,
+        )
+
     try:
         stdout, stderr = await asyncio.wait_for(
             asyncio.shield(communicate_task),
@@ -279,12 +304,7 @@ async def run_structure_drift_in_subprocess(
         raise
     except TimeoutError as error:
         _, stderr = await terminate_then_kill()
-        raise SnapshotSubprocessError(
-            "structure-drift-timeout",
-            last_stage="structure-drift",
-            elapsed_ms=elapsed_ms(),
-            stderr=stderr,
-        ) from error
+        raise drift_error("structure-drift-timeout", stderr) from error
     if process.returncode is not None and process.returncode < 0:
         signal_number = -process.returncode
         try:
@@ -292,24 +312,14 @@ async def run_structure_drift_in_subprocess(
         except ValueError:
             signal_name = str(signal_number)
         suffix = "-possible-oom" if signal_number == signal.SIGKILL else ""
-        raise SnapshotSubprocessError(
-            f"structure-drift-signal-{signal_name}{suffix}",
-            last_stage="structure-drift",
-            elapsed_ms=elapsed_ms(),
-            stderr=stderr,
-        )
+        raise drift_error(f"structure-drift-signal-{signal_name}{suffix}", stderr)
     try:
         payload = json.loads(stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         reason = (
             "sqlite-busy" if b"database is locked" in stderr.lower() else "invalid-json"
         )
-        raise SnapshotSubprocessError(
-            f"structure-drift-{reason}",
-            last_stage="structure-drift",
-            elapsed_ms=elapsed_ms(),
-            stderr=stderr,
-        ) from error
+        raise drift_error(f"structure-drift-{reason}", stderr) from error
     expected_keys = {
         "checkpointed",
         "chunks_processed",
@@ -1123,7 +1133,7 @@ class SnapshotScheduler:
                     finished_at_ms=int(time.time() * 1_000),
                     last_phase=error.last_stage,
                     chunks_processed=error.chunks_processed or 0,
-                    rows_processed=0,
+                    rows_processed=error.rows_processed or 0,
                     elapsed_ms=error.elapsed_ms,
                     failure_kind=error_text.removeprefix("snapshot-subprocess-")[:64],
                     stderr_bytes=error.stderr_bytes,

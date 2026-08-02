@@ -85,6 +85,7 @@ _STRUCTURE_DRIFT_SAFE_MARKER_RE = re.compile(
     re.MULTILINE,
 )
 _STRUCTURE_DRIFT_ATTEMPT_RETENTION = 100
+_STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS = 100
 
 _VALID_MODES = ("subset", "full")
 # Structure publication and Quote collection share one WAL database. Their
@@ -3889,7 +3890,7 @@ class SQLiteStore:
                     publication_id=str(progress[2]),
                     generation_snapshot_id=int(progress[1]),
                     after_event_id=cursor,
-                    limit=max_rows,
+                    limit=min(max_rows, _STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS),
                 )
                 group_state_value = digests.get("source_group_truth_state")
                 group_count = counts.get("source_group_truth_count")

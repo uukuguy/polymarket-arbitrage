@@ -11,6 +11,9 @@ child 每行块最多 500、每 slice 最多 100 块或 45 秒，每块独立 CA
 hard timeout 后 TERM，15 秒仍不退出则 KILL。
 parent 在 spawn 前先取得专用 attempt ownership；任何 child 都必须有 terminal evidence。重启会回收 orphan，
 而该账本独立于普通 Structure snapshot attempts，不能影响 adaptive cadence/timeout。
+全局 chunk 上限仍是 500，但 `source-events` 每块最多 100 events：一个 event 会展开 embedded markets 和
+group-truth hashing，按普通“行数”估算会严重低估工作量。phase cap 只改变 checkpoint 频率，不改变 cursor、
+串流顺序或最终 digest。
 
 ## 代码地图
 
@@ -38,6 +41,7 @@ parent 在 spawn 前先取得专用 attempt ownership；任何 child 都必须�
 - 不在 event loop 跑 slice：SQLite/CPU 异常不能阻塞 Quote scheduler。
 - 不让 operator CLI 推进：`make structure-generation-drift-compare` 永远只读；写入只由 scheduler child 所有。
 - writer busy 不增加 Structure failure counter：已提交 chunk 保留，下次 admission 从 cursor 恢复。
+- timeout ledger 以最后一条 post-CAS marker 为准：marker 已写出就代表该 chunk committed，不能记录成 0 行。
 
 ## 自检题
 

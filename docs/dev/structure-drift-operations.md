@@ -20,6 +20,10 @@ make structure-generation-drift-compare
 - `structure_generation_drift_max_chunks_per_tick=100`
 - `structure_generation_drift_slice_s=45`
 
+`max_rows=500` 是全局上限；`source-events` phase 在内部进一步限制为每 chunk 100 events，避免 dense embedded
+markets 让单个不可抢占 CAS chunk 越过 parent 75 秒边界。其它 phase 仍可使用 500 行，slice 总边界仍是
+100 chunks / 45 秒。
+
 scheduler 在 `_tick_lock` 内先检查 Quote，再取得共享 producer lock 并复查 Quote，之后才 spawn child。不要直接运行
 隐藏的 `structure-generation-drift-advance`；它是 parent-owned subprocess protocol，不是 operator surface。
 
@@ -40,6 +44,8 @@ writer busy、child timeout/cancel/SIGKILL 会释放 producer lock。已完成 c
 chunks/rows/elapsed、stderr bytes/digest 和最后一条白名单 marker。启动时把遗留 running 标为
 `parent-restarted-orphan`；只保留最近 100 条 terminal evidence，且绝不写入 `snapshot_attempts` 或 adaptive schedule。
 strict health 引用最新 drift attempt：failed 或 running 超 90 秒为 fail，deferred 保持可诊断 warn。
+timeout/SIGKILL 时 parent 只采信 child 最后一条 post-CAS 白名单 marker；例如 marker 的 `chunks=1 rows=500`
+表示这些行已经提交，attempt ledger 必须保留该值，即使 child 没有返回最终 stdout JSON。
 
 ## 实际验收门
 
