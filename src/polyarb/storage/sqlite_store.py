@@ -4222,7 +4222,24 @@ class SQLiteStore:
                     publication_id, True, False
                 )
             if status == "failed" and row[4] == reason:
-                if row[6] != "failed" or row[9] != "failed" or row[10] != reason:
+                pointer_is_candidate = (
+                    con.execute(
+                        "SELECT 1 FROM current_structure_generation WHERE id=1 "
+                        "AND snapshot_id=?",
+                        (snapshot_id,),
+                    ).fetchone()
+                    is not None
+                )
+                if (
+                    stored_version == current_version
+                    or row[5] != "structure"
+                    or row[6] != "failed"
+                    or int(row[7]) != 0
+                    or int(row[8]) != 0
+                    or row[9] != "failed"
+                    or row[10] != reason
+                    or pointer_is_candidate
+                ):
                     raise ValueError("structure-publication-supersession-incomplete")
                 con.execute("COMMIT")
                 return StructurePublicationContractReconciliation(

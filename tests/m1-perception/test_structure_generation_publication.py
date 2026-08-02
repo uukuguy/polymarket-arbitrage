@@ -1902,6 +1902,118 @@ def test_other_partial_contract_states_remain_fail_closed(
     assert after == before
 
 
+@pytest.mark.parametrize(
+    "corruption",
+    (
+        "current-contract",
+        "wrong-product",
+        "snapshot-valid",
+        "snapshot-published",
+        "pointer-candidate",
+    ),
+)
+def test_idempotent_supersession_rejects_corrupt_terminal_postcondition(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    from polyarb.perception.structure_contract import (
+        STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+    )
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    _publish_generation(
+        store,
+        snapshot_id=845,
+        market_id="serving-market",
+        now_ms=1_000,
+    )
+    publication = _begin_generation(
+        store,
+        snapshot_id=846,
+        market_id="candidate-market",
+        now_ms=2_000,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_publications SET normalization_contract_version=NULL "
+            "WHERE publication_id=?",
+            (publication.publication_id,),
+        )
+    assert store.reconcile_structure_publication_contract(
+        publication.window_id,
+        STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+        now_ms=2_100,
+    ).superseded is True
+
+    with sqlite3.connect(store.db_path) as con:
+        if corruption == "current-contract":
+            con.execute(
+                "UPDATE structure_publications SET normalization_contract_version=? "
+                "WHERE publication_id=?",
+                (STRUCTURE_NORMALIZATION_CONTRACT_VERSION, publication.publication_id),
+            )
+        elif corruption == "wrong-product":
+            con.execute(
+                "UPDATE snapshots SET data_product='legacy_combined' WHERE id=846"
+            )
+        elif corruption == "snapshot-valid":
+            con.execute("UPDATE snapshots SET is_valid=1 WHERE id=846")
+        elif corruption == "snapshot-published":
+            con.execute("UPDATE snapshots SET market_view_published=1 WHERE id=846")
+        elif corruption == "pointer-candidate":
+            con.execute(
+                "UPDATE current_structure_generation SET snapshot_id=?,publication_id=? "
+                "WHERE id=1",
+                (846, publication.publication_id),
+            )
+        before = {
+            "publication": con.execute(
+                "SELECT * FROM structure_publications WHERE publication_id=?",
+                (publication.publication_id,),
+            ).fetchone(),
+            "snapshot": con.execute(
+                "SELECT * FROM snapshots WHERE id=846"
+            ).fetchone(),
+            "window": con.execute(
+                "SELECT * FROM structure_sync_windows WHERE id=?",
+                (publication.window_id,),
+            ).fetchone(),
+            "pointer": con.execute(
+                "SELECT * FROM current_structure_generation WHERE id=1"
+            ).fetchone(),
+        }
+
+    with pytest.raises(
+        ValueError,
+        match="structure-publication-supersession-incomplete",
+    ):
+        store.reconcile_structure_publication_contract(
+            publication.window_id,
+            STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+            now_ms=2_200,
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        after = {
+            "publication": con.execute(
+                "SELECT * FROM structure_publications WHERE publication_id=?",
+                (publication.publication_id,),
+            ).fetchone(),
+            "snapshot": con.execute(
+                "SELECT * FROM snapshots WHERE id=846"
+            ).fetchone(),
+            "window": con.execute(
+                "SELECT * FROM structure_sync_windows WHERE id=?",
+                (publication.window_id,),
+            ).fetchone(),
+            "pointer": con.execute(
+                "SELECT * FROM current_structure_generation WHERE id=1"
+            ).fetchone(),
+        }
+    assert after == before
+
+
 def test_bounded_certification_resumes_every_primary_key_checkpoint(
     tmp_path: Path,
 ) -> None:
