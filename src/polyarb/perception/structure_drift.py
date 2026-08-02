@@ -353,6 +353,7 @@ def _is_fresh_addition(
     *,
     classifier_v2: bool,
 ) -> bool:
+    truth = evidence.group_truth
     return (
         evidence.source_present
         and evidence.current_active
@@ -361,7 +362,16 @@ def _is_fresh_addition(
         and evidence.generation_certified
         and not evidence.event_only_quarantine
         and not evidence.market_side_quarantine
-        and (not classifier_v2 or evidence.projected_member == member)
+        and (
+            not classifier_v2
+            or (
+                evidence.projected_member == member
+                and truth is not None
+                and truth.neg_risk_type == "standard"
+                and truth.quality == "complete-supported"
+                and not truth.global_relation_conflict
+            )
+        )
     )
 
 
@@ -424,7 +434,36 @@ def diagnose_unresolved_member(
     authorized_removal_reasons: tuple[str, ...],
 ) -> StructureDriftDiagnostic:
     """Assign exactly one unresolved code using the frozen first-match table."""
+    predicates = _diagnostic_predicates(
+        side=side,
+        member=member,
+        evidence=evidence,
+        authorized_removal_reasons=authorized_removal_reasons,
+    )
+    return _diagnostic_from_predicates(
+        side=side,
+        member=member,
+        evidence=evidence,
+        predicates=predicates,
+    )
+
+
+def _diagnostic_predicates(
+    *,
+    side: Literal["legacy-only", "generation-only"],
+    member: StructuralMemberIdentity | StructureDriftCandidateEnvelope,
+    evidence: FreshMemberEvidence | None,
+    authorized_removal_reasons: tuple[str, ...],
+) -> tuple[bool, ...]:
     truth = None if evidence is None else evidence.group_truth
+    active_open_projection_required = (
+        evidence is not None
+        and evidence.source_present
+        and evidence.current_active
+        and not evidence.current_closed
+        and not evidence.event_only_quarantine
+        and not evidence.market_side_quarantine
+    )
     preceding_predicates = (
         evidence is not None and evidence.duplicate_market_identity,
         evidence is None or not evidence.identity_revalidated,
@@ -450,18 +489,27 @@ def diagnose_unresolved_member(
         side == "generation-only"
         and evidence is not None
         and (not evidence.current_active or evidence.current_closed),
-        evidence is not None and evidence.projected_member is None,
-        evidence is not None
+        active_open_projection_required and evidence.projected_member is None,
+        active_open_projection_required
         and evidence.projected_member is not None
         and isinstance(member, StructuralMemberIdentity)
         and evidence.projected_member != member,
         side == "legacy-only" and len(authorized_removal_reasons) > 1,
         side == "legacy-only" and not authorized_removal_reasons,
     )
-    predicates = (
+    return (
         *preceding_predicates,
         side == "generation-only" and not any(preceding_predicates),
     )
+
+
+def _diagnostic_from_predicates(
+    *,
+    side: Literal["legacy-only", "generation-only"],
+    member: StructuralMemberIdentity | StructureDriftCandidateEnvelope,
+    evidence: FreshMemberEvidence | None,
+    predicates: tuple[bool, ...],
+) -> StructureDriftDiagnostic:
     code = next(
         code
         for code, predicate in zip(STRUCTURE_DRIFT_DIAGNOSTIC_CODES, predicates, strict=True)
@@ -476,6 +524,29 @@ def diagnose_unresolved_member(
             evidence=evidence,
         ),
         predicate_bits=predicates,
+    )
+
+
+def _v2_authorization_blocker(
+    *,
+    side: Literal["legacy-only", "generation-only"],
+    member: StructuralMemberIdentity,
+    evidence: FreshMemberEvidence | None,
+    authorized_removal_reasons: tuple[str, ...],
+) -> StructureDriftDiagnostic | None:
+    predicates = _diagnostic_predicates(
+        side=side,
+        member=member,
+        evidence=evidence,
+        authorized_removal_reasons=authorized_removal_reasons,
+    )
+    if not any(predicates[:16]):
+        return None
+    return _diagnostic_from_predicates(
+        side=side,
+        member=member,
+        evidence=evidence,
+        predicates=predicates,
     )
 
 
@@ -644,6 +715,20 @@ def classify_structure_member_drift(
             continue
         member_evidence = evidence.get(market_id)
         if generation_member is not None:
+            blocker = (
+                _v2_authorization_blocker(
+                    side="generation-only",
+                    member=generation_member,
+                    evidence=member_evidence,
+                    authorized_removal_reasons=(),
+                )
+                if classifier_v2
+                else None
+            )
+            if blocker is not None:
+                unclassified.append(generation_member)
+                diagnostics.append(blocker)
+                continue
             if member_evidence is not None and _is_fresh_addition(
                 generation_member,
                 member_evidence,
@@ -670,6 +755,20 @@ def classify_structure_member_drift(
             and _is_fresh_group_ineligible(legacy_member, member_evidence)
         ):
             reasons = (*reasons, "fresh-group-ineligible")
+        blocker = (
+            _v2_authorization_blocker(
+                side="legacy-only",
+                member=legacy_member,
+                evidence=member_evidence,
+                authorized_removal_reasons=reasons,
+            )
+            if classifier_v2
+            else None
+        )
+        if blocker is not None:
+            unclassified.append(legacy_member)
+            diagnostics.append(blocker)
+            continue
         if len(reasons) == 1:
             removals.setdefault(reasons[0], []).append(legacy_member)
         else:

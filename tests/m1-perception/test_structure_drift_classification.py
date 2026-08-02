@@ -214,6 +214,228 @@ def test_global_conflict_precedes_local_group_ineligible_reason() -> None:
 
 
 @pytest.mark.parametrize(
+    ("changes", "expected_code"),
+    [
+        ({"identity_revalidated": False}, "evidence-missing"),
+        (
+            {
+                "group_truth": FreshGroupEvidence(
+                    "event-1",
+                    "group-1",
+                    "standard",
+                    "incomplete-source",
+                    "conflicting-event-membership",
+                    "a" * 64,
+                    True,
+                )
+            },
+            "conflicting-event-membership",
+        ),
+        ({"invalid_neg_risk_classification": True}, "invalid-neg-risk-classification"),
+        ({"invalid_event_membership": True}, "invalid-event-membership"),
+        (
+            {
+                "group_truth": FreshGroupEvidence(
+                    "event-1",
+                    "group-1",
+                    "standard",
+                    "incomplete-source",
+                    "missing-source-member",
+                    "a" * 64,
+                    False,
+                )
+            },
+            "group-incomplete-source",
+        ),
+        (
+            {
+                "group_truth": FreshGroupEvidence(
+                    "event-1",
+                    "group-1",
+                    "augmented",
+                    "complete-unsupported",
+                    "augmented-neg-risk-not-supported",
+                    "a" * 64,
+                    False,
+                )
+            },
+            "augmented-group",
+        ),
+        (
+            {
+                "group_truth": FreshGroupEvidence(
+                    "event-1",
+                    "group-1",
+                    "standard",
+                    "complete-unsupported",
+                    "unknown-reason",
+                    "a" * 64,
+                    False,
+                )
+            },
+            "group-complete-unsupported-unknown-reason",
+        ),
+    ],
+)
+def test_v2_fresh_addition_authorized_path_blocking_precedes_classification(
+    changes: dict[str, object],
+    expected_code: str,
+) -> None:
+    member = _member()
+    result = classify_structure_member_drift(
+        legacy=(),
+        generation=(member,),
+        evidence={"market-1": _v2_evidence(member, **changes)},
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V2,
+    )
+    assert result.fresh_addition_count == 0
+    assert result.unclassified == (member,)
+    assert result.diagnostic_counts == {expected_code: 1}
+
+
+@pytest.mark.parametrize(
+    ("evidence_changes", "expected_code"),
+    [
+        (
+            {
+                "current_active": False,
+                "group_truth": FreshGroupEvidence(
+                    "event-1",
+                    "group-1",
+                    "standard",
+                    "incomplete-source",
+                    "conflicting-event-membership",
+                    "a" * 64,
+                    True,
+                ),
+            },
+            "conflicting-event-membership",
+        ),
+        (
+            {
+                "event_only_quarantine": True,
+                "invalid_neg_risk_classification": True,
+            },
+            "invalid-neg-risk-classification",
+        ),
+        (
+            {
+                "market_side_quarantine": True,
+                "identity_revalidated": False,
+            },
+            "evidence-missing",
+        ),
+        (
+            {
+                "source_present": False,
+                "absent_from_event_catalog": True,
+                "absent_from_market_catalog": True,
+                "invalid_event_membership": True,
+            },
+            "invalid-event-membership",
+        ),
+    ],
+)
+def test_v2_legacy_removal_authorized_path_blocking_precedes_classification(
+    evidence_changes: dict[str, object],
+    expected_code: str,
+) -> None:
+    member = _member()
+    result = classify_structure_member_drift(
+        legacy=(member,),
+        generation=(),
+        evidence={"market-1": _v2_evidence(member, **evidence_changes)},
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V2,
+    )
+    assert result.legacy_removal_counts == {}
+    assert result.unclassified == (member,)
+    assert result.diagnostic_counts == {expected_code: 1}
+
+
+@pytest.mark.parametrize(
+    ("evidence_changes", "expected_code"),
+    [
+        (
+            {"invalid_neg_risk_classification": True},
+            "invalid-neg-risk-classification",
+        ),
+        (
+            {"projected_member": replace(_member(), condition_id="mismatch")},
+            "active-open-projection-mismatch",
+        ),
+    ],
+)
+def test_v2_group_ineligible_authorized_path_blocking_precedes_classification(
+    evidence_changes: dict[str, object],
+    expected_code: str,
+) -> None:
+    member = _member()
+    truth = FreshGroupEvidence(
+        event_id="event-1",
+        group_id="group-1",
+        neg_risk_type="standard",
+        quality="complete-unsupported",
+        reason="standard-neg-risk-has-non-tradable-members",
+        membership_hash="b" * 64,
+        global_relation_conflict=False,
+    )
+    result = classify_structure_member_drift(
+        legacy=(member,),
+        generation=(),
+        evidence={
+            "market-1": _v2_evidence(
+                member,
+                group_truth=truth,
+                **evidence_changes,
+            )
+        },
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V2,
+    )
+    assert result.legacy_removal_counts == {}
+    assert result.unclassified == (member,)
+    assert result.diagnostic_counts == {expected_code: 1}
+
+
+def test_v1_authorized_paths_ignore_v2_blocking_predicates() -> None:
+    member = _member()
+    addition = classify_structure_member_drift(
+        legacy=(),
+        generation=(member,),
+        evidence={
+            "market-1": _v2_evidence(
+                member,
+                invalid_event_membership=True,
+            )
+        },
+    )
+    assert addition.fresh_addition_count == 1
+    assert addition.diagnostics == ()
+
+    conflict_truth = FreshGroupEvidence(
+        event_id="event-1",
+        group_id="group-1",
+        neg_risk_type="standard",
+        quality="incomplete-source",
+        reason="conflicting-event-membership",
+        membership_hash="a" * 64,
+        global_relation_conflict=True,
+    )
+    removal = classify_structure_member_drift(
+        legacy=(member,),
+        generation=(),
+        evidence={
+            "market-1": _v2_evidence(
+                member,
+                current_active=False,
+                group_truth=conflict_truth,
+            )
+        },
+    )
+    assert removal.legacy_removal_counts == {"current-nontradable": 1}
+    assert removal.diagnostics == ()
+
+
+@pytest.mark.parametrize(
     ("side", "changes", "authorized_reasons", "expected"),
     [
         ("legacy-only", {"duplicate_market_identity": True}, (), "duplicate-market-identity"),
