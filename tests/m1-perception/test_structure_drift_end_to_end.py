@@ -896,9 +896,16 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
             "unclassified_count": 0,
             "created_at_ms": 3_001,
         }
-        receipt_digest = sqlite_store_module._structure_drift_receipt_digest(
-            {field: payload[field] for field in digest_fields}
-        )
+        assert tuple(
+            sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
+        ) == digest_fields
+        receipt_digest = hashlib.sha256(
+            json.dumps(
+                tuple(payload[field] for field in digest_fields),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
         insert_fields = (
             digest_fields
             if "hash_algorithm" in digest_fields
