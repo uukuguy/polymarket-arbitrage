@@ -32,13 +32,24 @@ No successor window or snapshot is created inside the supersession transaction. 
 ## Failure and migration behavior
 
 - Missing contract column is added during schema initialization before publication work.
+- Legacy snapshot-status backfill excludes snapshots bound to active `writing` or `ready` publications. A building generation has `is_valid=0` until certification and must not be mistaken for a completed failed snapshot.
 - Legacy `NULL` active rows fail safe by supersession.
 - Schema initialization does not supersede rows by itself; runtime reconciliation provides the warning/audit and controlled checkpoint.
 - Any transaction race or impossible publication/window/snapshot state remains a real failure and follows existing scheduler failure handling.
 - The current pointer remains on 845 until a fully normalized and certified fresh generation publishes.
+
+### Repairing a pre-existing split state
+
+Production snapshot 846 was already `failed` more than three hours before the contract-supersession deployment while its publication remained `writing` and its source window remained `complete`. The legacy snapshot-status backfill created this state by deterministically mapping every Structure row with `is_valid=0` to failed, including an unfinished generation.
+
+Reconciliation accepts exactly this recoverable split: an active incompatible publication, an already-failed invalid/unpublished Structure snapshot, a complete bound window, and no current pointer to that snapshot. It authenticates the already-failed snapshot but does not rewrite its `finished_at_ms` or other failure evidence. In the same transaction it terminal-fails only the publication and window with `publication-contract-superseded`. Any other partial combination remains fail-closed.
+
+The ordinary three-row supersession path remains atomic. A forced failure after the publication and snapshot compare-and-set operations must roll back every mutation, proving that the reconciliation transaction itself cannot create the split state.
 
 ## Tests
 
 Tests must first reproduce the production state: pointer 845, publication/snapshot 846, `issues|done`, certification started, and a `NULL` or old contract. They prove one call atomically fails publication/snapshot/window with the exact reason, preserves pointer and generation rows, and returns the supersession checkpoint. A second call proves idempotence. A subsequent natural admission must create a fresh window and eventually reserve snapshot 847, never resume 846.
 
 Additional tests cover exact-version resume, fresh publication version persistence, legacy-column migration, a `NULL` active publication, no failure-counter escalation for the controlled checkpoint, and warning/audit visibility. Existing publication, scheduler, migration, and full-repository suites remain green.
+
+The migration regression additionally reproduces the pre-existing 846 split, verifies that schema initialization no longer changes an active building snapshot, verifies exact split-state repair without changing its historical `finished_at_ms`, injects a late transaction failure to prove rollback, and then exercises natural fresh-window recovery to 847.
