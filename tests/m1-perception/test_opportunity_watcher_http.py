@@ -93,6 +93,26 @@ def test_market_map_exposes_scannable_and_rejected_groups(http_test_client):
     ]
 
 
+def test_market_map_stays_200_and_excludes_quarantine_only_market(http_test_client):
+    revision = _seed_market_map(http_test_client)
+    with sqlite3.connect(http_test_client.app.state.sqlite_store.db_path) as con:
+        con.execute(
+            "INSERT INTO validation_issues(snapshot_id,layer,category,market_id,detail,"
+            "raw_payload) VALUES (?,1,'api_jitter','quarantined-market',"
+            "'quarantined',?)",
+            (
+                revision,
+                "active-open-neg-risk-market-parent-absent-from-active-event-catalogue:"
+                + "0" * 64,
+            ),
+        )
+
+    response = http_test_client.get("/market-map")
+
+    assert response.status_code == 200
+    assert "quarantined-market" not in response.text
+
+
 def test_market_map_event_filter_returns_only_requested_event(http_test_client):
     _seed_market_map(http_test_client)
 

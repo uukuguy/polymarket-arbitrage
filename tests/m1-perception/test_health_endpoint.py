@@ -256,6 +256,35 @@ def test_structure_generation_health_fails_stale_active_comparison() -> None:
     assert checks["snapshot:structure_generation_comparison"][0]["status"] == "fail"
 
 
+def test_structure_generation_health_warns_nonfatally_on_exact_quarantine() -> None:
+    checks = health_module._structure_generation_health_checks(
+        {
+            "pointer_snapshot_id": 9,
+            "generation_count_agrees": True,
+            "generation_hash_agrees": True,
+            "comparison_authenticated": True,
+            "publication": {
+                "status": "published",
+                "checkpoint_at_ms": 100_000,
+                "quarantine_count": 184,
+            },
+            "comparison": None,
+            "retained_generation_count_lower_bound": 2,
+            "retained_generation_count_is_exact": True,
+            "reclaimable_generation_count_lower_bound": 0,
+            "retention_floor": 2,
+        },
+        now_ms=102_000,
+        read_mode="legacy",
+        publication_sla_s=100,
+        pressure_warn_count=4,
+        pressure_fail_count=8,
+    )
+    check = checks["snapshot:structure_generation"][0]
+    assert check["status"] == "warn"
+    assert "quarantine_count=184" in check["output"]
+
+
 @pytest.mark.parametrize(
     ("checkpoint_at_ms", "blocked_reason", "expected"),
     ((99_000, None, "warn"), (1_000, None, "fail"), (99_000, "invalid-json", "fail")),

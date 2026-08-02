@@ -469,6 +469,7 @@ def _structure_generation_health_checks(
         publication_output = "stage=idle"
     else:
         stage = str(publication.get("status") or "unknown")
+        quarantine_count = int(publication.get("quarantine_count") or 0)
         checkpoint = publication.get("checkpoint_at_ms")
         if isinstance(checkpoint, int):
             checkpoint_age_s = max(0.0, (now_ms - checkpoint) / 1_000)
@@ -480,12 +481,15 @@ def _structure_generation_health_checks(
             and checkpoint_age_s > publication_sla_s
             else "warn" if active else "pass"
         )
+        if quarantine_count > 0 and publication_status == "pass":
+            publication_status = "warn"
         publication_output = (
             f"stage={stage} normalization_component="
             f"{publication.get('normalization_component')} "
             f"normalization_cursor={publication.get('normalization_cursor')} "
             f"write_component={publication.get('write_component')} "
             f"write_cursor={publication.get('write_cursor')} "
+            f"quarantine_count={quarantine_count} "
             f"checkpoint_age_seconds={checkpoint_age_s}"
         )
     if status.get("pointer_snapshot_id") is None and read_mode == "generation":

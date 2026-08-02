@@ -68,7 +68,11 @@ _SNAPSHOT_ATTEMPT_STDERR_TAIL_RE = re.compile(
     r"structure-publication-progress "
     r"stage=(?:normalizing|certifying|ready) "
     r"component=(?:[a-z][a-z_-]{0,31}|none) "
-    r"chunks=(?:100|[1-9][0-9]?) rows=(?:0|[1-9][0-9]*))"
+    r"chunks=(?:100|[1-9][0-9]?) rows=(?:0|[1-9][0-9]*)|"
+    r"structure-sync-failure failure_kind=(?:generation-count-mismatch|"
+    r"generation-incomplete|generation-validation-issues|membership-invalid|"
+    r"source-truth-invalid|sqlite-busy|structure-child-error|"
+    r"structure-publication-not-writing))"
 )
 
 _VALID_MODES = ("subset", "full")
@@ -3148,25 +3152,38 @@ class SQLiteStore:
         window_id: str,
         after_market_id: str | None,
         limit: int,
-    ) -> list[tuple[str, str]]:
-        """Read at most one keyset chunk of parent groups, including non-duplicates."""
+    ) -> list[tuple[str, dict[str, object]]]:
+        """Read one complete market keyset with every staged parent identity."""
         if not window_id or not 1 <= limit <= 500:
             raise ValueError("invalid-structure-market-parent-group-chunk")
         with sqlite3.connect(self._db_path) as con:
             rows = con.execute(
-                "WITH market_keys AS (SELECT market_id FROM "
-                "structure_sync_event_market_staging WHERE window_id=? "
+                "WITH market_keys AS (SELECT market_id,payload_json FROM "
+                "structure_sync_market_staging WHERE window_id=? "
                 "AND (? IS NULL OR market_id>?) GROUP BY market_id "
-                "ORDER BY market_id LIMIT ?), ordered AS (SELECT relation.market_id,"
-                "relation.event_id FROM structure_sync_event_market_staging relation "
-                "JOIN market_keys ON market_keys.market_id=relation.market_id "
-                "WHERE relation.window_id=? ORDER BY relation.market_id,"
-                "relation.source_ordinal,relation.event_id) SELECT market_id,"
-                "GROUP_CONCAT(event_id,',') FROM ordered GROUP BY market_id "
-                "ORDER BY market_id",
+                "ORDER BY market_id LIMIT ?) SELECT market_keys.market_id,"
+                "market_keys.payload_json,relation.event_id FROM market_keys LEFT JOIN "
+                "structure_sync_event_market_staging relation ON relation.window_id=? "
+                "AND relation.market_id=market_keys.market_id ORDER BY "
+                "market_keys.market_id,relation.source_ordinal,relation.event_id",
                 (window_id, after_market_id, after_market_id, limit, window_id),
             ).fetchall()
-        return [(str(row[0]), str(row[1])) for row in rows]
+        grouped: dict[str, dict[str, object]] = {}
+        for market_id, payload_json, event_id in rows:
+            item = grouped.setdefault(
+                str(market_id),
+                {"raw": json.loads(str(payload_json)), "event_ids": []},
+            )
+            if event_id is not None:
+                assert isinstance(item["event_ids"], list)
+                item["event_ids"].append(str(event_id))
+        return [
+            (
+                market_id,
+                {"raw": item["raw"], "event_ids": tuple(item["event_ids"])},
+            )
+            for market_id, item in grouped.items()
+        ]
 
     def seal_structure_publication_counts(
         self, publication_id: str, *, now_ms: int
@@ -3556,6 +3573,54 @@ class SQLiteStore:
             ready,
         )
 
+    @staticmethod
+    def _structure_quarantine_evidence_matches(
+        con: sqlite3.Connection,
+        *,
+        publication_id: str,
+        snapshot_id: int,
+        market_id: str,
+        layer: object,
+        category: object,
+        detail: object,
+        raw_payload: object,
+    ) -> bool:
+        """Recompute one exact source quarantine receipt from the pinned window."""
+        from polyarb.perception.structure_publication import market_quarantine_issue
+
+        source = con.execute(
+            "SELECT raw.payload_json,p.window_id FROM structure_publications p JOIN "
+            "structure_sync_market_staging raw ON raw.window_id=p.window_id "
+            "WHERE p.publication_id=? AND raw.market_id=?",
+            (publication_id, market_id),
+        ).fetchone()
+        if source is None:
+            return False
+        event_ids = tuple(
+            str(row[0])
+            for row in con.execute(
+                "SELECT event_id FROM structure_sync_event_market_staging "
+                "WHERE window_id=? AND market_id=? ORDER BY source_ordinal,event_id",
+                (str(source[1]), market_id),
+            ).fetchall()
+        )
+        expected = market_quarantine_issue(
+            market_id, json.loads(str(source[0])), event_ids
+        )
+        generated = con.execute(
+            "SELECT 1 FROM structure_generation_markets WHERE snapshot_id=? "
+            "AND market_id=?",
+            (snapshot_id, market_id),
+        ).fetchone()
+        return bool(
+            expected is not None
+            and generated is None
+            and layer == expected["layer"]
+            and category == expected["category"]
+            and detail == expected["detail"]
+            and raw_payload == expected["raw_payload"]
+        )
+
     def advance_structure_certification_chunk(
         self, publication_id: str, *, max_rows: int, now_ms: int
     ) -> StructureCertificationChunk:
@@ -3736,7 +3801,18 @@ class SQLiteStore:
                     ).fetchone() is None:
                         raise ValueError("source-truth-invalid")
             elif component == "issues" and rows and not is_backfill:
-                raise ValueError("generation-validation-issues")
+                for issue in rows:
+                    if not self._structure_quarantine_evidence_matches(
+                        read_con,
+                        publication_id=publication_id,
+                        snapshot_id=snapshot_id,
+                        market_id=str(issue[positions["market_id"]]),
+                        layer=issue[positions["layer"]],
+                        category=issue[positions["category"]],
+                        detail=issue[positions["detail"]],
+                        raw_payload=issue[positions["raw_payload"]],
+                    ):
+                        raise ValueError("generation-validation-issues")
             elif component == "source_events":
                 from polyarb.snapshot.normalizer import normalize_events
 
@@ -3841,6 +3917,24 @@ class SQLiteStore:
                         "AND market_id=?",
                         (snapshot_id, source_market[1]),
                     ).fetchone()
+                    if generated is None:
+                        issue = read_con.execute(
+                            "SELECT layer,category,detail,raw_payload FROM "
+                            "structure_generation_issues WHERE snapshot_id=? "
+                            "AND market_id=?",
+                            (snapshot_id, source_market[1]),
+                        ).fetchone()
+                        if issue is not None and self._structure_quarantine_evidence_matches(
+                            read_con,
+                            publication_id=publication_id,
+                            snapshot_id=snapshot_id,
+                            market_id=str(source_market[1]),
+                            layer=issue[0],
+                            category=issue[1],
+                            detail=issue[2],
+                            raw_payload=issue[3],
+                        ):
+                            continue
                     if generated != _row_to_tuple(normalized, snapshot_id):
                         raise ValueError("source-truth-invalid")
             digest = hashlib.sha256()
@@ -3863,13 +3957,21 @@ class SQLiteStore:
                 next_component = component
             else:
                 committed_counts = json.loads(str(publication[4]))
-                expected_count = int(
-                    committed_counts[
-                        component.removeprefix("source_")
-                        if component in _STRUCTURE_SOURCE_COMPONENTS
-                        else component
-                    ]
-                )
+                if component in _STRUCTURE_SOURCE_COMPONENTS:
+                    source_name = component.removeprefix("source_")
+                    source_table = (
+                        "structure_sync_event_staging"
+                        if source_name == "events"
+                        else "structure_sync_market_staging"
+                    )
+                    expected_count = int(
+                        read_con.execute(
+                            f"SELECT COUNT(*) FROM {source_table} WHERE window_id=?",  # noqa: S608
+                            (window_id,),
+                        ).fetchone()[0]
+                    )
+                else:
+                    expected_count = int(committed_counts[component])
                 if scanned_counts[component] != expected_count:
                     raise ValueError("generation-count-mismatch")
                 index = certification_components.index(component)
@@ -4548,7 +4650,7 @@ class SQLiteStore:
             publication = con.execute(
                 "SELECT publication_id,snapshot_id,status,normalization_component,"
                 "normalization_source_cursor,write_component,write_row_cursor,"
-                "checkpoint_at_ms FROM structure_publications "
+                "checkpoint_at_ms,committed_counts_json FROM structure_publications p "
                 "WHERE status IN ('normalizing','writing','ready') "
                 "ORDER BY checkpoint_at_ms DESC,publication_id DESC LIMIT 1"
             ).fetchone()
@@ -4556,7 +4658,8 @@ class SQLiteStore:
                 publication = con.execute(
                     "SELECT p.publication_id,p.snapshot_id,p.status,"
                     "p.normalization_component,p.normalization_source_cursor,"
-                    "p.write_component,p.write_row_cursor,p.checkpoint_at_ms FROM "
+                    "p.write_component,p.write_row_cursor,p.checkpoint_at_ms,"
+                    "p.committed_counts_json FROM "
                     "current_structure_generation g JOIN structure_publications p "
                     "ON p.snapshot_id=g.snapshot_id AND "
                     "p.publication_id=g.publication_id WHERE g.id=1"
@@ -4845,6 +4948,11 @@ class SQLiteStore:
                 "write_component": publication[5],
                 "write_cursor": publication[6],
                 "checkpoint_at_ms": int(publication[7]),
+                "quarantine_count": (
+                    int(json.loads(str(publication[8])).get("issues", 0))
+                    if str(publication[2]) in {"ready", "published"}
+                    else 0
+                ),
             },
             "bootstrap": None
             if bootstrap is None

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -17,6 +19,53 @@ from polyarb.perception.structure_contract import (
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 from polyarb.snapshot.orchestrator import SnapshotResult
 from polyarb.storage.sqlite_store import SQLiteStore, StructurePublicationState
+
+ORPHAN_NEG_RISK_QUARANTINE_REASON = (
+    "active-open-neg-risk-market-parent-absent-from-active-event-catalogue"
+)
+MISSING_GROUP_NEG_RISK_QUARANTINE_REASON = (
+    "active-open-neg-risk-market-missing-group-identity"
+)
+
+
+def structure_market_source_hash(raw: dict) -> str:
+    encoded = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def market_quarantine_issue(
+    market_id: str,
+    raw: dict,
+    event_ids: tuple[str, ...],
+) -> dict[str, object] | None:
+    """Return authenticated evidence only for one exact cross-catalogue orphan."""
+    if not (
+        raw.get("active") is True
+        and raw.get("closed") is False
+        and raw.get("negRisk") is True
+    ):
+        return None
+    group_id = raw.get("negRiskMarketID")
+    if not (isinstance(group_id, str) and bool(group_id.strip())):
+        reason = MISSING_GROUP_NEG_RISK_QUARANTINE_REASON
+        detail = f"Gamma neg-risk market missing group identity quarantined: {market_id}"
+    elif not event_ids:
+        reason = ORPHAN_NEG_RISK_QUARANTINE_REASON
+        detail = (
+            "Gamma active neg-risk market parent absent from active event catalogue "
+            f"quarantined: {market_id}"
+        )
+    else:
+        return None
+    return {
+        "layer": 1,
+        "category": "api_jitter",
+        "market_id": market_id,
+        "detail": detail[:200],
+        "raw_payload": (
+            f"{reason}:{structure_market_source_hash(raw)}"
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -180,18 +229,34 @@ def normalize_structure_component_chunk(
             event_id = market_event_ids.get(market_id)
             normalized = normalize_market(raw, {market_id: event_id} if event_id else {})
             if normalized is not None:
+                if market_quarantine_issue(
+                    market_id,
+                    raw,
+                    (() if event_id is None else (event_id,)),
+                ) is not None:
+                    continue
                 normalized["fetched_at_ms"] = taken_at_ms
                 canonical.append(normalized)
         elif component == "issues":
-            if "," in str(raw):
+            event_ids = tuple(str(item) for item in raw["event_ids"])
+            if len(event_ids) > 1:
                 canonical.append(
                     {
                         "layer": 1,
                         "category": "api_jitter",
                         "market_id": _source_key,
-                        "detail": f"market-id-conflict-across-events:{raw}"[:200],
+                        "detail": (
+                            "market-id-conflict-across-events:"
+                            f"{','.join(event_ids)}"
+                        )[:200],
                     }
                 )
+            else:
+                issue = market_quarantine_issue(
+                    _source_key, raw["raw"], event_ids
+                )
+                if issue is not None:
+                    canonical.append(issue)
     sort_keys = {
         "events": lambda row: (str(row["id"]),),
         "event_tags": lambda row: (str(row["event_id"]), str(row["tag_id"])),

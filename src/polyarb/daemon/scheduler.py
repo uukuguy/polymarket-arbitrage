@@ -123,6 +123,13 @@ _STRUCTURE_PROGRESS_MARKER_RE = re.compile(
     rb"chunks=(100|[1-9][0-9]?) rows=(?:0|[1-9][0-9]*)$",
     re.MULTILINE,
 )
+_STRUCTURE_FAILURE_MARKER_RE = re.compile(
+    rb"^structure-sync-failure failure_kind="
+    rb"(generation-count-mismatch|generation-incomplete|generation-validation-issues|"
+    rb"membership-invalid|source-truth-invalid|sqlite-busy|structure-child-error|"
+    rb"structure-publication-not-writing)$",
+    re.MULTILINE,
+)
 
 
 def _parse_last_snapshot_stage(stderr: bytes) -> str | None:
@@ -145,6 +152,7 @@ def _safe_stderr_tail(stderr: bytes) -> str | None:
     """Retain only the final allowlisted marker, never arbitrary child output."""
     matches = [*_SNAPSHOT_STAGE_MARKER_RE.finditer(stderr)]
     matches.extend(_STRUCTURE_PROGRESS_MARKER_RE.finditer(stderr))
+    matches.extend(_STRUCTURE_FAILURE_MARKER_RE.finditer(stderr))
     if not matches:
         return None
     tail = max(matches, key=lambda match: match.start()).group(0).decode("ascii")

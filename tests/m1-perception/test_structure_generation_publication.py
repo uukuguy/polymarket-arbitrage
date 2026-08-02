@@ -450,6 +450,352 @@ def test_issues_duplicates_cross_500_key_boundary_without_restart_loss(
     assert issue_markets == [("market-499",), ("market-500",)]
 
 
+@pytest.mark.parametrize(
+    ("raw_market", "raw_events", "expected_market_count", "reason_prefix"),
+    (
+        pytest.param(
+            {
+                "id": "orphan-neg-risk",
+                "active": True,
+                "closed": False,
+                "negRisk": True,
+                "negRiskMarketID": "inactive-parent-group",
+            },
+            [],
+            0,
+            "active-open-neg-risk-market-parent-absent-from-active-event-catalogue",
+            id="inactive-parent-not-visible",
+        ),
+        pytest.param(
+            {
+                "id": "missing-group",
+                "active": True,
+                "closed": False,
+                "negRisk": True,
+                "negRiskMarketID": None,
+            },
+            [{"id": "event-1", "markets": [{"id": "missing-group"}]}],
+            0,
+            "active-open-neg-risk-market-missing-group-identity",
+            id="missing-group-identity",
+        ),
+        pytest.param(
+            {
+                "id": "ordinary-orphan",
+                "active": True,
+                "closed": False,
+                "negRisk": False,
+                "negRiskMarketID": None,
+            },
+            [],
+            1,
+            None,
+            id="ordinary-orphan-remains-visible",
+        ),
+        pytest.param(
+            {
+                "id": "recovered-market",
+                "active": True,
+                "closed": False,
+                "negRisk": True,
+                "negRiskMarketID": "recovered-group",
+            },
+            [
+                {
+                    "id": "recovered-event",
+                    "negRisk": True,
+                    "enableNegRisk": True,
+                    "negRiskAugmented": False,
+                    "negRiskMarketID": "recovered-group",
+                    "markets": [
+                        {
+                            "id": "recovered-market",
+                            "active": True,
+                            "closed": False,
+                            "negRiskOther": False,
+                        }
+                    ],
+                }
+            ],
+            1,
+            None,
+            id="parent-restored-next-generation",
+        ),
+    ),
+)
+def test_structure_quarantine_is_exact_and_source_authenticated(
+    tmp_path: Path,
+    raw_market: dict[str, object],
+    raw_events: list[dict[str, object]],
+    expected_market_count: int,
+    reason_prefix: str | None,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=raw_events,
+        finished_at_ms=101,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        markets=[raw_market],
+        finished_at_ms=102,
+    )
+    while not store.advance_structure_event_market_backfill(
+        window_id=window["id"],
+        max_events=500,
+        max_relationships=500,
+        now_ms=103,
+    )["completed"]:
+        pass
+    publication = store.begin_structure_publication(
+        window_id=window["id"],
+        snapshot_metadata={
+            "snapshot_id": 1,
+            "taken_at_ms": 1_000,
+            "mode": "full",
+            "data_product": "structure",
+            "expected_counts": COMPONENT_COUNTS,
+        },
+        now_ms=104,
+    )
+    for component in (
+        "events",
+        "event_tags",
+        "memberships",
+        "group_truth",
+        "markets",
+        "issues",
+    ):
+        _normalize_component_to_done(store, publication, component)
+
+    with sqlite3.connect(store.db_path) as con:
+        markets = con.execute(
+            "SELECT market_id FROM structure_generation_markets WHERE snapshot_id=1"
+        ).fetchall()
+        issues = con.execute(
+            "SELECT market_id,detail,raw_payload FROM structure_generation_issues "
+            "WHERE snapshot_id=1"
+        ).fetchall()
+    assert len(markets) == expected_market_count
+    if reason_prefix is None:
+        assert issues == []
+    else:
+        assert len(issues) == 1
+        assert issues[0][0] == raw_market["id"]
+        assert str(issues[0][2]).startswith(f"{reason_prefix}:")
+        assert len(str(issues[0][2]).rsplit(":", 1)[1]) == 64
+
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=200)
+    observed_source_market = False
+    for offset in range(30):
+        chunk = SQLiteStore(store.db_path).advance_structure_certification_chunk(
+            publication.publication_id,
+            max_rows=500,
+            now_ms=201 + offset,
+        )
+        if chunk.component == "source_markets" and chunk.rows_processed == 1:
+            observed_source_market = True
+            break
+    assert observed_source_market is True
+
+
+def test_structure_quarantine_exactly_equals_production_shaped_184_row_difference(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    orphan_markets = [
+        {
+            "id": f"orphan-{index:03d}",
+            "active": True,
+            "closed": False,
+            "negRisk": True,
+            "negRiskMarketID": f"inactive-parent-{index:03d}",
+        }
+        for index in range(140)
+    ]
+    missing_group_markets = [
+        {
+            "id": f"missing-group-{index:03d}",
+            "active": True,
+            "closed": False,
+            "negRisk": True,
+            "negRiskMarketID": None,
+        }
+        for index in range(44)
+    ]
+    events = [
+        {
+            "id": f"event-{index:03d}",
+            "markets": [{"id": f"missing-group-{index:03d}"}],
+        }
+        for index in range(44)
+    ]
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=events, finished_at_ms=101,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=[*orphan_markets, *missing_group_markets],
+        finished_at_ms=102,
+    )
+    while not store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
+    )["completed"]:
+        pass
+    publication = store.begin_structure_publication(
+        window_id=window["id"],
+        snapshot_metadata={
+            "snapshot_id": 1,
+            "taken_at_ms": 1_000,
+            "mode": "full",
+            "data_product": "structure",
+            "expected_counts": COMPONENT_COUNTS,
+        },
+        now_ms=104,
+    )
+    for component in (
+        "events", "event_tags", "memberships", "group_truth", "markets", "issues"
+    ):
+        _normalize_component_to_done(store, publication, component)
+
+    with sqlite3.connect(store.db_path) as con:
+        source_minus_generation = {
+            str(row[0])
+            for row in con.execute(
+                "SELECT market_id FROM structure_sync_market_staging WHERE window_id=? "
+                "EXCEPT SELECT market_id FROM structure_generation_markets "
+                "WHERE snapshot_id=1",
+                (window["id"],),
+            ).fetchall()
+        }
+        issues = con.execute(
+            "SELECT market_id,raw_payload FROM structure_generation_issues "
+            "WHERE snapshot_id=1 ORDER BY market_id"
+        ).fetchall()
+    issue_ids = {str(row[0]) for row in issues}
+    assert len(source_minus_generation) == 184
+    assert issue_ids == source_minus_generation
+    assert sum("parent-absent" in str(row[1]) for row in issues) == 140
+    assert sum("missing-group-identity" in str(row[1]) for row in issues) == 44
+
+
+def test_forged_quarantine_issue_remains_fatal(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store, snapshot_id=1, market_id="market-active", now_ms=1_000
+    )
+    _append_generation_truth(
+        store,
+        publication,
+        snapshot_id=1,
+        market_id="market-active",
+        now_ms=1_004,
+    )
+    store.append_structure_publication_chunk(
+        publication.publication_id,
+        "issues",
+        (
+            {
+                "layer": 1,
+                "category": "api_jitter",
+                "market_id": "market-active",
+                "detail": "forged quarantine",
+                "raw_payload": (
+                    "active-open-neg-risk-market-missing-group-identity:" + "0" * 64
+                ),
+            },
+        ),
+        expected_prior_cursor="market-active",
+        next_cursor="issues|done",
+        now_ms=1_009,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        counts = json.loads(
+            con.execute(
+                "SELECT committed_counts_json FROM structure_publications "
+                "WHERE publication_id=?",
+                (publication.publication_id,),
+            ).fetchone()[0]
+        )
+        con.execute(
+            "UPDATE structure_publications SET expected_counts_json=? "
+            "WHERE publication_id=?",
+            (json.dumps(counts, sort_keys=True), publication.publication_id),
+        )
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
+
+    with pytest.raises(ValueError, match="generation-validation-issues"):
+        for offset in range(20):
+            store.advance_structure_certification_chunk(
+                publication.publication_id, max_rows=500, now_ms=1_011 + offset
+            )
+
+
+def test_source_market_difference_without_exact_quarantine_evidence_fails_closed(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=[], finished_at_ms=101,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True,
+        markets=[{
+            "id": "orphan", "active": True, "closed": False,
+            "negRisk": True, "negRiskMarketID": "group-1",
+        }],
+        finished_at_ms=102,
+    )
+    assert store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
+    )["completed"] is True
+    zero_counts = {component: 0 for component in COMPONENT_COUNTS}
+    publication = store.begin_structure_publication(
+        window_id=window["id"],
+        snapshot_metadata={
+            "snapshot_id": 1, "taken_at_ms": 1_000, "mode": "full",
+            "data_product": "structure", "expected_counts": zero_counts,
+        },
+        now_ms=104,
+    )
+    cursor = None
+    for offset, component in enumerate(COMPONENT_COUNTS):
+        next_cursor = f"{component}|done"
+        store.append_structure_publication_chunk(
+            publication.publication_id,
+            component,
+            (),
+            expected_prior_cursor=cursor,
+            next_cursor=next_cursor,
+            now_ms=105 + offset,
+        )
+        cursor = next_cursor
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=120)
+
+    with pytest.raises(ValueError, match="source-truth-invalid"):
+        for offset in range(20):
+            store.advance_structure_certification_chunk(
+                publication.publication_id, max_rows=500, now_ms=121 + offset
+            )
+
+
 def test_normalization_chunk_never_fetches_more_than_raw_row_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

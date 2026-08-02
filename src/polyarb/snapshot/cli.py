@@ -375,6 +375,11 @@ def structure_sync(
         )
     except Exception as error:  # noqa: BLE001 - process boundary owns the protocol
         failure_kind = _structure_failure_kind(error)
+        print(
+            f"structure-sync-failure failure_kind={failure_kind}",
+            file=sys.stderr,
+            flush=True,
+        )
         if json_output:
             print(
                 json.dumps(

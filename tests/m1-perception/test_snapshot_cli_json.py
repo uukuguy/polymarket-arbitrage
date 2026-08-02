@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -48,7 +51,9 @@ def test_structure_sync_cli_returns_bounded_failure_json(monkeypatch) -> None:
         result = CliRunner().invoke(app, ["structure-sync", "--json"])
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == {
+    lines = result.stdout.splitlines()
+    assert lines[0] == "structure-sync-failure failure_kind=membership-invalid"
+    assert json.loads(lines[-1]) == {
         "failed": True,
         "failure_kind": "membership-invalid",
     }
@@ -67,12 +72,47 @@ def test_structure_sync_cli_redacts_unexpected_exception(monkeypatch) -> None:
         result = CliRunner().invoke(app, ["structure-sync", "--json"])
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout) == {
+    lines = result.stdout.splitlines()
+    assert lines[0] == "structure-sync-failure failure_kind=structure-child-error"
+    assert json.loads(lines[-1]) == {
         "failed": True,
         "failure_kind": "structure-child-error",
     }
     assert secret not in result.stdout
     assert secret not in result.output
+
+
+def test_structure_sync_failure_uses_separate_os_pipe_contract() -> None:
+    """The real process boundary keeps terminal JSON and failure marker separate."""
+    script = """
+from unittest.mock import AsyncMock, patch
+from polyarb.snapshot.cli import app
+with patch(
+    'polyarb.snapshot.cli.run_structure_sync_until_published',
+    new=AsyncMock(side_effect=ValueError('source-truth-invalid')),
+):
+    app(['structure-sync', '--json'], standalone_mode=True)
+"""
+    environment = os.environ.copy()
+    environment["POLYARB_ALLOW_EMPTY_SECRET"] = "1"
+    environment["POLYARB_ALLOW_EXTERNAL_PATHS"] = "1"
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {
+        "failed": True,
+        "failure_kind": "source-truth-invalid",
+    }
+    assert result.stderr == (
+        "structure-sync-failure failure_kind=source-truth-invalid\n"
+    )
 
 
 def test_structure_sync_cli_returns_cooperative_checkpoint_json(monkeypatch) -> None:

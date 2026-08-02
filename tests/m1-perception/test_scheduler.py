@@ -1289,6 +1289,7 @@ async def test_snapshot_subprocess_accepts_bounded_child_failure_contract() -> N
         b"arbitrary secret-bearing diagnostic\n"
         b"structure-publication-progress stage=certifying component=memberships "
         b"chunks=1 rows=500\n"
+        b"structure-sync-failure failure_kind=membership-invalid\n"
     )
 
     async def spawn(*_args, **_kwargs):
@@ -1307,10 +1308,7 @@ async def test_snapshot_subprocess_accepts_bounded_child_failure_contract() -> N
     error = raised.value
     assert error.stderr_bytes == len(stderr)
     assert len(error.stderr_sha256) == 64
-    assert error.stderr_tail == (
-        "structure-publication-progress stage=certifying component=memberships "
-        "chunks=1 rows=500"
-    )
+    assert error.stderr_tail == "structure-sync-failure failure_kind=membership-invalid"
     assert "secret" not in error.stderr_tail
     assert error.chunks_processed == 1
 

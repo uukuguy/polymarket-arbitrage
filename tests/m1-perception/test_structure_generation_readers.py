@@ -31,6 +31,7 @@ def _seed_structure_revision(
     snapshot_id: int,
     market_suffix: str,
     point_current: bool,
+    quarantine_issue: bool = False,
 ) -> None:
     store = SQLiteStore(path)
     with sqlite3.connect(path) as con:
@@ -126,6 +127,29 @@ def _seed_structure_revision(
             f"SELECT {market_columns} FROM markets WHERE snapshot_id=?",
             (snapshot_id,),
         )
+        if quarantine_issue:
+            evidence = (
+                "active-open-neg-risk-market-parent-absent-from-active-event-catalogue:"
+                + "0" * 64
+            )
+            issue_values = (
+                snapshot_id,
+                1,
+                "api_jitter",
+                "quarantined-market",
+                "quarantined",
+                evidence,
+            )
+            con.execute(
+                "INSERT INTO validation_issues(snapshot_id,layer,category,market_id,"
+                "detail,raw_payload) VALUES (?,?,?,?,?,?)",
+                issue_values,
+            )
+            con.execute(
+                "INSERT INTO structure_generation_issues(snapshot_id,issue_index,layer,"
+                "category,market_id,detail,raw_payload) VALUES (?,1,?,?,?,?,?)",
+                issue_values,
+            )
         counts = store._generation_counts(con, snapshot_id)
         generation_hash = store._generation_hash(con, snapshot_id)
         counts_json = json.dumps(counts, sort_keys=True, separators=(",", ":"))
@@ -1258,6 +1282,41 @@ def test_opportunity_scanner_reads_generation_tables(generation_db: Path) -> Non
         "market-old-1",
         "market-old-2",
     ]
+
+
+def test_quarantined_generation_market_never_enters_opportunity_views(
+    tmp_path: Path,
+) -> None:
+    generation_db = tmp_path / "quarantine-opportunity.db"
+    SQLiteStore(generation_db).init_schema()
+    _seed_structure_revision(
+        generation_db,
+        snapshot_id=1,
+        market_suffix="visible",
+        point_current=True,
+        quarantine_issue=True,
+    )
+
+    opportunities = scan_neg_risk_buy_all(
+        generation_db,
+        min_edge_bps=0,
+        structure_generation_read_mode="generation",
+    )
+    payload = _read_market_map(
+        generation_db,
+        event_id=None,
+        now_ms=1_001,
+        max_age_s=60,
+        quote_max_age_s=60,
+        structure_generation_read_mode="generation",
+    )
+
+    assert all(
+        leg.market_id != "quarantined-market"
+        for opportunity in opportunities
+        for leg in opportunity.legs
+    )
+    assert "quarantined-market" not in json.dumps(payload)
 
 
 def test_market_map_reads_generation_truth(generation_db: Path) -> None:
