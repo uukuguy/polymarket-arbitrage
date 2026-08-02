@@ -337,6 +337,27 @@ class/overlap-conflict
 class/unclassified
 ```
 
+Comparable rows use two commitments without adding another domain. The
+projection and source streams keep their `projection-member` and
+`source-group-truth` audit roots. Generation rows keep independent
+`generation-member` and `generation-group-truth` audit roots for the receipt,
+and in parallel update comparison mirrors over the identical canonical row
+representation using the corresponding projection/source domain. Strict
+equality is evaluated only between a projection/source audit root and its
+generation comparison mirror. A generation audit root is never compared to a
+root in another domain and is never relabelled as a comparison root.
+
+The mirror state and count are persisted in progress JSON on every checkpoint,
+so restart and chunk partitioning cannot change the result. The finalized
+mirror count/root pairs are explicit receipt fields:
+`generation_projection_member_comparison_count/root` and
+`generation_source_group_truth_comparison_count/root`. All four fields are in
+the receipt digest. Authorization cross-checks every audit root, comparison
+root, and comparison count against sealed progress, then checks the two
+same-domain equalities. Tampering either the audit or comparison commitment
+fails closed. This adds hashing work to the generation scans and is included
+in the Task 5 production performance budget.
+
 Reconstruction commitments remain SHA-256 commitments over ordered class tag,
 count, and the corresponding finalized v2 class root. Their framing is also
 prefixed with `PREFIX` and domain-separated as `legacy-reconstruction` and
@@ -349,7 +370,12 @@ included in the comparison identity, `comparison_id`, source-identity
 commitment, reconstruction commitments, and final receipt digest. The schema
 migration labels existing rows `serializable-sha256-v1` and rebuilds the
 progress and receipt identity uniqueness constraints to include
-`hash_algorithm`. Progress also gains nullable `terminal_reason`; the migration
+`hash_algorithm`, without changing business data. Comparison-mirror receipt
+columns are nullable only for queryable historical receipts created before the
+v2 mirror contract; every newly sealed v2 receipt must populate all four, and
+status validation rejects a missing value. Existing hash-versioned databases
+add the nullable columns idempotently during startup.
+Progress also gains nullable `terminal_reason`; the migration
 labels pre-existing terminal rows `legacy-terminal-reason-unspecified`, while
 new algorithm supersession uses the exact reason below.
 

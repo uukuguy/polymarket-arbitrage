@@ -365,6 +365,28 @@ def _migrate_structure_drift_hash_v2(
     if {"hash_algorithm", "terminal_reason"} <= progress_columns and (
         "hash_algorithm" in receipt_columns
     ):
+        mirror_columns = {
+            "generation_projection_member_comparison_count": (
+                "INTEGER CHECK(generation_projection_member_comparison_count>=0)"
+            ),
+            "generation_projection_member_comparison_root": (
+                "TEXT CHECK(generation_projection_member_comparison_root IS NULL OR "
+                "length(generation_projection_member_comparison_root)=64)"
+            ),
+            "generation_source_group_truth_comparison_count": (
+                "INTEGER CHECK(generation_source_group_truth_comparison_count>=0)"
+            ),
+            "generation_source_group_truth_comparison_root": (
+                "TEXT CHECK(generation_source_group_truth_comparison_root IS NULL OR "
+                "length(generation_source_group_truth_comparison_root)=64)"
+            ),
+        }
+        for column, ddl in mirror_columns.items():
+            if column not in receipt_columns:
+                con.execute(
+                    "ALTER TABLE structure_generation_drift_receipts "
+                    f"ADD COLUMN {column} {ddl}"
+                )
         return
     con.execute("SAVEPOINT structure_drift_hash_v2_migration")
     try:
@@ -474,6 +496,16 @@ def _migrate_structure_drift_hash_v2(
             "CHECK(length(generation_universe_hash)=64),"
             "generation_group_truth_hash TEXT NOT NULL "
             "CHECK(length(generation_group_truth_hash)=64),"
+            "generation_projection_member_comparison_count INTEGER CHECK("
+            "generation_projection_member_comparison_count>=0),"
+            "generation_projection_member_comparison_root TEXT CHECK("
+            "generation_projection_member_comparison_root IS NULL OR length("
+            "generation_projection_member_comparison_root)=64),"
+            "generation_source_group_truth_comparison_count INTEGER CHECK("
+            "generation_source_group_truth_comparison_count>=0),"
+            "generation_source_group_truth_comparison_root TEXT CHECK("
+            "generation_source_group_truth_comparison_root IS NULL OR length("
+            "generation_source_group_truth_comparison_root)=64),"
             "class_counts_json TEXT NOT NULL,class_digests_json TEXT NOT NULL,"
             "legacy_reconstruction_root TEXT NOT NULL "
             "CHECK(length(legacy_reconstruction_root)=64),"
@@ -684,6 +716,10 @@ _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS = (
     "projection_group_truth_hash",
     "generation_universe_hash",
     "generation_group_truth_hash",
+    "generation_projection_member_comparison_count",
+    "generation_projection_member_comparison_root",
+    "generation_source_group_truth_comparison_count",
+    "generation_source_group_truth_comparison_root",
     "class_counts_json",
     "class_digests_json",
     "legacy_reconstruction_root",
@@ -4179,7 +4215,12 @@ class SQLiteStore:
                 raise ValueError("structure-drift-source-phase-invalid")
             phase = str(progress[13])
             cursor = None if progress[14] is None else json.loads(str(progress[14]))
-            digest = SerializableSHA256.from_json(str(progress[15]))
+            digest = RowChainSHA256.from_json(
+                str(progress[15]),
+                expected_domain=(
+                    "source-event" if phase == "source-events" else "source-market"
+                ),
+            )
             counts = json.loads(str(progress[16]))
             digests = json.loads(str(progress[17]))
             phase_count = counts.get("phase_row_count")
@@ -4199,17 +4240,12 @@ class SQLiteStore:
                     or type(group_count) is not int
                 ):
                     raise ValueError("structure-drift-progress-invalid")
-                group_digest = SerializableSHA256.from_json(group_state_value)
+                group_digest = RowChainSHA256.from_json(
+                    group_state_value,
+                    expected_domain="source-group-truth",
+                )
                 for ordinal, event_id, raw, market_ids in rows:
-                    if phase_count:
-                        digest.update(b",")
-                    digest.update(
-                        json.dumps(
-                            (ordinal, event_id, raw),
-                            ensure_ascii=True,
-                            separators=(",", ":"),
-                        ).encode()
-                    )
+                    digest.update((ordinal, event_id, raw))
                     phase_count += 1
                     projection = project_legacy_compatible_event(
                         raw,
@@ -4217,23 +4253,17 @@ class SQLiteStore:
                         complete_market_ids=market_ids,
                     )
                     for truth in projection.truths:
-                        if group_count:
-                            group_digest.update(b",")
                         group_digest.update(
-                            json.dumps(
-                                (
-                                    truth.event_id,
-                                    truth.group_id,
-                                    truth.neg_risk_type,
-                                    truth.expected_member_count,
-                                    truth.active_named_count,
-                                    truth.membership_hash,
-                                    truth.quality,
-                                    truth.reason,
-                                ),
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            ).encode()
+                            (
+                                truth.event_id,
+                                truth.group_id,
+                                truth.neg_risk_type,
+                                truth.expected_member_count,
+                                truth.active_named_count,
+                                truth.membership_hash,
+                                truth.quality,
+                                truth.reason,
+                            )
                         )
                         group_count += 1
                 counts["source_group_truth_count"] = group_count
@@ -4248,15 +4278,7 @@ class SQLiteStore:
                 )
                 rows = market_rows
                 for market_id, raw, event_ids, _taken_at_ms in market_rows:
-                    if phase_count:
-                        digest.update(b",")
-                    digest.update(
-                        json.dumps(
-                            (market_id, raw, event_ids),
-                            ensure_ascii=True,
-                            separators=(",", ":"),
-                        ).encode()
-                    )
+                    digest.update((market_id, raw, event_ids))
                     phase_count += 1
                 next_cursor = None if not rows else rows[-1][0]
             counts["phase_row_count"] = phase_count
@@ -4317,36 +4339,37 @@ class SQLiteStore:
                 )
                 if phase_count != expected_count:
                     raise ValueError("structure-drift-source-count-mismatch")
-                digest.update(b"]")
                 final_hash = digest.hexdigest()
-                next_digest = SerializableSHA256.new()
-                next_digest.update(b"[")
                 counts["phase_row_count"] = 0
                 if phase == "source-events":
-                    group_digest = SerializableSHA256.from_json(
-                        str(digests.pop("source_group_truth_state"))
+                    group_digest = RowChainSHA256.from_json(
+                        str(digests.pop("source_group_truth_state")),
+                        expected_domain="source-group-truth",
                     )
-                    group_digest.update(b"]")
                     digests["source_group_truth_hash"] = group_digest.hexdigest()
+                    next_digest = RowChainSHA256.new("source-market")
                     next_phase = "source-markets"
                     source_event_hash = final_hash
                     source_market_hash = None
                     source_identity_hash = None
                 else:
+                    next_digest = RowChainSHA256.new("generation-group-truth")
+                    digests["generation_source_group_truth_comparison_state"] = (
+                        RowChainSHA256.new("source-group-truth").to_json()
+                    )
                     next_phase = "generation-members"
                     source_event_hash = str(progress[10])
                     source_market_hash = final_hash
-                    source_identity_hash = hashlib.sha256(
-                        json.dumps(
-                            (
-                                int(progress[8]),
-                                source_event_hash,
-                                int(progress[9]),
-                                source_market_hash,
-                            ),
-                            separators=(",", ":"),
-                        ).encode()
-                    ).hexdigest()
+                    source_identity = RowChainSHA256.new("source-identity")
+                    source_identity.update(
+                        (
+                            int(progress[8]),
+                            source_event_hash,
+                            int(progress[9]),
+                            source_market_hash,
+                        )
+                    )
+                    source_identity_hash = source_identity.hexdigest()
                 changed = writer.execute(
                     "UPDATE structure_generation_drift_progress SET phase=?,"
                     "row_cursor_json=NULL,digest_state_json=?,class_counts_json=?,"
@@ -4427,7 +4450,19 @@ class SQLiteStore:
         phase_count = counts.get("phase_row_count")
         if type(phase_count) is not int or phase_count < 0:
             raise ValueError("structure-drift-progress-invalid")
-        digest = SerializableSHA256.from_json(str(progress[10]))
+        digest = RowChainSHA256.from_json(
+            str(progress[10]),
+            expected_domain="generation-group-truth",
+        )
+        comparison_state = digests.get(
+            "generation_source_group_truth_comparison_state"
+        )
+        if not isinstance(comparison_state, str):
+            raise ValueError("structure-drift-progress-invalid")
+        comparison_digest = RowChainSHA256.from_json(
+            comparison_state,
+            expected_domain="source-group-truth",
+        )
         rows = self.fetch_structure_drift_group_truth_chunk(
             publication_id=str(progress[2]),
             generation_snapshot_id=int(progress[1]),
@@ -4435,16 +4470,15 @@ class SQLiteStore:
             limit=max_rows,
         )
         for row in rows:
-            if phase_count:
-                digest.update(b",")
-            digest.update(
-                json.dumps(
-                    row,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode()
-            )
+            digest.update(row)
+            comparison_digest.update(row)
             phase_count += 1
+        counts["generation_source_group_truth_comparison_count"] = (
+            comparison_digest.count
+        )
+        digests["generation_source_group_truth_comparison_state"] = (
+            comparison_digest.to_json()
+        )
         counts["phase_row_count"] = phase_count
         next_cursor = None if not rows else (str(rows[-1][0]), str(rows[-1][1]))
         prior_checkpoint = int(progress[13])
@@ -4484,13 +4518,15 @@ class SQLiteStore:
             if rows:
                 changed = writer.execute(
                     "UPDATE structure_generation_drift_progress SET row_cursor_json=?,"
-                    "digest_state_json=?,class_counts_json=?,checkpoint_at_ms=? "
+                    "digest_state_json=?,class_counts_json=?,class_digests_json=?,"
+                    "checkpoint_at_ms=? "
                     "WHERE comparison_id=? AND phase='fresh-group-truth' AND "
                     "checkpoint_at_ms=?",
                     (
                         json.dumps(next_cursor),
                         digest.to_json(),
                         json.dumps(counts, sort_keys=True, separators=(",", ":")),
+                        json.dumps(digests, sort_keys=True, separators=(",", ":")),
                         now_ms,
                         comparison_id,
                         prior_checkpoint,
@@ -4499,9 +4535,20 @@ class SQLiteStore:
                 next_phase = "fresh-group-truth"
                 ready = False
             else:
-                digest.update(b"]")
                 generation_hash = digest.hexdigest()
                 digests["generation_group_truth_hash"] = generation_hash
+                comparison_digest = RowChainSHA256.from_json(
+                    str(
+                        digests.pop(
+                            "generation_source_group_truth_comparison_state"
+                        )
+                    ),
+                    expected_domain="source-group-truth",
+                )
+                group_comparison_root = comparison_digest.hexdigest()
+                digests["generation_source_group_truth_comparison_root"] = (
+                    group_comparison_root
+                )
                 source_hash = digests.get("source_group_truth_hash")
                 conflict_count = counts.get("class_count:overlap-conflict", 0)
                 unclassified_count = counts.get("class_count:unclassified", 0)
@@ -4509,6 +4556,15 @@ class SQLiteStore:
                 generation_count = counts.get("generation_member_count")
                 projection_root = digests.get("projection_member_root")
                 generation_root = digests.get("generation_member_root")
+                member_comparison_root = digests.get(
+                    "generation_projection_member_comparison_root"
+                )
+                member_comparison_count = counts.get(
+                    "generation_projection_member_comparison_count"
+                )
+                group_comparison_count = counts.get(
+                    "generation_source_group_truth_comparison_count"
+                )
                 if (
                     not isinstance(source_hash, str)
                     or len(source_hash) != 64
@@ -4524,12 +4580,20 @@ class SQLiteStore:
                     or len(projection_root) != 64
                     or not isinstance(generation_root, str)
                     or len(generation_root) != 64
+                    or not isinstance(member_comparison_root, str)
+                    or len(member_comparison_root) != 64
+                    or type(member_comparison_count) is not int
+                    or member_comparison_count < 0
+                    or type(group_comparison_count) is not int
+                    or group_comparison_count < 0
                 ):
                     raise ValueError("structure-drift-progress-invalid")
                 authorized = (
-                    generation_hash == source_hash
+                    group_comparison_root == source_hash
+                    and group_comparison_count == phase_count
                     and projection_count == generation_count
-                    and projection_root == generation_root
+                    and member_comparison_count == generation_count
+                    and projection_root == member_comparison_root
                     and conflict_count == 0
                     and unclassified_count == 0
                 )
@@ -4561,8 +4625,10 @@ class SQLiteStore:
                             continue
                         if not isinstance(state_value, str):
                             raise ValueError("structure-drift-progress-invalid")
-                        class_digest = SerializableSHA256.from_json(state_value)
-                        class_digest.update(b"]")
+                        class_digest = RowChainSHA256.from_json(
+                            state_value,
+                            expected_domain=f"class/{tag}",
+                        )
                         final_class_digests[tag] = class_digest.hexdigest()
                     removal_tags = (
                         "current-nontradable",
@@ -4574,12 +4640,14 @@ class SQLiteStore:
                         class_counts=final_class_counts,
                         class_digests=final_class_digests,
                         tags=("shared", *removal_tags),
+                        domain="legacy-reconstruction",
                     )
                     generation_reconstruction_root = (
                         reconstruction_root_from_class_commitments(
                             class_counts=final_class_counts,
                             class_digests=final_class_digests,
                             tags=("shared", "fresh-addition"),
+                            domain="generation-reconstruction",
                         )
                     )
                     exact = writer.execute(
@@ -4655,6 +4723,18 @@ class SQLiteStore:
                         "projection_group_truth_hash": str(source_hash),
                         "generation_universe_hash": str(generation_root),
                         "generation_group_truth_hash": generation_hash,
+                        "generation_projection_member_comparison_count": (
+                            member_comparison_count
+                        ),
+                        "generation_projection_member_comparison_root": str(
+                            member_comparison_root
+                        ),
+                        "generation_source_group_truth_comparison_count": (
+                            group_comparison_count
+                        ),
+                        "generation_source_group_truth_comparison_root": str(
+                            group_comparison_root
+                        ),
                         "class_counts_json": class_counts_json,
                         "class_digests_json": class_digests_json,
                         "legacy_reconstruction_root": legacy_root,
@@ -4801,18 +4881,34 @@ class SQLiteStore:
                 raise ValueError("structure-drift-progress-invalid")
             projection_state_value = digests.get("projection_member_state")
             generation_state_value = digests.get("generation_member_state")
+            comparison_state_value = digests.get(
+                "generation_projection_member_comparison_state"
+            )
             if projection_state_value is None:
-                projection_digest = SerializableSHA256.new()
-                projection_digest.update(b"[")
+                projection_digest = RowChainSHA256.new("projection-member")
             elif isinstance(projection_state_value, str):
-                projection_digest = SerializableSHA256.from_json(projection_state_value)
+                projection_digest = RowChainSHA256.from_json(
+                    projection_state_value,
+                    expected_domain="projection-member",
+                )
             else:
                 raise ValueError("structure-drift-progress-invalid")
             if generation_state_value is None:
-                generation_digest = SerializableSHA256.new()
-                generation_digest.update(b"[")
+                generation_digest = RowChainSHA256.new("generation-member")
             elif isinstance(generation_state_value, str):
-                generation_digest = SerializableSHA256.from_json(generation_state_value)
+                generation_digest = RowChainSHA256.from_json(
+                    generation_state_value,
+                    expected_domain="generation-member",
+                )
+            else:
+                raise ValueError("structure-drift-progress-invalid")
+            if comparison_state_value is None:
+                comparison_digest = RowChainSHA256.new("projection-member")
+            elif isinstance(comparison_state_value, str):
+                comparison_digest = RowChainSHA256.from_json(
+                    comparison_state_value,
+                    expected_domain="projection-member",
+                )
             else:
                 raise ValueError("structure-drift-progress-invalid")
             for member in classified_rows:
@@ -4829,15 +4925,8 @@ class SQLiteStore:
                     member.neg_risk,
                     member.incomplete,
                 )
-                if generation_count:
-                    generation_digest.update(b",")
-                generation_digest.update(
-                    json.dumps(
-                        actual_tuple,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ).encode()
-                )
+                generation_digest.update(actual_tuple)
+                comparison_digest.update(actual_tuple)
                 generation_count += 1
                 expected = evidence[member.market_id].projected_member
                 if expected is None:
@@ -4855,20 +4944,15 @@ class SQLiteStore:
                     expected.neg_risk,
                     expected.incomplete,
                 )
-                if projection_count:
-                    projection_digest.update(b",")
-                projection_digest.update(
-                    json.dumps(
-                        expected_tuple,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ).encode()
-                )
+                projection_digest.update(expected_tuple)
                 projection_count += 1
             counts["projection_member_count"] = projection_count
             counts["generation_member_count"] = generation_count
             digests["projection_member_state"] = projection_digest.to_json()
             digests["generation_member_state"] = generation_digest.to_json()
+            digests["generation_projection_member_comparison_state"] = (
+                comparison_digest.to_json()
+            )
         else:
             generation_ids = {
                 str(getattr(member, "market_id")) for member in counterpart
@@ -4906,34 +4990,30 @@ class SQLiteStore:
                 raise ValueError("structure-drift-progress-invalid")
             state_value = digests.get(state_key)
             if state_value is None:
-                class_digest = SerializableSHA256.new()
-                class_digest.update(b"[")
+                class_digest = RowChainSHA256.new(f"class/{tag}")
             elif isinstance(state_value, str):
-                class_digest = SerializableSHA256.from_json(state_value)
+                class_digest = RowChainSHA256.from_json(
+                    state_value,
+                    expected_domain=f"class/{tag}",
+                )
             else:
                 raise ValueError("structure-drift-progress-invalid")
             for member in members:
-                if class_count:
-                    class_digest.update(b",")
                 class_digest.update(
-                    json.dumps(
-                        (
-                            tag,
-                            member.event_id,
-                            member.group_id,
-                            member.market_id,
-                            member.member_kind,
-                            member.active,
-                            member.closed,
-                            member.condition_id,
-                            member.yes_token_id,
-                            member.no_token_id,
-                            member.neg_risk,
-                            member.incomplete,
-                        ),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ).encode()
+                    (
+                        tag,
+                        member.event_id,
+                        member.group_id,
+                        member.market_id,
+                        member.member_kind,
+                        member.active,
+                        member.closed,
+                        member.condition_id,
+                        member.yes_token_id,
+                        member.no_token_id,
+                        member.neg_risk,
+                        member.incomplete,
+                    )
                 )
                 class_count += 1
             counts[count_key] = class_count
@@ -4996,16 +5076,30 @@ class SQLiteStore:
                     "legacy-members" if generation_phase else "fresh-group-truth"
                 )
                 if generation_phase:
-                    projection_digest = SerializableSHA256.from_json(
-                        str(digests.pop("projection_member_state"))
+                    projection_digest = RowChainSHA256.from_json(
+                        str(digests.pop("projection_member_state")),
+                        expected_domain="projection-member",
                     )
-                    generation_digest = SerializableSHA256.from_json(
-                        str(digests.pop("generation_member_state"))
+                    generation_digest = RowChainSHA256.from_json(
+                        str(digests.pop("generation_member_state")),
+                        expected_domain="generation-member",
                     )
-                    projection_digest.update(b"]")
-                    generation_digest.update(b"]")
+                    comparison_digest = RowChainSHA256.from_json(
+                        str(
+                            digests.pop(
+                                "generation_projection_member_comparison_state"
+                            )
+                        ),
+                        expected_domain="projection-member",
+                    )
                     digests["projection_member_root"] = projection_digest.hexdigest()
                     digests["generation_member_root"] = generation_digest.hexdigest()
+                    digests["generation_projection_member_comparison_root"] = (
+                        comparison_digest.hexdigest()
+                    )
+                    counts["generation_projection_member_comparison_count"] = (
+                        comparison_digest.count
+                    )
                     counts["generation_member_scan_count"] = phase_count
                 else:
                     counts["legacy_member_scan_count"] = phase_count
@@ -5334,6 +5428,40 @@ class SQLiteStore:
                 and receipt_payload["source_event_hash"] == progress[8]
                 and receipt_payload["source_market_hash"] == progress[9]
                 and receipt_payload["source_identity_hash"] == progress[10]
+                and receipt_payload["projection_universe_hash"]
+                == progress_digests.get("projection_member_root")
+                and receipt_payload["generation_universe_hash"]
+                == progress_digests.get("generation_member_root")
+                and receipt_payload["projection_group_truth_hash"]
+                == progress_digests.get("source_group_truth_hash")
+                and receipt_payload["generation_group_truth_hash"]
+                == progress_digests.get("generation_group_truth_hash")
+                and receipt_payload["generation_projection_member_comparison_count"]
+                == progress_counts.get(
+                    "generation_projection_member_comparison_count"
+                )
+                and receipt_payload["generation_projection_member_comparison_root"]
+                == progress_digests.get(
+                    "generation_projection_member_comparison_root"
+                )
+                and receipt_payload[
+                    "generation_source_group_truth_comparison_count"
+                ]
+                == progress_counts.get(
+                    "generation_source_group_truth_comparison_count"
+                )
+                and receipt_payload[
+                    "generation_source_group_truth_comparison_root"
+                ]
+                == progress_digests.get(
+                    "generation_source_group_truth_comparison_root"
+                )
+                and receipt_payload["projection_universe_hash"]
+                == receipt_payload["generation_projection_member_comparison_root"]
+                and receipt_payload["projection_group_truth_hash"]
+                == receipt_payload[
+                    "generation_source_group_truth_comparison_root"
+                ]
                 and receipt_payload["overlap_conflict_count"] == 0
                 and receipt_payload["unclassified_count"] == 0
                 and progress_digests.get("receipt_digest") == receipt_row[-1]

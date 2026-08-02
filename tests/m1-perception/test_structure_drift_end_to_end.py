@@ -435,8 +435,58 @@ def test_drift_v2_schema_binds_algorithm_reason_and_member_scan_indexes(
         1,
         "'serializable-sha256-v1'",
     )
+    assert {
+        "generation_projection_member_comparison_count",
+        "generation_projection_member_comparison_root",
+        "generation_source_group_truth_comparison_count",
+        "generation_source_group_truth_comparison_root",
+    } <= set(receipt_columns)
     assert "idx_structure_generation_memberships_drift_scan" in indexes
     assert "idx_event_market_memberships_drift_scan" in indexes
+
+
+def test_existing_v2_receipt_schema_adds_comparison_commitments_idempotently(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "drift-v2-comparison-columns.db")
+    store.init_schema()
+    mirror_columns = (
+        "generation_projection_member_comparison_count",
+        "generation_projection_member_comparison_root",
+        "generation_source_group_truth_comparison_count",
+        "generation_source_group_truth_comparison_root",
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_drift_receipt_update")
+        con.execute("DROP TRIGGER trg_structure_drift_receipt_delete")
+        for column in mirror_columns:
+            con.execute(
+                "ALTER TABLE structure_generation_drift_receipts "
+                f"DROP COLUMN {column}"
+            )
+
+    store.init_schema()
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        columns = {
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_receipts)"
+            )
+        }
+        triggers = {
+            str(row[0])
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' AND "
+                "tbl_name='structure_generation_drift_receipts'"
+            )
+        }
+
+    assert set(mirror_columns) <= columns
+    assert {
+        "trg_structure_drift_receipt_update",
+        "trg_structure_drift_receipt_delete",
+    } <= triggers
 
 
 @pytest.mark.parametrize("failure_point", ("index", "analyze"))
@@ -578,6 +628,10 @@ _DRIFT_RECEIPT_V2_DIGEST_FIELDS = (
     "projection_group_truth_hash",
     "generation_universe_hash",
     "generation_group_truth_hash",
+    "generation_projection_member_comparison_count",
+    "generation_projection_member_comparison_root",
+    "generation_source_group_truth_comparison_count",
+    "generation_source_group_truth_comparison_root",
     "class_counts_json",
     "class_digests_json",
     "legacy_reconstruction_root",
@@ -589,7 +643,14 @@ _DRIFT_RECEIPT_V2_DIGEST_FIELDS = (
 _V1_RECEIPT_COLUMNS = tuple(
     field
     for field in _DRIFT_RECEIPT_V2_DIGEST_FIELDS
-    if field != "hash_algorithm"
+    if field
+    not in {
+        "hash_algorithm",
+        "generation_projection_member_comparison_count",
+        "generation_projection_member_comparison_root",
+        "generation_source_group_truth_comparison_count",
+        "generation_source_group_truth_comparison_root",
+    }
 ) + ("receipt_digest",)
 
 
@@ -888,6 +949,10 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
             "projection_group_truth_hash": "5" * 64,
             "generation_universe_hash": "6" * 64,
             "generation_group_truth_hash": "7" * 64,
+            "generation_projection_member_comparison_count": 1,
+            "generation_projection_member_comparison_root": "4" * 64,
+            "generation_source_group_truth_comparison_count": 1,
+            "generation_source_group_truth_comparison_root": "5" * 64,
             "class_counts_json": class_counts_json,
             "class_digests_json": "{}",
             "legacy_reconstruction_root": "8" * 64,
@@ -929,9 +994,21 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
                     {
                         "class_count:overlap-conflict": 0,
                         "class_count:unclassified": 0,
+                        "generation_projection_member_comparison_count": 1,
+                        "generation_source_group_truth_comparison_count": 1,
                     }
                 ),
-                json.dumps({"receipt_digest": receipt_digest}),
+                json.dumps(
+                    {
+                        "receipt_digest": receipt_digest,
+                        "projection_member_root": "4" * 64,
+                        "generation_member_root": "6" * 64,
+                        "source_group_truth_hash": "5" * 64,
+                        "generation_group_truth_hash": "7" * 64,
+                        "generation_projection_member_comparison_root": "4" * 64,
+                        "generation_source_group_truth_comparison_root": "5" * 64,
+                    }
+                ),
                 comparison_id,
             ),
         )
@@ -1093,6 +1170,35 @@ def test_sealed_receipt_pointer_and_source_identity_drift_fail_closed(
     assert status["reason"] == "structure-drift-receipt-invalid"
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("projection_universe_hash", "a" * 64),
+        ("generation_universe_hash", "b" * 64),
+        ("projection_group_truth_hash", "c" * 64),
+        ("generation_group_truth_hash", "d" * 64),
+        ("generation_projection_member_comparison_count", 2),
+        ("generation_projection_member_comparison_root", "e" * 64),
+        ("generation_source_group_truth_comparison_count", 2),
+        ("generation_source_group_truth_comparison_root", "f" * 64),
+    ),
+)
+def test_sealed_receipt_audit_and_comparison_commitment_tamper_fails_closed(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    _install_sealed_drift_authority(store, comparison_id)
+
+    _rewrite_drift_receipt(store, comparison_id, **{field: replacement})
+
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is False
+    assert status["reason"] == "structure-drift-receipt-invalid"
+
+
 def test_exact_authorization_is_independent_of_drift_receipt_algorithm(
     tmp_path: Path,
 ) -> None:
@@ -1141,9 +1247,15 @@ def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
         "generation_member_count"
     )
     assert debug_digests.get("projection_member_root") == debug_digests.get(
+        "generation_projection_member_comparison_root"
+    )
+    assert debug_digests.get("projection_member_root") != debug_digests.get(
         "generation_member_root"
     )
     assert debug_digests.get("source_group_truth_hash") == debug_digests.get(
+        "generation_source_group_truth_comparison_root"
+    )
+    assert debug_digests.get("source_group_truth_hash") != debug_digests.get(
         "generation_group_truth_hash"
     )
     assert debug_counts.get("class_count:overlap-conflict", 0) == 0
@@ -1232,6 +1344,50 @@ def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
     tampered_status = store.structure_generation_drift_status()
     assert tampered_status["authorized"] is False
     assert tampered_status["reason"] == "structure-drift-receipt-invalid"
+
+
+def test_v2_drift_commitments_are_chunk_partition_independent(tmp_path: Path) -> None:
+    commitment_fields = (
+        "source_event_hash",
+        "source_market_hash",
+        "source_identity_hash",
+        "projection_universe_hash",
+        "generation_universe_hash",
+        "projection_group_truth_hash",
+        "generation_group_truth_hash",
+        "generation_projection_member_comparison_count",
+        "generation_projection_member_comparison_root",
+        "generation_source_group_truth_comparison_count",
+        "generation_source_group_truth_comparison_root",
+        "class_counts_json",
+        "class_digests_json",
+        "legacy_reconstruction_root",
+        "generation_reconstruction_root",
+    )
+    observed: list[tuple[object, ...]] = []
+    for max_rows in (1, 17, 500):
+        store = _drift_store(tmp_path / f"rows-{max_rows}")
+        comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+        for now_ms in range(3_001, 3_100):
+            chunk = store.advance_structure_drift_comparison_chunk(
+                comparison_id,
+                max_rows=max_rows,
+                now_ms=now_ms,
+            )
+            if chunk.component in {"sealed", "stale"}:
+                break
+        assert chunk.component == "sealed"
+        assert store.structure_generation_drift_status()["authorized"] is True
+        with sqlite3.connect(store.db_path) as con:
+            row = con.execute(
+                "SELECT " + ",".join(commitment_fields) + " FROM "
+                "structure_generation_drift_receipts WHERE comparison_id=?",
+                (comparison_id,),
+            ).fetchone()
+        assert row is not None
+        observed.append(tuple(row))
+
+    assert observed[0] == observed[1] == observed[2]
 
 
 def test_drift_pointer_race_fails_before_next_checkpoint(tmp_path: Path) -> None:

@@ -3132,6 +3132,16 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_receipts (
     generation_universe_hash TEXT NOT NULL CHECK(length(generation_universe_hash)=64),
     generation_group_truth_hash TEXT NOT NULL
         CHECK(length(generation_group_truth_hash)=64),
+    generation_projection_member_comparison_count INTEGER
+        CHECK(generation_projection_member_comparison_count >= 0),
+    generation_projection_member_comparison_root TEXT
+        CHECK(generation_projection_member_comparison_root IS NULL OR
+              length(generation_projection_member_comparison_root)=64),
+    generation_source_group_truth_comparison_count INTEGER
+        CHECK(generation_source_group_truth_comparison_count >= 0),
+    generation_source_group_truth_comparison_root TEXT
+        CHECK(generation_source_group_truth_comparison_root IS NULL OR
+              length(generation_source_group_truth_comparison_root)=64),
     class_counts_json TEXT NOT NULL,
     class_digests_json TEXT NOT NULL,
     legacy_reconstruction_root TEXT NOT NULL

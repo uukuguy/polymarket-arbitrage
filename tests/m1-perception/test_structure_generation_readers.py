@@ -18,6 +18,7 @@ from polyarb.http.market_map import _read_market_map
 from polyarb.routing.focused_quote_collector import SqliteStructureMembershipReader
 from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore, _source_truth_hash
 from polyarb.routing.opportunity_scanner import scan_neg_risk_buy_all
+from polyarb.storage.row_chain_sha256 import RowChainSHA256
 from polyarb.storage.sqlite_store import (
     SQLiteStore,
     StructureGenerationReadError,
@@ -562,9 +563,15 @@ def test_drift_initialization_pins_current_authenticated_identity_once(
             "FROM structure_generation_drift_progress WHERE comparison_id=?",
             (comparison_id,),
         ).fetchone()
-    empty_hash = hashlib.sha256(b"[]").hexdigest()
-    assert source[0:2] == (empty_hash, empty_hash)
-    assert len(str(source[2])) == 64
+    empty_event_hash = RowChainSHA256.new("source-event").hexdigest()
+    empty_market_hash = RowChainSHA256.new("source-market").hexdigest()
+    source_identity = RowChainSHA256.new("source-identity")
+    source_identity.update((0, empty_event_hash, 0, empty_market_hash))
+    assert source[0:3] == (
+        empty_event_hash,
+        empty_market_hash,
+        source_identity.hexdigest(),
+    )
     assert source[3] == "generation-members"
 
     generated = store.advance_structure_drift_comparison_chunk(
@@ -633,11 +640,13 @@ def test_drift_initialization_pins_current_authenticated_identity_once(
         class_digests = json.loads(class_digests_json)
     assert class_counts["class_count:unclassified"] == 2
     assert class_counts["class_count:fresh-source-absent"] == 2
-    assert sqlite_store_module.SerializableSHA256.from_json(
-        class_digests["class_state:unclassified"]
+    assert RowChainSHA256.from_json(
+        class_digests["class_state:unclassified"],
+        expected_domain="class/unclassified",
     )
-    assert sqlite_store_module.SerializableSHA256.from_json(
-        class_digests["class_state:fresh-source-absent"]
+    assert RowChainSHA256.from_json(
+        class_digests["class_state:fresh-source-absent"],
+        expected_domain="class/fresh-source-absent",
     )
     assert checkpoint_at_ms == 3_009
 

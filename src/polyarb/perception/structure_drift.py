@@ -15,6 +15,7 @@ from polyarb.perception.structure_publication import (
     project_event_structure,
 )
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
+from polyarb.storage.row_chain_sha256 import RowChainSHA256
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,7 @@ def reconstruction_root_from_class_commitments(
     class_counts: Mapping[str, int],
     class_digests: Mapping[str, str],
     tags: tuple[str, ...],
+    domain: str,
 ) -> str:
     """Bind one reconstructed universe to its complete tagged partitions."""
     commitments: list[tuple[str, int, str]] = []
@@ -124,7 +126,10 @@ def reconstruction_root_from_class_commitments(
         if not isinstance(digest, str) or len(digest) != 64:
             raise ValueError("invalid-structure-drift-class-digest")
         commitments.append((tag, count, digest))
-    return _canonical_list_hash(commitments)
+    digest = RowChainSHA256.new(domain)
+    for commitment in commitments:
+        digest.update(commitment)
+    return digest.hexdigest()
 
 
 def project_legacy_compatible_event(
@@ -217,9 +222,10 @@ def _tagged_member_hash(
     tag: str,
     members: tuple[StructuralMemberIdentity, ...],
 ) -> str:
-    return _canonical_list_hash(
-        [(tag, *_member_tuple(member)) for member in sorted(members, key=_member_tuple)]
-    )
+    digest = RowChainSHA256.new(f"class/{tag}")
+    for member in sorted(members, key=_member_tuple):
+        digest.update((tag, *_member_tuple(member)))
+    return digest.hexdigest()
 
 
 def _legacy_removal_reasons(evidence: FreshMemberEvidence) -> tuple[str, ...]:
@@ -421,11 +427,13 @@ def classify_structure_member_drift(
             class_counts=class_counts,
             class_digests=class_digests,
             tags=("shared", *removal_tags),
+            domain="legacy-reconstruction",
         ),
         reconstruction_root_from_class_commitments(
             class_counts=class_counts,
             class_digests=class_digests,
             tags=("shared", "fresh-addition"),
+            domain="generation-reconstruction",
         ),
     )
 
