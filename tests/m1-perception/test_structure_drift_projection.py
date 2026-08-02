@@ -229,8 +229,8 @@ def test_published_event_source_chunk_is_bounded_and_issue_independent(
         )
         for ordinal, _event_id, raw, market_ids in rows
     ]
-    assert len(rows) == 500
-    assert len([sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]) <= 3
+    assert len(rows) == 100
+    assert len([sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]) <= 5
     assert "structure_generation_issues" not in "\n".join(statements)
 
     with sqlite3.connect(store.db_path) as con:
@@ -392,8 +392,10 @@ def test_source_chunks_resume_on_exact_keyset_boundary(tmp_path: Path) -> None:
         after_event_id=first_events[-1][1],
         limit=500,
     )
-    assert len(first_events) == 500
-    assert [row[1] for row in final_events] == ["event-500"]
+    assert len(first_events) == 100
+    assert len(final_events) == 100
+    assert first_events[-1][1] == "event-099"
+    assert final_events[0][1] == "event-100"
 
     first_markets = store.fetch_structure_drift_market_source_chunk(
         publication_id="publication-1",

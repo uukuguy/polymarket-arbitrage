@@ -3417,12 +3417,13 @@ class SQLiteStore:
             ):
                 raise ValueError("structure-drift-source-identity-mismatch")
             window_id = str(identity[0])
+            candidate_limit = min(limit, STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS)
             rows = con.execute(
                 "SELECT COALESCE(source_ordinal,rowid),event_id,"
                 "length(CAST(payload_json AS BLOB)) FROM "
                 "structure_sync_event_staging WHERE window_id=? AND "
                 "(? IS NULL OR event_id>?) ORDER BY event_id LIMIT ?",
-                (window_id, after_event_id, after_event_id, limit),
+                (window_id, after_event_id, after_event_id, candidate_limit),
             ).fetchall()
             if rows:
                 payload_prefix = _structure_drift_event_prefix_size(
