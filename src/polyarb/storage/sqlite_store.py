@@ -4201,6 +4201,25 @@ class SQLiteStore:
             )
             scan_cursor: FreshProjectionCursor | None = None
             projection_complete = False
+            if remaining == 0 and candidates:
+                last_market_id = str(candidates[-1]["market_id"])
+                more_markets = con.execute(
+                    "SELECT 1 FROM structure_sync_market_staging "
+                    "WHERE window_id=? AND market_id>? LIMIT 1",
+                    (window_id, last_market_id),
+                ).fetchone()
+                if more_markets is None:
+                    event_only_exists = con.execute(
+                        "SELECT 1 FROM structure_sync_event_staging event JOIN "
+                        "json_each(event.payload_json,'$.markets') member LEFT JOIN "
+                        "structure_sync_market_staging market ON market.window_id="
+                        "event.window_id AND market.market_id=json_extract("
+                        "member.value,'$.id') WHERE event.window_id=? AND "
+                        "json_type(member.value,'$.id')='text' AND "
+                        "market.market_id IS NULL LIMIT 1",
+                        (window_id,),
+                    ).fetchone()
+                    projection_complete = event_only_exists is None
             if remaining:
                 event_rows: list[tuple[object, ...]] = []
                 if event_cursor is not None:
@@ -4562,23 +4581,39 @@ class SQLiteStore:
                     and raw_member.get("id") == market_id
                 )
                 source_member = exact_members[0] if len(exact_members) == 1 else None
+                raw_source_event = raw_events[0] if len(raw_events) == 1 else None
+                source_identity_valid = (
+                    source_member is not None
+                    and len(event_ids) == 1
+                    and raw_market.get("id") == market_id
+                    and isinstance(raw_source_event, dict)
+                    and raw_source_event.get("id") == event_ids[0]
+                    and source_member.event_id == event_ids[0]
+                    and source_member.market_id == market_id
+                    and raw_market.get("negRiskMarketID") == source_member.group_id
+                    and raw_source_event.get("negRiskMarketID")
+                    == source_member.group_id
+                )
+                validated_source_member = (
+                    source_member if source_identity_valid else None
+                )
                 truth = (
                     next(
                         (
                             item
                             for item in truths
-                            if source_member is not None
-                            and item.event_id == source_member.event_id
-                            and item.group_id == source_member.group_id
+                            if validated_source_member is not None
+                            and item.event_id == validated_source_member.event_id
+                            and item.group_id == validated_source_member.group_id
                         ),
                         None,
                     )
-                    if source_member is not None
+                    if validated_source_member is not None
                     else None
                 )
                 group_raw_ids: set[str] = set()
-                if source_member is not None:
-                    source_event = events[source_member.event_id]
+                if validated_source_member is not None:
+                    source_event = events[validated_source_member.event_id]
                     raw_group = source_event.get("markets")
                     if isinstance(raw_group, list):
                         group_raw_ids = {
@@ -4614,6 +4649,7 @@ class SQLiteStore:
                     and len(raw_tokens) > 0
                     and isinstance(raw_tokens[0], str)
                     and raw_tokens[0]
+                    and raw_tokens[0].strip() == raw_tokens[0]
                     else None
                 )
                 strict_no_token = (
@@ -4622,6 +4658,7 @@ class SQLiteStore:
                     and len(raw_tokens) > 1
                     and isinstance(raw_tokens[1], str)
                     and raw_tokens[1]
+                    and raw_tokens[1].strip() == raw_tokens[1]
                     else None
                 )
                 condition_id = (
@@ -4649,34 +4686,46 @@ class SQLiteStore:
                     else None
                 )
                 market_identity_valid = (
-                    row is not None
+                    validated_source_member is not None
+                    and row is not None
                     and condition_id is not None
                     and yes_token_id is not None
                     and no_token_id is not None
+                    and row.get("market_id") == market_id
+                    and row.get("neg_risk_market_id")
+                    == validated_source_member.group_id
                     and type(row.get("neg_risk")) is bool
                     and type(row.get("incomplete")) is bool
                 )
                 member = (
                     StructuralMemberIdentity(
-                        event_id=source_member.event_id,
-                        group_id=source_member.group_id,
-                        market_id=source_member.market_id,
-                        member_kind=source_member.member_kind,
-                        active=source_member.active,
-                        closed=source_member.closed,
+                        event_id=validated_source_member.event_id,
+                        group_id=validated_source_member.group_id,
+                        market_id=validated_source_member.market_id,
+                        member_kind=validated_source_member.member_kind,
+                        active=validated_source_member.active,
+                        closed=validated_source_member.closed,
                         condition_id=condition_id,
                         yes_token_id=yes_token_id,
                         no_token_id=no_token_id,
                         neg_risk=bool(row["neg_risk"]),
                         incomplete=bool(row["incomplete"]),
                     )
-                    if source_member is not None and market_identity_valid
+                    if validated_source_member is not None and market_identity_valid
                     else None
                 )
                 group_evidence = (
                     FreshGroupEvidence(
-                        event_id=source_member.event_id,
-                        group_id=source_member.group_id,
+                        event_id=(
+                            validated_source_member.event_id
+                            if validated_source_member is not None
+                            else event_ids[0]
+                        ),
+                        group_id=(
+                            validated_source_member.group_id
+                            if validated_source_member is not None
+                            else str(raw_market["negRiskMarketID"])
+                        ),
                         neg_risk_type=("standard" if truth is None else truth.neg_risk_type),
                         quality=(
                             "incomplete-source"
@@ -4693,7 +4742,13 @@ class SQLiteStore:
                         membership_hash=("" if truth is None else truth.membership_hash),
                         global_relation_conflict=conflict,
                     )
-                    if source_member is not None
+                    if validated_source_member is not None
+                    or (
+                        conflict
+                        and bool(event_ids)
+                        and isinstance(raw_market.get("negRiskMarketID"), str)
+                        and bool(raw_market["negRiskMarketID"])
+                    )
                     else None
                 )
                 evidence = FreshMemberEvidence(
@@ -4717,7 +4772,7 @@ class SQLiteStore:
                         len(exact_members) > 1 or raw_identity_count > 1
                     ),
                     identity_revalidated=True,
-                    invalid_event_membership=source_member is None,
+                    invalid_event_membership=not source_identity_valid,
                 )
                 eligible = (
                     member is not None

@@ -412,6 +412,19 @@ def test_event_only_exact_full_page_returns_terminal_cursor(tmp_path: Path) -> N
     assert chunk.cursor is None
 
 
+def test_exact_500_market_union_is_terminal_in_same_call(tmp_path: Path) -> None:
+    store = _published_source_store(tmp_path, event_count=500)
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+    )
+    assert chunk.candidates_processed == 500
+    assert len(chunk.members) == 500
+    assert chunk.cursor is None
+
+
 def test_certified_event_only_global_conflict_wins_before_quarantine(
     tmp_path: Path,
 ) -> None:
@@ -472,6 +485,30 @@ def test_event_only_duplicate_precedes_uncertified_quarantine(tmp_path: Path) ->
             None,
             "active-open-projection-missing",
         ),
+        (
+            {"clobTokenIds": json.dumps(["   ", "no-0"])},
+            None,
+            None,
+            "active-open-projection-missing",
+        ),
+        (
+            {"clobTokenIds": json.dumps([" yes-0 ", "no-0"])},
+            None,
+            None,
+            "active-open-projection-missing",
+        ),
+        (
+            {"clobTokenIds": json.dumps(["yes-0", "   "])},
+            None,
+            None,
+            "active-open-projection-missing",
+        ),
+        (
+            {"clobTokenIds": json.dumps(["yes-0", " no-0 "])},
+            None,
+            None,
+            "active-open-projection-missing",
+        ),
         (None, {"id": None}, None, "invalid-event-membership"),
         (None, {"negRiskMarketID": None}, None, "invalid-event-membership"),
         (None, None, {"active": None}, "invalid-event-membership"),
@@ -513,6 +550,39 @@ def test_projection_missing_identity_fields_fail_closed_with_nullable_envelope(
         assert envelope.active is None
     if member_overrides and "closed" in member_overrides:
         assert envelope.closed is None
+
+
+@pytest.mark.parametrize(
+    ("market_overrides", "event_overrides", "member_overrides"),
+    [
+        (None, {"id": "raw-event-other"}, None),
+        ({"id": "raw-market-other"}, None, None),
+        ({"negRiskMarketID": "raw-group-other"}, None, None),
+        (None, None, {"id": "raw-member-other"}),
+    ],
+)
+def test_projection_exact_source_identity_mismatch_fails_closed(
+    tmp_path: Path,
+    market_overrides: dict[str, object] | None,
+    event_overrides: dict[str, object] | None,
+    member_overrides: dict[str, object] | None,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=1,
+        raw_market_overrides=market_overrides,
+        raw_event_overrides=event_overrides,
+        raw_member_overrides=member_overrides,
+    )
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+    )
+    assert chunk.members == ()
+    assert chunk.diagnostics[0].code == "invalid-event-membership"
+    assert chunk.diagnostics[0].envelope.market_id == "market-000"
 
 
 @pytest.mark.parametrize("limit", [1, 17, 500])
