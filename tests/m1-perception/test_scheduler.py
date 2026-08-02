@@ -752,7 +752,12 @@ async def test_structure_drift_child_parser_accepts_bounded_slice() -> None:
 async def test_structure_drift_child_cancel_terminates_then_kills() -> None:
     from polyarb.daemon.scheduler import run_structure_drift_in_subprocess
 
-    process = _FakeProcess({}, returncode=0, block=True)
+    process = _FakeProcess(
+        {},
+        returncode=0,
+        block=True,
+        stderr=b"structure-drift stage=source-events chunks=1 rows=100\n",
+    )
 
     async def spawn(*_args, **_kwargs):
         return process
@@ -769,10 +774,13 @@ async def test_structure_drift_child_cancel_terminates_then_kills() -> None:
     )
     await asyncio.sleep(0)
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as raised:
         await task
     assert process.terminated is True
     assert process.killed is True
+    assert raised.value.last_stage == "source-events"
+    assert raised.value.chunks_processed == 1
+    assert raised.value.rows_processed == 100
 
 
 @pytest.mark.asyncio
@@ -811,7 +819,7 @@ async def test_structure_drift_child_timeout_reaps_before_failure() -> None:
         {},
         returncode=0,
         block=True,
-        stderr=b"structure-drift stage=source-events chunks=1 rows=500\n",
+        stderr=b"structure-drift stage=source-events chunks=1 rows=100\n",
     )
 
     async def spawn(*_args, **_kwargs):
@@ -833,7 +841,41 @@ async def test_structure_drift_child_timeout_reaps_before_failure() -> None:
     assert process.killed is True
     assert raised.value.last_stage == "source-events"
     assert raised.value.chunks_processed == 1
-    assert raised.value.rows_processed == 500
+    assert raised.value.rows_processed == 100
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "marker",
+    (
+        b"structure-drift stage=source-events chunks=1 rows=500\n",
+        b"structure-drift stage=source-events chunks=0 rows=0\n",
+    ),
+)
+async def test_structure_drift_child_rejects_impossible_commit_marker(
+    marker: bytes,
+) -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_structure_drift_in_subprocess,
+    )
+
+    process = _FakeProcess(
+        {}, returncode=0, block=True, stderr=marker,
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(SnapshotSubprocessError) as raised:
+        await run_structure_drift_in_subprocess(
+            db_path="/tmp/drift.db", max_rows=500, max_chunks=100,
+            max_elapsed_s=45.0, spawn=spawn, timeout_s=0.001,
+            terminate_timeout_s=0.001,
+        )
+    assert raised.value.chunks_processed == 0
+    assert raised.value.rows_processed == 0
+    assert raised.value.stderr_tail is None
 
 
 @pytest.mark.asyncio
@@ -1687,6 +1729,7 @@ async def test_structure_drift_cancellation_releases_shared_producer_lock(
     monkeypatch,
 ) -> None:
     from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import StructureDriftCancelled
     from polyarb.storage.sqlite_store import SQLiteStore
 
     settings = daemon_settings_for_test.model_copy(
@@ -1701,10 +1744,17 @@ async def test_structure_drift_cancellation_releases_shared_producer_lock(
             "reason": "structure-drift-incomplete",
         }
     )
+    cancelled = StructureDriftCancelled(
+        last_stage="source-events",
+        chunks_processed=1,
+        rows_processed=100,
+        stderr=b"structure-drift stage=source-events chunks=1 rows=100",
+    )
+    cancelled.stderr_tail = "structure-drift stage=source-events chunks=1 rows=100"
     monkeypatch.setattr(
         scheduler_module,
         "run_structure_drift_in_subprocess",
-        AsyncMock(side_effect=asyncio.CancelledError),
+        AsyncMock(side_effect=cancelled),
     )
     producer_lock = asyncio.Lock()
     scheduler = SnapshotScheduler(
@@ -1722,6 +1772,11 @@ async def test_structure_drift_cancellation_releases_shared_producer_lock(
     assert attempt is not None
     assert attempt["outcome"] == "cancelled"
     assert attempt["failure_kind"] == "scheduler-cancelled"
+    assert attempt["chunks_processed"] == 1
+    assert attempt["rows_processed"] == 100
+    assert attempt["stderr_safe_marker"] == (
+        "structure-drift stage=source-events chunks=1 rows=100"
+    )
 
 
 @pytest.mark.asyncio
@@ -1848,9 +1903,9 @@ async def test_structure_drift_parent_terminalizes_child_failures(
                 chunks_processed=(
                     1 if failure_kind == "structure-drift-timeout" else 0
                 ),
-                rows_processed=(500 if failure_kind == "structure-drift-timeout" else 0),
+                rows_processed=(100 if failure_kind == "structure-drift-timeout" else 0),
                 stderr=(
-                    b"structure-drift stage=source-events chunks=1 rows=500"
+                    b"structure-drift stage=source-events chunks=1 rows=100"
                     if failure_kind == "structure-drift-timeout"
                     else b"unsafe secret"
                 ),
@@ -1871,9 +1926,9 @@ async def test_structure_drift_parent_terminalizes_child_failures(
     assert attempt["failure_kind"] == failure_kind
     if failure_kind == "structure-drift-timeout":
         assert attempt["chunks_processed"] == 1
-        assert attempt["rows_processed"] == 500
+        assert attempt["rows_processed"] == 100
         assert attempt["stderr_safe_marker"] == (
-            "structure-drift stage=source-events chunks=1 rows=500"
+            "structure-drift stage=source-events chunks=1 rows=100"
         )
     else:
         assert attempt["stderr_safe_marker"] is None

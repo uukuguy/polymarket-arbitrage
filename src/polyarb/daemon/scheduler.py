@@ -44,6 +44,7 @@ from loguru import logger
 
 from polyarb.daemon.structure_schedule import derive_structure_schedule
 from polyarb.perception.structure_contract import (
+    STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
     valid_structure_publication_checkpoint,
 )
 from polyarb.validator.category import SnapshotStatus
@@ -80,6 +81,26 @@ class SnapshotSubprocessError(RuntimeError):
         self.stderr_bytes = len(stderr)
         self.stderr_sha256 = hashlib.sha256(stderr).hexdigest()
         self.stderr_tail = _safe_stderr_tail(stderr)
+
+
+class StructureDriftCancelled(asyncio.CancelledError):
+    """Cancellation that retains only bounded parent-observed commit evidence."""
+
+    def __init__(
+        self,
+        *,
+        last_stage: str | None,
+        chunks_processed: int,
+        rows_processed: int,
+        stderr: bytes,
+    ) -> None:
+        super().__init__()
+        self.last_stage = last_stage
+        self.chunks_processed = chunks_processed
+        self.rows_processed = rows_processed
+        self.stderr_bytes = len(stderr)
+        self.stderr_sha256 = hashlib.sha256(stderr).hexdigest()
+        self.stderr_tail: str | None = None
 
 
 SNAPSHOT_SUBPROCESS_TIMEOUT_S = 240.0
@@ -179,14 +200,31 @@ def _safe_stderr_tail(stderr: bytes) -> str | None:
 
 def _parse_last_structure_drift_marker(
     stderr: bytes,
-) -> tuple[str | None, int, int]:
+    *,
+    max_rows: int,
+    max_chunks: int,
+) -> tuple[str | None, int, int, str | None]:
     """Return only the last post-CAS drift marker as committed parent evidence."""
     matches = [*_STRUCTURE_DRIFT_MARKER_RE.finditer(stderr)]
     if not matches:
-        return None, 0, 0
+        return None, 0, 0, None
     marker = matches[-1]
     phase = marker.group("phase").decode("ascii")
-    return phase, int(marker.group("chunks")), int(marker.group("rows"))
+    chunks = int(marker.group("chunks"))
+    rows = int(marker.group("rows"))
+    phase_row_limit = (
+        STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS
+        if phase == "source-events"
+        else max_rows
+    )
+    if (
+        chunks == 0
+        or chunks > max_chunks
+        or rows > max_rows * chunks
+        or rows > phase_row_limit * chunks
+    ):
+        return None, 0, 0, None
+    return phase, chunks, rows, marker.group(0).decode("ascii")
 
 
 @dataclass(frozen=True)
@@ -284,8 +322,12 @@ async def run_structure_drift_in_subprocess(
         return max(0, int((time.monotonic() - started) * 1_000))
 
     def drift_error(reason: str, stderr: bytes) -> SnapshotSubprocessError:
-        phase, chunks, rows = _parse_last_structure_drift_marker(stderr)
-        return SnapshotSubprocessError(
+        phase, chunks, rows, safe_marker = _parse_last_structure_drift_marker(
+            stderr,
+            max_rows=max_rows,
+            max_chunks=max_chunks,
+        )
+        result = SnapshotSubprocessError(
             reason,
             last_stage=phase or "structure-drift",
             elapsed_ms=elapsed_ms(),
@@ -293,15 +335,29 @@ async def run_structure_drift_in_subprocess(
             rows_processed=rows,
             stderr=stderr,
         )
+        result.stderr_tail = safe_marker
+        return result
 
     try:
         stdout, stderr = await asyncio.wait_for(
             asyncio.shield(communicate_task),
             timeout=timeout_s,
         )
-    except asyncio.CancelledError:
-        await terminate_then_kill()
-        raise
+    except asyncio.CancelledError as error:
+        _, stderr = await terminate_then_kill()
+        phase, chunks, rows, safe_marker = _parse_last_structure_drift_marker(
+            stderr,
+            max_rows=max_rows,
+            max_chunks=max_chunks,
+        )
+        cancelled = StructureDriftCancelled(
+            last_stage=phase,
+            chunks_processed=chunks,
+            rows_processed=rows,
+            stderr=stderr,
+        )
+        cancelled.stderr_tail = safe_marker
+        raise cancelled from error
     except TimeoutError as error:
         _, stderr = await terminate_then_kill()
         raise drift_error("structure-drift-timeout", stderr) from error
@@ -1108,16 +1164,21 @@ class SnapshotScheduler:
                     timeout_s=75.0,
                     terminate_timeout_s=15.0,
                 )
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as error:
                 self._finish_structure_drift_attempt(
                     attempt_id=attempt_id,
                     outcome="cancelled",
                     finished_at_ms=int(time.time() * 1_000),
-                    last_phase=None,
-                    chunks_processed=0,
-                    rows_processed=0,
+                    last_phase=getattr(error, "last_stage", None),
+                    chunks_processed=getattr(error, "chunks_processed", 0),
+                    rows_processed=getattr(error, "rows_processed", 0),
                     elapsed_ms=max(0, int(time.time() * 1_000) - attempt_started_at_ms),
                     failure_kind="scheduler-cancelled",
+                    stderr_bytes=getattr(error, "stderr_bytes", 0),
+                    stderr_sha256=getattr(
+                        error, "stderr_sha256", hashlib.sha256(b"").hexdigest()
+                    ),
+                    stderr_safe_marker=getattr(error, "stderr_tail", None),
                 )
                 raise
             except SnapshotSubprocessError as error:
