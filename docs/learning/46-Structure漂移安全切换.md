@@ -16,6 +16,11 @@ parent 在 spawn 前先取得专用 attempt ownership；任何 child 都必须�
 会严重低估工作量。正常 event 至少取 1 条；单 event 自身超限时必须 fail closed 并报警，不能用“防饿死”
 为由执行一个可能超过 75 秒的 chunk。prefix 只改变 checkpoint 频率，不改变 cursor、串流顺序或最终 digest。
 
+当前持久算法是 `row-chain-sha256-v2`：每行先做 canonical JSON，再用 C-backed SHA-256 leaf/chain
+推进固定 32-byte state。旧 active v1 不续跑，而是留下
+`drift-hash-algorithm-superseded` terminal evidence，并从 v2 cursor zero 重启。这个动作只换证明算法，
+不会暂停或切换 legacy serving plane；exact authorization 仍是独立路径。
+
 ## 代码地图
 
 - `src/polyarb/perception/structure_drift.py`：raw projector、成员分类和 tagged reconstruction roots。
@@ -26,14 +31,19 @@ parent 在 spawn 前先取得专用 attempt ownership；任何 child 都必须�
 - `src/polyarb/http/health.py:616`：disabled/incomplete/sealed/stale 的三态健康投影。
 - `structure_drift_attempts`：最近 100 次 child 的身份、进度、结果和安全 stderr 摘要。
 
-## 三套不能混为一谈的哈希
+## 审计 root 和比较 mirror 不能混为一谈
 
 1. `projection_member_root`：只从冻结 raw event/market 投影出的 eligible member 串流。
-2. `generation_member_root`：只从 generation 表读取的 actual eligible member 串流。
-3. class roots：用 `shared/add/remove-reason` tagged commitments 重构 temporal 差异。
+2. `generation_member_root`：只从 generation 表读取的 actual eligible member 串流，使用独立 generation domain。
+3. `generation_projection_member_comparison_root`：actual rows 的同内容镜像，但使用 projection domain，
+   只和第 1 项做严格相等比较。
+4. group truth 也有同样的 source audit / generation audit / source-domain comparison mirror 三件套。
+5. class roots：用 `shared/add/remove-reason` tagged commitments 重构 temporal 差异。
 
-前两者相等证明“新数据忠于同窗 raw”；第三者证明“相对旧数据的完整对称差可解释”。拿同一个 root
-同时填两个字段会变成自证，因此代码保留独立 SHA state/count。
+不同 domain 的 root 即使 rows 完全相同也必然不同，所以不能直接比较 projection audit 和 generation audit。
+严格相等由同 domain 的 audit/mirror 证明；generation audit 仍独立进入 receipt，防止 mirror 冒充 actual
+审计。mirror state/count 每个 chunk 都持久化，receipt digest 和 status verifier 再与 progress 交叉核对。
+class roots 则证明“相对旧数据的完整对称差可解释”。
 
 ## 设计取舍
 
@@ -43,6 +53,7 @@ parent 在 spawn 前先取得专用 attempt ownership；任何 child 都必须�
 - 不让 operator CLI 推进：`make structure-generation-drift-compare` 永远只读；写入只由 scheduler child 所有。
 - writer busy 不增加 Structure failure counter：已提交 chunk 保留，下次 admission 从 cursor 恢复。
 - timeout ledger 以最后一条 post-CAS marker 为准：marker 已写出就代表该 chunk committed，不能记录成 0 行。
+- 不续跑 v1 cursor：哈希状态不能跨算法解释；保留 stale evidence，再从 v2 cursor zero 重算才可审计。
 
 ## 自检题
 
@@ -50,6 +61,7 @@ parent 在 spawn 前先取得专用 attempt ownership；任何 child 都必须�
 2. child 第 37 个 chunk 后 SQLite busy，前 36 个 chunk 是否应回滚？
 3. Quote 在 slice 已启动后变 due，为什么不杀 child，而是在下一次 admission 抢占？
 4. `authorization_mode=drift-safe-sealed` 是否自动授权修改 production read mode？
+5. 为什么 `projection_member_root != generation_member_root` 在 v2 中可能正确，而 mirror 不相等一定失败？
 
 ## FAQ 增量
 

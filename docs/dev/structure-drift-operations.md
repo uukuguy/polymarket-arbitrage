@@ -30,6 +30,18 @@ scheduler 在 `_tick_lock` 内先检查 Quote，再取得共享 producer lock �
 
 ## 运行中判读
 
+当前比较算法是 `row-chain-sha256-v2`。只读状态里的
+`hash_algorithm=row-chain-sha256-v2` 才能形成新的 drift-safe 授权。升级时若存在仍在推进的
+`serializable-sha256-v1` progress，初始化会在一个事务内把它标成
+`stale / drift-hash-algorithm-superseded`，再从 v2 cursor zero 新建比较；这是证据算法换代，
+不是 legacy 数据面降级，也不是让 operator 手工续跑旧 cursor 的信号。历史 sealed v1 receipt 仍可查询，
+但不能授权 v2 gate。`authorization_mode=exact` 走独立的旧 exact receipt 验证，不依赖 drift hash 版本。
+
+v2 generation 扫描同时写两类承诺：generation-domain audit root 进入 receipt；同一 canonical row 还写入
+projection/source-domain comparison mirror，只用于严格等值。状态验证会交叉核对 audit root、mirror
+root/count、progress 和 receipt digest，任一缺失或替换都 fail closed。启动时会幂等补齐 120k member
+scan 覆盖索引和 comparison receipt 列；启动失败必须先修复并重新运行初始化，不能绕过 schema gate。
+
 strict health 的 `snapshot:structure_generation_drift`：
 
 - `disabled/pass`：功能关闭，legacy 数据面不受影响。
@@ -64,3 +76,5 @@ exact release 验证、read-mode 切换计划和回滚证据；本 gate 自身�
 - `structure-drift-child-failed`：看 child signal/timeout 分类；SIGKILL 先按 possible cgroup OOM 调查。
 - `unclassified>0` / `overlap-conflict>0`：数据证据失败，不是性能重试问题。
 - checkpoint 超 SLA：确认 scheduler feature flag、defer receipt 和 Quote 持续 due/active 事实。
+- `drift-hash-algorithm-superseded`：确认已有新的 v2 progress 从 cursor zero 推进；不要把旧 v1 stale
+  改回 active，也不要因此切换或暂停 legacy serving plane。
