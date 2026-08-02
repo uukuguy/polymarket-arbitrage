@@ -60,6 +60,34 @@ class StructuralMemberIdentity:
 
 
 @dataclass(frozen=True)
+class FreshProjectionCursor:
+    stream: Literal["market", "event-only"]
+    market_id: str | None
+    event_id: str | None
+    source_ordinal: int | None
+    member_ordinal: int | None
+
+
+@dataclass(frozen=True)
+class FreshProjectionChunk:
+    cursor: FreshProjectionCursor | None
+    members: tuple[StructuralMemberIdentity, ...]
+    diagnostics: tuple[StructureDriftDiagnostic, ...]
+    candidates_processed: int
+
+    @property
+    def count(self) -> int:
+        return len(self.members)
+
+    @property
+    def root(self) -> str:
+        digest = RowChainSHA256.new("projection-member")
+        for member in sorted(self.members, key=_member_tuple):
+            digest.update(_member_tuple(member))
+        return digest.hexdigest()
+
+
+@dataclass(frozen=True)
 class FreshGroupEvidence:
     event_id: str
     group_id: str

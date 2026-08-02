@@ -48,7 +48,7 @@ def _v2_root(rows: Sequence[object], *, domain: str) -> str:
     return digest.hexdigest()
 
 
-def test_row_chain_v2_root_work_is_at_least_twice_as_fast_as_v1() -> None:
+def test_projection_row_chain_v2_root_work_is_at_least_twice_as_fast_as_v1() -> None:
     event_rows = tuple(
         (
             index,

@@ -10,12 +10,15 @@ import pytest
 
 from polyarb.perception.market_truth import membership_hash
 from polyarb.perception.structure_drift import (
+    FreshProjectionCursor,
     StructuralMemberIdentity,
     classify_structure_member_drift,
     hash_legacy_compatible_projection,
     project_legacy_compatible_event,
     project_legacy_compatible_market,
 )
+from polyarb.perception.structure_publication import event_only_member_quarantine_issue
+from polyarb.storage.row_chain_sha256 import RowChainSHA256
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -46,7 +49,14 @@ def _raw_event() -> dict[str, object]:
     }
 
 
-def _published_source_store(tmp_path: Path, *, event_count: int) -> SQLiteStore:
+def _published_source_store(
+    tmp_path: Path,
+    *,
+    event_count: int,
+    event_only_members: tuple[tuple[str, bool], ...] = (),
+    global_relation_conflict: bool = False,
+    duplicate_market_identity: bool = False,
+) -> SQLiteStore:
     store = SQLiteStore(tmp_path / "drift-source.db")
     store.init_schema()
     digest = "a" * 64
@@ -85,6 +95,28 @@ def _published_source_store(tmp_path: Path, *, event_count: int) -> SQLiteStore:
                     }
                 ],
             }
+            if index == 0:
+                if duplicate_market_identity:
+                    raw_event["markets"].append(dict(raw_event["markets"][0]))
+                if global_relation_conflict:
+                    raw_event["markets"].insert(
+                        0,
+                        {
+                            "id": "inactive-a",
+                            "active": False,
+                            "closed": True,
+                            "negRiskOther": False,
+                        },
+                    )
+                raw_event["markets"].extend(
+                    {
+                        "id": market_id,
+                        "active": True,
+                        "closed": False,
+                        "negRiskOther": False,
+                    }
+                    for market_id, _certified in event_only_members
+                )
             raw_market = {
                 "id": market_id,
                 "conditionId": f"condition-{index:03d}",
@@ -98,6 +130,13 @@ def _published_source_store(tmp_path: Path, *, event_count: int) -> SQLiteStore:
                 ("window-1", event_id, json.dumps(raw_event), index + 1)
             )
             relation_rows.append(("window-1", market_id, event_id, index + 1))
+            if index == 0:
+                relation_rows.extend(
+                    ("window-1", market_id, event_id, index + 1)
+                    for market_id, _certified in event_only_members
+                )
+            if index == 1 and global_relation_conflict:
+                relation_rows.append(("window-1", "market-000", event_id, index + 1))
             market_rows.append(
                 ("window-1", market_id, json.dumps(raw_market), index + 1)
             )
@@ -128,6 +167,30 @@ def _published_source_store(tmp_path: Path, *, event_count: int) -> SQLiteStore:
             "snapshot_id,issue_index,layer,category,market_id,detail,raw_payload) "
             "VALUES (1,1,1,'api_jitter','forged','forged','forged')"
         )
+        for issue_index, (market_id, certified) in enumerate(
+            event_only_members, start=100
+        ):
+            if not certified:
+                continue
+            raw_event = json.loads(str(event_rows[0][2]))
+            issue = event_only_member_quarantine_issue(
+                raw_event,
+                event_source_ordinal=1,
+                market_id=market_id,
+            )
+            assert issue is not None
+            con.execute(
+                "INSERT INTO structure_generation_issues(snapshot_id,issue_index,"
+                "layer,category,market_id,detail,raw_payload) VALUES (1,?,?,?,?,?,?)",
+                (
+                    issue_index,
+                    issue["layer"],
+                    issue["category"],
+                    market_id,
+                    issue["detail"],
+                    issue["raw_payload"],
+                ),
+            )
         con.execute(
             "INSERT INTO structure_publications("
             "publication_id,window_id,snapshot_id,status,normalization_contract_version,"
@@ -138,6 +201,196 @@ def _published_source_store(tmp_path: Path, *, event_count: int) -> SQLiteStore:
             (digest, digest),
         )
     return store
+
+
+def test_projection_union_excludes_only_certified_event_only_member(
+    tmp_path: Path,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=1,
+        event_only_members=(
+            ("event-only-certified", True),
+            ("event-only-uncertified", False),
+        ),
+    )
+
+    statements: list[str] = []
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+        trace_callback=statements.append,
+    )
+
+    assert chunk.members == (
+        StructuralMemberIdentity(
+            event_id="event-000",
+            group_id="group-000",
+            market_id="market-000",
+            member_kind="named",
+            active=True,
+            closed=False,
+            condition_id="condition-000",
+            yes_token_id="yes-0",
+            no_token_id="no-0",
+            neg_risk=True,
+            incomplete=False,
+        ),
+    )
+    assert [item.code for item in chunk.diagnostics] == [
+        "uncertified-event-only-member"
+    ]
+    assert chunk.diagnostics[0].envelope.market_id == "event-only-uncertified"
+    assert chunk.candidates_processed == 3
+    assert chunk.cursor == FreshProjectionCursor(
+        stream="event-only",
+        market_id=None,
+        event_id="event-000",
+        source_ordinal=1,
+        member_ordinal=2,
+    )
+    selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
+    assert len(selects) <= 6
+    assert not any(" WHERE relation.market_id='" in sql for sql in selects)
+    with sqlite3.connect(store.db_path) as con:
+        plans = "\n".join(
+            str(row[3])
+            for sql in selects
+            for row in con.execute("EXPLAIN QUERY PLAN " + sql)
+        )
+    assert "USE TEMP B-TREE FOR ORDER BY" not in plans
+
+
+def test_projection_preserves_exact_eleven_field_identity(tmp_path: Path) -> None:
+    store = _published_source_store(tmp_path, event_count=1)
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+    )
+    member = chunk.members[0]
+    assert (
+        member.event_id,
+        member.group_id,
+        member.market_id,
+        member.member_kind,
+        member.active,
+        member.closed,
+        member.condition_id,
+        member.yes_token_id,
+        member.no_token_id,
+        member.neg_risk,
+        member.incomplete,
+    ) == (
+        "event-000",
+        "group-000",
+        "market-000",
+        "named",
+        True,
+        False,
+        "condition-000",
+        "yes-0",
+        "no-0",
+        True,
+        False,
+    )
+
+
+def test_projection_duplicate_market_identity_fails_closed(tmp_path: Path) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=1,
+        duplicate_market_identity=True,
+    )
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+    )
+    assert chunk.members == ()
+    assert chunk.diagnostics[0].code == "duplicate-market-identity"
+
+
+@pytest.mark.parametrize("limit", [1, 17, 500])
+def test_global_relation_conflict_wins_across_projection_chunks(
+    tmp_path: Path,
+    limit: int,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=2,
+        global_relation_conflict=True,
+    )
+
+    cursor = None
+    diagnostics = []
+    members = []
+    while True:
+        chunk = store.fetch_structure_drift_fresh_projection_chunk(
+            publication_id="publication-1",
+            generation_snapshot_id=1,
+            cursor=cursor,
+            limit=limit,
+        )
+        diagnostics.extend(chunk.diagnostics)
+        members.extend(chunk.members)
+        if chunk.candidates_processed < limit:
+            break
+        cursor = chunk.cursor
+        assert cursor is not None
+
+    assert diagnostics[0].code == "conflicting-event-membership"
+    assert {item.market_id for item in members} == {"market-001"}
+
+
+def test_global_relation_projection_root_is_chunk_invariant(tmp_path: Path) -> None:
+    results = []
+    for limit in (1, 17, 500):
+        case_path = tmp_path / str(limit)
+        case_path.mkdir()
+        store = _published_source_store(
+            case_path,
+            event_count=2,
+            global_relation_conflict=True,
+        )
+        cursor = None
+        projected = []
+        diagnostics = []
+        while True:
+            chunk = store.fetch_structure_drift_fresh_projection_chunk(
+                publication_id="publication-1",
+                generation_snapshot_id=1,
+                cursor=cursor,
+                limit=limit,
+            )
+            projected.extend(chunk.members)
+            diagnostics.extend(chunk.diagnostics)
+            if chunk.candidates_processed < limit:
+                break
+            cursor = chunk.cursor
+        digest = RowChainSHA256.new("projection-member")
+        for member in sorted(projected, key=lambda item: item.market_id):
+            digest.update(
+                (
+                    member.event_id,
+                    member.group_id,
+                    member.market_id,
+                    member.member_kind,
+                    member.active,
+                    member.closed,
+                    member.condition_id,
+                    member.yes_token_id,
+                    member.no_token_id,
+                    member.neg_risk,
+                    member.incomplete,
+                )
+            )
+        results.append((digest.hexdigest(), tuple(item.code for item in diagnostics)))
+    assert all(result == results[0] for result in results)
 
 
 def test_event_projection_removes_only_exact_event_only_evidence_and_rehashes() -> None:

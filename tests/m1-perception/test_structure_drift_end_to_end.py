@@ -17,9 +17,11 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V2,
 )
 from polyarb.perception.structure_drift import (
+    _member_tuple,
     project_legacy_compatible_event,
     project_legacy_compatible_market,
 )
+from polyarb.storage.row_chain_sha256 import RowChainSHA256
 from polyarb.storage.sqlite_store import SQLiteStore
 
 _CLASSIFIER_PROGRESS_FIELDS = {
@@ -418,7 +420,9 @@ def _raw_market(
     }
 
 
-def _drift_store(tmp_path: Path) -> SQLiteStore:
+def _drift_store(
+    tmp_path: Path, *, omit_generation_market_id: str | None = None
+) -> SQLiteStore:
     store = SQLiteStore(tmp_path / "drift-e2e.db")
     store.init_schema()
     main_members = (("shared", True), ("addition", True))
@@ -574,6 +578,7 @@ def _drift_store(tmp_path: Path) -> SQLiteStore:
                         int(member.closed),
                     )
                     for member in projection.members
+                    if member.market_id != omit_generation_market_id
                 ),
             )
             con.executemany(
@@ -603,6 +608,8 @@ def _drift_store(tmp_path: Path) -> SQLiteStore:
         )
         for projection in market_projections.values():
             if projection.row is None:
+                continue
+            if projection.row["market_id"] == omit_generation_market_id:
                 continue
             con.execute(
                 "INSERT INTO structure_generation_markets(snapshot_id,"
@@ -710,6 +717,41 @@ def _drift_store(tmp_path: Path) -> SQLiteStore:
             (cert, exact_digest),
         )
     return store
+
+
+def test_complete_projection_detects_generation_omission(tmp_path: Path) -> None:
+    store = _drift_store(tmp_path, omit_generation_market_id="addition")
+    cursor = None
+    projected = []
+    while True:
+        chunk = store.fetch_structure_drift_fresh_projection_chunk(
+            publication_id="publication-2",
+            generation_snapshot_id=2,
+            cursor=cursor,
+            limit=1,
+        )
+        projected.extend(chunk.members)
+        if chunk.candidates_processed < 1:
+            break
+        cursor = chunk.cursor
+
+    generation = store.fetch_structure_drift_member_chunk(
+        snapshot_id=2,
+        generation=True,
+        after_market_id=None,
+        limit=500,
+    )
+    projection_digest = RowChainSHA256.new("projection-member")
+    generation_digest = RowChainSHA256.new("generation-member")
+    for member in sorted(projected, key=_member_tuple):
+        projection_digest.update(_member_tuple(member))
+    for member in generation:
+        generation_digest.update(_member_tuple(member))
+
+    assert {member.market_id for member in projected} == {"addition", "shared"}
+    assert {member.market_id for member in generation} == {"shared"}
+    assert len(projected) != len(generation)
+    assert projection_digest.hexdigest() != generation_digest.hexdigest()
 
 
 def _reshape_as_production_845_848(store: SQLiteStore) -> None:

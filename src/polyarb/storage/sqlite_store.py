@@ -22,6 +22,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
@@ -70,6 +71,12 @@ from polyarb.storage.schemas import (
 from polyarb.storage.serializable_sha256 import SerializableSHA256
 from polyarb.validator.category import Category, Issue, SnapshotStatus
 from polyarb.validator.layers import determine_snapshot_status
+
+if TYPE_CHECKING:
+    from polyarb.perception.structure_drift import (
+        FreshProjectionChunk,
+        FreshProjectionCursor,
+    )
 
 _SNAPSHOT_ATTEMPT_STDERR_MAX_BYTES = 100_000_000
 _SNAPSHOT_ATTEMPT_STDERR_TAIL_RE = re.compile(
@@ -4076,6 +4083,522 @@ class SQLiteStore:
             ]
             con.execute("COMMIT")
             return result
+
+    def fetch_structure_drift_fresh_projection_chunk(
+        self,
+        *,
+        publication_id: str,
+        generation_snapshot_id: int,
+        cursor: FreshProjectionCursor | None,
+        limit: int,
+        trace_callback: Callable[[str], None] | None = None,
+    ) -> FreshProjectionChunk:
+        """Project one bounded, generation-independent fresh-source union chunk."""
+        from polyarb.perception.structure_drift import (
+            FreshGroupEvidence,
+            FreshMemberEvidence,
+            FreshProjectionChunk,
+            FreshProjectionCursor,
+            StructuralMemberIdentity,
+            StructureDriftCandidateEnvelope,
+            diagnose_unresolved_member,
+            project_legacy_compatible_market,
+        )
+        from polyarb.perception.structure_publication import (
+            event_only_member_quarantine_issue,
+            market_quarantine_issue,
+        )
+        from polyarb.snapshot.normalizer import normalize_events
+
+        if (
+            not publication_id
+            or generation_snapshot_id < 1
+            or not 1 <= limit <= STRUCTURE_PUBLICATION_MAX_ROWS
+            or (
+                cursor is not None
+                and not isinstance(cursor, FreshProjectionCursor)
+            )
+        ):
+            raise ValueError("invalid-structure-drift-fresh-projection-chunk")
+        if isinstance(cursor, FreshProjectionCursor):
+            if cursor.stream not in {"market", "event-only"}:
+                raise ValueError("invalid-structure-drift-fresh-projection-cursor")
+            if cursor.stream == "market" and (
+                not cursor.market_id
+                or cursor.event_id is not None
+                or cursor.source_ordinal is not None
+                or cursor.member_ordinal is not None
+            ):
+                raise ValueError("invalid-structure-drift-fresh-projection-cursor")
+            if cursor.stream == "event-only" and (
+                cursor.market_id is not None
+                or not cursor.event_id
+                or cursor.source_ordinal is None
+                or cursor.member_ordinal is None
+            ):
+                raise ValueError("invalid-structure-drift-fresh-projection-cursor")
+
+        with sqlite3.connect(self._db_path) as con:
+            if trace_callback is not None:
+                con.set_trace_callback(trace_callback)
+            con.execute("BEGIN")
+            identity = con.execute(
+                "SELECT p.window_id,p.status,p.normalization_contract_version,"
+                "p.validation_hash,p.certification_hash,window.status,"
+                "window.published_snapshot_id FROM structure_publications p JOIN "
+                "structure_sync_windows window ON window.id=p.window_id "
+                "WHERE p.publication_id=? AND p.snapshot_id=?",
+                (publication_id, generation_snapshot_id),
+            ).fetchone()
+            if (
+                identity is None
+                or identity[1] != "published"
+                or not isinstance(identity[2], str)
+                or not identity[2]
+                or not isinstance(identity[3], str)
+                or len(identity[3]) != 64
+                or not isinstance(identity[4], str)
+                or len(identity[4]) != 64
+                or identity[5] != "published"
+                or identity[6] != generation_snapshot_id
+            ):
+                raise ValueError("structure-drift-source-identity-mismatch")
+            window_id = str(identity[0])
+            remaining = limit
+            candidates: list[dict[str, object]] = []
+
+            if cursor is None or cursor.stream == "market":
+                if cursor is None:
+                    market_rows = con.execute(
+                        "SELECT market_id,payload_json FROM "
+                        "structure_sync_market_staging WHERE window_id=? "
+                        "ORDER BY market_id LIMIT ?",
+                        (window_id, remaining),
+                    ).fetchall()
+                else:
+                    market_rows = con.execute(
+                        "SELECT market_id,payload_json FROM "
+                        "structure_sync_market_staging WHERE window_id=? "
+                        "AND market_id>? ORDER BY market_id LIMIT ?",
+                        (window_id, cursor.market_id, remaining),
+                    ).fetchall()
+                candidates.extend(
+                    {
+                        "kind": "market",
+                        "market_id": str(market_id),
+                        "raw_market": json.loads(str(payload_json)),
+                    }
+                    for market_id, payload_json in market_rows
+                )
+                remaining -= len(market_rows)
+
+            if remaining and (cursor is None or cursor.stream == "market"):
+                event_cursor: tuple[str, int, int] | None = None
+            elif isinstance(cursor, FreshProjectionCursor) and cursor.stream == "event-only":
+                event_cursor = (
+                    str(cursor.event_id),
+                    int(cursor.source_ordinal),
+                    int(cursor.member_ordinal),
+                )
+            else:
+                event_cursor = None
+
+            if remaining and (cursor is None or cursor.stream in {"market", "event-only"}):
+                base_sql = (
+                    "SELECT event.event_id,COALESCE(event.source_ordinal,event.rowid),"
+                    "CAST(member.key AS INTEGER),relation.market_id,event.payload_json "
+                    "FROM structure_sync_event_staging event JOIN json_each("
+                    "event.payload_json,'$.markets') member JOIN "
+                    "structure_sync_event_market_staging relation ON "
+                    "relation.window_id=event.window_id AND "
+                    "relation.event_id=event.event_id AND relation.market_id="
+                    "json_extract(member.value,'$.id') LEFT JOIN "
+                    "structure_sync_market_staging market ON "
+                    "market.window_id=relation.window_id AND "
+                    "market.market_id=relation.market_id WHERE event.window_id=? "
+                    "AND market.market_id IS NULL "
+                )
+                if event_cursor is None:
+                    event_rows = con.execute(
+                        base_sql + "LIMIT ?",
+                        (window_id, remaining),
+                    ).fetchall()
+                else:
+                    event_rows = con.execute(
+                        base_sql
+                        + "AND (event.event_id,event.source_ordinal,CAST(member.key AS INTEGER))"
+                        "> (?,?,?) LIMIT ?",
+                        (window_id, *event_cursor, remaining),
+                    ).fetchall()
+                event_rows = sorted(
+                    event_rows,
+                    key=lambda row: (str(row[0]), int(row[1]), int(row[2])),
+                )
+                candidates.extend(
+                    {
+                        "kind": "event-only",
+                        "event_id": str(event_id),
+                        "source_ordinal": int(source_ordinal),
+                        "member_ordinal": int(member_ordinal),
+                        "market_id": str(market_id),
+                        "raw_event": json.loads(str(payload_json)),
+                    }
+                    for event_id, source_ordinal, member_ordinal, market_id, payload_json
+                    in event_rows
+                )
+
+            market_ids = [str(item["market_id"]) for item in candidates]
+            relations: dict[str, list[str]] = {}
+            events: dict[str, dict[str, object]] = {}
+            relation_counts: dict[str, int] = {}
+            issues: dict[str, list[tuple[object, ...]]] = {}
+            if market_ids:
+                placeholders = ",".join("?" for _ in market_ids)
+                relation_rows = con.execute(
+                    "SELECT relation.market_id,relation.event_id,event.payload_json "
+                    "FROM structure_sync_event_market_staging relation JOIN "
+                    "structure_sync_event_staging event ON "
+                    "event.window_id=relation.window_id AND "
+                    "event.event_id=relation.event_id WHERE relation.window_id=? "
+                    f"AND relation.market_id IN ({placeholders})",
+                    (window_id, *market_ids),
+                ).fetchall()
+                for market_id, event_id, payload_json in relation_rows:
+                    relations.setdefault(str(market_id), []).append(str(event_id))
+                    events[str(event_id)] = json.loads(str(payload_json))
+
+                group_market_ids: set[str] = set(market_ids)
+                for raw_event in events.values():
+                    raw_members = raw_event.get("markets")
+                    if isinstance(raw_members, list):
+                        group_market_ids.update(
+                            str(member["id"])
+                            for member in raw_members
+                            if isinstance(member, dict)
+                            and isinstance(member.get("id"), str)
+                            and member["id"]
+                        )
+                group_placeholders = ",".join("?" for _ in group_market_ids)
+                relation_counts = {
+                    str(market_id): int(count)
+                    for market_id, count in con.execute(
+                        "SELECT market_id,COUNT(DISTINCT event_id) FROM "
+                        "structure_sync_event_market_staging WHERE window_id=? "
+                        f"AND market_id IN ({group_placeholders}) GROUP BY market_id",
+                        (window_id, *sorted(group_market_ids)),
+                    )
+                }
+                for row in con.execute(
+                    "SELECT market_id,layer,category,detail,raw_payload FROM "
+                    "structure_generation_issues WHERE snapshot_id=? "
+                    f"AND market_id IN ({placeholders})",
+                    (generation_snapshot_id, *market_ids),
+                ):
+                    issues.setdefault(str(row[0]), []).append(tuple(row[1:]))
+
+            members: list[StructuralMemberIdentity] = []
+            diagnostics = []
+            for candidate in candidates:
+                market_id = str(candidate["market_id"])
+                if candidate["kind"] == "event-only":
+                    raw_event = candidate["raw_event"]
+                    assert isinstance(raw_event, dict)
+                    expected = event_only_member_quarantine_issue(
+                        raw_event,
+                        event_source_ordinal=int(candidate["source_ordinal"]),
+                        market_id=market_id,
+                    )
+                    certified = expected is not None and (
+                        expected["layer"],
+                        expected["category"],
+                        expected["detail"],
+                        expected["raw_payload"],
+                    ) in issues.get(market_id, ())
+                    if certified:
+                        continue
+                    raw_members = raw_event.get("markets")
+                    raw_member = (
+                        raw_members[int(candidate["member_ordinal"])]
+                        if isinstance(raw_members, list)
+                        and int(candidate["member_ordinal"]) < len(raw_members)
+                        else {}
+                    )
+                    envelope = StructureDriftCandidateEnvelope(
+                        side="generation-only",
+                        event_id=str(candidate["event_id"]),
+                        group_id=(
+                            str(raw_event["negRiskMarketID"])
+                            if isinstance(raw_event.get("negRiskMarketID"), str)
+                            else None
+                        ),
+                        market_id=market_id,
+                        member_kind=None,
+                        active=(
+                            raw_member.get("active")
+                            if isinstance(raw_member, dict)
+                            and type(raw_member.get("active")) is bool
+                            else None
+                        ),
+                        closed=(
+                            raw_member.get("closed")
+                            if isinstance(raw_member, dict)
+                            and type(raw_member.get("closed")) is bool
+                            else None
+                        ),
+                        condition_id=None,
+                        yes_token_id=None,
+                        no_token_id=None,
+                        neg_risk=None,
+                        incomplete=None,
+                        source_ordinal=int(candidate["source_ordinal"]),
+                        member_ordinal=int(candidate["member_ordinal"]),
+                        raw_event_hash=hashlib.sha256(
+                            json.dumps(raw_event, sort_keys=True, separators=(",", ":")).encode()
+                        ).hexdigest(),
+                        raw_market_hash=None,
+                    )
+                    event_only_group_ids = {
+                        str(item["id"])
+                        for item in (
+                            raw_members if isinstance(raw_members, list) else []
+                        )
+                        if isinstance(item, dict)
+                        and isinstance(item.get("id"), str)
+                    }
+                    global_conflict = len(relations.get(market_id, ())) > 1 or any(
+                        relation_counts.get(item, 0) > 1
+                        for item in event_only_group_ids
+                    )
+                    group_evidence = (
+                        FreshGroupEvidence(
+                            event_id=str(candidate["event_id"]),
+                            group_id=str(raw_event["negRiskMarketID"]),
+                            neg_risk_type="standard",
+                            quality="incomplete-source",
+                            reason="conflicting-event-membership",
+                            membership_hash="",
+                            global_relation_conflict=True,
+                        )
+                        if global_conflict
+                        and isinstance(raw_event.get("negRiskMarketID"), str)
+                        else None
+                    )
+                    evidence = FreshMemberEvidence(
+                        source_present=True,
+                        current_active=envelope.active is True,
+                        current_closed=envelope.closed is True,
+                        projector_matches=False,
+                        generation_certified=True,
+                        event_only_quarantine=False,
+                        market_side_quarantine=False,
+                        absent_from_event_catalog=False,
+                        absent_from_market_catalog=True,
+                        identity_revalidated=True,
+                        uncertified_event_only_member=True,
+                        group_truth=group_evidence,
+                        source_ordinal=envelope.source_ordinal,
+                        member_ordinal=envelope.member_ordinal,
+                        raw_event_hash=envelope.raw_event_hash,
+                    )
+                    diagnostics.append(
+                        diagnose_unresolved_member(
+                            side="generation-only",
+                            member=envelope,
+                            evidence=evidence,
+                            authorized_removal_reasons=(),
+                        )
+                    )
+                    continue
+
+                raw_market = candidate["raw_market"]
+                assert isinstance(raw_market, dict)
+                event_ids = tuple(relations.get(market_id, ()))
+                raw_events = [events[event_id] for event_id in event_ids]
+                _event_rows, _tags, _mapping, source_members, truths = normalize_events(
+                    raw_events
+                )
+                exact_members = [item for item in source_members if item.market_id == market_id]
+                raw_identity_count = sum(
+                    1
+                    for raw_event in raw_events
+                    for raw_member in (
+                        raw_event.get("markets")
+                        if isinstance(raw_event.get("markets"), list)
+                        else []
+                    )
+                    if isinstance(raw_member, dict)
+                    and raw_member.get("id") == market_id
+                )
+                source_member = exact_members[0] if len(exact_members) == 1 else None
+                truth = (
+                    next(
+                        (
+                            item
+                            for item in truths
+                            if source_member is not None
+                            and item.event_id == source_member.event_id
+                            and item.group_id == source_member.group_id
+                        ),
+                        None,
+                    )
+                    if source_member is not None
+                    else None
+                )
+                group_raw_ids: set[str] = set()
+                if source_member is not None:
+                    source_event = events[source_member.event_id]
+                    raw_group = source_event.get("markets")
+                    if isinstance(raw_group, list):
+                        group_raw_ids = {
+                            str(item["id"])
+                            for item in raw_group
+                            if isinstance(item, dict) and isinstance(item.get("id"), str)
+                        }
+                conflict = len(event_ids) > 1 or any(
+                    relation_counts.get(item, 0) > 1 for item in group_raw_ids
+                )
+                projected = project_legacy_compatible_market(
+                    raw_market,
+                    event_ids=event_ids,
+                    taken_at_ms=0,
+                )
+                row = projected.row
+                member = (
+                    StructuralMemberIdentity(
+                        event_id=source_member.event_id,
+                        group_id=source_member.group_id,
+                        market_id=source_member.market_id,
+                        member_kind=source_member.member_kind,
+                        active=source_member.active,
+                        closed=source_member.closed,
+                        condition_id=str(row.get("condition_id") or ""),
+                        yes_token_id=str(row.get("yes_token_id") or ""),
+                        no_token_id=str(row.get("no_token_id") or ""),
+                        neg_risk=row.get("neg_risk") is True,
+                        incomplete=row.get("incomplete") is True,
+                    )
+                    if source_member is not None and row is not None
+                    else None
+                )
+                group_evidence = (
+                    FreshGroupEvidence(
+                        event_id=source_member.event_id,
+                        group_id=source_member.group_id,
+                        neg_risk_type=("standard" if truth is None else truth.neg_risk_type),
+                        quality=(
+                            "incomplete-source"
+                            if conflict or truth is None
+                            else truth.quality
+                        ),
+                        reason=(
+                            "conflicting-event-membership"
+                            if conflict
+                            else "invalid-event-membership"
+                            if truth is None
+                            else truth.reason
+                        ),
+                        membership_hash=("" if truth is None else truth.membership_hash),
+                        global_relation_conflict=conflict,
+                    )
+                    if source_member is not None
+                    else None
+                )
+                evidence = FreshMemberEvidence(
+                    source_present=True,
+                    current_active=raw_market.get("active") is True,
+                    current_closed=raw_market.get("closed") is True,
+                    projector_matches=member is not None,
+                    generation_certified=True,
+                    event_only_quarantine=False,
+                    market_side_quarantine=(
+                        market_quarantine_issue(market_id, raw_market, event_ids)
+                        is not None
+                    ),
+                    absent_from_event_catalog=not event_ids,
+                    absent_from_market_catalog=False,
+                    projected_member=member,
+                    event_source_count=len(event_ids),
+                    exact_source_member=member,
+                    group_truth=group_evidence,
+                    duplicate_market_identity=(
+                        len(exact_members) > 1 or raw_identity_count > 1
+                    ),
+                    identity_revalidated=member is not None,
+                    invalid_event_membership=source_member is None,
+                )
+                eligible = (
+                    member is not None
+                    and group_evidence is not None
+                    and group_evidence.quality == "complete-supported"
+                    and not group_evidence.global_relation_conflict
+                    and evidence.current_active
+                    and not evidence.current_closed
+                    and not evidence.market_side_quarantine
+                    and not evidence.duplicate_market_identity
+                )
+                if eligible:
+                    members.append(member)
+                else:
+                    diagnostic_member = member or StructureDriftCandidateEnvelope(
+                        side="generation-only",
+                        event_id=(None if source_member is None else source_member.event_id),
+                        group_id=(None if source_member is None else source_member.group_id),
+                        market_id=market_id,
+                        member_kind=(None if source_member is None else source_member.member_kind),
+                        active=(None if source_member is None else source_member.active),
+                        closed=(None if source_member is None else source_member.closed),
+                        condition_id=(None if row is None else str(row.get("condition_id") or "")),
+                        yes_token_id=(None if row is None else str(row.get("yes_token_id") or "")),
+                        no_token_id=(None if row is None else str(row.get("no_token_id") or "")),
+                        neg_risk=(None if row is None else row.get("neg_risk") is True),
+                        incomplete=(None if row is None else row.get("incomplete") is True),
+                        source_ordinal=None,
+                        member_ordinal=None,
+                        raw_event_hash=None,
+                        raw_market_hash=hashlib.sha256(
+                            json.dumps(
+                                raw_market,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode()
+                        ).hexdigest(),
+                    )
+                    diagnostics.append(
+                        diagnose_unresolved_member(
+                            side="generation-only",
+                            member=diagnostic_member,
+                            evidence=evidence,
+                            authorized_removal_reasons=(),
+                        )
+                    )
+
+            next_cursor = cursor
+            if candidates:
+                last = candidates[-1]
+                next_cursor = (
+                    FreshProjectionCursor(
+                        stream="market",
+                        market_id=str(last["market_id"]),
+                        event_id=None,
+                        source_ordinal=None,
+                        member_ordinal=None,
+                    )
+                    if last["kind"] == "market"
+                    else FreshProjectionCursor(
+                        stream="event-only",
+                        market_id=None,
+                        event_id=str(last["event_id"]),
+                        source_ordinal=int(last["source_ordinal"]),
+                        member_ordinal=int(last["member_ordinal"]),
+                    )
+                )
+            con.execute("COMMIT")
+            return FreshProjectionChunk(
+                cursor=next_cursor,
+                members=tuple(members),
+                diagnostics=tuple(diagnostics),
+                candidates_processed=len(candidates),
+            )
 
     def fetch_structure_drift_member_chunk(
         self,
