@@ -130,6 +130,10 @@ _STRUCTURE_FAILURE_MARKER_RE = re.compile(
     rb"structure-publication-not-writing)$",
     re.MULTILINE,
 )
+_STRUCTURE_SUPERSESSION_MARKER_RE = re.compile(
+    rb"^structure-publication-superseded publication_id=[0-9a-f]{32}$",
+    re.MULTILINE,
+)
 
 
 def _parse_last_snapshot_stage(stderr: bytes) -> str | None:
@@ -153,6 +157,7 @@ def _safe_stderr_tail(stderr: bytes) -> str | None:
     matches = [*_SNAPSHOT_STAGE_MARKER_RE.finditer(stderr)]
     matches.extend(_STRUCTURE_PROGRESS_MARKER_RE.finditer(stderr))
     matches.extend(_STRUCTURE_FAILURE_MARKER_RE.finditer(stderr))
+    matches.extend(_STRUCTURE_SUPERSESSION_MARKER_RE.finditer(stderr))
     if not matches:
         return None
     tail = max(matches, key=lambda match: match.start()).group(0).decode("ascii")
@@ -370,6 +375,15 @@ async def run_snapshot_in_subprocess(
                 or not isinstance(child_elapsed_ms, int)
                 or child_elapsed_ms < 0
                 or (cursor is not None and not isinstance(cursor, str))
+                or (
+                    stage == "superseded"
+                    and (
+                        rows_processed != 0
+                        or cursor is not None
+                        or chunks_processed != 1
+                        or re.fullmatch(r"[0-9a-f]{32}", publication_id) is None
+                    )
+                )
                 or process.returncode != 0
             ):
                 raise SnapshotSubprocessError(
@@ -884,17 +898,29 @@ class SnapshotScheduler:
                     attempt_id=attempt_id,
                     outcome="cancelled",
                     snapshot_id=None,
-                    failure_kind="structure-checkpoint",
+                    failure_kind=(
+                        "structure-contract-superseded"
+                        if result.stage == "superseded"
+                        else "structure-checkpoint"
+                    ),
                     last_stage=last_stage,
                     elapsed_ms=result.elapsed_ms,
                     chunks_processed=chunks_processed,
                 )
                 self._checkpoint_pending = True
-                logger.info(
+                message = (
                     "snapshot tick checkpointed: "
                     f"stage={result.stage} rows_or_pages={pages_or_rows} "
                     f"failure_counter={self._failure_counter}"
                 )
+                if result.stage == "superseded":
+                    logger.warning(
+                        "publication contract superseded: "
+                        f"publication_id={result.publication_id} "
+                        f"failure_counter={self._failure_counter}"
+                    )
+                else:
+                    logger.info(message)
                 self._persist_counter()
                 return True
             result_status = getattr(result, "status", None)

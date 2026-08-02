@@ -194,6 +194,40 @@ def test_structure_sync_cli_reports_publication_checkpoint_and_row_budget(
     assert run.await_args.kwargs["max_publication_rows"] == 17
 
 
+def test_structure_sync_cli_emits_controlled_supersession_checkpoint(monkeypatch) -> None:
+    monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
+    monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
+    checkpoint = StructurePublicationCheckpoint(
+        stage="superseded",
+        component=None,
+        rows_processed=0,
+        cursor=None,
+        publication_id="a" * 32,
+        chunks_processed=1,
+        elapsed_ms=12,
+    )
+    with patch(
+        "polyarb.snapshot.cli.run_structure_sync_until_published",
+        new=AsyncMock(return_value=checkpoint),
+    ):
+        result = CliRunner().invoke(app, ["structure-sync", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout.splitlines()[-1]) == {
+        "checkpointed": True,
+        "stage": "superseded",
+        "component": None,
+        "rows_processed": 0,
+        "cursor": None,
+        "publication_id": "a" * 32,
+        "chunks_processed": 1,
+        "elapsed_ms": 12,
+    }
+    assert result.stdout.splitlines()[0] == (
+        "structure-publication-superseded publication_id=" + "a" * 32
+    )
+
+
 def test_structure_sync_cli_rejects_publication_chunks_above_500(monkeypatch) -> None:
     monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
     monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")

@@ -13,6 +13,7 @@ from polyarb.config import Settings
 from polyarb.perception.market_truth import EventMember, GroupTruth
 from polyarb.perception.structure_contract import (
     STRUCTURE_COMPONENTS,
+    STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
     STRUCTURE_PUBLICATION_MAX_ROWS,
     STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S,
 )
@@ -337,6 +338,19 @@ def run_structure_publication_step(
         assert progress is not None
     else:
         publication = progress.publication
+    reconciliation = store.reconcile_structure_publication_contract(
+        window_id,
+        STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+        now_ms,
+    )
+    if reconciliation.superseded:
+        return StructurePublicationCheckpoint(
+            "superseded",
+            None,
+            0,
+            None,
+            reconciliation.publication_id,
+        )
     if publication.status == "published":
         return _result(store, publication)
     if time.monotonic() - started_at >= max_elapsed_s:
@@ -455,15 +469,16 @@ def run_structure_publication_slice(
         chunks_processed += 1
         rows_processed += result.rows_processed
         final_checkpoint = result
-        print(
-            "structure-publication-progress "
-            f"stage={result.stage} component={result.component or 'none'} "
-            f"chunks={chunks_processed} rows={rows_processed}",
-            file=sys.stderr,
-            flush=True,
-        )
+        if result.stage != "superseded":
+            print(
+                "structure-publication-progress "
+                f"stage={result.stage} component={result.component or 'none'} "
+                f"chunks={chunks_processed} rows={rows_processed}",
+                file=sys.stderr,
+                flush=True,
+            )
         elapsed_s = time.monotonic() - started_at
-        if result.stage == "ready" or elapsed_s >= max_elapsed_s:
+        if result.stage in {"ready", "superseded"} or elapsed_s >= max_elapsed_s:
             break
 
     if final_checkpoint is None:

@@ -74,6 +74,7 @@ _SNAPSHOT_ATTEMPT_STDERR_TAIL_RE = re.compile(
     r"generation-incomplete|generation-validation-issues|membership-invalid|"
     r"source-truth-invalid|sqlite-busy|structure-child-error|"
     r"structure-publication-not-writing))"
+    r"|structure-publication-superseded publication_id=[0-9a-f]{32}"
 )
 
 _VALID_MODES = ("subset", "full")

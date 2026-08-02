@@ -1415,6 +1415,41 @@ def test_matching_publication_contract_resumes_without_mutation(tmp_path: Path) 
         )
 
 
+def test_publication_step_returns_controlled_contract_supersession_checkpoint(
+    settings_for_test,
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    publication = _begin_generation(
+        store,
+        snapshot_id=1,
+        market_id="candidate-market",
+        now_ms=1_000,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_publications SET normalization_contract_version=NULL "
+            "WHERE publication_id=?",
+            (publication.publication_id,),
+        )
+
+    result = run_structure_publication_step(
+        settings_for_test,
+        publication.window_id,
+        max_rows=1,
+        max_elapsed_s=60,
+        store=store,
+    )
+
+    assert result == StructurePublicationCheckpoint(
+        stage="superseded",
+        component=None,
+        rows_processed=0,
+        cursor=None,
+        publication_id=publication.publication_id,
+    )
+
+
 def test_bounded_certification_resumes_every_primary_key_checkpoint(
     tmp_path: Path,
 ) -> None:

@@ -18,6 +18,7 @@ import hashlib
 import json
 import signal
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
@@ -556,6 +557,114 @@ async def test_snapshot_subprocess_accepts_publication_checkpoint() -> None:
     assert result.cursor == "events|event-500"
     assert result.publication_id == "publication-1"
     assert result.chunks_processed == 11
+
+
+@pytest.mark.asyncio
+async def test_snapshot_subprocess_accepts_exact_contract_supersession_checkpoint() -> None:
+    from polyarb.daemon.scheduler import (
+        IsolatedStructurePublicationCheckpoint,
+        run_snapshot_in_subprocess,
+    )
+
+    process = _FakeProcess(
+        {
+            "checkpointed": True,
+            "stage": "superseded",
+            "component": None,
+            "rows_processed": 0,
+            "cursor": None,
+            "publication_id": "a" * 32,
+            "chunks_processed": 1,
+            "elapsed_ms": 10,
+        },
+        returncode=0,
+        stderr=(
+            b"structure-publication-superseded "
+            b"publication_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        ),
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    result = await run_snapshot_in_subprocess(spawn=spawn)
+
+    assert isinstance(result, IsolatedStructurePublicationCheckpoint)
+    assert result.stage == "superseded"
+    assert result.rows_processed == 0
+    assert result.cursor is None
+
+
+@pytest.mark.asyncio
+async def test_actual_child_pipe_carries_contract_supersession_to_parent() -> None:
+    from polyarb.daemon.scheduler import (
+        IsolatedStructurePublicationCheckpoint,
+        run_snapshot_in_subprocess,
+    )
+
+    script = """
+import json, sys
+publication_id = "a" * 32
+print(json.dumps({
+    "checkpointed": True,
+    "stage": "superseded",
+    "component": None,
+    "rows_processed": 0,
+    "cursor": None,
+    "publication_id": publication_id,
+    "chunks_processed": 1,
+    "elapsed_ms": 10,
+}))
+print(
+    "structure-publication-superseded publication_id=" + publication_id,
+    file=sys.stderr,
+)
+"""
+
+    async def spawn(*_args, **kwargs):
+        return await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            script,
+            stdout=kwargs["stdout"],
+            stderr=kwargs["stderr"],
+        )
+
+    result = await run_snapshot_in_subprocess(spawn=spawn)
+
+    assert isinstance(result, IsolatedStructurePublicationCheckpoint)
+    assert result.stage == "superseded"
+    assert result.publication_id == "a" * 32
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rows_processed", "cursor"),
+    ((1, None), (0, "unexpected")),
+)
+async def test_snapshot_subprocess_rejects_nonzero_supersession_work(
+    rows_processed: int,
+    cursor: str | None,
+) -> None:
+    from polyarb.daemon.scheduler import SnapshotSubprocessError, run_snapshot_in_subprocess
+
+    process = _FakeProcess(
+        {
+            "checkpointed": True,
+            "stage": "superseded",
+            "component": None,
+            "rows_processed": rows_processed,
+            "cursor": cursor,
+            "publication_id": "a" * 32,
+        },
+        returncode=0,
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return process
+
+    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-invalid-json"):
+        await run_snapshot_in_subprocess(spawn=spawn)
 
 
 @pytest.mark.asyncio
@@ -1595,6 +1704,42 @@ async def test_structure_checkpoint_releases_slot_without_failure_or_alert(
     assert scheduler.state == SchedulerState.RUNNING
     assert scheduler._checkpoint_pending is True
     heartbeat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_contract_supersession_checkpoint_preserves_existing_failure_counter(
+    daemon_settings_for_test: Any,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import IsolatedStructurePublicationCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    store.upsert_scheduler_state(state="RECOVERING", failure_counter=193)
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    scheduler._run_snapshot = AsyncMock(
+        return_value=IsolatedStructurePublicationCheckpoint(
+            stage="superseded",
+            component=None,
+            rows_processed=0,
+            cursor=None,
+            publication_id="a" * 32,
+            elapsed_ms=10,
+        )
+    )
+
+    with patch.object(scheduler_module.logger, "warning") as warning:
+        await scheduler._tick()
+
+    attempt = store.get_latest_snapshot_attempt()
+    assert attempt is not None
+    assert attempt["outcome"] == "cancelled"
+    assert attempt["failure_kind"] == "structure-contract-superseded"
+    assert scheduler._failure_counter == 193
+    assert store.get_scheduler_state()["failure_counter"] == 193
+    warning.assert_called_once()
+    assert "publication contract superseded" in warning.call_args.args[0].lower()
 
 
 @pytest.mark.asyncio

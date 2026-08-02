@@ -391,6 +391,13 @@ def structure_sync(
             print(f"FAILED | failure_kind={failure_kind}")
         raise typer.Exit(code=1) from None
     if isinstance(result, StructurePublicationCheckpoint):
+        if result.stage == "superseded":
+            print(
+                "structure-publication-superseded "
+                f"publication_id={result.publication_id}",
+                file=sys.stderr,
+                flush=True,
+            )
         if json_output:
             print(
                 json.dumps(

@@ -42,4 +42,6 @@ def valid_structure_publication_checkpoint(
         return component in STRUCTURE_COMPONENTS
     if stage == "certifying":
         return component in STRUCTURE_PUBLICATION_CHECKPOINT_COMPONENTS
+    if stage == "superseded":
+        return component is None
     return stage == "ready" and component is None
