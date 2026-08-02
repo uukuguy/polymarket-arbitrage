@@ -379,7 +379,8 @@ def _migrate_structure_drift_hash_v2(
             fault_hook("after-progress-rename")
         con.execute(
             "CREATE TABLE structure_generation_drift_progress("
-            "comparison_id TEXT PRIMARY KEY,hash_algorithm TEXT NOT NULL,"
+            "comparison_id TEXT PRIMARY KEY,hash_algorithm TEXT NOT NULL "
+            "DEFAULT 'serializable-sha256-v1',"
             "legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),"
             "generation_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),"
             "publication_id TEXT NOT NULL REFERENCES structure_publications(publication_id),"
@@ -443,7 +444,8 @@ def _migrate_structure_drift_hash_v2(
             fault_hook("after-receipt-rename")
         con.execute(
             "CREATE TABLE structure_generation_drift_receipts("
-            "comparison_id TEXT PRIMARY KEY,hash_algorithm TEXT NOT NULL,"
+            "comparison_id TEXT PRIMARY KEY,hash_algorithm TEXT NOT NULL "
+            "DEFAULT 'serializable-sha256-v1',"
             "legacy_snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),"
             "legacy_taken_at_ms INTEGER NOT NULL CHECK(legacy_taken_at_ms>=0),"
             "legacy_finished_at_ms INTEGER NOT NULL CHECK(legacy_finished_at_ms>=0),"
@@ -3784,6 +3786,11 @@ class SQLiteStore:
             f"{prefix}memberships" if generation else "event_market_memberships"
         )
         market_table = f"{prefix}markets"
+        scan_index = (
+            "idx_structure_generation_memberships_drift_scan"
+            if generation
+            else "idx_event_market_memberships_drift_scan"
+        )
         cursor_clause = "" if after_market_id is None else "AND m.market_id>? "
         parameters = (
             (snapshot_id, limit)
@@ -3796,10 +3803,11 @@ class SQLiteStore:
             rows = con.execute(
                 "SELECT m.event_id,m.neg_risk_market_id,m.market_id,m.member_kind,"
                 "m.active,m.closed,k.condition_id,k.yes_token_id,k.no_token_id,"
-                f"k.neg_risk,k.incomplete FROM {truth_table} t JOIN "
-                f"{membership_table} m ON m.snapshot_id=t.snapshot_id AND "
+                f"k.neg_risk,k.incomplete FROM {membership_table} m INDEXED BY "
+                f"{scan_index} CROSS JOIN {truth_table} t ON "
+                "m.snapshot_id=t.snapshot_id AND "
                 "m.event_id=t.event_id AND m.neg_risk_market_id=t.neg_risk_market_id "
-                f"JOIN {market_table} k ON k.snapshot_id=m.snapshot_id AND "
+                f"CROSS JOIN {market_table} k ON k.snapshot_id=m.snapshot_id AND "
                 "k.market_id=m.market_id AND k.event_id=m.event_id AND "
                 "k.neg_risk_market_id=m.neg_risk_market_id WHERE t.snapshot_id=? "
                 "AND t.neg_risk_type='standard' AND t.quality='complete-supported' "

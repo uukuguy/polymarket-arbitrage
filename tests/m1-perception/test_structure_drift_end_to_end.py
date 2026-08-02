@@ -407,13 +407,13 @@ def test_drift_v2_schema_binds_algorithm_reason_and_member_scan_indexes(
     store.init_schema()
     with sqlite3.connect(store.db_path) as con:
         progress_columns = {
-            str(row[1])
+            str(row[1]): (int(row[3]), row[4])
             for row in con.execute(
                 "PRAGMA table_info(structure_generation_drift_progress)"
             )
         }
         receipt_columns = {
-            str(row[1])
+            str(row[1]): (int(row[3]), row[4])
             for row in con.execute(
                 "PRAGMA table_info(structure_generation_drift_receipts)"
             )
@@ -425,10 +425,108 @@ def test_drift_v2_schema_binds_algorithm_reason_and_member_scan_indexes(
             )
         }
 
-    assert {"hash_algorithm", "terminal_reason"} <= progress_columns
+    assert {"hash_algorithm", "terminal_reason"} <= set(progress_columns)
     assert "hash_algorithm" in receipt_columns
+    assert progress_columns["hash_algorithm"] == (
+        1,
+        "'serializable-sha256-v1'",
+    )
+    assert receipt_columns["hash_algorithm"] == (
+        1,
+        "'serializable-sha256-v1'",
+    )
     assert "idx_structure_generation_memberships_drift_scan" in indexes
     assert "idx_event_market_memberships_drift_scan" in indexes
+
+
+@pytest.mark.parametrize("failure_point", ("index", "analyze"))
+def test_drift_v2_schema_startup_failure_reinitializes_without_business_row_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    store = _drift_store(tmp_path)
+    business_tables = (
+        "snapshots",
+        "structure_publications",
+        "structure_generation_memberships",
+        "event_market_memberships",
+        "markets",
+    )
+    with sqlite3.connect(store.db_path) as con:
+        business_before = {
+            table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in business_tables
+        }
+        if failure_point == "index":
+            con.execute(
+                "DROP INDEX idx_structure_generation_memberships_drift_scan"
+            )
+
+    original_connect = store._connect_writer
+
+    def connect_with_startup_fault(
+        *, timeout_s: float | None = None
+    ) -> sqlite3.Connection:
+        con = original_connect(timeout_s=timeout_s)
+
+        def deny_selected_operation(
+            action: int,
+            arg1: str | None,
+            _arg2: str | None,
+            _database: str | None,
+            _trigger: str | None,
+        ) -> int:
+            index_failure = (
+                failure_point == "index"
+                and action == sqlite3.SQLITE_CREATE_INDEX
+                and arg1 == "idx_structure_generation_memberships_drift_scan"
+            )
+            analyze_failure = (
+                failure_point == "analyze" and action == sqlite3.SQLITE_ANALYZE
+            )
+            return sqlite3.SQLITE_DENY if index_failure or analyze_failure else sqlite3.SQLITE_OK
+
+        con.set_authorizer(deny_selected_operation)
+        return con
+
+    monkeypatch.setattr(store, "_connect_writer", connect_with_startup_fault)
+    with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+        store.init_schema()
+    monkeypatch.setattr(store, "_connect_writer", original_connect)
+
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        business_after = {
+            table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in business_tables
+        }
+        indexes = {
+            str(row[0])
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+        analyzed_indexes = {
+            str(row[0])
+            for row in con.execute(
+                "SELECT idx FROM sqlite_stat1 WHERE idx IN (?,?)",
+                (
+                    "idx_structure_generation_memberships_drift_scan",
+                    "idx_event_market_memberships_drift_scan",
+                ),
+            )
+        }
+
+    assert business_after == business_before
+    assert {
+        "idx_structure_generation_memberships_drift_scan",
+        "idx_event_market_memberships_drift_scan",
+    } <= indexes
+    assert {
+        "idx_structure_generation_memberships_drift_scan",
+        "idx_event_market_memberships_drift_scan",
+    } <= analyzed_indexes
 
 
 _V1_PROGRESS_COLUMNS = (
@@ -526,6 +624,16 @@ def test_drift_v2_migration_rolls_back_injected_crash_and_reinitializes(
     store.init_schema()
     store.init_schema()
     with sqlite3.connect(store.db_path) as con:
+        defaults = {
+            table: {
+                str(row[1]): (int(row[3]), row[4])
+                for row in con.execute(f"PRAGMA table_info({table})")
+            }["hash_algorithm"]
+            for table in (
+                "structure_generation_drift_progress",
+                "structure_generation_drift_receipts",
+            )
+        }
         migrated = con.execute(
             "SELECT comparison_id,hash_algorithm,phase,terminal_reason "
             "FROM structure_generation_drift_progress"
@@ -534,10 +642,28 @@ def test_drift_v2_migration_rolls_back_injected_crash_and_reinitializes(
             table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in immutable_before
         }
+        old_shape_row = con.execute(
+            "SELECT " + ",".join(_V1_PROGRESS_COLUMNS) + " FROM "
+            "structure_generation_drift_progress"
+        ).fetchone()
+        con.execute("DELETE FROM structure_generation_drift_progress")
+        con.execute(
+            "INSERT INTO structure_generation_drift_progress("
+            + ",".join(_V1_PROGRESS_COLUMNS)
+            + ") VALUES ("
+            + ",".join("?" for _ in _V1_PROGRESS_COLUMNS)
+            + ")",
+            old_shape_row,
+        )
+        omitted_column_algorithm = con.execute(
+            "SELECT hash_algorithm FROM structure_generation_drift_progress"
+        ).fetchone()
     assert migrated == [
         (comparison_id, "serializable-sha256-v1", "source-events", None)
     ]
     assert immutable_after == immutable_before
+    assert set(defaults.values()) == {(1, "'serializable-sha256-v1'")}
+    assert omitted_column_algorithm == ("serializable-sha256-v1",)
 
 
 def test_drift_v2_migration_writer_lock_leaves_v1_schema_reinitializable(

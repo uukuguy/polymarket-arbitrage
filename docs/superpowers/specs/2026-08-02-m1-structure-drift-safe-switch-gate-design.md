@@ -389,11 +389,16 @@ stop after the row limit without a full-snapshot scan or a temporary sort.
 Market and group-truth joins continue to authenticate the complete structural
 predicate; the index changes access only, not eligibility.
 
-Indexes and their targeted `ANALYZE` statistics are created atomically by
-`init_schema()` before the scheduler and Quote producers start. An index-build
-failure fails startup and leaves the old schema/data transactionally intact.
-The migration never drops an existing index and does not run online inside a
-drift slice.
+Indexes and their targeted `ANALYZE` statistics are created idempotently by
+`init_schema()` before the scheduler and Quote producers start. SQLite
+`executescript()` may commit an index before the later authority-table rebuild
+savepoint, so cross-index/table atomicity is neither claimed nor required. The
+small progress/receipt table rebuild itself is one rollback-safe savepoint and
+never mutates business data. If index creation, table migration, or `ANALYZE`
+fails, startup fails closed; a harmless completed index may remain, and the
+next `init_schema()` deterministically completes the missing steps without row
+loss. The migration never drops an existing production index and does not run
+online inside a drift slice.
 
 ## 6. Receipt Contract
 
