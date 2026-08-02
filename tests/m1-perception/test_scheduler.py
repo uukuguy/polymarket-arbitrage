@@ -1431,6 +1431,28 @@ async def test_snapshot_subprocess_accepts_bounded_child_failure_contract() -> N
 
 
 @pytest.mark.asyncio
+async def test_snapshot_subprocess_accepts_allowlisted_membership_evidence_marker() -> None:
+    from polyarb.daemon.scheduler import SnapshotSubprocessError, run_snapshot_in_subprocess
+
+    fingerprint = "a" * 64
+    stderr = (
+        "structure-sync-failure failure_kind=membership-invalid "
+        f"membership_kind=active-market-missing key_sha256={fingerprint}\n"
+    ).encode()
+
+    async def spawn(*_args, **_kwargs):
+        return _FakeProcess(
+            {"failed": True, "failure_kind": "membership-invalid"},
+            returncode=1,
+            stderr=stderr,
+        )
+
+    with pytest.raises(SnapshotSubprocessError) as raised:
+        await run_snapshot_in_subprocess(spawn=spawn)
+    assert raised.value.stderr_tail == stderr.decode().strip()
+
+
+@pytest.mark.asyncio
 async def test_snapshot_subprocess_classifies_sigkill_as_possible_oom() -> None:
     from polyarb.daemon.scheduler import (
         SnapshotSubprocessError,

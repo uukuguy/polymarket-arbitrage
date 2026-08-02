@@ -256,7 +256,10 @@ def test_structure_generation_health_fails_stale_active_comparison() -> None:
     assert checks["snapshot:structure_generation_comparison"][0]["status"] == "fail"
 
 
-def test_structure_generation_health_warns_nonfatally_on_exact_quarantine() -> None:
+@pytest.mark.parametrize("quarantine_count", (184, 62))
+def test_structure_generation_health_warns_nonfatally_on_exact_quarantine(
+    quarantine_count: int,
+) -> None:
     checks = health_module._structure_generation_health_checks(
         {
             "pointer_snapshot_id": 9,
@@ -266,7 +269,7 @@ def test_structure_generation_health_warns_nonfatally_on_exact_quarantine() -> N
             "publication": {
                 "status": "published",
                 "checkpoint_at_ms": 100_000,
-                "quarantine_count": 184,
+                "quarantine_count": quarantine_count,
             },
             "comparison": None,
             "retained_generation_count_lower_bound": 2,
@@ -282,7 +285,7 @@ def test_structure_generation_health_warns_nonfatally_on_exact_quarantine() -> N
     )
     check = checks["snapshot:structure_generation"][0]
     assert check["status"] == "warn"
-    assert "quarantine_count=184" in check["output"]
+    assert f"quarantine_count={quarantine_count}" in check["output"]
 
 
 @pytest.mark.parametrize(

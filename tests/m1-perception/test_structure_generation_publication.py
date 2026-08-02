@@ -28,6 +28,28 @@ COMPONENT_COUNTS = {
     "issues": 0,
 }
 
+PRODUCTION_CROSS_STREAM_MATRIX = {
+    "global_active_open_neg_risk": 48_102,
+    "event_active_open_membership": 47_983,
+    "both_present": 47_921,
+    "global_only": 181,
+    "event_only": 62,
+    "both_field_mismatch": 0,
+    "multi_parent": 0,
+}
+
+
+def test_production_cross_stream_matrix_is_closed_and_mutually_exclusive() -> None:
+    matrix = PRODUCTION_CROSS_STREAM_MATRIX
+    assert matrix["global_active_open_neg_risk"] == (
+        matrix["both_present"] + matrix["global_only"]
+    )
+    assert matrix["event_active_open_membership"] == (
+        matrix["both_present"] + matrix["event_only"]
+    )
+    assert matrix["global_only"] == 137 + 44
+    assert matrix["both_field_mismatch"] == matrix["multi_parent"] == 0
+
 
 def test_publication_slice_advances_multiple_durable_chunks_before_returning(
     settings_for_test, monkeypatch
@@ -689,6 +711,322 @@ def test_structure_quarantine_exactly_equals_production_shaped_184_row_differenc
     assert issue_ids == source_minus_generation
     assert sum("parent-absent" in str(row[1]) for row in issues) == 140
     assert sum("missing-group-identity" in str(row[1]) for row in issues) == 44
+
+
+def test_event_only_active_member_is_quarantined_with_recomputed_group_truth(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    raw_event = {
+        "id": "event-1",
+        "slug": "event-1",
+        "active": True,
+        "closed": False,
+        "negRisk": True,
+        "enableNegRisk": True,
+        "negRiskAugmented": False,
+        "negRiskMarketID": "group-1",
+        "markets": [
+            {
+                "id": "both-present",
+                "active": True,
+                "closed": False,
+                "negRiskOther": False,
+            },
+            {
+                "id": "event-only",
+                "active": True,
+                "closed": False,
+                "negRiskOther": False,
+            },
+        ],
+    }
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=[raw_event], finished_at_ms=101,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True,
+        markets=[{
+            "id": "both-present",
+            "conditionId": "condition-both",
+            "slug": "both-present",
+            "question": "Both present?",
+            "clobTokenIds": '["yes-both","no-both"]',
+            "active": True,
+            "closed": False,
+            "negRisk": True,
+            "negRiskMarketID": "group-1",
+        }],
+        finished_at_ms=102,
+    )
+    assert store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
+    )["completed"] is True
+    publication = store.begin_structure_publication(
+        window_id=window["id"],
+        snapshot_metadata={
+            "snapshot_id": 1,
+            "taken_at_ms": 1_000,
+            "mode": "full",
+            "data_product": "structure",
+            "expected_counts": COMPONENT_COUNTS,
+        },
+        now_ms=104,
+    )
+    for component in (
+        "events", "event_tags", "memberships", "group_truth", "markets", "issues"
+    ):
+        _normalize_component_to_done(store, publication, component)
+
+    with sqlite3.connect(store.db_path) as con:
+        memberships = con.execute(
+            "SELECT market_id FROM structure_generation_memberships "
+            "WHERE snapshot_id=1 ORDER BY market_id"
+        ).fetchall()
+        truth = con.execute(
+            "SELECT expected_member_count,active_named_count,membership_hash "
+            "FROM structure_generation_group_truth WHERE snapshot_id=1"
+        ).fetchone()
+        issue = con.execute(
+            "SELECT market_id,raw_payload FROM structure_generation_issues "
+            "WHERE snapshot_id=1"
+        ).fetchone()
+    expected_member = EventMember(
+        "event-1", "group-1", "both-present", "named", True, False
+    )
+    assert memberships == [("both-present",)]
+    assert truth == (
+        1,
+        1,
+        membership_hash("event-1", "group-1", [expected_member]),
+    )
+    assert issue is not None
+    assert issue[0] == "event-only"
+    assert str(issue[1]).startswith(
+        "active-open-neg-risk-event-member-absent-from-complete-market-catalogue:"
+    )
+    assert len(str(issue[1]).rsplit(":", 1)[1]) == 64
+
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=200)
+    observed_source_event = False
+    for offset in range(30):
+        chunk = store.advance_structure_certification_chunk(
+            publication.publication_id, max_rows=500, now_ms=201 + offset
+        )
+        if chunk.component == "source_events" and chunk.rows_processed == 1:
+            observed_source_event = True
+            break
+    assert observed_source_event is True
+
+
+def test_event_only_quarantine_evidence_is_exact_and_forgery_fails() -> None:
+    raw_event = {
+        "id": "event-1",
+        "negRisk": True,
+        "enableNegRisk": True,
+        "negRiskMarketID": "group-1",
+        "markets": [{
+            "id": "event-only", "active": True, "closed": False,
+            "negRiskOther": False,
+        }],
+    }
+    issue = structure_publication_module.event_only_member_quarantine_issue(
+        raw_event, event_source_ordinal=17, market_id="event-only"
+    )
+    assert issue is not None
+    baseline = issue["raw_payload"]
+    for changed in (
+        ({**raw_event, "title": "payload drift"}, 17),
+        (raw_event, 18),
+        ({**raw_event, "negRiskMarketID": "other-group"}, 17),
+        ({**raw_event, "markets": [{
+            **raw_event["markets"][0], "closed": True,
+        }]}, 17),
+    ):
+        forged = structure_publication_module.event_only_member_quarantine_issue(
+            changed[0], event_source_ordinal=changed[1], market_id="event-only"
+        )
+        assert forged is None or forged["raw_payload"] != baseline
+
+
+def test_duplicate_parent_event_only_candidate_remains_membership_invalid(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    events = [
+        {
+            "id": f"event-{index}", "slug": f"event-{index}",
+            "negRisk": True, "enableNegRisk": True,
+            "negRiskAugmented": False, "negRiskMarketID": f"group-{index}",
+            "markets": [{
+                "id": "shared-market", "active": True, "closed": False,
+                "negRiskOther": False,
+            }],
+        }
+        for index in range(2)
+    ]
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=events, finished_at_ms=101,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=[], finished_at_ms=102,
+    )
+    assert store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
+    )["completed"] is True
+    publication = store.begin_structure_publication(
+        window_id=window["id"],
+        snapshot_metadata={
+            "snapshot_id": 1, "taken_at_ms": 1_000, "mode": "full",
+            "data_product": "structure", "expected_counts": COMPONENT_COUNTS,
+        },
+        now_ms=104,
+    )
+    for component in (
+        "events", "event_tags", "memberships", "group_truth", "markets", "issues"
+    ):
+        _normalize_component_to_done(store, publication, component)
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=200)
+    with pytest.raises(ValueError, match="membership-invalid"):
+        for offset in range(20):
+            store.advance_structure_certification_chunk(
+                publication.publication_id, max_rows=500, now_ms=201 + offset
+            )
+
+
+def test_event_only_issue_source_keyset_is_bounded_at_500(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    events = [
+        {
+            "id": f"event-{index:03d}", "negRisk": True, "enableNegRisk": True,
+            "negRiskAugmented": False, "negRiskMarketID": f"group-{index:03d}",
+            "markets": [{
+                "id": f"event-only-{index:03d}", "active": True,
+                "closed": False, "negRiskOther": False,
+            }],
+        }
+        for index in range(501)
+    ]
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=events, finished_at_ms=101,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=[], finished_at_ms=102,
+    )
+    while not store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
+    )["completed"]:
+        pass
+    first = store.fetch_structure_issue_source_chunk(
+        window_id=window["id"], after_market_id=None, limit=500
+    )
+    second = store.fetch_structure_issue_source_chunk(
+        window_id=window["id"], after_market_id=first[-1][0], limit=500
+    )
+    assert len(first) == 500
+    assert len(second) == 1
+    assert first[-1][0] < second[0][0]
+    assert {row[1]["source_kind"] for row in [*first, *second]} == {"event_only"}
+
+
+def test_production_shaped_62_event_only_members_across_14_groups_certify(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    events: list[dict[str, object]] = []
+    markets: list[dict[str, object]] = []
+    event_only_total = 0
+    for event_index in range(14):
+        event_id = f"event-{event_index:02d}"
+        group_id = f"group-{event_index:02d}"
+        both_id = f"both-{event_index:02d}"
+        absent_count = 5 if event_index < 6 else 4
+        embedded = [{
+            "id": both_id, "active": True, "closed": False,
+            "negRiskOther": False,
+        }]
+        for member_index in range(absent_count):
+            embedded.append({
+                "id": f"event-only-{event_index:02d}-{member_index}",
+                "active": True,
+                "closed": False,
+                "negRiskOther": False,
+            })
+            event_only_total += 1
+        events.append({
+            "id": event_id, "slug": event_id, "active": True, "closed": False,
+            "negRisk": True, "enableNegRisk": True, "negRiskAugmented": False,
+            "negRiskMarketID": group_id, "markets": embedded,
+        })
+        markets.append({
+            "id": both_id, "conditionId": f"condition-{both_id}", "slug": both_id,
+            "question": f"Will {both_id}?",
+            "clobTokenIds": f'["yes-{both_id}","no-{both_id}"]',
+            "active": True, "closed": False, "negRisk": True,
+            "negRiskMarketID": group_id,
+        })
+    assert event_only_total == 62
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=events, finished_at_ms=101,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, markets=markets, finished_at_ms=102,
+    )
+    assert store.advance_structure_event_market_backfill(
+        window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
+    )["completed"] is True
+    publication = store.begin_structure_publication(
+        window_id=window["id"],
+        snapshot_metadata={
+            "snapshot_id": 1, "taken_at_ms": 1_000, "mode": "full",
+            "data_product": "structure", "expected_counts": COMPONENT_COUNTS,
+        },
+        now_ms=104,
+    )
+    for component in (
+        "events", "event_tags", "memberships", "group_truth", "markets", "issues"
+    ):
+        _normalize_component_to_done(store, publication, component)
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_memberships WHERE snapshot_id=1"
+        ).fetchone() == (14,)
+        assert con.execute(
+            "SELECT COUNT(*),SUM(expected_member_count),SUM(active_named_count) "
+            "FROM structure_generation_group_truth WHERE snapshot_id=1"
+        ).fetchone() == (14, 14, 14)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_issues WHERE snapshot_id=1 "
+            "AND raw_payload LIKE ?",
+            (f"{structure_publication_module.EVENT_ONLY_NEG_RISK_QUARANTINE_REASON}:%",),
+        ).fetchone() == (62,)
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=200)
+    observed = 0
+    for offset in range(30):
+        chunk = store.advance_structure_certification_chunk(
+            publication.publication_id, max_rows=500, now_ms=201 + offset
+        )
+        if chunk.component == "source_events":
+            observed += chunk.rows_processed
+        if observed == 14:
+            break
+    assert observed == 14
 
 
 def test_forged_quarantine_issue_remains_fatal(tmp_path: Path) -> None:
@@ -1450,10 +1788,16 @@ def test_publication_step_returns_controlled_contract_supersession_checkpoint(
     )
 
 
-def test_fresh_source_window_reserves_847_only_after_846_supersession(
+@pytest.mark.parametrize(
+    ("candidate_snapshot_id", "successor_snapshot_id"),
+    ((846, 847), (847, 848)),
+)
+def test_fresh_source_window_reserves_next_id_only_after_contract_supersession(
     settings_for_test,
+    candidate_snapshot_id: int,
+    successor_snapshot_id: int,
 ) -> None:
-    """N retires 846; N+1 collects distinct truth before 847 can exist."""
+    """N retires the old contract; N+1 collects fresh truth before reservation."""
     from polyarb.perception.structure_contract import (
         STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
     )
@@ -1468,10 +1812,11 @@ def test_fresh_source_window_reserves_847_only_after_846_supersession(
     )
     stale = _begin_generation(
         store,
-        snapshot_id=846,
+        snapshot_id=candidate_snapshot_id,
         market_id="stale-market",
         now_ms=2_000,
     )
+    store.upsert_scheduler_state(state="RECOVERING", failure_counter=261)
     with sqlite3.connect(store.db_path) as con:
         con.execute(
             "UPDATE structure_publications SET normalization_contract_version=NULL "
@@ -1493,7 +1838,9 @@ def test_fresh_source_window_reserves_847_only_after_846_supersession(
     assert successor["id"] != stale.window_id
     assert successor["status"] == "open"
     with sqlite3.connect(store.db_path) as con:
-        assert con.execute("SELECT 1 FROM snapshots WHERE id=847").fetchone() is None
+        assert con.execute(
+            "SELECT 1 FROM snapshots WHERE id=?", (successor_snapshot_id,)
+        ).fetchone() is None
         assert con.execute(
             "SELECT COUNT(*) FROM structure_sync_market_staging WHERE window_id=?",
             (successor["id"],),
@@ -1556,6 +1903,7 @@ def test_fresh_source_window_reserves_847_only_after_846_supersession(
         now_ms=3_300,
     )["completed"] is True
     assert store.current_structure_generation()["snapshot_id"] == 845
+    assert store.get_scheduler_state()["failure_counter"] == 261
 
     terminal = None
     for _ in range(80):
@@ -1569,23 +1917,25 @@ def test_fresh_source_window_reserves_847_only_after_846_supersession(
         if not isinstance(terminal, StructurePublicationCheckpoint):
             break
     else:
-        raise AssertionError("fresh 847 never published")
+        raise AssertionError(f"fresh {successor_snapshot_id} never published")
 
     assert terminal is not None
-    assert terminal.snapshot_id == 847
-    assert store.current_structure_generation()["snapshot_id"] == 847
+    assert terminal.snapshot_id == successor_snapshot_id
+    assert store.current_structure_generation()["snapshot_id"] == successor_snapshot_id
     assert store.current_generation_market_ids() == ("serving-market",)
     with sqlite3.connect(store.db_path) as con:
         assert con.execute(
             "SELECT window_id,normalization_contract_version "
-            "FROM structure_publications WHERE snapshot_id=847"
+            "FROM structure_publications WHERE snapshot_id=?",
+            (successor_snapshot_id,),
         ).fetchone() == (
             fresh_window_id,
             STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
         )
         assert con.execute(
             "SELECT COUNT(*) FROM structure_generation_markets "
-            "WHERE snapshot_id=847 AND market_id='stale-market'"
+            "WHERE snapshot_id=? AND market_id='stale-market'",
+            (successor_snapshot_id,),
         ).fetchone() == (0,)
 
 

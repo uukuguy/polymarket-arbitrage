@@ -127,7 +127,9 @@ _STRUCTURE_FAILURE_MARKER_RE = re.compile(
     rb"^structure-sync-failure failure_kind="
     rb"(generation-count-mismatch|generation-incomplete|generation-validation-issues|"
     rb"membership-invalid|source-truth-invalid|sqlite-busy|structure-child-error|"
-    rb"structure-publication-not-writing)$",
+    rb"structure-publication-not-writing)"
+    rb"(?: membership_kind=(?:active-market-missing|group-truth|market-identity|"
+    rb"terminal-invariant) key_sha256=[0-9a-f]{64})?$",
     re.MULTILINE,
 )
 _STRUCTURE_SUPERSESSION_MARKER_RE = re.compile(

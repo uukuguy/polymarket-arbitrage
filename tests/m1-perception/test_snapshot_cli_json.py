@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 from polyarb.perception.structure_publication import StructurePublicationCheckpoint
 from polyarb.perception.structure_sync import StructureSyncCheckpoint
 from polyarb.snapshot.cli import app
-from polyarb.storage.sqlite_store import SQLiteStore
+from polyarb.storage.sqlite_store import SQLiteStore, StructureMembershipInvalidError
 
 
 def test_structure_sync_cli_returns_certified_snapshot_json(monkeypatch) -> None:
@@ -59,6 +59,32 @@ def test_structure_sync_cli_returns_bounded_failure_json(monkeypatch) -> None:
     }
     assert len(result.stdout.encode()) <= 128
     assert "membership-invalid" in result.output
+
+
+def test_structure_sync_cli_emits_bounded_membership_failure_evidence(monkeypatch) -> None:
+    monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
+    monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
+    error = StructureMembershipInvalidError(
+        "active-market-missing", ("event-secret", "market-secret")
+    )
+    with patch(
+        "polyarb.snapshot.cli.run_structure_sync_until_published",
+        new=AsyncMock(side_effect=error),
+    ):
+        result = CliRunner().invoke(app, ["structure-sync", "--json"])
+
+    marker = result.stdout.splitlines()[0]
+    assert marker.startswith(
+        "structure-sync-failure failure_kind=membership-invalid "
+        "membership_kind=active-market-missing key_sha256="
+    )
+    assert len(marker.rsplit("=", 1)[1]) == 64
+    assert "event-secret" not in result.stdout
+    assert "market-secret" not in result.stdout
+    assert json.loads(result.stdout.splitlines()[-1]) == {
+        "failed": True,
+        "failure_kind": "membership-invalid",
+    }
 
 
 def test_structure_sync_cli_redacts_unexpected_exception(monkeypatch) -> None:

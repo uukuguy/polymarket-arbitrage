@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from polyarb.config import Settings
-from polyarb.perception.market_truth import EventMember, GroupTruth
+from polyarb.perception.market_truth import EventMember, GroupTruth, membership_hash
 from polyarb.perception.structure_contract import (
     STRUCTURE_COMPONENTS,
     STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
@@ -26,6 +26,9 @@ ORPHAN_NEG_RISK_QUARANTINE_REASON = (
 )
 MISSING_GROUP_NEG_RISK_QUARANTINE_REASON = (
     "active-open-neg-risk-market-missing-group-identity"
+)
+EVENT_ONLY_NEG_RISK_QUARANTINE_REASON = (
+    "active-open-neg-risk-event-member-absent-from-complete-market-catalogue"
 )
 
 
@@ -67,6 +70,99 @@ def market_quarantine_issue(
             f"{reason}:{structure_market_source_hash(raw)}"
         ),
     }
+
+
+def event_only_member_quarantine_issue(
+    raw_event: dict,
+    *,
+    event_source_ordinal: int,
+    market_id: str,
+) -> dict[str, object] | None:
+    """Build a fixed-size receipt for one exact event-only active member."""
+    event_id = raw_event.get("id")
+    group_id = raw_event.get("negRiskMarketID")
+    markets = raw_event.get("markets")
+    if not (
+        isinstance(event_id, str)
+        and event_id
+        and isinstance(group_id, str)
+        and group_id.strip() == group_id
+        and group_id
+        and raw_event.get("negRisk") is True
+        and raw_event.get("enableNegRisk") is True
+        and isinstance(markets, list)
+    ):
+        return None
+    matches = [
+        (index, member)
+        for index, member in enumerate(markets)
+        if isinstance(member, dict) and member.get("id") == market_id
+    ]
+    if len(matches) != 1:
+        return None
+    member_ordinal, member = matches[0]
+    if not (member.get("active") is True and member.get("closed") is False):
+        return None
+    envelope = {
+        "event_id": event_id,
+        "event_payload_sha256": structure_market_source_hash(raw_event),
+        "event_source_ordinal": event_source_ordinal,
+        "group_id": group_id,
+        "market_id": market_id,
+        "member_ordinal": member_ordinal,
+        "member_payload_sha256": structure_market_source_hash(member),
+    }
+    return {
+        "layer": 1,
+        "category": "api_jitter",
+        "market_id": market_id,
+        "detail": (
+            "Gamma active event member absent from market catalogue quarantined: "
+            f"{market_id}"
+        )[:200],
+        "raw_payload": (
+            f"{EVENT_ONLY_NEG_RISK_QUARANTINE_REASON}:"
+            f"{structure_market_source_hash(envelope)}"
+        ),
+    }
+
+
+def project_event_structure(
+    raw_event: dict,
+    quarantined_market_ids: set[str] | frozenset[str],
+) -> tuple[list[EventMember], list[GroupTruth]]:
+    """Remove only pre-authenticated event-only members and repair group truth."""
+    _events, _tags, _mapping, members, truths = normalize_events([raw_event])
+    filtered = [
+        member for member in members if member.market_id not in quarantined_market_ids
+    ]
+    projected_truths: list[GroupTruth] = []
+    for truth in truths:
+        group_members = [
+            member
+            for member in filtered
+            if member.event_id == truth.event_id and member.group_id == truth.group_id
+        ]
+        if not group_members:
+            continue
+        projected_truths.append(
+            GroupTruth(
+                event_id=truth.event_id,
+                group_id=truth.group_id,
+                neg_risk_type=truth.neg_risk_type,
+                expected_member_count=len(group_members),
+                active_named_count=sum(
+                    member.member_kind == "named" and member.active
+                    for member in group_members
+                ),
+                membership_hash=membership_hash(
+                    truth.event_id, truth.group_id, group_members
+                ),
+                quality=truth.quality,
+                reason=truth.reason,
+            )
+        )
+    return filtered, projected_truths
 
 
 @dataclass(frozen=True)
@@ -177,7 +273,7 @@ def normalize_structure_component_chunk(
     if progress is None or progress.publication.publication_id != publication.publication_id:
         raise ValueError("structure-publication-not-found")
     if component == "issues":
-        rows = store.fetch_structure_market_parent_group_chunk(
+        rows = store.fetch_structure_issue_source_chunk(
             window_id=publication.window_id,
             after_market_id=after_source_key,
             limit=max_source_rows,
@@ -196,6 +292,14 @@ def normalize_structure_component_chunk(
         )
         if component == "group_truth"
         else set()
+    )
+    event_only_market_ids = (
+        store.structure_event_only_market_ids(
+            publication.publication_id,
+            [str(source_key) for source_key, _raw in rows],
+        )
+        if component in {"memberships", "group_truth"}
+        else {}
     )
     market_event_ids = (
         store.structure_event_ids_for_markets(
@@ -217,9 +321,15 @@ def normalize_structure_component_chunk(
             elif component == "event_tags":
                 canonical.extend(tag_rows)
             elif component == "memberships":
-                canonical.extend(_member_row(member) for member in members)
+                projected_members, _projected_truths = project_event_structure(
+                    raw, event_only_market_ids.get(str(_source_key), frozenset())
+                )
+                canonical.extend(_member_row(member) for member in projected_members)
             else:
-                for truth in truths:
+                _projected_members, projected_truths = project_event_structure(
+                    raw, event_only_market_ids.get(str(_source_key), frozenset())
+                )
+                for truth in projected_truths:
                     row = _truth_row(truth)
                     if truth.event_id in duplicate_event_ids:
                         row["quality"] = "incomplete-source"
@@ -239,6 +349,15 @@ def normalize_structure_component_chunk(
                 normalized["fetched_at_ms"] = taken_at_ms
                 canonical.append(normalized)
         elif component == "issues":
+            if raw.get("source_kind") == "event_only":
+                issue = event_only_member_quarantine_issue(
+                    raw["raw_event"],
+                    event_source_ordinal=int(raw["event_source_ordinal"]),
+                    market_id=_source_key,
+                )
+                if issue is not None:
+                    canonical.append(issue)
+                continue
             event_ids = tuple(str(item) for item in raw["event_ids"])
             if len(event_ids) > 1:
                 canonical.append(

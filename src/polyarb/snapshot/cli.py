@@ -64,6 +64,19 @@ def _structure_failure_kind(error: Exception) -> str:
     return "structure-child-error"
 
 
+def _structure_failure_marker(error: Exception, failure_kind: str) -> str:
+    """Format only allowlisted membership diagnostics for stderr collection."""
+    marker = f"structure-sync-failure failure_kind={failure_kind}"
+    from polyarb.storage.sqlite_store import StructureMembershipInvalidError
+
+    if isinstance(error, StructureMembershipInvalidError):
+        marker += (
+            f" membership_kind={error.membership_kind}"
+            f" key_sha256={error.key_sha256}"
+        )
+    return marker
+
+
 def _generation_store(
     *,
     initialize: bool = True,
@@ -375,11 +388,7 @@ def structure_sync(
         )
     except Exception as error:  # noqa: BLE001 - process boundary owns the protocol
         failure_kind = _structure_failure_kind(error)
-        print(
-            f"structure-sync-failure failure_kind={failure_kind}",
-            file=sys.stderr,
-            flush=True,
-        )
+        print(_structure_failure_marker(error, failure_kind), file=sys.stderr, flush=True)
         if json_output:
             print(
                 json.dumps(
