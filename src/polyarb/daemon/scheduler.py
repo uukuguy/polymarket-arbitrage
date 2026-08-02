@@ -147,7 +147,8 @@ def _safe_stderr_tail(stderr: bytes) -> str | None:
     matches.extend(_STRUCTURE_PROGRESS_MARKER_RE.finditer(stderr))
     if not matches:
         return None
-    return max(matches, key=lambda match: match.start()).group(0).decode("ascii")
+    tail = max(matches, key=lambda match: match.start()).group(0).decode("ascii")
+    return tail if len(tail) <= 256 else None
 
 
 @dataclass(frozen=True)

@@ -226,6 +226,17 @@ def test_snapshot_attempt_diagnostic_columns_migrate_legacy_rows(tmp_path: Path)
         ).fetchone()
     assert diagnostic_columns <= legacy_columns
     assert historical_diagnostics == (None, None, None, None, None, None)
+    legacy_store.finish_snapshot_attempt(
+        attempt_id=1,
+        outcome="failed",
+        finished_at_ms=2_000,
+        snapshot_id=None,
+        failure_kind="snapshot-subprocess-structure-child-error",
+        stderr_bytes=350,
+        stderr_sha256="0" * 64,
+        stderr_tail=None,
+    )
+    assert legacy_store.get_latest_snapshot_attempt()["outcome"] == "failed"
 
 
 def test_snapshot_attempt_terminal_row_cannot_be_rewritten(
@@ -265,6 +276,12 @@ def test_snapshot_attempt_terminal_row_cannot_be_rewritten(
         {"stderr_bytes": 100_000_001, "stderr_sha256": "0" * 64},
         {"stderr_bytes": 1, "stderr_sha256": "G" * 64},
         {"stderr_bytes": 1, "stderr_sha256": "0" * 64, "stderr_tail": "secret"},
+        {
+            "stderr_bytes": 1,
+            "stderr_sha256": "0" * 64,
+            "stderr_tail": "snapshot-stage stage=persist state=start elapsed_ms="
+            + "1" * 300,
+        },
         {"stderr_bytes": 1},
     ),
 )
@@ -335,6 +352,36 @@ async def test_scheduler_persists_sigkill_attempt_failure(
             "component=memberships chunks=7 rows=3500"
         ),
     }
+
+
+@pytest.mark.asyncio
+async def test_scheduler_discards_oversized_tail_but_finishes_attempt(
+    daemon_settings_for_test: Any,
+) -> None:
+    from polyarb.daemon.scheduler import SnapshotSubprocessError
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+    child_stderr = (
+        b"snapshot-stage stage=persist state=start elapsed_ms=" + b"1" * 300
+    )
+    scheduler._run_snapshot = AsyncMock(
+        side_effect=SnapshotSubprocessError(
+            "structure-child-error",
+            stderr=child_stderr,
+        )
+    )
+
+    await scheduler._tick()
+
+    attempt = store.get_latest_snapshot_attempt()
+    assert attempt is not None
+    assert attempt["outcome"] == "failed"
+    assert attempt["stderr_bytes"] == len(child_stderr)
+    assert attempt["stderr_sha256"] == hashlib.sha256(child_stderr).hexdigest()
+    assert attempt["stderr_tail"] is None
 
 
 @pytest.mark.asyncio
@@ -639,6 +686,16 @@ def test_snapshot_stage_parser_keeps_only_final_allowlisted_marker() -> None:
     )
 
     assert _parse_last_snapshot_stage(stderr) == "gamma-markets"
+
+
+def test_snapshot_stderr_tail_discards_oversized_allowlisted_marker() -> None:
+    from polyarb.daemon.scheduler import _safe_stderr_tail
+
+    stderr = (
+        b"snapshot-stage stage=persist state=start elapsed_ms=" + b"1" * 300
+    )
+
+    assert _safe_stderr_tail(stderr) is None
 
 
 @pytest.mark.asyncio

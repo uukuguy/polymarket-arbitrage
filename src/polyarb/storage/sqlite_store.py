@@ -6354,6 +6354,7 @@ class SQLiteStore:
             raise ValueError("incomplete snapshot attempt stderr diagnostic")
         if stderr_tail is not None and (
             stderr_bytes is None
+            or len(stderr_tail) > 256
             or _SNAPSHOT_ATTEMPT_STDERR_TAIL_RE.fullmatch(stderr_tail) is None
         ):
             raise ValueError("invalid snapshot attempt stderr_tail")
