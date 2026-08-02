@@ -4005,6 +4005,9 @@ class SQLiteStore:
         now_ms: int,
     ) -> StructureCertificationChunk:
         """Hash fresh generation truth and fail closed on any exact mismatch."""
+        from polyarb.perception.structure_drift import (
+            reconstruction_root_from_class_commitments,
+        )
         with sqlite3.connect(self._db_path) as read_con:
             progress = read_con.execute(
                 "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,"
@@ -4113,6 +4116,10 @@ class SQLiteStore:
                 source_hash = digests.get("source_group_truth_hash")
                 conflict_count = counts.get("class_count:overlap-conflict", 0)
                 unclassified_count = counts.get("class_count:unclassified", 0)
+                projection_count = counts.get("projection_member_count")
+                generation_count = counts.get("generation_member_count")
+                projection_root = digests.get("projection_member_root")
+                generation_root = digests.get("generation_member_root")
                 if (
                     not isinstance(source_hash, str)
                     or len(source_hash) != 64
@@ -4120,16 +4127,190 @@ class SQLiteStore:
                     or conflict_count < 0
                     or type(unclassified_count) is not int
                     or unclassified_count < 0
+                    or type(projection_count) is not int
+                    or projection_count < 0
+                    or type(generation_count) is not int
+                    or generation_count < 0
+                    or not isinstance(projection_root, str)
+                    or len(projection_root) != 64
+                    or not isinstance(generation_root, str)
+                    or len(generation_root) != 64
                 ):
                     raise ValueError("structure-drift-progress-invalid")
                 authorized = (
                     generation_hash == source_hash
+                    and projection_count == generation_count
+                    and projection_root == generation_root
                     and conflict_count == 0
                     and unclassified_count == 0
                 )
                 counts["fresh_group_truth_complete"] = 1
                 counts["phase_row_count"] = 0
-                next_phase = "fresh-group-truth" if authorized else "stale"
+                next_phase = "sealed" if authorized else "stale"
+                if authorized:
+                    class_tags = (
+                        "shared",
+                        "fresh-addition",
+                        "current-nontradable",
+                        "event-only-quarantine",
+                        "market-side-quarantine",
+                        "fresh-source-absent",
+                        "overlap-conflict",
+                        "unclassified",
+                    )
+                    final_class_counts: dict[str, int] = {}
+                    final_class_digests: dict[str, str] = {}
+                    for tag in class_tags:
+                        class_count = counts.get(f"class_count:{tag}", 0)
+                        if type(class_count) is not int or class_count < 0:
+                            raise ValueError("structure-drift-progress-invalid")
+                        final_class_counts[tag] = class_count
+                        state_value = digests.pop(f"class_state:{tag}", None)
+                        if class_count == 0:
+                            if state_value is not None:
+                                raise ValueError("structure-drift-progress-invalid")
+                            continue
+                        if not isinstance(state_value, str):
+                            raise ValueError("structure-drift-progress-invalid")
+                        class_digest = SerializableSHA256.from_json(state_value)
+                        class_digest.update(b"]")
+                        final_class_digests[tag] = class_digest.hexdigest()
+                    removal_tags = (
+                        "current-nontradable",
+                        "event-only-quarantine",
+                        "market-side-quarantine",
+                        "fresh-source-absent",
+                    )
+                    legacy_root = reconstruction_root_from_class_commitments(
+                        class_counts=final_class_counts,
+                        class_digests=final_class_digests,
+                        tags=("shared", *removal_tags),
+                    )
+                    generation_reconstruction_root = (
+                        reconstruction_root_from_class_commitments(
+                            class_counts=final_class_counts,
+                            class_digests=final_class_digests,
+                            tags=("shared", "fresh-addition"),
+                        )
+                    )
+                    exact = writer.execute(
+                        "SELECT r.legacy_market_count,r.generation_market_count,"
+                        "r.legacy_universe_hash,r.legacy_source_truth_hash,"
+                        "legacy.taken_at_ms,legacy.finished_at_ms FROM "
+                        "structure_generation_comparison_receipts r JOIN snapshots "
+                        "legacy ON legacy.id=r.legacy_snapshot_id WHERE "
+                        "r.generation_snapshot_id=? AND r.publication_id=? AND "
+                        "r.legacy_snapshot_id=? AND r.receipt_digest=?",
+                        (
+                            int(progress[1]),
+                            str(progress[2]),
+                            int(progress[0]),
+                            str(progress[5]),
+                        ),
+                    ).fetchone()
+                    legacy_member_count = final_class_counts["shared"] + sum(
+                        final_class_counts[tag] for tag in removal_tags
+                    )
+                    reconstructed_generation_count = (
+                        final_class_counts["shared"]
+                        + final_class_counts["fresh-addition"]
+                    )
+                    legacy_scan_count = counts.get("legacy_member_scan_count")
+                    generation_scan_count = counts.get(
+                        "generation_member_scan_count"
+                    )
+                    if (
+                        exact is None
+                        or type(legacy_scan_count) is not int
+                        or legacy_scan_count != legacy_member_count
+                        or type(generation_scan_count) is not int
+                        or generation_scan_count != reconstructed_generation_count
+                        or reconstructed_generation_count != generation_count
+                    ):
+                        raise ValueError("structure-drift-reconstruction-count-mismatch")
+                    class_counts_json = json.dumps(
+                        final_class_counts,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    class_digests_json = json.dumps(
+                        final_class_digests,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    receipt_payload: dict[str, object] = {
+                        "comparison_id": comparison_id,
+                        "legacy_snapshot_id": int(progress[0]),
+                        "legacy_taken_at_ms": int(exact[4]),
+                        "legacy_finished_at_ms": int(exact[5]),
+                        "legacy_market_count": int(exact[0]),
+                        "legacy_universe_hash": str(exact[2]),
+                        "legacy_source_truth_hash": str(exact[3]),
+                        "generation_snapshot_id": int(progress[1]),
+                        "publication_id": str(progress[2]),
+                        "window_id": str(progress[3]),
+                        "published_snapshot_id": int(progress[1]),
+                        "normalization_contract_version": str(progress[4]),
+                        "exact_receipt_digest": str(progress[5]),
+                        "pointer_validation_hash": str(progress[6]),
+                        "generation_certification_hash": str(progress[7]),
+                        "source_event_count": int(counts.get("source_event_count", 0)),
+                        "source_market_count": int(counts.get("source_market_count", 0)),
+                        "source_event_hash": "",
+                        "source_market_hash": "",
+                        "source_identity_hash": "",
+                        "projection_universe_hash": str(projection_root),
+                        "projection_group_truth_hash": str(source_hash),
+                        "generation_universe_hash": str(generation_root),
+                        "generation_group_truth_hash": generation_hash,
+                        "class_counts_json": class_counts_json,
+                        "class_digests_json": class_digests_json,
+                        "legacy_reconstruction_root": legacy_root,
+                        "generation_reconstruction_root": (
+                            generation_reconstruction_root
+                        ),
+                        "overlap_conflict_count": 0,
+                        "unclassified_count": 0,
+                        "created_at_ms": now_ms,
+                    }
+                    stored_source = writer.execute(
+                        "SELECT source_event_count,source_market_count,source_event_hash,"
+                        "source_market_hash,source_identity_hash FROM "
+                        "structure_generation_drift_progress WHERE comparison_id=?",
+                        (comparison_id,),
+                    ).fetchone()
+                    if (
+                        stored_source is None
+                        or any(
+                            not isinstance(value, str) or len(value) != 64
+                            for value in stored_source[2:]
+                        )
+                    ):
+                        raise ValueError("structure-drift-progress-invalid")
+                    receipt_payload["source_event_count"] = int(stored_source[0])
+                    receipt_payload["source_market_count"] = int(stored_source[1])
+                    receipt_payload["source_event_hash"] = str(stored_source[2])
+                    receipt_payload["source_market_hash"] = str(stored_source[3])
+                    receipt_payload["source_identity_hash"] = str(stored_source[4])
+                    receipt_digest = _structure_drift_receipt_digest(receipt_payload)
+                    receipt_columns = _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
+                    writer.execute(
+                        "INSERT INTO structure_generation_drift_receipts("
+                        + ",".join(receipt_columns)
+                        + ",receipt_digest) VALUES ("
+                        + ",".join("?" for _ in range(len(receipt_columns) + 1))
+                        + ")",
+                        (
+                            *(receipt_payload[column] for column in receipt_columns),
+                            receipt_digest,
+                        ),
+                    )
+                    digests["sealed_class_digests"] = final_class_digests
+                    digests["legacy_reconstruction_root"] = legacy_root
+                    digests["generation_reconstruction_root"] = (
+                        generation_reconstruction_root
+                    )
+                    digests["receipt_digest"] = receipt_digest
                 changed = writer.execute(
                     "UPDATE structure_generation_drift_progress SET phase=?,"
                     "row_cursor_json=NULL,digest_state_json=?,class_counts_json=?,"
@@ -4446,6 +4627,9 @@ class SQLiteStore:
                     digests["generation_member_root"] = (
                         generation_digest.hexdigest()
                     )
+                    counts["generation_member_scan_count"] = phase_count
+                else:
+                    counts["legacy_member_scan_count"] = phase_count
                 counts["phase_row_count"] = 0
                 changed = writer.execute(
                     "UPDATE structure_generation_drift_progress SET phase=?,"

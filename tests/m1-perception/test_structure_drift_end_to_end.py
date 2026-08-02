@@ -1,0 +1,437 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+import polyarb.storage.sqlite_store as sqlite_store_module
+from polyarb.perception.structure_drift import (
+    project_legacy_compatible_event,
+    project_legacy_compatible_market,
+)
+from polyarb.storage.sqlite_store import SQLiteStore
+
+
+def _raw_market(
+    market_id: str, *, group_id: str, active: bool = True
+) -> dict[str, object]:
+    return {
+        "id": market_id,
+        "conditionId": f"condition-{market_id}",
+        "clobTokenIds": json.dumps([f"yes-{market_id}", f"no-{market_id}"]),
+        "active": active,
+        "closed": False,
+        "negRisk": True,
+        "negRiskMarketID": group_id,
+    }
+
+
+def _drift_store(tmp_path: Path) -> SQLiteStore:
+    store = SQLiteStore(tmp_path / "drift-e2e.db")
+    store.init_schema()
+    main_members = (("shared", True), ("addition", True))
+    raw_main = {
+        "id": "event-main",
+        "slug": "event-main",
+        "active": True,
+        "closed": False,
+        "negRisk": True,
+        "enableNegRisk": True,
+        "negRiskAugmented": False,
+        "negRiskMarketID": "group-main",
+        "markets": [
+            {
+                "id": market_id,
+                "active": active,
+                "closed": False,
+                "negRiskOther": False,
+            }
+            for market_id, active in main_members
+        ],
+    }
+    def single_event(
+        event_id: str, group_id: str, market_id: str, *, active: bool = True
+    ) -> dict[str, object]:
+        return {
+            "id": event_id,
+            "slug": event_id,
+            "active": True,
+            "closed": False,
+            "negRisk": True,
+            "enableNegRisk": True,
+            "negRiskAugmented": False,
+            "negRiskMarketID": group_id,
+            "markets": [
+                {
+                    "id": market_id,
+                    "active": active,
+                    "closed": False,
+                    "negRiskOther": False,
+                }
+            ],
+        }
+
+    raw_events = (
+        raw_main,
+        single_event(
+            "event-current",
+            "group-current",
+            "current-nontradable",
+            active=False,
+        ),
+        single_event("event-event-only", "group-event-only", "event-only"),
+    )
+    raw_markets = {
+        "shared": _raw_market("shared", group_id="group-main"),
+        "addition": _raw_market("addition", group_id="group-main"),
+        "current-nontradable": _raw_market(
+            "current-nontradable", group_id="group-current", active=False
+        ),
+        "market-side": _raw_market("market-side", group_id="group-market-a"),
+    }
+    complete_ids = frozenset(raw_markets)
+    event_projections = tuple(
+        project_legacy_compatible_event(
+            raw_event,
+            event_source_ordinal=ordinal,
+            complete_market_ids=complete_ids,
+        )
+        for ordinal, raw_event in enumerate(raw_events, 1)
+    )
+    market_projections = {
+        market_id: project_legacy_compatible_market(
+            raw,
+            event_ids=(
+                ()
+                if market_id == "market-side"
+                else ("event-current",)
+                if market_id == "current-nontradable"
+                else ("event-main",)
+            ),
+            taken_at_ms=2_000,
+        )
+        for market_id, raw in raw_markets.items()
+    }
+    with sqlite3.connect(store.db_path) as con:
+        con.executemany(
+            "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+            "market_view_published,data_product,archive_status,snapshot_status,is_valid,"
+            "parquet_path) VALUES (?,?,?,'full',?,1,'structure','legacy','ok',1,'')",
+            ((1, 1_000, 1_001, 5), (2, 2_000, 2_001, 3)),
+        )
+        con.execute(
+            "INSERT INTO snapshot_source_coverage(snapshot_id,completed,market_items,"
+            "event_items) VALUES (1,1,5,1)"
+        )
+        legacy_members = (
+            ("event-main", "group-main", "shared"),
+            ("event-current", "group-current", "current-nontradable"),
+            ("event-event-only", "group-event-only", "event-only"),
+            ("event-market-a", "group-market-a", "market-side"),
+            ("event-fresh", "group-fresh", "fresh-absent"),
+        )
+        con.executemany(
+            "INSERT INTO event_market_memberships(snapshot_id,event_id,"
+            "neg_risk_market_id,market_id,member_kind,active,closed) "
+            "VALUES (1,?,?,?,'named',1,0)",
+            legacy_members,
+        )
+        for event_id, group_id, market_id in legacy_members:
+            legacy_hash = hashlib.sha256(
+                json.dumps(
+                    [(event_id, group_id, market_id, "named", True, False)],
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            con.execute(
+            "INSERT INTO neg_risk_group_truth(snapshot_id,event_id,neg_risk_market_id,"
+            "neg_risk_type,expected_member_count,active_named_count,membership_hash,"
+                "quality) VALUES (1,?,?,'standard',1,1,?,"
+            "'complete-supported')",
+                (event_id, group_id, legacy_hash),
+            )
+        con.executemany(
+            "INSERT INTO markets(snapshot_id,market_id,condition_id,yes_token_id,"
+            "no_token_id,active,closed,neg_risk,neg_risk_market_id,fetched_at_ms,"
+            "incomplete,event_id) VALUES (1,?,?,?, ?,1,0,1,?,1000,0,?)",
+            (
+                (
+                    market_id,
+                    f"condition-{market_id}",
+                    f"yes-{market_id}",
+                    f"no-{market_id}",
+                    group_id,
+                    event_id,
+                )
+                for event_id, group_id, market_id in legacy_members
+            ),
+        )
+        for projection in event_projections:
+            con.executemany(
+                "INSERT INTO structure_generation_memberships(snapshot_id,event_id,"
+                "neg_risk_market_id,market_id,member_kind,active,closed) "
+                "VALUES (2,?,?,?,?,?,?)",
+                (
+                    (
+                        member.event_id,
+                        member.group_id,
+                        member.market_id,
+                        member.member_kind,
+                        int(member.active),
+                        int(member.closed),
+                    )
+                    for member in projection.members
+                ),
+            )
+            con.executemany(
+                "INSERT INTO structure_generation_group_truth(snapshot_id,event_id,"
+                "neg_risk_market_id,neg_risk_type,expected_member_count,"
+                "active_named_count,membership_hash,quality,reason) "
+                "VALUES (2,?,?,?,?,?,?,?,?)",
+                (
+                    (
+                        truth.event_id,
+                        truth.group_id,
+                        truth.neg_risk_type,
+                        truth.expected_member_count,
+                        truth.active_named_count,
+                        truth.membership_hash,
+                        truth.quality,
+                        truth.reason,
+                    )
+                    for truth in projection.truths
+                ),
+            )
+        market_columns = (
+            "market_id,condition_id,slug,question,yes_token_id,no_token_id,mid_price,"
+            "liquidity_usd,volume_usd,best_bid_price,best_bid_size,best_ask_price,"
+            "best_ask_size,end_time_ms,active,closed,neg_risk,neg_risk_market_id,"
+            "fetched_at_ms,page_fetched_at_ms,incomplete,event_id"
+        )
+        for projection in market_projections.values():
+            if projection.row is None:
+                continue
+            con.execute(
+                "INSERT INTO structure_generation_markets(snapshot_id,"
+                + market_columns
+                + ") VALUES (2,"
+                + ",".join("?" for _ in projection.row)
+                + ")",
+                tuple(projection.row.values()),
+            )
+        con.execute(
+            "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms,"
+            "published_snapshot_id) VALUES ('window-2','open',2000,2001,NULL)"
+        )
+        con.executemany(
+            "INSERT INTO structure_sync_event_staging(window_id,event_id,payload_json,"
+            "source_ordinal) VALUES ('window-2',?,?,?)",
+            (
+                (str(raw_event["id"]), json.dumps(raw_event), ordinal)
+                for ordinal, raw_event in enumerate(raw_events, 1)
+            ),
+        )
+        relations = [
+            (str(member["id"]), str(raw_event["id"]), ordinal)
+            for ordinal, raw_event in enumerate(raw_events, 1)
+            for member in raw_event["markets"]
+        ]
+        con.executemany(
+            "INSERT INTO structure_sync_event_market_staging(window_id,market_id,"
+            "event_id,source_ordinal) VALUES ('window-2',?,?,?)",
+            relations,
+        )
+        con.execute(
+            "UPDATE structure_sync_windows SET status='events_complete' "
+            "WHERE id='window-2'"
+        )
+        con.executemany(
+            "INSERT INTO structure_sync_market_staging(window_id,market_id,payload_json,"
+            "source_ordinal) VALUES ('window-2',?,?,?)",
+            (
+                (market_id, json.dumps(raw), ordinal)
+                for ordinal, (market_id, raw) in enumerate(raw_markets.items(), 1)
+            ),
+        )
+        con.execute(
+            "UPDATE structure_sync_windows SET status='published',"
+            "published_snapshot_id=2 WHERE id='window-2'"
+        )
+        cert = "a" * 64
+        cert_counts = json.dumps(
+            {"source_events": 3, "source_markets": 4},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        con.execute(
+            "INSERT INTO structure_publications(publication_id,window_id,snapshot_id,"
+            "status,normalization_contract_version,expected_counts_json,"
+            "committed_counts_json,validation_hash,certification_component,"
+            "certification_hash,certification_counts_json,created_at_ms,checkpoint_at_ms) "
+            "VALUES ('publication-2','window-2',2,'published','contract-v1','{}','{}',"
+            "?,'bounded-complete',?,?,2000,2001)",
+            (cert, cert, cert_counts),
+        )
+        legacy_universe, legacy_truth = sqlite_store_module._structure_universe_hash(
+            con, snapshot_id=1, generation=False
+        )
+        generation_universe, generation_truth = (
+            sqlite_store_module._structure_universe_hash(
+                con, snapshot_id=2, generation=True
+            )
+        )
+        exact_digest = sqlite_store_module._comparison_receipt_digest(
+            generation_snapshot_id=2,
+            publication_id="publication-2",
+            legacy_snapshot_id=1,
+            legacy_market_count=5,
+            generation_market_count=3,
+            legacy_universe_hash=legacy_universe,
+            generation_universe_hash=generation_universe,
+            legacy_source_truth_hash=legacy_truth,
+            generation_source_truth_hash=generation_truth,
+            generation_validation_hash=cert,
+            created_at_ms=2_001,
+        )
+        con.execute(
+            "INSERT INTO structure_generation_comparison_receipts("
+            "generation_snapshot_id,publication_id,legacy_snapshot_id,"
+            "legacy_market_count,generation_market_count,legacy_universe_hash,"
+            "generation_universe_hash,legacy_source_truth_hash,"
+            "generation_source_truth_hash,generation_validation_hash,created_at_ms,"
+            "receipt_digest) VALUES (2,'publication-2',1,5,3,?,?,?,?,?,?,?)",
+            (
+                legacy_universe,
+                generation_universe,
+                legacy_truth,
+                generation_truth,
+                cert,
+                2_001,
+                exact_digest,
+            ),
+        )
+        con.execute(
+            "INSERT INTO current_structure_generation(id,snapshot_id,publication_id,"
+            "validation_hash,counts_json,certification_component,"
+            "comparison_receipt_digest,switched_at_ms) VALUES "
+            "(1,2,'publication-2',?,'{}','bounded-complete',?,2001)",
+            (cert, exact_digest),
+        )
+    return store
+
+
+def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    observed_phases: set[str] = set()
+    for now_ms in range(3_001, 3_100):
+        chunk = store.advance_structure_drift_comparison_chunk(
+            comparison_id, max_rows=1, now_ms=now_ms
+        )
+        assert chunk.rows_processed <= 1
+        observed_phases.add(str(chunk.component))
+        if chunk.component in {"sealed", "stale"}:
+            break
+    else:
+        pytest.fail("drift comparison did not seal")
+    with sqlite3.connect(store.db_path) as con:
+        debug_row = con.execute(
+            "SELECT class_counts_json,class_digests_json FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+    debug_counts = json.loads(debug_row[0])
+    debug_digests = json.loads(debug_row[1])
+    assert debug_counts.get("projection_member_count") == debug_counts.get(
+        "generation_member_count"
+    )
+    assert debug_digests.get("projection_member_root") == debug_digests.get(
+        "generation_member_root"
+    )
+    assert debug_digests.get("source_group_truth_hash") == debug_digests.get(
+        "generation_group_truth_hash"
+    )
+    assert debug_counts.get("class_count:overlap-conflict", 0) == 0
+    assert debug_counts.get("class_count:unclassified", 0) == 0
+    assert chunk.component == "sealed"
+    assert {
+        "source-events",
+        "source-markets",
+        "generation-members",
+        "legacy-members",
+        "fresh-group-truth",
+        "sealed",
+    } <= observed_phases
+    with sqlite3.connect(store.db_path) as con:
+        row = con.execute(
+            "SELECT "
+            + ",".join(sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS)
+            + ",receipt_digest,class_counts_json FROM "
+            "structure_generation_drift_receipts WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+    assert row is not None
+    field_count = len(sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS)
+    payload = dict(
+        zip(
+            sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS,
+            row[:field_count],
+            strict=True,
+        )
+    )
+    assert row[field_count] == sqlite_store_module._structure_drift_receipt_digest(
+        payload
+    )
+    classes = json.loads(row[field_count + 1])
+    assert classes == {
+        "current-nontradable": 1,
+        "event-only-quarantine": 1,
+        "fresh-addition": 1,
+        "fresh-source-absent": 1,
+        "market-side-quarantine": 1,
+        "overlap-conflict": 0,
+        "shared": 1,
+        "unclassified": 0,
+    }
+    substituted = dict(payload)
+    substituted["projection_universe_hash"] = "f" * 64
+    assert sqlite_store_module._structure_drift_receipt_digest(substituted) != row[
+        field_count
+    ]
+    with sqlite3.connect(store.db_path) as con:
+        with pytest.raises(sqlite3.IntegrityError, match="receipt-sealed"):
+            con.execute(
+                "UPDATE structure_generation_drift_receipts SET created_at_ms=9999 "
+                "WHERE comparison_id=?",
+                (comparison_id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="receipt-sealed"):
+            con.execute(
+                "DELETE FROM structure_generation_drift_receipts WHERE comparison_id=?",
+                (comparison_id,),
+            )
+
+
+def test_drift_pointer_race_fails_before_next_checkpoint(tmp_path: Path) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE current_structure_generation SET validation_hash=? WHERE id=1",
+            ("b" * 64,),
+        )
+    with pytest.raises(ValueError, match="structure-drift-current-identity-invalid"):
+        store.advance_structure_drift_comparison_chunk(
+            comparison_id, max_rows=1, now_ms=3_001
+        )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT phase,checkpoint_at_ms FROM structure_generation_drift_progress "
+            "WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone() == ("source-events", 3_000)
