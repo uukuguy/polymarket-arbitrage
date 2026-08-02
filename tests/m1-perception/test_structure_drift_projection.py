@@ -9,6 +9,8 @@ import pytest
 
 from polyarb.perception.market_truth import membership_hash
 from polyarb.perception.structure_drift import (
+    StructuralMemberIdentity,
+    classify_structure_member_drift,
     hash_legacy_compatible_projection,
     project_legacy_compatible_event,
     project_legacy_compatible_market,
@@ -407,3 +409,50 @@ def test_source_chunks_resume_on_exact_keyset_boundary(tmp_path: Path) -> None:
     )
     assert len(first_markets) == 500
     assert [row[0] for row in final_markets] == ["market-500"]
+
+
+def test_fresh_member_evidence_is_bulk_raw_derived_and_issue_independent(
+    tmp_path: Path,
+) -> None:
+    store = _published_source_store(tmp_path, event_count=500)
+    members = tuple(
+        StructuralMemberIdentity(
+            event_id=f"event-{index:03d}",
+            group_id=f"group-{index:03d}",
+            market_id=f"market-{index:03d}",
+            member_kind="named",
+            active=True,
+            closed=False,
+            condition_id=f"condition-{index:03d}",
+            yes_token_id=f"yes-{index}",
+            no_token_id=f"no-{index}",
+            neg_risk=True,
+            incomplete=False,
+        )
+        for index in range(500)
+    )
+    statements: list[str] = []
+    evidence = store.fetch_structure_drift_fresh_evidence(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        members=members,
+        trace_callback=statements.append,
+    )
+    assert len(evidence) == 500
+    assert all(
+        item.source_present
+        and item.projector_matches
+        and item.generation_certified
+        and not item.event_only_quarantine
+        and not item.market_side_quarantine
+        for item in evidence.values()
+    )
+    assert len([sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]) <= 3
+    assert "structure_generation_issues" not in "\n".join(statements)
+    classified = classify_structure_member_drift(
+        legacy=(),
+        generation=members,
+        evidence=evidence,
+    )
+    assert classified.fresh_addition_count == 500
+    assert classified.authorized is True

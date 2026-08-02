@@ -3411,6 +3411,156 @@ class SQLiteStore:
             con.execute("COMMIT")
             return result
 
+    def fetch_structure_drift_member_chunk(
+        self,
+        *,
+        snapshot_id: int,
+        generation: bool,
+        after_market_id: str | None,
+        limit: int,
+        trace_callback: Callable[[str], None] | None = None,
+    ) -> list[object]:
+        """Read one eligible legacy or generation member keyset for classification."""
+        from polyarb.perception.structure_drift import StructuralMemberIdentity
+
+        if (
+            snapshot_id < 1
+            or type(generation) is not bool
+            or not 1 <= limit <= STRUCTURE_PUBLICATION_MAX_ROWS
+        ):
+            raise ValueError("invalid-structure-drift-member-chunk")
+        prefix = "structure_generation_" if generation else ""
+        truth_table = f"{prefix}group_truth" if generation else "neg_risk_group_truth"
+        membership_table = (
+            f"{prefix}memberships" if generation else "event_market_memberships"
+        )
+        market_table = f"{prefix}markets"
+        with sqlite3.connect(self._db_path) as con:
+            if trace_callback is not None:
+                con.set_trace_callback(trace_callback)
+            rows = con.execute(
+                "SELECT m.event_id,m.neg_risk_market_id,m.market_id,m.member_kind,"
+                "m.active,m.closed,k.condition_id,k.yes_token_id,k.no_token_id,"
+                f"k.neg_risk,k.incomplete FROM {truth_table} t JOIN "
+                f"{membership_table} m ON m.snapshot_id=t.snapshot_id AND "
+                "m.event_id=t.event_id AND m.neg_risk_market_id=t.neg_risk_market_id "
+                f"JOIN {market_table} k ON k.snapshot_id=m.snapshot_id AND "
+                "k.market_id=m.market_id AND k.event_id=m.event_id AND "
+                "k.neg_risk_market_id=m.neg_risk_market_id WHERE t.snapshot_id=? "
+                "AND t.neg_risk_type='standard' AND t.quality='complete-supported' "
+                "AND m.member_kind='named' AND m.active=1 AND m.closed=0 "
+                "AND k.active=1 AND k.closed=0 AND k.incomplete=0 "
+                "AND trim(k.yes_token_id)!='' AND (? IS NULL OR m.market_id>?) "
+                "ORDER BY m.market_id LIMIT ?",
+                (snapshot_id, after_market_id, after_market_id, limit),
+            ).fetchall()
+        return [
+            StructuralMemberIdentity(
+                event_id=str(row[0]),
+                group_id=str(row[1]),
+                market_id=str(row[2]),
+                member_kind=str(row[3]),
+                active=bool(row[4]),
+                closed=bool(row[5]),
+                condition_id=str(row[6] or ""),
+                yes_token_id=str(row[7] or ""),
+                no_token_id=str(row[8] or ""),
+                neg_risk=bool(row[9]),
+                incomplete=bool(row[10]),
+            )
+            for row in rows
+        ]
+
+    def fetch_structure_drift_fresh_evidence(
+        self,
+        *,
+        publication_id: str,
+        generation_snapshot_id: int,
+        members: tuple[object, ...],
+        trace_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, object]:
+        """Bulk-recompute fresh evidence without trusting committed issue rows."""
+        from polyarb.perception.structure_drift import build_fresh_member_evidence
+
+        market_ids = [str(getattr(member, "market_id", "")) for member in members]
+        if (
+            not publication_id
+            or generation_snapshot_id < 1
+            or len(market_ids) > STRUCTURE_PUBLICATION_MAX_ROWS
+            or any(not market_id for market_id in market_ids)
+            or len(set(market_ids)) != len(market_ids)
+        ):
+            raise ValueError("invalid-structure-drift-evidence-chunk")
+        if not members:
+            return {}
+        placeholders = ",".join("?" for _ in market_ids)
+        with sqlite3.connect(self._db_path) as con:
+            if trace_callback is not None:
+                con.set_trace_callback(trace_callback)
+            con.execute("BEGIN")
+            identity = con.execute(
+                "SELECT p.window_id,p.status,p.normalization_contract_version,"
+                "p.validation_hash,p.certification_hash,window.status,"
+                "window.published_snapshot_id FROM structure_publications p JOIN "
+                "structure_sync_windows window ON window.id=p.window_id "
+                "WHERE p.publication_id=? AND p.snapshot_id=?",
+                (publication_id, generation_snapshot_id),
+            ).fetchone()
+            if (
+                identity is None
+                or identity[1] != "published"
+                or not isinstance(identity[2], str)
+                or not identity[2]
+                or not isinstance(identity[3], str)
+                or len(identity[3]) != 64
+                or not isinstance(identity[4], str)
+                or len(identity[4]) != 64
+                or identity[5] != "published"
+                or identity[6] != generation_snapshot_id
+            ):
+                raise ValueError("structure-drift-source-identity-mismatch")
+            window_id = str(identity[0])
+            raw_markets = {
+                str(market_id): json.loads(str(payload_json))
+                for market_id, payload_json in con.execute(
+                    "SELECT market_id,payload_json FROM structure_sync_market_staging "
+                    f"WHERE window_id=? AND market_id IN ({placeholders})",
+                    (window_id, *market_ids),
+                )
+            }
+            event_sources: dict[
+                str, list[tuple[str, int, dict[str, object]]]
+            ] = {}
+            for market_id, event_id, source_ordinal, payload_json in con.execute(
+                "SELECT relation.market_id,relation.event_id,"
+                "COALESCE(event.source_ordinal,event.rowid),event.payload_json FROM "
+                "structure_sync_event_market_staging relation JOIN "
+                "structure_sync_event_staging event ON "
+                "event.window_id=relation.window_id AND "
+                "event.event_id=relation.event_id WHERE relation.window_id=? "
+                f"AND relation.market_id IN ({placeholders}) ORDER BY "
+                "relation.market_id,relation.source_ordinal,relation.event_id",
+                (window_id, *market_ids),
+            ):
+                event_sources.setdefault(str(market_id), []).append(
+                    (
+                        str(event_id),
+                        int(source_ordinal),
+                        json.loads(str(payload_json)),
+                    )
+                )
+            result = {
+                market_id: build_fresh_member_evidence(
+                    member,
+                    raw_market=raw_markets.get(market_id),
+                    event_sources=tuple(event_sources.get(market_id, ())),
+                    generation_certified=True,
+                )
+                for member, market_id in zip(members, market_ids, strict=True)
+            }
+            con.execute("COMMIT")
+            return result
+
     def structure_event_only_market_ids(
         self,
         publication_id: str,
