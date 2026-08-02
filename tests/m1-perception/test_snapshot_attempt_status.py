@@ -56,6 +56,9 @@ def test_snapshot_attempt_status_reports_latest_failed_attempt(tmp_path: Path) -
             "last_stage": "gamma-markets",
             "outcome": "failed",
             "snapshot_id": None,
+            "stderr_bytes": None,
+            "stderr_sha256": None,
+            "stderr_tail": None,
             "started_at_ms": 1_000,
         }
     }

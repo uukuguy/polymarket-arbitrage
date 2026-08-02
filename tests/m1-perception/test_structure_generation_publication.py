@@ -1593,8 +1593,20 @@ def test_bounded_certification_rejects_stale_membership_hash(tmp_path: Path) -> 
             )
 
 
-def test_membership_certification_allows_inactive_member_absent_from_active_stream(
+@pytest.mark.parametrize("certification_path", ("bounded", "legacy"))
+@pytest.mark.parametrize(
+    ("member_kind", "member_active", "member_closed"),
+    (
+        pytest.param("inactive-reserved", False, False, id="inactive-open"),
+        pytest.param("named", True, True, id="active-closed"),
+    ),
+)
+def test_membership_certification_allows_non_open_member_absent_from_active_stream(
     tmp_path: Path,
+    certification_path: str,
+    member_kind: str,
+    member_active: bool,
+    member_closed: bool,
 ) -> None:
     """Event structure retains inactive members that /markets intentionally omits."""
     store = SQLiteStore(tmp_path / "state.db")
@@ -1603,8 +1615,13 @@ def test_membership_certification_allows_inactive_member_absent_from_active_stre
     active = EventMember(
         "event-1", "group-1", "market-active", "named", True, False
     )
-    inactive = EventMember(
-        "event-1", "group-1", "market-inactive", "inactive-reserved", False, False
+    reserved = EventMember(
+        "event-1",
+        "group-1",
+        "market-reserved",
+        member_kind,
+        member_active,
+        member_closed,
     )
     counts = {**COMPONENT_COUNTS, "memberships": 2}
     publication = store.begin_structure_publication(
@@ -1625,21 +1642,25 @@ def test_membership_certification_allows_inactive_member_absent_from_active_stre
             (
                 _membership(1, "market-active"),
                 {
-                    **_membership(1, "market-inactive"),
-                    "member_kind": "inactive-reserved",
-                    "active": 0,
+                    **_membership(1, "market-reserved"),
+                    "member_kind": member_kind,
+                    "active": int(member_active),
+                    "closed": int(member_closed),
                 },
             ),
-            "event-1:market-inactive",
+            "event-1:market-reserved",
         ),
         (
             "group_truth",
             (
                 {
-                    **_group_truth(1),
-                    "expected_member_count": 2,
+                        **_group_truth(1),
+                        "expected_member_count": 2,
+                        "active_named_count": 1 + int(
+                            member_kind == "named" and member_active
+                        ),
                     "membership_hash": membership_hash(
-                        "event-1", "group-1", [active, inactive]
+                        "event-1", "group-1", [active, reserved]
                     ),
                     "quality": "complete-unsupported",
                     "reason": "standard-neg-risk-has-non-tradable-members",
@@ -1661,20 +1682,39 @@ def test_membership_certification_allows_inactive_member_absent_from_active_stre
             now_ms=1_004 + offset,
         )
         cursor = next_cursor
-    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
-
-    for offset in range(10):
-        chunk = store.advance_structure_certification_chunk(
-            publication.publication_id, max_rows=500, now_ms=1_011 + offset
+    if certification_path == "legacy":
+        store.certify_structure_generation(
+            publication_id=publication.publication_id,
+            receipt={
+                "source_coverage": {
+                    "completed": True,
+                    "event_items": 1,
+                    "market_items": 1,
+                },
+                "validation_hash": "a" * 64,
+                "certified_at_ms": 1_010,
+            },
         )
-        if chunk.component == "group_truth":
-            break
+        assert store.structure_certification_checkpoint(publication.publication_id)[0] == (
+            "comparison"
+        )
+    else:
+        store.seal_structure_publication_counts(
+            publication.publication_id, now_ms=1_010
+        )
+        for offset in range(10):
+            chunk = store.advance_structure_certification_chunk(
+                publication.publication_id, max_rows=500, now_ms=1_011 + offset
+            )
+            if chunk.component == "group_truth":
+                break
 
-    assert chunk.component == "group_truth"
+        assert chunk.component == "group_truth"
 
 
+@pytest.mark.parametrize("certification_path", ("bounded", "legacy"))
 def test_membership_certification_rejects_active_open_member_without_market(
-    tmp_path: Path,
+    tmp_path: Path, certification_path: str,
 ) -> None:
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()
@@ -1694,23 +1734,42 @@ def test_membership_certification_rejects_active_open_member_without_market(
             "WHERE snapshot_id=1"
         )
 
-    with pytest.raises(ValueError, match="membership-invalid"):
-        store.certify_structure_generation(
-            publication_id=publication.publication_id,
-            receipt={
-                "source_coverage": {
-                    "completed": True,
-                    "event_items": 1,
-                    "market_items": 1,
-                },
-                "validation_hash": "a" * 64,
-                "certified_at_ms": 1_010,
-            },
+    if certification_path == "bounded":
+        store.append_structure_publication_chunk(
+            publication.publication_id,
+            "issues",
+            (),
+            expected_prior_cursor="market-active",
+            next_cursor="issues|done",
+            now_ms=1_009,
         )
+        store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
+        with pytest.raises(ValueError, match="membership-invalid"):
+            for offset in range(10):
+                store.advance_structure_certification_chunk(
+                    publication.publication_id,
+                    max_rows=500,
+                    now_ms=1_011 + offset,
+                )
+    else:
+        with pytest.raises(ValueError, match="membership-invalid"):
+            store.certify_structure_generation(
+                publication_id=publication.publication_id,
+                receipt={
+                    "source_coverage": {
+                        "completed": True,
+                        "event_items": 1,
+                        "market_items": 1,
+                    },
+                    "validation_hash": "a" * 64,
+                    "certified_at_ms": 1_010,
+                },
+            )
 
 
+@pytest.mark.parametrize("certification_path", ("bounded", "legacy"))
 def test_membership_certification_rejects_existing_market_identity_mismatch(
-    tmp_path: Path,
+    tmp_path: Path, certification_path: str,
 ) -> None:
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()
@@ -1737,14 +1796,30 @@ def test_membership_certification_rejects_existing_market_identity_mismatch(
         next_cursor="issues|done",
         now_ms=1_009,
     )
-    store.seal_structure_publication_counts(publication.publication_id, now_ms=1_010)
-
-    with pytest.raises(ValueError, match="membership-invalid"):
-        for offset in range(10):
-            SQLiteStore(store.db_path).advance_structure_certification_chunk(
-                publication.publication_id,
-                max_rows=500,
-                now_ms=1_011 + offset,
+    if certification_path == "bounded":
+        store.seal_structure_publication_counts(
+            publication.publication_id, now_ms=1_010
+        )
+        with pytest.raises(ValueError, match="membership-invalid"):
+            for offset in range(10):
+                SQLiteStore(store.db_path).advance_structure_certification_chunk(
+                    publication.publication_id,
+                    max_rows=500,
+                    now_ms=1_011 + offset,
+                )
+    else:
+        with pytest.raises(ValueError, match="membership-invalid"):
+            store.certify_structure_generation(
+                publication_id=publication.publication_id,
+                receipt={
+                    "source_coverage": {
+                        "completed": True,
+                        "event_items": 1,
+                        "market_items": 1,
+                    },
+                    "validation_hash": "a" * 64,
+                    "certified_at_ms": 1_010,
+                },
             )
 
 

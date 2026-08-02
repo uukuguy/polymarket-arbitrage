@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from collections.abc import Callable, Iterable, Iterator
@@ -58,6 +59,17 @@ from polyarb.storage.schemas import (
 from polyarb.storage.serializable_sha256 import SerializableSHA256
 from polyarb.validator.category import Category, Issue, SnapshotStatus
 from polyarb.validator.layers import determine_snapshot_status
+
+_SNAPSHOT_ATTEMPT_STDERR_MAX_BYTES = 100_000_000
+_SNAPSHOT_ATTEMPT_STDERR_TAIL_RE = re.compile(
+    r"(?:snapshot-stage stage="
+    r"(?:gamma-events|gamma-markets|membership-recheck|validate|persist) "
+    r"state=(?:start|complete) elapsed_ms=(?:0|[1-9][0-9]*)|"
+    r"structure-publication-progress "
+    r"stage=(?:normalizing|certifying|ready) "
+    r"component=(?:[a-z][a-z_-]{0,31}|none) "
+    r"chunks=(?:100|[1-9][0-9]?) rows=(?:0|[1-9][0-9]*))"
+)
 
 _VALID_MODES = ("subset", "full")
 # Structure publication and Quote collection share one WAL database. Their
@@ -6328,11 +6340,22 @@ class SQLiteStore:
             )
         ):
             raise ValueError("invalid snapshot attempt chunks_processed")
-        if stderr_bytes is not None and stderr_bytes < 0:
+        if stderr_bytes is not None and (
+            isinstance(stderr_bytes, bool)
+            or not isinstance(stderr_bytes, int)
+            or not 0 <= stderr_bytes <= _SNAPSHOT_ATTEMPT_STDERR_MAX_BYTES
+        ):
             raise ValueError("invalid snapshot attempt stderr_bytes")
-        if stderr_sha256 is not None and len(stderr_sha256) != 64:
+        if stderr_sha256 is not None and re.fullmatch(
+            r"[0-9a-f]{64}", stderr_sha256
+        ) is None:
             raise ValueError("invalid snapshot attempt stderr_sha256")
-        if stderr_tail is not None and len(stderr_tail) > 256:
+        if (stderr_bytes is None) != (stderr_sha256 is None):
+            raise ValueError("incomplete snapshot attempt stderr diagnostic")
+        if stderr_tail is not None and (
+            stderr_bytes is None
+            or _SNAPSHOT_ATTEMPT_STDERR_TAIL_RE.fullmatch(stderr_tail) is None
+        ):
             raise ValueError("invalid snapshot attempt stderr_tail")
         con = self._connect_writer()
         try:

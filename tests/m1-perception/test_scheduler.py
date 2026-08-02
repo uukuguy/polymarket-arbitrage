@@ -257,6 +257,39 @@ def test_snapshot_attempt_terminal_row_cannot_be_rewritten(
         )
 
 
+@pytest.mark.parametrize(
+    "diagnostics",
+    (
+        {"stderr_bytes": True, "stderr_sha256": "0" * 64},
+        {"stderr_bytes": -1, "stderr_sha256": "0" * 64},
+        {"stderr_bytes": 100_000_001, "stderr_sha256": "0" * 64},
+        {"stderr_bytes": 1, "stderr_sha256": "G" * 64},
+        {"stderr_bytes": 1, "stderr_sha256": "0" * 64, "stderr_tail": "secret"},
+        {"stderr_bytes": 1},
+    ),
+)
+def test_snapshot_attempt_rejects_untrusted_stderr_diagnostics(
+    daemon_settings_for_test: Any,
+    diagnostics: dict[str, object],
+) -> None:
+    """The final SQLite boundary cannot be bypassed with secret-bearing text."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    attempt_id = store.begin_snapshot_attempt(started_at_ms=1_000)
+
+    with pytest.raises(ValueError, match="snapshot attempt stderr"):
+        store.finish_snapshot_attempt(
+            attempt_id=attempt_id,
+            outcome="failed",
+            finished_at_ms=2_000,
+            snapshot_id=None,
+            failure_kind="test-failure",
+            **diagnostics,
+        )
+
+
 @pytest.mark.asyncio
 async def test_scheduler_persists_sigkill_attempt_failure(
     daemon_settings_for_test: Any,
