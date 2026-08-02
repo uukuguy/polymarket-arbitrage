@@ -163,3 +163,36 @@ git commit -m "test(m1): prove fresh recovery after contract supersession"
 - [ ] **Step 6: Request independent review and run the full repository suite**
 
 Review git range `3254e77..HEAD` against the approved design. Resolve every Critical/Important finding with a new RED/GREEN cycle. Then run `uv run pytest -q`, collect the exact total, rerun Ruff on all changed Python files, and run `git diff --check 3254e77..HEAD`. Do not deploy.
+
+### Task 4: Repair a pre-existing active-publication split state
+
+**Files:**
+- Modify: `src/polyarb/storage/sqlite_store.py`
+- Test: `tests/m1-perception/test_structure_generation_publication.py`
+
+**Interfaces:**
+- Consumes: `reconcile_structure_publication_contract(...)` from Task 1.
+- Preserves: the historical `finished_at_ms` of an already-failed snapshot.
+- Produces: the same controlled supersession result and natural 847 recovery as the ordinary path.
+
+- [ ] **Step 1: Write migration and split-repair RED tests**
+
+Reproduce an active building/invalid/unpublished 846, rerun full schema initialization, and assert it remains building. Separately seed the production-observed split (`snapshot=failed`, `publication=writing`, contract `NULL`, window `complete`, pointer 845) and assert reconciliation terminal-fails publication/window without changing snapshot `finished_at_ms`, pointer, or generation rows. Continue through a fresh window to 847.
+
+- [ ] **Step 2: Write the atomic rollback RED test**
+
+Install a temporary trigger that aborts the window terminal update. Assert reconciliation raises and publication, building snapshot, and window all retain their pre-call states.
+
+- [ ] **Step 3: Run RED**
+
+Run: `uv run pytest -q tests/m1-perception/test_structure_generation_publication.py -k 'active_snapshot_status_backfill or existing_split or supersession_rollback'`
+
+Expected: migration test sees `failed`; split repair raises `structure-publication-supersession-unsafe`.
+
+- [ ] **Step 4: Implement the minimal repair**
+
+Exclude snapshots joined to active `writing`/`ready` publications from `_backfill_structure_snapshot_statuses`. In reconciliation, accept only `building` or the exact already-failed invalid/unpublished split. CAS-authenticate an already-failed snapshot without updating it; update publication/window in the same `BEGIN IMMEDIATE` transaction. Retain fail-closed behavior for every other partial combination.
+
+- [ ] **Step 5: Run GREEN, focused, review, and full gates**
+
+Run the Step 3 tests, the five-file focused suite, Ruff on changed files, independent review, and `uv run pytest -q`. Collect exact totals and do not deploy.
