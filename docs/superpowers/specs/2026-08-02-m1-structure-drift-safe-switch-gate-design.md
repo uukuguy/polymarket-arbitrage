@@ -1,7 +1,7 @@
 # M1 Structure Drift-Safe Read-Switch Gate
 
 **Date:** 2026-08-02  
-**Status:** Design approved; implementation not started  
+**Status:** Base gate implemented; row-chain v2 performance amendment approved
 **Scope:** Authenticate a generation read switch when the pinned legacy snapshot
 and the generation were built from different complete source windows. This
 design does not deploy, change the production pointer, or change read mode.
@@ -210,7 +210,7 @@ market sort order. Counts alone never authorize the gate.
 
 The comparison is resumable and bounded. One invocation reads at most the
 configured row budget, with the existing production ceiling of 500 source or
-universe rows. Suggested phases are:
+universe rows. The phases are:
 
 1. `source-events` — project event members and fresh group truth;
 2. `source-markets` — project structural markets and eligible universe;
@@ -268,12 +268,139 @@ If the current legacy identity or generation pointer changes, existing progress
 and any prior receipt are stale. They are retained as audit evidence but cannot
 resume or authorize a switch; a new comparison identity is required.
 
+### 5.2 Row-chain SHA-256 v2
+
+The production-shaped v1 profile showed that the pure-Python serializable
+SHA-256 compressor, not SQLite or commit latency, dominates comparison time.
+The comparison therefore uses the exact algorithm identifier
+`row-chain-sha256-v2` for every newly initialized drift comparison. This is an
+algorithm-version change, not a transparent implementation substitution.
+
+Let `H` be standard SHA-256 provided by Python's C-backed `hashlib`. Let `U16`
+and `U64` encode unsigned integers in big-endian order. Let:
+
+```text
+PREFIX = UTF8("polyarb.structure-drift.row-chain-sha256-v2") || 0x00
+FRAME(operation, domain) =
+    PREFIX || U16(len(UTF8(operation))) || UTF8(operation)
+           || U16(len(UTF8(domain))) || UTF8(domain)
+CANONICAL(row) = UTF8(JSON(row, sort_keys=true, ensure_ascii=false,
+                           allow_nan=false, separators=(",", ":")))
+```
+
+`operation` and `domain` are ASCII strings, so byte length and character count
+are identical. No operation or domain may exceed 65,535 bytes. Each stream is
+initialized, advanced, and finalized as follows:
+
+```text
+state_0 = H(FRAME("init", domain))
+leaf_i  = H(FRAME("leaf", domain) || U64(len(CANONICAL(row_i)))
+                                  || CANONICAL(row_i))
+state_i = H(FRAME("chain", domain) || state_(i-1) || leaf_i)
+root_n  = H(FRAME("root", domain) || U64(n) || state_n)
+```
+
+The empty root is therefore exactly
+`H(FRAME("root", domain) || U64(0) || H(FRAME("init", domain)))`; it is never
+an omitted field or the SHA-256 of an empty byte string. Durable state is the
+strict JSON object:
+
+```json
+{"algorithm":"row-chain-sha256-v2","count":0,"domain":"source-market","state_hex":"<64 lowercase hex>"}
+```
+
+The decoder rejects missing or extra keys, a non-v2 algorithm, the wrong
+domain, a non-integer or negative count, uppercase/non-hex state, and a state
+whose decoded length is not 32 bytes. Resume restores exactly `state_hex` and
+`count`; chunk boundaries never enter the transition, so a 500-row stream has
+the same root under partitions `500`, `1+499`, or any other ordered partition.
+
+The complete fixed domain registry is:
+
+```text
+source-event
+source-market
+source-group-truth
+projection-member
+generation-member
+generation-group-truth
+source-identity
+legacy-reconstruction
+generation-reconstruction
+class/shared
+class/fresh-addition
+class/current-nontradable
+class/event-only-quarantine
+class/market-side-quarantine
+class/fresh-source-absent
+class/overlap-conflict
+class/unclassified
+```
+
+Reconstruction commitments remain SHA-256 commitments over ordered class tag,
+count, and the corresponding finalized v2 class root. Their framing is also
+prefixed with `PREFIX` and domain-separated as `legacy-reconstruction` and
+`generation-reconstruction`. `source_identity_hash` is recomputed with domain
+`source-identity` over the authenticated source event count/root and source
+market count/root. No v1 root may be copied into a v2 receipt.
+
+`hash_algorithm` is a first-class column on progress and receipt rows and is
+included in the comparison identity, `comparison_id`, source-identity
+commitment, reconstruction commitments, and final receipt digest. The schema
+migration labels existing rows `serializable-sha256-v1` and rebuilds the
+progress and receipt identity uniqueness constraints to include
+`hash_algorithm`. Progress also gains nullable `terminal_reason`; the migration
+labels pre-existing terminal rows `legacy-terminal-reason-unspecified`, while
+new algorithm supersession uses the exact reason below.
+
+When v2 initialization finds an active v1 progress row for the same immutable
+identities, one `BEGIN IMMEDIATE` transaction must:
+
+1. revalidate the exact legacy, pointer, publication, and source-window
+   identities;
+2. CAS the v1 row to `phase='stale'` with exact reason
+   `drift-hash-algorithm-superseded`;
+3. insert a distinct v2 progress row at `source-events`, cursor `NULL`, all
+   counts zero, and every v2 stream at its domain-specific empty state;
+4. commit both changes together.
+
+A crash cannot leave the v1 row stale without the v2 restart row, or create a
+v2 row while v1 still owns active progress. Existing sealed v1 receipts and
+progress remain immutable audit evidence, but `drift-safe-sealed`
+authorization accepts only `row-chain-sha256-v2`. The unchanged exact receipt
+path remains independently authorized. This migration does not mutate the
+generation pointer, exact receipt, publication, source rows, legacy serving
+tables, read mode, or any data-plane row.
+
+### 5.3 Member scan indexes
+
+The generation and legacy member keyset queries add covering scan indexes with
+the common ordered prefix:
+
+```text
+(snapshot_id, market_id, event_id, neg_risk_market_id,
+ member_kind, active, closed)
+```
+
+The `after_market_id IS NULL` and non-null cases use separate SQL statements.
+The resumed form uses `snapshot_id=? AND market_id>?`, never
+`(? IS NULL OR market_id>?)`, so SQLite can perform an ordered range scan and
+stop after the row limit without a full-snapshot scan or a temporary sort.
+Market and group-truth joins continue to authenticate the complete structural
+predicate; the index changes access only, not eligibility.
+
+Indexes and their targeted `ANALYZE` statistics are created atomically by
+`init_schema()` before the scheduler and Quote producers start. An index-build
+failure fails startup and leaves the old schema/data transactionally intact.
+The migration never drops an existing index and does not run online inside a
+drift slice.
+
 ## 6. Receipt Contract
 
 Add an append-only drift-safe receipt, versioned independently from the existing
 exact receipt. Its authenticated payload includes at least:
 
-- receipt version and creation time;
+- receipt version, `hash_algorithm`, and creation time;
 - legacy snapshot ID, timestamps, count, universe/source-truth hashes;
 - generation snapshot ID and publication ID;
 - source window ID, `published` lifecycle identity, exact
@@ -300,8 +427,8 @@ legacy identity cannot accidentally reuse an earlier authorization.
 The current `structure-generation-compare` command and its exact-match exit
 semantics remain unchanged for compatibility and audit clarity.
 
-Add a separate read-only Makefile-backed command, tentatively
-`make structure-generation-drift-compare`, which:
+The separate read-only Makefile-backed command
+`make structure-generation-drift-compare`:
 
 - reads only the bounded drift-safe progress/receipt and current authorization;
 - prints exact identities, class counts, reason counts, projection equality,
@@ -371,6 +498,49 @@ Implementation is not complete until tests prove:
     number of rows that require proof and is never used as a tolerance;
 14. no test or command changes the production pointer, legacy serving tables,
     deployment state, or configured read mode.
+15. the v2 row-chain matches the exact framing above, has the specified empty
+    root for every domain, and produces one root for every tested partition of
+    the same ordered rows;
+16. changing any canonical field, row order, row count, duplicate, domain,
+    algorithm, state byte, or persisted count changes the root or fails decode;
+17. v1 active progress is atomically marked stale with
+    `drift-hash-algorithm-superseded` and restarted at v2 cursor zero, while a
+    sealed v1 receipt remains queryable but cannot authorize the v2 gate;
+18. progress, comparison ID, source identity, reconstruction roots, and receipt
+    digest all bind `hash_algorithm`, and cross-version field substitution
+    fails closed;
+19. `EXPLAIN QUERY PLAN` for both resumed member scans uses the new
+    `(snapshot_id,market_id,...)` index without `USE TEMP B-TREE FOR ORDER BY`,
+    and a 120,000-row production-shaped regression proves at least 2x median
+    improvement for both generation and legacy scans;
+20. a production-shaped benchmark records source-event, source-market, and
+    member-root v1/v2 timings and must retain at least 2x estimated complete
+    gate speedup before deployment is considered.
+
+## 9.1 Performance evidence for the v2 amendment
+
+The read-only local profile used 120,000 markets, 5,000 events, 24 members per
+event, production-shaped raw payloads, the production schema, and 500-row
+member/market chunks. It found:
+
+- source-market SQL: 3-10 ms per 500 rows; complete warm v1 chunk about 350 ms;
+- source-market root work: 336.2 ms v1 versus 0.477 ms v2 (705x);
+- source-event root work for twenty approximately 10 KiB events: 329.8 ms v1
+  versus 0.100 ms v2 (3,298x);
+- three 500-member roots: 234.2 ms v1 versus 1.246 ms v2 (188x);
+- generation member complete chunk: about 454 ms v1, of which fresh evidence
+  and SQL remain about 220 ms, yielding an estimated 2.05x v2 chunk speedup;
+- legacy member scan: 66-117 ms before the index and 5-15 ms after index build
+  plus `ANALYZE`, with the temporary order sort removed.
+
+Production attempt evidence at 17,000 of 122,101 source markets showed 2,500-
+3,000 rows per 50-60 second slice and approximately 60 seconds between slices.
+At that measured cadence, v1 had approximately 73 minutes of source-market wall
+time and a conservative 2.4-2.7 hours for the complete remaining gate. The v2
+row-chain plus member indexes estimates 55-65 minutes for the same remaining
+work, or approximately 2.3-2.7x wall-clock speedup. These estimates are
+capacity planning evidence, not an authorization shortcut; full correctness
+and production verification gates remain mandatory.
 
 ## 10. Rejected Alternatives
 
