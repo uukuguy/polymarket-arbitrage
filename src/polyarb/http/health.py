@@ -653,6 +653,7 @@ def _structure_drift_health_check(
                         "observedValue": "terminal-receipt-invalid",
                         "status": "fail",
                         "output": "structure-drift-terminal-receipt-invalid",
+                        "authorityError": reason,
                         "time": _utc_now_iso(),
                     }
                 ]

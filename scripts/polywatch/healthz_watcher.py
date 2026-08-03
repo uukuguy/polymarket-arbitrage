@@ -500,13 +500,57 @@ def _output_json_token(output: str, key: str) -> object | None:
     return value
 
 
-def structure_drift_incident(healthz: dict | None) -> dict[str, object] | None:
+def structure_drift_incident(
+    healthz: dict | None,
+    *,
+    detected_at_ms: int | None = None,
+) -> dict[str, object] | None:
     """Return the authenticated drift incident identity for resident state."""
     if not healthz:
         return None
     check = _extract_check(healthz, "snapshot:structure_generation_drift", {})
     if not check or check.get("status") == "pass":
         return None
+    authority_error = check.get("authorityError")
+    authority_invalid = (
+        check.get("observedValue") == "terminal-receipt-invalid"
+        and authority_error
+        in {
+            "structure-drift-terminal-receipt-invalid",
+            "structure-drift-member-receipt-invalid",
+        }
+    )
+    if authority_invalid:
+        boundary = (
+            detected_at_ms
+            if isinstance(detected_at_ms, int) and detected_at_ms >= 0
+            else int(time.time() * 1_000)
+        )
+        fingerprint_payload = json.dumps(
+            {
+                "authority_error": authority_error,
+                "contract": CURRENT_DRIFT_CLASSIFIER_CONTRACT,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return {
+            "kind": "structure-drift",
+            "comparison_id": None,
+            "classifier_contract": CURRENT_DRIFT_CLASSIFIER_CONTRACT,
+            "terminal_reason": authority_error,
+            "diagnostic_fingerprint": hashlib.sha256(
+                fingerprint_payload.encode("utf-8")
+            ).hexdigest(),
+            "checkpoint_at_ms": boundary,
+            "required_recovery": {
+                "authorization_mode": "drift-safe-sealed",
+                "classifier_contract": CURRENT_DRIFT_CLASSIFIER_CONTRACT,
+                "comparison_rule": "later-valid-current-v2-seal",
+                "comparison_id": None,
+                "after_checkpoint_at_ms": boundary,
+            },
+        }
     output = str(check.get("output") or "")
     contract = check.get("classifierContract") or _output_token(output, "contract")
     comparison_id = check.get("comparisonId") or _output_token(output, "comparison")
@@ -599,6 +643,8 @@ def structure_drift_recovery_matches(
         return comparison_id == required_comparison
     if rule == "later-comparison":
         return comparison_id != required_comparison
+    if rule == "later-valid-current-v2-seal":
+        return True
     return False
 
 
@@ -621,6 +667,13 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
     drift = _extract_check(healthz, "snapshot:structure_generation_drift", {})
     if drift and drift.get("status") == "fail":
         output = str(drift.get("output") or "")
+        if drift.get("observedValue") == "terminal-receipt-invalid":
+            authority_error = drift.get("authorityError") or output
+            return (
+                "push",
+                "L1 Structure drift authority invalid "
+                f"(error={authority_error})",
+            )
         if drift.get("observedValue") == "terminal-stale":
             contract = drift.get("classifierContract")
             comparison_id = drift.get("comparisonId")
@@ -911,7 +964,10 @@ def main() -> int:
     previous_l1 = (
         raw_incidents.get("l1") if isinstance(raw_incidents, Mapping) else None
     )
-    l1_drift_incident = structure_drift_incident(l1)
+    l1_drift_incident = structure_drift_incident(
+        l1,
+        detected_at_ms=int(now_s * 1_000),
+    )
     incident_by_component = {
         "l1": l1_drift_incident,
     }

@@ -9,10 +9,10 @@ checkpoint；成功写授权收据，确定性失败写 terminal 收据。状态
 
 ## 代码地图
 
-- `src/polyarb/storage/sqlite_store.py:6536`：有界推进完整 fresh projection，保存 union cursor、count、root 和诊断。
-- `src/polyarb/storage/sqlite_store.py:7713`：用 classifier-v2 分类 generation/legacy member，并在同一个 CAS 中保存诊断。
-- `src/polyarb/storage/sqlite_store.py:7194`：最终比较 group truth，原子写 sealed 或 stale receipt。
-- `src/polyarb/storage/sqlite_store.py:8138`：只读取当前 classifier，并在公开证据前验证对应收据。
+- `src/polyarb/storage/sqlite_store.py:7026`：有界推进完整 fresh projection，保存 union cursor、count、root 和诊断。
+- `src/polyarb/storage/sqlite_store.py:8213`：用 classifier-v2 分类 generation/legacy member，并在同一个 CAS 中保存诊断。
+- `src/polyarb/storage/sqlite_store.py:7686`：最终比较 group truth，原子写 sealed 或 stale receipt。
+- `src/polyarb/storage/sqlite_store.py:8640`：只读取当前 classifier，并在公开证据前验证对应收据。
 - `src/polyarb/perception/structure_drift.py:238`：给“fresh 有、generation 没有”生成完整诊断 envelope。
 
 ## 为什么多一个 `fresh-projection-members` phase

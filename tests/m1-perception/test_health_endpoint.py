@@ -478,8 +478,57 @@ def test_structure_drift_health_never_projects_untrusted_terminal_evidence(
         "observedValue": "terminal-receipt-invalid",
         "status": "fail",
         "output": "structure-drift-terminal-receipt-invalid",
+        "authorityError": status_reason,
         "time": check["time"],
     }
+
+
+@pytest.mark.parametrize("endpoint", ("/health", "/healthz"))
+@pytest.mark.parametrize(
+    "authority_error",
+    (
+        "structure-drift-terminal-receipt-invalid",
+        "structure-drift-member-receipt-invalid",
+    ),
+)
+def test_both_health_endpoints_preserve_trusted_drift_authority_error_type(
+    endpoint: str,
+    authority_error: str,
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon_settings_for_test.structure_generation_drift_compare_enabled = True
+    store = http_test_client.app.state.sqlite_store
+    monkeypatch.setattr(
+        store,
+        "structure_generation_drift_status",
+        lambda: {
+            "authorization_mode": "none",
+            "authorized": False,
+            "checkpoint_at_ms": 123,
+            "classifier_contract_version": "untrusted-contract",
+            "diagnostic_counts": {"untrusted": 999},
+            "diagnostic_samples": {"untrusted": [{"secret": "no"}]},
+            "phase": "stale",
+            "progress_id": "untrusted-comparison",
+            "reason": authority_error,
+        },
+    )
+    monkeypatch.setattr(store, "get_latest_structure_drift_attempt", lambda: None)
+
+    check = http_test_client.get(endpoint).json()["checks"][
+        "snapshot:structure_generation_drift"
+    ][0]
+
+    assert check["status"] == "fail"
+    assert check["observedValue"] == "terminal-receipt-invalid"
+    assert check["output"] == "structure-drift-terminal-receipt-invalid"
+    assert check["authorityError"] == authority_error
+    assert "classifierContract" not in check
+    assert "comparisonId" not in check
+    assert "diagnosticCounts" not in check
+    assert "diagnosticSamples" not in check
 
 
 def test_structure_drift_health_projects_later_authenticated_seal_as_healthy() -> None:

@@ -191,6 +191,220 @@ def _terminal_drift_check(
     return check
 
 
+def _invalid_drift_check(authority_error: str) -> list[dict[str, Any]]:
+    return [{
+        "componentId": "structure-generation-drift",
+        "observedValue": "terminal-receipt-invalid",
+        "status": "fail",
+        "output": "structure-drift-terminal-receipt-invalid",
+        "authorityError": authority_error,
+    }]
+
+
+@pytest.mark.parametrize(
+    "authority_error",
+    (
+        "structure-drift-terminal-receipt-invalid",
+        "structure-drift-member-receipt-invalid",
+    ),
+)
+def test_invalid_drift_authority_lifecycle_recovers_only_after_later_valid_seal(
+    authority_error: str,
+    tmp_path: Path,
+) -> None:
+    invalid_health = _health(status="fail", checks={
+        "snapshot:structure_generation_drift": _invalid_drift_check(authority_error),
+    })
+    incident = WATCHER.structure_drift_incident(
+        invalid_health,
+        detected_at_ms=1_000_000,
+    )
+    assert incident == {
+        "kind": "structure-drift",
+        "comparison_id": None,
+        "classifier_contract": "structure-drift-classifier-v2",
+        "terminal_reason": authority_error,
+        "diagnostic_fingerprint": incident["diagnostic_fingerprint"],
+        "checkpoint_at_ms": 1_000_000,
+        "required_recovery": {
+            "authorization_mode": "drift-safe-sealed",
+            "classifier_contract": "structure-drift-classifier-v2",
+            "comparison_rule": "later-valid-current-v2-seal",
+            "comparison_id": None,
+            "after_checkpoint_at_ms": 1_000_000,
+        },
+    }
+    assert "untrusted" not in str(incident)
+    action, reason = WATCHER.decide_l1(invalid_health)
+    assert action == "push"
+    assert authority_error in reason
+
+    decisions = WATCHER.component_notification_decisions(
+        {"l1": True}, {}, now_s=1_000.0, reminder_s=1_800,
+        incident_by_component={"l1": incident},
+    )
+    assert decisions == {"l1": "alert"}
+    state = WATCHER.updated_component_notification_state(
+        {"l1": True}, {}, decisions, now_s=1_000.0,
+        delivery_ok_by_component={"l1": True},
+        incident_by_component={"l1": incident},
+    )
+    state_path = tmp_path / f"{authority_error}.json"
+    assert WATCHER._save_notification_state(str(state_path), state) is True
+    restarted = WATCHER._load_notification_state(str(state_path))
+    assert restarted["incidents"]["l1"]["terminal_reason"] == authority_error
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, restarted, now_s=1_001.0, reminder_s=1_800,
+        incident_by_component={"l1": incident},
+    ) == {"l1": "suppress"}
+
+    later_detection = WATCHER.structure_drift_incident(
+        invalid_health,
+        detected_at_ms=1_000_100,
+    )
+    assert later_detection["diagnostic_fingerprint"] == incident[
+        "diagnostic_fingerprint"
+    ]
+    later_decisions = WATCHER.component_notification_decisions(
+        {"l1": True}, restarted, now_s=1_001.0, reminder_s=1_800,
+        incident_by_component={"l1": later_detection},
+    )
+    assert later_decisions == {"l1": "suppress"}
+    restarted = WATCHER.updated_component_notification_state(
+        {"l1": True}, restarted, later_decisions, now_s=1_001.0,
+        delivery_ok_by_component={"l1": True},
+        incident_by_component={"l1": later_detection},
+    )
+    assert restarted["incidents"]["l1"]["required_recovery"][
+        "after_checkpoint_at_ms"
+    ] == 1_000_100
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, restarted, now_s=2_800.0, reminder_s=1_800,
+        incident_by_component={"l1": incident},
+    ) == {"l1": "alert"}
+
+    invalid_recovery_checks = (
+        None,
+        _check("disabled", status="pass", output="enabled=false"),
+        _check("exact", status="pass", output="enabled=true"),
+        _check("none", status="warn", output="structure-drift-incomplete"),
+        _terminal_drift_check(
+            status="pass",
+            comparison_id="comparison-v2-sealed",
+            checkpoint_at_ms=1_000_001,
+            classifier_contract="structure-drift-classifier-v1",
+        ),
+        _terminal_drift_check(
+            status="pass",
+            comparison_id="comparison-v2-sealed",
+            checkpoint_at_ms=1_000_100,
+        ),
+    )
+    for drift_check in invalid_recovery_checks:
+        checks = {} if drift_check is None else {
+            "snapshot:structure_generation_drift": drift_check
+        }
+        assert WATCHER.structure_drift_recovery_matches(
+            _health(status="pass", checks=checks),
+            restarted["incidents"]["l1"],
+        ) is False
+
+    valid_seal = _health(status="pass", checks={
+        "snapshot:structure_generation_drift": _terminal_drift_check(
+            status="pass",
+            comparison_id="comparison-v2-natural-seal",
+            checkpoint_at_ms=1_000_101,
+        )
+    })
+    assert WATCHER.structure_drift_recovery_matches(
+        valid_seal,
+        restarted["incidents"]["l1"],
+    ) is True
+    recovery_decisions = WATCHER.component_notification_decisions(
+        {"l1": False}, restarted, now_s=2_900.0, reminder_s=1_800,
+        recovery_by_component={"l1": True},
+    )
+    assert recovery_decisions == {"l1": "recovery"}
+    failed_recovery = WATCHER.updated_component_notification_state(
+        {"l1": False}, restarted, recovery_decisions, now_s=2_900.0,
+        delivery_ok_by_component={"l1": False},
+    )
+    assert WATCHER.component_notification_decisions(
+        {"l1": False}, failed_recovery, now_s=2_901.0, reminder_s=1_800,
+        recovery_by_component={"l1": True},
+    ) == {"l1": "recovery"}
+    recovered = WATCHER.updated_component_notification_state(
+        {"l1": False}, failed_recovery, recovery_decisions, now_s=2_901.0,
+        delivery_ok_by_component={"l1": True},
+    )
+    assert "l1" not in recovered["incidents"]
+
+    other_error = (
+        "structure-drift-member-receipt-invalid"
+        if authority_error == "structure-drift-terminal-receipt-invalid"
+        else "structure-drift-terminal-receipt-invalid"
+    )
+    changed = WATCHER.structure_drift_incident(
+        _health(status="fail", checks={
+            "snapshot:structure_generation_drift": _invalid_drift_check(other_error),
+        }),
+        detected_at_ms=1_000_100,
+    )
+    assert changed["diagnostic_fingerprint"] != incident["diagnostic_fingerprint"]
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, restarted, now_s=1_001.0, reminder_s=1_800,
+        incident_by_component={"l1": changed},
+    ) == {"l1": "alert"}
+
+
+@pytest.mark.parametrize(
+    "authority_error",
+    (
+        "structure-drift-terminal-receipt-invalid",
+        "structure-drift-member-receipt-invalid",
+    ),
+)
+def test_invalid_drift_authority_type_reaches_telegram_without_untrusted_evidence(
+    authority_error: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid_health = _health(status="fail", checks={
+        "snapshot:structure_generation_drift": _invalid_drift_check(authority_error),
+    })
+    opportunity = {
+        "strategy": "neg-risk-buy-all",
+        "profit_basis": "gross-before-fees",
+        "coverage": "verified-standard-neg-risk",
+        "refreshing": False,
+        "latest_structure_snapshot_id": 10,
+        "source_snapshot_id": 10,
+        "count": 0,
+        "opportunities": [],
+    }
+
+    def fetch(url: str) -> dict[str, Any]:
+        if url == WATCHER.L1_HEALTHZ:
+            return invalid_health
+        if url == WATCHER.OPPORTUNITY_URL:
+            return opportunity
+        return _health(status="warn", checks=_healthy_l2_checks())
+
+    messages: list[str] = []
+    monkeypatch.setattr(WATCHER, "_fetch_json", fetch)
+    monkeypatch.setattr(WATCHER, "_probe_dashboard", lambda _url: (200, {}, None))
+    monkeypatch.setattr(
+        WATCHER,
+        "_send_telegram",
+        lambda message: messages.append(message) or True,
+    )
+    monkeypatch.setattr(WATCHER, "STATE_FILE", "")
+
+    assert WATCHER.main() == 0
+    assert len(messages) == 1
+    assert authority_error in messages[0]
+    assert "untrusted" not in messages[0]
+
+
 def test_structure_drift_incident_state_round_trips_and_fingerprints_changes() -> None:
     first_health = _health(status="fail", checks={
         "snapshot:structure_generation_drift": _terminal_drift_check(),
