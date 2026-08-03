@@ -57,6 +57,8 @@ def _published_source_store(
     global_relation_conflict: bool = False,
     duplicate_market_identity: bool = False,
     duplicate_event_only_identity: bool = False,
+    duplicate_event_only_identity_count: int = 0,
+    extra_relation_parent_market_id: str | None = None,
     null_event_source_ordinal: bool = False,
     certified_event_only_conflict: bool = False,
     raw_market_overrides: dict[str, object] | None = None,
@@ -134,6 +136,11 @@ def _published_source_store(
                 )
                 if duplicate_event_only_identity and event_only_members:
                     raw_event["markets"].append(dict(raw_event["markets"][-1]))
+                if duplicate_event_only_identity_count and event_only_members:
+                    raw_event["markets"].extend(
+                        dict(raw_event["markets"][-1])
+                        for _ in range(duplicate_event_only_identity_count)
+                    )
             raw_market = {
                 "id": market_id,
                 "conditionId": f"condition-{index:03d}",
@@ -165,6 +172,10 @@ def _published_source_store(
                 relation_rows.append(
                     ("window-1", "event-only-certified", event_id, index + 1)
                 )
+            if index > 0 and extra_relation_parent_market_id is not None:
+                relation_rows.append((
+                    "window-1", extra_relation_parent_market_id, event_id, index + 1
+                ))
             market_rows.append(
                 ("window-1", market_id, json.dumps(raw_market), index + 1)
             )
@@ -519,6 +530,36 @@ def test_event_only_global_conflict_precedes_duplicate_and_quarantine(
         if item.envelope.market_id == "event-only-certified"
     ]
     assert [item.code for item in matching] == ["conflicting-event-membership"]
+
+
+def test_projection_evidence_queries_bound_high_duplication_and_many_parents(
+    tmp_path: Path,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=200,
+        event_only_members=(("event-only-adversarial", False),),
+        duplicate_event_only_identity_count=2_000,
+        extra_relation_parent_market_id="event-only-adversarial",
+    )
+    inspected: list[tuple[str, int]] = []
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+        inspection_callback=lambda name, rows: inspected.append((name, rows)),
+    )
+    matching = [
+        item for item in chunk.diagnostics
+        if item.envelope.market_id == "event-only-adversarial"
+    ]
+    assert [item.code for item in matching] == ["conflicting-event-membership"]
+    assert max(rows for _name, rows in inspected) <= 2 * chunk.candidates_processed
+    assert dict(inspected)["relations"] <= 2 * len({
+        item.market_id for item in chunk.members
+    } | {item.envelope.market_id for item in chunk.diagnostics})
+    assert dict(inspected)["identity-cardinalities"] <= chunk.candidates_processed
 
 
 @pytest.mark.parametrize(

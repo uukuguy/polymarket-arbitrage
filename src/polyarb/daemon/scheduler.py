@@ -269,6 +269,110 @@ class IsolatedStructureDriftCheckpoint:
     stderr: bytes = b""
 
 
+@dataclass(frozen=True)
+class IsolatedStructureEventMemberCheckpoint:
+    window_id: str
+    rows_processed: int
+    chunks_processed: int
+    sealed: bool
+    deferred: bool
+    defer_reason: str | None
+    stop_reason: str
+    elapsed_ms: int
+
+
+async def run_structure_event_members_in_subprocess(
+    *,
+    db_path: object,
+    window_id: str,
+    max_rows: int = 500,
+    max_chunks: int = 100,
+    max_elapsed_s: float = 45.0,
+    spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = asyncio.create_subprocess_exec,
+    timeout_s: float = 75.0,
+    terminate_timeout_s: float = 15.0,
+) -> IsolatedStructureEventMemberCheckpoint:
+    """Run one bounded event-member slice outside the resident scheduler."""
+    process = await spawn(
+        sys.executable, "-m", "polyarb.snapshot", "structure-event-members-advance",
+        "--db-path", str(db_path), "--window-id", window_id,
+        "--max-rows", str(max_rows), "--max-chunks", str(max_chunks),
+        "--max-elapsed-seconds", str(max_elapsed_s),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    started = time.monotonic()
+    communicate_task = asyncio.create_task(process.communicate())
+
+    async def terminate_then_kill() -> tuple[bytes, bytes]:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(communicate_task), timeout=terminate_timeout_s
+            )
+        except TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            return await asyncio.shield(communicate_task)
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communicate_task), timeout=timeout_s
+        )
+    except asyncio.CancelledError:
+        await terminate_then_kill()
+        raise
+    except TimeoutError as error:
+        await terminate_then_kill()
+        raise SnapshotSubprocessError(
+            "structure-event-members-timeout",
+            last_stage="structure-event-members",
+            elapsed_ms=max(0, int((time.monotonic() - started) * 1_000)),
+        ) from error
+    try:
+        payload = json.loads(stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        reason = "sqlite-busy" if b"database is locked" in stderr.lower() else "invalid-json"
+        raise SnapshotSubprocessError(f"structure-event-members-{reason}") from error
+    expected_keys = {
+        "checkpointed", "chunks_processed", "defer_reason", "deferred",
+        "elapsed_ms", "kind", "rows_processed", "sealed", "stop_reason", "window_id",
+    }
+    defer_reason = payload.get("defer_reason") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict) or set(payload) != expected_keys
+        or payload["checkpointed"] is not True
+        or payload["kind"] != "structure-event-members"
+        or payload["window_id"] != window_id
+        or type(payload["rows_processed"]) is not int
+        or not 0 <= payload["rows_processed"] <= max_rows * max_chunks
+        or type(payload["chunks_processed"]) is not int
+        or not 0 <= payload["chunks_processed"] <= max_chunks
+        or type(payload["elapsed_ms"]) is not int or payload["elapsed_ms"] < 0
+        or type(payload["sealed"]) is not bool
+        or type(payload["deferred"]) is not bool
+        or (defer_reason is not None and not isinstance(defer_reason, str))
+        or bool(payload["deferred"]) != (defer_reason == "writer-busy")
+        or payload["stop_reason"] not in {
+            "complete", "max-chunks", "max-elapsed-seconds", "writer-busy"
+        }
+        or process.returncode != 0
+    ):
+        raise SnapshotSubprocessError("structure-event-members-invalid-json")
+    return IsolatedStructureEventMemberCheckpoint(
+        window_id=window_id,
+        rows_processed=int(payload["rows_processed"]),
+        chunks_processed=int(payload["chunks_processed"]),
+        sealed=bool(payload["sealed"]), deferred=bool(payload["deferred"]),
+        defer_reason=defer_reason, stop_reason=str(payload["stop_reason"]),
+        elapsed_ms=int(payload["elapsed_ms"]),
+    )
+
+
 async def run_structure_drift_in_subprocess(
     *,
     db_path: object,
@@ -1277,7 +1381,7 @@ class SnapshotScheduler:
     async def _maybe_advance_structure_event_members(
         self, *, queued_at_ms: int
     ) -> bool | None:
-        """Advance one member chunk under the existing Quote-priority lock."""
+        """Advance one isolated member slice under the Quote-priority lock."""
         if not self.structure_sync_enabled:
             return None
         window = await asyncio.to_thread(self._sqlite_store.get_latest_structure_sync)
@@ -1325,10 +1429,41 @@ class SnapshotScheduler:
                     )
                     if status.get("sealed") is True:
                         return None
-            await asyncio.to_thread(
-                self._sqlite_store.advance_structure_event_member_staging_chunk,
-                window_id=window_id, limit=500,
+            try:
+                checkpoint = await run_structure_event_members_in_subprocess(
+                    db_path=self._settings.db_path,
+                    window_id=window_id,
+                    max_rows=500,
+                    max_chunks=100,
+                    max_elapsed_s=45.0,
+                    timeout_s=75.0,
+                    terminate_timeout_s=15.0,
+                )
+            except SnapshotSubprocessError as error:
+                reason = (
+                    "structure-event-members:child-timeout"
+                    if "timeout" in str(error)
+                    else "structure-event-members:child-failed"
+                )
+                await self._record_structure_defer(
+                    reason=reason, queued_at_ms=queued_at_ms
+                )
+                raise
+            if checkpoint.deferred:
+                await self._record_structure_defer(
+                    reason="structure-event-members:writer-busy",
+                    queued_at_ms=queued_at_ms,
+                )
+            logger.info(
+                "structure event-member slice checkpointed "
+                f"rows={checkpoint.rows_processed} chunks={checkpoint.chunks_processed} "
+                f"sealed={checkpoint.sealed} stop={checkpoint.stop_reason}"
             )
+            if not checkpoint.sealed and not checkpoint.deferred:
+                # The outer resident loop uses this flag for a 100ms
+                # continuation instead of the ordinary production cadence.
+                # The next call re-enters every Quote-priority admission check.
+                self._checkpoint_pending = True
             return True
         finally:
             self._release_producer_slot()

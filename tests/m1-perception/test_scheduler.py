@@ -91,7 +91,11 @@ def test_structure_drift_scheduler_enablement_reads_env(
 
 
 @pytest.mark.asyncio
-async def test_event_member_sidecar_precedes_structure_drift() -> None:
+async def test_event_member_sidecar_precedes_structure_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+
     calls: list[str] = []
     store = MagicMock()
     store.get_scheduler_state.return_value = None
@@ -100,8 +104,16 @@ async def test_event_member_sidecar_precedes_structure_drift() -> None:
     store.recover_orphaned_structure_drift_attempts.return_value = 0
     store.get_latest_structure_sync.return_value = {"id": "w", "status": "complete"}
     store.structure_event_member_status.return_value = {"sealed": False}
-    store.advance_structure_event_member_staging_chunk.side_effect = (
-        lambda **_kwargs: calls.append("members")
+    member_child = AsyncMock(
+        side_effect=lambda **_kwargs: calls.append("members")
+        or scheduler_module.IsolatedStructureEventMemberCheckpoint(
+            window_id="w", rows_processed=500, chunks_processed=1,
+            sealed=False, deferred=False, defer_reason=None,
+            stop_reason="max-elapsed-seconds", elapsed_ms=45_000,
+        )
+    )
+    monkeypatch.setattr(
+        scheduler_module, "run_structure_event_members_in_subprocess", member_child
     )
     store.structure_generation_drift_status.side_effect = (
         lambda: calls.append("drift") or {"authorized": True}
@@ -112,6 +124,7 @@ async def test_event_member_sidecar_precedes_structure_drift() -> None:
             legacy_structure_reconciliation_enabled=False,
             structure_generation_drift_compare_enabled=True,
             scheduler_interval_s=300,
+            db_path="unused.db",
         ), sqlite_store=store, producer_lock=asyncio.Lock(),
     )
     assert await scheduler._tick_once(queued_at_ms=1) is True
@@ -129,6 +142,8 @@ async def test_event_source_unavailable_historical_window_is_not_retried() -> No
     store.get_latest_structure_sync.return_value = {"id": "old", "status": "complete"}
     store.structure_event_member_status.return_value = {
         "sealed": False,
+        "state": "waiting-natural-window",
+        "authenticated": True,
         "reason": "structure-event-source-receipt-unavailable",
     }
     scheduler = SnapshotScheduler(
@@ -284,6 +299,155 @@ async def test_event_member_waits_for_and_releases_shared_producer_lock(
     assert await running is True
     assert producer_lock.locked() is False
     assert store.structure_event_member_status(window_id=window_id)["sealed"] is True
+
+
+@pytest.mark.asyncio
+async def test_event_member_scheduler_slice_seals_1200_members_in_one_admission(
+    daemon_settings_for_test: Any,
+) -> None:
+    """The production scheduler child must not spread 500/500/200 across ticks."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    store.commit_structure_event_page(
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[
+            {
+                "id": "event-1200",
+                "negRiskMarketID": "group-1",
+                "markets": [
+                    {
+                        "id": f"market-{index:04d}",
+                        "negRiskOther": False,
+                        "active": True,
+                        "closed": False,
+                    }
+                    for index in range(1_200)
+                ],
+            }
+        ],
+        finished_at_ms=2,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("UPDATE structure_sync_windows SET status='complete'")
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test.model_copy(
+            update={"structure_sync_enabled": True}
+        ),
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+
+    assert await scheduler._maybe_advance_structure_event_members(queued_at_ms=3) is True
+    status = store.structure_event_member_status(window_id=window_id)
+    assert status["sealed"] is True
+    assert status["rows_written"] == 1_200
+
+
+@pytest.mark.asyncio
+async def test_event_member_checkpoint_releases_slot_and_next_admission_yields_to_quote(
+    daemon_settings_for_test: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+
+    store = MagicMock()
+    store.get_scheduler_state.return_value = None
+    store.get_snapshot_attempts.return_value = []
+    store.get_latest_structure_schedule_adjustment.return_value = None
+    store.recover_orphaned_structure_drift_attempts.return_value = 0
+    store.get_latest_structure_sync.return_value = {"id": "w", "status": "complete"}
+    store.structure_event_member_status.return_value = {"sealed": False}
+    child = AsyncMock(
+        return_value=scheduler_module.IsolatedStructureEventMemberCheckpoint(
+            window_id="w",
+            rows_processed=500,
+            chunks_processed=1,
+            sealed=False,
+            deferred=False,
+            defer_reason=None,
+            stop_reason="max-elapsed-seconds",
+            elapsed_ms=45_000,
+        )
+    )
+    monkeypatch.setattr(
+        scheduler_module, "run_structure_event_members_in_subprocess", child
+    )
+
+    class QuoteRuntime:
+        active = False
+
+        def pipeline_active(self) -> bool:
+            return self.active
+
+        def pipeline_due(self, _interval_s: float) -> bool:
+            return False
+
+    runtime = QuoteRuntime()
+    lock = asyncio.Lock()
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test.model_copy(
+            update={"structure_sync_enabled": True}
+        ),
+        sqlite_store=store,
+        producer_lock=lock,
+        quote_worker_runtime=runtime,
+    )
+    assert await scheduler._maybe_advance_structure_event_members(queued_at_ms=3) is True
+    assert lock.locked() is False
+    assert scheduler._checkpoint_pending is True
+    runtime.active = True
+    assert await scheduler._maybe_advance_structure_event_members(queued_at_ms=4) is False
+    assert child.await_count == 1
+    assert store.get_latest_structure_defer()["reason"].startswith(
+        "structure-event-members:quote-pipeline-active"
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_member_child_timeout_records_breadcrumb_and_recovery_failure(
+    daemon_settings_for_test: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    store.commit_structure_event_page(
+        window_id=window_id, requested_cursor=None, next_cursor=None,
+        completed=True,
+        events=[{"id": "event-1", "negRiskMarketID": "group-1", "markets": []}],
+        finished_at_ms=2,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("UPDATE structure_sync_windows SET status='complete'")
+    monkeypatch.setattr(
+        scheduler_module,
+        "run_structure_event_members_in_subprocess",
+        AsyncMock(side_effect=scheduler_module.SnapshotSubprocessError(
+            "structure-event-members-timeout",
+            last_stage="structure-event-members",
+            elapsed_ms=75_000,
+        )),
+    )
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test.model_copy(
+            update={"structure_sync_enabled": True}
+        ), sqlite_store=store, producer_lock=asyncio.Lock(),
+    )
+    assert await scheduler._tick_once(queued_at_ms=3) is True
+    assert scheduler._failure_counter == 1
+    assert store.get_latest_structure_defer()["reason"] == (
+        "structure-event-members:child-timeout"
+    )
+    assert scheduler._producer_slot_owned is False
 
 
 def test_structure_drift_attempt_lifecycle_recovery_and_retention(

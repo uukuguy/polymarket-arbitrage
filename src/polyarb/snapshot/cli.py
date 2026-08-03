@@ -437,6 +437,73 @@ def structure_generation_drift_advance(
     )
 
 
+@app.command(name="structure-event-members-advance", hidden=True)
+def structure_event_members_advance(
+    db_path: Path = typer.Option(..., "--db-path"),
+    window_id: str = typer.Option(..., "--window-id"),
+    max_rows: int = typer.Option(500, "--max-rows", min=1, max=500),
+    max_chunks: int = typer.Option(100, "--max-chunks", min=1, max=100),
+    max_elapsed_seconds: float = typer.Option(
+        45.0, "--max-elapsed-seconds", min=1.0, max=45.0
+    ),
+) -> None:
+    """Internal scheduler child: derive one cooperative event-member slice."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(db_path, writer_timeout_s=0.25)
+    started = time.monotonic()
+    chunks = 0
+    rows_processed = 0
+    sealed = False
+    deferred = False
+    defer_reason: str | None = None
+    stop_reason = "max-chunks"
+    for _index in range(max_chunks):
+        if time.monotonic() - started >= max_elapsed_seconds:
+            stop_reason = "max-elapsed-seconds"
+            break
+        try:
+            chunk = store.advance_structure_event_member_staging_chunk(
+                window_id=window_id, limit=max_rows
+            )
+        except sqlite3.OperationalError as error:
+            if not _is_sqlite_writer_busy(error):
+                raise
+            deferred = True
+            defer_reason = "writer-busy"
+            stop_reason = "writer-busy"
+            break
+        if chunk.get("failure_reason") is not None or chunk.get("reason") is not None:
+            raise ValueError(str(chunk.get("failure_reason") or chunk.get("reason")))
+        chunks += 1
+        rows_processed += int(chunk.get("rows_written", 0))
+        sealed = chunk.get("sealed") is True
+        if sealed:
+            stop_reason = "complete"
+            break
+        if time.monotonic() - started >= max_elapsed_seconds:
+            stop_reason = "max-elapsed-seconds"
+            break
+    elapsed_ms = max(0, int((time.monotonic() - started) * 1_000))
+    print(
+        json.dumps(
+            {
+                "checkpointed": True,
+                "chunks_processed": chunks,
+                "defer_reason": defer_reason,
+                "deferred": deferred,
+                "elapsed_ms": elapsed_ms,
+                "kind": "structure-event-members",
+                "rows_processed": rows_processed,
+                "sealed": sealed,
+                "stop_reason": stop_reason,
+                "window_id": window_id,
+            },
+            sort_keys=True,
+        )
+    )
+
+
 @app.command(name="structure-generation-cleanup")
 def structure_generation_cleanup(
     max_rows: int = typer.Option(500, "--max-rows", min=1),

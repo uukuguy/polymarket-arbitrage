@@ -598,6 +598,32 @@ def test_event_member_health_recovers_after_validated_seal(
         )
 
 
+def test_precontract_window_waits_for_natural_authority_without_failing_health(
+    daemon_settings_for_test: Any, http_test_client: TestClient,
+) -> None:
+    """Deploying the migration over a legacy serving window must not cause 503."""
+    _insert_snapshot(
+        daemon_settings_for_test.db_path,
+        taken_at_ms=int(time.time() * 1_000) - 1_000,
+    )
+    with sqlite3.connect(daemon_settings_for_test.db_path) as con:
+        con.execute(
+            "INSERT INTO structure_sync_windows("
+            "id,recovery_root_window_id,status,started_at_ms,checkpoint_at_ms) "
+            "VALUES ('legacy-window','legacy-window','complete',1,2)"
+        )
+
+    for path in ("/health", "/healthz"):
+        response = http_test_client.get(path)
+        check = response.json()["checks"]["snapshot:structure_event_members"][0]
+        assert (check["observedValue"], check["status"], check["output"]) == (
+            "waiting-natural-window",
+            "pass",
+            "authenticated=true reason=structure-event-source-receipt-unavailable",
+        )
+        assert response.status_code == 200
+
+
 @pytest.mark.parametrize("tamper", ["checkpoint", "source"])
 def test_event_member_health_fails_closed_on_authenticated_authority_tamper(
     daemon_settings_for_test: Any, http_test_client: TestClient, tamper: str,

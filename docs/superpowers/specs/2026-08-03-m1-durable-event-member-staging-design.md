@@ -1,6 +1,6 @@
 # M1 Durable Event-Member Staging Design
 
-**Status:** Approved in principle on 2026-08-03; written-spec review pending
+**Status:** Implemented with whole-amendment review fixes on 2026-08-03; final re-review pending
 
 **Parent design:** `2026-08-02-m1-structure-drift-classifier-recovery-design.md`
 

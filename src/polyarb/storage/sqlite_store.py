@@ -2840,6 +2840,7 @@ class SQLiteStore:
             if source is None:
                 con.execute("COMMIT")
                 return {"sealed": False, "complete": False,
+                        "state": "waiting-natural-window", "authenticated": True,
                         "reason": "structure-event-source-receipt-unavailable"}
             progress = con.execute(progress_sql, (window_id,)).fetchone()
             if progress is None:
@@ -3057,6 +3058,7 @@ class SQLiteStore:
                 if receipt is not None:
                     return invalid
                 return {"sealed": False, "complete": False,
+                        "state": "waiting-natural-window", "authenticated": True,
                         "reason": "structure-event-source-receipt-unavailable"}
             progress = con.execute(
                 "SELECT event_cursor,member_ordinal,rows_written,member_byte_offset,"
@@ -4630,6 +4632,7 @@ class SQLiteStore:
         cursor: FreshProjectionCursor | None,
         limit: int,
         trace_callback: Callable[[str], None] | None = None,
+        inspection_callback: Callable[[str, int], None] | None = None,
     ) -> FreshProjectionChunk:
         """Validate sealed authority, then read one bounded sidecar projection chunk."""
         self._validated_fresh_projection_member_authority(
@@ -4643,6 +4646,7 @@ class SQLiteStore:
             cursor=cursor,
             limit=limit,
             trace_callback=trace_callback,
+            inspection_callback=inspection_callback,
         )
 
     def _fetch_structure_drift_fresh_projection_chunk(
@@ -4653,6 +4657,7 @@ class SQLiteStore:
         cursor: FreshProjectionCursor | None,
         limit: int,
         trace_callback: Callable[[str], None] | None = None,
+        inspection_callback: Callable[[str, int], None] | None = None,
     ) -> FreshProjectionChunk:
         """Project one bounded fresh-source union from the sealed member sidecar."""
         from polyarb.perception.structure_drift import (
@@ -4863,94 +4868,191 @@ class SQLiteStore:
                 else:
                     projection_complete = True
 
-            market_ids = [str(item["market_id"]) for item in candidates]
+            market_ids = sorted({str(item["market_id"]) for item in candidates})
+            if inspection_callback is not None:
+                inspection_callback("candidates", len(candidates))
             relations: dict[str, list[str]] = {}
             sidecar_rows_by_market: dict[str, list[tuple[object, ...]]] = {}
             sidecar_market_counts: dict[str, int] = {}
             sidecar_identity_counts: dict[tuple[str, str], tuple[int, int]] = {}
             conflict_events: set[str] = set()
-            issues: dict[str, list[tuple[object, ...]]] = {}
+            certified_event_keys: set[tuple[str, int, int]] = set()
             if market_ids:
                 placeholders = ",".join("?" for _ in market_ids)
-                relation_rows = con.execute(
-                    "SELECT relation.market_id,relation.event_id FROM "
-                    "structure_sync_event_market_staging relation WHERE relation.window_id=? "
-                    f"AND relation.market_id IN ({placeholders})",
-                    (window_id, *market_ids),
+                witness_limit = 2 * len(market_ids)
+                relation_probe = con.execute(
+                    "SELECT market_id,event_id FROM "
+                    "structure_sync_event_market_staging WHERE window_id=? AND "
+                    f"market_id IN ({placeholders}) LIMIT ?",
+                    (window_id, *market_ids, witness_limit + 1),
                 ).fetchall()
+                relation_probe_counts: dict[str, int] = {}
+                for market_id, _event_id in relation_probe:
+                    key = str(market_id)
+                    relation_probe_counts[key] = relation_probe_counts.get(key, 0) + 1
+                if (
+                    len(relation_probe) > witness_limit
+                    or any(count > 2 for count in relation_probe_counts.values())
+                ):
+                    bounded_relation_sql = " UNION ALL ".join(
+                        "SELECT market_id,event_id FROM (SELECT market_id,event_id FROM "
+                        "structure_sync_event_market_staging WHERE window_id=? AND "
+                        "market_id=? ORDER BY event_id LIMIT 2)"
+                        for _market_id in market_ids
+                    )
+                    relation_rows = con.execute(
+                        bounded_relation_sql,
+                        tuple(
+                            value for market_id in market_ids
+                            for value in (window_id, market_id)
+                        ),
+                    ).fetchall()
+                else:
+                    relation_rows = relation_probe
+                if inspection_callback is not None:
+                    inspection_callback("relations", len(relation_rows))
                 for market_id, event_id in relation_rows:
                     relations.setdefault(str(market_id), []).append(str(event_id))
-                sidecar_market_counts.update(
-                    {
-                        str(market_id): int(count)
-                        for market_id, count in con.execute(
-                            "SELECT market_id,COUNT(*) FROM "
-                            "structure_sync_event_member_staging WHERE window_id=? AND "
-                            f"market_id IN ({placeholders}) GROUP BY market_id",
-                            (window_id, *market_ids),
-                        )
-                    }
-                )
-                staged = con.execute(
+                staged_probe = con.execute(
                     "SELECT member.market_id,member.event_id,member.event_ordinal,"
                     "member.member_ordinal,member.group_id,member.member_kind,member.active,"
-                    "member.closed,member.payload_json,member.payload_hash,metadata.payload_hash "
-                    "FROM structure_sync_event_member_staging member JOIN "
-                    "structure_sync_event_metadata_staging metadata ON "
-                    "metadata.window_id=member.window_id AND metadata.event_id=member.event_id "
-                    f"WHERE member.window_id=? AND member.market_id IN ({placeholders}) "
-                    "AND NOT EXISTS (SELECT 1 FROM structure_sync_event_member_staging "
-                    "other WHERE other.window_id=member.window_id AND "
-                    "other.market_id=member.market_id AND other.rowid!=member.rowid) "
-                    "ORDER BY member.market_id LIMIT 500",
-                    (window_id, *market_ids),
+                    "member.closed,member.payload_json,member.payload_hash,"
+                    "metadata.payload_hash FROM structure_sync_event_member_staging member "
+                    "JOIN structure_sync_event_metadata_staging metadata ON "
+                    "metadata.window_id=member.window_id AND "
+                    "metadata.event_id=member.event_id WHERE member.window_id=? AND "
+                    f"member.market_id IN ({placeholders}) LIMIT ?",
+                    (window_id, *market_ids, witness_limit + 1),
                 ).fetchall()
-                for row in staged:
-                    sidecar_rows_by_market.setdefault(str(row[0]), []).append(tuple(row[1:]))
-                for event_id, member_market_id, count, first_ordinal in con.execute(
-                    "SELECT event_id,market_id,COUNT(*),MIN(member_ordinal) FROM "
-                    "structure_sync_event_member_staging WHERE window_id=? AND "
-                    f"market_id IN ({placeholders}) GROUP BY market_id,event_id",
-                    (window_id, *market_ids),
+                staged_probe_counts: dict[str, int] = {}
+                for row in staged_probe:
+                    key = str(row[0])
+                    staged_probe_counts[key] = staged_probe_counts.get(key, 0) + 1
+                if (
+                    len(staged_probe) > witness_limit
+                    or any(count > 2 for count in staged_probe_counts.values())
                 ):
+                    bounded_sidecar_sql = " UNION ALL ".join(
+                        "SELECT market_id,event_id,event_ordinal,member_ordinal,group_id,"
+                        "member_kind,active,closed,payload_json,payload_hash,metadata_hash "
+                        "FROM (SELECT member.market_id,member.event_id,member.event_ordinal,"
+                        "member.member_ordinal,member.group_id,member.member_kind,member.active,"
+                        "member.closed,member.payload_json,member.payload_hash,"
+                        "metadata.payload_hash AS metadata_hash FROM "
+                        "structure_sync_event_member_staging member JOIN "
+                        "structure_sync_event_metadata_staging metadata ON "
+                        "metadata.window_id=member.window_id AND "
+                        "metadata.event_id=member.event_id WHERE member.window_id=? AND "
+                        "member.market_id=? ORDER BY member.event_id,member.member_ordinal "
+                        "LIMIT 2)" for _market_id in market_ids
+                    )
+                    staged = con.execute(
+                        bounded_sidecar_sql,
+                        tuple(
+                            value for market_id in market_ids
+                            for value in (window_id, market_id)
+                        ),
+                    ).fetchall()
+                else:
+                    staged = staged_probe
+                if inspection_callback is not None:
+                    inspection_callback("sidecar-witnesses", len(staged))
+                staged_by_market: dict[str, list[tuple[object, ...]]] = {}
+                for row in staged:
+                    staged_by_market.setdefault(str(row[0]), []).append(tuple(row[1:]))
+                sidecar_market_counts.update({
+                    market_id: len(rows) for market_id, rows in staged_by_market.items()
+                })
+                sidecar_rows_by_market.update({
+                    market_id: rows
+                    for market_id, rows in staged_by_market.items()
+                    if len(rows) == 1
+                })
+                identity_keys = sorted({
+                    (str(item["event_id"]), str(item["market_id"]))
+                    for item in candidates if item["kind"] == "event-only"
+                })
+                identity_values = ",".join("(?,?)" for _ in identity_keys)
+                identity_params = tuple(value for key in identity_keys for value in key)
+                identity_rows = () if not identity_keys else con.execute(
+                    "WITH candidate(event_id,market_id) AS (VALUES " + identity_values + ") "
+                    "SELECT candidate.event_id,candidate.market_id,"
+                    "EXISTS(SELECT 1 FROM structure_sync_event_member_staging first WHERE "
+                    "first.window_id=? AND first.event_id=candidate.event_id AND "
+                    "first.market_id=candidate.market_id LIMIT 1)+EXISTS(SELECT 1 FROM "
+                    "structure_sync_event_member_staging second WHERE second.window_id=? "
+                    "AND second.event_id=candidate.event_id AND "
+                    "second.market_id=candidate.market_id LIMIT 1 OFFSET 1),"
+                    "(SELECT first.member_ordinal FROM structure_sync_event_member_staging "
+                    "first WHERE first.window_id=? AND first.event_id=candidate.event_id "
+                    "AND first.market_id=candidate.market_id ORDER BY first.member_ordinal "
+                    "LIMIT 1) FROM candidate",
+                    (*identity_params, window_id, window_id, window_id),
+                ).fetchall()
+                if inspection_callback is not None:
+                    inspection_callback("identity-cardinalities", len(identity_rows))
+                for event_id, member_market_id, count, first_ordinal in identity_rows:
                     sidecar_identity_counts[(str(event_id), str(member_market_id))] = (
                         int(count), int(first_ordinal)
                     )
-                event_ids = sorted(
-                    {
-                        *(
-                            event_id
-                            for relation_event_ids in relations.values()
-                            for event_id in relation_event_ids
-                        ),
-                        *(
-                            str(item["event_id"])
-                            for item in candidates
-                            if item["kind"] == "event-only"
-                        ),
-                    }
-                )
+                event_ids = sorted({
+                    str(item["event_id"])
+                    for item in candidates if item["kind"] == "event-only"
+                })
                 if event_ids:
-                    event_placeholders = ",".join("?" for _ in event_ids)
-                    for (event_id,) in con.execute(
-                        "SELECT member.event_id FROM structure_sync_event_member_staging member "
-                        "WHERE member.window_id=? AND member.event_id IN ("
-                        + event_placeholders
-                        + ") AND EXISTS (SELECT 1 FROM structure_sync_event_market_staging r1 "
-                        "JOIN structure_sync_event_market_staging r2 ON "
-                        "r2.window_id=r1.window_id AND r2.market_id=r1.market_id "
-                        "AND r2.event_id!=r1.event_id WHERE r1.window_id=member.window_id "
-                        "AND r1.market_id=member.market_id) GROUP BY member.event_id",
-                        (window_id, *event_ids),
-                    ):
-                        conflict_events.add(str(event_id))
-                for row in con.execute(
-                    "SELECT market_id,layer,category,detail,raw_payload FROM "
-                    "structure_generation_issues WHERE snapshot_id=? "
-                    f"AND market_id IN ({placeholders})",
-                    (generation_snapshot_id, *market_ids),
-                ):
-                    issues.setdefault(str(row[0]), []).append(tuple(row[1:]))
+                    event_values = ",".join("(?)" for _ in event_ids)
+                    conflict_rows = con.execute(
+                        "WITH candidate(event_id) AS (VALUES " + event_values + ") "
+                        "SELECT candidate.event_id FROM candidate WHERE EXISTS (SELECT 1 "
+                        "FROM structure_sync_event_market_staging relation WHERE "
+                        "relation.window_id=? AND relation.event_id=candidate.event_id AND "
+                        "EXISTS (SELECT 1 FROM structure_sync_event_market_staging other "
+                        "WHERE other.window_id=relation.window_id AND "
+                        "other.market_id=relation.market_id AND "
+                        "other.event_id!=relation.event_id LIMIT 1) LIMIT 1)",
+                        (*event_ids, window_id),
+                    ).fetchall()
+                    if inspection_callback is not None:
+                        inspection_callback("conflict-events", len(conflict_rows))
+                    conflict_events.update(str(row[0]) for row in conflict_rows)
+                issue_keys = []
+                for item in candidates:
+                    if item["kind"] != "event-only":
+                        continue
+                    envelope = {
+                        "event_id": item["event_id"],
+                        "event_payload_sha256": item["raw_event_hash"],
+                        "event_source_ordinal": item["source_ordinal"],
+                        "group_id": item["group_id"],
+                        "market_id": item["market_id"],
+                        "member_ordinal": item["member_ordinal"],
+                        "member_payload_sha256": item["raw_market_hash"],
+                    }
+                    issue_keys.append((
+                        str(item["event_id"]), int(item["source_ordinal"]),
+                        int(item["member_ordinal"]), str(item["market_id"]),
+                        f"{EVENT_ONLY_NEG_RISK_QUARANTINE_REASON}:"
+                        f"{structure_market_source_hash(envelope)}",
+                    ))
+                if issue_keys:
+                    issue_values = ",".join("(?,?,?,?,?)" for _ in issue_keys)
+                    issue_params = tuple(value for key in issue_keys for value in key)
+                    issue_rows = con.execute(
+                        "WITH candidate(event_id,event_ordinal,member_ordinal,market_id,"
+                        "raw_payload) AS (VALUES " + issue_values + ") SELECT "
+                        "candidate.event_id,candidate.event_ordinal,candidate.member_ordinal "
+                        "FROM candidate WHERE EXISTS (SELECT 1 FROM "
+                        "structure_generation_issues issue WHERE issue.snapshot_id=? AND "
+                        "issue.market_id=candidate.market_id AND "
+                        "issue.raw_payload=candidate.raw_payload LIMIT 1)",
+                        (*issue_params, generation_snapshot_id),
+                    ).fetchall()
+                    if inspection_callback is not None:
+                        inspection_callback("certified-issues", len(issue_rows))
+                    for event_id, event_ordinal, member_ordinal in issue_rows:
+                        certified_event_keys.add((
+                            str(event_id), int(event_ordinal), int(member_ordinal)
+                        ))
 
             members: list[StructuralMemberIdentity] = []
             diagnostics = []
@@ -4999,19 +5101,6 @@ class SQLiteStore:
                         and isinstance(candidate["group_id"], str)
                         else None
                     )
-                    issue_envelope = {
-                        "event_id": candidate["event_id"],
-                        "event_payload_sha256": candidate["raw_event_hash"],
-                        "event_source_ordinal": candidate["source_ordinal"],
-                        "group_id": candidate["group_id"],
-                        "market_id": market_id,
-                        "member_ordinal": candidate["member_ordinal"],
-                        "member_payload_sha256": candidate["raw_market_hash"],
-                    }
-                    expected_raw = (
-                        f"{EVENT_ONLY_NEG_RISK_QUARANTINE_REASON}:"
-                        f"{structure_market_source_hash(issue_envelope)}"
-                    )
                     certified = (
                         envelope.event_id is not None
                         and envelope.group_id is not None
@@ -5019,7 +5108,11 @@ class SQLiteStore:
                         and envelope.closed is False
                         and isinstance(candidate["raw_member"], dict)
                         and type(candidate["raw_member"].get("negRiskOther")) is bool
-                        and any(row[3] == expected_raw for row in issues.get(market_id, ()))
+                        and (
+                            str(candidate["event_id"]),
+                            int(candidate["source_ordinal"]),
+                            int(candidate["member_ordinal"]),
+                        ) in certified_event_keys
                     )
                     sidecar_identity_valid = (
                         bool(market_id)

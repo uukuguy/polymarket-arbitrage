@@ -1380,6 +1380,17 @@ def _build_health_checks(
                     f"rows={int(evidence['rows_written'])} "
                     f"invalid={int(evidence['invalid_member_count'])}"
                 )
+            elif (
+                evidence.get("state") == "waiting-natural-window"
+                and evidence.get("authenticated") is True
+                and evidence.get("reason")
+                == "structure-event-source-receipt-unavailable"
+            ):
+                member_value, member_status = "waiting-natural-window", "pass"
+                member_output = (
+                    "authenticated=true reason="
+                    "structure-event-source-receipt-unavailable"
+                )
             elif evidence.get("failure_reason") is not None:
                 member_value, member_status = "failed", "fail"
                 member_output = str(evidence["failure_reason"])

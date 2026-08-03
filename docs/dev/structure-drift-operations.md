@@ -27,6 +27,9 @@ payload ≤512 KiB 的稳定非空前缀。正常单 event 至少推进 1 条；
 
 scheduler 在 `_tick_lock` 内先检查 Quote，再取得共享 producer lock 并复查 Quote，之后才 spawn child。不要直接运行
 隐藏的 `structure-generation-drift-advance`；它是 parent-owned subprocess protocol，不是 operator surface。
+event-member 派生同样运行在隐藏的隔离 child 中：每次 CAS 最多 500 members，一次 admission 最多 100 chunks
+或 45 秒，parent 75 秒超时。未 seal 的正常 checkpoint 会令 resident loop 在约 100ms 后重新 admission；不会等
+普通采集 cadence。重新 admission 会完整重复 Quote 检查，所以 Quote 可以在两个 slice 之间抢占。
 
 ## 运行中判读
 
@@ -82,14 +85,20 @@ member progress、member receipt 和 publication 全部属于同一 window 且�
 
 event-only anti-join 使用覆盖索引和复合 keyset
 `(market_sort_key,event_id,event_ordinal,member_ordinal)`；首块和续块是两条独立 SQL，没有 nullable-OR、
-`json_each`、逐 member SELECT 或临时排序。历史 window 如果没有自然 source receipt 就保持 unavailable；不能从
-旧 raw payload 合成 receipt。receipt invalid 时保留 legacy serving plane，停止验收并等待新 window。
+`json_each`、逐 member SELECT 或临时排序。历史 window 如果完全没有 source metadata/progress/receipt，会显示
+`waiting-natural-window/pass`；这是经过“无 source evidence”检查后的迁移态，不能从旧 raw payload 合成 receipt。
+只要 metadata/progress 已存在而 receipt 缺失或无效，就仍是 fail。receipt invalid 时保留 legacy serving plane，
+停止验收并等待新 window。
 
 query budget 必须按两层读：direct reader 每次固定最多 7 条 publication/source/member authority SELECT，加最多
 10 条 bulk candidate/evidence SELECT，总计最多 17；commitment 已验证 receipt 后内部复用该 authority，当前
-production-shaped gate 实测 16 条 SELECT/call。这个常数不会随页内 1/17/500 个 member 增长。不要把旧的
+production-shaped gate 实测 12 条 SELECT/call。这个常数不会随页内 1/17/500 个 member 增长。不要把旧的
 “≤10”理解成含 receipt gate 的总数；
 它只描述 candidate/evidence 层。任何逐 member 增长都属于回归。
+
+relation/sidecar bulk probe 最多读取 `2 * candidate_count + 1` 条；出现 sentinel 或任一 key 超过两条时，切换
+到 indexed per-key `LIMIT 2` witness 查询。最终证据每 key 最多两条，既能判断唯一/重复/多 parent，也不会把
+高重复数据完整搬进 Python。
 
 - `structure-drift-writer-busy`：确认 Quote/其他 writer 所有权；不要并发手动推进。
 - `structure-drift-child-failed`：看 child signal/timeout 分类；SIGKILL 先按 possible cgroup OOM 调查。

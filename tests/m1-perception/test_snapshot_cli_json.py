@@ -104,6 +104,85 @@ def test_structure_drift_internal_child_keeps_partial_commit_at_post_deadline(
     assert fake.calls == 1
 
 
+def test_event_member_internal_child_keeps_partial_commit_at_45_second_deadline(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import polyarb.storage.sqlite_store as store_module
+    from polyarb.snapshot import cli as cli_module
+
+    class FakeStore:
+        calls = 0
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def advance_structure_event_member_staging_chunk(self, **_kwargs):
+            self.calls += 1
+            return {"rows_written": 500, "sealed": False}
+
+    fake = FakeStore()
+    clock = iter((0.0, 0.0, 46.0, 46.0))
+    monkeypatch.setattr(store_module, "SQLiteStore", lambda *_a, **_k: fake)
+    monkeypatch.setattr(cli_module.time, "monotonic", lambda: next(clock))
+    result = CliRunner().invoke(
+        app,
+        [
+            "structure-event-members-advance",
+            "--db-path", str(tmp_path / "state.db"),
+            "--window-id", "window-1",
+            "--max-chunks", "100",
+            "--max-elapsed-seconds", "45",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.splitlines()[-1])
+    assert payload["chunks_processed"] == 1
+    assert payload["rows_processed"] == 500
+    assert payload["sealed"] is False
+    assert payload["stop_reason"] == "max-elapsed-seconds"
+    assert fake.calls == 1
+
+
+def test_event_member_internal_child_caps_production_slice_at_50000_rows(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import polyarb.storage.sqlite_store as store_module
+
+    class FakeStore:
+        calls = 0
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def advance_structure_event_member_staging_chunk(self, **_kwargs):
+            self.calls += 1
+            return {"rows_written": 500, "sealed": False}
+
+    fake = FakeStore()
+    monkeypatch.setattr(store_module, "SQLiteStore", lambda *_a, **_k: fake)
+    result = CliRunner().invoke(
+        app,
+        [
+            "structure-event-members-advance",
+            "--db-path", str(tmp_path / "state.db"),
+            "--window-id", "window-1",
+            "--max-rows", "500",
+            "--max-chunks", "100",
+            "--max-elapsed-seconds", "45",
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.splitlines()[-1])
+    assert payload["chunks_processed"] == 100
+    assert payload["rows_processed"] == 50_000
+    assert payload["stop_reason"] == "max-chunks"
+    assert fake.calls == 100
+
+
 def test_structure_drift_internal_child_fails_fast_on_oversized_source_event(
     monkeypatch,
     tmp_path,

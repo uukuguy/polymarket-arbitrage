@@ -2578,6 +2578,7 @@ def test_historical_window_without_source_receipt_is_unavailable(tmp_path) -> No
         )
     expected = {
         "sealed": False, "complete": False,
+        "state": "waiting-natural-window", "authenticated": True,
         "reason": "structure-event-source-receipt-unavailable",
     }
     assert store.structure_event_member_status(window_id="w") == expected

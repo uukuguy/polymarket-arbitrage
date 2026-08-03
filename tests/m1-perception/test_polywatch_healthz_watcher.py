@@ -105,6 +105,24 @@ def test_event_member_failure_preempts_generic_snapshot_cancellation(reason) -> 
     )
 
 
+def test_event_member_waiting_natural_window_does_not_alert() -> None:
+    health = _health(status="pass", checks={
+        "snapshot:structure_event_members": _check(
+            "waiting-natural-window",
+            status="pass",
+            output=("authenticated=true reason="
+                    "structure-event-source-receipt-unavailable"),
+        ),
+        "snapshot:last_success_age_seconds": _check(60.0),
+        "market_truth:coverage": _check("complete"),
+        "quote_feed:last_complete_age_seconds": _check(60.0),
+        "quote_feed:collector_state": _check("running"),
+    })
+    action, reason = WATCHER.decide_l1(health)
+    assert action == "noop"
+    assert "sidecar failed" not in reason
+
+
 def test_event_member_component_first_suppress_reminder_recovery_lifecycle() -> None:
     health = _health(status="fail", checks={
         "snapshot:structure_event_members": _check(

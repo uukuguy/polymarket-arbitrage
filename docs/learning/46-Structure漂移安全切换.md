@@ -25,6 +25,9 @@ fresh projection 的 event member 来源现在是一张独立 sealed sidecar，�
 采集链是：natural event page → source receipt → 最多 500 行/块的 member 派生 → member receipt → indexed
 anti-join。projection commitment 除了 11-field member count/root，还绑定 member receipt digest；即使两个 window
 碰巧得到相同 count/root，receipt/source 身份不同也不能互认。
+member 派生也由独立 child 执行：500 rows/CAS、100 chunks/45 秒、parent 75 秒。1,200 members 因而在一次
+admission 内自然形成 500/500/200，而不是被三次普通 cadence 隔开。若 slice 尚未 seal，resident loop 约 100ms
+后重新 admission，并重新执行 Quote priority 检查。
 
 ## 代码地图
 
@@ -64,6 +67,8 @@ class roots 则证明“相对旧数据的完整对称差可解释”。
 - 不扩展旧 relation table：relation 无法表达 null/padded identity、重复 ordinal、member payload hash 和精确恢复
   cursor；这些正是 fail-closed 诊断与 receipt seal 所需证据。
 - 不为历史 window 合成 sidecar：没有 natural source receipt 就没有可认证的派生起点。
+- “完全无 source evidence”的旧 window 是 `waiting-natural-window/pass` 迁移态；“已有 evidence 却缺/坏
+  receipt”是 fail。二者不能用同一个 unavailable 告警语义混淆。
 
 ## 自检题
 
