@@ -143,6 +143,141 @@ async def test_event_source_unavailable_historical_window_is_not_retried() -> No
     store.advance_structure_event_member_staging_chunk.assert_not_called()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper", ["checkpoint", "source"])
+async def test_event_member_invalid_authority_blocks_scheduler_without_advancing(
+    daemon_settings_for_test: Any, tamper: str,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    store.commit_structure_event_page(
+        window_id=window_id, requested_cursor=None, next_cursor=None,
+        completed=True,
+        events=[{"id": "event-1", "markets": [
+            {"id": "m-1", "negRiskOther": False, "active": True, "closed": False},
+            {"id": "m-2", "negRiskOther": False, "active": True, "closed": False},
+        ]}], finished_at_ms=2,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("UPDATE structure_sync_windows SET status='complete'")
+    store.advance_structure_event_member_staging_chunk(window_id=window_id, limit=1)
+    with sqlite3.connect(store.db_path) as con:
+        table = (
+            "structure_sync_event_member_progress"
+            if tamper == "checkpoint" else "structure_sync_event_source_receipts"
+        )
+        column = "checkpoint_digest" if tamper == "checkpoint" else "receipt_digest"
+        if tamper == "source":
+            con.execute("DROP TRIGGER trg_structure_event_source_receipt_update_guard")
+        con.execute(
+            f"UPDATE {table} SET {column}=? WHERE window_id=?", ("f" * 64, window_id),
+        )
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test.model_copy(
+            update={"structure_sync_enabled": True}
+        ),
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+    assert await scheduler._maybe_advance_structure_event_members(queued_at_ms=3) is True
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_member_staging WHERE window_id=?",
+            (window_id,),
+        ).fetchone() == (1,)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("active_checks", [
+    (True,),
+    (False, True),
+    (False, False, True),
+])
+async def test_event_member_checks_quote_priority_at_every_double_check_boundary(
+    daemon_settings_for_test: Any, active_checks: tuple[bool, ...],
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    store.commit_structure_event_page(
+        window_id=window_id, requested_cursor=None, next_cursor=None,
+        completed=True,
+        events=[{"id": "event-1", "markets": [
+            {"id": "m-1", "negRiskOther": False, "active": True, "closed": False},
+        ]}], finished_at_ms=2,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("UPDATE structure_sync_windows SET status='complete'")
+
+    class QuoteRuntime:
+        def __init__(self) -> None:
+            self._checks = iter(active_checks)
+
+        def pipeline_active(self) -> bool:
+            return next(self._checks)
+
+        def pipeline_due(self, _interval_s: float) -> bool:
+            return False
+
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test.model_copy(
+            update={"structure_sync_enabled": True}
+        ),
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+        quote_worker_runtime=QuoteRuntime(),
+    )
+    assert await scheduler._maybe_advance_structure_event_members(queued_at_ms=3) is False
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_member_staging WHERE window_id=?",
+            (window_id,),
+        ).fetchone() == (0,)
+    assert store.get_latest_structure_defer()["reason"].startswith(
+        "structure-event-members:quote-pipeline-active"
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_member_waits_for_and_releases_shared_producer_lock(
+    daemon_settings_for_test: Any,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    store.commit_structure_event_page(
+        window_id=window_id, requested_cursor=None, next_cursor=None,
+        completed=True, events=[{"id": "event-1", "markets": []}], finished_at_ms=2,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("UPDATE structure_sync_windows SET status='complete'")
+    producer_lock = asyncio.Lock()
+    await producer_lock.acquire()
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test.model_copy(
+            update={"structure_sync_enabled": True}
+        ),
+        sqlite_store=store, producer_lock=producer_lock,
+    )
+    running = asyncio.create_task(
+        scheduler._maybe_advance_structure_event_members(queued_at_ms=3)
+    )
+    await asyncio.sleep(0)
+    assert running.done() is False
+    assert store.structure_event_member_status(window_id=window_id).get("sealed") is not True
+    producer_lock.release()
+    assert await running is True
+    assert producer_lock.locked() is False
+    assert store.structure_event_member_status(window_id=window_id)["sealed"] is True
+
+
 def test_structure_drift_attempt_lifecycle_recovery_and_retention(
     tmp_path: Path,
 ) -> None:

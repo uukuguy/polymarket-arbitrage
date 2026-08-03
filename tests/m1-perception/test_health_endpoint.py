@@ -598,6 +598,61 @@ def test_event_member_health_recovers_after_validated_seal(
         )
 
 
+@pytest.mark.parametrize("tamper", ["checkpoint", "source"])
+def test_event_member_health_fails_closed_on_authenticated_authority_tamper(
+    daemon_settings_for_test: Any, http_test_client: TestClient, tamper: str,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    store.commit_structure_event_page(
+        window_id=window_id, requested_cursor=None, next_cursor=None,
+        completed=True,
+        events=[{"id": "event-1", "markets": [
+            {"id": "m-1", "negRiskOther": False, "active": True, "closed": False},
+            {"id": "m-2", "negRiskOther": False, "active": True, "closed": False},
+        ]}], finished_at_ms=2,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("UPDATE structure_sync_windows SET status='complete'")
+    store.advance_structure_event_member_staging_chunk(window_id=window_id, limit=1)
+    with sqlite3.connect(store.db_path) as con:
+        table = (
+            "structure_sync_event_member_progress"
+            if tamper == "checkpoint" else "structure_sync_event_source_receipts"
+        )
+        column = "checkpoint_digest" if tamper == "checkpoint" else "receipt_digest"
+        digest = con.execute(
+            f"SELECT {column} FROM {table} WHERE window_id=?", (window_id,),
+        ).fetchone()[0]
+        if tamper == "source":
+            con.execute("DROP TRIGGER trg_structure_event_source_receipt_update_guard")
+        con.execute(
+            f"UPDATE {table} SET {column}=? WHERE window_id=?", ("f" * 64, window_id),
+        )
+    expected_reason = (
+        "structure-event-member-checkpoint-invalid"
+        if tamper == "checkpoint" else "structure-event-source-receipt-invalid"
+    )
+    for path in ("/health", "/healthz"):
+        failed = http_test_client.get(path).json()["checks"][
+            "snapshot:structure_event_members"
+        ][0]
+        assert (failed["observedValue"], failed["status"], failed["output"]) == (
+            "invalid", "fail", expected_reason,
+        )
+        assert "rows=" not in failed["output"] and "cursor=" not in failed["output"]
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            f"UPDATE {table} SET {column}=? WHERE window_id=?", (digest, window_id),
+        )
+    recovered = http_test_client.get("/healthz").json()["checks"][
+        "snapshot:structure_event_members"
+    ][0]
+    assert (recovered["observedValue"], recovered["status"]) == ("recovering", "warn")
+
+
 def test_health_exposes_release_bound_qualification_policy(
     daemon_settings_for_test: Any,
     http_test_client: TestClient,

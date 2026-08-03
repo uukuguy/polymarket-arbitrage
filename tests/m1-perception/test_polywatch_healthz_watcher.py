@@ -85,19 +85,52 @@ def test_l1_quote_age_failure_pushes() -> None:
     assert "quote" in reason.lower()
 
 
-def test_event_member_failure_preempts_generic_snapshot_cancellation() -> None:
+@pytest.mark.parametrize("reason", [
+    "structure-event-member-checkpoint-invalid",
+    "structure-event-source-receipt-invalid",
+    "structure-event-member-receipt-invalid",
+])
+def test_event_member_failure_preempts_generic_snapshot_cancellation(reason) -> None:
     health = _health(status="fail", checks={
         "snapshot:structure_event_members": _check(
             "invalid", status="fail",
-            output="structure-event-member-receipt-invalid",
+            output=reason,
         ),
         "snapshot:last_success_age_seconds": _check(100000.0, status="fail"),
         "snapshot:latest_attempt": _check("cancelled", status="fail"),
     })
     assert WATCHER.decide_l1(health) == (
         "push", "L1 Structure event-member sidecar failed "
-        "(structure-event-member-receipt-invalid)",
+        f"({reason})",
     )
+
+
+def test_event_member_component_first_suppress_reminder_recovery_lifecycle() -> None:
+    health = _health(status="fail", checks={
+        "snapshot:structure_event_members": _check(
+            "invalid", status="fail",
+            output="structure-event-member-checkpoint-invalid",
+        ),
+    })
+    assert WATCHER.decide_l1(health)[0] == "push"
+    state: dict[str, Any] = {}
+    decisions = WATCHER.component_notification_decisions(
+        {"l1": True}, state, now_s=1_000.0, reminder_s=1_800,
+    )
+    assert decisions == {"l1": "alert"}
+    state = WATCHER.updated_component_notification_state(
+        {"l1": True}, state, decisions, now_s=1_000.0,
+        delivery_ok_by_component={"l1": True},
+    )
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, state, now_s=1_100.0, reminder_s=1_800,
+    ) == {"l1": "suppress"}
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, state, now_s=2_800.0, reminder_s=1_800,
+    ) == {"l1": "alert"}
+    assert WATCHER.component_notification_decisions(
+        {"l1": False}, state, now_s=1_100.0, reminder_s=1_800,
+    ) == {"l1": "recovery"}
 
 
 def test_l1_quote_refresh_transition_does_not_alert() -> None:
