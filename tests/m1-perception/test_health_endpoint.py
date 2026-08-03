@@ -417,6 +417,7 @@ def test_structure_drift_health_projects_authenticated_terminal_evidence() -> No
                 "other-zero-removal-reason": 2,
                 "active-open-projection-missing": 1,
             },
+            "diagnostic_root": "d" * 64,
             "diagnostic_samples": {
                 "other-zero-removal-reason": [
                     {"market_id": "market-1", "predicate_bitset": "0101"}
@@ -438,6 +439,10 @@ def test_structure_drift_health_projects_authenticated_terminal_evidence() -> No
     assert "reason=drift-unclassified" in check["output"]
     assert "other-zero-removal-reason" in check["output"]
     assert "market-1" in check["output"]
+    assert f"diagnostic_root={'d' * 64}" in check["output"]
+    assert "checkpoint_at_ms=9000" in check["output"]
+    assert check["diagnosticRoot"] == "d" * 64
+    assert check["checkpointAtMs"] == 9_000
 
 
 @pytest.mark.parametrize(
@@ -516,6 +521,7 @@ def test_both_health_endpoints_publish_the_same_authenticated_drift_terminal(
             "checkpoint_at_ms": int(time.time() * 1_000),
             "classifier_contract_version": "structure-drift-classifier-v2",
             "diagnostic_counts": {"other-zero-removal-reason": 1},
+            "diagnostic_root": "d" * 64,
             "diagnostic_samples": {
                 "other-zero-removal-reason": [{"market_id": "market-1"}]
             },
@@ -536,6 +542,8 @@ def test_both_health_endpoints_publish_the_same_authenticated_drift_terminal(
     assert check["comparisonId"] == "comparison-v2-terminal"
     assert check["terminalReason"] == "drift-unclassified"
     assert check["diagnosticCounts"] == {"other-zero-removal-reason": 1}
+    assert check["diagnosticRoot"] == "d" * 64
+    assert isinstance(check["checkpointAtMs"], int)
 
 
 @pytest.mark.parametrize(
@@ -1359,7 +1367,7 @@ def test_health_fails_quote_priority_defer_older_than_structure_sla(
     assert response.json()["checks"]["snapshot:producer_defer"][0]["status"] == "fail"
 
 
-def test_authenticated_drift_seal_supersedes_older_drift_defer(
+def test_unbound_legacy_drift_defer_is_not_hidden_by_unrelated_seal(
     daemon_settings_for_test: Any,
     http_test_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1392,7 +1400,103 @@ def test_authenticated_drift_seal_supersedes_older_drift_defer(
     checks = http_test_client.get("/healthz").json()["checks"]
 
     assert checks["snapshot:structure_generation_drift"][0]["status"] == "pass"
-    assert "snapshot:producer_defer" not in checks
+    assert checks["snapshot:producer_defer"][0]["observedValue"] == (
+        "structure-drift-identity-stale"
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "authorization_mode",
+        "phase",
+        "progress_id",
+        "contract",
+        "expected_hidden",
+    ),
+    (
+        (
+            "drift-safe-sealed",
+            "sealed",
+            "comparison-new",
+            "structure-drift-classifier-v2",
+            True,
+        ),
+        (
+            "drift-safe-sealed",
+            "sealed",
+            "comparison-wrong",
+            "structure-drift-classifier-v2",
+            False,
+        ),
+        ("exact", "exact", None, None, False),
+        (
+            "none",
+            "generation-members",
+            "comparison-new",
+            "structure-drift-classifier-v2",
+            False,
+        ),
+        (
+            "drift-safe-sealed",
+            "sealed",
+            "comparison-new",
+            "structure-drift-classifier-v1",
+            False,
+        ),
+    ),
+)
+def test_only_identity_bound_current_contract_seal_supersedes_drift_defer(
+    authorization_mode: str,
+    phase: str,
+    progress_id: str | None,
+    contract: str | None,
+    expected_hidden: bool,
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    now_ms = int(time.time() * 1_000)
+    daemon_settings_for_test.structure_generation_drift_compare_enabled = True
+    SQLiteStore(daemon_settings_for_test.db_path).record_structure_defer(
+        reason="structure-drift-identity-stale",
+        queued_at_ms=now_ms - 10_000,
+        observed_at_ms=now_ms - 9_000,
+        initialized_comparison_id="comparison-old",
+        current_comparison_id="comparison-new",
+        classifier_contract_version="structure-drift-classifier-v2",
+    )
+    store = http_test_client.app.state.sqlite_store
+    monkeypatch.setattr(
+        store,
+        "structure_generation_drift_status",
+        lambda: {
+            "authorization_mode": authorization_mode,
+            "authorized": authorization_mode in {"drift-safe-sealed", "exact"},
+            "checkpoint_at_ms": now_ms,
+            "classifier_contract_version": contract,
+            "phase": phase,
+            "progress_id": progress_id,
+            "reason": (
+                None
+                if authorization_mode in {"drift-safe-sealed", "exact"}
+                else "structure-drift-incomplete"
+            ),
+        },
+    )
+    monkeypatch.setattr(store, "get_latest_structure_drift_attempt", lambda: None)
+
+    checks = http_test_client.get("/healthz").json()["checks"]
+
+    assert ("snapshot:producer_defer" not in checks) is expected_hidden
+    if not expected_hidden:
+        defer_check = checks["snapshot:producer_defer"][0]
+        assert defer_check["initializedComparisonId"] == "comparison-old"
+        assert defer_check["currentComparisonId"] == "comparison-new"
+        assert defer_check["classifierContract"] == (
+            "structure-drift-classifier-v2"
+        )
 
 
 def test_health_fails_a_stalled_snapshot_attempt_while_truth_is_fresh(

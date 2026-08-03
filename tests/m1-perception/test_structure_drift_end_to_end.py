@@ -356,6 +356,7 @@ def test_terminal_receipt_status_tamper_fails_closed(
 
 def test_valid_terminal_receipt_status_exposes_authenticated_evidence(
     tmp_path: Path,
+    daemon_settings_for_test,
 ) -> None:
     store = _drift_store(tmp_path)
     comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
@@ -397,6 +398,33 @@ def test_valid_terminal_receipt_status_exposes_authenticated_evidence(
     assert check["comparisonId"] == comparison_id
     assert check["terminalReason"] == "drift-unclassified"
     assert check["diagnosticCounts"] == {"other-zero-removal-reason": 1}
+    assert check["diagnosticRoot"] == payload["diagnostic_root"]
+    assert check["checkpointAtMs"] == payload["checkpoint_at_ms"]
+
+    from unittest.mock import MagicMock
+
+    from starlette.testclient import TestClient
+
+    from polyarb.http.app import create_app
+    from polyarb.perception.store import OpportunityPerceptionStore
+
+    settings = daemon_settings_for_test.model_copy(update={
+        "db_path": store.db_path,
+        "structure_generation_drift_compare_enabled": True,
+    })
+    OpportunityPerceptionStore(store.db_path).init_schema()
+    client = TestClient(create_app(
+        scheduler=MagicMock(),
+        sqlite_store=store,
+        settings=settings,
+    ))
+    for endpoint in ("/health", "/healthz"):
+        endpoint_check = client.get(endpoint).json()["checks"][
+            "snapshot:structure_generation_drift"
+        ][0]
+        assert endpoint_check["comparisonId"] == comparison_id
+        assert endpoint_check["diagnosticRoot"] == payload["diagnostic_root"]
+        assert endpoint_check["checkpointAtMs"] == payload["checkpoint_at_ms"]
 
 
 def test_mixed_terminal_receipt_with_valid_digest_fails_closed(tmp_path: Path) -> None:

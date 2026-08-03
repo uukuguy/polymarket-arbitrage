@@ -151,19 +151,221 @@ def test_event_member_component_first_suppress_reminder_recovery_lifecycle() -> 
     ) == {"l1": "recovery"}
 
 
-def _terminal_drift_check(*, status: str = "fail") -> list[dict[str, Any]]:
-    return _check(
+def _terminal_drift_check(
+    *,
+    status: str = "fail",
+    comparison_id: str = "comparison-v2-terminal",
+    terminal_reason: str = "drift-unclassified",
+    diagnostic_root: str = "d" * 64,
+    checkpoint_at_ms: int = 9_000,
+    classifier_contract: str = "structure-drift-classifier-v2",
+) -> list[dict[str, Any]]:
+    check = _check(
         "terminal-stale" if status == "fail" else "drift-safe-sealed",
         status=status,
         output=(
-            "contract=structure-drift-classifier-v2 "
-            "comparison=comparison-v2-terminal reason=drift-unclassified "
-            'diagnostic_counts={"other-zero-removal-reason": 2}'
+            f"contract={classifier_contract} "
+            f"comparison={comparison_id} reason={terminal_reason} "
+            'diagnostic_counts={"other-zero-removal-reason":2} '
+            f"diagnostic_root={diagnostic_root} "
+            f"checkpoint_at_ms={checkpoint_at_ms} "
+            "diagnostic_samples={}"
             if status == "fail"
-            else "contract=structure-drift-classifier-v2 "
-            "comparison=comparison-v2-sealed reason=None"
+            else f"contract={classifier_contract} "
+            f"comparison={comparison_id} reason=None "
+            f"checkpoint_at_ms={checkpoint_at_ms}"
         ),
     )
+    check[0].update({
+        "classifierContract": classifier_contract,
+        "comparisonId": comparison_id,
+        "checkpointAtMs": checkpoint_at_ms,
+    })
+    if status == "fail":
+        check[0].update({
+            "terminalReason": terminal_reason,
+            "diagnosticCounts": {"other-zero-removal-reason": 2},
+            "diagnosticRoot": diagnostic_root,
+            "diagnosticSamples": {},
+        })
+    return check
+
+
+def test_structure_drift_incident_state_round_trips_and_fingerprints_changes() -> None:
+    first_health = _health(status="fail", checks={
+        "snapshot:structure_generation_drift": _terminal_drift_check(),
+    })
+    first = WATCHER.structure_drift_incident(first_health)
+    assert first is not None
+    assert first["kind"] == "structure-drift"
+    assert first["comparison_id"] == "comparison-v2-terminal"
+    assert first["classifier_contract"] == "structure-drift-classifier-v2"
+    assert first["terminal_reason"] == "drift-unclassified"
+    assert len(first["diagnostic_fingerprint"]) == 64
+    assert first["required_recovery"] == {
+        "authorization_mode": "drift-safe-sealed",
+        "classifier_contract": "structure-drift-classifier-v2",
+        "comparison_rule": "later-comparison",
+        "comparison_id": "comparison-v2-terminal",
+        "after_checkpoint_at_ms": 9_000,
+    }
+
+    decisions = WATCHER.component_notification_decisions(
+        {"l1": True}, {}, now_s=1_000.0, reminder_s=1_800,
+        incident_by_component={"l1": first},
+    )
+    state = WATCHER.updated_component_notification_state(
+        {"l1": True}, {}, decisions, now_s=1_000.0,
+        delivery_ok_by_component={"l1": True},
+        incident_by_component={"l1": first},
+    )
+    restarted = WATCHER.normalize_notification_state(state)
+    assert restarted["incidents"]["l1"] == {
+        "active": True,
+        "last_alert_at_s": 1_000.0,
+        **first,
+    }
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, restarted, now_s=1_100.0, reminder_s=1_800,
+        incident_by_component={"l1": first},
+    ) == {"l1": "suppress"}
+
+    changed_comparison = WATCHER.structure_drift_incident(_health(
+        status="fail",
+        checks={"snapshot:structure_generation_drift": _terminal_drift_check(
+            comparison_id="comparison-v2-next",
+        )},
+    ))
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, restarted, now_s=1_100.0, reminder_s=1_800,
+        incident_by_component={"l1": changed_comparison},
+    ) == {"l1": "alert"}
+    replaced = WATCHER.updated_component_notification_state(
+        {"l1": True},
+        restarted,
+        {"l1": "alert"},
+        now_s=1_100.0,
+        delivery_ok_by_component={"l1": True},
+        incident_by_component={"l1": changed_comparison},
+    )
+    assert replaced["incidents"]["l1"]["comparison_id"] == "comparison-v2-next"
+    failed_replace = WATCHER.updated_component_notification_state(
+        {"l1": True},
+        restarted,
+        {"l1": "alert"},
+        now_s=1_100.0,
+        delivery_ok_by_component={"l1": False},
+        incident_by_component={"l1": changed_comparison},
+    )
+    assert WATCHER.component_notification_decisions(
+        {"l1": True},
+        failed_replace,
+        now_s=1_101.0,
+        reminder_s=1_800,
+        incident_by_component={"l1": changed_comparison},
+    ) == {"l1": "alert"}
+
+    changed_diagnostic = WATCHER.structure_drift_incident(_health(
+        status="fail",
+        checks={"snapshot:structure_generation_drift": _terminal_drift_check(
+            terminal_reason="drift-overlap-conflict",
+            diagnostic_root="e" * 64,
+        )},
+    ))
+    assert changed_diagnostic["diagnostic_fingerprint"] != first[
+        "diagnostic_fingerprint"
+    ]
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, restarted, now_s=1_100.0, reminder_s=1_800,
+        incident_by_component={"l1": changed_diagnostic},
+    ) == {"l1": "alert"}
+
+    pending_check = _check(
+        "none",
+        status="warn",
+        output=(
+            "contract=structure-drift-classifier-v2 "
+            "comparison=comparison-v2-pending "
+            "reason=structure-drift-incomplete checkpoint_at_ms=11000"
+        ),
+    )
+    pending_check[0].update({
+        "classifierContract": "structure-drift-classifier-v2",
+        "comparisonId": "comparison-v2-pending",
+        "checkpointAtMs": 11_000,
+    })
+    pending = WATCHER.structure_drift_incident(_health(
+        status="warn",
+        checks={"snapshot:structure_generation_drift": pending_check},
+    ))
+    assert pending["required_recovery"]["comparison_rule"] == "same-comparison"
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, restarted, now_s=1_100.0, reminder_s=1_800,
+        incident_by_component={"l1": pending},
+    ) == {"l1": "alert"}
+    assert WATCHER.structure_drift_recovery_matches(
+        _health(status="pass", checks={
+            "snapshot:structure_generation_drift": _terminal_drift_check(
+                status="pass",
+                comparison_id="comparison-v2-pending",
+                checkpoint_at_ms=12_000,
+            )
+        }),
+        pending,
+    ) is True
+
+
+@pytest.mark.parametrize(
+    ("drift_check", "expected"),
+    (
+        (None, False),
+        (_check("disabled", status="pass", output="enabled=false"), False),
+        (_check("exact", status="pass", output="enabled=true"), False),
+        (_check("none", status="warn", output="structure-drift-incomplete"), False),
+        (_terminal_drift_check(
+            status="pass", comparison_id="comparison-v2-terminal",
+            checkpoint_at_ms=10_000,
+        ), False),
+        (_terminal_drift_check(
+            status="pass", comparison_id="comparison-v2-sealed",
+            checkpoint_at_ms=8_999,
+        ), False),
+        (_terminal_drift_check(
+            status="pass", comparison_id="comparison-v2-sealed",
+            checkpoint_at_ms=10_000,
+            classifier_contract="structure-drift-classifier-v1",
+        ), False),
+        (_terminal_drift_check(
+            status="pass", comparison_id="comparison-v2-sealed",
+            checkpoint_at_ms=10_000,
+        ), True),
+    ),
+)
+def test_drift_recovery_requires_current_contract_later_seal(
+    drift_check: list[dict[str, Any]] | None,
+    expected: bool,
+) -> None:
+    incident = WATCHER.structure_drift_incident(_health(
+        status="fail",
+        checks={"snapshot:structure_generation_drift": _terminal_drift_check()},
+    ))
+    assert incident is not None
+    checks = {} if drift_check is None else {
+        "snapshot:structure_generation_drift": drift_check
+    }
+    health = _health(status="pass", checks=checks)
+
+    allowed = WATCHER.structure_drift_recovery_matches(health, incident)
+
+    assert allowed is expected
+    assert WATCHER.component_notification_decisions(
+        {"l1": False},
+        {"incidents": {"l1": {"active": True, "last_alert_at_s": 1_000.0,
+                                **incident}}},
+        now_s=1_100.0,
+        reminder_s=1_800,
+        recovery_by_component={"l1": allowed},
+    ) == {"l1": "recovery" if expected else "suppress"}
 
 
 def test_authenticated_drift_terminal_preempts_generic_snapshot_failures() -> None:
@@ -180,7 +382,8 @@ def test_authenticated_drift_terminal_preempts_generic_snapshot_failures() -> No
         "L1 Structure drift terminal "
         "(contract=structure-drift-classifier-v2, "
         "comparison=comparison-v2-terminal, reason=drift-unclassified, "
-        'diagnostics={"other-zero-removal-reason": 2})'
+        'diagnostics={"other-zero-removal-reason": 2}, '
+        f"diagnostic_root={'d' * 64}, checkpoint_at_ms=9000)"
     )
 
 
@@ -211,7 +414,11 @@ def test_drift_incident_lifecycle_recovers_only_after_healthy_drift_status() -> 
         "snapshot:structure_generation_drift": _terminal_drift_check(),
     })
     sealed = _health(status="pass", checks={
-        "snapshot:structure_generation_drift": _terminal_drift_check(status="pass"),
+        "snapshot:structure_generation_drift": _terminal_drift_check(
+            status="pass",
+            comparison_id="comparison-v2-sealed",
+            checkpoint_at_ms=10_000,
+        ),
         "snapshot:last_success_age_seconds": _check(60.0),
         "market_truth:coverage": _check("complete"),
         "quote_feed:last_complete_age_seconds": _check(20.0),
@@ -305,6 +512,8 @@ def test_authenticated_drift_terminal_reaches_telegram_text(
     assert "comparison-v2-terminal" in messages[0]
     assert "drift-unclassified" in messages[0]
     assert "other-zero-removal-reason" in messages[0]
+    assert "d" * 64 in messages[0]
+    assert "checkpoint_at_ms=9000" in messages[0]
 
     now_s[0] = 1_100.0
     assert WATCHER.main() == 0
@@ -316,7 +525,11 @@ def test_authenticated_drift_terminal_reaches_telegram_text(
     assert "comparison-v2-terminal" in messages[1]
 
     current_l1[0] = _health(status="pass", checks={
-        "snapshot:structure_generation_drift": _terminal_drift_check(status="pass"),
+        "snapshot:structure_generation_drift": _terminal_drift_check(
+            status="pass",
+            comparison_id="comparison-v2-sealed",
+            checkpoint_at_ms=10_000,
+        ),
         "snapshot:last_success_age_seconds": _check(60.0),
         "market_truth:coverage": _check("complete"),
         "quote_feed:last_complete_age_seconds": _check(20.0),

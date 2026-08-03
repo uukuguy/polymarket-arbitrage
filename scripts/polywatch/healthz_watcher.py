@@ -75,6 +75,7 @@ DRY_RUN = os.environ.get("POLYWATCH_DRY_RUN", "0") == "1"
 STATE_FILE = os.environ.get("POLYWATCH_STATE_FILE", "")
 REMINDER_S = int(os.environ.get("POLYWATCH_REMINDER_S", "1800"))
 COMPONENTS = ("l1", "l2", "opportunity", "dashboard")
+CURRENT_DRIFT_CLASSIFIER_CONTRACT = "structure-drift-classifier-v2"
 
 # Sentry issue link (well-known: SCHEDULER_PAUSED issue 121111789)
 SENTRY_PAUSED_LINK = (
@@ -224,7 +225,7 @@ def normalize_notification_state(state: Mapping[str, object]) -> dict:
             if raw_incident.get("active") is not True:
                 continue
             raw_last_alert = raw_incident.get("last_alert_at_s", 0.0)
-            incidents[component] = {
+            incident: dict[str, object] = {
                 "active": True,
                 "last_alert_at_s": (
                     float(raw_last_alert)
@@ -232,6 +233,24 @@ def normalize_notification_state(state: Mapping[str, object]) -> dict:
                     else 0.0
                 ),
             }
+            for key in (
+                "kind",
+                "comparison_id",
+                "classifier_contract",
+                "terminal_reason",
+                "diagnostic_fingerprint",
+                "checkpoint_at_ms",
+                "delivery_pending",
+            ):
+                value = raw_incident.get(key)
+                if key in raw_incident and (
+                    isinstance(value, (str, int)) or value is None
+                ):
+                    incident[key] = value
+            required_recovery = raw_incident.get("required_recovery")
+            if isinstance(required_recovery, Mapping):
+                incident["required_recovery"] = dict(required_recovery)
+            incidents[component] = incident
     else:
         raw_active_keys = state.get("active_keys", [])
         raw_last_alert = state.get("last_alert_at_s", 0.0)
@@ -256,12 +275,16 @@ def component_notification_decisions(
     *,
     now_s: float,
     reminder_s: int,
+    incident_by_component: Mapping[str, Mapping[str, object] | None] | None = None,
+    recovery_by_component: Mapping[str, bool] | None = None,
 ) -> dict[str, str]:
     """Decide each component's alert lifecycle independently."""
     incidents = normalize_notification_state(state)["incidents"]
     assert isinstance(incidents, Mapping)
     components = tuple(sorted(set(active_by_component) | set(incidents)))
     decisions: dict[str, str] = {}
+    incoming_incidents = incident_by_component or {}
+    recovery_allowed = recovery_by_component or {}
     for component in components:
         active = active_by_component.get(component, False)
         raw_incident = incidents.get(component)
@@ -270,6 +293,19 @@ def component_notification_decisions(
             if not previous_active:
                 decisions[component] = "alert"
                 continue
+            if raw_incident.get("delivery_pending") is True:
+                decisions[component] = "alert"
+                continue
+            incoming = incoming_incidents.get(component)
+            if isinstance(incoming, Mapping):
+                previous_metadata = {
+                    key: value
+                    for key, value in raw_incident.items()
+                    if key not in {"active", "last_alert_at_s", "delivery_pending"}
+                }
+                if previous_metadata != dict(incoming):
+                    decisions[component] = "alert"
+                    continue
             raw_last_alert = raw_incident.get("last_alert_at_s", 0.0)
             last_alert = (
                 float(raw_last_alert)
@@ -278,7 +314,16 @@ def component_notification_decisions(
             )
             decisions[component] = "alert" if now_s - last_alert >= reminder_s else "suppress"
         else:
-            decisions[component] = "recovery" if previous_active else "noop"
+            if not previous_active:
+                decisions[component] = "noop"
+            elif raw_incident.get("kind") == "structure-drift":
+                decisions[component] = (
+                    "recovery"
+                    if recovery_allowed.get(component) is True
+                    else "suppress"
+                )
+            else:
+                decisions[component] = "recovery"
     return decisions
 
 
@@ -289,12 +334,14 @@ def updated_component_notification_state(
     *,
     now_s: float,
     delivery_ok_by_component: Mapping[str, bool],
+    incident_by_component: Mapping[str, Mapping[str, object] | None] | None = None,
 ) -> dict:
     """Persist only transitions whose own notification delivery succeeded."""
     normalized = normalize_notification_state(state)
     raw_incidents = normalized["incidents"]
     assert isinstance(raw_incidents, Mapping)
     incidents = {component: dict(incident) for component, incident in raw_incidents.items()}
+    incoming_incidents = incident_by_component or {}
     for component, decision in decisions.items():
         delivery_ok = delivery_ok_by_component.get(component, True)
         if decision == "recovery":
@@ -304,12 +351,28 @@ def updated_component_notification_state(
         if active_by_component.get(component, False):
             previous = incidents.get(component, {})
             previous_last_alert = previous.get("last_alert_at_s", 0.0)
+            incoming = incoming_incidents.get(component)
+            metadata = (
+                dict(incoming)
+                if isinstance(incoming, Mapping)
+                else {
+                    key: value
+                    for key, value in previous.items()
+                    if key not in {"active", "last_alert_at_s", "delivery_pending"}
+                }
+            )
             incidents[component] = {
                 "active": True,
                 "last_alert_at_s": (
                     now_s
                     if decision == "alert" and delivery_ok
                     else previous_last_alert
+                ),
+                **metadata,
+                **(
+                    {"delivery_pending": True}
+                    if decision == "alert" and not delivery_ok
+                    else {}
                 ),
             }
     return {"incidents": incidents, "last_seen_at_s": now_s}
@@ -429,6 +492,108 @@ def _output_json_token(output: str, key: str) -> object | None:
     return value
 
 
+def structure_drift_incident(healthz: dict | None) -> dict[str, object] | None:
+    """Return the authenticated drift incident identity for resident state."""
+    if not healthz:
+        return None
+    check = _extract_check(healthz, "snapshot:structure_generation_drift", {})
+    if not check or check.get("status") == "pass":
+        return None
+    output = str(check.get("output") or "")
+    contract = check.get("classifierContract") or _output_token(output, "contract")
+    comparison_id = check.get("comparisonId") or _output_token(output, "comparison")
+    checkpoint = check.get("checkpointAtMs")
+    if checkpoint is None:
+        raw_checkpoint = _output_token(output, "checkpoint_at_ms")
+        try:
+            checkpoint = int(raw_checkpoint) if raw_checkpoint is not None else None
+        except ValueError:
+            checkpoint = None
+    terminal_reason = (
+        check.get("terminalReason")
+        or _output_token(output, "reason")
+        or output
+        or "structure-drift-health-invalid"
+    )
+    diagnostic_counts = check.get("diagnosticCounts")
+    if diagnostic_counts is None:
+        diagnostic_counts = _output_json_token(output, "diagnostic_counts")
+    diagnostic_root = check.get("diagnosticRoot") or _output_token(
+        output, "diagnostic_root"
+    )
+    if contract != CURRENT_DRIFT_CLASSIFIER_CONTRACT:
+        contract = CURRENT_DRIFT_CLASSIFIER_CONTRACT
+    fingerprint_payload = json.dumps(
+        {
+            "comparison_id": comparison_id,
+            "contract": contract,
+            "diagnostic_counts": diagnostic_counts or {},
+            "diagnostic_root": diagnostic_root,
+            "terminal_reason": terminal_reason,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    is_terminal = check.get("observedValue") == "terminal-stale"
+    return {
+        "kind": "structure-drift",
+        "comparison_id": comparison_id,
+        "classifier_contract": contract,
+        "terminal_reason": terminal_reason,
+        "diagnostic_fingerprint": hashlib.sha256(
+            fingerprint_payload.encode("utf-8")
+        ).hexdigest(),
+        "checkpoint_at_ms": checkpoint,
+        "required_recovery": {
+            "authorization_mode": "drift-safe-sealed",
+            "classifier_contract": CURRENT_DRIFT_CLASSIFIER_CONTRACT,
+            "comparison_rule": (
+                "later-comparison" if is_terminal else "same-comparison"
+            ),
+            "comparison_id": comparison_id,
+            "after_checkpoint_at_ms": checkpoint,
+        },
+    }
+
+
+def structure_drift_recovery_matches(
+    healthz: dict | None,
+    incident: Mapping[str, object],
+) -> bool:
+    """Require an explicit receipt-authenticated current-contract seal."""
+    if incident.get("kind") != "structure-drift" or not healthz:
+        return False
+    required = incident.get("required_recovery")
+    if not isinstance(required, Mapping):
+        return False
+    check = _extract_check(healthz, "snapshot:structure_generation_drift", {})
+    if (
+        not check
+        or check.get("status") != "pass"
+        or check.get("observedValue") != "drift-safe-sealed"
+        or check.get("classifierContract") != CURRENT_DRIFT_CLASSIFIER_CONTRACT
+        or required.get("classifier_contract")
+        != CURRENT_DRIFT_CLASSIFIER_CONTRACT
+    ):
+        return False
+    comparison_id = check.get("comparisonId")
+    checkpoint = check.get("checkpointAtMs")
+    required_comparison = required.get("comparison_id")
+    after_checkpoint = required.get("after_checkpoint_at_ms")
+    if not isinstance(comparison_id, str) or not comparison_id:
+        return False
+    if not isinstance(checkpoint, int):
+        return False
+    if isinstance(after_checkpoint, int) and checkpoint <= after_checkpoint:
+        return False
+    rule = required.get("comparison_rule")
+    if rule == "same-comparison":
+        return comparison_id == required_comparison
+    if rule == "later-comparison":
+        return comparison_id != required_comparison
+    return False
+
+
 def decide_l1(healthz: dict | None) -> tuple[str, str]:
     """Return (action, reason). action ∈ {'noop', 'push', 'unpause+push'}.
 
@@ -453,6 +618,8 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
             comparison_id = drift.get("comparisonId")
             terminal_reason = drift.get("terminalReason")
             diagnostic_counts = drift.get("diagnosticCounts")
+            diagnostic_root = drift.get("diagnosticRoot")
+            checkpoint_at_ms = drift.get("checkpointAtMs")
             if contract is None:
                 contract = _output_token(output, "contract")
             if comparison_id is None:
@@ -461,12 +628,18 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
                 terminal_reason = _output_token(output, "reason")
             if diagnostic_counts is None:
                 diagnostic_counts = _output_json_token(output, "diagnostic_counts")
+            if diagnostic_root is None:
+                diagnostic_root = _output_token(output, "diagnostic_root")
+            if checkpoint_at_ms is None:
+                checkpoint_at_ms = _output_token(output, "checkpoint_at_ms")
             return (
                 "push",
                 "L1 Structure drift terminal "
                 f"(contract={contract}, comparison={comparison_id}, "
                 f"reason={terminal_reason}, diagnostics="
-                f"{json.dumps(diagnostic_counts or {}, sort_keys=True)})",
+                f"{json.dumps(diagnostic_counts or {}, sort_keys=True)}, "
+                f"diagnostic_root={diagnostic_root}, "
+                f"checkpoint_at_ms={checkpoint_at_ms})",
             )
         return "push", f"L1 Structure drift failed ({output})"
     producer_defer = _extract_check(healthz, "snapshot:producer_defer", {})
@@ -725,12 +898,30 @@ def main() -> int:
 
     now_s = time.time()
     state = _load_notification_state(STATE_FILE)
+    normalized_state = normalize_notification_state(state)
+    raw_incidents = normalized_state.get("incidents", {})
+    previous_l1 = (
+        raw_incidents.get("l1") if isinstance(raw_incidents, Mapping) else None
+    )
+    l1_drift_incident = structure_drift_incident(l1)
+    incident_by_component = {
+        "l1": l1_drift_incident,
+    }
+    recovery_by_component = {
+        "l1": (
+            structure_drift_recovery_matches(l1, previous_l1)
+            if isinstance(previous_l1, Mapping)
+            else False
+        )
+    }
     if STATE_FILE:
         decisions = component_notification_decisions(
             active_by_component,
             state,
             now_s=now_s,
             reminder_s=REMINDER_S,
+            incident_by_component=incident_by_component,
+            recovery_by_component=recovery_by_component,
         )
     else:
         decisions = {
@@ -813,6 +1004,7 @@ def main() -> int:
             now_s=now_s,
             decisions=decisions,
             delivery_ok_by_component=delivery_ok_by_component,
+            incident_by_component=incident_by_component,
         )
         state_ok = _save_notification_state(STATE_FILE, next_state)
         escalation_ok = escalation_ok and state_ok

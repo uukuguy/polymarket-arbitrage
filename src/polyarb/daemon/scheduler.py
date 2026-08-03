@@ -44,6 +44,7 @@ from loguru import logger
 
 from polyarb.daemon.structure_schedule import derive_structure_schedule
 from polyarb.perception.structure_contract import (
+    STRUCTURE_DRIFT_CLASSIFIER_V2,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
     valid_structure_publication_checkpoint,
 )
@@ -1113,6 +1114,9 @@ class SnapshotScheduler:
         *,
         reason: str,
         queued_at_ms: int,
+        initialized_comparison_id: str | None = None,
+        current_comparison_id: str | None = None,
+        classifier_contract_version: str | None = None,
     ) -> None:
         try:
             await asyncio.to_thread(
@@ -1120,6 +1124,9 @@ class SnapshotScheduler:
                 reason,
                 queued_at_ms,
                 int(time.time() * 1_000),
+                initialized_comparison_id=initialized_comparison_id,
+                current_comparison_id=current_comparison_id,
+                classifier_contract_version=classifier_contract_version,
             )
         except Exception as error:  # noqa: BLE001 - admission still stays fail-safe
             logger.warning(
@@ -1189,6 +1196,7 @@ class SnapshotScheduler:
             await self._record_structure_defer(
                 reason="structure-drift-status-unavailable",
                 queued_at_ms=queued_at_ms,
+                classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
             )
             logger.warning(
                 f"structure drift status unavailable kind={type(error).__name__}"
@@ -1206,6 +1214,8 @@ class SnapshotScheduler:
             await self._record_structure_defer(
                 reason=f"structure-drift:{reason}",
                 queued_at_ms=queued_at_ms,
+                current_comparison_id=status.get("progress_id"),
+                classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
             )
             return False
         if self._producer_lock is not None:
@@ -1217,8 +1227,11 @@ class SnapshotScheduler:
                 await self._record_structure_defer(
                     reason=f"structure-drift:{reason}",
                     queued_at_ms=queued_at_ms,
+                    current_comparison_id=status.get("progress_id"),
+                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
                 )
                 return False
+            initialized_comparison_id: str | None = None
             try:
                 status = await asyncio.to_thread(
                     self._sqlite_store.structure_generation_drift_status
@@ -1244,6 +1257,9 @@ class SnapshotScheduler:
                     await self._record_structure_defer(
                         reason="structure-drift-identity-stale",
                         queued_at_ms=queued_at_ms,
+                        initialized_comparison_id=initialized_comparison_id,
+                        current_comparison_id=status.get("progress_id"),
+                        classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
                     )
                     logger.warning(
                         "structure drift current identity changed after "
@@ -1267,6 +1283,9 @@ class SnapshotScheduler:
                     await self._record_structure_defer(
                         reason="structure-drift-status-unavailable",
                         queued_at_ms=queued_at_ms,
+                        initialized_comparison_id=initialized_comparison_id,
+                        current_comparison_id=status.get("progress_id"),
+                        classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
                     )
                     logger.warning(
                         "structure drift post-initialization status invalid; "
@@ -1277,6 +1296,8 @@ class SnapshotScheduler:
                 await self._record_structure_defer(
                     reason="structure-drift-status-unavailable",
                     queued_at_ms=queued_at_ms,
+                    initialized_comparison_id=initialized_comparison_id,
+                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
                 )
                 logger.warning(
                     "structure drift current-contract initialization unavailable "
@@ -1421,6 +1442,9 @@ class SnapshotScheduler:
                 await self._record_structure_defer(
                     reason=defer_reason,
                     queued_at_ms=queued_at_ms,
+                    initialized_comparison_id=initialized_comparison_id,
+                    current_comparison_id=initialized_comparison_id,
+                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
                 )
                 return True
             self._finish_structure_drift_attempt(

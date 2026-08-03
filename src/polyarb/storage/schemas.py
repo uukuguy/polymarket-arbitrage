@@ -2641,10 +2641,13 @@ ON snapshot_attempts(started_at_ms DESC);
 
 STRUCTURE_DEFER_RECEIPTS_DDL = """
 CREATE TABLE IF NOT EXISTS structure_defer_receipts (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    reason         TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 64),
-    queued_at_ms   INTEGER NOT NULL CHECK(queued_at_ms >= 0),
-    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= queued_at_ms)
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    reason                      TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 64),
+    queued_at_ms                INTEGER NOT NULL CHECK(queued_at_ms >= 0),
+    observed_at_ms              INTEGER NOT NULL CHECK(observed_at_ms >= queued_at_ms),
+    initialized_comparison_id   TEXT,
+    current_comparison_id       TEXT,
+    classifier_contract_version TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_structure_defer_receipts_observed_at
 ON structure_defer_receipts(observed_at_ms DESC);

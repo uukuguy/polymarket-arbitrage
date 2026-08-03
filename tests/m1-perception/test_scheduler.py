@@ -2031,6 +2031,71 @@ def test_structure_defer_receipts_are_restart_visible_and_bounded(
     assert retained_count == 100
 
 
+def test_structure_drift_defer_receipt_persists_comparison_contract_identity(
+    daemon_settings_for_test,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+
+    receipt_id = store.record_structure_defer(
+        reason="structure-drift-identity-stale",
+        queued_at_ms=1_000,
+        observed_at_ms=1_100,
+        initialized_comparison_id="comparison-old",
+        current_comparison_id="comparison-new",
+        classifier_contract_version="structure-drift-classifier-v2",
+    )
+
+    assert SQLiteStore(store.db_path).get_latest_structure_defer() == {
+        "id": receipt_id,
+        "reason": "structure-drift-identity-stale",
+        "queued_at_ms": 1_000,
+        "observed_at_ms": 1_100,
+        "initialized_comparison_id": "comparison-old",
+        "current_comparison_id": "comparison-new",
+        "classifier_contract_version": "structure-drift-classifier-v2",
+    }
+
+
+def test_legacy_structure_defer_table_migrates_add_only_identity_columns(
+    tmp_path,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    db_path = tmp_path / "legacy-defer.db"
+    with sqlite3.connect(db_path) as con:
+        con.executescript(
+            "CREATE TABLE structure_defer_receipts ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 64),"
+            "queued_at_ms INTEGER NOT NULL CHECK(queued_at_ms >= 0),"
+            "observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= queued_at_ms));"
+            "INSERT INTO structure_defer_receipts(reason,queued_at_ms,observed_at_ms) "
+            "VALUES ('quote-pipeline-active',1000,1100);"
+        )
+
+    store = SQLiteStore(db_path)
+    store.init_schema()
+
+    with sqlite3.connect(db_path) as con:
+        columns = [row[1] for row in con.execute(
+            "PRAGMA table_info(structure_defer_receipts)"
+        )]
+    assert columns[-3:] == [
+        "initialized_comparison_id",
+        "current_comparison_id",
+        "classifier_contract_version",
+    ]
+    assert store.get_latest_structure_defer() == {
+        "id": 1,
+        "reason": "quote-pipeline-active",
+        "queued_at_ms": 1_000,
+        "observed_at_ms": 1_100,
+    }
+
+
 @pytest.mark.asyncio
 async def test_structure_rechecks_quote_priority_after_lock_acquisition(
     daemon_settings_for_test,
@@ -2517,8 +2582,9 @@ async def test_structure_drift_identity_change_after_initialize_blocks_snapshot(
             },
             {
                 "authorized": False,
-                "phase": None,
-                "reason": "structure-drift-progress-missing",
+                "phase": "source-events",
+                "reason": "structure-drift-incomplete",
+                "progress_id": "comparison-new",
             },
             {
                 "authorized": False,
@@ -2573,6 +2639,11 @@ async def test_structure_drift_identity_change_after_initialize_blocks_snapshot(
     defer = store.get_latest_structure_defer()
     assert defer is not None
     assert defer["reason"] == "structure-drift-identity-stale"
+    assert defer["initialized_comparison_id"] == "comparison-old"
+    assert defer["current_comparison_id"] == "comparison-new"
+    assert defer["classifier_contract_version"] == (
+        "structure-drift-classifier-v2"
+    )
 
     assert await scheduler._tick_once(queued_at_ms=2_000) is True
     scheduler._run_snapshot.assert_not_awaited()
@@ -2580,6 +2651,62 @@ async def test_structure_drift_identity_change_after_initialize_blocks_snapshot(
     assert store.get_latest_structure_drift_attempt()["progress_id"] == (
         "comparison-new"
     )
+
+
+@pytest.mark.asyncio
+async def test_post_initialize_status_unavailable_defer_binds_current_identity(
+    daemon_settings_for_test,
+) -> None:
+    from polyarb.daemon.scheduler import SnapshotScheduler
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    statuses = iter((
+        {
+            "authorized": False,
+            "phase": None,
+            "reason": "structure-drift-progress-missing",
+        },
+        {
+            "authorized": False,
+            "phase": None,
+            "reason": "structure-drift-progress-missing",
+        },
+        {
+            "authorized": False,
+            "phase": "unexpected-phase",
+            "reason": "structure-drift-incomplete",
+            "progress_id": "comparison-v2",
+        },
+    ))
+    store.structure_generation_drift_status = MagicMock(
+        side_effect=lambda: next(statuses)
+    )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v2"
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+    scheduler._run_snapshot = AsyncMock()
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is True
+
+    defer = store.get_latest_structure_defer()
+    assert defer is not None
+    assert defer["reason"] == "structure-drift-status-unavailable"
+    assert defer["initialized_comparison_id"] == "comparison-v2"
+    assert defer["current_comparison_id"] == "comparison-v2"
+    assert defer["classifier_contract_version"] == (
+        "structure-drift-classifier-v2"
+    )
+    scheduler._run_snapshot.assert_not_awaited()
 
 
 @pytest.mark.asyncio

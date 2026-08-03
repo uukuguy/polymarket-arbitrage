@@ -3024,6 +3024,15 @@ class SQLiteStore:
             _ensure_column("snapshot_attempts", "stderr_sha256", "TEXT")
             _ensure_column("snapshot_attempts", "stderr_tail", "TEXT")
             _ensure_column(
+                "structure_defer_receipts", "initialized_comparison_id", "TEXT"
+            )
+            _ensure_column(
+                "structure_defer_receipts", "current_comparison_id", "TEXT"
+            )
+            _ensure_column(
+                "structure_defer_receipts", "classifier_contract_version", "TEXT"
+            )
+            _ensure_column(
                 "structure_drift_attempts",
                 "identity_json",
                 "TEXT NOT NULL DEFAULT '{}'",
@@ -13304,6 +13313,10 @@ class SQLiteStore:
         reason: str,
         queued_at_ms: int,
         observed_at_ms: int,
+        *,
+        initialized_comparison_id: str | None = None,
+        current_comparison_id: str | None = None,
+        classifier_contract_version: str | None = None,
     ) -> int:
         """Persist bounded Quote-priority admission evidence across restarts."""
         if (
@@ -13311,15 +13324,32 @@ class SQLiteStore:
             or len(reason) > 64
             or queued_at_ms < 0
             or observed_at_ms < queued_at_ms
+            or any(
+                value is not None and (not value or len(value) > 128)
+                for value in (
+                    initialized_comparison_id,
+                    current_comparison_id,
+                    classifier_contract_version,
+                )
+            )
         ):
             raise ValueError("invalid-structure-defer")
         con = self._connect_writer()
         try:
             con.execute("BEGIN IMMEDIATE")
             cur = con.execute(
-                "INSERT INTO structure_defer_receipts(reason,queued_at_ms,observed_at_ms) "
-                "VALUES (?,?,?)",
-                (reason, queued_at_ms, observed_at_ms),
+                "INSERT INTO structure_defer_receipts("
+                "reason,queued_at_ms,observed_at_ms,initialized_comparison_id,"
+                "current_comparison_id,classifier_contract_version) "
+                "VALUES (?,?,?,?,?,?)",
+                (
+                    reason,
+                    queued_at_ms,
+                    observed_at_ms,
+                    initialized_comparison_id,
+                    current_comparison_id,
+                    classifier_contract_version,
+                ),
             )
             assert cur.lastrowid is not None
             receipt_id = int(cur.lastrowid)
@@ -13341,20 +13371,31 @@ class SQLiteStore:
         try:
             with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as con:
                 row = con.execute(
-                    "SELECT id,reason,queued_at_ms,observed_at_ms "
+                    "SELECT id,reason,queued_at_ms,observed_at_ms,"
+                    "initialized_comparison_id,current_comparison_id,"
+                    "classifier_contract_version "
                     "FROM structure_defer_receipts ORDER BY id DESC LIMIT 1"
                 ).fetchone()
         except sqlite3.OperationalError:
             return None
         if row is None:
             return None
-        return dict(
+        result = dict(
             zip(
-                ("id", "reason", "queued_at_ms", "observed_at_ms"),
+                (
+                    "id",
+                    "reason",
+                    "queued_at_ms",
+                    "observed_at_ms",
+                    "initialized_comparison_id",
+                    "current_comparison_id",
+                    "classifier_contract_version",
+                ),
                 row,
                 strict=True,
             )
         )
+        return {key: value for key, value in result.items() if value is not None}
 
     def finish_snapshot_attempt(
         self,

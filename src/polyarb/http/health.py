@@ -59,6 +59,7 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from polyarb.perception.structure_contract import STRUCTURE_DRIFT_CLASSIFIER_V2
 from polyarb.routing.feed_handoff import decide_feed_availability
 
 HEALTH_CONTENT_TYPE = "application/health+json"
@@ -711,12 +712,15 @@ def _structure_drift_health_check(
         comparison_id = status.get("progress_id")
         if phase == "stale":
             diagnostic_counts = status.get("diagnostic_counts", {})
+            diagnostic_root = status.get("diagnostic_root")
             diagnostic_samples = status.get("diagnostic_samples", {})
             observed = "terminal-stale"
             output = (
                 f"contract={contract} comparison={comparison_id} reason={reason} "
                 "diagnostic_counts="
                 f"{json.dumps(diagnostic_counts, sort_keys=True, separators=(',', ':'))} "
+                f"diagnostic_root={diagnostic_root} "
+                f"checkpoint_at_ms={checkpoint} "
                 "diagnostic_samples="
                 f"{json.dumps(diagnostic_samples, sort_keys=True, separators=(',', ':'))}"
             )
@@ -725,7 +729,9 @@ def _structure_drift_health_check(
                 "comparisonId": comparison_id,
                 "terminalReason": reason,
                 "diagnosticCounts": diagnostic_counts,
+                "diagnosticRoot": diagnostic_root,
                 "diagnosticSamples": diagnostic_samples,
+                "checkpointAtMs": checkpoint,
             }
         else:
             observed = status.get("authorization_mode")
@@ -743,6 +749,11 @@ def _structure_drift_health_check(
                 "class_counts="
                 f"{json.dumps(status.get('class_counts', {}), sort_keys=True)}"
             )
+            extra = {
+                "classifierContract": contract,
+                "comparisonId": comparison_id,
+                "checkpointAtMs": checkpoint,
+            }
     return {
         "snapshot:structure_generation_drift": [
             {
@@ -1282,6 +1293,13 @@ def _build_health_checks(
         in {"structure-drift-identity-stale", "structure-drift-status-unavailable"}
         and drift_status is not None
         and drift_status.get("authorized") is True
+        and drift_status.get("authorization_mode") == "drift-safe-sealed"
+        and drift_status.get("phase") == "sealed"
+        and latest_defer.get("classifier_contract_version")
+        == drift_status.get("classifier_contract_version")
+        == STRUCTURE_DRIFT_CLASSIFIER_V2
+        and latest_defer.get("current_comparison_id")
+        == drift_status.get("progress_id")
     )
     defer_is_current = latest_defer is not None and (
         latest_attempt is None
@@ -1311,7 +1329,18 @@ def _build_health_checks(
                 "status": defer_status,
                 "output": (
                     f"queued_age_seconds={round(queued_age_s, 1)} "
-                    f"observed_age_seconds={round(observed_age_s, 1)}"
+                    f"observed_age_seconds={round(observed_age_s, 1)} "
+                    "initialized_comparison="
+                    f"{latest_defer.get('initialized_comparison_id')} "
+                    f"current_comparison={latest_defer.get('current_comparison_id')} "
+                    f"contract={latest_defer.get('classifier_contract_version')}"
+                ),
+                "initializedComparisonId": latest_defer.get(
+                    "initialized_comparison_id"
+                ),
+                "currentComparisonId": latest_defer.get("current_comparison_id"),
+                "classifierContract": latest_defer.get(
+                    "classifier_contract_version"
                 ),
                 "time": _utc_now_iso(),
             }
