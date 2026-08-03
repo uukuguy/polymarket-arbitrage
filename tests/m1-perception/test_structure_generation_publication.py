@@ -40,6 +40,36 @@ PRODUCTION_CROSS_STREAM_MATRIX = {
 }
 
 
+def _seal_event_members(store: SQLiteStore, window_id: str) -> None:
+    while store.structure_event_member_status(window_id=window_id).get("sealed") is not True:
+        result = store.advance_structure_event_member_staging_chunk(
+            window_id=window_id, limit=500,
+        )
+        if result.get("failure_reason") or result.get("reason"):
+            raise AssertionError(result)
+
+
+def test_event_source_authority_is_required_before_publication(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "publication-source-gate.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
+            "VALUES ('historical','complete',1,2)"
+        )
+    with pytest.raises(
+        ValueError, match="structure-event-source-receipt-unavailable"
+    ):
+        store.begin_structure_publication(
+            "historical",
+            snapshot_metadata={
+                "snapshot_id": 1, "taken_at_ms": 2, "mode": "full",
+                "data_product": "structure", "expected_counts": COMPONENT_COUNTS,
+            },
+            now_ms=2,
+        )
+
+
 def test_production_cross_stream_matrix_is_closed_and_mutually_exclusive() -> None:
     matrix = PRODUCTION_CROSS_STREAM_MATRIX
     assert matrix["global_active_open_neg_risk"] == (
@@ -256,6 +286,7 @@ def test_group_truth_500_event_chunk_uses_bounded_bulk_duplicate_lookup(
     assert store.advance_structure_event_market_backfill(
         window_id=window["id"], max_events=500, max_relationships=500, now_ms=400
     )["completed"] is True
+    _seal_event_members(store, str(window["id"]))
     publication = store.begin_structure_publication(
         window_id=window["id"],
         snapshot_metadata={
@@ -579,6 +610,7 @@ def test_structure_quarantine_is_exact_and_source_authenticated(
         now_ms=103,
     )["completed"]:
         pass
+    _seal_event_members(store, str(window["id"]))
     publication = store.begin_structure_publication(
         window_id=window["id"],
         snapshot_metadata={
@@ -677,6 +709,7 @@ def test_structure_quarantine_exactly_equals_production_shaped_184_row_differenc
         window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
     )["completed"]:
         pass
+    _seal_event_members(store, str(window["id"]))
     publication = store.begin_structure_publication(
         window_id=window["id"],
         snapshot_metadata={
@@ -767,6 +800,7 @@ def test_event_only_active_member_is_quarantined_with_recomputed_group_truth(
     assert store.advance_structure_event_market_backfill(
         window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
     )["completed"] is True
+    _seal_event_members(store, str(window["id"]))
     publication = store.begin_structure_publication(
         window_id=window["id"],
         snapshot_metadata={
@@ -904,6 +938,7 @@ def test_duplicate_parent_event_only_candidate_remains_membership_invalid(
     assert store.advance_structure_event_market_backfill(
         window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
     )["completed"] is True
+    _seal_event_members(store, str(window["id"]))
     publication = store.begin_structure_publication(
         window_id=window["id"],
         snapshot_metadata={
@@ -964,6 +999,7 @@ def test_both_present_status_mismatch_remains_membership_invalid(
     assert store.advance_structure_event_market_backfill(
         window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
     )["completed"] is True
+    _seal_event_members(store, str(window["id"]))
     publication = store.begin_structure_publication(
         window_id=window["id"],
         snapshot_metadata={
@@ -1086,6 +1122,7 @@ def test_production_shaped_62_event_only_members_across_14_groups_certify(
     assert store.advance_structure_event_market_backfill(
         window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
     )["completed"] is True
+    _seal_event_members(store, str(window["id"]))
     publication = store.begin_structure_publication(
         window_id=window["id"],
         snapshot_metadata={
@@ -1200,6 +1237,7 @@ def test_source_market_difference_without_exact_quarantine_evidence_fails_closed
         window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
     )["completed"] is True
     zero_counts = {component: 0 for component in COMPONENT_COUNTS}
+    _seal_event_members(store, str(window["id"]))
     publication = store.begin_structure_publication(
         window_id=window["id"],
         snapshot_metadata={
@@ -1235,6 +1273,7 @@ def test_normalization_chunk_never_fetches_more_than_raw_row_budget(
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()
     window_id = _complete_window(store, "market-1", now_ms=100)
+    _seal_event_members(store, window_id)
     publication = store.begin_structure_publication(
         window_id=window_id,
         snapshot_metadata={
@@ -1477,6 +1516,7 @@ def _complete_window(store: SQLiteStore, market_id: str, *, now_ms: int) -> str:
         now_ms=now_ms + 3,
     )
     assert bootstrap["completed"] is True
+    _seal_event_members(store, window_id)
     return window_id
 
 
@@ -1552,6 +1592,7 @@ def _begin_large_generation(
         now_ms += 1
         if bootstrap["completed"]:
             break
+    _seal_event_members(store, str(window["id"]))
     publication = store.begin_structure_publication(
         window_id=window["id"],
         snapshot_metadata={
@@ -1997,6 +2038,7 @@ def test_fresh_source_window_reserves_next_id_only_after_contract_supersession(
         max_relationships=10,
         now_ms=3_300,
     )["completed"] is True
+    _seal_event_members(store, fresh_window_id)
     assert store.current_structure_generation()["snapshot_id"] == 845
     assert store.get_scheduler_state()["failure_counter"] == 261
 
@@ -2715,6 +2757,7 @@ def test_bulk_source_certification_matches_per_event_reference_projection(
         window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
     )["completed"]:
         pass
+    _seal_event_members(store, str(window["id"]))
     publication = store.begin_structure_publication(
         window_id=window["id"],
         snapshot_metadata={
@@ -2805,6 +2848,7 @@ def test_bulk_event_only_evidence_rejects_post_seal_window_status_drift(
     assert store.advance_structure_event_market_backfill(
         window_id=window["id"], max_events=500, max_relationships=500, now_ms=103
     )["completed"] is True
+    _seal_event_members(store, str(window["id"]))
     publication = store.begin_structure_publication(
         window_id=window["id"],
         snapshot_metadata={
@@ -3177,6 +3221,7 @@ def test_duplicate_market_uses_first_source_parent_and_never_publishes(
     assert store.advance_structure_event_market_backfill(
         window_id=window_id, max_events=10, max_relationships=10, now_ms=103
     )["completed"] is True
+    _seal_event_members(store, window_id)
 
     publication_id = None
     with pytest.raises(ValueError, match="generation-validation-issues|membership-invalid"):
@@ -3377,6 +3422,7 @@ def test_membership_certification_allows_non_open_member_absent_from_active_stre
         member_closed,
     )
     counts = {**COMPONENT_COUNTS, "memberships": 2}
+    _seal_event_members(store, window_id)
     publication = store.begin_structure_publication(
         window_id=window_id,
         snapshot_metadata={

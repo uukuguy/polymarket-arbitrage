@@ -574,15 +574,13 @@ def test_event_member_health_recovers_after_validated_seal(
     from polyarb.storage.sqlite_store import SQLiteStore
 
     store = SQLiteStore(daemon_settings_for_test.db_path)
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    store.commit_structure_event_page(
+        window_id=window_id, requested_cursor=None, next_cursor=None,
+        completed=True, events=[{"id": "event-1", "markets": []}],
+        finished_at_ms=2,
+    )
     with sqlite3.connect(store.db_path) as con:
-        con.execute(
-            "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
-            "VALUES ('member-window','open',1,2)"
-        )
-        con.execute(
-            "INSERT INTO structure_sync_event_staging VALUES "
-            "('member-window','event-1','{\"markets\":[]}',NULL,1)"
-        )
         con.execute("UPDATE structure_sync_windows SET status='complete'")
     recovering = http_test_client.get("/healthz").json()["checks"][
         "snapshot:structure_event_members"
@@ -590,7 +588,7 @@ def test_event_member_health_recovers_after_validated_seal(
     assert (recovering["observedValue"], recovering["status"]) == (
         "recovering", "warn",
     )
-    store.advance_structure_event_member_staging_chunk(window_id="member-window")
+    store.advance_structure_event_member_staging_chunk(window_id=window_id)
     for path in ("/health", "/healthz"):
         sealed = http_test_client.get(path).json()["checks"][
             "snapshot:structure_event_members"

@@ -2844,6 +2844,75 @@ BEGIN SELECT RAISE(ABORT,'structure-event-market-staging-frozen'); END;
 # savepoint; sqlite3.executescript() would implicitly commit that savepoint.
 STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
     (
+        "after-event-metadata-table",
+        "CREATE TABLE IF NOT EXISTS structure_sync_event_metadata_staging ("
+        "window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),"
+        "event_id TEXT NOT NULL,event_ordinal INTEGER NOT NULL CHECK(event_ordinal>=0),"
+        "event_group_id TEXT,payload_hash TEXT NOT NULL CHECK(length(payload_hash)=64),"
+        "payload_length INTEGER NOT NULL CHECK(payload_length>=0),metadata_contract TEXT "
+        "NOT NULL CHECK(metadata_contract='structure-event-source-v1'),"
+        "PRIMARY KEY(window_id,event_id))",
+    ),
+    (
+        "after-event-source-progress-table",
+        "CREATE TABLE IF NOT EXISTS structure_sync_event_source_progress ("
+        "window_id TEXT PRIMARY KEY REFERENCES structure_sync_windows(id) ON DELETE CASCADE,"
+        "event_count INTEGER NOT NULL DEFAULT 0 CHECK(event_count>=0),"
+        "event_state TEXT NOT NULL,checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms>=0))",
+    ),
+    (
+        "after-event-source-receipt-table",
+        "CREATE TABLE IF NOT EXISTS structure_sync_event_source_receipts ("
+        "window_id TEXT PRIMARY KEY REFERENCES structure_sync_windows(id),"
+        "event_count INTEGER NOT NULL CHECK(event_count>=0),event_root TEXT NOT NULL "
+        "CHECK(length(event_root)=64),terminal_event_pages INTEGER NOT NULL "
+        "CHECK(terminal_event_pages>=0),"
+        "terminal_event_cursor TEXT NOT NULL,metadata_contract TEXT NOT NULL "
+        "CHECK(metadata_contract='structure-event-source-v1'),sealed_at_ms INTEGER NOT NULL "
+        "CHECK(sealed_at_ms>=0),receipt_digest TEXT NOT NULL CHECK(length(receipt_digest)=64))",
+    ),
+    (
+        "after-event-metadata-replace-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_metadata_replace_guard "
+        "BEFORE INSERT ON structure_sync_event_metadata_staging WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_metadata_staging WHERE window_id=NEW.window_id AND "
+        "event_id=NEW.event_id) BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-metadata-frozen'); END",
+    ),
+    (
+        "after-event-metadata-update-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_metadata_update_guard BEFORE UPDATE "
+        "ON structure_sync_event_metadata_staging BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-metadata-frozen'); END",
+    ),
+    (
+        "after-event-metadata-delete-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_metadata_delete_guard BEFORE DELETE "
+        "ON structure_sync_event_metadata_staging WHEN (SELECT status FROM "
+        "structure_sync_windows WHERE id=OLD.window_id) NOT IN ('published','failed') BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-metadata-frozen'); END",
+    ),
+    (
+        "after-event-source-receipt-replace-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_source_receipt_replace_guard "
+        "BEFORE INSERT ON structure_sync_event_source_receipts WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_source_receipts WHERE window_id=NEW.window_id) BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-source-receipt-frozen'); END",
+    ),
+    (
+        "after-event-source-receipt-update-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_source_receipt_update_guard BEFORE "
+        "UPDATE ON structure_sync_event_source_receipts BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-source-receipt-frozen'); END",
+    ),
+    (
+        "after-event-source-receipt-delete-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_source_receipt_delete_guard BEFORE "
+        "DELETE ON structure_sync_event_source_receipts WHEN (SELECT status FROM "
+        "structure_sync_windows WHERE id=OLD.window_id) NOT IN ('published','failed') BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-source-receipt-frozen'); END",
+    ),
+    (
         "after-sidecar-table",
         "CREATE TABLE IF NOT EXISTS structure_sync_event_member_staging ("
         "window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),"
@@ -2865,7 +2934,9 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "CHECK(member_byte_offset>=0),member_state TEXT NOT NULL,diagnostic_state TEXT NOT NULL,"
         "checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms>=0),"
         "completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms>=0),"
-        "failure_reason TEXT)",
+        "failure_reason TEXT,member_character_offset INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(member_character_offset>=0),source_receipt_digest TEXT NOT NULL DEFAULT '',"
+        "parent_payload_hash TEXT NOT NULL DEFAULT '',checkpoint_digest TEXT NOT NULL DEFAULT '')",
     ),
     (
         "after-receipt-table",
@@ -2955,9 +3026,11 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
     (
         "after-sidecar-delete-trigger-create",
         "CREATE TRIGGER trg_structure_event_member_staging_delete_guard BEFORE DELETE ON "
-        "structure_sync_event_member_staging WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_staging WHEN (SELECT status FROM "
+        "structure_sync_windows WHERE id=OLD.window_id) NOT IN ('published','failed') AND "
+        "(EXISTS (SELECT 1 FROM "
         "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) OR "
-        "(SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='open' "
+        "(SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='open') "
         "BEGIN SELECT "
         "RAISE(ABORT,'structure-event-member-staging-frozen'); END",
     ),
@@ -2989,7 +3062,8 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
     (
         "after-receipt-delete-trigger-create",
         "CREATE TRIGGER trg_structure_event_member_receipt_delete BEFORE DELETE ON "
-        "structure_sync_event_member_receipts BEGIN SELECT "
+        "structure_sync_event_member_receipts WHEN (SELECT status FROM "
+        "structure_sync_windows WHERE id=OLD.window_id) NOT IN ('published','failed') BEGIN SELECT "
         "RAISE(ABORT,'structure-event-member-receipt-sealed'); END",
     ),
 )

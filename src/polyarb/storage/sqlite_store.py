@@ -43,6 +43,7 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_PAYLOAD_BYTES,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
     STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT,
+    STRUCTURE_EVENT_SOURCE_CONTRACT,
     STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
     STRUCTURE_PUBLICATION_MAX_ROWS,
     STRUCTURE_SOURCE_COMPONENTS,
@@ -171,27 +172,6 @@ def _structure_event_member_receipt_digest(values: tuple[object, ...]) -> str:
     ).encode()).hexdigest()
 
 
-def _structure_event_source_identity(
-    con: sqlite3.Connection, *, window_id: str, checkpoint_at_ms: int
-) -> tuple[int, str, str]:
-    chain = RowChainSHA256.new("source-event")
-    count = 0
-    for event_id, source_ordinal, payload_json in con.execute(
-        "SELECT event_id,COALESCE(source_ordinal,rowid),payload_json FROM "
-        "structure_sync_event_staging WHERE window_id=? ORDER BY event_id", (window_id,),
-    ):
-        chain.update((str(event_id), int(source_ordinal), hashlib.sha256(
-            str(payload_json).encode("utf-8")
-        ).hexdigest()))
-        count += 1
-    root = chain.hexdigest()
-    identity = hashlib.sha256(json.dumps(
-        (window_id, checkpoint_at_ms, count, root), ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode()).hexdigest()
-    return count, root, identity
-
-
 def _event_member_progress_state(
     *, member_chain: RowChainSHA256, source_event_count: int,
     source_event_root: str, source_identity_hash: str,
@@ -242,6 +222,25 @@ def _migrate_structure_event_member_schema(
             con.execute(statement)
             if fault_point is not None and fault_hook is not None:
                 fault_hook(fault_point)
+        progress_columns = {
+            str(row[1]) for row in con.execute(
+                "PRAGMA table_info(structure_sync_event_member_progress)"
+            )
+        }
+        additions = (
+            ("member_character_offset", "INTEGER NOT NULL DEFAULT 0"),
+            ("source_receipt_digest", "TEXT NOT NULL DEFAULT ''"),
+            ("parent_payload_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("checkpoint_digest", "TEXT NOT NULL DEFAULT ''"),
+        )
+        for column, ddl in additions:
+            if column not in progress_columns:
+                con.execute(
+                    f"ALTER TABLE structure_sync_event_member_progress "
+                    f"ADD COLUMN {column} {ddl}"
+                )
+                if fault_hook is not None:
+                    fault_hook(f"after-progress-{column}")
         con.execute("RELEASE SAVEPOINT structure_event_member_schema_migration")
     except BaseException:
         con.execute("ROLLBACK TO SAVEPOINT structure_event_member_schema_migration")
@@ -1013,6 +1012,55 @@ def _comparison_receipt_digest(
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _structure_event_source_receipt_digest(values: tuple[object, ...]) -> str:
+    return hashlib.sha256(
+        json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _structure_event_member_checkpoint_digest(values: tuple[object, ...]) -> str:
+    return hashlib.sha256(
+        json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _validated_structure_event_source_receipt(
+    con: sqlite3.Connection, window_id: str,
+) -> tuple[int, str, str, str] | None:
+    row = con.execute(
+        "SELECT window_id,event_count,event_root,terminal_event_pages,"
+        "terminal_event_cursor,metadata_contract,sealed_at_ms,receipt_digest FROM "
+        "structure_sync_event_source_receipts WHERE window_id=?", (window_id,),
+    ).fetchone()
+    if row is None or row[5] != STRUCTURE_EVENT_SOURCE_CONTRACT:
+        return None
+    if row[7] != _structure_event_source_receipt_digest(tuple(row[:7])):
+        raise ValueError("structure-event-source-receipt-invalid")
+    window = con.execute(
+        "SELECT status,event_cursor,event_pages FROM structure_sync_windows WHERE id=?",
+        (window_id,),
+    ).fetchone()
+    progress = con.execute(
+        "SELECT event_count,event_state FROM structure_sync_event_source_progress "
+        "WHERE window_id=?", (window_id,),
+    ).fetchone()
+    if window is None or window[0] not in {"complete", "published"} or progress is None:
+        raise ValueError("structure-event-source-receipt-invalid")
+    chain = RowChainSHA256.from_json(str(progress[1]), expected_domain="source-event")
+    if (
+        int(progress[0]) != int(row[1])
+        or chain.count != int(row[1])
+        or chain.hexdigest() != row[2]
+        or int(window[2]) != int(row[3])
+        or str(window[1] or "") != str(row[4])
+    ):
+        raise ValueError("structure-event-source-receipt-invalid")
+    identity = hashlib.sha256(json.dumps(
+        (row[0], row[1], row[2], row[7]), separators=(",", ":")
+    ).encode()).hexdigest()
+    return int(row[1]), str(row[2]), identity, str(row[7])
 
 
 _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS = (
@@ -2762,7 +2810,9 @@ class SQLiteStore:
         progress_sql = (
             "SELECT event_cursor,member_ordinal,rows_written,member_byte_offset,"
             "member_state,diagnostic_state,checkpoint_at_ms,completed_at_ms,"
-            "failure_reason FROM structure_sync_event_member_progress WHERE window_id=?"
+            "failure_reason,member_character_offset,source_receipt_digest,"
+            "parent_payload_hash,checkpoint_digest FROM "
+            "structure_sync_event_member_progress WHERE window_id=?"
         )
         try:
             con.execute("BEGIN IMMEDIATE")
@@ -2772,11 +2822,13 @@ class SQLiteStore:
             ).fetchone()
             if window is None or window[0] not in {"complete", "published"}:
                 raise ValueError("structure-sync-window-not-complete")
+            source = _validated_structure_event_source_receipt(con, window_id)
+            if source is None:
+                con.execute("COMMIT")
+                return {"sealed": False, "complete": False,
+                        "reason": "structure-event-source-receipt-unavailable"}
             progress = con.execute(progress_sql, (window_id,)).fetchone()
             if progress is None:
-                source = _structure_event_source_identity(
-                    con, window_id=window_id, checkpoint_at_ms=int(window[1])
-                )
                 state = _event_member_progress_state(
                     member_chain=RowChainSHA256.new("source-event"),
                     source_event_count=source[0], source_event_root=source[1],
@@ -2784,13 +2836,18 @@ class SQLiteStore:
                     window_checkpoint_at_ms=int(window[1]),
                 )
                 diagnostic = RowChainSHA256.new("diagnostic/unclassified").to_json()
+                checkpoint_digest = _structure_event_member_checkpoint_digest((
+                    source[3], "", 0, 0, 0, 0, "", state, diagnostic,
+                ))
                 con.execute(
                     "INSERT INTO structure_sync_event_member_progress VALUES "
-                    "(?,?,?,?,?,?,?,?,?,?)",
-                    (window_id, "", 0, 0, 0, state, diagnostic, now_ms, None, None),
+                    "(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (window_id, "", 0, 0, 0, state, diagnostic, now_ms, None, None,
+                     0, source[3], "", checkpoint_digest),
                 )
                 con.execute("COMMIT")
-                progress = ("", 0, 0, 0, state, diagnostic, now_ms, None, None)
+                progress = ("", 0, 0, 0, state, diagnostic, now_ms, None, None,
+                            0, source[3], "", checkpoint_digest)
             else:
                 con.execute("COMMIT")
             if progress[7] is not None:
@@ -2802,6 +2859,13 @@ class SQLiteStore:
                         "member_ordinal": max(0, int(progress[1]) - 1),
                         "failure_reason": str(progress[8])}
             cursor, ordinal, byte_offset = str(progress[0]), int(progress[1]), int(progress[3])
+            character_offset = int(progress[9])
+            expected_checkpoint = _structure_event_member_checkpoint_digest((
+                progress[10], cursor, ordinal, character_offset, byte_offset,
+                int(progress[2]), progress[11], progress[4], progress[5],
+            ))
+            if progress[10] != source[3] or progress[12] != expected_checkpoint:
+                raise ValueError("structure-event-member-checkpoint-invalid")
             chain, source_count, source_root, source_identity, checkpoint = (
                 _read_event_member_progress_state(str(progress[4]))
             )
@@ -2813,25 +2877,41 @@ class SQLiteStore:
             rows = []
             remaining = limit
             terminal_ordinal, terminal_offset = max(0, ordinal - 1), byte_offset
+            terminal_character_offset = character_offset
+            parent_hash = str(progress[11])
             try:
                 for _ in range(limit):
                     if not remaining:
                         break
                     sql = (
-                        "SELECT event_id,COALESCE(source_ordinal,rowid),payload_json FROM "
-                        "structure_sync_event_staging WHERE window_id=? AND event_id=?"
+                        "SELECT event.event_id,COALESCE(event.source_ordinal,event.rowid),"
+                        "event.payload_json,metadata.event_group_id,metadata.payload_hash FROM "
+                        "structure_sync_event_staging event JOIN "
+                        "structure_sync_event_metadata_staging metadata ON "
+                        "metadata.window_id=event.window_id AND metadata.event_id=event.event_id "
+                        "WHERE event.window_id=? AND event.event_id=?"
                         if ordinal else
-                        "SELECT event_id,COALESCE(source_ordinal,rowid),payload_json FROM "
-                        "structure_sync_event_staging WHERE window_id=? AND event_id>? "
-                        "ORDER BY event_id LIMIT 1"
+                        "SELECT event.event_id,COALESCE(event.source_ordinal,event.rowid),"
+                        "event.payload_json,metadata.event_group_id,metadata.payload_hash FROM "
+                        "structure_sync_event_staging event JOIN "
+                        "structure_sync_event_metadata_staging metadata ON "
+                        "metadata.window_id=event.window_id AND metadata.event_id=event.event_id "
+                        "WHERE event.window_id=? AND event.event_id>? "
+                        "ORDER BY event.event_id LIMIT 1"
                     )
                     event = con.execute(sql, (window_id, cursor)).fetchone()
                     if event is None:
                         break
                     event_id, event_order, payload = str(event[0]), int(event[1]), str(event[2])
+                    event_group_id = event[3]
+                    parent_hash = str(event[4])
+                    if ordinal and progress[11] != parent_hash:
+                        raise ValueError("structure-event-member-parent-mismatch")
                     batch = decode_event_member_batch(
                         payload, member_ordinal=ordinal,
-                        member_byte_offset=byte_offset, limit=remaining,
+                        member_byte_offset=byte_offset,
+                        member_character_offset=character_offset,
+                        limit=remaining,
                     )
                     for item_ordinal, member, _raw in batch.members:
                         if inspection_callback is not None:
@@ -2840,6 +2920,7 @@ class SQLiteStore:
                             window_id=window_id, event_id=event_id,
                             event_ordinal=event_order,
                             member_ordinal=item_ordinal, member=member,
+                            event_group_id=event_group_id,
                         )
                         commitment = (
                             STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT, event_id,
@@ -2855,23 +2936,25 @@ class SQLiteStore:
                         rows.append(row)
                     remaining -= len(batch.members)
                     cursor, terminal_offset = event_id, batch.next_byte_offset
+                    terminal_character_offset = batch.next_character_offset
+                    character_offset = batch.next_character_offset
                     if batch.members:
                         terminal_ordinal = batch.members[-1][0]
                     if batch.complete:
-                        ordinal, byte_offset = 0, 0
+                        ordinal, byte_offset, character_offset = 0, 0, 0
                     else:
                         ordinal, byte_offset = batch.next_member_ordinal, batch.next_byte_offset
                         break
             except ValueError as error:
                 reason = str(error)[:200]
                 con.execute("BEGIN IMMEDIATE")
+                if con.execute(progress_sql, (window_id,)).fetchone() != progress:
+                    raise ValueError("structure-event-member-cursor-race")
                 updated = con.execute(
                     "UPDATE structure_sync_event_member_progress SET "
-                    "checkpoint_at_ms=?,failure_reason=? WHERE window_id=? AND "
-                    "event_cursor=? AND member_ordinal=? AND rows_written=? AND "
-                    "member_byte_offset=? AND member_state=? AND diagnostic_state=? "
+                    "checkpoint_at_ms=?,failure_reason=? WHERE window_id=? "
                     "AND completed_at_ms IS NULL AND failure_reason IS NULL",
-                    (now_ms, reason, window_id, *progress[:6]),
+                    (now_ms, reason, window_id),
                 )
                 if updated.rowcount != 1:
                     raise ValueError("structure-event-member-cursor-race")
@@ -2907,6 +2990,15 @@ class SQLiteStore:
             )
             stored_ordinal = terminal_ordinal if complete else ordinal
             stored_offset = terminal_offset if complete else byte_offset
+            stored_character_offset = (
+                terminal_character_offset if complete else character_offset
+            )
+            stored_parent_hash = parent_hash if cursor else ""
+            checkpoint_digest = _structure_event_member_checkpoint_digest((
+                source[3], cursor, stored_ordinal, stored_character_offset,
+                stored_offset, chain.count, stored_parent_hash, next_state,
+                invalid_chain.to_json(),
+            ))
             if complete:
                 receipt = (
                     window_id, source_count, source_root, source_identity,
@@ -2922,13 +3014,14 @@ class SQLiteStore:
             updated = con.execute(
                 "UPDATE structure_sync_event_member_progress SET event_cursor=?,"
                 "member_ordinal=?,rows_written=?,member_byte_offset=?,member_state=?,"
-                "diagnostic_state=?,checkpoint_at_ms=?,completed_at_ms=? WHERE "
-                "window_id=? AND event_cursor=? AND member_ordinal=? AND rows_written=? "
-                "AND member_byte_offset=? AND member_state=? AND diagnostic_state=? "
-                "AND checkpoint_at_ms=? AND completed_at_ms IS NULL AND failure_reason IS NULL",
+                "diagnostic_state=?,checkpoint_at_ms=?,completed_at_ms=?,"
+                "member_character_offset=?,source_receipt_digest=?,"
+                "parent_payload_hash=?,checkpoint_digest=? WHERE "
+                "window_id=? AND completed_at_ms IS NULL AND failure_reason IS NULL",
                 (cursor, stored_ordinal, chain.count, stored_offset, next_state,
                  invalid_chain.to_json(), now_ms, now_ms if complete else None,
-                 window_id, *progress[:7]),
+                 stored_character_offset, source[3], stored_parent_hash,
+                 checkpoint_digest, window_id),
             )
             if updated.rowcount != 1:
                 raise ValueError("structure-event-member-cursor-race")
@@ -2948,18 +3041,25 @@ class SQLiteStore:
         invalid = {"sealed": False, "complete": False,
                    "reason": "structure-event-member-receipt-invalid"}
         with sqlite3.connect(self._db_path) as con:
-            window = con.execute(
-                "SELECT status,checkpoint_at_ms FROM structure_sync_windows WHERE id=?",
+            receipt = con.execute(
+                "SELECT * FROM structure_sync_event_member_receipts WHERE window_id=?",
                 (window_id,),
             ).fetchone()
+            try:
+                source = _validated_structure_event_source_receipt(con, window_id)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return invalid
+            if source is None:
+                if receipt is not None:
+                    return invalid
+                return {"sealed": False, "complete": False,
+                        "reason": "structure-event-source-receipt-unavailable"}
             progress = con.execute(
                 "SELECT event_cursor,member_ordinal,rows_written,member_byte_offset,"
                 "member_state,diagnostic_state,checkpoint_at_ms,completed_at_ms,"
-                "failure_reason FROM structure_sync_event_member_progress WHERE window_id=?",
-                (window_id,),
-            ).fetchone()
-            receipt = con.execute(
-                "SELECT * FROM structure_sync_event_member_receipts WHERE window_id=?",
+                "failure_reason,member_character_offset,source_receipt_digest,"
+                "parent_payload_hash,checkpoint_digest FROM "
+                "structure_sync_event_member_progress WHERE window_id=?",
                 (window_id,),
             ).fetchone()
             if receipt is None:
@@ -2977,8 +3077,7 @@ class SQLiteStore:
                             "member_byte_offset": int(progress[3])}
                 return invalid
             try:
-                if (window is None or window[0] not in {"complete", "published"}
-                        or progress is None or progress[7] is None
+                if (progress is None or progress[7] is None
                         or progress[8] is not None or receipt[0] != window_id
                         or receipt[4] != STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT
                         or receipt[13] != _structure_event_member_receipt_digest(
@@ -2986,7 +3085,13 @@ class SQLiteStore:
                         or progress[0] != receipt[9]
                         or int(progress[1]) != int(receipt[10])
                         or int(progress[2]) != int(receipt[5])
-                        or int(progress[3]) != int(receipt[11])):
+                        or int(progress[3]) != int(receipt[11])
+                        or progress[10] != source[3]
+                        or progress[12] != _structure_event_member_checkpoint_digest((
+                            progress[10], progress[0], int(progress[1]),
+                            int(progress[9]), int(progress[3]), int(progress[2]),
+                            progress[11], progress[4], progress[5],
+                        ))):
                     return invalid
                 chain, count, root, identity, checkpoint = (
                     _read_event_member_progress_state(str(progress[4]))
@@ -2994,11 +3099,8 @@ class SQLiteStore:
                 diagnostic = RowChainSHA256.from_json(
                     str(progress[5]), expected_domain="diagnostic/unclassified"
                 )
-                source = _structure_event_source_identity(
-                    con, window_id=window_id, checkpoint_at_ms=int(window[1])
-                )
-                if (source != (count, root, identity)
-                        or checkpoint != int(window[1])
+                if ((count, root, identity) != source[:3]
+                        or checkpoint < 0
                         or (count, root, identity) != tuple(receipt[1:4])
                         or chain.count != int(receipt[5])
                         or chain.hexdigest() != receipt[6]
@@ -8474,6 +8576,12 @@ class SQLiteStore:
             or any(type(value) is not int or value < 0 for value in expected.values())
         ):
             raise ValueError("invalid-structure-publication-metadata")
+        member_status = self.structure_event_member_status(window_id=window_id)
+        if member_status.get("sealed") is not True:
+            raise ValueError(
+                str(member_status.get("reason") or member_status.get("failure_reason")
+                    or "structure-event-member-sidecar-incomplete")
+            )
         counts = {component: 0 for component in _STRUCTURE_COMPONENTS}
         expected_json = json.dumps(expected, sort_keys=True, separators=(",", ":"))
         counts_json = json.dumps(counts, sort_keys=True, separators=(",", ":"))
@@ -10351,6 +10459,11 @@ class SQLiteStore:
                     "VALUES (?,?,'open',?,?)",
                     (window_id, window_id, started_at_ms, started_at_ms),
                 )
+                con.execute(
+                    "INSERT INTO structure_sync_event_source_progress VALUES (?,?,?,?)",
+                    (window_id, 0, RowChainSHA256.new("source-event").to_json(),
+                     started_at_ms),
+                )
                 row = con.execute(
                     "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
                     "checkpoint_at_ms,event_pages,market_pages,failure_reason,"
@@ -10418,6 +10531,11 @@ class SQLiteStore:
                 ") VALUES (?,?,'open',?,?)",
                 (successor_id, str(lineage[0]), restarted_at_ms, restarted_at_ms + 1),
             )
+            con.execute(
+                "INSERT INTO structure_sync_event_source_progress VALUES (?,?,?,?)",
+                (successor_id, 0, RowChainSHA256.new("source-event").to_json(),
+                 restarted_at_ms + 1),
+            )
             row = con.execute(
                 "SELECT id,status,event_cursor,market_cursor,started_at_ms,"
                 "checkpoint_at_ms,event_pages,market_pages,failure_reason,"
@@ -10478,6 +10596,11 @@ class SQLiteStore:
                 "id,recovery_root_window_id,status,started_at_ms,checkpoint_at_ms) "
                 "VALUES (?,?,'open',?,?)",
                 (successor_id, str(blocked[6]), rotated_at_ms, rotated_at_ms + 1),
+            )
+            con.execute(
+                "INSERT INTO structure_sync_event_source_progress VALUES (?,?,?,?)",
+                (successor_id, 0, RowChainSHA256.new("source-event").to_json(),
+                 rotated_at_ms + 1),
             )
             digest = _bootstrap_rotation_digest(
                 recovery_root_window_id=str(blocked[6]),
@@ -10582,6 +10705,16 @@ class SQLiteStore:
             ]
             if to_delete:
                 delete_placeholders = ",".join("?" for _ in to_delete)
+                for table in (
+                    "structure_sync_event_member_receipts",
+                    "structure_sync_event_member_staging",
+                    "structure_sync_event_source_receipts",
+                    "structure_sync_event_metadata_staging",
+                ):
+                    con.execute(
+                        f"DELETE FROM {table} WHERE window_id IN ({delete_placeholders})",
+                        to_delete,
+                    )
                 con.execute(
                     "DELETE FROM structure_sync_event_market_staging "
                     f"WHERE window_id IN ({delete_placeholders})",
@@ -10638,6 +10771,16 @@ class SQLiteStore:
             ]
             if to_delete:
                 placeholders = ",".join("?" for _ in to_delete)
+                for table in (
+                    "structure_sync_event_member_receipts",
+                    "structure_sync_event_member_staging",
+                    "structure_sync_event_source_receipts",
+                    "structure_sync_event_metadata_staging",
+                ):
+                    con.execute(
+                        f"DELETE FROM {table} WHERE window_id IN ({placeholders})",
+                        to_delete,
+                    )
                 con.execute(
                     "DELETE FROM structure_sync_event_market_staging "
                     f"WHERE window_id IN ({placeholders})",
@@ -10799,14 +10942,25 @@ class SQLiteStore:
             raise ValueError("invalid-structure-sync-window")
         if finished_at_ms < 0 or completed != (next_cursor is None):
             raise ValueError("invalid-structure-event-page")
-        serialized: list[tuple[str, str, str | None]] = []
+        serialized: list[tuple[str, str, str | None, str | None, str, int]] = []
         for event in events:
             event_id = event.get("id") if isinstance(event, dict) else None
             if not isinstance(event_id, str) or not event_id:
                 raise ValueError("invalid-structure-event")
-            serialized.append(
-                (event_id, json.dumps(event, sort_keys=True), requested_cursor)
+            payload = json.dumps(
+                event, sort_keys=True, ensure_ascii=False, allow_nan=False,
+                separators=(",", ":"),
             )
+            raw_group = event.get("negRiskMarketID")
+            group_id = (
+                raw_group if isinstance(raw_group, str) and raw_group
+                and raw_group.strip() == raw_group else None
+            )
+            serialized.append((
+                event_id, payload, requested_cursor, group_id,
+                hashlib.sha256(payload.encode()).hexdigest(),
+                len(payload.encode()),
+            ))
         con = self._connect_writer()
         try:
             con.execute("BEGIN IMMEDIATE")
@@ -10827,13 +10981,65 @@ class SQLiteStore:
                 (*item, ordinal_base + index)
                 for index, item in enumerate(serialized, start=1)
             ]
-            con.executemany(
-                "INSERT INTO structure_sync_event_staging("
-                "window_id,event_id,payload_json,source_cursor,source_ordinal) "
-                "VALUES (?,?,?,?,?) ON CONFLICT(window_id,event_id) DO UPDATE SET "
-                "payload_json=excluded.payload_json,source_cursor=excluded.source_cursor",
-                [(window_id, *item) for item in ordered],
+            source_progress = con.execute(
+                "SELECT event_count,event_state FROM "
+                "structure_sync_event_source_progress WHERE window_id=?", (window_id,),
+            ).fetchone()
+            source_chain = (
+                RowChainSHA256.from_json(str(source_progress[1]), expected_domain="source-event")
+                if source_progress is not None else None
             )
+            source_count = 0 if source_progress is None else int(source_progress[0])
+            for (
+                event_id, payload, cursor, group_id, payload_hash, payload_length, ordinal,
+            ) in ordered:
+                existing = con.execute(
+                    "SELECT event.payload_json,event.source_cursor,event.source_ordinal,"
+                    "metadata.event_group_id,metadata.payload_hash,metadata.payload_length "
+                    "FROM structure_sync_event_staging event LEFT JOIN "
+                    "structure_sync_event_metadata_staging metadata ON "
+                    "metadata.window_id=event.window_id AND metadata.event_id=event.event_id "
+                    "WHERE event.window_id=? AND event.event_id=?", (window_id, event_id),
+                ).fetchone()
+                expected = (payload, cursor, ordinal, group_id, payload_hash, payload_length)
+                if existing is not None:
+                    if tuple(existing) != expected:
+                        raise ValueError("structure-event-source-replay-mismatch")
+                    continue
+                con.execute(
+                    "INSERT INTO structure_sync_event_staging VALUES (?,?,?,?,?)",
+                    (window_id, event_id, payload, cursor, ordinal),
+                )
+                if source_chain is not None:
+                    con.execute(
+                        "INSERT INTO structure_sync_event_metadata_staging VALUES "
+                        "(?,?,?,?,?,?,?)",
+                        (window_id, event_id, ordinal, group_id, payload_hash,
+                         payload_length, STRUCTURE_EVENT_SOURCE_CONTRACT),
+                    )
+                    source_chain.update((
+                        STRUCTURE_EVENT_SOURCE_CONTRACT, event_id, ordinal, group_id,
+                        payload_hash, payload_length,
+                    ))
+                    source_count += 1
+            if source_chain is not None:
+                con.execute(
+                    "UPDATE structure_sync_event_source_progress SET event_count=?,"
+                    "event_state=?,checkpoint_at_ms=? WHERE window_id=?",
+                    (source_count, source_chain.to_json(), finished_at_ms, window_id),
+                )
+                if completed:
+                    receipt = (
+                        window_id, source_count, source_chain.hexdigest(),
+                        int(con.execute("SELECT event_pages+1 FROM structure_sync_windows "
+                                        "WHERE id=?", (window_id,)).fetchone()[0]),
+                        "", STRUCTURE_EVENT_SOURCE_CONTRACT, finished_at_ms,
+                    )
+                    con.execute(
+                        "INSERT INTO structure_sync_event_source_receipts VALUES ("
+                        + ",".join("?" for _ in range(8)) + ")",
+                        (*receipt, _structure_event_source_receipt_digest(receipt)),
+                    )
             con.execute(
                 "UPDATE structure_sync_windows SET status=?,event_cursor=?,"
                 "checkpoint_at_ms=?,event_pages=event_pages+1 WHERE id=?",

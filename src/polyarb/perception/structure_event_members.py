@@ -13,6 +13,7 @@ class DecodedMemberBatch:
     members: tuple[tuple[int, dict[str, object], str], ...]
     next_member_ordinal: int
     next_byte_offset: int
+    next_character_offset: int
     complete: bool
 
 
@@ -155,6 +156,7 @@ def decode_event_member_batch(
     *,
     member_ordinal: int,
     member_byte_offset: int,
+    member_character_offset: int | None = None,
     limit: int,
 ) -> DecodedMemberBatch:
     """Decode at most ``limit`` objects from the top-level markets array."""
@@ -172,10 +174,15 @@ def decode_event_member_batch(
             raise ValueError("structure-event-member-cursor-mismatch")
         array_offset = _locate_markets_array(payload_json)
         offset = _skip_whitespace(payload_json, array_offset + 1)
+        running_byte_offset = len(payload_json[:offset].encode("utf-8"))
     else:
         if member_byte_offset == 0:
             raise ValueError("structure-event-member-cursor-mismatch")
-        offset = _character_offset(payload_json, member_byte_offset)
+        if member_character_offset is None:
+            offset = _character_offset(payload_json, member_byte_offset)
+        else:
+            offset = member_character_offset
+        running_byte_offset = member_byte_offset
         previous = offset - 1
         while previous >= 0 and payload_json[previous] in " \t\r\n":
             previous -= 1
@@ -187,9 +194,10 @@ def decode_event_member_batch(
     ordinal = member_ordinal
     if offset < len(payload_json) and payload_json[offset] == "]":
         _validate_after_markets(payload_json, offset + 1)
-        return DecodedMemberBatch((), ordinal, _byte_offset(payload_json, offset), True)
+        return DecodedMemberBatch((), ordinal, running_byte_offset, offset, True)
     while len(members) < limit:
         start = offset
+        start_byte_offset = running_byte_offset
         try:
             member, offset = _DECODER.raw_decode(payload_json, start)
         except json.JSONDecodeError as error:
@@ -202,16 +210,24 @@ def decode_event_member_batch(
         if offset >= len(payload_json):
             raise ValueError("invalid-structure-event-member-json")
         if payload_json[offset] == "]":
+            running_byte_offset = start_byte_offset + len(
+                payload_json[start:offset].encode("utf-8")
+            )
             _validate_after_markets(payload_json, offset + 1)
             return DecodedMemberBatch(
-                tuple(members), ordinal, _byte_offset(payload_json, offset), True
+                tuple(members), ordinal, running_byte_offset, offset, True
             )
         if payload_json[offset] != ",":
             raise ValueError("invalid-structure-event-member-json")
         offset = _skip_whitespace(payload_json, offset + 1)
         if offset >= len(payload_json) or payload_json[offset] == "]":
             raise ValueError("invalid-structure-event-member-json")
-    return DecodedMemberBatch(tuple(members), ordinal, _byte_offset(payload_json, offset), False)
+        running_byte_offset = start_byte_offset + len(
+            payload_json[start:offset].encode("utf-8")
+        )
+    return DecodedMemberBatch(
+        tuple(members), ordinal, running_byte_offset, offset, False
+    )
 
 
 def _strict_string(value: object) -> str | None:
@@ -236,13 +252,9 @@ def extract_structure_event_member_row(
         separators=(",", ":"),
     )
     market_id = _strict_string(member.get("id"))
-    nested_group_id = _strict_string(member.get("negRiskMarketID", member.get("groupId")))
-    expected_group_id = _strict_string(event_group_id)
-    group_id = (
-        nested_group_id
-        if expected_group_id is None or nested_group_id == expected_group_id
-        else None
-    )
+    # Group identity is parent-event authority.  A nested member value is raw
+    # evidence only and must never be allowed to invent or override the group.
+    group_id = _strict_string(event_group_id)
     active = member.get("active") if type(member.get("active")) is bool else None
     closed = member.get("closed") if type(member.get("closed")) is bool else None
     other = member.get("negRiskOther")
@@ -255,8 +267,9 @@ def extract_structure_event_member_row(
         if other is False and active is True and closed is not None
         else None
     )
-    explicit_kind = _strict_string(member.get("memberKind"))
-    member_kind = derived_kind if explicit_kind is None else explicit_kind
+    # Gamma does not authoritatively publish ``memberKind``.  Derive the
+    # classification solely from the three explicit source booleans.
+    member_kind = derived_kind
     return StructureEventMemberRow(
         window_id=window_id,
         event_id=event_id,

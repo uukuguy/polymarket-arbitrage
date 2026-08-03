@@ -18,6 +18,7 @@ from polyarb.perception import structure_publication as structure_publication_mo
 from polyarb.perception import structure_sync as structure_sync_module
 from polyarb.perception.structure_contract import (
     STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT,
+    STRUCTURE_EVENT_SOURCE_CONTRACT,
 )
 from polyarb.perception.structure_event_members import (
     StructureEventMemberProgress,
@@ -2151,6 +2152,7 @@ async def test_completed_legacy_window_checkpoints_bootstrap_before_publication(
             (window["id"],),
         )
     store.init_structure_sync_schema()
+    store.advance_structure_event_member_staging_chunk(window_id=str(window["id"]))
 
     class Gamma:
         async def __aenter__(self):
@@ -2197,6 +2199,7 @@ def test_publication_cannot_begin_before_relationship_bootstrap_completes(
         markets=[{"id": "market-1"}],
         finished_at_ms=300,
     )
+    store.advance_structure_event_member_staging_chunk(window_id=str(window["id"]))
 
     with pytest.raises(ValueError, match="structure-bootstrap-incomplete"):
         store.begin_structure_publication(
@@ -2289,33 +2292,35 @@ def test_event_member_extraction_is_canonical_and_nullable() -> None:
     assert row.payload_hash == hashlib.sha256(row.payload_json.encode()).hexdigest()
 
 
-def _seed_event_member_window(store: SQLiteStore, count: int) -> None:
-    payload = json.dumps({"markets": [
-        {"id": f"m-{i}", "negRiskMarketID": "g", "memberKind": "named",
+def _seed_event_member_window(store: SQLiteStore, count: int) -> str:
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    event = {"id": "e", "negRiskMarketID": "g", "markets": [
+        {"id": f"m-{i}", "negRiskMarketID": "nested-is-not-authority",
+         "memberKind": "untrusted", "negRiskOther": False,
          "active": True, "closed": False}
         for i in range(count)
-    ]}, separators=(",", ":"))
+    ]}
+    store.commit_structure_event_page(
+        window_id=window_id, requested_cursor=None, next_cursor=None,
+        completed=True, events=[event], finished_at_ms=2,
+    )
     with sqlite3.connect(store.db_path) as con:
         con.execute(
-            "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
-            "VALUES ('w','open',1,2)"
+            "UPDATE structure_sync_windows SET status='complete' WHERE id=?",
+            (window_id,),
         )
-        con.execute(
-            "INSERT INTO structure_sync_event_staging VALUES ('w','e',?,NULL,1)",
-            (payload,),
-        )
-        con.execute("UPDATE structure_sync_windows SET status='complete' WHERE id='w'")
+    return window_id
 
 
 def test_event_member_derivation_is_bounded_500_500_200(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "members.db")
     store.init_schema()
-    _seed_event_member_window(store, 1200)
+    window_id = _seed_event_member_window(store, 1200)
     runs, counters = [], []
     for _ in range(3):
         seen = []
         runs.append(store.advance_structure_event_member_staging_chunk(
-            window_id="w", inspection_callback=seen.append
+            window_id=window_id, inspection_callback=seen.append
         ))
         counters.append(len(seen))
         store = SQLiteStore(store.db_path)
@@ -2323,7 +2328,7 @@ def test_event_member_derivation_is_bounded_500_500_200(tmp_path) -> None:
             for r in runs] == [(500, 499, False), (500, 999, False),
                                (200, 1199, True)]
     assert counters == [500, 500, 200]
-    assert store.structure_event_member_status(window_id="w")["sealed"] is True
+    assert store.structure_event_member_status(window_id=window_id)["sealed"] is True
     with sqlite3.connect(store.db_path) as con:
         assert [r[0] for r in con.execute(
             "SELECT member_ordinal FROM structure_sync_event_member_staging "
@@ -2335,7 +2340,7 @@ def test_event_member_derivation_is_bounded_500_500_200(tmp_path) -> None:
 def test_event_member_cas_fault_is_atomic(tmp_path, fault) -> None:
     store = SQLiteStore(tmp_path / f"{fault}.db")
     store.init_schema()
-    _seed_event_member_window(store, 2)
+    window_id = _seed_event_member_window(store, 2)
     table = {"write": "structure_sync_event_member_staging",
              "progress": "structure_sync_event_member_progress",
              "receipt": "structure_sync_event_member_receipts"}[fault]
@@ -2344,7 +2349,7 @@ def test_event_member_cas_fault_is_atomic(tmp_path, fault) -> None:
         con.execute(f"CREATE TRIGGER injected BEFORE {operation} ON {table} "
                     "BEGIN SELECT RAISE(ABORT,'injected-fault'); END")
     with pytest.raises(sqlite3.IntegrityError, match="injected-fault"):
-        store.advance_structure_event_member_staging_chunk(window_id="w")
+        store.advance_structure_event_member_staging_chunk(window_id=window_id)
     with sqlite3.connect(store.db_path) as con:
         assert con.execute(
             "SELECT COUNT(*) FROM structure_sync_event_member_staging"
@@ -2368,8 +2373,8 @@ def test_event_member_cas_fault_is_atomic(tmp_path, fault) -> None:
 def test_event_member_receipt_tamper_fails_closed(tmp_path, field) -> None:
     store = SQLiteStore(tmp_path / f"receipt-{field}.db")
     store.init_schema()
-    _seed_event_member_window(store, 1)
-    store.advance_structure_event_member_staging_chunk(window_id="w")
+    window_id = _seed_event_member_window(store, 1)
+    store.advance_structure_event_member_staging_chunk(window_id=window_id)
     with sqlite3.connect(store.db_path) as con:
         row = con.execute("SELECT * FROM structure_sync_event_member_receipts").fetchone()
         assert row[-1] == hashlib.sha256(json.dumps(
@@ -2388,7 +2393,189 @@ def test_event_member_receipt_tamper_fails_closed(tmp_path, field) -> None:
         con.execute(f"UPDATE structure_sync_event_member_receipts SET {field}=?",
                     (changed,))
     status = store.structure_event_member_status(
-        window_id=str(changed) if field == "window_id" else "w"
+        window_id=str(changed) if field == "window_id" else window_id
     )
     assert status == {"sealed": False, "complete": False,
                       "reason": "structure-event-member-receipt-invalid"}
+
+
+def test_event_source_authority_seals_with_natural_event_page(tmp_path) -> None:
+    assert STRUCTURE_EVENT_SOURCE_CONTRACT == "structure-event-source-v1"
+    store = SQLiteStore(tmp_path / "source.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=1)
+    event = {
+        "id": "e", "negRiskMarketID": "group-parent",
+        "markets": [{"id": "m", "active": True, "closed": False,
+                     "negRiskOther": False}],
+    }
+    store.commit_structure_event_page(
+        window_id=window["id"], requested_cursor=None, next_cursor=None,
+        completed=True, events=[event], finished_at_ms=2,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        metadata = con.execute(
+            "SELECT event_group_id,payload_hash,payload_length,metadata_contract "
+            "FROM structure_sync_event_metadata_staging WHERE window_id=?",
+            (window["id"],),
+        ).fetchone()
+        receipt = con.execute(
+            "SELECT event_count,event_root,metadata_contract,receipt_digest "
+            "FROM structure_sync_event_source_receipts WHERE window_id=?",
+            (window["id"],),
+        ).fetchone()
+    assert metadata[0] == "group-parent"
+    assert len(metadata[1]) == 64 and metadata[2] > 0
+    assert metadata[3] == STRUCTURE_EVENT_SOURCE_CONTRACT
+    assert receipt[0] == 1 and len(receipt[1]) == 64
+    assert receipt[2] == STRUCTURE_EVENT_SOURCE_CONTRACT
+    assert len(receipt[3]) == 64
+
+
+@pytest.mark.parametrize("fault", ["metadata", "progress", "receipt"])
+def test_event_source_authority_fault_rolls_back_page_and_cursor(tmp_path, fault) -> None:
+    store = SQLiteStore(tmp_path / f"source-{fault}.db")
+    store.init_schema()
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    table, operation = {
+        "metadata": ("structure_sync_event_metadata_staging", "INSERT"),
+        "progress": ("structure_sync_event_source_progress", "UPDATE"),
+        "receipt": ("structure_sync_event_source_receipts", "INSERT"),
+    }[fault]
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            f"CREATE TRIGGER injected BEFORE {operation} ON {table} "
+            "BEGIN SELECT RAISE(ABORT,'source-injected-fault'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="source-injected-fault"):
+        store.commit_structure_event_page(
+            window_id=window_id, requested_cursor=None, next_cursor=None,
+            completed=True, events=[{"id": "e", "markets": []}],
+            finished_at_ms=2,
+        )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT status,event_cursor,event_pages FROM structure_sync_windows WHERE id=?",
+            (window_id,),
+        ).fetchone() == ("open", None, 0)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_staging WHERE window_id=?",
+            (window_id,),
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT event_count FROM structure_sync_event_source_progress WHERE window_id=?",
+            (window_id,),
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_source_receipts WHERE window_id=?",
+            (window_id,),
+        ).fetchone()[0] == 0
+
+
+def test_historical_window_without_source_receipt_is_unavailable(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "historical.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
+            "VALUES ('w','complete',1,2)"
+        )
+    assert store.structure_event_member_status(window_id="w") == {
+        "sealed": False, "complete": False,
+        "reason": "structure-event-source-receipt-unavailable",
+    }
+
+
+def test_event_member_parent_group_and_kind_are_source_derived() -> None:
+    row = extract_structure_event_member_row(
+        window_id="w", event_id="e", event_ordinal=1, member_ordinal=0,
+        event_group_id="parent-group",
+        member={"id": "m", "negRiskMarketID": "nested-group",
+                "memberKind": "other", "negRiskOther": False,
+                "active": True, "closed": False},
+    )
+    assert (row.group_id, row.member_kind) == ("parent-group", "named")
+    invalid = extract_structure_event_member_row(
+        window_id="w", event_id="e", event_ordinal=1, member_ordinal=1,
+        event_group_id=" padded ",
+        member={"id": "m", "negRiskOther": "false",
+                "active": True, "closed": False},
+    )
+    assert (invalid.group_id, invalid.member_kind) == (None, None)
+
+
+def test_event_member_multi_event_chunk_spends_one_shared_budget(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "multi-event.db")
+    store.init_schema()
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    events = [
+        {"id": event_id, "negRiskMarketID": "g", "markets": [
+            {"id": f"{event_id}-{index}", "negRiskOther": False,
+             "active": True, "closed": False}
+            for index in range(count)
+        ]}
+        for event_id, count in (("a", 3), ("b", 4))
+    ]
+    store.commit_structure_event_page(
+        window_id=window_id, requested_cursor=None, next_cursor=None,
+        completed=True, events=events, finished_at_ms=2,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("UPDATE structure_sync_windows SET status='complete' WHERE id=?",
+                    (window_id,))
+    first = store.advance_structure_event_member_staging_chunk(
+        window_id=window_id, limit=5,
+    )
+    second = store.advance_structure_event_member_staging_chunk(
+        window_id=window_id, limit=5,
+    )
+    assert (first["rows_written"], first["complete"]) == (5, False)
+    assert (second["rows_written"], second["complete"]) == (2, True)
+
+
+def test_event_member_utf8_resume_uses_authenticated_character_offset(monkeypatch) -> None:
+    payload = json.dumps({"markets": [
+        {"id": f"市场-{index}", "label": "éclair"}
+        for index in range(4)
+    ]}, ensure_ascii=False, separators=(",", ":"))
+    first = decode_event_member_batch(
+        payload, member_ordinal=0, member_byte_offset=0, limit=2,
+    )
+    monkeypatch.setattr(
+        member_module, "_character_offset",
+        lambda *_args: pytest.fail("UTF-8 committed prefix decoded"),
+    )
+    monkeypatch.setattr(
+        member_module, "_locate_markets_array",
+        lambda *_args: pytest.fail("UTF-8 committed prefix rescanned"),
+    )
+    second = decode_event_member_batch(
+        payload, member_ordinal=first.next_member_ordinal,
+        member_byte_offset=first.next_byte_offset,
+        member_character_offset=first.next_character_offset, limit=2,
+    )
+    assert second.complete is True
+    assert second.next_member_ordinal == 4
+
+
+@pytest.mark.parametrize("field", [
+    "member_character_offset", "source_receipt_digest",
+    "parent_payload_hash", "checkpoint_digest",
+])
+def test_event_member_authenticated_cursor_tamper_fails_closed(tmp_path, field) -> None:
+    store = SQLiteStore(tmp_path / f"cursor-{field}.db")
+    store.init_schema()
+    window_id = _seed_event_member_window(store, 501)
+    store.advance_structure_event_member_staging_chunk(window_id=window_id, limit=500)
+    with sqlite3.connect(store.db_path) as con:
+        value = con.execute(
+            f"SELECT {field} FROM structure_sync_event_member_progress WHERE window_id=?",
+            (window_id,),
+        ).fetchone()[0]
+        changed = value + 1 if type(value) is int else "f" * 64
+        con.execute(
+            f"UPDATE structure_sync_event_member_progress SET {field}=? WHERE window_id=?",
+            (changed, window_id),
+        )
+    with pytest.raises(ValueError, match="structure-event-member-checkpoint-invalid"):
+        store.advance_structure_event_member_staging_chunk(window_id=window_id, limit=500)

@@ -1289,6 +1289,11 @@ class SnapshotScheduler:
         )
         if status.get("sealed") is True:
             return None
+        if status.get("reason") == "structure-event-source-receipt-unavailable":
+            # Historical windows predate natural source authority.  They are
+            # intentionally not backfilled; allow the normal producer to open
+            # a fresh authoritative window instead of retrying this one.
+            return None
         if status.get("failure_reason") is not None or status.get("reason") is not None:
             logger.error(
                 "structure event member derivation unavailable "

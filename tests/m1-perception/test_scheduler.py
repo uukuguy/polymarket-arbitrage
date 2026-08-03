@@ -119,6 +119,30 @@ async def test_event_member_sidecar_precedes_structure_drift() -> None:
     store.begin_snapshot_attempt.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_event_source_unavailable_historical_window_is_not_retried() -> None:
+    store = MagicMock()
+    store.get_scheduler_state.return_value = None
+    store.get_snapshot_attempts.return_value = []
+    store.get_latest_structure_schedule_adjustment.return_value = None
+    store.recover_orphaned_structure_drift_attempts.return_value = 0
+    store.get_latest_structure_sync.return_value = {"id": "old", "status": "complete"}
+    store.structure_event_member_status.return_value = {
+        "sealed": False,
+        "reason": "structure-event-source-receipt-unavailable",
+    }
+    scheduler = SnapshotScheduler(
+        settings=SimpleNamespace(
+            structure_sync_enabled=True,
+            legacy_structure_reconciliation_enabled=False,
+            structure_generation_drift_compare_enabled=False,
+            scheduler_interval_s=300,
+        ), sqlite_store=store, producer_lock=asyncio.Lock(),
+    )
+    assert await scheduler._maybe_advance_structure_event_members(queued_at_ms=1) is None
+    store.advance_structure_event_member_staging_chunk.assert_not_called()
+
+
 def test_structure_drift_attempt_lifecycle_recovery_and_retention(
     tmp_path: Path,
 ) -> None:
