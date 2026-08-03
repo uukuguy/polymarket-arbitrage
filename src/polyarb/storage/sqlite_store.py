@@ -2843,27 +2843,10 @@ class SQLiteStore:
                         "reason": "structure-event-source-receipt-unavailable"}
             progress = con.execute(progress_sql, (window_id,)).fetchone()
             if progress is None:
-                state = _event_member_progress_state(
-                    member_chain=RowChainSHA256.new("source-event"),
-                    source_event_count=source[0], source_event_root=source[1],
-                    source_identity_hash=source[2],
-                    window_checkpoint_at_ms=int(window[1]),
-                )
-                diagnostic = RowChainSHA256.new("diagnostic/unclassified").to_json()
-                checkpoint_digest = _structure_event_member_checkpoint_digest((
-                    source[3], "", 0, 0, 0, 0, "", state, diagnostic,
-                ))
-                con.execute(
-                    "INSERT INTO structure_sync_event_member_progress VALUES "
-                    "(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (window_id, "", 0, 0, 0, state, diagnostic, now_ms, None, None,
-                     0, source[3], "", checkpoint_digest),
-                )
                 con.execute("COMMIT")
-                progress = ("", 0, 0, 0, state, diagnostic, now_ms, None, None,
-                            0, source[3], "", checkpoint_digest)
-            else:
-                con.execute("COMMIT")
+                return {"sealed": False, "complete": False,
+                        "reason": "structure-event-member-checkpoint-invalid"}
+            con.execute("COMMIT")
             if progress[7] is not None:
                 status = self.structure_event_member_status(window_id=window_id)
                 return {**status, "rows_written": 0,

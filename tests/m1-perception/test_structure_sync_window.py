@@ -2576,10 +2576,14 @@ def test_historical_window_without_source_receipt_is_unavailable(tmp_path) -> No
             "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
             "VALUES ('w','complete',1,2)"
         )
-    assert store.structure_event_member_status(window_id="w") == {
+    expected = {
         "sealed": False, "complete": False,
         "reason": "structure-event-source-receipt-unavailable",
     }
+    assert store.structure_event_member_status(window_id="w") == expected
+    before = _event_source_state_bytes(store.db_path)
+    assert store.advance_structure_event_member_staging_chunk(window_id="w") == expected
+    assert _event_source_state_bytes(store.db_path) == before
 
 
 def test_event_member_parent_group_and_kind_are_source_derived() -> None:
@@ -2913,3 +2917,33 @@ def test_event_member_missing_recovering_progress_fails_closed(tmp_path) -> None
         "sealed": False, "complete": False,
         "reason": "structure-event-member-checkpoint-invalid",
     }
+
+
+def test_event_member_direct_advance_never_recreates_missing_progress(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "member-direct-missing-progress.db")
+    store.init_schema()
+    window_id = _seed_event_member_window(store, 1)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "DELETE FROM structure_sync_event_member_progress WHERE window_id=?",
+            (window_id,),
+        )
+    before = _event_source_state_bytes(store.db_path)
+    assert store.advance_structure_event_member_staging_chunk(window_id=window_id) == {
+        "sealed": False, "complete": False,
+        "reason": "structure-event-member-checkpoint-invalid",
+    }
+    assert _event_source_state_bytes(store.db_path) == before
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_member_progress WHERE window_id=?",
+            (window_id,),
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_member_staging WHERE window_id=?",
+            (window_id,),
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_member_receipts WHERE window_id=?",
+            (window_id,),
+        ).fetchone() == (0,)

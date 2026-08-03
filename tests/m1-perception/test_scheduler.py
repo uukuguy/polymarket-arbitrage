@@ -144,7 +144,7 @@ async def test_event_source_unavailable_historical_window_is_not_retried() -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tamper", ["checkpoint", "source"])
+@pytest.mark.parametrize("tamper", ["checkpoint", "source", "missing-progress"])
 async def test_event_member_invalid_authority_blocks_scheduler_without_advancing(
     daemon_settings_for_test: Any, tamper: str,
 ) -> None:
@@ -163,18 +163,26 @@ async def test_event_member_invalid_authority_blocks_scheduler_without_advancing
     )
     with sqlite3.connect(store.db_path) as con:
         con.execute("UPDATE structure_sync_windows SET status='complete'")
-    store.advance_structure_event_member_staging_chunk(window_id=window_id, limit=1)
+    if tamper != "missing-progress":
+        store.advance_structure_event_member_staging_chunk(window_id=window_id, limit=1)
     with sqlite3.connect(store.db_path) as con:
-        table = (
-            "structure_sync_event_member_progress"
-            if tamper == "checkpoint" else "structure_sync_event_source_receipts"
-        )
-        column = "checkpoint_digest" if tamper == "checkpoint" else "receipt_digest"
-        if tamper == "source":
-            con.execute("DROP TRIGGER trg_structure_event_source_receipt_update_guard")
-        con.execute(
-            f"UPDATE {table} SET {column}=? WHERE window_id=?", ("f" * 64, window_id),
-        )
+        if tamper == "missing-progress":
+            con.execute(
+                "DELETE FROM structure_sync_event_member_progress WHERE window_id=?",
+                (window_id,),
+            )
+        else:
+            table = (
+                "structure_sync_event_member_progress"
+                if tamper == "checkpoint" else "structure_sync_event_source_receipts"
+            )
+            column = "checkpoint_digest" if tamper == "checkpoint" else "receipt_digest"
+            if tamper == "source":
+                con.execute("DROP TRIGGER trg_structure_event_source_receipt_update_guard")
+            con.execute(
+                f"UPDATE {table} SET {column}=? WHERE window_id=?",
+                ("f" * 64, window_id),
+            )
     scheduler = SnapshotScheduler(
         settings=daemon_settings_for_test.model_copy(
             update={"structure_sync_enabled": True}
@@ -187,7 +195,7 @@ async def test_event_member_invalid_authority_blocks_scheduler_without_advancing
         assert con.execute(
             "SELECT COUNT(*) FROM structure_sync_event_member_staging WHERE window_id=?",
             (window_id,),
-        ).fetchone() == (1,)
+        ).fetchone() == ((0,) if tamper == "missing-progress" else (1,))
 
 
 @pytest.mark.asyncio
