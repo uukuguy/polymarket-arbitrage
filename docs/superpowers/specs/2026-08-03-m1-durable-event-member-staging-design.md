@@ -35,8 +35,9 @@ chunks, then make fresh projection read only the indexed sidecar.
 Benefits: true keyset resume, duplicate preservation, historical relation rows
 remain immutable, and invalid raw identities remain diagnosable.
 
-Cost: one new source table, bounded derivation progress, an immutable seal
-receipt, migration/bootstrap logic, and publication-chain validation.
+Cost: new event metadata/source-receipt authority, one member source table,
+bounded derivation progress, an immutable seal receipt, migration logic, and
+publication-chain validation.
 
 ### B. Add columns to `structure_sync_event_market_staging` — rejected
 
@@ -96,11 +97,50 @@ rejected with a stable error.
 
 ## 4. Bounded Derivation State Machine
 
+### 4.1 New-window event source authority
+
+Historical event payloads do not have a pre-publication immutable content
+commitment, and their canonical JSON places the large `markets` array before
+the event-level `negRiskMarketID`. They are therefore not eligible for member
+sidecar backfill.
+
+For every new window created after this contract ships, event-page ingestion
+writes `structure_sync_event_metadata_staging` in the same transaction as the
+existing event row. Each metadata row contains:
+
+```text
+window_id, event_id, event_ordinal, event_group_id,
+payload_hash, payload_length, metadata_contract
+```
+
+`event_group_id` is extracted from the already-decoded top-level Gamma event,
+not from nested market objects. `payload_hash` is computed from the exact
+canonical payload string already being persisted; this adds no second parse or
+member-array walk. Event retries must match the existing metadata byte-for-byte.
+
+The event writer maintains a rolling `source-event` commitment over these
+metadata rows. The transition to `events_complete` atomically inserts an
+append-only, replacement-safe `structure_sync_event_source_receipts` row bound
+to the window, event count/root, terminal page/cursor, metadata contract, and
+receipt digest. Publication cannot start until this receipt validates.
+
+The exact source contract is `structure-event-source-v1`. Migration creates the
+empty metadata/receipt authority but never derives it for old windows. A window
+without this receipt returns `structure-event-source-receipt-unavailable`; it
+is neither scanned nor repeatedly retried. The existing pointer/serving window
+remains unchanged while the scheduler naturally creates a new eligible window.
+
+Sidecar derivation reads event group ID and payload hash only from the sealed
+metadata row. It never searches the parent payload for group identity and never
+rehashes all event payloads during advance, status, health, or receipt
+validation.
+
 Add one progress row per window with:
 
 ```text
 window_id, event_cursor, member_ordinal, rows_written,
-member_byte_offset,
+member_character_offset, member_byte_offset,
+source_receipt_digest, parent_payload_hash, checkpoint_digest,
 member_state, diagnostic_state, checkpoint_at_ms,
 completed_at_ms, failure_reason
 ```
@@ -113,27 +153,29 @@ One advance call:
    `json.loads()` on the complete event object or member array;
 3. reads only enough following event rows to expose at most 500 raw members;
 4. parses and writes at most 500 sidecar rows in one `BEGIN IMMEDIATE` CAS;
-5. advances `(event_id, member_ordinal, member_byte_offset)` in the same
-   transaction;
+5. advances `(event_id, member_ordinal, member_character_offset,
+   member_byte_offset)` and its checkpoint digest in the same transaction;
 6. never decodes an already committed member object after restart.
 
 The parent event JSON text may be loaded as one immutable blob, but no call may
 materialize the complete event object or member array. A small structural
 scanner finds the top-level `markets` array without decoding its contents;
-`raw_decode` then decodes one member object at a time from the persisted byte
-offset. No call may decode, iterate, normalize, hash, or insert more than 500
-member elements. Resume cross-checks both durable ordinal and byte offset.
+`raw_decode` then decodes one member object at a time from the persisted
+character offset; the corresponding UTF-8 byte offset is stored and bound but
+never recomputed by encoding the committed prefix. No call may decode, iterate,
+normalize, hash, or insert more than 500 member elements. Resume validates a
+checkpoint digest binding both offsets, ordinal, source receipt, parent payload
+hash, row count, and row-chain states. It never rescans the committed prefix.
 
 The scanner accepts only canonical JSON structure: top-level object, exactly
 one `markets` key whose value is an array, comma-separated JSON values, and no
 trailing non-whitespace data. Malformed structure blocks sealing with a stable
 bounded failure; it is never skipped or guessed.
 
-New windows derive the sidecar after event staging and before publication can
-seal. Historical published windows derive it through the same bounded state
-machine under an explicit bootstrap authority; no existing event, relation,
-market, publication, pointer, serving, generation, or exact-receipt row is
-updated.
+New windows derive the sidecar after the event-source receipt seals and before
+publication can start. Historical/open windows without the new source receipt
+are ineligible and remain immutable; no existing event, relation, market,
+publication, pointer, serving, generation, or exact-receipt row is updated.
 
 An exception leaves the last committed cursor intact. Automatic scheduler
 retry resumes from that cursor. Deterministic malformed-member evidence is
@@ -162,10 +204,10 @@ explicit first tuple element `structure-event-member-staging-v1`; no new
 row-chain domain is added. This preserves the parent design's exact registry.
 
 Fresh databases and migrated databases must have identical columns, indexes,
-and triggers. Migration creates empty sidecar/progress/receipt tables only; it
-does not perform an unbounded startup backfill. Historical sidecars are filled
-naturally by bounded scheduler advances. Any failed DDL/rebuild step rolls back
-without changing business-table rows.
+and triggers. Migration creates empty event-metadata/source-receipt and
+sidecar/progress/member-receipt tables only; it performs no startup backfill.
+Only naturally collected post-contract windows receive the new source receipt.
+Any failed DDL/rebuild step rolls back without changing business-table rows.
 
 The member receipt validator recomputes the receipt digest and binds it to the
 current immutable source-event identity. Missing, mixed, or tampered receipts
@@ -200,6 +242,7 @@ Structure scheduling order becomes:
 
 ```text
 event staging complete
+→ event-source receipt sealed
 → bounded event-member derivation/seal
 → publication/generation work
 → classifier-v2 fresh projection
@@ -227,8 +270,9 @@ Deployment is forbidden until tests prove:
 4. nullable, blank, padded, and valid-but-mismatched identities remain
    diagnosable and never become projection rows;
 5. fresh and migrated schema/index/trigger signatures are identical;
-6. historical published-window bootstrap changes only the new sidecar,
-   progress, and receipt tables;
+6. historical windows receive no metadata/source/member rows, while a new
+   naturally collected window atomically seals event-source authority before
+   member derivation;
 7. update, delete, duplicate insert, and `INSERT OR REPLACE` cannot overwrite a
    sealed receipt;
 8. every receipt field tamper, missing receipt, and mixed identity fails closed;
