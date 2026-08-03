@@ -406,6 +406,138 @@ def test_structure_drift_health_is_disabled_warn_pending_and_fail_stale() -> Non
     assert "latest_attempt_id=7" in failed_attempt["output"]
 
 
+def test_structure_drift_health_projects_authenticated_terminal_evidence() -> None:
+    check = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "none",
+            "authorized": False,
+            "checkpoint_at_ms": 9_000,
+            "classifier_contract_version": "structure-drift-classifier-v2",
+            "diagnostic_counts": {
+                "other-zero-removal-reason": 2,
+                "active-open-projection-missing": 1,
+            },
+            "diagnostic_samples": {
+                "other-zero-removal-reason": [
+                    {"market_id": "market-1", "predicate_bitset": "0101"}
+                ]
+            },
+            "phase": "stale",
+            "progress_id": "comparison-v2-terminal",
+            "reason": "drift-unclassified",
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+
+    assert check["status"] == "fail"
+    assert check["observedValue"] == "terminal-stale"
+    assert "contract=structure-drift-classifier-v2" in check["output"]
+    assert "comparison=comparison-v2-terminal" in check["output"]
+    assert "reason=drift-unclassified" in check["output"]
+    assert "other-zero-removal-reason" in check["output"]
+    assert "market-1" in check["output"]
+
+
+@pytest.mark.parametrize(
+    "status_reason",
+    (
+        "structure-drift-terminal-receipt-invalid",
+        "structure-drift-member-receipt-invalid",
+    ),
+)
+def test_structure_drift_health_never_projects_untrusted_terminal_evidence(
+    status_reason: str,
+) -> None:
+    check = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "none",
+            "authorized": False,
+            "checkpoint_at_ms": 9_000,
+            "classifier_contract_version": "attacker-contract",
+            "diagnostic_counts": {"attacker-code": 999},
+            "diagnostic_samples": {"attacker-code": [{"secret": "leak"}]},
+            "phase": "stale",
+            "progress_id": "attacker-comparison",
+            "reason": status_reason,
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+
+    assert check == {
+        "componentId": "structure-generation-drift",
+        "componentType": "datastore",
+        "observedValue": "terminal-receipt-invalid",
+        "status": "fail",
+        "output": "structure-drift-terminal-receipt-invalid",
+        "time": check["time"],
+    }
+
+
+def test_structure_drift_health_projects_later_authenticated_seal_as_healthy() -> None:
+    check = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "drift-safe-sealed",
+            "authorized": True,
+            "checkpoint_at_ms": 9_000,
+            "classifier_contract_version": "structure-drift-classifier-v2",
+            "phase": "sealed",
+            "progress_id": "comparison-v2-sealed",
+            "reason": None,
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+
+    assert check["status"] == "pass"
+    assert check["observedValue"] == "drift-safe-sealed"
+    assert "comparison=comparison-v2-sealed" in check["output"]
+
+
+@pytest.mark.parametrize("endpoint", ("/health", "/healthz"))
+def test_both_health_endpoints_publish_the_same_authenticated_drift_terminal(
+    endpoint: str,
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    daemon_settings_for_test.structure_generation_drift_compare_enabled = True
+    store = http_test_client.app.state.sqlite_store
+    monkeypatch.setattr(
+        store,
+        "structure_generation_drift_status",
+        lambda: {
+            "authorization_mode": "none",
+            "authorized": False,
+            "checkpoint_at_ms": int(time.time() * 1_000),
+            "classifier_contract_version": "structure-drift-classifier-v2",
+            "diagnostic_counts": {"other-zero-removal-reason": 1},
+            "diagnostic_samples": {
+                "other-zero-removal-reason": [{"market_id": "market-1"}]
+            },
+            "phase": "stale",
+            "progress_id": "comparison-v2-terminal",
+            "reason": "drift-unclassified",
+        },
+    )
+    monkeypatch.setattr(store, "get_latest_structure_drift_attempt", lambda: None)
+
+    check = http_test_client.get(endpoint).json()["checks"][
+        "snapshot:structure_generation_drift"
+    ][0]
+
+    assert check["status"] == "fail"
+    assert check["observedValue"] == "terminal-stale"
+    assert check["classifierContract"] == "structure-drift-classifier-v2"
+    assert check["comparisonId"] == "comparison-v2-terminal"
+    assert check["terminalReason"] == "drift-unclassified"
+    assert check["diagnosticCounts"] == {"other-zero-removal-reason": 1}
+
+
 @pytest.mark.parametrize(
     ("free", "expected_status"),
     ((25, "pass"), (19, "warn"), (9, "fail")),
@@ -1225,6 +1357,42 @@ def test_health_fails_quote_priority_defer_older_than_structure_sla(
     response = http_test_client.get("/health")
     assert response.status_code == 503
     assert response.json()["checks"]["snapshot:producer_defer"][0]["status"] == "fail"
+
+
+def test_authenticated_drift_seal_supersedes_older_drift_defer(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    now_ms = int(time.time() * 1_000)
+    daemon_settings_for_test.structure_generation_drift_compare_enabled = True
+    SQLiteStore(daemon_settings_for_test.db_path).record_structure_defer(
+        reason="structure-drift-identity-stale",
+        queued_at_ms=now_ms - 10_000,
+        observed_at_ms=now_ms - 9_000,
+    )
+    store = http_test_client.app.state.sqlite_store
+    monkeypatch.setattr(
+        store,
+        "structure_generation_drift_status",
+        lambda: {
+            "authorization_mode": "drift-safe-sealed",
+            "authorized": True,
+            "checkpoint_at_ms": now_ms,
+            "classifier_contract_version": "structure-drift-classifier-v2",
+            "phase": "sealed",
+            "progress_id": "comparison-v2-sealed",
+            "reason": None,
+        },
+    )
+    monkeypatch.setattr(store, "get_latest_structure_drift_attempt", lambda: None)
+
+    checks = http_test_client.get("/healthz").json()["checks"]
+
+    assert checks["snapshot:structure_generation_drift"][0]["status"] == "pass"
+    assert "snapshot:producer_defer" not in checks
 
 
 def test_health_fails_a_stalled_snapshot_attempt_while_truth_is_fresh(

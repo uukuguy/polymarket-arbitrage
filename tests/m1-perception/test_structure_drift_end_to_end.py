@@ -12,6 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 import polyarb.storage.sqlite_store as sqlite_store_module
+from polyarb.http import health as health_module
 from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V1,
     STRUCTURE_DRIFT_CLASSIFIER_V2,
@@ -341,6 +342,16 @@ def test_terminal_receipt_status_tamper_fails_closed(
     assert "class_counts" not in status
     assert "diagnostic_counts" not in status
     assert "diagnostic_samples" not in status
+    check = health_module._structure_drift_health_check(
+        status,
+        enabled=True,
+        now_ms=3_003,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+    assert check["observedValue"] == "terminal-receipt-invalid"
+    assert check["output"] == "structure-drift-terminal-receipt-invalid"
+    assert "diagnosticCounts" not in check
+    assert "diagnosticSamples" not in check
 
 
 def test_valid_terminal_receipt_status_exposes_authenticated_evidence(
@@ -376,6 +387,16 @@ def test_valid_terminal_receipt_status_exposes_authenticated_evidence(
     assert status["reason"] == "drift-unclassified"
     assert status["terminal_receipt_digest"] == receipt_digest
     assert status["diagnostic_counts"] == {"other-zero-removal-reason": 1}
+    check = health_module._structure_drift_health_check(
+        status,
+        enabled=True,
+        now_ms=3_003,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+    assert check["observedValue"] == "terminal-stale"
+    assert check["comparisonId"] == comparison_id
+    assert check["terminalReason"] == "drift-unclassified"
+    assert check["diagnosticCounts"] == {"other-zero-removal-reason": 1}
 
 
 def test_mixed_terminal_receipt_with_valid_digest_fails_closed(tmp_path: Path) -> None:

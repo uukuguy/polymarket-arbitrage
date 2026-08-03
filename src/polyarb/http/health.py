@@ -627,6 +627,7 @@ def _structure_drift_health_check(
     publication_sla_s: int,
 ) -> dict[str, list[dict[str, Any]]]:
     """Project bounded stored drift state without scanning source or universes."""
+    extra: dict[str, object] = {}
     if not enabled:
         severity = "pass"
         observed: object = "disabled"
@@ -639,6 +640,22 @@ def _structure_drift_health_check(
         authorized = status.get("authorized") is True
         phase = status.get("phase")
         reason = status.get("reason")
+        if reason in {
+            "structure-drift-terminal-receipt-invalid",
+            "structure-drift-member-receipt-invalid",
+        } and phase in {"sealed", "stale"}:
+            return {
+                "snapshot:structure_generation_drift": [
+                    {
+                        "componentId": "structure-generation-drift",
+                        "componentType": "datastore",
+                        "observedValue": "terminal-receipt-invalid",
+                        "status": "fail",
+                        "output": "structure-drift-terminal-receipt-invalid",
+                        "time": _utc_now_iso(),
+                    }
+                ]
+            }
         checkpoint = status.get("checkpoint_at_ms")
         checkpoint_age_s = (
             max(0.0, (now_ms - checkpoint) / 1_000)
@@ -690,19 +707,42 @@ def _structure_drift_health_check(
             or stale_checkpoint
             else "warn"
         )
-        observed = status.get("authorization_mode")
-        output = (
-            f"enabled=true authorized={str(authorized).lower()} phase={phase} "
-            f"legacy_snapshot_id={status.get('legacy_snapshot_id')} "
-            f"generation_snapshot_id={status.get('generation_snapshot_id')} "
-            f"publication_id={status.get('publication_id')} "
-            f"window_id={status.get('window_id')} "
-            f"checkpoint_age_seconds={checkpoint_age_s} reason={reason} "
-            f"latest_attempt_id={attempt_id} "
-            f"latest_attempt_outcome={attempt_outcome} "
-            f"latest_attempt_failure={attempt_failure} "
-            f"class_counts={json.dumps(status.get('class_counts', {}), sort_keys=True)}"
-        )
+        contract = status.get("classifier_contract_version")
+        comparison_id = status.get("progress_id")
+        if phase == "stale":
+            diagnostic_counts = status.get("diagnostic_counts", {})
+            diagnostic_samples = status.get("diagnostic_samples", {})
+            observed = "terminal-stale"
+            output = (
+                f"contract={contract} comparison={comparison_id} reason={reason} "
+                "diagnostic_counts="
+                f"{json.dumps(diagnostic_counts, sort_keys=True, separators=(',', ':'))} "
+                "diagnostic_samples="
+                f"{json.dumps(diagnostic_samples, sort_keys=True, separators=(',', ':'))}"
+            )
+            extra = {
+                "classifierContract": contract,
+                "comparisonId": comparison_id,
+                "terminalReason": reason,
+                "diagnosticCounts": diagnostic_counts,
+                "diagnosticSamples": diagnostic_samples,
+            }
+        else:
+            observed = status.get("authorization_mode")
+            output = (
+                f"enabled=true authorized={str(authorized).lower()} phase={phase} "
+                f"contract={contract} comparison={comparison_id} "
+                f"legacy_snapshot_id={status.get('legacy_snapshot_id')} "
+                f"generation_snapshot_id={status.get('generation_snapshot_id')} "
+                f"publication_id={status.get('publication_id')} "
+                f"window_id={status.get('window_id')} "
+                f"checkpoint_age_seconds={checkpoint_age_s} reason={reason} "
+                f"latest_attempt_id={attempt_id} "
+                f"latest_attempt_outcome={attempt_outcome} "
+                f"latest_attempt_failure={attempt_failure} "
+                "class_counts="
+                f"{json.dumps(status.get('class_counts', {}), sort_keys=True)}"
+            )
     return {
         "snapshot:structure_generation_drift": [
             {
@@ -712,6 +752,7 @@ def _structure_drift_health_check(
                 "status": severity,
                 "output": output,
                 "time": _utc_now_iso(),
+                **extra,
             }
         ]
     }
@@ -1219,12 +1260,33 @@ def _build_health_checks(
         }
     ]
 
+    drift_enabled = bool(
+        getattr(settings, "structure_generation_drift_compare_enabled", False)
+    )
+    drift_status: dict[str, Any] | None = None
+    if drift_enabled:
+        try:
+            drift_status = store.structure_generation_drift_status()
+            drift_status = {
+                **drift_status,
+                "latest_attempt": store.get_latest_structure_drift_attempt(),
+            }
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            drift_status = None
+
     latest_attempt = store.get_latest_snapshot_attempt()
     latest_defer = store.get_latest_structure_defer()
+    drift_defer_superseded = (
+        latest_defer is not None
+        and latest_defer.get("reason")
+        in {"structure-drift-identity-stale", "structure-drift-status-unavailable"}
+        and drift_status is not None
+        and drift_status.get("authorized") is True
+    )
     defer_is_current = latest_defer is not None and (
         latest_attempt is None
         or int(latest_defer["observed_at_ms"]) > int(latest_attempt["started_at_ms"])
-    )
+    ) and not drift_defer_superseded
     if defer_is_current:
         assert latest_defer is not None
         queued_age_s = max(
@@ -1459,19 +1521,6 @@ def _build_health_checks(
     for entries in generation_checks.values():
         overall = _severity(overall, str(entries[0]["status"]))
 
-    drift_enabled = bool(
-        getattr(settings, "structure_generation_drift_compare_enabled", False)
-    )
-    drift_status: dict[str, Any] | None = None
-    if drift_enabled:
-        try:
-            drift_status = store.structure_generation_drift_status()
-            drift_status = {
-                **drift_status,
-                "latest_attempt": store.get_latest_structure_drift_attempt(),
-            }
-        except (OSError, sqlite3.Error, TypeError, ValueError):
-            drift_status = None
     drift_checks = _structure_drift_health_check(
         drift_status,
         enabled=drift_enabled,

@@ -151,6 +151,184 @@ def test_event_member_component_first_suppress_reminder_recovery_lifecycle() -> 
     ) == {"l1": "recovery"}
 
 
+def _terminal_drift_check(*, status: str = "fail") -> list[dict[str, Any]]:
+    return _check(
+        "terminal-stale" if status == "fail" else "drift-safe-sealed",
+        status=status,
+        output=(
+            "contract=structure-drift-classifier-v2 "
+            "comparison=comparison-v2-terminal reason=drift-unclassified "
+            'diagnostic_counts={"other-zero-removal-reason": 2}'
+            if status == "fail"
+            else "contract=structure-drift-classifier-v2 "
+            "comparison=comparison-v2-sealed reason=None"
+        ),
+    )
+
+
+def test_authenticated_drift_terminal_preempts_generic_snapshot_failures() -> None:
+    health = _health(status="fail", checks={
+        "snapshot:structure_generation_drift": _terminal_drift_check(),
+        "snapshot:last_success_age_seconds": _check(100_000.0, status="fail"),
+        "snapshot:latest_attempt": _check("cancelled", status="fail"),
+    })
+
+    action, reason = WATCHER.decide_l1(health)
+
+    assert action == "push"
+    assert reason == (
+        "L1 Structure drift terminal "
+        "(contract=structure-drift-classifier-v2, "
+        "comparison=comparison-v2-terminal, reason=drift-unclassified, "
+        'diagnostics={"other-zero-removal-reason": 2})'
+    )
+
+
+@pytest.mark.parametrize(
+    "defer_reason",
+    ("structure-drift-identity-stale", "structure-drift-status-unavailable"),
+)
+def test_durable_drift_defer_preempts_generic_snapshot_failure(
+    defer_reason: str,
+) -> None:
+    health = _health(status="fail", checks={
+        "snapshot:structure_generation_drift": _check(
+            "none", status="warn", output="reason=structure-drift-incomplete"
+        ),
+        "snapshot:producer_defer": _check(defer_reason, status="warn"),
+        "snapshot:last_success_age_seconds": _check(100_000.0, status="fail"),
+        "snapshot:latest_attempt": _check("cancelled", status="fail"),
+    })
+
+    assert WATCHER.decide_l1(health) == (
+        "push",
+        f"L1 Structure drift admission deferred (reason={defer_reason})",
+    )
+
+
+def test_drift_incident_lifecycle_recovers_only_after_healthy_drift_status() -> None:
+    stale = _health(status="fail", checks={
+        "snapshot:structure_generation_drift": _terminal_drift_check(),
+    })
+    sealed = _health(status="pass", checks={
+        "snapshot:structure_generation_drift": _terminal_drift_check(status="pass"),
+        "snapshot:last_success_age_seconds": _check(60.0),
+        "market_truth:coverage": _check("complete"),
+        "quote_feed:last_complete_age_seconds": _check(20.0),
+        "quote_feed:collector_state": _check("running"),
+    })
+    pending = _health(status="warn", checks={
+        "snapshot:structure_generation_drift": _check(
+            "none",
+            status="warn",
+            output=(
+                "enabled=true phase=generation-members "
+                "contract=structure-drift-classifier-v2 "
+                "comparison=comparison-v2-next "
+                "reason=structure-drift-incomplete"
+            ),
+        ),
+        "snapshot:last_success_age_seconds": _check(60.0),
+        "market_truth:coverage": _check("complete"),
+        "quote_feed:last_complete_age_seconds": _check(20.0),
+        "quote_feed:collector_state": _check("running"),
+    })
+    state: dict[str, Any] = {}
+
+    assert WATCHER.decide_l1(stale)[0] == "push"
+    decisions = WATCHER.component_notification_decisions(
+        {"l1": True}, state, now_s=1_000.0, reminder_s=1_800,
+    )
+    assert decisions == {"l1": "alert"}
+    state = WATCHER.updated_component_notification_state(
+        {"l1": True}, state, decisions, now_s=1_000.0,
+        delivery_ok_by_component={"l1": True},
+    )
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, state, now_s=1_100.0, reminder_s=1_800,
+    ) == {"l1": "suppress"}
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, state, now_s=2_800.0, reminder_s=1_800,
+    ) == {"l1": "alert"}
+
+    assert WATCHER.decide_l1(pending)[0] == "push"
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, state, now_s=2_900.0, reminder_s=1_800,
+    ) == {"l1": "alert"}
+
+    assert WATCHER.decide_l1(sealed)[0] == "noop"
+    assert WATCHER.component_notification_decisions(
+        {"l1": False}, state, now_s=2_900.0, reminder_s=1_800,
+    ) == {"l1": "recovery"}
+
+
+def test_authenticated_drift_terminal_reaches_telegram_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_l1 = [_health(status="fail", checks={
+        "snapshot:structure_generation_drift": _terminal_drift_check(),
+    })]
+    opportunity = {
+        "strategy": "neg-risk-buy-all",
+        "profit_basis": "gross-before-fees",
+        "coverage": "verified-standard-neg-risk",
+        "refreshing": False,
+        "latest_structure_snapshot_id": 10,
+        "source_snapshot_id": 10,
+        "count": 0,
+        "opportunities": [],
+    }
+
+    def fetch(url: str) -> dict[str, Any]:
+        if url == WATCHER.L1_HEALTHZ:
+            return current_l1[0]
+        if url == WATCHER.OPPORTUNITY_URL:
+            return opportunity
+        return _health(status="warn", checks=_healthy_l2_checks())
+
+    messages: list[str] = []
+    now_s = [1_000.0]
+    monkeypatch.setattr(WATCHER, "_fetch_json", fetch)
+    monkeypatch.setattr(WATCHER, "_probe_dashboard", lambda _url: (200, {}, None))
+    monkeypatch.setattr(
+        WATCHER,
+        "_send_telegram",
+        lambda message: messages.append(message) or True,
+    )
+    monkeypatch.setattr(WATCHER, "STATE_FILE", str(tmp_path / "polywatch-state.json"))
+    monkeypatch.setattr(WATCHER.time, "time", lambda: now_s[0])
+
+    assert WATCHER.main() == 0
+    assert len(messages) == 1
+    assert "structure-drift-classifier-v2" in messages[0]
+    assert "comparison-v2-terminal" in messages[0]
+    assert "drift-unclassified" in messages[0]
+    assert "other-zero-removal-reason" in messages[0]
+
+    now_s[0] = 1_100.0
+    assert WATCHER.main() == 0
+    assert len(messages) == 1
+
+    now_s[0] = 2_800.0
+    assert WATCHER.main() == 0
+    assert len(messages) == 2
+    assert "comparison-v2-terminal" in messages[1]
+
+    current_l1[0] = _health(status="pass", checks={
+        "snapshot:structure_generation_drift": _terminal_drift_check(status="pass"),
+        "snapshot:last_success_age_seconds": _check(60.0),
+        "market_truth:coverage": _check("complete"),
+        "quote_feed:last_complete_age_seconds": _check(20.0),
+        "quote_feed:collector_state": _check("running"),
+    })
+    now_s[0] = 2_900.0
+    assert WATCHER.main() == 0
+    assert len(messages) == 3
+    assert "polywatch recovered" in messages[2]
+    assert "resolved: l1" in messages[2]
+
+
 def test_l1_quote_refresh_transition_does_not_alert() -> None:
     health = _health(
         status="warn",

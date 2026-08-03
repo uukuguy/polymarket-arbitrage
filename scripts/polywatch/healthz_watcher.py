@@ -408,6 +408,27 @@ def updated_notification_state(
 # ---------------------------------------------------------------------------
 
 
+def _output_token(output: str, key: str) -> str | None:
+    marker = f"{key}="
+    start = output.find(marker)
+    if start < 0:
+        return None
+    value = output[start + len(marker) :].split(" ", 1)[0]
+    return value or None
+
+
+def _output_json_token(output: str, key: str) -> object | None:
+    marker = f"{key}="
+    start = output.find(marker)
+    if start < 0:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(output[start + len(marker) :])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return value
+
+
 def decide_l1(healthz: dict | None) -> tuple[str, str]:
     """Return (action, reason). action ∈ {'noop', 'push', 'unpause+push'}.
 
@@ -424,6 +445,47 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
     if members and members.get("status") == "fail":
         output = members.get("output") or "structure-event-member-receipt-invalid"
         return "push", f"L1 Structure event-member sidecar failed ({output})"
+    drift = _extract_check(healthz, "snapshot:structure_generation_drift", {})
+    if drift and drift.get("status") == "fail":
+        output = str(drift.get("output") or "")
+        if drift.get("observedValue") == "terminal-stale":
+            contract = drift.get("classifierContract")
+            comparison_id = drift.get("comparisonId")
+            terminal_reason = drift.get("terminalReason")
+            diagnostic_counts = drift.get("diagnosticCounts")
+            if contract is None:
+                contract = _output_token(output, "contract")
+            if comparison_id is None:
+                comparison_id = _output_token(output, "comparison")
+            if terminal_reason is None:
+                terminal_reason = _output_token(output, "reason")
+            if diagnostic_counts is None:
+                diagnostic_counts = _output_json_token(output, "diagnostic_counts")
+            return (
+                "push",
+                "L1 Structure drift terminal "
+                f"(contract={contract}, comparison={comparison_id}, "
+                f"reason={terminal_reason}, diagnostics="
+                f"{json.dumps(diagnostic_counts or {}, sort_keys=True)})",
+            )
+        return "push", f"L1 Structure drift failed ({output})"
+    producer_defer = _extract_check(healthz, "snapshot:producer_defer", {})
+    defer_reason = producer_defer.get("observedValue") if producer_defer else None
+    if (
+        drift
+        and drift.get("status") != "pass"
+        and defer_reason
+        in {"structure-drift-identity-stale", "structure-drift-status-unavailable"}
+    ):
+        return (
+            "push",
+            f"L1 Structure drift admission deferred (reason={defer_reason})",
+        )
+    if drift and drift.get("status") == "warn":
+        return (
+            "push",
+            f"L1 Structure drift not healthy ({drift.get('output') or 'pending'})",
+        )
     snap = _extract_check(healthz, "snapshot:last_success_age_seconds", {})
     snap_status = snap.get("status") if snap else None
     age = snap.get("observedValue") if snap else None
