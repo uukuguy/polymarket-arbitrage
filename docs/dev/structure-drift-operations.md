@@ -40,6 +40,19 @@ event-member 派生同样运行在隐藏的隔离 child 中：每次 CAS 最多 
 不是 legacy 数据面降级，也不是让 operator 手工续跑旧 cursor 的信号。历史 sealed v1 receipt 仍可查询，
 但不能授权 v2 gate。`authorization_mode=exact` 走独立的旧 exact receipt 验证，不依赖 drift hash 版本。
 
+分类合同独立版本化为 `structure-drift-classifier-v2`。当前 frozen identity 若只有 v1 active progress，
+初始化会在同一事务把旧行终结为 `drift-classifier-contract-superseded`，再从 v2 cursor zero 开始；
+历史 sealed/stale v1 只保留审计价值。同一个 identity + v2 合同一旦得到 stale terminal receipt，
+不会反复重跑；必须等待 source/pointer identity 变化或未来合同升级。这是 same-contract no-retry，
+不是让 operator 删除 receipt 后重试。
+
+v2 complete projection 是 market staging 与 event-member sidecar anti-join 的有序 union。global relation
+conflict 优先于 duplicate、quarantine 和本地 group-ineligible；只有无全局冲突且 source group truth 为
+`complete-unsupported / standard-neg-risk-has-non-tradable-members` 时，仍活跃的 legacy sibling 才能进入
+`fresh-group-ineligible`。未唯一归类的行写入 diagnostic count/root 与每 code 最多三条 sample。stale
+finalization 在一个事务里同时写 progress 和 immutable terminal receipt；status 重验 receipt digest、member
+receipt identity、diagnostic root/sample digest 后才暴露诊断。
+
 v2 generation 扫描同时写两类承诺：generation-domain audit root 进入 receipt；同一 canonical row 还写入
 projection/source-domain comparison mirror，只用于严格等值。状态验证会交叉核对 audit root、mirror
 root/count、progress 和 receipt digest，任一缺失或替换都 fail closed。启动时会幂等补齐 120k member
@@ -73,6 +86,19 @@ make health-local
 只有 `authorized=true` 且 `authorization_mode=exact|drift-safe-sealed` 才通过 preflight。随后仍需单独的部署授权、
 exact release 验证、read-mode 切换计划和回滚证据；本 gate 自身不完成这些 mutation。
 
+上线严格分两步，不能把比较通过与 Quote 恢复合并：
+
+1. 在 exact approved SHA 上部署 schema/worker，保持 legacy serving 与 Quote disabled；等待 natural window、
+   member receipt 和 classifier-v2 terminal evidence。只有 sealed PASS 后，才单独把
+   `structure_generation_read_mode` 切到 generation，并验证 pointer/read health 与 natural publication。
+2. generation read 稳定且 legacy rollback 演练证据完整后，才单独启用 Quote；再复验 Quote freshness、
+   candidate lifecycle 与 Polywatch。任一步失败都保持或恢复 Quote disabled。
+
+长性能资格使用 `make classifier-v2-deploy-perf`。它在计时外生成 120,000 markets、5,000 events、
+24 members/group、global conflict 和 event-only candidate；old v1 与 v2 都 warm 后完整运行三次取 median。
+2026-08-03 证据：old v1 `152.796017s`，classifier-v2 `45.139646s`，`3.385x`；最坏 100-chunk
+slice `7.437705s`，projection `17 SELECT/call`。该命令约 14 分钟，是 deploy gate，不是健康探针。
+
 ## 故障处理
 
 ### Fresh projection 的 sealed sidecar 前置门
@@ -103,9 +129,9 @@ event-only anti-join 使用覆盖索引和复合 keyset
 只要 metadata/progress 已存在而 receipt 缺失或无效，就仍是 fail。receipt invalid 时保留 legacy serving plane，
 停止验收并等待新 window。
 
-query budget 必须按两层读：direct reader 每次固定最多 7 条 publication/source/member authority SELECT，加最多
-10 条 bulk candidate/evidence SELECT，总计最多 17；commitment 已验证 receipt 后内部复用该 authority，当前
-production-shaped gate 实测 14 条 SELECT/call。这个常数不会随页内 1/17/500 个 member 增长。不要把旧的
+query budget 必须按两层读：receipt/source/group-truth authority 与 bulk candidate/evidence。完整 120k
+production-shaped gate 的最坏 event-only terminal page 实测 17 条 SELECT/call；普通 market page 更少。
+这个常数不会随页内 1/17/500 个 member 增长。不要把旧的
 “≤10”理解成含 receipt gate 的总数；
 它只描述 candidate/evidence 层。任何逐 member 增长都属于回归。
 
@@ -116,6 +142,10 @@ relation/sidecar bulk probe 最多读取 `2 * candidate_count + 1` 条；出现 
 - `structure-drift-writer-busy`：确认 Quote/其他 writer 所有权；不要并发手动推进。
 - `structure-drift-child-failed`：看 child signal/timeout 分类；SIGKILL 先按 possible cgroup OOM 调查。
 - `unclassified>0` / `overlap-conflict>0`：数据证据失败，不是性能重试问题。
+- `fresh-group-ineligible>0`：只有 receipt 认证且 reconstruction roots 闭合时才是可授权 removal；
+  它不是吞掉任意 group failure 的兜底类。
+- `drift-classifier-contract-superseded`：确认新 v2 comparison ID 从 cursor zero 推进；同合同 stale
+  terminal 不重试，等待新 natural identity，不删除旧 terminal receipt。
 - checkpoint 超 SLA：确认 scheduler feature flag、defer receipt 和 Quote 持续 due/active 事实。
 - `drift-hash-algorithm-superseded`：确认已有新的 v2 progress 从 cursor zero 推进；不要把旧 v1 stale
   改回 active，也不要因此切换或暂停 legacy serving plane。

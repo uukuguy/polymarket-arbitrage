@@ -200,6 +200,7 @@ def _validated_structure_event_group_truth(
     window_id: str,
     *,
     expected: tuple[int, str] | None = None,
+    source_receipt_digest: str | None = None,
 ) -> tuple[int, str]:
     progress = con.execute(
         "SELECT event_cursor,group_cursor,market_cursor,member_ordinal,"
@@ -209,11 +210,15 @@ def _validated_structure_event_group_truth(
         "WHERE window_id=?",
         (window_id,),
     ).fetchone()
-    member_progress = con.execute(
-        "SELECT source_receipt_digest FROM structure_sync_event_member_progress "
-        "WHERE window_id=?",
-        (window_id,),
-    ).fetchone()
+    member_progress = (
+        (source_receipt_digest,)
+        if source_receipt_digest is not None
+        else con.execute(
+            "SELECT source_receipt_digest FROM structure_sync_event_member_progress "
+            "WHERE window_id=?",
+            (window_id,),
+        ).fetchone()
+    )
     if progress is None or member_progress is None or progress[10] is None:
         raise ValueError("structure-event-group-truth-incomplete")
     membership = SerializableSHA256.from_json(str(progress[4]))
@@ -4412,6 +4417,7 @@ class SQLiteStore:
                 group_count, group_root = _validated_structure_event_group_truth(
                     con, window_id,
                     expected=(int(receipt[17]), str(receipt[18])),
+                    source_receipt_digest=str(progress[10]),
                 )
                 if ((count, root, identity) != source[:3]
                         or checkpoint < 0
@@ -8617,12 +8623,14 @@ class SQLiteStore:
                         json.loads(str(payload_json)),
                     )
                 )
+            event_normalization_cache = {}
             result = {
                 market_id: build_fresh_member_evidence(
                     member,
                     raw_market=raw_markets.get(market_id),
                     event_sources=tuple(event_sources.get(market_id, ())),
                     generation_certified=True,
+                    event_normalization_cache=event_normalization_cache,
                 )
                 for member, market_id in zip(members, market_ids, strict=True)
             }

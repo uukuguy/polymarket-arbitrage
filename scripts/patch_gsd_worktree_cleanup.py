@@ -6,9 +6,8 @@ from __future__ import annotations
 import argparse
 import os
 import tempfile
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Sequence
-
 
 MARKER = "GSD_WORKTREE_CLEANUP_V2"
 QUICK_HEAD_CAPTURE = """```bash
@@ -19,10 +18,10 @@ EXECUTE_HEAD_CAPTURE = """   ```bash
    ```"""
 
 EXECUTE_LIST = """   # List worktrees created by this wave's agents
-   WORKTREES=$(git worktree list --porcelain | grep "^worktree " | grep -v "$(pwd)$" | sed 's/^worktree //')"""
+   WORKTREES=$(git worktree list --porcelain | grep "^worktree " | grep -v "$(pwd)$" | sed 's/^worktree //')"""  # noqa: E501
 
 QUICK_LIST = """   # Find worktrees created by the executor
-   WORKTREES=$(git worktree list --porcelain | grep "^worktree " | grep -v "$(pwd)$" | sed 's/^worktree //')"""
+   WORKTREES=$(git worktree list --porcelain | grep "^worktree " | grep -v "$(pwd)$" | sed 's/^worktree //')"""  # noqa: E501
 
 EXECUTE_REMOVE = """       # Remove the worktree
        git worktree remove "$WT" --force 2>/dev/null || true

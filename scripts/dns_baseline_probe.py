@@ -27,7 +27,7 @@ import os
 import socket
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 HOSTS = [
     "gamma-api.polymarket.com",
@@ -45,7 +45,7 @@ def probe(host: str) -> dict:
         ip = socket.gethostbyname(host)
         latency_ms = (time.monotonic() - t0) * 1000
         return {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "host": host,
             "ok": True,
             "ip": ip,
@@ -53,7 +53,7 @@ def probe(host: str) -> dict:
         }
     except OSError as e:
         return {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "host": host,
             "ok": False,
             "errno": getattr(e, "errno", None),

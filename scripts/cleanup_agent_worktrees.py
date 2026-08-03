@@ -12,10 +12,9 @@ import argparse
 import os
 import re
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
-
 
 AGENT_DIR_RE = re.compile(r"^agent-[A-Za-z0-9_-]+$")
 PID_RE = re.compile(r"\(pid (?P<pid>[1-9][0-9]*)\)")

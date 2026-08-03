@@ -697,12 +697,16 @@ tail-logs:
 	@echo ">> tail-logs — flyctl logs"
 	FLY_API_TOKEN= flyctl logs --app polyarb-l1
 
-.PHONY: memory-budget-test docker-smoke-256mb
+.PHONY: memory-budget-test classifier-v2-deploy-perf docker-smoke-256mb
 
 ## memory-budget-test: run streaming memory regression test (slow; D-23 acceptance gate)
 memory-budget-test:
 	@echo ">> memory-budget-test — T5.0 calibration + T5.1 budget test"
 	uv run pytest tests/m1-perception/test_streaming_memory_calibration.py tests/m1-perception/test_streaming_memory_budget.py -xvs
+
+## classifier-v2-deploy-perf: run the long 120k old-v1 vs classifier-v2 deployment performance gate
+classifier-v2-deploy-perf:
+	uv run pytest -s tests/m1-perception/test_structure_drift_performance.py -k 120k_production_shaped_complete_classifier_gate -x
 
 ## docker-smoke-256mb: build + run snapshot under hard 256MB cap with prod $1k threshold (T6 step 1)
 docker-smoke-256mb: docker-build

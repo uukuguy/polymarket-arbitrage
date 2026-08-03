@@ -26,7 +26,7 @@ Phase 02 soak completion flow (no local long-running daemon):
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -55,7 +55,7 @@ def _headers() -> dict:
 
 def _fetch_sla(monitor_id: str, days: int = 7) -> dict:
     """Fetch SLA summary from Better Stack for the last `days` days."""
-    from_dt = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    from_dt = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     url = f"{BS_API}/monitors/{monitor_id}/sla?from={from_dt}"
     try:
         r = httpx.get(url, headers=_headers(), timeout=30.0)
@@ -101,7 +101,7 @@ def status(
     typer.echo(f"Better Stack {days}-day SLA summary:")
     typer.echo(f"  Uptime:    {availability:.3f}%")
     typer.echo(f"  Incidents: {total_incidents}")
-    typer.echo(f"")
+    typer.echo("")
     typer.echo(
         f"Phase 02 soak gate (thread §1 生产级判定标准): "
         f"uptime >= {SOAK_GATE_UPTIME_PCT}% — [{gate_marker}]"
@@ -139,7 +139,7 @@ def export(
     gate_pass = availability >= SOAK_GATE_UPTIME_PCT
     gate_marker = "PASS" if gate_pass else "FAIL"
 
-    export_ts = datetime.now(timezone.utc).isoformat()
+    export_ts = datetime.now(UTC).isoformat()
 
     if not LOG_PATH.exists():
         typer.echo(

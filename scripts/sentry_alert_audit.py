@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 # Known Sentry org + rule + issue surface as of 2026-05-27 SESSION 28
 SENTRY_ORG = "speechlessai"
@@ -132,7 +132,7 @@ def emit_canonical_command_sequence() -> list[dict[str, str]]:
 
 def main() -> int:
     """Emit JSON-lines audit baseline + navigation cookbook."""
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     print(
         json.dumps(
             {

@@ -21,6 +21,16 @@ parent 在 spawn 前先取得专用 attempt ownership；任何 child 都必须�
 `drift-hash-algorithm-superseded` terminal evidence，并从 v2 cursor zero 重启。这个动作只换证明算法，
 不会暂停或切换 legacy serving plane；exact authorization 仍是独立路径。
 
+哈希版本与分类合同是两根不同的保险丝。当前分类合同是 `structure-drift-classifier-v2`：v1 active
+progress 会留下 `drift-classifier-contract-superseded`，v2 从 cursor zero 重建；相同 frozen identity 的
+v2 stale terminal 不重试。这样既能从旧合同自动恢复，又不会把 deterministic data conflict 变成无限重试噪声。
+
+complete projection 不是“从 generation 反推 source”，而是 market staging 与 event-member anti-join 的完整
+union。global conflict 先于 duplicate、quarantine 和 group-ineligible 判定；否则一个跨 event market 可能被
+局部 inactive sibling 错误解释。`fresh-group-ineligible` 只允许一个很窄的证明：legacy member 本身仍 active、
+exact source identity 相同，但它所属 standard group 因另一个 non-tradable member 成为
+`complete-unsupported`。任何不满足这些谓词的 removal 都进入 diagnostic，不会被兜底类吞掉。
+
 fresh projection 的 event member 来源现在是一张独立 sealed sidecar，而不是运行时展开 parent event JSON。
 采集链是：natural event page → source receipt → 最多 500 行/块的 member 派生 → member receipt → indexed
 anti-join。projection commitment 除了 11-field member count/root，还绑定 member receipt digest；即使两个 window
@@ -44,11 +54,15 @@ self-duplicate，会让下一块首个 child 生成重复 parent，且 root 随 
 ## 代码地图
 
 - `src/polyarb/perception/structure_drift.py`：raw projector、成员分类和 tagged reconstruction roots。
-- `src/polyarb/storage/sqlite_store.py:4760`：只读 current receipt verifier；同文件中的有界 phase state machine 写进度。
+- `src/polyarb/storage/sqlite_store.py:7026`：complete fresh projection 的 bounded CAS。
+- `src/polyarb/storage/sqlite_store.py:7244`：v1→v2 contract supersession 与 same-contract no-retry 初始化。
+- `src/polyarb/storage/sqlite_store.py:8213`：classification、diagnostics 和 generation mirror 同 CAS 推进。
+- `src/polyarb/storage/sqlite_store.py:8640`：只读 current/terminal receipt verifier。
+- `src/polyarb/perception/structure_drift.py:637`：diagnostic first-match priority；同文件 `:926` 是互斥分类器。
 - `src/polyarb/snapshot/cli.py:346`：scheduler-only cooperative child slice。
-- `src/polyarb/daemon/scheduler.py:210`：严格 child JSON parser 与 TERM/KILL 边界。
-- `src/polyarb/daemon/scheduler.py:966`：Quote 双检、共享锁和 drift-first admission。
-- `src/polyarb/http/health.py:616`：disabled/incomplete/sealed/stale 的三态健康投影。
+- `src/polyarb/daemon/scheduler.py:377`：隔离 child 与 TERM/KILL 边界；同文件 `:1183` 是 Quote 双检 admission。
+- `src/polyarb/http/health.py:623`：disabled/incomplete/sealed/stale 的健康投影。
+- `scripts/polywatch/healthz_watcher.py:503`：terminal incident identity；`:567` 验证同 identity recovery。
 - `structure_drift_attempts`：最近 100 次 child 的身份、进度、结果和安全 stderr 摘要。
 - `structure_sync_event_member_staging`：逐 ordinal 的 immutable member envelope；projection 不读取 parent
   `markets` 数组。
@@ -81,6 +95,11 @@ class roots 则证明“相对旧数据的完整对称差可解释”。
 - 不为历史 window 合成 sidecar：没有 natural source receipt 就没有可认证的派生起点。
 - “完全无 source evidence”的旧 window 是 `waiting-natural-window/pass` 迁移态；“已有 evidence 却缺/坏
   receipt”是 fail。二者不能用同一个 unavailable 告警语义混淆。
+- terminal failure receipt 不是“失败日志”：它把 comparison identity、class/diagnostic roots、sample digest
+  和 checkpoint 原子封存。status 只有重验全部字段才可展示 sample；Polywatch 用 comparison/contract/reason/root
+  组成 incident identity，首次 alert、相同 identity 去重/提醒，sealed 同 identity 才 recovery。
+- generation read 与 Quote 是两步 rollout：先 Quote disabled 切 read、验证 natural publication 和 legacy rollback；
+  再单独 enable Quote。比较 PASS 不等于自动获得任何 mutation 权限。
 
 ## 自检题
 
@@ -92,6 +111,9 @@ class roots 则证明“相对旧数据的完整对称差可解释”。
 6. 两个 window 的 11-field count/root 相同，为什么 member receipt digest 不同仍必须拒绝复用 commitment？
 7. 为什么只冻结 conflict summary 表仍不足以证明单个候选 event 的 conflict 值？
 8. 一个 Merkle chunk 读到奇数个 child 时，什么证据允许最后一个 child self-duplicate？
+9. v2 stale terminal 后 scheduler 为什么不应继续重试同一 comparison ID？什么变化才允许新运行？
+10. 跨 event conflict 与 local group-ineligible 同时成立时，哪一个先判，错序会造成什么授权风险？
+11. 为什么 generation read PASS 后仍不能在同一个动作里打开 Quote？
 
 ## FAQ 增量
 
@@ -99,3 +121,10 @@ class roots 则证明“相对旧数据的完整对称差可解释”。
 
 因为 feature 默认关闭本身不是数据面故障。启用后 incomplete 是 warn；stale、receipt invalid、identity invalid
 或 checkpoint 超 SLA 才是 fail。legacy serving plane 的健康不会因未启用验收工具而被伪造为故障。
+
+### 性能门为什么要跑十几分钟？
+
+`make classifier-v2-deploy-perf` 在计时外 seed 120k markets / 5k events / 24 members/group，再让 old v1 与
+classifier-v2 各自 warm 并完整跑三次。2026-08-03 实测 old v1 `152.796017s`、v2 `45.139646s`，
+`3.385x`；最坏 100-chunk slice `7.437705s < 45s`，projection 最坏 17 SELECT/call。它是 release SHA
+资格，不是每两分钟运行的生产健康探针。

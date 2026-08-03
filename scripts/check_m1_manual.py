@@ -30,6 +30,7 @@ L3_CREDENTIAL_PROOF_TARGETS = (
     "supabase-prod-revision",
 )
 M1_MAKE_TARGETS = {
+    "classifier-v2-deploy-perf",
     "snapshot-markets-v",
     "sync-structure-local",
     "archive-markets-local",

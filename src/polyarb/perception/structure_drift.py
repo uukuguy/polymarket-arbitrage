@@ -775,6 +775,10 @@ def build_fresh_member_evidence(
     raw_market: dict[str, object] | None,
     event_sources: tuple[tuple[str, int, dict[str, object]], ...],
     generation_certified: bool,
+    event_normalization_cache: dict[
+        str, tuple[tuple[EventMember, ...], tuple[GroupTruth, ...], str]
+    ]
+    | None = None,
 ) -> FreshMemberEvidence:
     """Recompute one member's evidence from pinned raw catalogues only."""
     event_ids = tuple(source[0] for source in event_sources)
@@ -823,9 +827,30 @@ def build_fresh_member_evidence(
             event_ids=(event_id,),
             taken_at_ms=0,
         )
-        _events, _tags, _mapping, source_members, truths = normalize_events(
-            [raw_event]
+        normalized = (
+            None
+            if event_normalization_cache is None
+            else event_normalization_cache.get(event_id)
         )
+        if normalized is None:
+            _events, _tags, _mapping, source_members, truths = normalize_events(
+                [raw_event]
+            )
+            normalized = (
+                tuple(source_members),
+                tuple(truths),
+                hashlib.sha256(
+                    json.dumps(
+                        raw_event,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+            )
+            if event_normalization_cache is not None:
+                event_normalization_cache[event_id] = normalized
+        source_members, truths, normalized_event_hash = normalized
         source_member = next(
             (item for item in source_members if item.market_id == member.market_id),
             None,
@@ -864,14 +889,7 @@ def build_fresh_member_evidence(
                     membership_hash=truth.membership_hash,
                     global_relation_conflict=False,
                 )
-            raw_event_hash = hashlib.sha256(
-                json.dumps(
-                    raw_event,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode()
-            ).hexdigest()
+            raw_event_hash = normalized_event_hash
     projector_matches = projected_member == member
     return FreshMemberEvidence(
         source_present=raw_market is not None or bool(event_sources),

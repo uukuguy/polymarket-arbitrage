@@ -8,7 +8,7 @@ seconds, prints frame counts by event_type, then exits.
 Usage:
     uv run python scripts/smoke_l2_ws.py
     # or with a custom asset:
-    uv run python scripts/smoke_l2_ws.py 21742633143463906290569050155826241533067272736897614950488156847949938836455
+    uv run python scripts/smoke_l2_ws.py <current-asset-id>
 
 Expected output (live asset):
     === Smoke result (30s) ===
@@ -34,7 +34,8 @@ from polyarb.observability.logging import init_logging
 # A currently-liquid market token id (2026-05-24: "Iraq 2026 World Cup",
 # liquidity ~$10M; smoke validated 3 frames in 30s incl. initial book).
 # If the smoke prints zero frames, replace with a current asset_id:
-#   curl -s 'https://gamma-api.polymarket.com/markets?active=true&closed=false&order=liquidityNum&ascending=false&limit=1' \
+#   curl -s 'https://gamma-api.polymarket.com/markets?active=true&closed=false' \
+#     --get --data 'order=liquidityNum' --data 'ascending=false' --data 'limit=1' \
 #     | python3 -c 'import sys,json; m=json.load(sys.stdin)[0]; \
 #                    t=json.loads(m["clobTokenIds"]); print(t[0])'
 DEFAULT_ASSET = "53465512181802150755993130711224070738002100921790051090044528012833736167995"
@@ -51,7 +52,7 @@ async def smoke(asset_id: str, duration_s: int = 30) -> int:
 
     try:
         await asyncio.wait_for(_consume(), timeout=duration_s)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         # Expected — we want exactly duration_s of listening
         pass
     except asyncio.CancelledError:

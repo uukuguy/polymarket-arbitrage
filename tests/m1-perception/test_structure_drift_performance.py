@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import statistics
@@ -15,6 +16,7 @@ from polyarb.perception.structure_drift import (
     project_legacy_compatible_market,
 )
 from polyarb.snapshot.normalizer import normalize_events
+from polyarb.storage import sqlite_store as sqlite_store_module
 from polyarb.storage.row_chain_sha256 import RowChainSHA256
 from polyarb.storage.serializable_sha256 import SerializableSHA256
 from polyarb.storage.sqlite_store import SQLiteStore
@@ -164,8 +166,12 @@ def _seed_projection_gate_database(
     store: SQLiteStore,
     *,
     no_conflict_event_siblings: int | None = None,
+    event_count: int = 50,
+    event_only_market_index: int | None = None,
+    global_conflict_market_index: int | None = None,
+    add_orphan_market: bool = False,
+    publish: bool = True,
 ) -> int:
-    event_count = 50
     members_per_event = 24
     row_count = event_count * members_per_event
     store.init_schema()
@@ -202,29 +208,30 @@ def _seed_projection_gate_database(
                         "negRiskOther": False,
                     }
                 )
-                markets.append(
-                    (
-                        "window-perf",
-                        market_id,
-                        json.dumps(
-                            {
-                                "id": market_id,
-                                "conditionId": f"condition-{market_index:06d}",
-                                "clobTokenIds": json.dumps(
-                                    [
-                                        f"yes-{market_index:06d}",
-                                        f"no-{market_index:06d}",
-                                    ]
-                                ),
-                                "active": True,
-                                "closed": False,
-                                "negRisk": True,
-                                "negRiskMarketID": group_id,
-                            }
-                        ),
-                        market_index + 1,
+                if market_index != event_only_market_index:
+                    markets.append(
+                        (
+                            "window-perf",
+                            market_id,
+                            json.dumps(
+                                {
+                                    "id": market_id,
+                                    "conditionId": f"condition-{market_index:06d}",
+                                    "clobTokenIds": json.dumps(
+                                        [
+                                            f"yes-{market_index:06d}",
+                                            f"no-{market_index:06d}",
+                                        ]
+                                    ),
+                                    "active": True,
+                                    "closed": False,
+                                    "negRisk": True,
+                                    "negRiskMarketID": group_id,
+                                }
+                            ),
+                            market_index + 1,
+                        )
                     )
-                )
                 relations.append(
                     ("window-perf", market_id, event_id, event_index + 1)
                 )
@@ -259,6 +266,34 @@ def _seed_projection_gate_database(
                 )
                 for index in range(no_conflict_event_siblings)
             )
+        if global_conflict_market_index is not None:
+            relations.append(
+                (
+                    "window-perf",
+                    f"market-{global_conflict_market_index:06d}",
+                    "event-0001",
+                    2,
+                )
+            )
+        if add_orphan_market:
+            markets.append(
+                (
+                    "window-perf",
+                    "market-orphan",
+                    json.dumps(
+                        {
+                            "id": "market-orphan",
+                            "conditionId": "condition-orphan",
+                            "clobTokenIds": json.dumps(["yes-orphan", "no-orphan"]),
+                            "active": True,
+                            "closed": False,
+                            "negRisk": True,
+                            "negRiskMarketID": "group-orphan",
+                        }
+                    ),
+                    row_count + 1,
+                )
+            )
         con.executemany(
             "INSERT INTO structure_sync_event_market_staging VALUES (?,?,?,?)",
             relations,
@@ -290,20 +325,22 @@ def _seed_projection_gate_database(
             window_id="window-perf", limit=500
         )
         assert result.get("reason") is None and result.get("failure_reason") is None
-    with sqlite3.connect(store.db_path) as con:
-        digest = "a" * 64
-        con.execute(
-            "INSERT INTO structure_publications(publication_id,window_id,snapshot_id,status,"
-            "normalization_contract_version,expected_counts_json,committed_counts_json,"
-            "validation_hash,certification_component,certification_hash,created_at_ms,"
-            "checkpoint_at_ms) VALUES ('publication-perf','window-perf',1,'published',"
-            "'contract-v1','{}','{}',?,'bounded-complete',?,1000,1001)",
-            (digest, digest),
-        )
-        con.execute(
-            "UPDATE structure_sync_windows SET status='published',published_snapshot_id=1 "
-            "WHERE id='window-perf'"
-        )
+    if publish:
+        with sqlite3.connect(store.db_path) as con:
+            digest = "a" * 64
+            con.execute(
+                "INSERT INTO structure_publications(publication_id,window_id,snapshot_id,"
+                "status,normalization_contract_version,expected_counts_json,"
+                "committed_counts_json,validation_hash,certification_component,"
+                "certification_hash,created_at_ms,checkpoint_at_ms) VALUES "
+                "('publication-perf','window-perf',1,'published','contract-v1','{}',"
+                "'{}',?,'bounded-complete',?,1000,1001)",
+                (digest, digest),
+            )
+            con.execute(
+                "UPDATE structure_sync_windows SET status='published',"
+                "published_snapshot_id=1 WHERE id='window-perf'"
+            )
     return row_count
 
 
@@ -466,6 +503,546 @@ def test_complete_sealed_sidecar_gate_is_twice_as_fast_as_old_raw_projection(
         "ratio": raw_median / sidecar_median,
         "v2_select_count": select_count,
     }
+
+
+def _copy_sqlite_database(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(source) as source_con, sqlite3.connect(destination) as target:
+        source_con.backup(target)
+
+
+def _seed_production_shaped_classifier_database(store: SQLiteStore) -> dict[str, int]:
+    event_count = 5_000
+    members_per_group = 24
+    market_count = event_count * members_per_group
+    event_only_index = members_per_group * 2
+    global_conflict_index = 0
+    _seed_projection_gate_database(
+        store,
+        event_count=event_count,
+        event_only_market_index=event_only_index,
+        global_conflict_market_index=global_conflict_index,
+        add_orphan_market=True,
+        publish=False,
+    )
+    eligible_indexes = range(members_per_group * 2 + 1, market_count)
+    eligible_count = market_count - members_per_group * 2 - 1
+    legacy_count = eligible_count + 1
+    cert = "a" * 64
+    certification_counts = json.dumps(
+        {"source_events": event_count, "source_markets": market_count},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("PRAGMA synchronous=OFF")
+        con.execute("UPDATE snapshots SET market_count=? WHERE id=1", (eligible_count,))
+        con.execute(
+            "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+            "market_view_published,data_product,archive_status,snapshot_status,is_valid,"
+            "parquet_path) VALUES (2,900,901,'full',?,1,'structure','legacy','ok',1,'')",
+            (legacy_count,),
+        )
+        con.execute(
+            "INSERT INTO snapshot_source_coverage(snapshot_id,completed,market_items,"
+            "event_items) VALUES (2,1,?,?)",
+            (legacy_count, event_count),
+        )
+        membership_rows = (
+            (
+                index // members_per_group,
+                index,
+            )
+            for index in eligible_indexes
+        )
+        materialized = tuple(membership_rows)
+        for generation in (False, True):
+            snapshot_id = 1 if generation else 2
+            membership_table = (
+                "structure_generation_memberships"
+                if generation
+                else "event_market_memberships"
+            )
+            market_table = "structure_generation_markets" if generation else "markets"
+            con.executemany(
+                f"INSERT INTO {membership_table}(snapshot_id,event_id,"
+                "neg_risk_market_id,market_id,member_kind,active,closed) "
+                "VALUES (?,?,?,?,'named',1,0)",
+                (
+                    (
+                        snapshot_id,
+                        f"event-{event_index:04d}",
+                        f"group-{event_index:04d}",
+                        f"market-{market_index:06d}",
+                    )
+                    for event_index, market_index in materialized
+                ),
+            )
+            con.executemany(
+                f"INSERT INTO {market_table}(snapshot_id,market_id,condition_id,"
+                "yes_token_id,no_token_id,active,closed,neg_risk,neg_risk_market_id,"
+                "fetched_at_ms,incomplete,event_id) VALUES (?,?,?,?,?,1,0,1,?,1000,0,?)",
+                (
+                    (
+                        snapshot_id,
+                        f"market-{market_index:06d}",
+                        f"condition-{market_index:06d}",
+                        f"yes-{market_index:06d}",
+                        f"no-{market_index:06d}",
+                        f"group-{event_index:04d}",
+                        f"event-{event_index:04d}",
+                    )
+                    for event_index, market_index in materialized
+                ),
+            )
+        truths = con.execute(
+            "SELECT event_id,group_id,neg_risk_type,expected_member_count,"
+            "active_named_count,membership_hash,quality,reason FROM "
+            "structure_sync_event_group_truth_staging WHERE window_id='window-perf' "
+            "ORDER BY event_id,group_id"
+        ).fetchall()
+        assert len(truths) == event_count
+        for generation in (False, True):
+            snapshot_id = 1 if generation else 2
+            truth_table = (
+                "structure_generation_group_truth" if generation else "neg_risk_group_truth"
+            )
+            con.executemany(
+                f"INSERT INTO {truth_table}(snapshot_id,event_id,neg_risk_market_id,"
+                "neg_risk_type,expected_member_count,active_named_count,membership_hash,"
+                "quality,reason) VALUES (?,?,?,?,?,?,?,?,?)",
+                ((snapshot_id, *truth) for truth in truths),
+            )
+        legacy_only_hash = hashlib.sha256(
+            json.dumps(
+                [
+                    (
+                        "event-legacy-only",
+                        "group-legacy-only",
+                        "market-legacy-only",
+                        "named",
+                        True,
+                        False,
+                    )
+                ],
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        con.execute(
+            "INSERT INTO event_market_memberships(snapshot_id,event_id,"
+            "neg_risk_market_id,market_id,member_kind,active,closed) VALUES "
+            "(2,'event-legacy-only','group-legacy-only','market-legacy-only','named',1,0)"
+        )
+        con.execute(
+            "INSERT INTO neg_risk_group_truth(snapshot_id,event_id,neg_risk_market_id,"
+            "neg_risk_type,expected_member_count,active_named_count,membership_hash,"
+            "quality) VALUES (2,'event-legacy-only','group-legacy-only','standard',"
+            "1,1,?,'complete-supported')",
+            (legacy_only_hash,),
+        )
+        con.execute(
+            "INSERT INTO markets(snapshot_id,market_id,condition_id,yes_token_id,"
+            "no_token_id,active,closed,neg_risk,neg_risk_market_id,fetched_at_ms,"
+            "incomplete,event_id) VALUES (2,'market-legacy-only',"
+            "'condition-legacy-only','yes-legacy-only','no-legacy-only',1,0,1,"
+            "'group-legacy-only',900,0,'event-legacy-only')"
+        )
+        con.execute(
+            "INSERT INTO structure_publications(publication_id,window_id,snapshot_id,status,"
+            "normalization_contract_version,expected_counts_json,committed_counts_json,"
+            "validation_hash,certification_component,certification_hash,"
+            "certification_counts_json,created_at_ms,checkpoint_at_ms) VALUES "
+            "('publication-perf','window-perf',1,'published','contract-v1','{}','{}',"
+            "?,'bounded-complete',?,?,1000,1001)",
+            (cert, cert, certification_counts),
+        )
+        con.execute(
+            "UPDATE structure_sync_windows SET status='published',published_snapshot_id=1 "
+            "WHERE id='window-perf'"
+        )
+        legacy_universe, legacy_truth = sqlite_store_module._structure_universe_hash(
+            con, snapshot_id=2, generation=False
+        )
+        generation_universe, generation_truth = (
+            sqlite_store_module._structure_universe_hash(
+                con, snapshot_id=1, generation=True
+            )
+        )
+        receipt_digest = sqlite_store_module._comparison_receipt_digest(
+            generation_snapshot_id=1,
+            publication_id="publication-perf",
+            legacy_snapshot_id=2,
+            legacy_market_count=legacy_count,
+            generation_market_count=eligible_count,
+            legacy_universe_hash=legacy_universe,
+            generation_universe_hash=generation_universe,
+            legacy_source_truth_hash=legacy_truth,
+            generation_source_truth_hash=generation_truth,
+            generation_validation_hash=cert,
+            created_at_ms=1_001,
+        )
+        con.execute(
+            "INSERT INTO structure_generation_comparison_receipts("
+            "generation_snapshot_id,publication_id,legacy_snapshot_id,"
+            "legacy_market_count,generation_market_count,legacy_universe_hash,"
+            "generation_universe_hash,legacy_source_truth_hash,"
+            "generation_source_truth_hash,generation_validation_hash,created_at_ms,"
+            "receipt_digest) VALUES (1,'publication-perf',2,?,?,?,?,?,?,?,?,?)",
+            (
+                legacy_count,
+                eligible_count,
+                legacy_universe,
+                generation_universe,
+                legacy_truth,
+                generation_truth,
+                cert,
+                1_001,
+                receipt_digest,
+            ),
+        )
+        con.execute(
+            "INSERT INTO current_structure_generation(id,snapshot_id,publication_id,"
+            "validation_hash,counts_json,certification_component,"
+            "comparison_receipt_digest,switched_at_ms) VALUES "
+            "(1,1,'publication-perf',?,'{}','bounded-complete',?,1001)",
+            (cert, receipt_digest),
+        )
+    return {
+        "market_count": market_count,
+        "event_count": event_count,
+        "members_per_group": members_per_group,
+        "global_conflict_count": 2,
+        "event_only_candidate_count": 1,
+    }
+
+
+def _run_production_shaped_classifier_benchmark(tmp_path: Path) -> dict[str, float]:
+    template = SQLiteStore(tmp_path / "classifier-template.db")
+    shape = _seed_production_shaped_classifier_database(template)
+
+    def old_complete_gate() -> tuple[int, str]:
+        raw_events: dict[str, dict[str, object]] = {}
+        event_cursor = None
+        source_event_digest = SerializableSHA256.new()
+        source_event_digest.update(b"[")
+        source_event_count = 0
+        while True:
+            rows = template.fetch_structure_drift_event_source_chunk(
+                publication_id="publication-perf",
+                generation_snapshot_id=1,
+                after_event_id=event_cursor,
+                limit=100,
+            )
+            if not rows:
+                break
+            for ordinal, event_id, raw, _market_ids in rows:
+                if source_event_count:
+                    source_event_digest.update(b",")
+                source_event_digest.update(
+                    json.dumps(
+                        (ordinal, event_id, raw),
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ).encode()
+                )
+                source_event_count += 1
+                raw_events[str(event_id)] = raw
+            event_cursor = str(rows[-1][1])
+        source_event_digest.update(b"]")
+        source_market_digest = SerializableSHA256.new()
+        source_market_digest.update(b"[")
+        projection_digest = SerializableSHA256.new()
+        projection_digest.update(b"[")
+        emitted = 0
+        source_market_count = 0
+        market_cursor = None
+        while True:
+            rows = template.fetch_structure_drift_market_source_chunk(
+                publication_id="publication-perf",
+                generation_snapshot_id=1,
+                after_market_id=market_cursor,
+                limit=500,
+            )
+            if not rows:
+                break
+            for market_id, raw_market, event_ids, _taken_at_ms in rows:
+                if source_market_count:
+                    source_market_digest.update(b",")
+                source_market_digest.update(
+                    json.dumps(
+                        (market_id, raw_market, event_ids),
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ).encode()
+                )
+                source_market_count += 1
+                if not event_ids:
+                    continue
+                # Reproduce the rejected gate: every candidate reparses and
+                # normalizes its complete 24-member parent event.
+                _events, _tags, _mapping, source_members, truths = normalize_events(
+                    [raw_events[str(event_ids[0])]]
+                )
+                source_member = next(
+                    (member for member in source_members if member.market_id == market_id),
+                    None,
+                )
+                if (
+                    source_member is None
+                    or not truths
+                    or truths[0].quality != "complete-supported"
+                ):
+                    continue
+                projected = project_legacy_compatible_market(
+                    raw_market, event_ids=event_ids, taken_at_ms=0
+                )
+                if projected.row is None:
+                    continue
+                if emitted:
+                    projection_digest.update(b",")
+                projection_digest.update(
+                    json.dumps(
+                        (
+                            source_member.event_id,
+                            source_member.group_id,
+                            source_member.market_id,
+                            source_member.member_kind,
+                            source_member.active,
+                            source_member.closed,
+                            projected.row["condition_id"],
+                            projected.row["yes_token_id"],
+                            projected.row["no_token_id"],
+                            projected.row["neg_risk"],
+                            projected.row["incomplete"],
+                        ),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode()
+                )
+                emitted += 1
+            market_cursor = str(rows[-1][0])
+        source_market_digest.update(b"]")
+        projection_digest.update(b"]")
+        audit_roots = []
+        for generation, snapshot_id in ((True, 1), (False, 2)):
+            audit = SerializableSHA256.new()
+            audit.update(b"[")
+            audit_count = 0
+            member_cursor = None
+            while True:
+                rows = template.fetch_structure_drift_member_chunk(
+                    snapshot_id=snapshot_id,
+                    generation=generation,
+                    after_market_id=member_cursor,
+                    limit=500,
+                )
+                if not rows:
+                    break
+                for member in rows:
+                    if audit_count:
+                        audit.update(b",")
+                    audit.update(
+                        json.dumps(
+                            _member_tuple(member),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode()
+                    )
+                    audit_count += 1
+                member_cursor = rows[-1].market_id
+            audit.update(b"]")
+            audit_roots.append(audit.hexdigest())
+        terminal = hashlib.sha256(
+            json.dumps(
+                (
+                    source_event_digest.hexdigest(),
+                    source_market_digest.hexdigest(),
+                    projection_digest.hexdigest(),
+                    *audit_roots,
+                ),
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return emitted, terminal
+
+    def projection_query_budget() -> tuple[int, int]:
+        commitment = None
+        max_selects = 0
+        calls = 0
+        while commitment is None or not commitment.complete:
+            statements: list[str] = []
+            commitment = template.advance_structure_drift_fresh_projection_commitment(
+                publication_id="publication-perf",
+                generation_snapshot_id=1,
+                commitment=commitment,
+                limit=500,
+                trace_callback=statements.append,
+            )
+            calls += 1
+            max_selects = max(
+                max_selects,
+                sum(
+                    statement.lstrip().upper().startswith("SELECT")
+                    for statement in statements
+                ),
+            )
+        assert commitment.member_count > 0
+        return max_selects, calls
+
+    def classifier_v2_complete_gate(
+        sample: int,
+    ) -> tuple[float, dict[str, list[float]], float, str, int]:
+        sample_path = tmp_path / f"classifier-v2-{sample}.db"
+        _copy_sqlite_database(template.db_path, sample_path)
+        store = SQLiteStore(sample_path)
+        comparison_id = store.initialize_structure_drift_comparison(now_ms=2_000)
+        stage_timings: dict[str, list[float]] = {
+            "fresh-projection-members": [],
+            "generation-members": [],
+            "legacy-members": [],
+            "terminal-receipt": [],
+        }
+        child_slice_elapsed = 0.0
+        max_child_slice = 0.0
+        chunks_in_slice = 0
+        started_total = time.perf_counter()
+        terminal = ""
+        for chunk_index in range(2_000):
+            with sqlite3.connect(sample_path) as con:
+                phase = str(
+                    con.execute(
+                        "SELECT phase FROM structure_generation_drift_progress "
+                        "WHERE comparison_id=?",
+                        (comparison_id,),
+                    ).fetchone()[0]
+                )
+            started = time.perf_counter()
+            result = store.advance_structure_drift_comparison_chunk(
+                comparison_id,
+                max_rows=500,
+                now_ms=2_001 + chunk_index,
+            )
+            elapsed = time.perf_counter() - started
+            child_slice_elapsed += elapsed
+            chunks_in_slice += 1
+            if phase in stage_timings:
+                stage_timings[phase].append(elapsed)
+            if result.component in {"sealed", "stale"}:
+                terminal = str(result.component)
+                stage_timings["terminal-receipt"].append(elapsed)
+                max_child_slice = max(max_child_slice, child_slice_elapsed)
+                break
+            if chunks_in_slice == 100:
+                max_child_slice = max(max_child_slice, child_slice_elapsed)
+                child_slice_elapsed = 0.0
+                chunks_in_slice = 0
+        else:
+            pytest.fail("120k classifier-v2 benchmark did not reach terminal state")
+        total = time.perf_counter() - started_total
+        with sqlite3.connect(sample_path) as con:
+            terminal_receipts = int(
+                con.execute(
+                    "SELECT COUNT(*) FROM structure_generation_drift_terminal_receipts "
+                    "WHERE comparison_id=?",
+                    (comparison_id,),
+                ).fetchone()[0]
+            )
+        return total, stage_timings, max_child_slice, terminal, terminal_receipts
+
+    # Seed and database copies stay outside every timed operation. Each path is
+    # warmed once before the three samples used for medians.
+    old_warm_started = time.perf_counter()
+    old_complete_gate()
+    print(
+        "classifier-v1-complete-gate-sample "
+        f"kind=warm elapsed_s={time.perf_counter() - old_warm_started:.6f}",
+        flush=True,
+    )
+    old_samples = []
+    for sample_index in range(3):
+        started = time.perf_counter()
+        old_complete_gate()
+        elapsed = time.perf_counter() - started
+        old_samples.append(elapsed)
+        print(
+            "classifier-v1-complete-gate-sample "
+            f"kind=timed index={sample_index} elapsed_s={elapsed:.6f}",
+            flush=True,
+        )
+    v2_warm = classifier_v2_complete_gate(-1)
+    print(
+        "classifier-v2-complete-gate-sample "
+        f"kind=warm elapsed_s={v2_warm[0]:.6f}",
+        flush=True,
+    )
+    v2_samples = []
+    for sample_index in range(3):
+        sample = classifier_v2_complete_gate(sample_index)
+        v2_samples.append(sample)
+        print(
+            "classifier-v2-complete-gate-sample "
+            f"kind=timed index={sample_index} elapsed_s={sample[0]:.6f}",
+            flush=True,
+        )
+    projection_selects, projection_calls = projection_query_budget()
+    stage_medians: dict[str, float] = {}
+    for stage in (
+        "fresh-projection-members",
+        "generation-members",
+        "legacy-members",
+        "terminal-receipt",
+    ):
+        samples = [
+            sum(timings[stage])
+            for _total, timings, _slice, _terminal, _receipts in v2_samples
+        ]
+        assert all(samples), stage
+        stage_medians[stage] = statistics.median(samples)
+    terminals = {sample[3] for sample in v2_samples}
+    terminal_receipts = {sample[4] for sample in v2_samples}
+    assert terminals == {"stale"}
+    assert terminal_receipts == {1}
+    evidence: dict[str, float] = {
+        **shape,
+        "old_complete_gate_median_s": statistics.median(old_samples),
+        "classifier_v2_complete_gate_median_s": statistics.median(
+            sample[0] for sample in v2_samples
+        ),
+        "complete_projection_median_s": stage_medians["fresh-projection-members"],
+        "classification_diagnostics_median_s": stage_medians["generation-members"],
+        # The production generation phase advances the comparison mirror in
+        # the same CAS as classification; this records that integrated wall time.
+        "generation_mirror_median_s": stage_medians["generation-members"],
+        "legacy_scan_median_s": stage_medians["legacy-members"],
+        "terminal_receipt_median_s": stage_medians["terminal-receipt"],
+        "max_child_slice_s": max(sample[2] for sample in v2_samples),
+        "projection_query_count": projection_selects,
+        "bounded_chunk_query_budget": 17,
+        "projection_call_count": projection_calls,
+    }
+    print(
+        "classifier-v2-production-gate "
+        + json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+    )
+    return evidence
+
+
+@pytest.mark.slow
+def test_120k_production_shaped_complete_classifier_gate(tmp_path: Path) -> None:
+    evidence = _run_production_shaped_classifier_benchmark(tmp_path)
+
+    assert evidence["market_count"] == 120_000
+    assert evidence["event_count"] == 5_000
+    assert evidence["members_per_group"] == 24
+    assert evidence["global_conflict_count"] > 0
+    assert evidence["event_only_candidate_count"] > 0
+    assert evidence["old_complete_gate_median_s"] / evidence[
+        "classifier_v2_complete_gate_median_s"
+    ] >= 2.0
+    assert evidence["max_child_slice_s"] < 45.0
+    assert evidence["projection_query_count"] <= evidence[
+        "bounded_chunk_query_budget"
+    ]
 
 
 def _seed_member_scan_database(store: SQLiteStore, *, row_count: int) -> None:
