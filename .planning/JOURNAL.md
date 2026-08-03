@@ -6018,3 +6018,38 @@ parallel with that evidence, audit the failure-counter reset semantics and the
 retention FK chain; either prove both safe or repair them under TDD before the
 generation-read/Quote cutovers. Candidate lifecycle and final M1 UAT remain the
 last product gate.
+
+## SESSION 129 — 2026-08-04 (recovery/retention root causes proven)
+
+- [LIVE] The post-sidecar generation continued natural forward progress from
+  `group_truth|533282` to `group_truth|748224` while the current pointer stayed
+  at 865. The daemon is active; classifier-v2 authorization and Quote remain
+  downstream gates.
+- [ROOT CAUSE — FAILURE STREAK] `_tick_once` preserves the old failure counter
+  for every cooperative sidecar and generation checkpoint and resets it only
+  after a complete snapshot. Live logs showed multiple successful checkpoints
+  while the counter remained 4/5. This violates the advertised consecutive-
+  failure contract and can produce a false RECOVERING transition.
+- [ROOT CAUSE — WINDOW RETENTION] Both Structure-window purge methods omit
+  `structure_sync_event_group_truth_staging`. A minimal current-schema fixture
+  reproduced the exact `sqlite3.IntegrityError: FOREIGN KEY constraint failed`.
+- [ROOT CAUSE — SNAPSHOT RETENTION] `purge_old_snapshots` can select a snapshot
+  still referenced by `snapshot_attempts`, then delete the parent without
+  retiring that same-retention operational evidence. A second minimal fixture
+  reproduced the exact FK failure. Quote-run references require independent
+  retention ordering rather than implicit deletion.
+- [ROOT CAUSE — GENERATION PRESSURE] The evidence-aware generation cleanup is
+  implemented and exposed through Makefile/CLI but has no resident runtime
+  caller. Therefore the live nine-retained/seven-reclaimable FAIL state cannot
+  converge automatically.
+- [DESIGN GATE] No implementation was written. The recommended repair is one
+  bounded Quote-aware maintenance owner, exact durable-progress streak reset,
+  FK-complete window deletion, and transactionally aligned snapshot-attempt
+  retention. It awaits the mandatory written-design approval path.
+
+### [NEXT — CURRENT]
+
+Obtain approval for recommended recovery/retention design A, write and commit
+the focused spec, then produce a TDD implementation plan. Keep release 233
+under read-only observation in parallel; do not cut over generation reads or
+enable Quote before the natural drift seal and maintenance risks are closed.

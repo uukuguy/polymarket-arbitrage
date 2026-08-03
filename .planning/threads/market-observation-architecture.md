@@ -1514,3 +1514,26 @@ success is not user receipt/read evidence.
   active comparison without creating an authorization receipt. A failed
   pointer transaction rolls both changes back; the next tick creates exactly
   one v2 comparison for the new current identity.
+
+### §2.22 Cooperative progress must break failure streaks and retention must have a resident owner (2026-08-04)
+
+- Production release 233 retained `snapshot:failure_counter=4` across many
+  authenticated, durable sidecar and generation checkpoints. The code resets
+  the counter only after a complete `OK/DEGRADED` snapshot. That contradicts
+  the documented consecutive-failure meaning: non-deferred forward progress
+  breaks a streak even though a scheduler already in `RECOVERING` must remain
+  there until complete certified truth is published. Supersession, writer-busy
+  defer, and zero-progress results do not prove recovery and must not reset it.
+- Retention table ownership must evolve with schemas. Both failed and published
+  Structure-window purge lists omitted
+  `structure_sync_event_group_truth_staging`; a minimal current-schema fixture
+  reproduces the production `FOREIGN KEY constraint failed`. Snapshot purge
+  likewise selects rows still referenced by `snapshot_attempts`; it must retire
+  same-retention operational attempts transactionally and leave snapshots
+  referenced by independently retained Quote runs alone.
+- A safe cleanup primitive without a resident caller is not self-healing.
+  Generation evidence currently has a bounded authenticated cleanup API and a
+  Makefile target, but no daemon owner, so production pressure remains at nine
+  retained generations and seven reclaimable indefinitely. The production
+  contract needs a low-priority, Quote-aware resident maintenance loop with
+  bounded transactions, durable cursor/health truth, retry, and alert recovery.
