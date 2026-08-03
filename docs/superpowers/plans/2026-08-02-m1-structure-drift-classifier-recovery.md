@@ -329,6 +329,12 @@ independent oracle, uniqueness, triggers, and data-plane write absence.
 
 ### Task 3: Build the Complete Global Fresh Projection Reader
 
+> **Blocking prerequisite added 2026-08-03:** execute and independently review
+> `2026-08-03-m1-durable-event-member-staging.md` first. Raw event JSON cannot
+> satisfy the database-side 500-member work bound. This task is complete only
+> when its event-only reader consumes the sealed per-ordinal sidecar and the
+> amendment plan's three task gates pass.
+
 **Files:**
 - Modify: `src/polyarb/perception/structure_drift.py`
 - Modify: `src/polyarb/storage/sqlite_store.py`
