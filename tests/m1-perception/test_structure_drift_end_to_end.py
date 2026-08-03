@@ -549,11 +549,18 @@ def _seal_fixture_event_members(store: SQLiteStore, window_id: str) -> None:
 
 
 def _drift_store(
-    tmp_path: Path, *, omit_generation_market_id: str | None = None
+    tmp_path: Path,
+    *,
+    omit_generation_market_id: str | None = None,
+    sibling_recovery: bool = False,
 ) -> SQLiteStore:
     store = SQLiteStore(tmp_path / "drift-e2e.db")
     store.init_schema()
-    main_members = (("shared", True), ("addition", True))
+    main_members = (
+        (("shared", True), ("current-nontradable", False))
+        if sibling_recovery
+        else (("shared", True), ("addition", True))
+    )
     raw_main = {
         "id": "event-main",
         "slug": "event-main",
@@ -597,20 +604,32 @@ def _drift_store(
         }
 
     raw_events = (
-        raw_main,
-        single_event(
-            "event-current",
-            "group-current",
-            "current-nontradable",
-            active=False,
-        ),
-        single_event("event-event-only", "group-event-only", "event-only"),
+        (
+            raw_main,
+            single_event("event-addition", "group-addition", "addition"),
+            single_event("event-event-only", "group-event-only", "event-only"),
+        )
+        if sibling_recovery
+        else (
+            raw_main,
+            single_event(
+                "event-current",
+                "group-current",
+                "current-nontradable",
+                active=False,
+            ),
+            single_event("event-event-only", "group-event-only", "event-only"),
+        )
     )
     raw_markets = {
         "shared": _raw_market("shared", group_id="group-main"),
-        "addition": _raw_market("addition", group_id="group-main"),
+        "addition": _raw_market(
+            "addition", group_id="group-addition" if sibling_recovery else "group-main"
+        ),
         "current-nontradable": _raw_market(
-            "current-nontradable", group_id="group-current", active=False
+            "current-nontradable",
+            group_id="group-main" if sibling_recovery else "group-current",
+            active=False,
         ),
         "market-side": _raw_market("market-side", group_id="group-market-a"),
     }
@@ -631,6 +650,8 @@ def _drift_store(
                 if market_id == "market-side"
                 else ("event-current",)
                 if market_id == "current-nontradable"
+                else ("event-addition",)
+                if sibling_recovery and market_id == "addition"
                 else ("event-main",)
             ),
             taken_at_ms=2_000,
@@ -649,11 +670,21 @@ def _drift_store(
             "event_items) VALUES (1,1,5,1)"
         )
         legacy_members = (
-            ("event-main", "group-main", "shared"),
-            ("event-current", "group-current", "current-nontradable"),
-            ("event-event-only", "group-event-only", "event-only"),
-            ("event-market-a", "group-market-a", "market-side"),
-            ("event-fresh", "group-fresh", "fresh-absent"),
+            (
+                ("event-main", "group-main", "shared"),
+                ("event-main", "group-main", "current-nontradable"),
+                ("event-event-only", "group-event-only", "event-only"),
+                ("event-market-a", "group-market-a", "market-side"),
+                ("event-fresh", "group-fresh", "fresh-absent"),
+            )
+            if sibling_recovery
+            else (
+                ("event-main", "group-main", "shared"),
+                ("event-current", "group-current", "current-nontradable"),
+                ("event-event-only", "group-event-only", "event-only"),
+                ("event-market-a", "group-market-a", "market-side"),
+                ("event-fresh", "group-fresh", "fresh-absent"),
+            )
         )
         con.executemany(
             "INSERT INTO event_market_memberships(snapshot_id,event_id,"
@@ -669,7 +700,8 @@ def _drift_store(
                 ).encode()
             ).hexdigest()
             con.execute(
-                "INSERT INTO neg_risk_group_truth(snapshot_id,event_id,neg_risk_market_id,"
+                "INSERT OR IGNORE INTO neg_risk_group_truth("
+                "snapshot_id,event_id,neg_risk_market_id,"
                 "neg_risk_type,expected_member_count,active_named_count,membership_hash,"
                 "quality) VALUES (1,?,?,'standard',1,1,?,"
                 "'complete-supported')",
@@ -1628,6 +1660,74 @@ def test_v2_insert_failure_rolls_back_v1_supersession(tmp_path: Path) -> None:
         ]
 
 
+def test_fresh_projection_phase_migration_rolls_back_and_preserves_audit_rows(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    with sqlite3.connect(store.db_path) as con:
+        sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND "
+            "name='structure_generation_drift_progress'"
+        ).fetchone()[0]
+        old_sql = str(sql).replace("'fresh-projection-members',", "", 1)
+        columns = [
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_progress)"
+            )
+        ]
+        column_sql = ",".join(columns)
+        con.execute("DROP INDEX idx_structure_drift_progress_active")
+        con.execute(
+            "ALTER TABLE structure_generation_drift_progress RENAME TO "
+            "structure_generation_drift_progress_new"
+        )
+        con.execute(old_sql)
+        con.execute(
+            "INSERT INTO structure_generation_drift_progress("
+            + column_sql
+            + ") SELECT "
+            + column_sql
+            + " FROM structure_generation_drift_progress_new"
+        )
+        con.execute("DROP TABLE structure_generation_drift_progress_new")
+        con.execute(
+            "CREATE INDEX idx_structure_drift_progress_active ON "
+            "structure_generation_drift_progress(checkpoint_at_ms DESC,comparison_id) "
+            "WHERE phase NOT IN ('sealed','stale')"
+        )
+
+        def fail(point: str) -> None:
+            if point == "after-fresh-projection-progress-rename":
+                raise RuntimeError("injected-fresh-phase-migration-failure")
+
+        with pytest.raises(
+            RuntimeError, match="injected-fresh-phase-migration-failure"
+        ):
+            sqlite_store_module._migrate_structure_drift_fresh_projection_phase(
+                con, fault_hook=fail
+            )
+        rolled_back_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND "
+            "name='structure_generation_drift_progress'"
+        ).fetchone()[0]
+        assert "fresh-projection-members" not in rolled_back_sql
+        assert con.execute(
+            "SELECT comparison_id FROM structure_generation_drift_progress"
+        ).fetchall() == [(comparison_id,)]
+
+        sqlite_store_module._migrate_structure_drift_fresh_projection_phase(con)
+        upgraded_sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND "
+            "name='structure_generation_drift_progress'"
+        ).fetchone()[0]
+        assert "fresh-projection-members" in upgraded_sql
+        assert con.execute(
+            "SELECT comparison_id FROM structure_generation_drift_progress"
+        ).fetchall() == [(comparison_id,)]
+
+
 def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> None:
     digest_fields = _DRIFT_RECEIPT_V2_DIGEST_FIELDS
     with sqlite3.connect(store.db_path) as con:
@@ -1655,6 +1755,7 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
             "event-only-quarantine": 0,
             "market-side-quarantine": 0,
             "fresh-source-absent": 0,
+            "fresh-group-ineligible": 0,
             "overlap-conflict": 0,
             "unclassified": 0,
         }
@@ -1737,7 +1838,8 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
         con.execute(
             "UPDATE structure_generation_drift_progress SET phase='sealed',"
             "source_event_hash=?,source_market_hash=?,source_identity_hash=?,"
-            "class_counts_json=?,class_digests_json=? WHERE comparison_id=?",
+            "class_counts_json=?,class_digests_json=?,diagnostic_root=? "
+            "WHERE comparison_id=?",
             (
                 *source_hashes,
                 json.dumps(
@@ -1770,6 +1872,7 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
                         "generation_reconstruction_root": "9" * 64,
                     }
                 ),
+                "d" * 64,
                 comparison_id,
             ),
         )
@@ -2098,12 +2201,16 @@ def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
     store = _drift_store(tmp_path)
     comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
     observed_phases: set[str] = set()
+    phase_order: list[str] = []
     for now_ms in range(3_001, 3_100):
+        store = SQLiteStore(store.db_path)
         chunk = store.advance_structure_drift_comparison_chunk(
             comparison_id, max_rows=1, now_ms=now_ms
         )
         assert chunk.rows_processed <= 1
         observed_phases.add(str(chunk.component))
+        if not phase_order or phase_order[-1] != chunk.component:
+            phase_order.append(str(chunk.component))
         if chunk.component in {"sealed", "stale"}:
             break
     else:
@@ -2134,9 +2241,19 @@ def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
     assert debug_counts.get("class_count:overlap-conflict", 0) == 0
     assert debug_counts.get("class_count:unclassified", 0) == 0
     assert chunk.component == "sealed"
+    assert tuple(phase_order) == (
+        "source-events",
+        "source-markets",
+        "fresh-projection-members",
+        "generation-members",
+        "legacy-members",
+        "fresh-group-truth",
+        "sealed",
+    )
     assert {
         "source-events",
         "source-markets",
+        "fresh-projection-members",
         "generation-members",
         "legacy-members",
         "fresh-group-truth",
@@ -2167,7 +2284,8 @@ def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
         "current-nontradable": 1,
         "event-only-quarantine": 1,
         "fresh-addition": 1,
-        "fresh-source-absent": 1,
+            "fresh-source-absent": 1,
+            "fresh-group-ineligible": 0,
         "market-side-quarantine": 1,
         "overlap-conflict": 0,
         "shared": 1,
@@ -2236,6 +2354,11 @@ def test_v2_drift_commitments_are_chunk_partition_independent(tmp_path: Path) ->
         "class_digests_json",
         "legacy_reconstruction_root",
         "generation_reconstruction_root",
+        "diagnostic_counts_json",
+        "diagnostic_root",
+        "diagnostic_samples_json",
+        "diagnostic_samples_digest",
+        "receipt_digest",
     )
     observed: list[tuple[object, ...]] = []
     for max_rows in (1, 17, 500):
@@ -2261,6 +2384,140 @@ def test_v2_drift_commitments_are_chunk_partition_independent(tmp_path: Path) ->
         observed.append(tuple(row))
 
     assert observed[0] == observed[1] == observed[2]
+
+
+def _run_drift_to_terminal(
+    store: SQLiteStore, comparison_id: str, *, start_ms: int = 3_001
+) -> str:
+    for now_ms in range(start_ms, start_ms + 100):
+        chunk = store.advance_structure_drift_comparison_chunk(
+            comparison_id, max_rows=17, now_ms=now_ms
+        )
+        if chunk.component in {"sealed", "stale"}:
+            return chunk.component
+    pytest.fail("drift comparison did not terminate")
+
+
+def test_stale_overlap_finalization_atomically_seals_terminal_receipt(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_generation_markets_frozen_update_v2")
+        con.execute(
+            "UPDATE structure_generation_markets SET yes_token_id='divergent' "
+            "WHERE snapshot_id=2 AND market_id='shared'"
+        )
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+
+    assert _run_drift_to_terminal(store, comparison_id) == "stale"
+    with sqlite3.connect(store.db_path) as con:
+        progress = con.execute(
+            "SELECT phase,terminal_reason FROM structure_generation_drift_progress "
+            "WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        receipts = con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_terminal_receipts "
+            "WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()[0]
+    assert progress == ("stale", "drift-overlap-conflict")
+    assert receipts == 1
+    status = store.structure_generation_drift_status()
+    assert status["reason"] == "drift-overlap-conflict"
+    assert status["diagnostic_counts"]
+
+
+def test_two_member_sibling_recovery_seals_v2_reconstruction(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path, sibling_recovery=True)
+    immutable_tables = (
+        "current_structure_generation",
+        "structure_publications",
+        "structure_generation_markets",
+        "structure_generation_memberships",
+        "structure_generation_group_truth",
+        "structure_sync_event_metadata_staging",
+        "structure_sync_event_member_staging",
+        "structure_sync_event_member_receipts",
+    )
+    with sqlite3.connect(store.db_path) as con:
+        immutable_before = {
+            table: con.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for table in immutable_tables
+        }
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+
+    assert _run_drift_to_terminal(store, comparison_id) == "sealed"
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is True
+    assert status["class_counts"]["current-nontradable"] == 1
+    assert status["class_counts"]["fresh-group-ineligible"] == 1
+    assert status["class_counts"]["overlap-conflict"] == 0
+    assert status["class_counts"]["unclassified"] == 0
+    with sqlite3.connect(store.db_path) as con:
+        row = con.execute(
+            "SELECT projection_universe_hash,"
+            "generation_projection_member_comparison_root,"
+            "legacy_reconstruction_root,generation_reconstruction_root,"
+            "diagnostic_counts_json FROM structure_generation_drift_receipts "
+            "WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        immutable_after = {
+            table: con.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for table in immutable_tables
+        }
+    assert row is not None
+    assert row[0] == row[1]
+    assert all(isinstance(value, str) and len(value) == 64 for value in row[2:4])
+    assert json.loads(row[4]) == {}
+    assert immutable_after == immutable_before
+
+
+def test_generation_omission_finalizes_with_projection_missing_diagnostic(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path, omit_generation_market_id="addition")
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+
+    assert _run_drift_to_terminal(store, comparison_id) == "stale"
+    status = store.structure_generation_drift_status()
+    assert status["reason"] == "drift-unclassified"
+    assert status["diagnostic_counts"] == {
+        "active-open-projection-missing": 1
+    }
+    assert len(status["diagnostic_samples"]["active-open-projection-missing"]) == 1
+
+
+def test_terminal_receipt_insert_failure_rolls_back_stale_transition(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_generation_markets_frozen_update_v2")
+        con.execute(
+            "UPDATE structure_generation_markets SET yes_token_id='divergent' "
+            "WHERE snapshot_id=2 AND market_id='shared'"
+        )
+        con.execute(
+            "CREATE TRIGGER reject_terminal_receipt BEFORE INSERT ON "
+            "structure_generation_drift_terminal_receipts BEGIN SELECT "
+            "RAISE(ABORT,'injected-terminal-receipt-failure'); END"
+        )
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    with pytest.raises(sqlite3.IntegrityError, match="injected-terminal-receipt-failure"):
+        _run_drift_to_terminal(store, comparison_id)
+    with sqlite3.connect(store.db_path) as con:
+        phase, reason = con.execute(
+            "SELECT phase,terminal_reason FROM structure_generation_drift_progress "
+            "WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+    assert phase == "fresh-group-truth"
+    assert reason is None
 
 
 def test_drift_pointer_race_fails_before_next_checkpoint(tmp_path: Path) -> None:

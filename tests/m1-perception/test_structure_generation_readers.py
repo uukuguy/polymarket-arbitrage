@@ -566,7 +566,7 @@ def test_drift_initialization_pins_current_authenticated_identity_once(
         max_rows=500,
         now_ms=3_003,
     )
-    assert markets.component == "generation-members"
+    assert markets.component == "fresh-projection-members"
     assert markets.rows_processed == 0
     with sqlite3.connect(generation_db) as con:
         source = con.execute(
@@ -583,110 +583,16 @@ def test_drift_initialization_pins_current_authenticated_identity_once(
         empty_market_hash,
         source_identity.hexdigest(),
     )
-    assert source[3] == "generation-members"
+    assert source[3] == "fresh-projection-members"
 
-    generated = store.advance_structure_drift_comparison_chunk(
-        comparison_id,
-        max_rows=1,
-        now_ms=3_004,
-    )
-    assert generated.component == "generation-members"
-    assert generated.rows_processed == 1
-    generated_again = store.advance_structure_drift_comparison_chunk(
-        comparison_id,
-        max_rows=1,
-        now_ms=3_005,
-    )
-    assert generated_again.component == "generation-members"
-    assert generated_again.rows_processed == 1
-    generation_done = store.advance_structure_drift_comparison_chunk(
-        comparison_id,
-        max_rows=1,
-        now_ms=3_006,
-    )
-    assert generation_done.component == "legacy-members"
-    with sqlite3.connect(generation_db) as con:
-        generation_counts_json, generation_digests_json = con.execute(
-            "SELECT class_counts_json,class_digests_json FROM "
-            "structure_generation_drift_progress WHERE comparison_id=?",
-            (comparison_id,),
-        ).fetchone()
-    generation_counts = json.loads(generation_counts_json)
-    generation_digests = json.loads(generation_digests_json)
-    assert generation_counts["projection_member_count"] == 0
-    assert generation_counts["generation_member_count"] == 2
-    assert len(generation_digests["projection_member_root"]) == 64
-    assert len(generation_digests["generation_member_root"]) == 64
-    assert (
-        generation_digests["projection_member_root"]
-        != generation_digests["generation_member_root"]
-    )
-    legacy = store.advance_structure_drift_comparison_chunk(
-        comparison_id,
-        max_rows=1,
-        now_ms=3_007,
-    )
-    assert legacy.component == "legacy-members"
-    assert legacy.rows_processed == 1
-    legacy_again = store.advance_structure_drift_comparison_chunk(
-        comparison_id,
-        max_rows=1,
-        now_ms=3_008,
-    )
-    assert legacy_again.component == "legacy-members"
-    assert legacy_again.rows_processed == 1
-    legacy_done = store.advance_structure_drift_comparison_chunk(
-        comparison_id,
-        max_rows=1,
-        now_ms=3_009,
-    )
-    assert legacy_done.component == "fresh-group-truth"
-    with sqlite3.connect(generation_db) as con:
-        class_counts_json, class_digests_json, checkpoint_at_ms = con.execute(
-            "SELECT class_counts_json,class_digests_json,checkpoint_at_ms FROM "
-            "structure_generation_drift_progress WHERE comparison_id=?",
-            (comparison_id,),
-        ).fetchone()
-        class_counts = json.loads(class_counts_json)
-        class_digests = json.loads(class_digests_json)
-    assert class_counts["class_count:unclassified"] == 2
-    assert class_counts["class_count:fresh-source-absent"] == 2
-    assert RowChainSHA256.from_json(
-        class_digests["class_state:unclassified"],
-        expected_domain="class/unclassified",
-    )
-    assert RowChainSHA256.from_json(
-        class_digests["class_state:fresh-source-absent"],
-        expected_domain="class/fresh-source-absent",
-    )
-    assert checkpoint_at_ms == 3_009
-
-    fresh_truth = store.advance_structure_drift_comparison_chunk(
-        comparison_id,
-        max_rows=1,
-        now_ms=3_010,
-    )
-    assert fresh_truth.component == "fresh-group-truth"
-    assert fresh_truth.rows_processed == 1
-    truth_done = store.advance_structure_drift_comparison_chunk(
-        comparison_id,
-        max_rows=1,
-        now_ms=3_011,
-    )
-    assert truth_done.component == "stale"
-    with sqlite3.connect(generation_db) as con:
-        phase, class_digests_json = con.execute(
-            "SELECT phase,class_digests_json FROM "
-            "structure_generation_drift_progress WHERE comparison_id=?",
-            (comparison_id,),
-        ).fetchone()
-    final_digests = json.loads(class_digests_json)
-    assert phase == "stale"
-    assert len(final_digests["generation_group_truth_hash"]) == 64
-    assert (
-        final_digests["generation_group_truth_hash"]
-        != final_digests["source_group_truth_hash"]
-    )
+    # This audit fixture predates the natural event-member source contract.
+    # The new phase must refuse historical fabrication or backfill.
+    with pytest.raises(ValueError, match="structure-event-source-receipt-unavailable"):
+        store.advance_structure_drift_comparison_chunk(
+            comparison_id,
+            max_rows=1,
+            now_ms=3_004,
+        )
 
 
 def test_drift_group_truth_reader_is_bounded_and_keyset_stable(

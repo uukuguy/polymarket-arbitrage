@@ -723,7 +723,8 @@ def _migrate_structure_drift_hash_v2(
             "source_market_hash IS NULL OR length(source_market_hash)=64),"
             "source_identity_hash TEXT CHECK(source_identity_hash IS NULL OR "
             "length(source_identity_hash)=64),phase TEXT NOT NULL CHECK(phase IN "
-            "('source-events','source-markets','generation-members','legacy-members',"
+            "('source-events','source-markets','fresh-projection-members',"
+            "'generation-members','legacy-members',"
             "'fresh-group-truth','sealed','stale')),terminal_reason TEXT,"
             "row_cursor_json TEXT,digest_state_json TEXT NOT NULL,"
             "class_counts_json TEXT NOT NULL,class_digests_json TEXT NOT NULL,"
@@ -1078,6 +1079,68 @@ def _migrate_structure_drift_classifier_v2(
     except BaseException:
         con.execute("ROLLBACK TO SAVEPOINT structure_drift_classifier_v2_migration")
         con.execute("RELEASE SAVEPOINT structure_drift_classifier_v2_migration")
+        raise
+
+
+def _migrate_structure_drift_fresh_projection_phase(
+    con: sqlite3.Connection,
+    *,
+    fault_hook: Callable[[str], None] | None = None,
+) -> None:
+    """Add the v2 sidecar phase to an existing authority table atomically."""
+    row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND "
+        "name='structure_generation_drift_progress'"
+    ).fetchone()
+    if row is None or "fresh-projection-members" in str(row[0]):
+        return
+    old_sql = str(row[0])
+    upgraded_sql = old_sql.replace(
+        "'source-events','source-markets','generation-members'",
+        "'source-events','source-markets','fresh-projection-members',"
+        "'generation-members'",
+        1,
+    )
+    if upgraded_sql == old_sql:
+        raise ValueError("structure-drift-phase-schema-invalid")
+    columns = [
+        str(item[1])
+        for item in con.execute(
+            "PRAGMA table_info(structure_generation_drift_progress)"
+        ).fetchall()
+    ]
+    con.execute("SAVEPOINT structure_drift_fresh_projection_phase_migration")
+    try:
+        con.execute("DROP INDEX IF EXISTS idx_structure_drift_progress_active")
+        con.execute(
+            "ALTER TABLE structure_generation_drift_progress RENAME TO "
+            "structure_generation_drift_progress_before_projection"
+        )
+        if fault_hook is not None:
+            fault_hook("after-fresh-projection-progress-rename")
+        con.execute(upgraded_sql)
+        column_sql = ",".join(columns)
+        con.execute(
+            "INSERT INTO structure_generation_drift_progress("
+            + column_sql
+            + ") SELECT "
+            + column_sql
+            + " FROM structure_generation_drift_progress_before_projection"
+        )
+        if fault_hook is not None:
+            fault_hook("after-fresh-projection-progress-copy")
+        con.execute(
+            "DROP TABLE structure_generation_drift_progress_before_projection"
+        )
+        con.execute(
+            "CREATE INDEX idx_structure_drift_progress_active ON "
+            "structure_generation_drift_progress(checkpoint_at_ms DESC,comparison_id) "
+            "WHERE phase NOT IN ('sealed','stale')"
+        )
+        con.execute("RELEASE SAVEPOINT structure_drift_fresh_projection_phase_migration")
+    except BaseException:
+        con.execute("ROLLBACK TO SAVEPOINT structure_drift_fresh_projection_phase_migration")
+        con.execute("RELEASE SAVEPOINT structure_drift_fresh_projection_phase_migration")
         raise
 
 
@@ -2730,6 +2793,7 @@ class SQLiteStore:
             _migrate_structure_event_member_schema(con)
             _migrate_structure_drift_hash_v2(con)
             _migrate_structure_drift_classifier_v2(con)
+            _migrate_structure_drift_fresh_projection_phase(con)
             con.executescript(STRUCTURE_GENERATIONS_DDL)
             con.execute("ANALYZE idx_structure_generation_memberships_drift_scan")
             con.execute("ANALYZE idx_event_market_memberships_drift_scan")
@@ -5629,6 +5693,7 @@ class SQLiteStore:
             sidecar_rows_by_market: dict[str, list[tuple[object, ...]]] = {}
             sidecar_market_counts: dict[str, int] = {}
             sidecar_identity_counts: dict[tuple[str, str], tuple[int, int]] = {}
+            group_truth_by_key: dict[tuple[str, str], tuple[object, ...]] = {}
             conflict_events: set[str] = set()
             certified_event_keys: set[tuple[str, int, int]] = set()
             if market_ids:
@@ -5722,6 +5787,29 @@ class SQLiteStore:
                     for market_id, rows in staged_by_market.items()
                     if len(rows) == 1
                 })
+                group_keys = sorted({
+                    (str(row[0]), str(row[3]))
+                    for rows in staged_by_market.values()
+                    for row in rows
+                    if isinstance(row[3], str) and row[3]
+                })
+                if group_keys:
+                    group_values = ",".join("(?,?)" for _ in group_keys)
+                    group_params = tuple(value for key in group_keys for value in key)
+                    for truth_row in con.execute(
+                        "WITH candidate(event_id,group_id) AS (VALUES "
+                        + group_values
+                        + ") SELECT truth.event_id,truth.neg_risk_market_id,"
+                        "truth.neg_risk_type,truth.quality,truth.reason,"
+                        "truth.membership_hash FROM candidate JOIN "
+                        "structure_generation_group_truth truth ON "
+                        "truth.snapshot_id=? AND truth.event_id=candidate.event_id AND "
+                        "truth.neg_risk_market_id=candidate.group_id",
+                        (*group_params, generation_snapshot_id),
+                    ):
+                        group_truth_by_key[(str(truth_row[0]), str(truth_row[1]))] = (
+                            *truth_row[2:],
+                        )
                 identity_keys = sorted({
                     (str(item["event_id"]), str(item["market_id"]))
                     for item in candidates if item["kind"] == "event-only"
@@ -6040,37 +6128,41 @@ class SQLiteStore:
                     if source_identity_valid and market_identity_valid
                     else None
                 )
+                truth_identity = (
+                    (str(source_row[0]), str(source_row[3]))
+                    if source_row is not None and isinstance(source_row[3], str)
+                    else None
+                )
+                cached_truth = (
+                    None
+                    if truth_identity is None
+                    else group_truth_by_key.get(truth_identity)
+                )
+                effective_truth = cached_truth or (
+                    "standard",
+                    "complete-supported",
+                    None,
+                    "",
+                )
                 group_evidence = (
                     FreshGroupEvidence(
-                        event_id=(
-                            str(source_row[0])
-                            if source_row is not None
-                            else event_ids[0]
+                        event_id=truth_identity[0],
+                        group_id=truth_identity[1],
+                        neg_risk_type=(
+                            "standard" if conflict else str(effective_truth[0])
                         ),
-                        group_id=(
-                            str(source_row[3])
-                            if source_row is not None
-                            else str(raw_market["negRiskMarketID"])
-                        ),
-                        neg_risk_type="standard",
                         quality=(
-                            "incomplete-source" if conflict else "complete-supported"
+                            "incomplete-source" if conflict else str(effective_truth[1])
                         ),
                         reason=(
                             "conflicting-event-membership"
                             if conflict
-                            else None
+                            else effective_truth[2]
                         ),
-                        membership_hash="",
+                        membership_hash=("" if conflict else str(effective_truth[3])),
                         global_relation_conflict=conflict,
                     )
-                    if source_identity_valid
-                    or (
-                        conflict
-                        and bool(event_ids)
-                        and isinstance(raw_market.get("negRiskMarketID"), str)
-                        and bool(raw_market["negRiskMarketID"])
-                    )
+                    if truth_identity is not None
                     else None
                 )
                 evidence = FreshMemberEvidence(
@@ -6441,6 +6533,222 @@ class SQLiteStore:
             ).fetchall()
         return [tuple(row) for row in rows]
 
+    def _advance_structure_drift_fresh_projection_chunk(
+        self,
+        comparison_id: str,
+        *,
+        max_rows: int,
+        now_ms: int,
+    ) -> StructureCertificationChunk:
+        """Checkpoint one authenticated sidecar projection chunk atomically."""
+        from polyarb.perception.structure_drift import (
+            FreshProjectionChunk,
+            FreshProjectionCommitment,
+            FreshProjectionCursor,
+            advance_fresh_projection_commitment,
+            projection_missing_diagnostic,
+            structure_drift_diagnostic_sample,
+        )
+
+        with sqlite3.connect(self._db_path) as read_con:
+            progress = read_con.execute(
+                "SELECT generation_snapshot_id,publication_id,phase,row_cursor_json,"
+                "class_counts_json,class_digests_json,diagnostic_counts_json,"
+                "diagnostic_digest_state_json,diagnostic_samples_json,checkpoint_at_ms,"
+                "legacy_snapshot_id "
+                "FROM structure_generation_drift_progress WHERE comparison_id=?",
+                (comparison_id,),
+            ).fetchone()
+        if progress is None or progress[2] != "fresh-projection-members":
+            raise ValueError("structure-drift-fresh-projection-phase-invalid")
+        counts = json.loads(str(progress[4]))
+        digests = json.loads(str(progress[5]))
+        diagnostic_counts = json.loads(str(progress[6]))
+        diagnostic_samples = json.loads(str(progress[8]))
+        if not all(
+            isinstance(value, dict)
+            for value in (counts, digests, diagnostic_counts, diagnostic_samples)
+        ):
+            raise ValueError("structure-drift-progress-invalid")
+        cursor_payload = (
+            None if progress[3] is None else json.loads(str(progress[3]))
+        )
+        cursor = None
+        if cursor_payload is not None:
+            if not isinstance(cursor_payload, dict):
+                raise ValueError("structure-drift-progress-invalid")
+            try:
+                cursor = FreshProjectionCursor(
+                    stream=cursor_payload["stream"],
+                    market_id=cursor_payload["market_id"],
+                    event_id=cursor_payload["event_id"],
+                    source_ordinal=cursor_payload["source_ordinal"],
+                    member_ordinal=cursor_payload["member_ordinal"],
+                )
+            except (KeyError, TypeError) as error:
+                raise ValueError("structure-drift-progress-invalid") from error
+        member_state = digests.get("projection_member_state")
+        if not isinstance(member_state, str):
+            raise ValueError("structure-drift-progress-invalid")
+        member_receipt_digest = self._validated_fresh_projection_member_authority(
+            publication_id=str(progress[1]),
+            generation_snapshot_id=int(progress[0]),
+            trace_callback=None,
+        )
+        stored_member_receipt = digests.get("projection_member_receipt_digest")
+        if stored_member_receipt not in {None, member_receipt_digest}:
+            raise ValueError("structure-drift-fresh-projection-receipt-mismatch")
+        commitment = FreshProjectionCommitment(
+            publication_id=str(progress[1]),
+            generation_snapshot_id=int(progress[0]),
+            member_receipt_digest=member_receipt_digest,
+            cursor=cursor,
+            candidates_processed=int(counts.get("projection_candidate_count", 0)),
+            member_count=int(counts.get("projection_member_count", 0)),
+            member_digest_state=member_state,
+            diagnostic_count=int(counts.get("projection_diagnostic_count", 0)),
+            diagnostic_digest_state=str(progress[7]),
+            complete=False,
+        )
+        chunk = self._fetch_structure_drift_fresh_projection_chunk(
+            publication_id=str(progress[1]),
+            generation_snapshot_id=int(progress[0]),
+            cursor=cursor,
+            limit=max_rows,
+        )
+        diagnostic_market_ids = sorted(
+            {item.envelope.market_id for item in chunk.diagnostics}
+        )
+        legacy_ids = {
+            item.market_id
+            for item in self.fetch_structure_drift_members_by_id(
+                snapshot_id=int(progress[10]),
+                generation=False,
+                market_ids=diagnostic_market_ids,
+            )
+        }
+        unresolved_diagnostics = tuple(
+            item
+            for item in chunk.diagnostics
+            if item.envelope.market_id not in legacy_ids
+        )
+        projected_ids = [item.market_id for item in chunk.members]
+        generation_ids = {
+            item.market_id
+            for item in self.fetch_structure_drift_members_by_id(
+                snapshot_id=int(progress[0]),
+                generation=True,
+                market_ids=projected_ids,
+            )
+        }
+        unresolved_diagnostics = (
+            *unresolved_diagnostics,
+            *(
+                projection_missing_diagnostic(item)
+                for item in chunk.members
+                if item.market_id not in generation_ids
+            ),
+        )
+        commitment_chunk = FreshProjectionChunk(
+            cursor=chunk.cursor,
+            members=chunk.members,
+            diagnostics=unresolved_diagnostics,
+            candidates_processed=chunk.candidates_processed,
+        )
+        advanced = advance_fresh_projection_commitment(commitment, commitment_chunk)
+        for diagnostic in unresolved_diagnostics:
+            diagnostic_counts[diagnostic.code] = (
+                int(diagnostic_counts.get(diagnostic.code, 0)) + 1
+            )
+            samples = diagnostic_samples.get(diagnostic.code, [])
+            if not isinstance(samples, list):
+                raise ValueError("structure-drift-progress-invalid")
+            samples.append(structure_drift_diagnostic_sample(diagnostic))
+            samples.sort(
+                key=lambda item: json.dumps(
+                    item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+            )
+            diagnostic_samples[diagnostic.code] = samples[:3]
+        counts["projection_candidate_count"] = advanced.candidates_processed
+        counts["projection_member_count"] = advanced.member_count
+        counts["projection_diagnostic_count"] = advanced.diagnostic_count
+        digests["projection_member_receipt_digest"] = member_receipt_digest
+        digests["projection_member_state"] = advanced.member_digest_state
+        cursor_json = None
+        if advanced.cursor is not None:
+            cursor_json = json.dumps(
+                {
+                    "stream": advanced.cursor.stream,
+                    "market_id": advanced.cursor.market_id,
+                    "event_id": advanced.cursor.event_id,
+                    "source_ordinal": advanced.cursor.source_ordinal,
+                    "member_ordinal": advanced.cursor.member_ordinal,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        next_phase = "fresh-projection-members"
+        next_digest = advanced.member_digest_state
+        if advanced.complete:
+            digests.pop("projection_member_state")
+            digests["projection_member_root"] = advanced.root
+            counts["projection_member_complete"] = 1
+            counts["phase_row_count"] = 0
+            next_phase = "generation-members"
+            next_digest = RowChainSHA256.new("generation-group-truth").to_json()
+            cursor_json = None
+        samples_json = json.dumps(
+            diagnostic_samples, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        prior_checkpoint = int(progress[9])
+        writer = self._connect_writer()
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+            changed = writer.execute(
+                "UPDATE structure_generation_drift_progress SET phase=?,"
+                "row_cursor_json=?,digest_state_json=?,class_counts_json=?,"
+                "class_digests_json=?,diagnostic_counts_json=?,"
+                "diagnostic_digest_state_json=?,diagnostic_root=?,"
+                "diagnostic_samples_json=?,diagnostic_samples_digest=?,"
+                "checkpoint_at_ms=? WHERE comparison_id=? AND "
+                "phase='fresh-projection-members' AND checkpoint_at_ms=?",
+                (
+                    next_phase,
+                    cursor_json,
+                    next_digest,
+                    json.dumps(counts, sort_keys=True, separators=(",", ":")),
+                    json.dumps(digests, sort_keys=True, separators=(",", ":")),
+                    json.dumps(
+                        diagnostic_counts, sort_keys=True, separators=(",", ":")
+                    ),
+                    advanced.diagnostic_digest_state,
+                    advanced.diagnostic_root if advanced.complete else None,
+                    samples_json,
+                    hashlib.sha256(samples_json.encode()).hexdigest(),
+                    now_ms,
+                    comparison_id,
+                    prior_checkpoint,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise StructurePublicationCursorError(
+                    "structure-drift-cursor-mismatch"
+                )
+            writer.execute("COMMIT")
+        except BaseException:
+            if writer.in_transaction:
+                writer.execute("ROLLBACK")
+            raise
+        finally:
+            writer.close()
+        return StructureCertificationChunk(
+            next_phase,
+            cursor_json,
+            chunk.candidates_processed,
+            False,
+        )
+
     def initialize_structure_drift_comparison(self, *, now_ms: int) -> str:
         """Pin one current exact-receipt identity for bounded drift comparison."""
         if now_ms < 0:
@@ -6601,7 +6909,12 @@ class SQLiteStore:
                         separators=(",", ":"),
                     ),
                     json.dumps(
-                        {"source_group_truth_state": group_state.to_json()},
+                        {
+                            "source_group_truth_state": group_state.to_json(),
+                            "projection_member_state": RowChainSHA256.new(
+                                "projection-member"
+                            ).to_json(),
+                        },
                         sort_keys=True,
                         separators=(",", ":"),
                     ),
@@ -6651,6 +6964,12 @@ class SQLiteStore:
             "legacy-members",
         }:
             return self._advance_structure_drift_member_chunk(
+                comparison_id,
+                max_rows=max_rows,
+                now_ms=now_ms,
+            )
+        if phase_row is not None and phase_row[0] == "fresh-projection-members":
+            return self._advance_structure_drift_fresh_projection_chunk(
                 comparison_id,
                 max_rows=max_rows,
                 now_ms=now_ms,
@@ -6817,11 +7136,11 @@ class SQLiteStore:
                     source_market_hash = None
                     source_identity_hash = None
                 else:
-                    next_digest = RowChainSHA256.new("generation-group-truth")
+                    next_digest = RowChainSHA256.new("projection-member")
                     digests["generation_source_group_truth_comparison_state"] = (
                         RowChainSHA256.new("source-group-truth").to_json()
                     )
-                    next_phase = "generation-members"
+                    next_phase = "fresh-projection-members"
                     source_event_hash = str(progress[10])
                     source_market_hash = final_hash
                     source_identity = RowChainSHA256.new("source-identity")
@@ -6890,7 +7209,9 @@ class SQLiteStore:
                 "window_id,normalization_contract_version,exact_receipt_digest,"
                 "pointer_validation_hash,generation_certification_hash,phase,"
                 "row_cursor_json,digest_state_json,class_counts_json,"
-                "class_digests_json,checkpoint_at_ms FROM "
+                "class_digests_json,checkpoint_at_ms,diagnostic_counts_json,"
+                "diagnostic_digest_state_json,diagnostic_samples_json,"
+                "diagnostic_samples_digest,source_identity_hash,created_at_ms FROM "
                 "structure_generation_drift_progress WHERE comparison_id=?",
                 (comparison_id,),
             ).fetchone()
@@ -7030,6 +7351,22 @@ class SQLiteStore:
                 group_comparison_count = counts.get(
                     "generation_source_group_truth_comparison_count"
                 )
+                try:
+                    diagnostic_counts = json.loads(str(progress[14]))
+                except (TypeError, json.JSONDecodeError) as error:
+                    raise ValueError("structure-drift-progress-invalid") from error
+                if not isinstance(diagnostic_counts, dict) or any(
+                    type(value) is not int or value < 0
+                    for value in diagnostic_counts.values()
+                ):
+                    raise ValueError("structure-drift-progress-invalid")
+                diagnostic_total = sum(diagnostic_counts.values())
+                diagnostic_digest = RowChainSHA256.from_json(
+                    str(progress[15]), expected_domain="diagnostic/unclassified"
+                )
+                if diagnostic_digest.count != diagnostic_total:
+                    raise ValueError("structure-drift-progress-invalid")
+                final_diagnostic_root = diagnostic_digest.hexdigest()
                 if (
                     not isinstance(source_hash, str)
                     or len(source_hash) != 64
@@ -7061,10 +7398,12 @@ class SQLiteStore:
                     and projection_root == member_comparison_root
                     and conflict_count == 0
                     and unclassified_count == 0
+                    and diagnostic_total == 0
                 )
                 counts["fresh_group_truth_complete"] = 1
                 counts["phase_row_count"] = 0
                 next_phase = "sealed" if authorized else "stale"
+                terminal_reason = None
                 if authorized:
                     class_tags = (
                         "shared",
@@ -7073,6 +7412,7 @@ class SQLiteStore:
                         "event-only-quarantine",
                         "market-side-quarantine",
                         "fresh-source-absent",
+                        "fresh-group-ineligible",
                         "overlap-conflict",
                         "unclassified",
                     )
@@ -7100,6 +7440,7 @@ class SQLiteStore:
                         "event-only-quarantine",
                         "market-side-quarantine",
                         "fresh-source-absent",
+                        "fresh-group-ineligible",
                     )
                     legacy_root = reconstruction_root_from_class_commitments(
                         class_counts=final_class_counts,
@@ -7203,19 +7544,20 @@ class SQLiteStore:
                         ),
                         "class_counts_json": class_counts_json,
                         "class_digests_json": class_digests_json,
-                        "diagnostic_counts_json": "{}",
-                        "diagnostic_root": RowChainSHA256.new(
-                            "diagnostic/unclassified"
+                        "diagnostic_counts_json": str(progress[14]),
+                        "diagnostic_root": RowChainSHA256.from_json(
+                            str(progress[15]),
+                            expected_domain="diagnostic/unclassified",
                         ).hexdigest(),
-                        "diagnostic_samples_json": "{}",
-                        "diagnostic_samples_digest": hashlib.sha256(b"{}").hexdigest(),
+                        "diagnostic_samples_json": str(progress[16]),
+                        "diagnostic_samples_digest": str(progress[17]),
                         "legacy_reconstruction_root": legacy_root,
                         "generation_reconstruction_root": (
                             generation_reconstruction_root
                         ),
                         "overlap_conflict_count": 0,
                         "unclassified_count": 0,
-                        "created_at_ms": now_ms,
+                        "created_at_ms": int(progress[19]),
                     }
                     stored_source = writer.execute(
                         "SELECT source_event_count,source_market_count,source_event_hash,"
@@ -7252,16 +7594,100 @@ class SQLiteStore:
                         generation_reconstruction_root
                     )
                     digests["receipt_digest"] = receipt_digest
+                else:
+                    class_tags = (
+                        "shared",
+                        "fresh-addition",
+                        "current-nontradable",
+                        "event-only-quarantine",
+                        "market-side-quarantine",
+                        "fresh-source-absent",
+                        "fresh-group-ineligible",
+                        "overlap-conflict",
+                        "unclassified",
+                    )
+                    final_class_counts = {}
+                    final_class_digests = {}
+                    for tag in class_tags:
+                        class_count = counts.get(f"class_count:{tag}", 0)
+                        if type(class_count) is not int or class_count < 0:
+                            raise ValueError("structure-drift-progress-invalid")
+                        final_class_counts[tag] = class_count
+                        state_value = digests.get(f"class_state:{tag}")
+                        if class_count == 0:
+                            if state_value is not None:
+                                raise ValueError("structure-drift-progress-invalid")
+                            continue
+                        if not isinstance(state_value, str):
+                            raise ValueError("structure-drift-progress-invalid")
+                        final_class_digests[tag] = RowChainSHA256.from_json(
+                            state_value, expected_domain=f"class/{tag}"
+                        ).hexdigest()
+                    terminal_reason = (
+                        "drift-overlap-conflict"
+                        if conflict_count > 0
+                        else "drift-unclassified"
+                    )
+                    class_counts_json = json.dumps(
+                        final_class_counts, sort_keys=True, separators=(",", ":")
+                    )
+                    class_digests_json = json.dumps(
+                        final_class_digests, sort_keys=True, separators=(",", ":")
+                    )
+                    terminal_payload: dict[str, object] = {
+                        "comparison_id": comparison_id,
+                        "hash_algorithm": ROW_CHAIN_SHA256_V2,
+                        "classifier_contract_version": STRUCTURE_DRIFT_CLASSIFIER_V2,
+                        "legacy_snapshot_id": int(progress[0]),
+                        "generation_snapshot_id": int(progress[1]),
+                        "publication_id": str(progress[2]),
+                        "window_id": str(progress[3]),
+                        "normalization_contract_version": str(progress[4]),
+                        "exact_receipt_digest": str(progress[5]),
+                        "pointer_validation_hash": str(progress[6]),
+                        "generation_certification_hash": str(progress[7]),
+                        "source_identity_hash": str(progress[18]),
+                        "terminal_reason": terminal_reason,
+                        "class_counts_json": class_counts_json,
+                        "class_digests_json": class_digests_json,
+                        "diagnostic_counts_json": str(progress[14]),
+                        "diagnostic_root": final_diagnostic_root,
+                        "diagnostic_samples_json": str(progress[16]),
+                        "diagnostic_samples_digest": str(progress[17]),
+                        "created_at_ms": int(progress[19]),
+                        "checkpoint_at_ms": now_ms,
+                    }
+                    terminal_digest = _structure_drift_terminal_receipt_digest(
+                        terminal_payload
+                    )
+                    terminal_columns = _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS
+                    writer.execute(
+                        "INSERT INTO structure_generation_drift_terminal_receipts("
+                        + ",".join(terminal_columns)
+                        + ",receipt_digest) VALUES ("
+                        + ",".join("?" for _ in range(len(terminal_columns) + 1))
+                        + ")",
+                        (
+                            *(terminal_payload[column] for column in terminal_columns),
+                            terminal_digest,
+                        ),
+                    )
+                    counts = final_class_counts
+                    digests = final_class_digests
                 changed = writer.execute(
                     "UPDATE structure_generation_drift_progress SET phase=?,"
+                    "terminal_reason=?,"
                     "row_cursor_json=NULL,digest_state_json=?,class_counts_json=?,"
-                    "class_digests_json=?,checkpoint_at_ms=? WHERE comparison_id=? "
+                    "class_digests_json=?,diagnostic_root=?,checkpoint_at_ms=? "
+                    "WHERE comparison_id=? "
                     "AND phase='fresh-group-truth' AND checkpoint_at_ms=?",
                     (
                         next_phase,
+                        terminal_reason,
                         digest.to_json(),
                         json.dumps(counts, sort_keys=True, separators=(",", ":")),
                         json.dumps(digests, sort_keys=True, separators=(",", ":")),
+                        final_diagnostic_root,
                         now_ms,
                         comparison_id,
                         prior_checkpoint,
@@ -7292,14 +7718,20 @@ class SQLiteStore:
         now_ms: int,
     ) -> StructureCertificationChunk:
         """Classify one bounded member keyset and CAS its digest checkpoint."""
-        from polyarb.perception.structure_drift import classify_structure_member_drift
+        from polyarb.perception.structure_drift import (
+            classify_structure_member_drift,
+            structure_drift_diagnostic_sample,
+            structure_drift_diagnostic_tuple,
+        )
 
         with sqlite3.connect(self._db_path) as read_con:
             progress = read_con.execute(
                 "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,"
                 "window_id,normalization_contract_version,exact_receipt_digest,"
                 "pointer_validation_hash,generation_certification_hash,phase,"
-                "row_cursor_json,class_counts_json,class_digests_json,checkpoint_at_ms "
+                "row_cursor_json,class_counts_json,class_digests_json,checkpoint_at_ms,"
+                "diagnostic_counts_json,diagnostic_digest_state_json,"
+                "diagnostic_samples_json "
                 "FROM structure_generation_drift_progress WHERE comparison_id=?",
                 (comparison_id,),
             ).fetchone()
@@ -7312,6 +7744,15 @@ class SQLiteStore:
         cursor = None if progress[9] is None else json.loads(str(progress[9]))
         counts = json.loads(str(progress[10]))
         digests = json.loads(str(progress[11]))
+        diagnostic_counts = json.loads(str(progress[13]))
+        diagnostic_samples = json.loads(str(progress[15]))
+        diagnostic_digest = RowChainSHA256.from_json(
+            str(progress[14]), expected_domain="diagnostic/unclassified"
+        )
+        if not isinstance(diagnostic_counts, dict) or not isinstance(
+            diagnostic_samples, dict
+        ):
+            raise ValueError("structure-drift-progress-invalid")
         phase_count = counts.get("phase_row_count")
         if type(phase_count) is not int or phase_count < 0:
             raise ValueError("structure-drift-progress-invalid")
@@ -7341,30 +7782,15 @@ class SQLiteStore:
                 legacy=tuple(counterpart),
                 generation=classified_rows,
                 evidence=evidence,
+                classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V2,
             )
-            projection_count = counts.get("projection_member_count", 0)
             generation_count = counts.get("generation_member_count", 0)
-            if (
-                type(projection_count) is not int
-                or projection_count < 0
-                or type(generation_count) is not int
-                or generation_count < 0
-            ):
+            if type(generation_count) is not int or generation_count < 0:
                 raise ValueError("structure-drift-progress-invalid")
-            projection_state_value = digests.get("projection_member_state")
             generation_state_value = digests.get("generation_member_state")
             comparison_state_value = digests.get(
                 "generation_projection_member_comparison_state"
             )
-            if projection_state_value is None:
-                projection_digest = RowChainSHA256.new("projection-member")
-            elif isinstance(projection_state_value, str):
-                projection_digest = RowChainSHA256.from_json(
-                    projection_state_value,
-                    expected_domain="projection-member",
-                )
-            else:
-                raise ValueError("structure-drift-progress-invalid")
             if generation_state_value is None:
                 generation_digest = RowChainSHA256.new("generation-member")
             elif isinstance(generation_state_value, str):
@@ -7400,27 +7826,7 @@ class SQLiteStore:
                 generation_digest.update(actual_tuple)
                 comparison_digest.update(actual_tuple)
                 generation_count += 1
-                expected = evidence[member.market_id].projected_member
-                if expected is None:
-                    continue
-                expected_tuple = (
-                    expected.event_id,
-                    expected.group_id,
-                    expected.market_id,
-                    expected.member_kind,
-                    expected.active,
-                    expected.closed,
-                    expected.condition_id,
-                    expected.yes_token_id,
-                    expected.no_token_id,
-                    expected.neg_risk,
-                    expected.incomplete,
-                )
-                projection_digest.update(expected_tuple)
-                projection_count += 1
-            counts["projection_member_count"] = projection_count
             counts["generation_member_count"] = generation_count
-            digests["projection_member_state"] = projection_digest.to_json()
             digests["generation_member_state"] = generation_digest.to_json()
             digests["generation_projection_member_comparison_state"] = (
                 comparison_digest.to_json()
@@ -7443,7 +7849,33 @@ class SQLiteStore:
                 legacy=classified_rows,
                 generation=(),
                 evidence=evidence,
+                classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V2,
             )
+
+        for diagnostic in result.diagnostics:
+            diagnostic_digest.update(structure_drift_diagnostic_tuple(diagnostic))
+            diagnostic_counts[diagnostic.code] = (
+                int(diagnostic_counts.get(diagnostic.code, 0)) + 1
+            )
+            samples = diagnostic_samples.get(diagnostic.code, [])
+            if not isinstance(samples, list):
+                raise ValueError("structure-drift-progress-invalid")
+            samples.append(structure_drift_diagnostic_sample(diagnostic))
+            samples.sort(
+                key=lambda item: json.dumps(
+                    item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+            )
+            diagnostic_samples[diagnostic.code] = samples[:3]
+        diagnostic_counts_json = json.dumps(
+            diagnostic_counts, sort_keys=True, separators=(",", ":")
+        )
+        diagnostic_samples_json = json.dumps(
+            diagnostic_samples,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
         classes = {
             "shared": result.shared,
@@ -7530,12 +7962,19 @@ class SQLiteStore:
             if rows:
                 changed = writer.execute(
                     "UPDATE structure_generation_drift_progress SET row_cursor_json=?,"
-                    "class_counts_json=?,class_digests_json=?,checkpoint_at_ms=? "
+                    "class_counts_json=?,class_digests_json=?,"
+                    "diagnostic_counts_json=?,diagnostic_digest_state_json=?,"
+                    "diagnostic_samples_json=?,diagnostic_samples_digest=?,"
+                    "checkpoint_at_ms=? "
                     "WHERE comparison_id=? AND phase=? AND checkpoint_at_ms=?",
                     (
                         json.dumps(next_cursor),
                         json.dumps(counts, sort_keys=True, separators=(",", ":")),
                         json.dumps(digests, sort_keys=True, separators=(",", ":")),
+                        diagnostic_counts_json,
+                        diagnostic_digest.to_json(),
+                        diagnostic_samples_json,
+                        hashlib.sha256(diagnostic_samples_json.encode()).hexdigest(),
                         now_ms,
                         comparison_id,
                         phase,
@@ -7548,10 +7987,6 @@ class SQLiteStore:
                     "legacy-members" if generation_phase else "fresh-group-truth"
                 )
                 if generation_phase:
-                    projection_digest = RowChainSHA256.from_json(
-                        str(digests.pop("projection_member_state")),
-                        expected_domain="projection-member",
-                    )
                     generation_digest = RowChainSHA256.from_json(
                         str(digests.pop("generation_member_state")),
                         expected_domain="generation-member",
@@ -7564,7 +7999,6 @@ class SQLiteStore:
                         ),
                         expected_domain="projection-member",
                     )
-                    digests["projection_member_root"] = projection_digest.hexdigest()
                     digests["generation_member_root"] = generation_digest.hexdigest()
                     digests["generation_projection_member_comparison_root"] = (
                         comparison_digest.hexdigest()
@@ -7579,12 +8013,18 @@ class SQLiteStore:
                 changed = writer.execute(
                     "UPDATE structure_generation_drift_progress SET phase=?,"
                     "row_cursor_json=NULL,class_counts_json=?,class_digests_json=?,"
+                    "diagnostic_counts_json=?,diagnostic_digest_state_json=?,"
+                    "diagnostic_samples_json=?,diagnostic_samples_digest=?,"
                     "checkpoint_at_ms=? WHERE comparison_id=? AND phase=? AND "
                     "checkpoint_at_ms=?",
                     (
                         next_phase,
                         json.dumps(counts, sort_keys=True, separators=(",", ":")),
                         json.dumps(digests, sort_keys=True, separators=(",", ":")),
+                        diagnostic_counts_json,
+                        diagnostic_digest.to_json(),
+                        diagnostic_samples_json,
+                        hashlib.sha256(diagnostic_samples_json.encode()).hexdigest(),
                         now_ms,
                         comparison_id,
                         phase,
@@ -7862,6 +8302,7 @@ class SQLiteStore:
                 "event-only-quarantine",
                 "market-side-quarantine",
                 "fresh-source-absent",
+                "fresh-group-ineligible",
                 "overlap-conflict",
                 "unclassified",
             )
@@ -8093,6 +8534,7 @@ class SQLiteStore:
                         "event-only-quarantine",
                         "market-side-quarantine",
                         "fresh-source-absent",
+                        "fresh-group-ineligible",
                     )
                 )
                 and progress_counts.get("generation_member_scan_count")
@@ -8158,6 +8600,12 @@ class SQLiteStore:
                 and receipt_payload["unclassified_count"] == 0
                 and receipt_payload["unclassified_count"]
                 == receipt_class_counts.get("unclassified")
+                and receipt_payload["diagnostic_counts_json"] == progress[13]
+                and receipt_payload["diagnostic_root"] == progress[14]
+                and receipt_payload["diagnostic_samples_json"] == progress[15]
+                and receipt_payload["diagnostic_samples_digest"] == progress[16]
+                and receipt_payload["diagnostic_samples_digest"]
+                == hashlib.sha256(str(progress[15]).encode()).hexdigest()
                 and progress_digests.get("receipt_digest") == receipt_row[-1]
             )
             return {

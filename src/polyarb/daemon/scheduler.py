@@ -508,6 +508,7 @@ async def run_structure_drift_in_subprocess(
         None,
         "source-events",
         "source-markets",
+        "fresh-projection-members",
         "generation-members",
         "legacy-members",
         "fresh-group-truth",

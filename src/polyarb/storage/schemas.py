@@ -3513,7 +3513,7 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_progress (
         source_identity_hash IS NULL OR length(source_identity_hash)=64
     ),
     phase TEXT NOT NULL CHECK(phase IN (
-        'source-events','source-markets','generation-members',
+        'source-events','source-markets','fresh-projection-members','generation-members',
         'legacy-members','fresh-group-truth','sealed','stale'
     )),
     terminal_reason TEXT,

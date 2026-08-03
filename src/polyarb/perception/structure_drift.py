@@ -184,17 +184,7 @@ def advance_fresh_projection_commitment(
     if not 0 <= chunk.candidates_processed <= 500:
         raise ValueError("invalid-fresh-projection-chunk-count")
     for diagnostic in chunk.diagnostics:
-        envelope = diagnostic.envelope
-        diagnostic_digest.update(
-            (
-                diagnostic.code,
-                *envelope.identity_fields.values(),
-                envelope.source_ordinal,
-                envelope.member_ordinal,
-                envelope.raw_event_hash,
-                envelope.raw_market_hash,
-            )
-        )
+        diagnostic_digest.update(structure_drift_diagnostic_tuple(diagnostic))
     return FreshProjectionCommitment(
         publication_id=commitment.publication_id,
         generation_snapshot_id=commitment.generation_snapshot_id,
@@ -208,6 +198,70 @@ def advance_fresh_projection_commitment(
         diagnostic_count=commitment.diagnostic_count + len(chunk.diagnostics),
         diagnostic_digest_state=diagnostic_digest.to_json(),
         complete=chunk.cursor is None,
+    )
+
+
+def structure_drift_diagnostic_tuple(
+    diagnostic: StructureDriftDiagnostic,
+) -> tuple[object, ...]:
+    """Return the classifier-v2 canonical unresolved-evidence envelope."""
+    envelope = diagnostic.envelope
+    return (
+        diagnostic.code,
+        diagnostic.side,
+        *envelope.identity_fields.values(),
+        envelope.source_ordinal,
+        envelope.member_ordinal,
+        envelope.raw_event_hash,
+        envelope.raw_market_hash,
+        diagnostic.predicate_bits,
+    )
+
+
+def structure_drift_diagnostic_sample(
+    diagnostic: StructureDriftDiagnostic,
+) -> dict[str, object]:
+    """Return one stable public sample; callers retain the smallest three."""
+    envelope = diagnostic.envelope
+    return {
+        "code": diagnostic.code,
+        "side": diagnostic.side,
+        "identity": dict(envelope.identity_fields),
+        "source_ordinal": envelope.source_ordinal,
+        "member_ordinal": envelope.member_ordinal,
+        "raw_event_hash": envelope.raw_event_hash,
+        "raw_market_hash": envelope.raw_market_hash,
+        "predicate_bits": list(diagnostic.predicate_bits),
+    }
+
+
+def projection_missing_diagnostic(
+    member: StructuralMemberIdentity,
+) -> StructureDriftDiagnostic:
+    """Bind one independently projected member omitted by the generation."""
+    predicates = tuple(index == 14 for index in range(19))
+    return StructureDriftDiagnostic(
+        side="generation-only",
+        code="active-open-projection-missing",
+        envelope=StructureDriftCandidateEnvelope(
+            side="generation-only",
+            event_id=member.event_id,
+            group_id=member.group_id,
+            market_id=member.market_id,
+            member_kind=member.member_kind,
+            active=member.active,
+            closed=member.closed,
+            condition_id=member.condition_id,
+            yes_token_id=member.yes_token_id,
+            no_token_id=member.no_token_id,
+            neg_risk=member.neg_risk,
+            incomplete=member.incomplete,
+            source_ordinal=None,
+            member_ordinal=None,
+            raw_event_hash=None,
+            raw_market_hash=None,
+        ),
+        predicate_bits=predicates,
     )
 
 
@@ -759,14 +813,17 @@ def build_fresh_member_evidence(
                 break
 
     projected_member = None
+    group_evidence = None
+    source_ordinal = None
+    raw_event_hash = None
     if raw_market is not None and len(event_sources) == 1 and market_issue is None:
-        event_id, _source_ordinal, raw_event = event_sources[0]
+        event_id, source_ordinal, raw_event = event_sources[0]
         projected_market = project_legacy_compatible_market(
             raw_market,
             event_ids=(event_id,),
             taken_at_ms=0,
         )
-        _events, _tags, _mapping, source_members, _truths = normalize_events(
+        _events, _tags, _mapping, source_members, truths = normalize_events(
             [raw_event]
         )
         source_member = next(
@@ -788,6 +845,33 @@ def build_fresh_member_evidence(
                 neg_risk=row.get("neg_risk") is True,
                 incomplete=row.get("incomplete") is True,
             )
+            truth = next(
+                (
+                    item
+                    for item in truths
+                    if item.event_id == source_member.event_id
+                    and item.group_id == source_member.group_id
+                ),
+                None,
+            )
+            if truth is not None:
+                group_evidence = FreshGroupEvidence(
+                    event_id=truth.event_id,
+                    group_id=truth.group_id,
+                    neg_risk_type=truth.neg_risk_type,
+                    quality=truth.quality,
+                    reason=truth.reason,
+                    membership_hash=truth.membership_hash,
+                    global_relation_conflict=False,
+                )
+            raw_event_hash = hashlib.sha256(
+                json.dumps(
+                    raw_event,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
     projector_matches = projected_member == member
     return FreshMemberEvidence(
         source_present=raw_market is not None or bool(event_sources),
@@ -800,6 +884,24 @@ def build_fresh_member_evidence(
         absent_from_event_catalog=not event_sources,
         absent_from_market_catalog=raw_market is None,
         projected_member=projected_member,
+        event_source_count=len(event_sources),
+        exact_source_member=projected_member,
+        group_truth=group_evidence,
+        identity_revalidated=len(event_sources) <= 1,
+        source_ordinal=source_ordinal,
+        raw_event_hash=raw_event_hash,
+        raw_market_hash=(
+            None
+            if raw_market is None
+            else hashlib.sha256(
+                json.dumps(
+                    raw_market,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+        ),
     )
 
 
