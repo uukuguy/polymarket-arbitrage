@@ -100,6 +100,7 @@ Add one progress row per window with:
 
 ```text
 window_id, event_cursor, member_ordinal, rows_written,
+member_byte_offset,
 member_state, diagnostic_state, checkpoint_at_ms,
 completed_at_ms, failure_reason
 ```
@@ -107,15 +108,26 @@ completed_at_ms, failure_reason
 One advance call:
 
 1. authenticates the frozen window and source-event identity;
-2. reads at most one current event payload plus only enough following event
-   rows to expose at most 500 raw members;
-3. parses and writes at most 500 sidecar rows in one `BEGIN IMMEDIATE` CAS;
-4. advances `(event_id, member_ordinal)` in the same transaction;
-5. never rereads an already committed ordinal after restart.
+2. uses a stdlib `json.JSONDecoder.raw_decode` array scanner and the durable
+   byte offset to decode at most 500 member objects; it never calls
+   `json.loads()` on the complete event object or member array;
+3. reads only enough following event rows to expose at most 500 raw members;
+4. parses and writes at most 500 sidecar rows in one `BEGIN IMMEDIATE` CAS;
+5. advances `(event_id, member_ordinal, member_byte_offset)` in the same
+   transaction;
+6. never decodes an already committed member object after restart.
 
-The parent event JSON may be loaded as one immutable blob, but no call may
-iterate, normalize, hash, or insert more than 500 member elements. Resume uses
-the durable member ordinal rather than `json_each()`.
+The parent event JSON text may be loaded as one immutable blob, but no call may
+materialize the complete event object or member array. A small structural
+scanner finds the top-level `markets` array without decoding its contents;
+`raw_decode` then decodes one member object at a time from the persisted byte
+offset. No call may decode, iterate, normalize, hash, or insert more than 500
+member elements. Resume cross-checks both durable ordinal and byte offset.
+
+The scanner accepts only canonical JSON structure: top-level object, exactly
+one `markets` key whose value is an array, comma-separated JSON values, and no
+trailing non-whitespace data. Malformed structure blocks sealing with a stable
+bounded failure; it is never skipped or guessed.
 
 New windows derive the sidecar after event staging and before publication can
 seal. Historical published windows derive it through the same bounded state
@@ -206,8 +218,9 @@ manual pointer or publication repair path.
 
 Deployment is forbidden until tests prove:
 
-1. a 1,200-member event advances in 500/500/200 raw-member operations, with
-   database and Python inspection counters never exceeding 500 per call;
+1. a 1,200-member event advances in 500/500/200 `raw_decode` operations, with
+   database, decoder, and Python inspection counters never exceeding 500 per
+   call and no whole-event `json.loads()`;
 2. restart after every cursor boundary emits every ordinal exactly once;
 3. duplicate market IDs at different ordinals remain distinct sidecar rows and
    later fail closed as `duplicate-market-identity`;

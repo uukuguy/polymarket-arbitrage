@@ -13,7 +13,8 @@
 - Metadata contract is exactly `structure-event-member-staging-v1`.
 - Never rebuild or mutate `structure_sync_event_staging` or `structure_sync_event_market_staging` business rows.
 - No derivation/reader call may parse, normalize, hash, query as candidates, or write more than 500 raw members.
-- Resume authority is `(window_id,event_id,member_ordinal)` and every checkpoint is committed in the same transaction as its sidecar rows.
+- Resume authority is `(window_id,event_id,member_ordinal,member_byte_offset)` and every checkpoint is committed in the same transaction as its sidecar rows.
+- Historical derivation uses stdlib `json.JSONDecoder.raw_decode` from the durable byte offset; it never materializes a complete event/member array with `json.loads()`.
 - Duplicate market IDs at different ordinals remain distinct sidecar rows.
 - Invalid/null/blank/padded fields remain nullable diagnostic evidence; they are never coerced into a valid identity.
 - Historical published windows are backfilled only through the bounded state machine; `init_schema()` performs no data backfill.
@@ -52,7 +53,7 @@
 **Interfaces:**
 - Produces: `STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT = "structure-event-member-staging-v1"`.
 - Produces: `StructureEventMemberRow`, `StructureEventMemberProgress`, `StructureEventMemberReceipt` immutable dataclasses.
-- Produces: canonical DDL/migration for `structure_sync_event_member_staging`, `structure_sync_event_member_progress`, and `structure_sync_event_member_receipts`.
+- Produces: canonical DDL/migration for `structure_sync_event_member_staging`, `structure_sync_event_member_progress` (including `member_byte_offset`), and `structure_sync_event_member_receipts`.
 
 - [ ] **Step 1: Write RED fresh-schema and registry tests**
 
@@ -200,12 +201,16 @@ assert [(r["rows_written"], r["member_ordinal"], r["complete"]) for r in runs] =
     (200, 1199, True),
 ]
 assert max(database_member_rows_inspected_per_call) <= 500
+assert max(raw_decode_calls_per_call) <= 500
 assert max(python_member_rows_inspected_per_call) <= 500
+assert whole_event_json_load_calls == 0
 ```
 
 Kill/reopen before and after each CAS and prove ordinals 0..1199 exist exactly
-once. Inject write/progress/receipt failures and prove the cursor never advances
-without its rows and terminal progress never commits without its receipt.
+once. Assert both `member_ordinal` and `member_byte_offset` resume at the first
+undecoded object. Inject write/progress/receipt failures and prove neither
+cursor advances without its rows and terminal progress never commits without
+its receipt.
 
 - [ ] **Step 3: Write RED receipt oracle and tamper matrix**
 
@@ -219,7 +224,41 @@ structure-event-member-receipt-invalid
 
 with no untrusted counts/samples.
 
-- [ ] **Step 4: Implement strict extraction and tagged commitments**
+- [ ] **Step 4: Implement the bounded stdlib member-array scanner**
+
+Create a focused scanner in `structure_event_members.py`:
+
+```python
+@dataclass(frozen=True)
+class DecodedMemberBatch:
+    members: tuple[tuple[int, dict[str, object], str], ...]
+    next_member_ordinal: int
+    next_byte_offset: int
+    complete: bool
+
+
+def decode_event_member_batch(
+    payload_json: str,
+    *,
+    member_ordinal: int,
+    member_byte_offset: int,
+    limit: int,
+) -> DecodedMemberBatch:
+    ...
+```
+
+Use `json.JSONDecoder.raw_decode` once per member. The initial call scans JSON
+syntax to the top-level `markets` array without decoding that array; resumed
+calls begin at the authenticated byte offset. Cross-check delimiters, ordinal,
+array termination, duplicate top-level `markets` keys, and trailing data.
+Never call `json.loads(payload_json)` or decode an unbounded prefix of member
+objects.
+
+Add RED/GREEN tests for escaped strings containing `"markets"`, nested keys,
+empty arrays, scalar/invalid `markets`, malformed commas/trailing data, restart
+offset mismatch, and exact 500/500/200 decoder-call counts.
+
+- [ ] **Step 5: Implement strict extraction and tagged commitments**
 
 Canonical raw-member JSON uses sorted keys and compact separators. Commitment
 rows are explicitly tagged while reusing the existing source-event domain:
@@ -241,24 +280,26 @@ member_chain.update((
 
 The invalid-member commitment uses the same tag and exact nullable envelope.
 
-- [ ] **Step 5: Implement one bounded CAS advance**
+- [ ] **Step 6: Implement one bounded CAS advance**
 
-Read the current parent event by PK and slice only:
+Read the current parent event text by PK and decode only one bounded batch:
 
 ```python
-start = progress.member_ordinal + 1
-stop = min(len(raw_members), start + limit)
-for member_ordinal in range(start, stop):
-    ...
+batch = decode_event_member_batch(
+    payload_json,
+    member_ordinal=progress.member_ordinal,
+    member_byte_offset=progress.member_byte_offset,
+    limit=remaining,
+)
 ```
 
-Do not call `json_each`. Never iterate `raw_members` outside `[start:stop]`.
-When the current event is exhausted, keyset-load the next event and spend only
-the remaining member budget. Insert sidecar rows and update the durable cursor
-inside one `BEGIN IMMEDIATE` identity CAS. At terminal state, insert the receipt
-before marking progress complete.
+Do not call `json_each` or whole-event `json.loads`. When the current event is
+exhausted, keyset-load the next event and spend only the remaining member
+budget. Insert sidecar rows and update both durable cursor fields inside one
+`BEGIN IMMEDIATE` identity CAS. At terminal state, insert the receipt before
+marking progress complete.
 
-- [ ] **Step 6: Implement validated status and scheduler ordering**
+- [ ] **Step 7: Implement validated status and scheduler ordering**
 
 Scheduler order under the existing producer lock is:
 
@@ -272,7 +313,7 @@ This runs after event staging is frozen and before publication/generation/drift.
 Keep Quote double-priority and attempt ledger semantics unchanged. Same sealed
 source identity is never rederived; a new window starts exactly once.
 
-- [ ] **Step 7: Close health and resident Polywatch chain**
+- [ ] **Step 8: Close health and resident Polywatch chain**
 
 Expose a constant-size `snapshot:structure_event_members` check in strict and
 reachability health payloads. Recovering shows cursor/rows; invalid receipt or
@@ -280,7 +321,7 @@ terminal derivation failure fails with exact code. Polywatch prioritizes the
 specific sidecar failure over generic snapshot cancellation and uses the
 existing component state for first alert, suppression, reminder, and recovery.
 
-- [ ] **Step 8: Run GREEN and proportional regression**
+- [ ] **Step 9: Run GREEN and proportional regression**
 
 ```bash
 uv run pytest -q tests/m1-perception/test_structure_sync_window.py tests/m1-perception/test_scheduler.py tests/m1-perception/test_health_endpoint.py tests/m1-perception/test_polywatch_healthz_watcher.py -k 'event_member'
@@ -290,7 +331,7 @@ uv run ruff check src/polyarb/perception/structure_event_members.py src/polyarb/
 git diff --check
 ```
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add src/polyarb/perception/structure_event_members.py src/polyarb/storage/sqlite_store.py src/polyarb/daemon/scheduler.py src/polyarb/http/health.py scripts/polywatch/healthz_watcher.py tests/m1-perception/test_structure_sync_window.py tests/m1-perception/test_scheduler.py tests/m1-perception/test_health_endpoint.py tests/m1-perception/test_polywatch_healthz_watcher.py
