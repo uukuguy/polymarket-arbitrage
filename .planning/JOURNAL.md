@@ -5929,3 +5929,53 @@ Commit the verified local documentation, deploy the exact clean SHA with
 `make deploy`, verify release/machine/image identity, then sample strict health
 and opportunities at least every 10 seconds through one natural Structure
 publication. First repository command: `make planning-status`.
+
+## SESSION 127 — 2026-08-04 (M1 completion recalibrated; natural recovery live)
+
+- [CALIBRATION] The persistent Goal remains active. M1 is not production-
+  complete: classifier recovery Task 8 still requires an authenticated natural
+  drift seal, generation-read and Quote cutovers, a full natural-generation
+  plus two-minute UAT, then the candidate-lifecycle queue plan and final UAT.
+- [ROOT CAUSE CLOSED LOCALLY] Production attempts 213/214 exposed a scheduler
+  deadlock: authenticated historical memberless drift required a natural
+  window, but drift ran before the snapshot that could create it; after pointer
+  movement, a same-v2 obsolete active identity would also block initialization.
+  Commit `06d3f92a8947eb74300391b964b8225c64ace28d` adds the exact authenticated
+  scheduler yield and pointer-coupled atomic supersession with fail-closed
+  rollback/multiple-active tests.
+- [VERIFIED] The final full suite passed 4,722 tests with 0 failures, 0 errors,
+  and 2 skips in 1,610.994 seconds. Ruff, `docs-m1-check`, `planning-status`, and
+  diff checks passed. Independent review reported no Critical or Important
+  findings and issued exact `DEPLOY_SHA_APPROVE 06d3f92...`.
+- [PROTECTED DEPLOY] Fly release 233 runs exact `06d3f92...` on unchanged app
+  machine `6830939c0070d8` and cron `8e2909a77ddd08`, image
+  `deployment-01KZ4A6SQX3BSD43ZJBX4QBHX3`, digest
+  `sha256:4e0e3f891ff45b28a694ad52f56d32ba51b797407dde93333b6e316414c38c3a`.
+  Both use Structure=true, Quote=false, read=legacy, drift=true and the
+  unchanged 500/100/45 bounds. The encrypted 50GB volume remains attached with
+  five-snapshot retention and backups enabled.
+- [NATURAL EVIDENCE] Without manual advance, restart, or pointer write,
+  generation 865/publication `a44d5b42...` published. Old comparison
+  `ba34df9d...` became `stale / drift-current-generation-superseded` at the
+  exact pointer switch timestamp (read-only PK query: 7.2ms). Because that
+  resumed window was itself pre-sidecar, the next cycle correctly yielded
+  again and opened first post-deploy window `0f39efd3...`; it naturally reached
+  166 event pages and 394 market pages and was still advancing at handoff.
+- [OBSERVABILITY] Polywatch detects and deduplicates the interim L1 drift
+  `progress-missing` incident. Three bounded retention paths logged FK failures
+  after generation 865; they are fail-soft for publication but remain evidence
+  to reassess after the drift authority closes rather than being called healthy.
+
+### [NEXT — CURRENT]
+
+Continue observing release 233 without manual advance/restart/pointer writes.
+First command:
+`curl -fsS --max-time 20 https://polyarb-l1.fly.dev/healthz`.
+Require window `0f39efd3...` to finish with authenticated event-member evidence,
+then require a new classifier-v2 comparison for the new current identity to
+seal before any config cutover. Only afterward switch read mode to generation
+on the same exact image, verify, enable Quote on that image, and run the full
+natural-generation/two-minute UAT. Then execute
+`docs/superpowers/plans/2026-08-01-m1-candidate-lifecycle-queue.md` and final
+M1 acceptance. Preserve the five unstaged user-owned `.superpowers/sdd/*`
+files.
