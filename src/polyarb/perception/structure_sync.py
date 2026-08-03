@@ -324,6 +324,15 @@ async def run_structure_sync_until_published(
                 stage="bootstrap",
                 pages_processed=max(1, bootstrap_rows),
             )
+        # Member/conflict authority must be admitted only after the terminal
+        # relationship checkpoint is durable.  Yield this producer slice so
+        # the scheduler's Quote-priority member child can seal before any
+        # publication work begins.
+        return StructureSyncCheckpoint(
+            window_id=str(latest["id"]),
+            stage="bootstrap",
+            pages_processed=max(1, bootstrap_rows),
+        )
     if (
         latest is not None
         and latest["status"] == "complete"

@@ -588,6 +588,12 @@ def test_event_member_health_recovers_after_validated_seal(
     assert (recovering["observedValue"], recovering["status"]) == (
         "recovering", "warn",
     )
+    assert store.advance_structure_event_market_backfill(
+        window_id=window_id,
+        max_events=500,
+        max_relationships=500,
+        now_ms=3,
+    )["completed"] is True
     store.advance_structure_event_member_staging_chunk(window_id=window_id)
     for path in ("/health", "/healthz"):
         sealed = http_test_client.get(path).json()["checks"][
@@ -624,7 +630,7 @@ def test_precontract_window_waits_for_natural_authority_without_failing_health(
         assert response.status_code == 200
 
 
-@pytest.mark.parametrize("tamper", ["checkpoint", "source"])
+@pytest.mark.parametrize("tamper", ["checkpoint", "source", "merkle"])
 def test_event_member_health_fails_closed_on_authenticated_authority_tamper(
     daemon_settings_for_test: Any, http_test_client: TestClient, tamper: str,
 ) -> None:
@@ -642,24 +648,47 @@ def test_event_member_health_fails_closed_on_authenticated_authority_tamper(
     )
     with sqlite3.connect(store.db_path) as con:
         con.execute("UPDATE structure_sync_windows SET status='complete'")
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "VALUES (?,?,?,?)", (window_id, 2, 2, 2)
+        )
     store.advance_structure_event_member_staging_chunk(window_id=window_id, limit=1)
+    if tamper == "merkle":
+        while store.structure_event_member_status(window_id=window_id)["sealed"] is not True:
+            store.advance_structure_event_member_staging_chunk(
+                window_id=window_id,
+                limit=1,
+            )
     with sqlite3.connect(store.db_path) as con:
         table = (
             "structure_sync_event_member_progress"
-            if tamper == "checkpoint" else "structure_sync_event_source_receipts"
+            if tamper == "checkpoint"
+            else "structure_sync_event_member_receipts"
+            if tamper == "merkle"
+            else "structure_sync_event_source_receipts"
         )
-        column = "checkpoint_digest" if tamper == "checkpoint" else "receipt_digest"
+        column = (
+            "checkpoint_digest"
+            if tamper == "checkpoint"
+            else "event_conflict_merkle_root"
+            if tamper == "merkle"
+            else "receipt_digest"
+        )
         digest = con.execute(
             f"SELECT {column} FROM {table} WHERE window_id=?", (window_id,),
         ).fetchone()[0]
         if tamper == "source":
             con.execute("DROP TRIGGER trg_structure_event_source_receipt_update_guard")
+        if tamper == "merkle":
+            con.execute("DROP TRIGGER trg_structure_event_member_receipt_update")
         con.execute(
             f"UPDATE {table} SET {column}=? WHERE window_id=?", ("f" * 64, window_id),
         )
     expected_reason = (
         "structure-event-member-checkpoint-invalid"
-        if tamper == "checkpoint" else "structure-event-source-receipt-invalid"
+        if tamper == "checkpoint" else "structure-event-member-receipt-invalid"
+        if tamper == "merkle" else "structure-event-source-receipt-invalid"
     )
     for path in ("/health", "/healthz"):
         failed = http_test_client.get(path).json()["checks"][
@@ -676,7 +705,9 @@ def test_event_member_health_fails_closed_on_authenticated_authority_tamper(
     recovered = http_test_client.get("/healthz").json()["checks"][
         "snapshot:structure_event_members"
     ][0]
-    assert (recovered["observedValue"], recovered["status"]) == ("recovering", "warn")
+    assert (recovered["observedValue"], recovered["status"]) == (
+        ("sealed", "pass") if tamper == "merkle" else ("recovering", "warn")
+    )
 
 
 def test_health_exposes_release_bound_qualification_policy(

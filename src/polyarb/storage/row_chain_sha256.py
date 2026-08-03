@@ -10,7 +10,6 @@ ROW_CHAIN_SHA256_V2 = "row-chain-sha256-v2"
 ROW_CHAIN_DOMAINS = frozenset(
     {
         "source-event",
-        "source-event-conflict",
         "source-market",
         "source-group-truth",
         "projection-member",

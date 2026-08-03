@@ -2868,6 +2868,83 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "CHECK(global_conflict IN (0,1)),PRIMARY KEY(window_id,event_id))",
     ),
     (
+        "after-event-conflict-proof-table",
+        "CREATE TABLE IF NOT EXISTS structure_sync_event_conflict_proofs ("
+        "window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),"
+        "event_id TEXT NOT NULL,leaf_index INTEGER NOT NULL CHECK(leaf_index>=0),"
+        "leaf_hash TEXT NOT NULL CHECK(length(leaf_hash)=64),"
+        "proof_json TEXT NOT NULL,PRIMARY KEY(window_id,event_id),"
+        "UNIQUE(window_id,leaf_index))",
+    ),
+    (
+        "after-event-conflict-merkle-node-table",
+        "CREATE TABLE IF NOT EXISTS structure_sync_event_conflict_merkle_nodes ("
+        "window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),"
+        "level INTEGER NOT NULL CHECK(level>=0),node_index INTEGER NOT NULL "
+        "CHECK(node_index>=0),node_hash TEXT NOT NULL CHECK(length(node_hash)=64),"
+        "PRIMARY KEY(window_id,level,node_index))",
+    ),
+    (
+        "after-event-conflict-proof-insert-guard-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_conflict_proof_insert_guard",
+    ),
+    (
+        "after-event-conflict-proof-insert-guard-create",
+        "CREATE TRIGGER trg_structure_event_conflict_proof_insert_guard BEFORE INSERT ON "
+        "structure_sync_event_conflict_proofs WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=NEW.window_id) BEGIN "
+        "SELECT RAISE(ABORT,'structure-event-conflict-proof-frozen'); END",
+    ),
+    (
+        "after-event-conflict-proof-update-guard-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_conflict_proof_update_guard",
+    ),
+    (
+        "after-event-conflict-proof-update-guard-create",
+        "CREATE TRIGGER trg_structure_event_conflict_proof_update_guard BEFORE UPDATE ON "
+        "structure_sync_event_conflict_proofs WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) OR "
+        "OLD.window_id IS NOT NEW.window_id OR OLD.event_id IS NOT NEW.event_id OR "
+        "OLD.leaf_index IS NOT NEW.leaf_index OR OLD.leaf_hash IS NOT NEW.leaf_hash "
+        "BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-conflict-proof-frozen'); END",
+    ),
+    (
+        "after-event-conflict-merkle-node-insert-guard-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_conflict_merkle_node_insert_guard",
+    ),
+    (
+        "after-event-conflict-merkle-node-insert-guard-create",
+        "CREATE TRIGGER trg_structure_event_conflict_merkle_node_insert_guard BEFORE INSERT "
+        "ON structure_sync_event_conflict_merkle_nodes WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=NEW.window_id) BEGIN "
+        "SELECT RAISE(ABORT,'structure-event-conflict-merkle-node-frozen'); END",
+    ),
+    (
+        "after-event-conflict-merkle-node-update-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_conflict_merkle_node_update_guard "
+        "BEFORE UPDATE ON structure_sync_event_conflict_merkle_nodes BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-conflict-merkle-node-frozen'); END",
+    ),
+    (
+        "after-event-conflict-merkle-node-delete-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_conflict_merkle_node_delete_guard "
+        "BEFORE DELETE ON structure_sync_event_conflict_merkle_nodes WHEN EXISTS (SELECT 1 "
+        "FROM structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN "
+        "SELECT RAISE(ABORT,'structure-event-conflict-merkle-node-frozen'); END",
+    ),
+    (
+        "after-event-conflict-proof-delete-guard-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_conflict_proof_delete_guard",
+    ),
+    (
+        "after-event-conflict-proof-delete-guard-create",
+        "CREATE TRIGGER trg_structure_event_conflict_proof_delete_guard BEFORE DELETE ON "
+        "structure_sync_event_conflict_proofs WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN "
+        "SELECT RAISE(ABORT,'structure-event-conflict-proof-frozen'); END",
+    ),
+    (
         "after-event-conflict-metadata-trigger-drop",
         "DROP TRIGGER IF EXISTS trg_structure_event_conflict_metadata_insert",
     ),
@@ -2929,6 +3006,54 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "structure_sync_event_conflict_summaries WHEN EXISTS (SELECT 1 FROM "
         "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN "
         "SELECT RAISE(ABORT,'structure-event-conflict-summary-frozen'); END",
+    ),
+    (
+        "after-event-conflict-summary-audit-update",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_conflict_summary_audit_update "
+        "AFTER UPDATE ON structure_sync_event_conflict_summaries WHEN EXISTS (SELECT 1 "
+        "FROM structure_sync_event_member_receipts WHERE window_id=NEW.window_id) BEGIN "
+        "UPDATE structure_sync_event_member_progress SET checkpoint_digest="
+        "'structure-event-conflict-tampered' WHERE window_id=NEW.window_id; END",
+    ),
+    (
+        "after-event-conflict-summary-audit-insert",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_conflict_summary_audit_insert "
+        "AFTER INSERT ON structure_sync_event_conflict_summaries WHEN EXISTS (SELECT 1 "
+        "FROM structure_sync_event_member_receipts WHERE window_id=NEW.window_id) BEGIN "
+        "UPDATE structure_sync_event_member_progress SET checkpoint_digest="
+        "'structure-event-conflict-tampered' WHERE window_id=NEW.window_id; END",
+    ),
+    (
+        "after-event-conflict-summary-audit-delete",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_conflict_summary_audit_delete "
+        "AFTER DELETE ON structure_sync_event_conflict_summaries WHEN EXISTS (SELECT 1 "
+        "FROM structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN "
+        "UPDATE structure_sync_event_member_progress SET checkpoint_digest="
+        "'structure-event-conflict-tampered' WHERE window_id=OLD.window_id; END",
+    ),
+    (
+        "after-event-conflict-proof-audit-update",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_conflict_proof_audit_update "
+        "AFTER UPDATE ON structure_sync_event_conflict_proofs WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=NEW.window_id) BEGIN UPDATE "
+        "structure_sync_event_member_progress SET checkpoint_digest="
+        "'structure-event-conflict-tampered' WHERE window_id=NEW.window_id; END",
+    ),
+    (
+        "after-event-conflict-proof-audit-insert",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_conflict_proof_audit_insert "
+        "AFTER INSERT ON structure_sync_event_conflict_proofs WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=NEW.window_id) BEGIN UPDATE "
+        "structure_sync_event_member_progress SET checkpoint_digest="
+        "'structure-event-conflict-tampered' WHERE window_id=NEW.window_id; END",
+    ),
+    (
+        "after-event-conflict-proof-audit-delete",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_conflict_proof_audit_delete "
+        "AFTER DELETE ON structure_sync_event_conflict_proofs WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN UPDATE "
+        "structure_sync_event_member_progress SET checkpoint_digest="
+        "'structure-event-conflict-tampered' WHERE window_id=OLD.window_id; END",
     ),
     (
         "after-event-source-receipt-table",
@@ -3027,7 +3152,9 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "CHECK(length(receipt_digest)=64),event_conflict_count INTEGER NOT NULL DEFAULT 0 "
         "CHECK(event_conflict_count>=0),event_conflict_root TEXT NOT NULL DEFAULT "
         "'0000000000000000000000000000000000000000000000000000000000000000' "
-        "CHECK(length(event_conflict_root)=64))",
+        "CHECK(length(event_conflict_root)=64),event_conflict_merkle_root TEXT NOT NULL "
+        "DEFAULT '0000000000000000000000000000000000000000000000000000000000000000' "
+        "CHECK(length(event_conflict_merkle_root)=64))",
     ),
     (
         "after-projection-index-drop",

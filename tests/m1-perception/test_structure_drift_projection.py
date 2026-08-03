@@ -201,6 +201,11 @@ def _published_source_store(
             "UPDATE structure_sync_windows SET status='complete' WHERE id='window-1'"
         )
         con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "VALUES ('window-1',1000,1000,1000)"
+        )
+        con.execute(
             "INSERT INTO structure_generation_issues("
             "snapshot_id,issue_index,layer,category,market_id,detail,raw_payload) "
             "VALUES (1,1,1,'api_jitter','forged','forged','forged')"
@@ -768,6 +773,121 @@ def test_global_relation_projection_root_is_chunk_invariant(tmp_path: Path) -> N
     assert all(result == results[0] for result in results)
 
 
+def test_projection_rejects_tampered_event_conflict_summary_leaf(
+    tmp_path: Path,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=2,
+        global_relation_conflict=True,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_event_conflict_summary_update_guard")
+        con.execute(
+            "UPDATE structure_sync_event_conflict_summaries SET global_conflict=0 "
+            "WHERE window_id='window-1' AND event_id='event-000'"
+        )
+
+    assert store.structure_event_member_status(window_id="window-1") == {
+        "sealed": False,
+        "complete": False,
+        "reason": "structure-event-member-checkpoint-invalid",
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="^structure-event-member-checkpoint-invalid$",
+    ):
+        store.fetch_structure_drift_fresh_projection_chunk(
+            publication_id="publication-1",
+            generation_snapshot_id=1,
+            cursor=None,
+            limit=500,
+        )
+
+
+def test_projection_rejects_cross_window_event_conflict_proof_leaf(
+    tmp_path: Path,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=2,
+        global_relation_conflict=True,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_event_conflict_proof_update_guard")
+        con.execute("DROP TRIGGER trg_structure_event_conflict_proof_audit_update")
+        con.execute(
+            "UPDATE structure_sync_event_conflict_proofs SET leaf_hash=? "
+            "WHERE window_id='window-1' AND event_id='event-000'",
+            (
+                sqlite_store_module._event_conflict_leaf_hash(
+                    window_id="another-window",
+                    event_id="event-000",
+                    global_conflict=True,
+                ),
+            ),
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="^structure-event-conflict-summary-invalid$",
+    ):
+        store.fetch_structure_drift_fresh_projection_chunk(
+            publication_id="publication-1",
+            generation_snapshot_id=1,
+            cursor=None,
+            limit=500,
+        )
+
+
+@pytest.mark.parametrize("mutation", ["delete", "replace"])
+def test_projection_rejects_missing_or_inserted_event_conflict_proof(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=2,
+        global_relation_conflict=True,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_event_conflict_proof_delete_guard")
+        con.execute("DROP TRIGGER trg_structure_event_conflict_proof_insert_guard")
+        con.execute("DROP TRIGGER trg_structure_event_conflict_proof_audit_delete")
+        con.execute("DROP TRIGGER trg_structure_event_conflict_proof_audit_insert")
+        con.execute(
+            "DELETE FROM structure_sync_event_conflict_proofs "
+            "WHERE window_id='window-1' AND event_id='event-000'"
+        )
+        if mutation == "replace":
+            con.execute(
+                "INSERT INTO structure_sync_event_conflict_proofs VALUES (?,?,?,?,?)",
+                (
+                    "window-1",
+                    "event-000",
+                    0,
+                    sqlite_store_module._event_conflict_leaf_hash(
+                        window_id="mixed-window",
+                        event_id="event-000",
+                        global_conflict=True,
+                    ),
+                    "[]",
+                ),
+            )
+
+    with pytest.raises(
+        ValueError,
+        match="^structure-event-conflict-summary-invalid$",
+    ):
+        store.fetch_structure_drift_fresh_projection_chunk(
+            publication_id="publication-1",
+            generation_snapshot_id=1,
+            cursor=None,
+            limit=500,
+        )
+
+
 def test_production_complete_projection_commitment_is_chunk_invariant(
     tmp_path: Path,
 ) -> None:
@@ -933,6 +1053,7 @@ def test_projection_rejects_resealed_mixed_member_authority_before_candidates(
             tuple(receipt[:13]),
             event_conflict_count=int(receipt[14]),
             event_conflict_root=str(receipt[15]),
+            event_conflict_merkle_root=str(receipt[16]),
         )
         if authority_mix == "window":
             con.execute("PRAGMA foreign_keys=OFF")

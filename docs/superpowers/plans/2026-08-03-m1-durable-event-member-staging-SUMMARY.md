@@ -20,13 +20,18 @@ expansion and whole-sibling normalization were removed.
   missing or invalid receipt remains fail-closed and alertable.
 - Review-fix RED/GREEN: 2,000 duplicate ordinals plus 200 relation parents return at most two cardinality rows per
   candidate key while preserving conflict-over-duplicate semantics.
+- Final-review RED/GREEN: event-member admission is authenticated as `waiting-event-market-backfill` until the same
+  window's event-market bootstrap is terminal; a real scheduler flow proves one market shared by two events seals and
+  projects `conflicting-event-membership` only after that prerequisite completes.
+- Final-review RED/GREEN: every persisted event-conflict summary has a receipt-bound Merkle proof. Update, delete,
+  insert/replace, cross-window proof substitution, and receipt-root tampering all fail closed.
 
 ## Work bounds and query shape
 
 - Candidate budget is 1..500 per call; the 1,200-row regression proves multi-page completeness.
 - Event-only keyset is `(market_sort_key,event_id,event_ordinal,member_ordinal)` with separate first/resume SQL.
 - Direct trace uses at most 17 SELECTs/call: 7 fixed authority/source receipt queries plus at most 10 bulk candidate/evidence
-  queries. Production-shaped commitment trace is 16/call because validated authority is reused internally. Neither budget scales per member;
+  queries. The current production-shaped commitment trace is 14/call because validated authority is reused internally. Neither budget scales per member;
   traces contain no `json_each`, parent `$.markets`, nullable-OR, or per-member SELECT.
 - EXPLAIN reports no `USE TEMP B-TREE FOR ORDER BY`.
 - Output remains exactly 11 fields. Count/root are generation-independent; commitment identity binds member receipt digest.
@@ -37,11 +42,13 @@ expansion and whole-sibling normalization were removed.
 ## Verification
 
 - Projection/end-to-end focused gate: 51 passed.
-- Performance projection gate: 2 passed; v2 row-chain cases retain at least 2x the v1 baseline. The review-wave replacement
+- Performance projection gate: 5 passed; v2 row-chain cases retain at least 2x the v1 baseline. The review-wave replacement
   invokes the real complete commitment path over 1,200 production-shaped rows: receipt validation, sidecar/metadata/market/
-  relation/conflict/quarantine queries, JSON decode, diagnostics, and root accumulation. Final median was 0.039987s versus
-  0.124318s for the rejected raw whole-sibling path (3.11x), with 36 SELECTs across 3 v2 calls. This benchmark is a
+  relation/conflict-proof/quarantine queries, JSON decode, diagnostics, and root accumulation. Final median was 0.043543s versus
+  0.127854s for the rejected raw whole-sibling path (2.94x), with 42 SELECTs across 3 v2 calls. This benchmark is a
   synchronous projection-reader measurement, not child timing evidence.
+- The standalone 120k row-chain gate remains in the performance module. Conflict lookup VM steps are independent of
+  unrelated sibling cardinality: 117,276 steps at both 100 and 50,000 siblings (1.000 ratio).
 - Actual child evidence: the scheduler-path 1,200-member subprocess test completes and seals in a 1.12s pytest call on the
   verification host. Deterministic child-clock tests prove a post-CAS 45-second checkpoint and the 100 x 500 = 50,000-row
   production cap; the parent protocol timeout remains 75 seconds with TERM/KILL cleanup.
@@ -55,3 +62,9 @@ payloads. Existing source metadata/progress with a missing or invalid receipt is
 
 Review wave 2 added global-conflict-over-duplicate precedence, complete 1,200-row count/root/diagnostic/sample/cursor/receipt
 oracles, recomputed-digest mixed-window/source rejection, and replaced the SQL surrogate benchmark with the production path.
+
+Final review additionally made event-market backfill a hard authenticated predecessor of member admission and replaced the
+conflict-summary-only commitment with a resumable `members -> conflicts -> merkle -> proofs -> complete` state machine.
+Every CAS writes at most 500 source/proof rows; the 501-row reopen-on-every-call regression independently recomputes the
+canonical Merkle root and verifies every proof before the member receipt can seal. Fresh and migrated databases expose the
+same conflict summary/proof/node schema and migration failure rolls back exactly.

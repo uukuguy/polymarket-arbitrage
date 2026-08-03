@@ -1398,6 +1398,11 @@ class SnapshotScheduler:
             # intentionally not backfilled; allow the normal producer to open
             # a fresh authoritative window instead of retrying this one.
             return None
+        if (
+            status.get("state") == "waiting-event-market-backfill"
+            and status.get("authenticated") is True
+        ):
+            return None
         if status.get("failure_reason") is not None or status.get("reason") is not None:
             logger.error(
                 "structure event member derivation unavailable "
@@ -1428,6 +1433,11 @@ class SnapshotScheduler:
                         window_id=window_id,
                     )
                     if status.get("sealed") is True:
+                        return None
+                    if (
+                        status.get("state") == "waiting-event-market-backfill"
+                        and status.get("authenticated") is True
+                    ):
                         return None
             try:
                 checkpoint = await run_structure_event_members_in_subprocess(

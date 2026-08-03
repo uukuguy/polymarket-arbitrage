@@ -28,6 +28,14 @@ anti-join。projection commitment 除了 11-field member count/root，还绑定 
 member 派生也由独立 child 执行：500 rows/CAS、100 chunks/45 秒、parent 75 秒。1,200 members 因而在一次
 admission 内自然形成 500/500/200，而不是被三次普通 cadence 隔开。若 slice 尚未 seal，resident loop 约 100ms
 后重新 admission，并重新执行 Quote priority 检查。
+这里还有一条容易漏掉的因果顺序：event-market backfill 必须先 terminal，member child 才能 admission。否则
+同一个 market 同时属于两个 event 的事实尚未落进 relation sidecar，提前 seal 会把真实冲突永久认证成无冲突。
+因此 `waiting-event-market-backfill` 是可自动恢复的前置等待，不是长期降级。
+
+global-conflict 也不能只靠“一张冻结 summary 表”获得真实性。seal 流程为
+`members -> conflicts -> merkle -> proofs -> complete`：每个 `(window,event)` summary 形成 tagged leaf，receipt
+绑定 Merkle root，每行保存认证路径。projection 只取本页候选行及其 proof，O(log N) 验到 receipt，不需要为了
+认证一行而全表重算。表级 freeze guard 防普通写入，逐行 proof 防绕过 guard 后的删改、插入和跨窗替换。
 
 ## 代码地图
 
@@ -78,6 +86,7 @@ class roots 则证明“相对旧数据的完整对称差可解释”。
 4. `authorization_mode=drift-safe-sealed` 是否自动授权修改 production read mode？
 5. 为什么 `projection_member_root != generation_member_root` 在 v2 中可能正确，而 mirror 不相等一定失败？
 6. 两个 window 的 11-field count/root 相同，为什么 member receipt digest 不同仍必须拒绝复用 commitment？
+7. 为什么只冻结 conflict summary 表仍不足以证明单个候选 event 的 conflict 值？
 
 ## FAQ 增量
 

@@ -133,6 +133,157 @@ async def test_event_member_sidecar_precedes_structure_drift(
 
 
 @pytest.mark.asyncio
+async def test_event_member_waits_for_event_market_backfill_authority(
+    daemon_settings_for_test: Any,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    store.commit_structure_event_page(
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[
+            {"id": "event-a", "markets": [{"id": "market-shared"}]},
+            {"id": "event-b", "markets": [{"id": "market-shared"}]},
+        ],
+        finished_at_ms=2,
+    )
+    store.commit_structure_market_page(
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        markets=[{"id": "market-shared"}],
+        finished_at_ms=3,
+    )
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test.model_copy(
+            update={"structure_sync_enabled": True}
+        ),
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+
+    assert await scheduler._maybe_advance_structure_event_members(
+        queued_at_ms=4
+    ) is None
+    assert store.structure_event_member_status(window_id=window_id)["sealed"] is False
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT completed_at_ms FROM "
+            "structure_sync_event_market_backfill_progress WHERE window_id=?",
+            (window_id,),
+        ).fetchone() == (None,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_member_receipts WHERE window_id=?",
+            (window_id,),
+        ).fetchone() == (0,)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_production_order_seals_shared_market_conflict(
+    daemon_settings_for_test: Any,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    events = [
+        {
+            "id": event_id,
+            "negRiskMarketID": f"group-{event_id}",
+            "markets": [{
+                "id": "market-shared",
+                "active": True,
+                "closed": False,
+                "negRiskOther": False,
+            }],
+        }
+        for event_id in ("a", "b")
+    ]
+    market = {
+        "id": "market-shared",
+        "conditionId": "condition-shared",
+        "clobTokenIds": json.dumps(["yes", "no"]),
+        "active": True,
+        "closed": False,
+        "negRisk": True,
+        "negRiskMarketID": "group-a",
+    }
+    store.commit_structure_event_page(
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=events,
+        finished_at_ms=2,
+    )
+    store.commit_structure_market_page(
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        markets=[market],
+        finished_at_ms=3,
+    )
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test.model_copy(
+            update={"structure_sync_enabled": True}
+        ),
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+
+    assert await scheduler._maybe_advance_structure_event_members(
+        queued_at_ms=4
+    ) is None
+    assert store.advance_structure_event_market_backfill(
+        window_id=window_id,
+        max_events=500,
+        max_relationships=500,
+        now_ms=5,
+    )["completed"] is True
+    assert await scheduler._maybe_advance_structure_event_members(
+        queued_at_ms=6
+    ) is True
+    assert store.structure_event_member_status(window_id=window_id)["sealed"] is True
+
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+            "market_view_published,data_product,archive_status,snapshot_status,is_valid,"
+            "parquet_path) VALUES (1,1,2,'full',1,1,'structure','legacy','ok',1,'')"
+        )
+        con.execute(
+            "INSERT INTO structure_publications(publication_id,window_id,snapshot_id,status,"
+            "normalization_contract_version,expected_counts_json,committed_counts_json,"
+            "validation_hash,certification_component,certification_hash,created_at_ms,"
+            "checkpoint_at_ms) VALUES ('publication-order',?,1,'published','contract-v1',"
+            "'{}','{}',?,'bounded-complete',?,7,7)",
+            (window_id, "a" * 64, "a" * 64),
+        )
+        con.execute(
+            "UPDATE structure_sync_windows SET status='published',"
+            "published_snapshot_id=1 WHERE id=?",
+            (window_id,),
+        )
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-order",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+    )
+    assert [item.code for item in chunk.diagnostics] == [
+        "conflicting-event-membership"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_event_source_unavailable_historical_window_is_not_retried() -> None:
     store = MagicMock()
     store.get_scheduler_state.return_value = None
@@ -178,6 +329,11 @@ async def test_event_member_invalid_authority_blocks_scheduler_without_advancing
     )
     with sqlite3.connect(store.db_path) as con:
         con.execute("UPDATE structure_sync_windows SET status='complete'")
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "VALUES (?,?,?,?)", (window_id, 2, 2, 2)
+        )
     if tamper != "missing-progress":
         store.advance_structure_event_member_staging_chunk(window_id=window_id, limit=1)
     with sqlite3.connect(store.db_path) as con:
@@ -236,6 +392,11 @@ async def test_event_member_checks_quote_priority_at_every_double_check_boundary
     )
     with sqlite3.connect(store.db_path) as con:
         con.execute("UPDATE structure_sync_windows SET status='complete'")
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "VALUES (?,?,?,?)", (window_id, 2, 2, 2)
+        )
 
     class QuoteRuntime:
         def __init__(self) -> None:
@@ -281,6 +442,11 @@ async def test_event_member_waits_for_and_releases_shared_producer_lock(
     )
     with sqlite3.connect(store.db_path) as con:
         con.execute("UPDATE structure_sync_windows SET status='complete'")
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "VALUES (?,?,?,?)", (window_id, 2, 2, 2)
+        )
     producer_lock = asyncio.Lock()
     await producer_lock.acquire()
     scheduler = SnapshotScheduler(
@@ -335,6 +501,11 @@ async def test_event_member_scheduler_slice_seals_1200_members_in_one_admission(
     )
     with sqlite3.connect(store.db_path) as con:
         con.execute("UPDATE structure_sync_windows SET status='complete'")
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "VALUES (?,?,?,?)", (window_id, 2, 2, 2)
+        )
     scheduler = SnapshotScheduler(
         settings=daemon_settings_for_test.model_copy(
             update={"structure_sync_enabled": True}
@@ -428,6 +599,11 @@ async def test_event_member_child_timeout_records_breadcrumb_and_recovery_failur
     )
     with sqlite3.connect(store.db_path) as con:
         con.execute("UPDATE structure_sync_windows SET status='complete'")
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "VALUES (?,?,?,?)", (window_id, 2, 2, 2)
+        )
     monkeypatch.setattr(
         scheduler_module,
         "run_structure_event_members_in_subprocess",

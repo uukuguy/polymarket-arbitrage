@@ -450,11 +450,11 @@ def test_event_member_immutable_preserves_duplicate_ordinals_and_replace_guard(t
         receipt = (
             "w", 1, "1" * 64, "2" * 64, STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT,
             2, "3" * 64, 0, "4" * 64, "e", 2, 10, 3, "5" * 64,
-            0, "0" * 64,
+            0, "0" * 64, "0" * 64,
         )
         receipt_insert = (
             "INSERT INTO structure_sync_event_member_receipts "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         )
         con.execute(receipt_insert, receipt)
         original = con.execute("SELECT * FROM structure_sync_event_member_receipts").fetchone()
@@ -546,7 +546,7 @@ def test_event_member_immutable_rejects_identity_and_target_authority_bypass(
             "('sealed-window',1,'" + "1" * 64 + "','" + "2" * 64
             + "','structure-event-member-staging-v1',1,'" + "3" * 64
             + "',0,'" + "4" * 64 + "','event-1',1,10,2,'" + "5" * 64
-            + "',0,'" + "0" * 64 + "')"
+            + "',0,'" + "0" * 64 + "','" + "0" * 64 + "')"
         )
         with pytest.raises(
             sqlite3.IntegrityError,
@@ -606,7 +606,39 @@ def test_event_member_migration_is_idempotent_and_schema_locked(tmp_path) -> Non
         assert _schema_objects(
             lhs, "structure_sync_event_member"
         ) == _schema_objects(rhs, "structure_sync_event_member")
+        assert _schema_objects(
+            lhs, "structure_sync_event_conflict"
+        ) == _schema_objects(rhs, "structure_sync_event_conflict")
         assert _event_member_migration_business_rows(rhs) == business_before
+
+
+def test_event_conflict_merkle_receipt_migration_fault_rolls_back(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "previous-amendment.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "ALTER TABLE structure_sync_event_member_receipts "
+            "DROP COLUMN event_conflict_merkle_root"
+        )
+        schema_before = tuple(con.execute(
+            "SELECT type,name,sql FROM sqlite_master ORDER BY type,name"
+        ))
+
+        def fail_here(point: str) -> None:
+            if point == "after-receipt-event_conflict_merkle_root":
+                raise RuntimeError(point)
+
+        with pytest.raises(
+            RuntimeError,
+            match="after-receipt-event_conflict_merkle_root",
+        ):
+            sqlite_store_module._migrate_structure_event_member_schema(
+                con,
+                fault_hook=fail_here,
+            )
+        assert tuple(con.execute(
+            "SELECT type,name,sql FROM sqlite_master ORDER BY type,name"
+        )) == schema_before
 
 
 @pytest.mark.parametrize(
@@ -924,9 +956,10 @@ async def test_bounded_slice_uses_remaining_time_for_publication(
             max_elapsed_s=45.0,
         )
 
-    assert result == checkpoint
+    assert isinstance(result, StructureSyncCheckpoint)
+    assert result.stage == "bootstrap"
     assert store.get_latest_structure_sync()["status"] == "complete"
-    assert publication_slice.call_args.kwargs["max_elapsed_s"] == 40.0
+    publication_slice.assert_not_called()
     finalizer.assert_not_awaited()
 
 
@@ -2173,10 +2206,12 @@ async def test_completed_legacy_window_checkpoints_bootstrap_before_publication(
             max_publication_rows=2,
         )
 
-    assert isinstance(result, structure_publication_module.StructurePublicationCheckpoint)
-    assert result.stage == "ready"
-    assert result.chunks_processed > 1
-    assert store.get_latest_structure_publication().status == "ready"
+    assert isinstance(result, StructureSyncCheckpoint)
+    assert result.stage == "bootstrap"
+    assert store.get_latest_structure_publication() is None
+    assert store.structure_event_member_status(
+        window_id=str(window["id"])
+    )["sealed"] is False
 
 
 def test_publication_cannot_begin_before_relationship_bootstrap_completes(
@@ -2350,6 +2385,12 @@ def _seed_event_member_window(store: SQLiteStore, count: int) -> str:
             "UPDATE structure_sync_windows SET status='complete' WHERE id=?",
             (window_id,),
         )
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "VALUES (?,?,?,?)",
+            (window_id, 2, 2, 2),
+        )
     return window_id
 
 
@@ -2467,6 +2508,7 @@ def test_event_member_cas_fault_is_atomic(tmp_path, fault) -> None:
     "invalid_member_count", "invalid_member_root", "terminal_event_cursor",
     "terminal_member_ordinal", "terminal_member_byte_offset", "sealed_at_ms",
     "receipt_digest", "event_conflict_count", "event_conflict_root",
+    "event_conflict_merkle_root",
 ])
 def test_event_member_receipt_tamper_fails_closed(tmp_path, field) -> None:
     store = SQLiteStore(tmp_path / f"receipt-{field}.db")
@@ -2479,6 +2521,7 @@ def test_event_member_receipt_tamper_fails_closed(tmp_path, field) -> None:
             tuple(row[:13]),
             event_conflict_count=int(row[14]),
             event_conflict_root=str(row[15]),
+            event_conflict_merkle_root=str(row[16]),
         )
         columns = [r[1] for r in con.execute(
             "PRAGMA table_info(structure_sync_event_member_receipts)"
@@ -2555,23 +2598,72 @@ def test_event_conflict_summary_sealing_resumes_in_500_row_chunks(tmp_path) -> N
             "UPDATE structure_sync_windows SET status='complete' WHERE id=?",
             (window_id,),
         )
-    first = store.advance_structure_event_member_staging_chunk(
-        window_id=window_id, limit=500
-    )
-    second = store.advance_structure_event_member_staging_chunk(
-        window_id=window_id, limit=500
-    )
-    third = store.advance_structure_event_member_staging_chunk(
-        window_id=window_id, limit=500
-    )
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "VALUES (?,?,?,?)",
+            (window_id, 2, 2, 2),
+        )
+    runs = []
+    for _ in range(30):
+        runs.append(store.advance_structure_event_member_staging_chunk(
+            window_id=window_id, limit=500
+        ))
+        store = SQLiteStore(store.db_path)
+        if runs[-1]["sealed"]:
+            break
+    first, second, third = runs[:3]
     assert (first["sealed"], first["rows_written"]) == (False, 0)
     assert (second["sealed"], second["rows_written"], second["state"]) == (
         False, 0, "sealing-conflicts"
     )
-    assert (third["sealed"], third["rows_written"]) == (True, 1)
+    assert (third["sealed"], third["rows_written"], third["state"]) == (
+        False, 1, "sealing-conflict-merkle"
+    )
+    assert runs[-1]["sealed"] is True
+    assert max(int(run["rows_written"]) for run in runs) <= 500
+    assert {str(run["state"]) for run in runs} >= {
+        "sealing-conflict-merkle",
+        "sealing-conflict-proofs",
+        "sealed",
+    }
     assert store.structure_event_member_status(window_id=window_id)[
         "event_conflict_count"
     ] == 501
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*),COUNT(DISTINCT leaf_index) FROM "
+            "structure_sync_event_conflict_proofs WHERE window_id=?",
+            (window_id,),
+        ).fetchone() == (501, 501)
+        merkle_root = str(con.execute(
+            "SELECT event_conflict_merkle_root FROM "
+            "structure_sync_event_member_receipts WHERE window_id=?",
+            (window_id,),
+        ).fetchone()[0])
+        proof_rows = con.execute(
+            "SELECT proof.leaf_hash,proof.proof_json FROM "
+            "structure_sync_event_conflict_proofs proof WHERE proof.window_id=? "
+            "ORDER BY proof.leaf_index",
+            (window_id,),
+        ).fetchall()
+    expected_root, _expected_proofs = sqlite_store_module._event_conflict_merkle_proofs([
+        sqlite_store_module._event_conflict_leaf_hash(
+            window_id=window_id,
+            event_id=f"event-{index:04d}",
+            global_conflict=False,
+        )
+        for index in range(501)
+    ])
+    assert merkle_root == expected_root
+    assert all(
+        sqlite_store_module._verify_event_conflict_merkle_proof(
+            leaf_hash=str(leaf_hash),
+            proof_json=str(proof_json),
+            expected_root=merkle_root,
+        )
+        for leaf_hash, proof_json in proof_rows
+    )
 
 
 def test_event_source_authority_seals_with_natural_event_page(tmp_path) -> None:
@@ -2763,6 +2855,12 @@ def test_event_member_multi_event_chunk_spends_one_shared_budget(tmp_path) -> No
     with sqlite3.connect(store.db_path) as con:
         con.execute("UPDATE structure_sync_windows SET status='complete' WHERE id=?",
                     (window_id,))
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "VALUES (?,?,?,?)",
+            (window_id, 2, 2, 2),
+        )
     first = store.advance_structure_event_member_staging_chunk(
         window_id=window_id, limit=5,
     )

@@ -83,8 +83,13 @@ fresh projection 不再展开 `structure_sync_event_staging.payload_json.markets
 member progress、member receipt 和 publication 全部属于同一 window 且验证通过时才读 candidate；缺失、混窗、
 混源或篡改统一 fail closed，不返回 count/root/sample，也不修改 generation 表。
 
-member seal 还会按 `event_id` 认证持久化的 global-conflict summary：每次最多推进 500 行，count/root 进入 member
-receipt digest。projection 只按 `(window_id,event_id)` 主键读取该摘要，不再扫描某个 event 的全部 relation siblings。
+member child 只有在同窗 event-market backfill 已认证为 terminal 后才会 admission；此前状态是
+`waiting-event-market-backfill`，scheduler 会在 Quote 优先检查后自动重试，不会把缺关系的 member 提前 seal。
+member seal 还会按 `event_id` 认证持久化的 global-conflict summary：每次最多推进 500 行，并经过
+`members -> conflicts -> merkle -> proofs -> complete` 有界阶段。count、chain root、Merkle root 都进入 member
+receipt digest；每个摘要行都有到 receipt root 的持久 proof。projection 只按候选 `(window_id,event_id)` 主键
+读取摘要和 proof 并逐行验签，不扫描全部 relation siblings；摘要/proof 的增删改、跨窗替换或 receipt root 篡改
+都 fail closed。
 event-member scheduler child 没有专用 attempt ledger；运维跟踪依赖 defer receipt、共享 scheduler failure counter
 和 `RECOVERING` health。专用 `structure_drift_attempts` 只属于后续 classifier-drift child，不要把两条执行链混为一谈。
 
@@ -97,7 +102,7 @@ event-only anti-join 使用覆盖索引和复合 keyset
 
 query budget 必须按两层读：direct reader 每次固定最多 7 条 publication/source/member authority SELECT，加最多
 10 条 bulk candidate/evidence SELECT，总计最多 17；commitment 已验证 receipt 后内部复用该 authority，当前
-production-shaped gate 实测 12 条 SELECT/call。这个常数不会随页内 1/17/500 个 member 增长。不要把旧的
+production-shaped gate 实测 14 条 SELECT/call。这个常数不会随页内 1/17/500 个 member 增长。不要把旧的
 “≤10”理解成含 receipt gate 的总数；
 它只描述 candidate/evidence 层。任何逐 member 增长都属于回归。
 

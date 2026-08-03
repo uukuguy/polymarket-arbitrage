@@ -169,15 +169,96 @@ def _structure_event_member_receipt_digest(
     *,
     event_conflict_count: int,
     event_conflict_root: str,
+    event_conflict_merkle_root: str,
 ) -> str:
     if len(values) != len(_STRUCTURE_EVENT_MEMBER_RECEIPT_FIELDS):
         raise ValueError("invalid-structure-event-member-receipt-fields")
     return hashlib.sha256(json.dumps(
         (*values, "structure-event-global-conflict-v1", event_conflict_count,
-         event_conflict_root),
+         event_conflict_root, event_conflict_merkle_root),
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()).hexdigest()
+
+
+def _event_conflict_leaf_hash(
+    *, window_id: str, event_id: str, global_conflict: bool
+) -> str:
+    return hashlib.sha256(json.dumps(
+        (
+            "structure-event-global-conflict-leaf-v1",
+            window_id,
+            event_id,
+            global_conflict,
+        ),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
+def _event_conflict_merkle_parent(left: str, right: str) -> str:
+    return hashlib.sha256(
+        b"structure-event-global-conflict-merkle-v1\x00"
+        + bytes.fromhex(left)
+        + bytes.fromhex(right)
+    ).hexdigest()
+
+
+def _event_conflict_merkle_proofs(
+    leaves: list[str],
+) -> tuple[str, list[str]]:
+    if not leaves:
+        return hashlib.sha256(
+            b"structure-event-global-conflict-merkle-empty-v1"
+        ).hexdigest(), []
+    levels = [list(leaves)]
+    while len(levels[-1]) > 1:
+        current = levels[-1]
+        levels.append([
+            _event_conflict_merkle_parent(
+                current[index],
+                current[index + 1] if index + 1 < len(current) else current[index],
+            )
+            for index in range(0, len(current), 2)
+        ])
+    proofs = []
+    for leaf_index in range(len(leaves)):
+        index = leaf_index
+        proof = []
+        for level in levels[:-1]:
+            sibling_index = index ^ 1
+            sibling = level[sibling_index] if sibling_index < len(level) else level[index]
+            proof.append(("left" if sibling_index < index else "right", sibling))
+            index //= 2
+        proofs.append(json.dumps(proof, separators=(",", ":")))
+    return levels[-1][0], proofs
+
+
+def _verify_event_conflict_merkle_proof(
+    *, leaf_hash: str, proof_json: str, expected_root: str
+) -> bool:
+    try:
+        proof = json.loads(proof_json)
+        if not isinstance(proof, list):
+            return False
+        current = leaf_hash
+        for item in proof:
+            if (
+                not isinstance(item, list)
+                or len(item) != 2
+                or item[0] not in {"left", "right"}
+                or not isinstance(item[1], str)
+                or len(item[1]) != 64
+            ):
+                return False
+            current = (
+                _event_conflict_merkle_parent(item[1], current)
+                if item[0] == "left"
+                else _event_conflict_merkle_parent(current, item[1])
+            )
+        return current == expected_root
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
 
 
 def _event_member_progress_state(
@@ -187,9 +268,14 @@ def _event_member_progress_state(
     phase: str = "members",
     conflict_cursor: str = "",
     event_conflict_chain: RowChainSHA256 | None = None,
+    merkle_level: int = 0,
+    merkle_cursor: int = -1,
+    merkle_width: int = 0,
+    proof_cursor: str = "",
+    proof_count: int = 0,
 ) -> str:
     conflict_chain = (
-        RowChainSHA256.new("source-event-conflict")
+        RowChainSHA256.new("source-event")
         if event_conflict_chain is None else event_conflict_chain
     )
     return json.dumps({
@@ -201,18 +287,28 @@ def _event_member_progress_state(
         "phase": phase,
         "conflict_cursor": conflict_cursor,
         "event_conflict_chain": conflict_chain.to_json(),
+        "merkle_level": merkle_level,
+        "merkle_cursor": merkle_cursor,
+        "merkle_width": merkle_width,
+        "proof_cursor": proof_cursor,
+        "proof_count": proof_count,
     }, sort_keys=True, separators=(",", ":"))
 
 
 def _read_event_member_progress_state(
     encoded: str,
-) -> tuple[RowChainSHA256, int, str, str, int, str, str, RowChainSHA256]:
+) -> tuple[
+    RowChainSHA256, int, str, str, int, str, str, RowChainSHA256,
+    int, int, int, str, int,
+]:
     try:
         state = json.loads(encoded)
         if not isinstance(state, dict) or set(state) != {
             "member_chain", "source_event_count", "source_event_root",
             "source_identity_hash", "window_checkpoint_at_ms", "phase",
             "conflict_cursor", "event_conflict_chain",
+            "merkle_level", "merkle_cursor", "merkle_width", "proof_cursor",
+            "proof_count",
         }:
             raise ValueError
         chain = RowChainSHA256.from_json(
@@ -220,24 +316,42 @@ def _read_event_member_progress_state(
         )
         conflict_chain = RowChainSHA256.from_json(
             str(state["event_conflict_chain"]),
-            expected_domain="source-event-conflict",
+            expected_domain="source-event",
         )
         count, checkpoint = state["source_event_count"], state["window_checkpoint_at_ms"]
         root, identity = state["source_event_root"], state["source_identity_hash"]
         phase, conflict_cursor = state["phase"], state["conflict_cursor"]
+        merkle_level = state["merkle_level"]
+        merkle_cursor = state["merkle_cursor"]
+        merkle_width = state["merkle_width"]
+        proof_cursor = state["proof_cursor"]
+        proof_count = state["proof_count"]
         if (type(count) is not int or count < 0 or type(checkpoint) is not int
                 or checkpoint < 0 or not isinstance(root, str) or len(root) != 64
                 or not isinstance(identity, str) or len(identity) != 64):
             raise ValueError
-        if phase not in {"members", "conflicts", "complete"}:
+        if phase not in {"members", "conflicts", "merkle", "proofs", "complete"}:
             raise ValueError
-        if not isinstance(conflict_cursor, str):
+        if (
+            not isinstance(conflict_cursor, str)
+            or type(merkle_level) is not int
+            or merkle_level < 0
+            or type(merkle_cursor) is not int
+            or merkle_cursor < -1
+            or type(merkle_width) is not int
+            or merkle_width < 0
+            or not isinstance(proof_cursor, str)
+            or type(proof_count) is not int
+            or proof_count < 0
+        ):
             raise ValueError
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise ValueError("structure-event-member-progress-invalid") from error
     return (
         chain, count, root, identity, checkpoint, str(phase),
         str(conflict_cursor), conflict_chain,
+        merkle_level, merkle_cursor, merkle_width, str(proof_cursor),
+        proof_count,
     )
 
 
@@ -281,6 +395,11 @@ def _migrate_structure_event_member_schema(
             ("event_conflict_count", "INTEGER NOT NULL DEFAULT 0"),
             (
                 "event_conflict_root",
+                "TEXT NOT NULL DEFAULT "
+                "'0000000000000000000000000000000000000000000000000000000000000000'",
+            ),
+            (
+                "event_conflict_merkle_root",
                 "TEXT NOT NULL DEFAULT "
                 "'0000000000000000000000000000000000000000000000000000000000000000'",
             ),
@@ -2894,6 +3013,26 @@ class SQLiteStore:
                 return {"sealed": False, "complete": False,
                         "state": "waiting-natural-window", "authenticated": True,
                         "reason": "structure-event-source-receipt-unavailable"}
+            backfill = con.execute(
+                "SELECT progress.window_checkpoint_at_ms,progress.completed_at_ms,"
+                "progress.blocked_reason FROM "
+                "structure_sync_event_market_backfill_progress progress WHERE "
+                "progress.window_id=?",
+                (window_id,),
+            ).fetchone()
+            if (
+                backfill is None
+                or int(backfill[0]) != int(window[1])
+                or backfill[1] is None
+                or backfill[2] is not None
+            ):
+                con.execute("COMMIT")
+                return {
+                    "sealed": False,
+                    "complete": False,
+                    "state": "waiting-event-market-backfill",
+                    "authenticated": True,
+                }
             progress = con.execute(progress_sql, (window_id,)).fetchone()
             if progress is None:
                 con.execute("COMMIT")
@@ -2919,6 +3058,8 @@ class SQLiteStore:
             (
                 chain, source_count, source_root, source_identity, checkpoint,
                 phase, conflict_cursor, conflict_chain,
+                merkle_level, merkle_cursor, merkle_width, proof_cursor,
+                proof_count,
             ) = (
                 _read_event_member_progress_state(str(progress[4]))
             )
@@ -2929,6 +3070,220 @@ class SQLiteStore:
                 raise ValueError("structure-event-member-progress-invalid")
             if phase == "complete":
                 raise ValueError("structure-event-member-progress-invalid")
+            if phase == "merkle":
+                children = con.execute(
+                    "SELECT node_index,node_hash FROM "
+                    "structure_sync_event_conflict_merkle_nodes WHERE window_id=? "
+                    "AND level=? AND node_index>? ORDER BY node_index LIMIT ?",
+                    (window_id, merkle_level, merkle_cursor, limit),
+                ).fetchall()
+                if not children or int(children[0][0]) != merkle_cursor + 1:
+                    raise ValueError("structure-event-conflict-summary-invalid")
+                expected_indexes = list(range(
+                    merkle_cursor + 1,
+                    merkle_cursor + 1 + len(children),
+                ))
+                if [int(row[0]) for row in children] != expected_indexes:
+                    raise ValueError("structure-event-conflict-summary-invalid")
+                level_complete = int(children[-1][0]) == merkle_width - 1
+                if not level_complete and len(children) != limit:
+                    raise ValueError("structure-event-conflict-summary-invalid")
+                parent_nodes = []
+                for offset in range(0, len(children), 2):
+                    left_index, left_hash = children[offset]
+                    right = (
+                        children[offset + 1]
+                        if offset + 1 < len(children)
+                        else (left_index, left_hash)
+                    )
+                    parent_nodes.append((
+                        window_id,
+                        merkle_level + 1,
+                        int(left_index) // 2,
+                        _event_conflict_merkle_parent(
+                            str(left_hash), str(right[1])
+                        ),
+                    ))
+                next_width = (merkle_width + 1) // 2
+                next_phase = (
+                    "proofs" if level_complete and next_width == 1 else "merkle"
+                )
+                next_level = merkle_level + 1 if level_complete else merkle_level
+                next_cursor = -1 if level_complete else int(children[-1][0])
+                next_state = _event_member_progress_state(
+                    member_chain=chain,
+                    source_event_count=source_count,
+                    source_event_root=source_root,
+                    source_identity_hash=source_identity,
+                    window_checkpoint_at_ms=checkpoint,
+                    phase=next_phase,
+                    conflict_cursor=conflict_cursor,
+                    event_conflict_chain=conflict_chain,
+                    merkle_level=next_level,
+                    merkle_cursor=next_cursor,
+                    merkle_width=next_width if level_complete else merkle_width,
+                    proof_cursor=proof_cursor,
+                    proof_count=proof_count,
+                )
+                checkpoint_digest = _structure_event_member_checkpoint_digest((
+                    source[3], progress[0], int(progress[1]), int(progress[9]),
+                    int(progress[3]), int(progress[2]), progress[11], next_state,
+                    progress[5],
+                ))
+                con.execute("BEGIN IMMEDIATE")
+                if con.execute(progress_sql, (window_id,)).fetchone() != progress:
+                    raise ValueError("structure-event-member-cursor-race")
+                con.executemany(
+                    "INSERT INTO structure_sync_event_conflict_merkle_nodes VALUES "
+                    "(?,?,?,?)",
+                    parent_nodes,
+                )
+                updated = con.execute(
+                    "UPDATE structure_sync_event_member_progress SET member_state=?,"
+                    "checkpoint_at_ms=?,checkpoint_digest=? WHERE window_id=? AND "
+                    "completed_at_ms IS NULL AND failure_reason IS NULL",
+                    (next_state, now_ms, checkpoint_digest, window_id),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError("structure-event-member-cursor-race")
+                con.execute("COMMIT")
+                return {
+                    "sealed": False,
+                    "complete": False,
+                    "rows_written": len(children),
+                    "state": "sealing-conflict-merkle",
+                }
+            if phase == "proofs":
+                root_row = con.execute(
+                    "SELECT node_hash FROM structure_sync_event_conflict_merkle_nodes "
+                    "WHERE window_id=? AND level=? AND node_index=0",
+                    (window_id, merkle_level),
+                ).fetchone()
+                if root_row is None:
+                    raise ValueError("structure-event-conflict-summary-invalid")
+                merkle_root = str(root_row[0])
+                proof_rows = con.execute(
+                    "SELECT proof.event_id,proof.leaf_index,proof.leaf_hash,"
+                    "summary.global_conflict FROM structure_sync_event_conflict_proofs "
+                    "proof JOIN structure_sync_event_conflict_summaries summary ON "
+                    "summary.window_id=proof.window_id AND "
+                    "summary.event_id=proof.event_id WHERE proof.window_id=? AND "
+                    "proof.event_id>? ORDER BY proof.event_id LIMIT ?",
+                    (window_id, proof_cursor, limit),
+                ).fetchall()
+                proof_updates = []
+                for event_id, leaf_index, leaf_hash, global_conflict in proof_rows:
+                    expected_leaf = _event_conflict_leaf_hash(
+                        window_id=window_id,
+                        event_id=str(event_id),
+                        global_conflict=bool(global_conflict),
+                    )
+                    if str(leaf_hash) != expected_leaf:
+                        raise ValueError("structure-event-conflict-summary-invalid")
+                    node_index = int(leaf_index)
+                    proof = []
+                    for level in range(merkle_level):
+                        sibling_index = node_index ^ 1
+                        sibling = con.execute(
+                            "SELECT node_hash FROM "
+                            "structure_sync_event_conflict_merkle_nodes WHERE "
+                            "window_id=? AND level=? AND node_index=?",
+                            (window_id, level, sibling_index),
+                        ).fetchone()
+                        if sibling is None:
+                            sibling = con.execute(
+                                "SELECT node_hash FROM "
+                                "structure_sync_event_conflict_merkle_nodes WHERE "
+                                "window_id=? AND level=? AND node_index=?",
+                                (window_id, level, node_index),
+                            ).fetchone()
+                        if sibling is None:
+                            raise ValueError("structure-event-conflict-summary-invalid")
+                        proof.append((
+                            "left" if sibling_index < node_index else "right",
+                            str(sibling[0]),
+                        ))
+                        node_index //= 2
+                    proof_updates.append((
+                        json.dumps(proof, separators=(",", ":")),
+                        window_id,
+                        str(event_id),
+                    ))
+                next_proof_cursor = (
+                    proof_cursor if not proof_rows else str(proof_rows[-1][0])
+                )
+                proofs_complete = con.execute(
+                    "SELECT 1 FROM structure_sync_event_conflict_proofs WHERE "
+                    "window_id=? AND event_id>? LIMIT 1",
+                    (window_id, next_proof_cursor),
+                ).fetchone() is None
+                next_proof_count = proof_count + len(proof_rows)
+                if proofs_complete and next_proof_count != source_count:
+                    raise ValueError("structure-event-conflict-summary-invalid")
+                next_state = _event_member_progress_state(
+                    member_chain=chain,
+                    source_event_count=source_count,
+                    source_event_root=source_root,
+                    source_identity_hash=source_identity,
+                    window_checkpoint_at_ms=checkpoint,
+                    phase="complete" if proofs_complete else "proofs",
+                    conflict_cursor=conflict_cursor,
+                    event_conflict_chain=conflict_chain,
+                    merkle_level=merkle_level,
+                    merkle_cursor=merkle_cursor,
+                    merkle_width=merkle_width,
+                    proof_cursor=next_proof_cursor,
+                    proof_count=next_proof_count,
+                )
+                checkpoint_digest = _structure_event_member_checkpoint_digest((
+                    source[3], progress[0], int(progress[1]), int(progress[9]),
+                    int(progress[3]), int(progress[2]), progress[11], next_state,
+                    progress[5],
+                ))
+                con.execute("BEGIN IMMEDIATE")
+                if con.execute(progress_sql, (window_id,)).fetchone() != progress:
+                    raise ValueError("structure-event-member-cursor-race")
+                con.executemany(
+                    "UPDATE structure_sync_event_conflict_proofs SET proof_json=? "
+                    "WHERE window_id=? AND event_id=?",
+                    proof_updates,
+                )
+                if proofs_complete:
+                    receipt = (
+                        window_id, source_count, source_root, source_identity,
+                        STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT, chain.count,
+                        chain.hexdigest(), invalid_chain.count,
+                        invalid_chain.hexdigest(), str(progress[0]), int(progress[1]),
+                        int(progress[3]), now_ms,
+                    )
+                    receipt_digest = _structure_event_member_receipt_digest(
+                        receipt,
+                        event_conflict_count=conflict_chain.count,
+                        event_conflict_root=conflict_chain.hexdigest(),
+                        event_conflict_merkle_root=merkle_root,
+                    )
+                    con.execute(
+                        "INSERT INTO structure_sync_event_member_receipts VALUES ("
+                        + ",".join("?" for _ in range(17)) + ")",
+                        (*receipt, receipt_digest, conflict_chain.count,
+                         conflict_chain.hexdigest(), merkle_root),
+                    )
+                updated = con.execute(
+                    "UPDATE structure_sync_event_member_progress SET member_state=?,"
+                    "checkpoint_at_ms=?,completed_at_ms=?,checkpoint_digest=? WHERE "
+                    "window_id=? AND completed_at_ms IS NULL AND failure_reason IS NULL",
+                    (next_state, now_ms, now_ms if proofs_complete else None,
+                     checkpoint_digest, window_id),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError("structure-event-member-cursor-race")
+                con.execute("COMMIT")
+                return {
+                    "sealed": proofs_complete,
+                    "complete": proofs_complete,
+                    "rows_written": len(proof_rows),
+                    "state": "sealed" if proofs_complete else "sealing-conflict-proofs",
+                }
             if phase == "conflicts":
                 conflict_rows = con.execute(
                     "SELECT event_id,global_conflict FROM "
@@ -2936,6 +3291,15 @@ class SQLiteStore:
                     "AND event_id>? ORDER BY event_id LIMIT ?",
                     (window_id, conflict_cursor, limit),
                 ).fetchall()
+                first_leaf_index = conflict_chain.count
+                scanned_leaves = [
+                    _event_conflict_leaf_hash(
+                        window_id=window_id,
+                        event_id=str(event_id),
+                        global_conflict=bool(global_conflict),
+                    )
+                    for event_id, global_conflict in conflict_rows
+                ]
                 for event_id, global_conflict in conflict_rows:
                     conflict_chain.update((
                         "structure-event-global-conflict-v1",
@@ -2946,22 +3310,59 @@ class SQLiteStore:
                     conflict_cursor
                     if not conflict_rows else str(conflict_rows[-1][0])
                 )
-                conflict_complete = con.execute(
+                summaries_complete = con.execute(
                     "SELECT 1 FROM structure_sync_event_conflict_summaries "
                     "WHERE window_id=? AND event_id>? LIMIT 1",
                     (window_id, next_conflict_cursor),
                 ).fetchone() is None
-                if conflict_complete and conflict_chain.count != source_count:
+                if summaries_complete and conflict_chain.count != source_count:
                     raise ValueError("structure-event-conflict-summary-invalid")
+                merkle_root = ""
+                conflict_proofs = [
+                    (
+                        window_id,
+                        str(row[0]),
+                        first_leaf_index + index,
+                        scanned_leaves[index],
+                        "",
+                    )
+                    for index, row in enumerate(conflict_rows)
+                ]
+                conflict_complete = summaries_complete and source_count <= 500
+                if conflict_complete:
+                    all_conflicts = con.execute(
+                        "SELECT event_id,global_conflict FROM "
+                        "structure_sync_event_conflict_summaries WHERE window_id=? "
+                        "ORDER BY event_id",
+                        (window_id,),
+                    ).fetchall()
+                    leaves = [
+                        _event_conflict_leaf_hash(
+                            window_id=window_id,
+                            event_id=str(event_id),
+                            global_conflict=bool(global_conflict),
+                        )
+                        for event_id, global_conflict in all_conflicts
+                    ]
+                    merkle_root, proofs = _event_conflict_merkle_proofs(leaves)
+                    complete_proofs = [
+                        (window_id, str(row[0]), index, leaves[index], proofs[index])
+                        for index, row in enumerate(all_conflicts)
+                    ]
+                    conflict_proofs = complete_proofs
                 next_state = _event_member_progress_state(
                     member_chain=chain,
                     source_event_count=source_count,
                     source_event_root=source_root,
                     source_identity_hash=source_identity,
                     window_checkpoint_at_ms=checkpoint,
-                    phase="complete" if conflict_complete else "conflicts",
+                    phase=(
+                        "complete" if conflict_complete
+                        else "merkle" if summaries_complete else "conflicts"
+                    ),
                     conflict_cursor=next_conflict_cursor,
                     event_conflict_chain=conflict_chain,
+                    merkle_width=source_count if summaries_complete else 0,
                 )
                 checkpoint_digest = _structure_event_member_checkpoint_digest((
                     source[3], progress[0], int(progress[1]), int(progress[9]),
@@ -2971,6 +3372,20 @@ class SQLiteStore:
                 con.execute("BEGIN IMMEDIATE")
                 if con.execute(progress_sql, (window_id,)).fetchone() != progress:
                     raise ValueError("structure-event-member-cursor-race")
+                con.executemany(
+                    "INSERT INTO structure_sync_event_conflict_proofs VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(window_id,event_id) DO UPDATE SET "
+                    "proof_json=excluded.proof_json",
+                    conflict_proofs,
+                )
+                con.executemany(
+                    "INSERT OR IGNORE INTO structure_sync_event_conflict_merkle_nodes VALUES "
+                    "(?,0,?,?)",
+                    [
+                        (window_id, first_leaf_index + index, leaf_hash)
+                        for index, leaf_hash in enumerate(scanned_leaves)
+                    ],
+                )
                 if conflict_complete:
                     receipt = (
                         window_id, source_count, source_root, source_identity,
@@ -2983,12 +3398,13 @@ class SQLiteStore:
                         receipt,
                         event_conflict_count=conflict_chain.count,
                         event_conflict_root=conflict_chain.hexdigest(),
+                        event_conflict_merkle_root=merkle_root,
                     )
                     con.execute(
                         "INSERT INTO structure_sync_event_member_receipts VALUES ("
-                        + ",".join("?" for _ in range(16)) + ")",
+                        + ",".join("?" for _ in range(17)) + ")",
                         (*receipt, receipt_digest, conflict_chain.count,
-                         conflict_chain.hexdigest()),
+                         conflict_chain.hexdigest(), merkle_root),
                     )
                 updated = con.execute(
                     "UPDATE structure_sync_event_member_progress SET member_state=?,"
@@ -3006,7 +3422,11 @@ class SQLiteStore:
                     "rows_written": len(conflict_rows),
                     "member_ordinal": int(progress[1]),
                     "member_byte_offset": int(progress[3]),
-                    "state": "sealed" if conflict_complete else "sealing-conflicts",
+                    "state": (
+                        "sealed" if conflict_complete
+                        else "sealing-conflict-merkle" if summaries_complete
+                        else "sealing-conflicts"
+                    ),
                 }
             rows = []
             remaining = limit
@@ -3101,7 +3521,10 @@ class SQLiteStore:
                 "AND event_id>? LIMIT 1", (window_id, cursor),
             ).fetchone() is None
             conflict_complete = False
+            summaries_complete = False
             conflict_rows: list[tuple[object, ...]] = []
+            merkle_root = ""
+            conflict_proofs: list[tuple[object, ...]] = []
             if complete:
                 conflict_rows = con.execute(
                     "SELECT event_id,global_conflict FROM "
@@ -3109,30 +3532,66 @@ class SQLiteStore:
                     "ORDER BY event_id LIMIT ?",
                     (window_id, limit),
                 ).fetchall()
+                first_leaf_index = conflict_chain.count
+                scanned_leaves = [
+                    _event_conflict_leaf_hash(
+                        window_id=window_id,
+                        event_id=str(event_id),
+                        global_conflict=bool(global_conflict),
+                    )
+                    for event_id, global_conflict in conflict_rows
+                ]
                 for event_id, global_conflict in conflict_rows:
                     conflict_chain.update((
                         "structure-event-global-conflict-v1",
                         str(event_id),
                         bool(global_conflict),
                     ))
-                conflict_complete = (
+                summaries_complete = (
                     conflict_chain.count == source_count
                     and len(conflict_rows) <= limit
                 )
                 if conflict_chain.count > source_count:
                     raise ValueError("structure-event-conflict-summary-invalid")
+                conflict_proofs = [
+                    (
+                        window_id,
+                        str(row[0]),
+                        first_leaf_index + index,
+                        scanned_leaves[index],
+                        "",
+                    )
+                    for index, row in enumerate(conflict_rows)
+                ]
+                conflict_complete = summaries_complete and source_count <= 500
+                if conflict_complete:
+                    leaves = [
+                        _event_conflict_leaf_hash(
+                            window_id=window_id,
+                            event_id=str(event_id),
+                            global_conflict=bool(global_conflict),
+                        )
+                        for event_id, global_conflict in conflict_rows
+                    ]
+                    merkle_root, proofs = _event_conflict_merkle_proofs(leaves)
+                    conflict_proofs = [
+                        (window_id, str(row[0]), index, leaves[index], proofs[index])
+                        for index, row in enumerate(conflict_rows)
+                    ]
             next_state = _event_member_progress_state(
                 member_chain=chain, source_event_count=source_count,
                 source_event_root=source_root, source_identity_hash=source_identity,
                 window_checkpoint_at_ms=checkpoint,
                 phase=(
                     "complete" if conflict_complete
+                    else "merkle" if summaries_complete
                     else "conflicts" if complete else "members"
                 ),
                 conflict_cursor=(
                     str(conflict_rows[-1][0]) if conflict_rows else ""
                 ),
                 event_conflict_chain=conflict_chain,
+                merkle_width=source_count if summaries_complete else 0,
             )
             con.execute("BEGIN IMMEDIATE")
             if con.execute(progress_sql, (window_id,)).fetchone() != progress:
@@ -3150,6 +3609,21 @@ class SQLiteStore:
                   r.market_id, r.market_sort_key, r.group_id, r.member_kind,
                   r.active, r.closed, r.payload_json, r.payload_hash) for r in rows],
             )
+            if complete:
+                con.executemany(
+                    "INSERT INTO structure_sync_event_conflict_proofs VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(window_id,event_id) DO UPDATE SET "
+                    "proof_json=excluded.proof_json",
+                    conflict_proofs,
+                )
+                con.executemany(
+                    "INSERT OR IGNORE INTO structure_sync_event_conflict_merkle_nodes "
+                    "VALUES (?,0,?,?)",
+                    [
+                        (window_id, first_leaf_index + index, leaf_hash)
+                        for index, leaf_hash in enumerate(scanned_leaves)
+                    ],
+                )
             stored_ordinal = terminal_ordinal if complete else ordinal
             stored_offset = terminal_offset if complete else byte_offset
             stored_character_offset = (
@@ -3173,12 +3647,13 @@ class SQLiteStore:
                     receipt,
                     event_conflict_count=conflict_chain.count,
                     event_conflict_root=conflict_chain.hexdigest(),
+                    event_conflict_merkle_root=merkle_root,
                 )
                 con.execute(
                     "INSERT INTO structure_sync_event_member_receipts VALUES ("
-                    + ",".join("?" for _ in range(16)) + ")",
+                    + ",".join("?" for _ in range(17)) + ")",
                     (*receipt, receipt_digest, conflict_chain.count,
-                     conflict_chain.hexdigest()),
+                     conflict_chain.hexdigest(), merkle_root),
                 )
             updated = con.execute(
                 "UPDATE structure_sync_event_member_progress SET event_cursor=?,"
@@ -3237,6 +3712,28 @@ class SQLiteStore:
                 return {"sealed": False, "complete": False,
                         "state": "waiting-natural-window", "authenticated": True,
                         "reason": "structure-event-source-receipt-unavailable"}
+            window = con.execute(
+                "SELECT checkpoint_at_ms FROM structure_sync_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            backfill = con.execute(
+                "SELECT window_checkpoint_at_ms,completed_at_ms,blocked_reason FROM "
+                "structure_sync_event_market_backfill_progress WHERE window_id=?",
+                (window_id,),
+            ).fetchone()
+            if receipt is None and (
+                window is None
+                or backfill is None
+                or int(backfill[0]) != int(window[0])
+                or backfill[1] is None
+                or backfill[2] is not None
+            ):
+                return {
+                    "sealed": False,
+                    "complete": False,
+                    "state": "waiting-event-market-backfill",
+                    "authenticated": True,
+                }
             progress = con.execute(
                 "SELECT event_cursor,member_ordinal,rows_written,member_byte_offset,"
                 "member_state,diagnostic_state,checkpoint_at_ms,completed_at_ms,"
@@ -3258,6 +3755,8 @@ class SQLiteStore:
                     (
                         chain, count, root, identity, checkpoint, phase,
                         conflict_cursor, conflict_chain,
+                        _merkle_level, _merkle_cursor, _merkle_width, _proof_cursor,
+                        _proof_count,
                     ) = (
                         _read_event_member_progress_state(str(progress[4]))
                     )
@@ -3308,6 +3807,7 @@ class SQLiteStore:
                             tuple(receipt[:13]),
                             event_conflict_count=int(receipt[14]),
                             event_conflict_root=str(receipt[15]),
+                            event_conflict_merkle_root=str(receipt[16]),
                         )
                         or progress[0] != receipt[9]
                         or int(progress[1]) != int(receipt[10])
@@ -3345,7 +3845,8 @@ class SQLiteStore:
                     "sealed_at_ms": int(receipt[12]),
                     "receipt_digest": str(receipt[13]),
                     "event_conflict_count": int(receipt[14]),
-                    "event_conflict_root": str(receipt[15])}
+                    "event_conflict_root": str(receipt[15]),
+                    "event_conflict_merkle_root": str(receipt[16])}
 
     def advance_structure_event_market_backfill(
         self,
@@ -4907,8 +5408,11 @@ class SQLiteStore:
             identity = con.execute(
                 "SELECT p.window_id,p.status,p.normalization_contract_version,"
                 "p.validation_hash,p.certification_hash,window.status,"
-                "window.published_snapshot_id FROM structure_publications p JOIN "
+                "window.published_snapshot_id,receipt.event_conflict_merkle_root "
+                "FROM structure_publications p JOIN "
                 "structure_sync_windows window ON window.id=p.window_id "
+                "JOIN structure_sync_event_member_receipts receipt ON "
+                "receipt.window_id=p.window_id "
                 "WHERE p.publication_id=? AND p.snapshot_id=?",
                 (publication_id, generation_snapshot_id),
             ).fetchone()
@@ -5198,18 +5702,37 @@ class SQLiteStore:
                 if event_ids:
                     event_placeholders = ",".join("?" for _ in event_ids)
                     conflict_rows = con.execute(
-                        "SELECT event_id,global_conflict FROM "
-                        "structure_sync_event_conflict_summaries WHERE window_id=? AND "
-                        f"event_id IN ({event_placeholders})",
+                        "SELECT summary.event_id,summary.global_conflict,proof.leaf_hash,"
+                        "proof.proof_json FROM structure_sync_event_conflict_summaries "
+                        "summary JOIN structure_sync_event_conflict_proofs proof ON "
+                        "proof.window_id=summary.window_id AND "
+                        "proof.event_id=summary.event_id WHERE summary.window_id=? AND "
+                        f"summary.event_id IN ({event_placeholders})",
                         (window_id, *event_ids),
                     ).fetchall()
                     if len(conflict_rows) != len(event_ids):
                         raise ValueError("structure-event-conflict-summary-invalid")
+                    for event_id, global_conflict, leaf_hash, proof_json in conflict_rows:
+                        expected_leaf = _event_conflict_leaf_hash(
+                            window_id=window_id,
+                            event_id=str(event_id),
+                            global_conflict=bool(global_conflict),
+                        )
+                        if (
+                            str(leaf_hash) != expected_leaf
+                            or not _verify_event_conflict_merkle_proof(
+                                leaf_hash=expected_leaf,
+                                proof_json=str(proof_json),
+                                expected_root=str(identity[7]),
+                            )
+                        ):
+                            raise ValueError("structure-event-conflict-summary-invalid")
                     if inspection_callback is not None:
                         inspection_callback("conflict-events", len(conflict_rows))
                     conflict_events.update(
                         str(event_id)
-                        for event_id, global_conflict in conflict_rows
+                        for event_id, global_conflict, _leaf_hash, _proof_json
+                        in conflict_rows
                         if bool(global_conflict)
                     )
                 issue_keys = []
@@ -8849,6 +9372,8 @@ class SQLiteStore:
             or any(type(value) is not int or value < 0 for value in expected.values())
         ):
             raise ValueError("invalid-structure-publication-metadata")
+        if not self.structure_event_market_backfill_complete(window_id):
+            raise ValueError("structure-bootstrap-incomplete")
         member_status = self.structure_event_member_status(window_id=window_id)
         if member_status.get("sealed") is not True:
             raise ValueError(
@@ -10980,6 +11505,8 @@ class SQLiteStore:
                 delete_placeholders = ",".join("?" for _ in to_delete)
                 for table in (
                     "structure_sync_event_member_receipts",
+                    "structure_sync_event_conflict_proofs",
+                    "structure_sync_event_conflict_merkle_nodes",
                     "structure_sync_event_conflict_summaries",
                     "structure_sync_event_member_staging",
                     "structure_sync_event_source_receipts",
@@ -11047,6 +11574,8 @@ class SQLiteStore:
                 placeholders = ",".join("?" for _ in to_delete)
                 for table in (
                     "structure_sync_event_member_receipts",
+                    "structure_sync_event_conflict_proofs",
+                    "structure_sync_event_conflict_merkle_nodes",
                     "structure_sync_event_conflict_summaries",
                     "structure_sync_event_member_staging",
                     "structure_sync_event_source_receipts",

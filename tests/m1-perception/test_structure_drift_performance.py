@@ -280,6 +280,11 @@ def _seed_projection_gate_database(
         con.execute(
             "UPDATE structure_sync_windows SET status='complete' WHERE id='window-perf'"
         )
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "VALUES ('window-perf',1001,1001,1001)"
+        )
     while store.structure_event_member_status(window_id="window-perf").get("sealed") is not True:
         result = store.advance_structure_event_member_staging_chunk(
             window_id="window-perf", limit=500
