@@ -29,6 +29,7 @@ from polyarb.perception.structure_sync import (
     run_structure_sync_until_published,
 )
 from polyarb.storage import sqlite_store as sqlite_store_module
+from polyarb.storage.schemas import STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS
 from polyarb.storage.sqlite_store import (
     SQLITE_BUSY_TIMEOUT_S,
     STRUCTURE_EVENT_PAYLOAD_MAX_BYTES,
@@ -47,11 +48,230 @@ def _schema_objects(con: sqlite3.Connection, prefix: str) -> tuple[tuple[str, st
     )
 
 
+# Verbatim relevant predecessor definitions copied from schemas.py at 9b117d4.
+# Tests never shell out to git and therefore remain deterministic after history pruning.
+_NINE_B117D4_EVENT_MEMBER_PREDECESSOR_DDL = """
+CREATE TABLE IF NOT EXISTS structure_sync_windows (
+    id TEXT PRIMARY KEY,
+    recovery_root_window_id TEXT,
+    status TEXT NOT NULL CHECK(status IN (
+        'open','events_complete','complete','published','failed'
+    )),
+    event_cursor TEXT,
+    market_cursor TEXT,
+    started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+    checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
+    event_pages INTEGER NOT NULL DEFAULT 0 CHECK(event_pages >= 0),
+    market_pages INTEGER NOT NULL DEFAULT 0 CHECK(market_pages >= 0),
+    published_snapshot_id INTEGER REFERENCES snapshots(id),
+    failure_reason TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_structure_sync_one_open_window
+ON structure_sync_windows(status) WHERE status IN ('open','events_complete');
+CREATE TABLE IF NOT EXISTS structure_sync_event_staging (
+    window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
+    event_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    source_cursor TEXT,
+    source_ordinal INTEGER,
+    PRIMARY KEY(window_id,event_id)
+);
+CREATE TABLE IF NOT EXISTS structure_sync_event_market_staging (
+    window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
+    market_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    source_ordinal INTEGER NOT NULL,
+    PRIMARY KEY(window_id,event_id,market_id)
+);
+CREATE INDEX IF NOT EXISTS idx_structure_sync_event_market_first
+ON structure_sync_event_market_staging(window_id,market_id,source_ordinal,event_id);
+CREATE TABLE IF NOT EXISTS structure_sync_event_market_backfill_progress (
+    window_id TEXT PRIMARY KEY REFERENCES structure_sync_windows(id) ON DELETE CASCADE,
+    window_checkpoint_at_ms INTEGER NOT NULL CHECK(window_checkpoint_at_ms >= 0),
+    event_cursor TEXT NOT NULL DEFAULT '',
+    member_offset INTEGER NOT NULL DEFAULT 0 CHECK(member_offset >= 0),
+    events_processed INTEGER NOT NULL DEFAULT 0 CHECK(events_processed >= 0),
+    relationships_processed INTEGER NOT NULL DEFAULT 0
+        CHECK(relationships_processed >= 0),
+    checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
+    completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms >= 0),
+    blocked_reason TEXT,
+    migration_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_structure_event_market_backfill_active
+ON structure_sync_event_market_backfill_progress(checkpoint_at_ms DESC,window_id DESC)
+WHERE completed_at_ms IS NULL;
+CREATE TABLE IF NOT EXISTS structure_sync_market_staging (
+    window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),
+    market_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    source_cursor TEXT,
+    source_ordinal INTEGER,
+    PRIMARY KEY(window_id,market_id)
+);
+CREATE TRIGGER IF NOT EXISTS trg_structure_event_staging_insert_guard
+BEFORE INSERT ON structure_sync_event_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=NEW.window_id)!='open'
+BEGIN SELECT RAISE(ABORT,'structure-event-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_event_staging_update_guard
+BEFORE UPDATE ON structure_sync_event_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='open'
+BEGIN SELECT RAISE(ABORT,'structure-event-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_event_staging_delete_guard
+BEFORE DELETE ON structure_sync_event_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)='complete'
+BEGIN SELECT RAISE(ABORT,'structure-event-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_market_staging_insert_guard
+BEFORE INSERT ON structure_sync_market_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=NEW.window_id)!='events_complete'
+BEGIN SELECT RAISE(ABORT,'structure-market-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_market_staging_update_guard
+BEFORE UPDATE ON structure_sync_market_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='events_complete'
+BEGIN SELECT RAISE(ABORT,'structure-market-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_market_staging_delete_guard
+BEFORE DELETE ON structure_sync_market_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)='complete'
+BEGIN SELECT RAISE(ABORT,'structure-market-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_event_market_insert_guard
+BEFORE INSERT ON structure_sync_event_market_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=NEW.window_id)!='open'
+AND NOT EXISTS (
+    SELECT 1 FROM structure_sync_event_market_backfill_progress progress
+    JOIN structure_sync_windows window ON window.id=progress.window_id
+    WHERE progress.window_id=NEW.window_id AND window.status='complete'
+      AND progress.completed_at_ms IS NULL AND progress.blocked_reason IS NULL
+)
+BEGIN SELECT RAISE(ABORT,'structure-event-market-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_event_market_update_guard
+BEFORE UPDATE ON structure_sync_event_market_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='open'
+BEGIN SELECT RAISE(ABORT,'structure-event-market-staging-frozen'); END;
+CREATE TRIGGER IF NOT EXISTS trg_structure_event_market_delete_guard
+BEFORE DELETE ON structure_sync_event_market_staging
+WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)='complete'
+BEGIN SELECT RAISE(ABORT,'structure-event-market-staging-frozen'); END;
+CREATE TABLE IF NOT EXISTS structure_publications (
+    publication_id TEXT PRIMARY KEY,
+    window_id TEXT NOT NULL UNIQUE REFERENCES structure_sync_windows(id),
+    snapshot_id INTEGER NOT NULL UNIQUE REFERENCES snapshots(id),
+    status TEXT NOT NULL CHECK(status IN (
+        'normalizing','writing','ready','published','failed'
+    )),
+    normalization_contract_version TEXT,
+    normalization_component TEXT,
+    normalization_source_cursor TEXT,
+    write_component TEXT,
+    write_prior_cursor TEXT,
+    write_row_cursor TEXT,
+    expected_counts_json TEXT NOT NULL,
+    committed_counts_json TEXT NOT NULL,
+    validation_hash TEXT CHECK(
+        validation_hash IS NULL OR length(validation_hash)=64
+    ),
+    certification_component TEXT,
+    certification_row_cursor TEXT,
+    certification_hash TEXT CHECK(
+        certification_hash IS NULL OR length(certification_hash)=64
+    ),
+    certification_counts_json TEXT,
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
+    certified_at_ms INTEGER,
+    published_at_ms INTEGER,
+    failure_reason TEXT,
+    UNIQUE(snapshot_id,publication_id)
+);
+CREATE INDEX IF NOT EXISTS idx_structure_publications_published_history
+ON structure_publications(published_at_ms,snapshot_id)
+WHERE status='published';
+CREATE INDEX IF NOT EXISTS idx_structure_publications_active_checkpoint
+ON structure_publications(checkpoint_at_ms DESC,publication_id)
+WHERE status IN ('normalizing','writing','ready');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_structure_publications_snapshot_publication
+ON structure_publications(snapshot_id,publication_id);
+CREATE TABLE IF NOT EXISTS structure_generation_memberships (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    event_id TEXT NOT NULL,
+    neg_risk_market_id TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    member_kind TEXT NOT NULL CHECK(member_kind IN (
+        'named','other','inactive-reserved'
+    )),
+    active INTEGER NOT NULL CHECK(active IN (0,1)),
+    closed INTEGER NOT NULL CHECK(closed IN (0,1)),
+    PRIMARY KEY(snapshot_id,event_id,market_id)
+);
+CREATE INDEX IF NOT EXISTS idx_structure_generation_memberships_quote_projection
+ON structure_generation_memberships(
+    snapshot_id,neg_risk_market_id,event_id,market_id
+);
+CREATE INDEX IF NOT EXISTS idx_structure_generation_memberships_quote_projection_v2
+ON structure_generation_memberships(
+    snapshot_id,neg_risk_market_id,market_id,event_id
+);
+CREATE INDEX IF NOT EXISTS idx_structure_generation_memberships_drift_scan
+ON structure_generation_memberships(
+    snapshot_id,market_id,event_id,neg_risk_market_id,member_kind,active,closed
+);
+CREATE TABLE IF NOT EXISTS structure_generation_markets (
+    snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+    market_id TEXT NOT NULL,
+    condition_id TEXT NOT NULL,
+    slug TEXT,
+    question TEXT,
+    yes_token_id TEXT,
+    no_token_id TEXT,
+    mid_price REAL,
+    liquidity_usd REAL,
+    volume_usd REAL,
+    best_bid_price REAL,
+    best_bid_size REAL,
+    best_ask_price REAL,
+    best_ask_size REAL,
+    end_time_ms INTEGER,
+    active INTEGER,
+    closed INTEGER,
+    neg_risk INTEGER,
+    neg_risk_market_id TEXT,
+    fetched_at_ms INTEGER NOT NULL,
+    page_fetched_at_ms INTEGER,
+    incomplete INTEGER NOT NULL DEFAULT 0,
+    event_id TEXT,
+    PRIMARY KEY(snapshot_id,market_id)
+);
+CREATE INDEX IF NOT EXISTS idx_structure_generation_markets_event
+ON structure_generation_markets(snapshot_id,event_id);
+CREATE INDEX IF NOT EXISTS idx_structure_generation_markets_quote_projection
+ON structure_generation_markets(
+    snapshot_id,neg_risk_market_id,event_id,market_id
+);
+CREATE INDEX IF NOT EXISTS idx_structure_generation_markets_quote_projection_v2
+ON structure_generation_markets(
+    snapshot_id,neg_risk_market_id,market_id,event_id
+);
+CREATE TABLE IF NOT EXISTS current_structure_generation (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    snapshot_id INTEGER NOT NULL UNIQUE REFERENCES snapshots(id),
+    publication_id TEXT NOT NULL UNIQUE,
+    validation_hash TEXT NOT NULL CHECK(length(validation_hash)=64),
+    counts_json TEXT NOT NULL,
+    certification_component TEXT NOT NULL CHECK(certification_component IN (
+        'bounded-complete','backfill-authenticated'
+    )),
+    comparison_receipt_digest TEXT NOT NULL CHECK(length(comparison_receipt_digest)=64),
+    switched_at_ms INTEGER NOT NULL CHECK(switched_at_ms >= 0),
+    FOREIGN KEY(publication_id) REFERENCES structure_publications(publication_id)
+);
+"""
+
+
+def _create_9b117d4_event_member_predecessor(path) -> None:
+    with sqlite3.connect(path) as con:
+        con.executescript(_NINE_B117D4_EVENT_MEMBER_PREDECESSOR_DDL)
+
+
 def _seed_event_member_migration_business_rows(con: sqlite3.Connection) -> None:
-    con.execute(
-        "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
-        "is_valid,parquet_path) VALUES (99,1,2,'full',1,1,'opaque')"
-    )
     con.execute(
         "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
         "VALUES ('legacy-window','open',1,2)"
@@ -77,22 +297,50 @@ def _seed_event_member_migration_business_rows(con: sqlite3.Connection) -> None:
     )
     con.execute(
         "INSERT INTO structure_publications(publication_id,window_id,snapshot_id,status,"
-        "expected_counts_json,committed_counts_json,created_at_ms,checkpoint_at_ms) "
-        "VALUES ('publication-1','legacy-window',99,'normalizing','{}','{}',2,2)"
+        "expected_counts_json,committed_counts_json,created_at_ms,checkpoint_at_ms,"
+        "published_at_ms) VALUES "
+        "('publication-1','legacy-window',99,'published','{}','{}',2,2,3)"
+    )
+    con.execute(
+        "INSERT INTO structure_generation_memberships VALUES "
+        "(99,'event-1','group-1','market-1','named',1,0)"
+    )
+    con.execute(
+        "INSERT INTO structure_generation_markets(snapshot_id,market_id,condition_id,"
+        "active,closed,neg_risk,neg_risk_market_id,fetched_at_ms,event_id) VALUES "
+        "(99,'market-1','condition-1',1,0,1,'group-1',2,'event-1')"
+    )
+    con.execute(
+        "INSERT INTO current_structure_generation VALUES "
+        "(1,99,'publication-1','" + "b" * 64 + "','{}','bounded-complete','"
+        + "c" * 64
+        + "',3)"
     )
 
 
 def _event_member_migration_business_rows(
     con: sqlite3.Connection,
-) -> tuple[tuple[str, tuple[object, ...]], ...]:
+) -> tuple[tuple[str, tuple[tuple[object, ...], ...]], ...]:
     tables = (
-        "snapshots",
         "structure_sync_event_staging",
         "structure_sync_event_market_staging",
         "structure_sync_market_staging",
         "structure_publications",
+        "structure_generation_memberships",
+        "structure_generation_markets",
+        "current_structure_generation",
     )
-    return tuple((table, tuple(con.execute(f"SELECT * FROM {table}"))) for table in tables)
+    signatures = []
+    for table in tables:
+        columns = tuple(row[1] for row in con.execute(f"PRAGMA table_info({table})"))
+        projection = ",".join(
+            f'typeof("{column}"),hex(CAST("{column}" AS BLOB))' for column in columns
+        )
+        rows = tuple(
+            con.execute(f"SELECT {projection} FROM {table} ORDER BY rowid")  # noqa: S608
+        )
+        signatures.append((table, rows))
+    return tuple(signatures)
 
 
 def test_event_member_contract_is_exact_and_immutable() -> None:
@@ -215,20 +463,110 @@ def test_event_member_immutable_preserves_duplicate_ordinals_and_replace_guard(t
         )
 
 
+def test_event_member_immutable_rejects_identity_and_target_authority_bypass(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        con.executemany(
+            "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
+            "VALUES (?,?,1,1)",
+            (("open-window", "open"), ("complete-window", "complete")),
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_member_staging VALUES "
+            "('open-window','event-1',0,4,'market-1','market-1',NULL,NULL,1,0,"
+            "'{}','" + "a" * 64 + "')"
+        )
+        con.execute(
+            "UPDATE structure_sync_event_member_staging SET payload_json=' { } ' "
+            "WHERE window_id='open-window'"
+        )
+        assert con.execute(
+            "SELECT payload_json FROM structure_sync_event_member_staging"
+        ).fetchone() == (" { } ",)
+
+        identity_updates = (
+            "window_id='complete-window'",
+            "event_id='event-2'",
+            "member_ordinal=5",
+        )
+        for assignment in identity_updates:
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="structure-event-member-staging-frozen",
+            ):
+                con.execute(
+                    "UPDATE structure_sync_event_member_staging SET "
+                    f"{assignment} WHERE window_id='open-window'"
+                )
+
+        con.execute(
+            "UPDATE structure_sync_windows SET status='complete' WHERE id='open-window'"
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="structure-event-member-staging-frozen",
+        ):
+            con.execute(
+                "UPDATE structure_sync_event_member_staging SET payload_json='[]' "
+                "WHERE window_id='open-window'"
+            )
+        con.execute(
+            "UPDATE structure_sync_windows SET status='published' WHERE id='open-window'"
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="structure-event-member-staging-frozen",
+        ):
+            con.execute(
+                "UPDATE structure_sync_event_member_staging SET payload_json='[1]' "
+                "WHERE window_id='open-window'"
+            )
+
+        con.execute(
+            "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
+            "VALUES ('sealed-window','open',1,1)"
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_member_staging VALUES "
+            "('sealed-window','event-1',0,4,'market-1','market-1',NULL,NULL,1,0,"
+            "'{}','" + "d" * 64 + "')"
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_member_receipts VALUES "
+            "('sealed-window',1,'" + "1" * 64 + "','" + "2" * 64
+            + "','structure-event-member-staging-v1',1,'" + "3" * 64
+            + "',0,'" + "4" * 64 + "','event-1',1,10,2,'" + "5" * 64 + "')"
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="structure-event-member-staging-frozen",
+        ):
+            con.execute(
+                "UPDATE structure_sync_event_member_staging SET payload_json='[2]' "
+                "WHERE window_id='sealed-window'"
+            )
+
+
+def test_event_member_rollback_labels_every_schema_statement() -> None:
+    assert all(label is not None for label, _sql in STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS)
+
+
 def test_event_member_migration_is_idempotent_and_schema_locked(tmp_path) -> None:
     fresh = SQLiteStore(tmp_path / "fresh.db")
     fresh.init_schema()
-    migrated = SQLiteStore(tmp_path / "migrated.db")
-    migrated.init_schema()
-    with sqlite3.connect(migrated.db_path) as con:
+    migrated_path = tmp_path / "migrated.db"
+    _create_9b117d4_event_member_predecessor(migrated_path)
+    with sqlite3.connect(migrated_path) as con:
         _seed_event_member_migration_business_rows(con)
-        for kind, name, _sql in reversed(_schema_objects(con, "structure_sync_event_member")):
-            con.execute(f"DROP {kind.upper()} IF EXISTS {name}")
+        assert _schema_objects(con, "structure_sync_event_member") == ()
         business_before = _event_member_migration_business_rows(con)
-    migrated.init_schema()
-    migrated.init_schema()
+        sqlite_store_module._migrate_structure_event_member_schema(con)
+        sqlite_store_module._migrate_structure_event_member_schema(con)
     with sqlite3.connect(fresh.db_path) as lhs, sqlite3.connect(
-        migrated.db_path
+        migrated_path
     ) as rhs:
         assert _schema_objects(
             lhs, "structure_sync_event_member"
@@ -238,20 +576,13 @@ def test_event_member_migration_is_idempotent_and_schema_locked(tmp_path) -> Non
 
 @pytest.mark.parametrize(
     "fault_point",
-    (
-        "after-sidecar-table", "after-progress-table", "after-receipt-table",
-        "after-sidecar-insert-trigger", "after-sidecar-update-trigger",
-        "after-sidecar-delete-trigger", "after-receipt-insert-trigger",
-        "after-receipt-update-trigger", "after-receipt-delete-trigger",
-    ),
+    tuple(label for label, _sql in STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS),
 )
 def test_event_member_rollback_restores_old_schema_and_rows(tmp_path, fault_point) -> None:
-    store = SQLiteStore(tmp_path / f"{fault_point}.db")
-    store.init_schema()
-    with sqlite3.connect(store.db_path) as con:
+    predecessor_path = tmp_path / f"{fault_point}.db"
+    _create_9b117d4_event_member_predecessor(predecessor_path)
+    with sqlite3.connect(predecessor_path) as con:
         _seed_event_member_migration_business_rows(con)
-        for kind, name, _sql in reversed(_schema_objects(con, "structure_sync_event_member")):
-            con.execute(f"DROP {kind.upper()} IF EXISTS {name}")
         schema_before = tuple(con.execute(
             "SELECT type,name,sql FROM sqlite_master ORDER BY type,name"
         ))
@@ -268,6 +599,43 @@ def test_event_member_rollback_restores_old_schema_and_rows(tmp_path, fault_poin
         assert tuple(con.execute(
             "SELECT type,name,sql FROM sqlite_master ORDER BY type,name"
         )) == schema_before
+        assert _event_member_migration_business_rows(con) == rows_before
+
+
+@pytest.mark.parametrize(
+    "fault_point",
+    tuple(
+        label
+        for label, _sql in STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS
+        if label.endswith("-drop")
+    ),
+)
+def test_event_member_rollback_restores_replaced_indexes_and_triggers(
+    tmp_path,
+    fault_point,
+) -> None:
+    predecessor_path = tmp_path / f"canonical-{fault_point}.db"
+    _create_9b117d4_event_member_predecessor(predecessor_path)
+    with sqlite3.connect(predecessor_path) as con:
+        _seed_event_member_migration_business_rows(con)
+        sqlite_store_module._migrate_structure_event_member_schema(con)
+        schema_before = tuple(
+            con.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")
+        )
+        rows_before = _event_member_migration_business_rows(con)
+
+        def fail_here(point: str) -> None:
+            if point == fault_point:
+                raise RuntimeError(point)
+
+        with pytest.raises(RuntimeError, match=fault_point):
+            sqlite_store_module._migrate_structure_event_member_schema(
+                con,
+                fault_hook=fail_here,
+            )
+        assert tuple(
+            con.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")
+        ) == schema_before
         assert _event_member_migration_business_rows(con) == rows_before
 
 

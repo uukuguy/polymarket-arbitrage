@@ -2885,35 +2885,44 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "sealed_at_ms INTEGER NOT NULL CHECK(sealed_at_ms>=0),receipt_digest TEXT NOT NULL "
         "CHECK(length(receipt_digest)=64))",
     ),
-    (None, "DROP INDEX IF EXISTS idx_structure_event_member_projection"),
     (
-        None,
+        "after-projection-index-drop",
+        "DROP INDEX IF EXISTS idx_structure_event_member_projection",
+    ),
+    (
+        "after-projection-index-create",
         "CREATE INDEX idx_structure_event_member_projection ON "
         "structure_sync_event_member_staging(window_id,market_sort_key,event_id,"
         "event_ordinal,member_ordinal)",
     ),
-    (None, "DROP INDEX IF EXISTS idx_structure_event_member_resume"),
+    ("after-resume-index-drop", "DROP INDEX IF EXISTS idx_structure_event_member_resume"),
     (
-        None,
+        "after-resume-index-create",
         "CREATE INDEX idx_structure_event_member_resume ON "
         "structure_sync_event_member_staging(window_id,event_id,member_ordinal)",
     ),
-    (None, "DROP INDEX IF EXISTS idx_structure_event_member_market"),
+    ("after-market-index-drop", "DROP INDEX IF EXISTS idx_structure_event_member_market"),
     (
-        None,
+        "after-market-index-create",
         "CREATE INDEX idx_structure_event_member_market ON "
         "structure_sync_event_member_staging(window_id,market_id,event_id,member_ordinal)",
     ),
-    (None, "DROP INDEX IF EXISTS idx_structure_event_member_progress_active"),
     (
-        None,
+        "after-progress-index-drop",
+        "DROP INDEX IF EXISTS idx_structure_event_member_progress_active",
+    ),
+    (
+        "after-progress-index-create",
         "CREATE INDEX idx_structure_event_member_progress_active ON "
         "structure_sync_event_member_progress(checkpoint_at_ms DESC,window_id DESC) "
         "WHERE completed_at_ms IS NULL",
     ),
-    (None, "DROP TRIGGER IF EXISTS trg_structure_event_member_staging_insert_guard"),
     (
-        "after-sidecar-insert-trigger",
+        "after-sidecar-insert-trigger-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_member_staging_insert_guard",
+    ),
+    (
+        "after-sidecar-insert-trigger-create",
         "CREATE TRIGGER trg_structure_event_member_staging_insert_guard BEFORE INSERT ON "
         "structure_sync_event_member_staging WHEN EXISTS (SELECT 1 FROM "
         "structure_sync_event_member_receipts WHERE window_id=NEW.window_id) OR "
@@ -2922,19 +2931,28 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "window_id=NEW.window_id AND completed_at_ms IS NULL AND failure_reason IS NULL)) "
         "BEGIN SELECT RAISE(ABORT,'structure-event-member-staging-frozen'); END",
     ),
-    (None, "DROP TRIGGER IF EXISTS trg_structure_event_member_staging_update_guard"),
     (
-        "after-sidecar-update-trigger",
+        "after-sidecar-update-trigger-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_member_staging_update_guard",
+    ),
+    (
+        "after-sidecar-update-trigger-create",
         "CREATE TRIGGER trg_structure_event_member_staging_update_guard BEFORE UPDATE ON "
-        "structure_sync_event_member_staging WHEN EXISTS (SELECT 1 FROM "
-        "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) OR "
-        "(SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='open' "
+        "structure_sync_event_member_staging WHEN OLD.window_id!=NEW.window_id OR "
+        "OLD.event_id!=NEW.event_id OR OLD.member_ordinal!=NEW.member_ordinal OR "
+        "EXISTS (SELECT 1 FROM structure_sync_event_member_receipts WHERE "
+        "window_id IN (OLD.window_id,NEW.window_id)) OR "
+        "(SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='open' OR "
+        "(SELECT status FROM structure_sync_windows WHERE id=NEW.window_id)!='open' "
         "BEGIN SELECT "
         "RAISE(ABORT,'structure-event-member-staging-frozen'); END",
     ),
-    (None, "DROP TRIGGER IF EXISTS trg_structure_event_member_staging_delete_guard"),
     (
-        "after-sidecar-delete-trigger",
+        "after-sidecar-delete-trigger-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_member_staging_delete_guard",
+    ),
+    (
+        "after-sidecar-delete-trigger-create",
         "CREATE TRIGGER trg_structure_event_member_staging_delete_guard BEFORE DELETE ON "
         "structure_sync_event_member_staging WHEN EXISTS (SELECT 1 FROM "
         "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) OR "
@@ -2942,24 +2960,33 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "BEGIN SELECT "
         "RAISE(ABORT,'structure-event-member-staging-frozen'); END",
     ),
-    (None, "DROP TRIGGER IF EXISTS trg_structure_event_member_receipt_insert"),
     (
-        "after-receipt-insert-trigger",
+        "after-receipt-insert-trigger-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_member_receipt_insert",
+    ),
+    (
+        "after-receipt-insert-trigger-create",
         "CREATE TRIGGER trg_structure_event_member_receipt_insert BEFORE INSERT ON "
         "structure_sync_event_member_receipts WHEN EXISTS (SELECT 1 FROM "
         "structure_sync_event_member_receipts WHERE window_id=NEW.window_id) BEGIN "
         "SELECT RAISE(ABORT,'structure-event-member-receipt-sealed'); END",
     ),
-    (None, "DROP TRIGGER IF EXISTS trg_structure_event_member_receipt_update"),
     (
-        "after-receipt-update-trigger",
+        "after-receipt-update-trigger-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_member_receipt_update",
+    ),
+    (
+        "after-receipt-update-trigger-create",
         "CREATE TRIGGER trg_structure_event_member_receipt_update BEFORE UPDATE ON "
         "structure_sync_event_member_receipts BEGIN SELECT "
         "RAISE(ABORT,'structure-event-member-receipt-sealed'); END",
     ),
-    (None, "DROP TRIGGER IF EXISTS trg_structure_event_member_receipt_delete"),
     (
-        "after-receipt-delete-trigger",
+        "after-receipt-delete-trigger-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_member_receipt_delete",
+    ),
+    (
+        "after-receipt-delete-trigger-create",
         "CREATE TRIGGER trg_structure_event_member_receipt_delete BEFORE DELETE ON "
         "structure_sync_event_member_receipts BEGIN SELECT "
         "RAISE(ABORT,'structure-event-member-receipt-sealed'); END",
