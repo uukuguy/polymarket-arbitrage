@@ -2108,6 +2108,9 @@ async def test_pending_structure_drift_slice_precedes_snapshot_child(
             "reason": "structure-drift-incomplete",
         }
     )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v2"
+    )
     child = AsyncMock(
         return_value=IsolatedStructureDriftCheckpoint(
             phase="legacy-members",
@@ -2143,6 +2146,7 @@ async def test_pending_structure_drift_slice_precedes_snapshot_child(
     assert producer_lock.locked() is False
     assert scheduler._failure_counter == 0
     assert store.get_latest_structure_drift_attempt()["outcome"] == "checkpointed"
+    store.initialize_structure_drift_comparison.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2165,6 +2169,9 @@ async def test_structure_drift_rechecks_quote_after_shared_lock(
             "reason": "structure-drift-incomplete",
         }
     )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v2"
+    )
     active = iter((False, True))
     runtime = MagicMock()
     runtime.pipeline_active.side_effect = lambda: next(active)
@@ -2185,6 +2192,7 @@ async def test_structure_drift_rechecks_quote_after_shared_lock(
     assert receipt is not None
     assert receipt["reason"] == "structure-drift:quote-pipeline-active"
     assert scheduler._failure_counter == 0
+    store.initialize_structure_drift_comparison.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2207,6 +2215,9 @@ async def test_structure_drift_quote_due_wins_next_slice_admission(
             "phase": "generation-members",
             "reason": "structure-drift-incomplete",
         }
+    )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v2"
     )
     runtime = MagicMock()
     runtime.pipeline_active.return_value = False
@@ -2237,6 +2248,7 @@ async def test_structure_drift_quote_due_wins_next_slice_admission(
     receipt = store.get_latest_structure_defer()
     assert receipt is not None
     assert receipt["reason"] == "structure-drift:quote-pipeline-due"
+    store.initialize_structure_drift_comparison.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2259,6 +2271,9 @@ async def test_request_now_reaches_same_structure_drift_child_path(
             "phase": "legacy-members",
             "reason": "structure-drift-incomplete",
         }
+    )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v2"
     )
     stop_event = asyncio.Event()
 
@@ -2311,6 +2326,9 @@ async def test_structure_drift_cancellation_releases_shared_producer_lock(
             "phase": "source-markets",
             "reason": "structure-drift-incomplete",
         }
+    )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v2"
     )
     cancelled = StructureDriftCancelled(
         last_stage="source-events",
@@ -2367,6 +2385,9 @@ async def test_structure_drift_terminal_write_failure_is_isolated_and_blocks_res
             "reason": "structure-drift-progress-missing",
         }
     )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v2"
+    )
     child = AsyncMock(
         return_value=IsolatedStructureDriftCheckpoint(
             phase="source-events", rows_processed=1, chunks_processed=1,
@@ -2408,6 +2429,9 @@ async def test_structure_drift_cancel_survives_terminal_write_failure(
             "phase": None,
             "reason": "structure-drift-progress-missing",
         }
+    )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v2"
     )
     monkeypatch.setattr(
         scheduler_module, "run_structure_drift_in_subprocess",
@@ -2456,6 +2480,9 @@ async def test_structure_drift_parent_terminalizes_child_failures(
             "reason": "structure-drift-incomplete",
             "progress_id": "progress-1",
         }
+    )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v2"
     )
     monkeypatch.setattr(
         scheduler_module,

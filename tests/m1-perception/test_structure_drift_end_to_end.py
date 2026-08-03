@@ -1781,6 +1781,185 @@ def test_v2_insert_failure_rolls_back_v1_supersession(tmp_path: Path) -> None:
         ]
 
 
+def test_current_stale_v1_initializes_and_advances_v2_without_mutating_v1(
+    tmp_path: Path,
+) -> None:
+    store = _drift_store(tmp_path)
+    original_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    v1_comparison_id = "d" * 64
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET comparison_id=?,"
+            "classifier_contract_version=?,phase='stale',terminal_reason="
+            "'drift-unclassified' WHERE comparison_id=?",
+            (v1_comparison_id, STRUCTURE_DRIFT_CLASSIFIER_V1, original_id),
+        )
+        v1_before = con.execute(
+            "SELECT * FROM structure_generation_drift_progress WHERE comparison_id=?",
+            (v1_comparison_id,),
+        ).fetchone()
+
+    chunk = store.advance_current_structure_drift_chunk(max_rows=1, now_ms=3_001)
+
+    assert chunk is not None
+    assert chunk.rows_processed == 1
+    with sqlite3.connect(store.db_path) as con:
+        v1_after = con.execute(
+            "SELECT * FROM structure_generation_drift_progress WHERE comparison_id=?",
+            (v1_comparison_id,),
+        ).fetchone()
+        v2_rows = con.execute(
+            "SELECT comparison_id,phase FROM structure_generation_drift_progress "
+            "WHERE classifier_contract_version=?",
+            (STRUCTURE_DRIFT_CLASSIFIER_V2,),
+        ).fetchall()
+    assert v1_after == v1_before
+    assert len(v2_rows) == 1
+    assert v2_rows[0][1] in {"source-events", "source-markets"}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_scheduler_ticks_start_one_real_v2_child(
+    tmp_path: Path,
+) -> None:
+    from polyarb.daemon.scheduler import SnapshotScheduler
+
+    store = _drift_store(tmp_path)
+    settings = SimpleNamespace(
+        db_path=store.db_path,
+        scheduler_interval_s=3600,
+        structure_generation_drift_compare_enabled=True,
+        structure_generation_drift_max_rows=500,
+        structure_generation_drift_max_chunks_per_tick=100,
+        structure_generation_drift_slice_s=45.0,
+    )
+    producer_lock = asyncio.Lock()
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=producer_lock,
+    )
+
+    results = await asyncio.gather(
+        scheduler._maybe_advance_structure_drift(queued_at_ms=1_000),
+        scheduler._maybe_advance_structure_drift(queued_at_ms=1_000),
+    )
+
+    assert results.count(True) == 1
+    assert results.count(None) == 1
+    with sqlite3.connect(store.db_path) as con:
+        progress = con.execute(
+            "SELECT comparison_id FROM structure_generation_drift_progress WHERE "
+            "classifier_contract_version=?",
+            (STRUCTURE_DRIFT_CLASSIFIER_V2,),
+        ).fetchall()
+        assert len(progress) == 1
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_drift_attempts"
+        ).fetchone() == (1,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_drift_attempts WHERE outcome='running'"
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT progress_id FROM structure_drift_attempts"
+        ).fetchone() == (progress[0][0],)
+
+
+@pytest.mark.asyncio
+async def test_same_contract_stale_does_not_spawn_real_scheduler_retry(
+    tmp_path: Path,
+) -> None:
+    from polyarb.daemon.scheduler import SnapshotScheduler
+
+    store = _drift_store(tmp_path, omit_generation_market_id="addition")
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    assert _run_drift_to_terminal(store, comparison_id) == "stale"
+    settings = SimpleNamespace(
+        db_path=store.db_path,
+        scheduler_interval_s=3600,
+        structure_generation_drift_compare_enabled=True,
+        structure_generation_drift_max_rows=500,
+        structure_generation_drift_max_chunks_per_tick=100,
+        structure_generation_drift_slice_s=45.0,
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+
+    assert await scheduler._maybe_advance_structure_drift(queued_at_ms=1_000) is None
+    assert await scheduler._maybe_advance_structure_drift(queued_at_ms=2_000) is None
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_progress WHERE "
+            "classifier_contract_version=?",
+            (STRUCTURE_DRIFT_CLASSIFIER_V2,),
+        ).fetchone() == (1,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_drift_attempts"
+        ).fetchone() == (0,)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_v2_initialization_fault_rolls_back_before_child_attempt(
+    tmp_path: Path,
+) -> None:
+    from polyarb.daemon.scheduler import SnapshotScheduler
+
+    store = _drift_store(tmp_path)
+    original_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    v1_comparison_id = "e" * 64
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET comparison_id=?,"
+            "classifier_contract_version=? WHERE comparison_id=?",
+            (v1_comparison_id, STRUCTURE_DRIFT_CLASSIFIER_V1, original_id),
+        )
+        con.execute(
+            "CREATE TRIGGER reject_scheduler_v2_progress BEFORE INSERT ON "
+            "structure_generation_drift_progress WHEN "
+            "NEW.classifier_contract_version='structure-drift-classifier-v2' "
+            "BEGIN SELECT RAISE(ABORT,'injected-scheduler-v2-failure'); END"
+        )
+        v1_before = con.execute(
+            "SELECT * FROM structure_generation_drift_progress WHERE comparison_id=?",
+            (v1_comparison_id,),
+        ).fetchone()
+    scheduler = SnapshotScheduler(
+        settings=SimpleNamespace(
+            db_path=store.db_path,
+            scheduler_interval_s=3600,
+            structure_generation_drift_compare_enabled=True,
+            structure_generation_drift_max_rows=500,
+            structure_generation_drift_max_chunks_per_tick=100,
+            structure_generation_drift_slice_s=45.0,
+        ),
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+
+    assert await scheduler._maybe_advance_structure_drift(queued_at_ms=1_000) is True
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT * FROM structure_generation_drift_progress WHERE comparison_id=?",
+            (v1_comparison_id,),
+        ).fetchone() == v1_before
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_progress WHERE "
+            "classifier_contract_version=?",
+            (STRUCTURE_DRIFT_CLASSIFIER_V2,),
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_drift_attempts"
+        ).fetchone() == (0,)
+    assert store.get_latest_structure_defer()["reason"] == (
+        "structure-drift-status-unavailable"
+    )
+
+
 @pytest.mark.parametrize(
     "failure_point",
     (
