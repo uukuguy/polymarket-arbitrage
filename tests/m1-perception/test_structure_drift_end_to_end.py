@@ -530,11 +530,22 @@ def _seal_fixture_event_members(store: SQLiteStore, window_id: str) -> None:
             "WHERE id=?",
             (window_id,),
         )
-    while store.structure_event_member_status(window_id=window_id).get("sealed") is not True:
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "SELECT id,checkpoint_at_ms,checkpoint_at_ms,checkpoint_at_ms FROM "
+            "structure_sync_windows WHERE id=?",
+            (window_id,),
+        )
+    for _ in range(20):
+        if store.structure_event_member_status(window_id=window_id).get("sealed") is True:
+            break
         result = store.advance_structure_event_member_staging_chunk(
             window_id=window_id, limit=500
         )
         assert result.get("reason") is None and result.get("failure_reason") is None
+    else:
+        pytest.fail("fixture event-member authority did not seal within 20 chunks")
 
 
 def _drift_store(

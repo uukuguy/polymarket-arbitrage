@@ -44,8 +44,8 @@ expansion and whole-sibling normalization were removed.
 - Projection/end-to-end focused gate: 51 passed.
 - Performance projection gate: 5 passed; v2 row-chain cases retain at least 2x the v1 baseline. The review-wave replacement
   invokes the real complete commitment path over 1,200 production-shaped rows: receipt validation, sidecar/metadata/market/
-  relation/conflict-proof/quarantine queries, JSON decode, diagnostics, and root accumulation. Final median was 0.043543s versus
-  0.127854s for the rejected raw whole-sibling path (2.94x), with 42 SELECTs across 3 v2 calls. This benchmark is a
+  relation/conflict-proof/quarantine queries, JSON decode, diagnostics, and root accumulation. Final median was 0.042571s versus
+  0.126162s for the rejected raw whole-sibling path (2.96x), with 42 SELECTs across 3 v2 calls. This benchmark is a
   synchronous projection-reader measurement, not child timing evidence.
 - The standalone 120k row-chain gate remains in the performance module. Conflict lookup VM steps are independent of
   unrelated sibling cardinality: 117,276 steps at both 100 and 50,000 siblings (1.000 ratio).
@@ -65,6 +65,8 @@ oracles, recomputed-digest mixed-window/source rejection, and replaced the SQL s
 
 Final review additionally made event-market backfill a hard authenticated predecessor of member admission and replaced the
 conflict-summary-only commitment with a resumable `members -> conflicts -> merkle -> proofs -> complete` state machine.
-Every CAS writes at most 500 source/proof rows; the 501-row reopen-on-every-call regression independently recomputes the
-canonical Merkle root and verifies every proof before the member receipt can seal. Fresh and migrated databases expose the
+Every CAS writes at most its 1..500 child budget. Non-terminal odd chunks persist an authenticated pending child and pair it
+after restart; only a terminal odd child self-duplicates. The 501-row, limits 1/17/500, reopen-on-every-call regression proves
+identical per-level node cardinality, independently recomputes the canonical Merkle root, and verifies every proof before the
+member receipt can seal. Fresh and migrated databases expose the
 same conflict summary/proof/node schema and migration failure rolls back exactly.

@@ -90,6 +90,9 @@ member seal 还会按 `event_id` 认证持久化的 global-conflict summary：�
 receipt digest；每个摘要行都有到 receipt root 的持久 proof。projection 只按候选 `(window_id,event_id)` 主键
 读取摘要和 proof 并逐行验签，不扫描全部 relation siblings；摘要/proof 的增删改、跨窗替换或 receipt root 篡改
 都 fail closed。
+Merkle 层的非终端奇数块不会把孤立 child 提前 self-duplicate；它把 child index/hash 写入同一个 authenticated
+checkpoint，重启后与下一 child 配对。只有确认到达该层末尾时，最后一个 odd child 才 self-duplicate。因而
+limit=1/17/500 生成相同 root/proofs，且每次新消费行数不超过调用 limit。
 event-member scheduler child 没有专用 attempt ledger；运维跟踪依赖 defer receipt、共享 scheduler failure counter
 和 `RECOVERING` health。专用 `structure_drift_attempts` 只属于后续 classifier-drift child，不要把两条执行链混为一谈。
 

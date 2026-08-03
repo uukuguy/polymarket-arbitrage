@@ -271,6 +271,8 @@ def _event_member_progress_state(
     merkle_level: int = 0,
     merkle_cursor: int = -1,
     merkle_width: int = 0,
+    merkle_pending_index: int = -1,
+    merkle_pending_hash: str = "",
     proof_cursor: str = "",
     proof_count: int = 0,
 ) -> str:
@@ -290,6 +292,8 @@ def _event_member_progress_state(
         "merkle_level": merkle_level,
         "merkle_cursor": merkle_cursor,
         "merkle_width": merkle_width,
+        "merkle_pending_index": merkle_pending_index,
+        "merkle_pending_hash": merkle_pending_hash,
         "proof_cursor": proof_cursor,
         "proof_count": proof_count,
     }, sort_keys=True, separators=(",", ":"))
@@ -299,7 +303,7 @@ def _read_event_member_progress_state(
     encoded: str,
 ) -> tuple[
     RowChainSHA256, int, str, str, int, str, str, RowChainSHA256,
-    int, int, int, str, int,
+    int, int, int, int, str, str, int,
 ]:
     try:
         state = json.loads(encoded)
@@ -307,7 +311,8 @@ def _read_event_member_progress_state(
             "member_chain", "source_event_count", "source_event_root",
             "source_identity_hash", "window_checkpoint_at_ms", "phase",
             "conflict_cursor", "event_conflict_chain",
-            "merkle_level", "merkle_cursor", "merkle_width", "proof_cursor",
+            "merkle_level", "merkle_cursor", "merkle_width",
+            "merkle_pending_index", "merkle_pending_hash", "proof_cursor",
             "proof_count",
         }:
             raise ValueError
@@ -324,6 +329,8 @@ def _read_event_member_progress_state(
         merkle_level = state["merkle_level"]
         merkle_cursor = state["merkle_cursor"]
         merkle_width = state["merkle_width"]
+        merkle_pending_index = state["merkle_pending_index"]
+        merkle_pending_hash = state["merkle_pending_hash"]
         proof_cursor = state["proof_cursor"]
         proof_count = state["proof_count"]
         if (type(count) is not int or count < 0 or type(checkpoint) is not int
@@ -340,6 +347,22 @@ def _read_event_member_progress_state(
             or merkle_cursor < -1
             or type(merkle_width) is not int
             or merkle_width < 0
+            or type(merkle_pending_index) is not int
+            or merkle_pending_index < -1
+            or not isinstance(merkle_pending_hash, str)
+            or (
+                (merkle_pending_index == -1 and merkle_pending_hash != "")
+                or (
+                    merkle_pending_index >= 0
+                    and (
+                        phase != "merkle"
+                        or merkle_pending_index != merkle_cursor
+                        or merkle_pending_index >= merkle_width - 1
+                        or merkle_pending_index % 2 != 0
+                        or len(merkle_pending_hash) != 64
+                    )
+                )
+            )
             or not isinstance(proof_cursor, str)
             or type(proof_count) is not int
             or proof_count < 0
@@ -350,7 +373,8 @@ def _read_event_member_progress_state(
     return (
         chain, count, root, identity, checkpoint, str(phase),
         str(conflict_cursor), conflict_chain,
-        merkle_level, merkle_cursor, merkle_width, str(proof_cursor),
+        merkle_level, merkle_cursor, merkle_width,
+        merkle_pending_index, str(merkle_pending_hash), str(proof_cursor),
         proof_count,
     )
 
@@ -3058,8 +3082,8 @@ class SQLiteStore:
             (
                 chain, source_count, source_root, source_identity, checkpoint,
                 phase, conflict_cursor, conflict_chain,
-                merkle_level, merkle_cursor, merkle_width, proof_cursor,
-                proof_count,
+                merkle_level, merkle_cursor, merkle_width,
+                merkle_pending_index, merkle_pending_hash, proof_cursor, proof_count,
             ) = (
                 _read_event_member_progress_state(str(progress[4]))
             )
@@ -3088,12 +3112,32 @@ class SQLiteStore:
                 level_complete = int(children[-1][0]) == merkle_width - 1
                 if not level_complete and len(children) != limit:
                     raise ValueError("structure-event-conflict-summary-invalid")
+                combined_children = (
+                    [(merkle_pending_index, merkle_pending_hash)] + list(children)
+                    if merkle_pending_index >= 0 else list(children)
+                )
+                if merkle_pending_index >= 0:
+                    pending_node = con.execute(
+                        "SELECT node_hash FROM "
+                        "structure_sync_event_conflict_merkle_nodes WHERE window_id=? "
+                        "AND level=? AND node_index=?",
+                        (window_id, merkle_level, merkle_pending_index),
+                    ).fetchone()
+                    if (
+                        pending_node is None
+                        or str(pending_node[0]) != merkle_pending_hash
+                        or int(children[0][0]) != merkle_pending_index + 1
+                    ):
+                        raise ValueError("structure-event-conflict-summary-invalid")
+                pairable_count = len(combined_children)
+                if not level_complete and pairable_count % 2:
+                    pairable_count -= 1
                 parent_nodes = []
-                for offset in range(0, len(children), 2):
-                    left_index, left_hash = children[offset]
+                for offset in range(0, pairable_count, 2):
+                    left_index, left_hash = combined_children[offset]
                     right = (
-                        children[offset + 1]
-                        if offset + 1 < len(children)
+                        combined_children[offset + 1]
+                        if offset + 1 < len(combined_children)
                         else (left_index, left_hash)
                     )
                     parent_nodes.append((
@@ -3104,6 +3148,11 @@ class SQLiteStore:
                             str(left_hash), str(right[1])
                         ),
                     ))
+                pending = (
+                    combined_children[-1]
+                    if not level_complete and pairable_count < len(combined_children)
+                    else (-1, "")
+                )
                 next_width = (merkle_width + 1) // 2
                 next_phase = (
                     "proofs" if level_complete and next_width == 1 else "merkle"
@@ -3122,6 +3171,8 @@ class SQLiteStore:
                     merkle_level=next_level,
                     merkle_cursor=next_cursor,
                     merkle_width=next_width if level_complete else merkle_width,
+                    merkle_pending_index=-1 if level_complete else int(pending[0]),
+                    merkle_pending_hash="" if level_complete else str(pending[1]),
                     proof_cursor=proof_cursor,
                     proof_count=proof_count,
                 )
@@ -3232,6 +3283,8 @@ class SQLiteStore:
                     merkle_level=merkle_level,
                     merkle_cursor=merkle_cursor,
                     merkle_width=merkle_width,
+                    merkle_pending_index=merkle_pending_index,
+                    merkle_pending_hash=merkle_pending_hash,
                     proof_cursor=next_proof_cursor,
                     proof_count=next_proof_count,
                 )
@@ -3755,7 +3808,8 @@ class SQLiteStore:
                     (
                         chain, count, root, identity, checkpoint, phase,
                         conflict_cursor, conflict_chain,
-                        _merkle_level, _merkle_cursor, _merkle_width, _proof_cursor,
+                        _merkle_level, _merkle_cursor, _merkle_width,
+                        _merkle_pending_index, _merkle_pending_hash, _proof_cursor,
                         _proof_count,
                     ) = (
                         _read_event_member_progress_state(str(progress[4]))

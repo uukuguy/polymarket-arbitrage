@@ -36,6 +36,10 @@ global-conflict 也不能只靠“一张冻结 summary 表”获得真实性。s
 `members -> conflicts -> merkle -> proofs -> complete`：每个 `(window,event)` summary 形成 tagged leaf，receipt
 绑定 Merkle root，每行保存认证路径。projection 只取本页候选行及其 proof，O(log N) 验到 receipt，不需要为了
 认证一行而全表重算。表级 freeze guard 防普通写入，逐行 proof 防绕过 guard 后的删改、插入和跨窗替换。
+Merkle 构建还有一个 chunk 边界陷阱：odd 只表示“当前块是奇数”，不表示“整层已经结束”。非终端孤儿若当场
+self-duplicate，会让下一块首个 child 生成重复 parent，且 root 随 limit 改变。实现把孤儿作为 checkpoint-digest
+覆盖的 pending child 持久化；下一 CAS 配对。整层终端 odd 才 self-duplicate，所以 limit=1 也能每次消费一行并
+稳定推进。
 
 ## 代码地图
 
@@ -87,6 +91,7 @@ class roots 则证明“相对旧数据的完整对称差可解释”。
 5. 为什么 `projection_member_root != generation_member_root` 在 v2 中可能正确，而 mirror 不相等一定失败？
 6. 两个 window 的 11-field count/root 相同，为什么 member receipt digest 不同仍必须拒绝复用 commitment？
 7. 为什么只冻结 conflict summary 表仍不足以证明单个候选 event 的 conflict 值？
+8. 一个 Merkle chunk 读到奇数个 child 时，什么证据允许最后一个 child self-duplicate？
 
 ## FAQ 增量
 

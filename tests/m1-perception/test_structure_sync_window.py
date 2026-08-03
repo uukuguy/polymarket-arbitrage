@@ -2577,8 +2577,11 @@ def test_event_conflict_summary_is_frozen_after_receipt(tmp_path, operation) -> 
         con.execute(*statements[operation])
 
 
-def test_event_conflict_summary_sealing_resumes_in_500_row_chunks(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "conflict-bounded.db")
+@pytest.mark.parametrize("limit", [1, 17, 500])
+def test_event_conflict_summary_sealing_is_chunk_invariant_across_restarts(
+    tmp_path, limit
+) -> None:
+    store = SQLiteStore(tmp_path / f"conflict-bounded-{limit}.db")
     store.init_schema()
     window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
     events = [
@@ -2605,23 +2608,15 @@ def test_event_conflict_summary_sealing_resumes_in_500_row_chunks(tmp_path) -> N
             (window_id, 2, 2, 2),
         )
     runs = []
-    for _ in range(30):
+    for _ in range(5_000):
         runs.append(store.advance_structure_event_member_staging_chunk(
-            window_id=window_id, limit=500
+            window_id=window_id, limit=limit
         ))
         store = SQLiteStore(store.db_path)
         if runs[-1]["sealed"]:
             break
-    first, second, third = runs[:3]
-    assert (first["sealed"], first["rows_written"]) == (False, 0)
-    assert (second["sealed"], second["rows_written"], second["state"]) == (
-        False, 0, "sealing-conflicts"
-    )
-    assert (third["sealed"], third["rows_written"], third["state"]) == (
-        False, 1, "sealing-conflict-merkle"
-    )
     assert runs[-1]["sealed"] is True
-    assert max(int(run["rows_written"]) for run in runs) <= 500
+    assert max(int(run["rows_written"]) for run in runs) <= limit
     assert {str(run["state"]) for run in runs} >= {
         "sealing-conflict-merkle",
         "sealing-conflict-proofs",
@@ -2647,6 +2642,12 @@ def test_event_conflict_summary_sealing_resumes_in_500_row_chunks(tmp_path) -> N
             "ORDER BY proof.leaf_index",
             (window_id,),
         ).fetchall()
+        level_counts = con.execute(
+            "SELECT level,COUNT(*),COUNT(DISTINCT node_index) FROM "
+            "structure_sync_event_conflict_merkle_nodes WHERE window_id=? "
+            "GROUP BY level ORDER BY level",
+            (window_id,),
+        ).fetchall()
     expected_root, _expected_proofs = sqlite_store_module._event_conflict_merkle_proofs([
         sqlite_store_module._event_conflict_leaf_hash(
             window_id=window_id,
@@ -2656,6 +2657,16 @@ def test_event_conflict_summary_sealing_resumes_in_500_row_chunks(tmp_path) -> N
         for index in range(501)
     ])
     assert merkle_root == expected_root
+    expected_widths = []
+    width = 501
+    while True:
+        expected_widths.append(width)
+        if width == 1:
+            break
+        width = (width + 1) // 2
+    assert level_counts == [
+        (level, width, width) for level, width in enumerate(expected_widths)
+    ]
     assert all(
         sqlite_store_module._verify_event_conflict_merkle_proof(
             leaf_hash=str(leaf_hash),
