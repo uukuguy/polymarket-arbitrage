@@ -6,6 +6,8 @@ Date: 2026-08-03
 
 Classifier v2 now has a deterministic, production-shaped 120,000-market / 5,000-event deployment-qualification gate, an operator-facing Make target, and updated operating and learning contracts. The gate exercises the real old-v1 and classifier-v2 pipelines end to end. It does not fabricate source authority, include fixture construction in timing, or substitute estimated work for either numerator or denominator.
 
+The final candidate also includes the deploy-review repair for invalid terminal/member receipt authority. These failures now become durable resident incidents without publishing untrusted comparison evidence, and recover only after a strictly later authenticated current-v2 safe seal.
+
 This task does **not** deploy classifier v2, switch generation reads, enable Quote, or authorize a production SHA. The deployment candidate is the exact commit containing this summary; its 40-character SHA is resolved after commit and requires a separate reviewer to emit `DEPLOY_SHA_APPROVE <SHA>`.
 
 ## Implementation
@@ -32,6 +34,19 @@ The implementation passed through these observed RED states:
 7. SQL tracing found the 18th SELECT was a duplicate `source_receipt_digest` lookup after the progress row had already authenticated it. Removing only that duplicate brought the exact budget to 17.
 8. Review rejected an interim estimated-numerator approach. The final gate restores the actual old-v1 warm run plus three complete timed runs.
 9. The first full-repository run found that the new documented Make target was absent from `M1_MAKE_TARGETS`. The target was registered and the failing contract test passed before the full rerun.
+
+### Deploy review rejection and recovery
+
+Independent review rejected candidate `8147f49c1a5c0a0f734647176419ce3bf0e9943d` with `DEPLOY_SHA_REJECT`. The blocking finding was an incomplete invalid-authority lifecycle: `/health` and `/healthz` failed closed when a classifier terminal/member receipt was invalid, but their constant public shape did not retain a trusted discriminator that Polywatch could use to create, deduplicate, remind, persist across restart, and later recover the resident incident. Treating that failure as generic unhealthy state either lost the classifier incident identity or allowed recovery without proof of a later valid classifier-v2 seal.
+
+Follow-up `a43d7d3d8402ea258c2acc810e9d3a61e7a99459` (`fix(m1): recover invalid drift authority incidents`) closes that chain:
+
+- Health exposes only the allow-listed `authorityError` (`structure-drift-terminal-receipt-invalid` or `structure-drift-member-receipt-invalid`) while continuing to withhold untrusted comparison, checkpoint, diagnostic count, and sample fields.
+- Polywatch derives a stable fingerprint from the trusted authority error and current classifier contract, records a local detection boundary, persists it, and suppresses repeated identical alerts while retaining reminders and failed-delivery retry.
+- Repeated detections advance the required recovery boundary without changing incident identity. Recovery requires a strictly later nonempty, receipt-authenticated, current-v2 `drift-safe-sealed` check; disabled, exact, incomplete, wrong-contract, and non-later states cannot clear it.
+- The same incident path produces an explicit Telegram authority-invalid alert and an authenticated recovery notification.
+
+Fixer evidence was watcher 67/67, focused invalid-authority 4/4, focused `/health` + `/healthz` 4/4, full health plus Structure-drift end-to-end regression, Ruff, docs, scoped diff, and 84-plan planning status. Learning document 47 references were also corrected to the current store entries at lines 7026, 8213, 7686, and 8640.
 
 ## Performance evidence
 
@@ -87,9 +102,17 @@ Focused and static evidence:
 
 Complete repository evidence:
 
-- `uv run pytest -o addopts='' --collect-only -q`: 4,712 tests collected in 2.74 s.
-- First complete run, `uv run pytest -q --junitxml=/tmp/m1-classifier-v2-full.xml`: 4,712 tests, 0 failures, 0 errors, 2 skipped-or-xfailed, 1,699.342 s; exit 0.
-- Post-baseline-cleanup complete run, `uv run pytest -q --junitxml=/tmp/m1-classifier-v2-full-postfix.xml`: 4,712 tests, 0 failures, 0 errors, 2 skipped-or-xfailed, 1,879.245 s; exit 0. This second run includes the slow 120k gate and covers the final candidate worktree.
+- Historical pre-fixer collection: 4,712 tests in 2.74 s.
+- Final post-`a43d7d3` collection: 4,720 tests in 2.88 s.
+- Historical pre-review run, `uv run pytest -q --junitxml=/tmp/m1-classifier-v2-full.xml`: 4,712 tests, 0 failures, 0 errors, 2 skipped-or-xfailed, 1,699.342 s; exit 0.
+- Historical pre-review post-baseline-cleanup run, `uv run pytest -q --junitxml=/tmp/m1-classifier-v2-full-postfix.xml`: 4,712 tests, 0 failures, 0 errors, 2 skipped-or-xfailed, 1,879.245 s; exit 0. This included the slow 120k gate but predates the deploy-review authority-lifecycle fix and is not used as final-candidate proof.
+- First final-tree run, `uv run pytest -q --junitxml=/tmp/m1-classifier-v2-full-final.xml`: 4,720 tests, 1 failure, 0 errors, 2 skipped-or-xfailed, 1,762.224 s. The 120k gate passed; the sole RED was the unrelated strict-wall-clock `test_more_stalled_highs_than_workers_cannot_delay_reserved_lanes_to_bound`, which observed 62.4 ms against a 50 ms assertion immediately after the resource-heavy slow gate.
+- The exact failed scheduler test then passed 10/10 isolated repetitions without source or test changes. This is diagnostic evidence only, not a release exception; a new complete run in this summary-bearing tree must still finish with zero failures and errors.
+- Zero-failure diagnostic rerun before root-cause repair, `uv run pytest -q --junitxml=/tmp/m1-classifier-v2-full-final-rerun.xml`: 4,720 tests, 0 failures, 0 errors, 2 skipped-or-xfailed, 1,675.543 s. Passing this rerun was not accepted as root-cause closure.
+- Root cause was a process-wide generation-2 cyclic-GC pause overlapping a test intended to measure the scheduler's algorithmic steady-state lane budget. In one process, 100 ordinary exact repetitions produced median 37.133 ms, p95 41.831 ms, max 42.803 ms, and only two generation-0 overlaps. cProfile measured the scheduling snapshot at about 2 ms, while five isolated `gc.collect` calls accumulated 108 ms (about 21.6 ms each). Forcing generation-2 collection 5 ms into the measured window reproduced the failure 3/3 at 56.432 / 62.028 / 62.904 ms, matching the full-suite RED at 62.398 ms.
+- The test now collects inherited cyclic garbage before starting its timer, pauses automatic GC only for the measured scheduler cycle, and restores the caller's original GC-enabled state in `finally`. The 50 ms assertion is unchanged; production scheduler and production GC behavior are unchanged. This gate explicitly measures steady-state algorithmic delivery, while the existing watcher delivery/lifecycle tests retain production correctness coverage.
+- Post-fix candidate-watcher file: 37/37 passed. Post-fix same-process 640 MB RSS sequence: 100/100 passed, median 38.409 ms, p95 43.296 ms, max 44.456 ms.
+- Final post-GC-isolation candidate run, `uv run pytest -q --junitxml=/tmp/m1-classifier-v2-full-final-gcfix.xml`: 4,720 tests, 0 failures, 0 errors, 2 skipped-or-xfailed, 1,622.386 s; exit 0. The slow 120k gate and the repaired scheduler timing gate both passed in the same final worktree.
 - The two non-pass entries are repository-known: one explicit streaming-memory-budget `pytest.xfail` and one Supabase-mirror-disabled `pytest.skip`.
 - `uv run ruff check src tests scripts`: all checks passed.
 - `make docs-m1-check`: `M1 manual contract OK`.

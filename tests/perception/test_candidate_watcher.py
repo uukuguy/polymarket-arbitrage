@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import inspect
 import sqlite3
 import threading
@@ -1109,8 +1110,19 @@ async def test_more_stalled_highs_than_workers_cannot_delay_reserved_lanes_to_bo
         ),
     )
 
+    # This gate measures the scheduler's steady-state lane reservation budget,
+    # not an unrelated process-wide cyclic-GC pause accumulated by earlier
+    # tests.  Preserve the caller's GC state exactly and keep the 50 ms bound.
+    gc_was_enabled = gc.isenabled()
+    gc.collect()
+    if gc_was_enabled:
+        gc.disable()
     started_at = time.monotonic()
-    await asyncio.wait_for(scheduler.run_due_once(), timeout=0.5)
+    try:
+        await asyncio.wait_for(scheduler.run_due_once(), timeout=0.5)
+    finally:
+        if gc_was_enabled:
+            gc.enable()
 
     assert all_high_started.is_set()
     assert lower_started_at is not None
