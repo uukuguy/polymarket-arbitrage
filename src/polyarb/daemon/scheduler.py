@@ -1274,6 +1274,60 @@ class SnapshotScheduler:
         finally:
             self._release_producer_slot()
 
+    async def _maybe_advance_structure_event_members(
+        self, *, queued_at_ms: int
+    ) -> bool | None:
+        """Advance one member chunk under the existing Quote-priority lock."""
+        if not self.structure_sync_enabled:
+            return None
+        window = await asyncio.to_thread(self._sqlite_store.get_latest_structure_sync)
+        if window is None or window.get("status") not in {"complete", "published"}:
+            return None
+        window_id = str(window["id"])
+        status = await asyncio.to_thread(
+            self._sqlite_store.structure_event_member_status, window_id=window_id
+        )
+        if status.get("sealed") is True:
+            return None
+        if status.get("failure_reason") is not None or status.get("reason") is not None:
+            logger.error(
+                "structure event member derivation unavailable "
+                f"reason={status.get('failure_reason') or status.get('reason')}"
+            )
+            return True
+        reason = self._quote_priority_reason()
+        if reason is not None:
+            await self._record_structure_defer(
+                reason=f"structure-event-members:{reason}", queued_at_ms=queued_at_ms
+            )
+            return False
+        if self._producer_lock is not None:
+            await self._producer_lock.acquire()
+            self._producer_slot_owned = True
+        try:
+            for _ in range(2):
+                reason = self._quote_priority_reason()
+                if reason is not None:
+                    await self._record_structure_defer(
+                        reason=f"structure-event-members:{reason}",
+                        queued_at_ms=queued_at_ms,
+                    )
+                    return False
+                if _ == 0:
+                    status = await asyncio.to_thread(
+                        self._sqlite_store.structure_event_member_status,
+                        window_id=window_id,
+                    )
+                    if status.get("sealed") is True:
+                        return None
+            await asyncio.to_thread(
+                self._sqlite_store.advance_structure_event_member_staging_chunk,
+                window_id=window_id, limit=500,
+            )
+            return True
+        finally:
+            self._release_producer_slot()
+
     async def _on_recovering(self) -> None:
         """Alert once when repeated failures require active recovery.
 
@@ -1369,6 +1423,11 @@ class SnapshotScheduler:
         attempt_id: int | None = None
 
         try:
+            member_completed = await self._maybe_advance_structure_event_members(
+                queued_at_ms=queued_at_ms
+            )
+            if member_completed is not None:
+                return member_completed
             drift_completed = await self._maybe_advance_structure_drift(
                 queued_at_ms=queued_at_ms
             )

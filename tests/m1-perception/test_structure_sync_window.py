@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -11,6 +13,7 @@ from polyarb.clients.gamma_client import (
     MarketPage,
     PaginationCursorRejectedError,
 )
+from polyarb.perception import structure_event_members as member_module
 from polyarb.perception import structure_publication as structure_publication_module
 from polyarb.perception import structure_sync as structure_sync_module
 from polyarb.perception.structure_contract import (
@@ -20,6 +23,8 @@ from polyarb.perception.structure_event_members import (
     StructureEventMemberProgress,
     StructureEventMemberReceipt,
     StructureEventMemberRow,
+    decode_event_member_batch,
+    extract_structure_event_member_row,
 )
 from polyarb.perception.structure_sync import (
     StagedGammaSource,
@@ -2223,3 +2228,167 @@ def test_publication_cannot_begin_before_relationship_bootstrap_completes(
         now_ms=500,
     )["completed"] is True
     assert store.structure_event_market_backfill_complete(window["id"]) is True
+
+
+def test_event_member_scanner_resumes_without_committed_prefix(monkeypatch) -> None:
+    payload = json.dumps({
+        "note": 'escaped \\"markets\\"',
+        "nested": {"markets": [{"id": "decoy"}]},
+        "markets": [{"id": f"m-{i}"} for i in range(1200)],
+    }, separators=(",", ":"))
+    first = decode_event_member_batch(
+        payload, member_ordinal=0, member_byte_offset=0, limit=500
+    )
+    calls = 0
+    decoder = json.JSONDecoder()
+
+    class Decoder:
+        def raw_decode(self, value, offset):
+            nonlocal calls
+            calls += 1
+            assert len(value[:offset].encode()) >= first.next_byte_offset
+            return decoder.raw_decode(value, offset)
+
+    monkeypatch.setattr(member_module, "_DECODER", Decoder())
+    monkeypatch.setattr(
+        member_module, "_locate_markets_array",
+        lambda _payload: pytest.fail("committed prefix rescanned"),
+    )
+    second = decode_event_member_batch(
+        payload, member_ordinal=first.next_member_ordinal,
+        member_byte_offset=first.next_byte_offset, limit=500,
+    )
+    assert (calls, second.next_member_ordinal) == (500, 1000)
+
+
+@pytest.mark.parametrize("payload", [
+    "[]", '{"markets":null}', '{"markets":[{},]}',
+    '{"markets":[]} trailing', '{"markets":[],"markets":[]}',
+    '{"markets":[{} {}]}',
+])
+def test_event_member_scanner_rejects_malformed(payload) -> None:
+    with pytest.raises(ValueError):
+        decode_event_member_batch(
+            payload, member_ordinal=0, member_byte_offset=0, limit=500
+        )
+
+
+def test_event_member_extraction_is_canonical_and_nullable() -> None:
+    member = {"id": " padded ", "active": 1, "closed": "false"}
+    row = extract_structure_event_member_row(
+        window_id="w", event_id="e", event_ordinal=1,
+        member_ordinal=2, member=member,
+    )
+    assert (row.market_id, row.market_sort_key, row.group_id,
+            row.member_kind, row.active, row.closed) == (
+        None, "", None, None, None, None,
+    )
+    assert row.payload_json == json.dumps(
+        member, sort_keys=True, separators=(",", ":")
+    )
+    assert row.payload_hash == hashlib.sha256(row.payload_json.encode()).hexdigest()
+
+
+def _seed_event_member_window(store: SQLiteStore, count: int) -> None:
+    payload = json.dumps({"markets": [
+        {"id": f"m-{i}", "negRiskMarketID": "g", "memberKind": "named",
+         "active": True, "closed": False}
+        for i in range(count)
+    ]}, separators=(",", ":"))
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
+            "VALUES ('w','open',1,2)"
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_staging VALUES ('w','e',?,NULL,1)",
+            (payload,),
+        )
+        con.execute("UPDATE structure_sync_windows SET status='complete' WHERE id='w'")
+
+
+def test_event_member_derivation_is_bounded_500_500_200(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "members.db")
+    store.init_schema()
+    _seed_event_member_window(store, 1200)
+    runs, counters = [], []
+    for _ in range(3):
+        seen = []
+        runs.append(store.advance_structure_event_member_staging_chunk(
+            window_id="w", inspection_callback=seen.append
+        ))
+        counters.append(len(seen))
+        store = SQLiteStore(store.db_path)
+    assert [(r["rows_written"], r["member_ordinal"], r["complete"])
+            for r in runs] == [(500, 499, False), (500, 999, False),
+                               (200, 1199, True)]
+    assert counters == [500, 500, 200]
+    assert store.structure_event_member_status(window_id="w")["sealed"] is True
+    with sqlite3.connect(store.db_path) as con:
+        assert [r[0] for r in con.execute(
+            "SELECT member_ordinal FROM structure_sync_event_member_staging "
+            "ORDER BY member_ordinal"
+        )] == list(range(1200))
+
+
+@pytest.mark.parametrize("fault", ["write", "progress", "receipt"])
+def test_event_member_cas_fault_is_atomic(tmp_path, fault) -> None:
+    store = SQLiteStore(tmp_path / f"{fault}.db")
+    store.init_schema()
+    _seed_event_member_window(store, 2)
+    table = {"write": "structure_sync_event_member_staging",
+             "progress": "structure_sync_event_member_progress",
+             "receipt": "structure_sync_event_member_receipts"}[fault]
+    operation = "UPDATE" if fault == "progress" else "INSERT"
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(f"CREATE TRIGGER injected BEFORE {operation} ON {table} "
+                    "BEGIN SELECT RAISE(ABORT,'injected-fault'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="injected-fault"):
+        store.advance_structure_event_member_staging_chunk(window_id="w")
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_member_staging"
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT event_cursor,member_ordinal,rows_written,member_byte_offset,"
+            "completed_at_ms FROM structure_sync_event_member_progress"
+        ).fetchone() == ("", 0, 0, 0, None)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_member_receipts"
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("field", [
+    "window_id", "source_event_count", "source_event_root", "source_identity_hash",
+    "metadata_contract", "member_row_count", "member_row_root",
+    "invalid_member_count", "invalid_member_root", "terminal_event_cursor",
+    "terminal_member_ordinal", "terminal_member_byte_offset", "sealed_at_ms",
+    "receipt_digest",
+])
+def test_event_member_receipt_tamper_fails_closed(tmp_path, field) -> None:
+    store = SQLiteStore(tmp_path / f"receipt-{field}.db")
+    store.init_schema()
+    _seed_event_member_window(store, 1)
+    store.advance_structure_event_member_staging_chunk(window_id="w")
+    with sqlite3.connect(store.db_path) as con:
+        row = con.execute("SELECT * FROM structure_sync_event_member_receipts").fetchone()
+        assert row[-1] == hashlib.sha256(json.dumps(
+            tuple(row[:-1]), ensure_ascii=False, separators=(",", ":")
+        ).encode()).hexdigest()
+        columns = [r[1] for r in con.execute(
+            "PRAGMA table_info(structure_sync_event_member_receipts)"
+        )]
+        old = row[columns.index(field)]
+        changed = old + 1 if type(old) is int else (
+            "x" * 64 if isinstance(old, str) and len(old) == 64 else f"{old}-x"
+        )
+        con.execute("DROP TRIGGER trg_structure_event_member_receipt_update")
+        con.execute("PRAGMA foreign_keys=OFF")
+        con.execute("PRAGMA ignore_check_constraints=ON")
+        con.execute(f"UPDATE structure_sync_event_member_receipts SET {field}=?",
+                    (changed,))
+    status = store.structure_event_member_status(
+        window_id=str(changed) if field == "window_id" else "w"
+    )
+    assert status == {"sealed": False, "complete": False,
+                      "reason": "structure-event-member-receipt-invalid"}

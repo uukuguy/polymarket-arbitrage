@@ -420,6 +420,10 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
         return "push", "L1 /healthz unreachable (network or daemon down)"
 
     top_status = healthz.get("status", "unknown")
+    members = _extract_check(healthz, "snapshot:structure_event_members", {})
+    if members and members.get("status") == "fail":
+        output = members.get("output") or "structure-event-member-receipt-invalid"
+        return "push", f"L1 Structure event-member sidecar failed ({output})"
     snap = _extract_check(healthz, "snapshot:last_success_age_seconds", {})
     snap_status = snap.get("status") if snap else None
     age = snap.get("observedValue") if snap else None

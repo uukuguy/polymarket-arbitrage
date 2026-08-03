@@ -90,6 +90,35 @@ def test_structure_drift_scheduler_enablement_reads_env(
     assert Settings(_env_file=None).structure_generation_drift_compare_enabled is True
 
 
+@pytest.mark.asyncio
+async def test_event_member_sidecar_precedes_structure_drift() -> None:
+    calls: list[str] = []
+    store = MagicMock()
+    store.get_scheduler_state.return_value = None
+    store.get_snapshot_attempts.return_value = []
+    store.get_latest_structure_schedule_adjustment.return_value = None
+    store.recover_orphaned_structure_drift_attempts.return_value = 0
+    store.get_latest_structure_sync.return_value = {"id": "w", "status": "complete"}
+    store.structure_event_member_status.return_value = {"sealed": False}
+    store.advance_structure_event_member_staging_chunk.side_effect = (
+        lambda **_kwargs: calls.append("members")
+    )
+    store.structure_generation_drift_status.side_effect = (
+        lambda: calls.append("drift") or {"authorized": True}
+    )
+    scheduler = SnapshotScheduler(
+        settings=SimpleNamespace(
+            structure_sync_enabled=True,
+            legacy_structure_reconciliation_enabled=False,
+            structure_generation_drift_compare_enabled=True,
+            scheduler_interval_s=300,
+        ), sqlite_store=store, producer_lock=asyncio.Lock(),
+    )
+    assert await scheduler._tick_once(queued_at_ms=1) is True
+    assert calls == ["members"]
+    store.begin_snapshot_attempt.assert_not_called()
+
+
 def test_structure_drift_attempt_lifecycle_recovery_and_retention(
     tmp_path: Path,
 ) -> None:

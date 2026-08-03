@@ -17,6 +17,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -41,9 +42,14 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_MEMBER_WORK,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_PAYLOAD_BYTES,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
+    STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT,
     STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
     STRUCTURE_PUBLICATION_MAX_ROWS,
     STRUCTURE_SOURCE_COMPONENTS,
+)
+from polyarb.perception.structure_event_members import (
+    decode_event_member_batch,
+    extract_structure_event_member_row,
 )
 from polyarb.storage.row_chain_sha256 import (
     ROW_CHAIN_SHA256_V2,
@@ -148,6 +154,80 @@ _EVENT_BOOL_COLUMNS = ("active", "closed")
 _STRUCTURE_COMPONENTS = STRUCTURE_COMPONENTS
 _STRUCTURE_SOURCE_COMPONENTS = STRUCTURE_SOURCE_COMPONENTS
 _STRUCTURE_CERTIFICATION_COMPONENTS = STRUCTURE_CERTIFICATION_COMPONENTS
+
+_STRUCTURE_EVENT_MEMBER_RECEIPT_FIELDS = (
+    "window_id", "source_event_count", "source_event_root", "source_identity_hash",
+    "metadata_contract", "member_row_count", "member_row_root",
+    "invalid_member_count", "invalid_member_root", "terminal_event_cursor",
+    "terminal_member_ordinal", "terminal_member_byte_offset", "sealed_at_ms",
+)
+
+
+def _structure_event_member_receipt_digest(values: tuple[object, ...]) -> str:
+    if len(values) != len(_STRUCTURE_EVENT_MEMBER_RECEIPT_FIELDS):
+        raise ValueError("invalid-structure-event-member-receipt-fields")
+    return hashlib.sha256(json.dumps(
+        values, ensure_ascii=False, separators=(",", ":")
+    ).encode()).hexdigest()
+
+
+def _structure_event_source_identity(
+    con: sqlite3.Connection, *, window_id: str, checkpoint_at_ms: int
+) -> tuple[int, str, str]:
+    chain = RowChainSHA256.new("source-event")
+    count = 0
+    for event_id, source_ordinal, payload_json in con.execute(
+        "SELECT event_id,COALESCE(source_ordinal,rowid),payload_json FROM "
+        "structure_sync_event_staging WHERE window_id=? ORDER BY event_id", (window_id,),
+    ):
+        chain.update((str(event_id), int(source_ordinal), hashlib.sha256(
+            str(payload_json).encode("utf-8")
+        ).hexdigest()))
+        count += 1
+    root = chain.hexdigest()
+    identity = hashlib.sha256(json.dumps(
+        (window_id, checkpoint_at_ms, count, root), ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+    return count, root, identity
+
+
+def _event_member_progress_state(
+    *, member_chain: RowChainSHA256, source_event_count: int,
+    source_event_root: str, source_identity_hash: str,
+    window_checkpoint_at_ms: int,
+) -> str:
+    return json.dumps({
+        "member_chain": member_chain.to_json(),
+        "source_event_count": source_event_count,
+        "source_event_root": source_event_root,
+        "source_identity_hash": source_identity_hash,
+        "window_checkpoint_at_ms": window_checkpoint_at_ms,
+    }, sort_keys=True, separators=(",", ":"))
+
+
+def _read_event_member_progress_state(
+    encoded: str,
+) -> tuple[RowChainSHA256, int, str, str, int]:
+    try:
+        state = json.loads(encoded)
+        if not isinstance(state, dict) or set(state) != {
+            "member_chain", "source_event_count", "source_event_root",
+            "source_identity_hash", "window_checkpoint_at_ms",
+        }:
+            raise ValueError
+        chain = RowChainSHA256.from_json(
+            str(state["member_chain"]), expected_domain="source-event"
+        )
+        count, checkpoint = state["source_event_count"], state["window_checkpoint_at_ms"]
+        root, identity = state["source_event_root"], state["source_identity_hash"]
+        if (type(count) is not int or count < 0 or type(checkpoint) is not int
+                or checkpoint < 0 or not isinstance(root, str) or len(root) != 64
+                or not isinstance(identity, str) or len(identity) != 64):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("structure-event-member-progress-invalid") from error
+    return chain, count, root, identity, checkpoint
 
 
 def _migrate_structure_event_member_schema(
@@ -2669,6 +2749,272 @@ class SQLiteStore:
         finally:
             con.close()
         self.init_schema()
+
+    def advance_structure_event_member_staging_chunk(
+        self, *, window_id: str, limit: int = 500,
+        inspection_callback: Callable[[int], None] | None = None,
+    ) -> dict[str, object]:
+        """Derive and atomically checkpoint at most 500 raw event members."""
+        if not window_id or not 1 <= limit <= 500:
+            raise ValueError("invalid-structure-event-member-advance")
+        now_ms = int(time.time() * 1_000)
+        con = self._connect_writer()
+        progress_sql = (
+            "SELECT event_cursor,member_ordinal,rows_written,member_byte_offset,"
+            "member_state,diagnostic_state,checkpoint_at_ms,completed_at_ms,"
+            "failure_reason FROM structure_sync_event_member_progress WHERE window_id=?"
+        )
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            window = con.execute(
+                "SELECT status,checkpoint_at_ms FROM structure_sync_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            if window is None or window[0] not in {"complete", "published"}:
+                raise ValueError("structure-sync-window-not-complete")
+            progress = con.execute(progress_sql, (window_id,)).fetchone()
+            if progress is None:
+                source = _structure_event_source_identity(
+                    con, window_id=window_id, checkpoint_at_ms=int(window[1])
+                )
+                state = _event_member_progress_state(
+                    member_chain=RowChainSHA256.new("source-event"),
+                    source_event_count=source[0], source_event_root=source[1],
+                    source_identity_hash=source[2],
+                    window_checkpoint_at_ms=int(window[1]),
+                )
+                diagnostic = RowChainSHA256.new("diagnostic/unclassified").to_json()
+                con.execute(
+                    "INSERT INTO structure_sync_event_member_progress VALUES "
+                    "(?,?,?,?,?,?,?,?,?,?)",
+                    (window_id, "", 0, 0, 0, state, diagnostic, now_ms, None, None),
+                )
+                con.execute("COMMIT")
+                progress = ("", 0, 0, 0, state, diagnostic, now_ms, None, None)
+            else:
+                con.execute("COMMIT")
+            if progress[7] is not None:
+                status = self.structure_event_member_status(window_id=window_id)
+                return {**status, "rows_written": 0,
+                        "member_ordinal": int(progress[1]), "complete": True}
+            if progress[8] is not None:
+                return {"sealed": False, "complete": False, "rows_written": 0,
+                        "member_ordinal": max(0, int(progress[1]) - 1),
+                        "failure_reason": str(progress[8])}
+            cursor, ordinal, byte_offset = str(progress[0]), int(progress[1]), int(progress[3])
+            chain, source_count, source_root, source_identity, checkpoint = (
+                _read_event_member_progress_state(str(progress[4]))
+            )
+            invalid_chain = RowChainSHA256.from_json(
+                str(progress[5]), expected_domain="diagnostic/unclassified"
+            )
+            if chain.count != int(progress[2]):
+                raise ValueError("structure-event-member-progress-invalid")
+            rows = []
+            remaining = limit
+            terminal_ordinal, terminal_offset = max(0, ordinal - 1), byte_offset
+            try:
+                for _ in range(limit):
+                    if not remaining:
+                        break
+                    sql = (
+                        "SELECT event_id,COALESCE(source_ordinal,rowid),payload_json FROM "
+                        "structure_sync_event_staging WHERE window_id=? AND event_id=?"
+                        if ordinal else
+                        "SELECT event_id,COALESCE(source_ordinal,rowid),payload_json FROM "
+                        "structure_sync_event_staging WHERE window_id=? AND event_id>? "
+                        "ORDER BY event_id LIMIT 1"
+                    )
+                    event = con.execute(sql, (window_id, cursor)).fetchone()
+                    if event is None:
+                        break
+                    event_id, event_order, payload = str(event[0]), int(event[1]), str(event[2])
+                    batch = decode_event_member_batch(
+                        payload, member_ordinal=ordinal,
+                        member_byte_offset=byte_offset, limit=remaining,
+                    )
+                    for item_ordinal, member, _raw in batch.members:
+                        if inspection_callback is not None:
+                            inspection_callback(item_ordinal)
+                        row = extract_structure_event_member_row(
+                            window_id=window_id, event_id=event_id,
+                            event_ordinal=event_order,
+                            member_ordinal=item_ordinal, member=member,
+                        )
+                        commitment = (
+                            STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT, event_id,
+                            event_order, item_ordinal, row.market_id, row.group_id,
+                            row.member_kind, row.active, row.closed, row.payload_hash,
+                        )
+                        chain.update(commitment)
+                        if any(value is None for value in (
+                            row.market_id, row.group_id, row.member_kind,
+                            row.active, row.closed,
+                        )):
+                            invalid_chain.update(commitment)
+                        rows.append(row)
+                    remaining -= len(batch.members)
+                    cursor, terminal_offset = event_id, batch.next_byte_offset
+                    if batch.members:
+                        terminal_ordinal = batch.members[-1][0]
+                    if batch.complete:
+                        ordinal, byte_offset = 0, 0
+                    else:
+                        ordinal, byte_offset = batch.next_member_ordinal, batch.next_byte_offset
+                        break
+            except ValueError as error:
+                reason = str(error)[:200]
+                con.execute("BEGIN IMMEDIATE")
+                updated = con.execute(
+                    "UPDATE structure_sync_event_member_progress SET "
+                    "checkpoint_at_ms=?,failure_reason=? WHERE window_id=? AND "
+                    "event_cursor=? AND member_ordinal=? AND rows_written=? AND "
+                    "member_byte_offset=? AND member_state=? AND diagnostic_state=? "
+                    "AND completed_at_ms IS NULL AND failure_reason IS NULL",
+                    (now_ms, reason, window_id, *progress[:6]),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError("structure-event-member-cursor-race")
+                con.execute("COMMIT")
+                return {"sealed": False, "complete": False, "rows_written": 0,
+                        "member_ordinal": max(0, int(progress[1]) - 1),
+                        "failure_reason": reason}
+            complete = ordinal == 0 and con.execute(
+                "SELECT 1 FROM structure_sync_event_staging WHERE window_id=? "
+                "AND event_id>? LIMIT 1", (window_id, cursor),
+            ).fetchone() is None
+            next_state = _event_member_progress_state(
+                member_chain=chain, source_event_count=source_count,
+                source_event_root=source_root, source_identity_hash=source_identity,
+                window_checkpoint_at_ms=checkpoint,
+            )
+            con.execute("BEGIN IMMEDIATE")
+            if con.execute(progress_sql, (window_id,)).fetchone() != progress:
+                raise ValueError("structure-event-member-cursor-race")
+            identity = con.execute(
+                "SELECT status,checkpoint_at_ms FROM structure_sync_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            if (identity is None or identity[0] not in {"complete", "published"}
+                    or int(identity[1]) != checkpoint):
+                raise ValueError("structure-event-member-source-identity-drift")
+            con.executemany(
+                "INSERT INTO structure_sync_event_member_staging VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(r.window_id, r.event_id, r.event_ordinal, r.member_ordinal,
+                  r.market_id, r.market_sort_key, r.group_id, r.member_kind,
+                  r.active, r.closed, r.payload_json, r.payload_hash) for r in rows],
+            )
+            stored_ordinal = terminal_ordinal if complete else ordinal
+            stored_offset = terminal_offset if complete else byte_offset
+            if complete:
+                receipt = (
+                    window_id, source_count, source_root, source_identity,
+                    STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT, chain.count,
+                    chain.hexdigest(), invalid_chain.count, invalid_chain.hexdigest(),
+                    cursor, terminal_ordinal, terminal_offset, now_ms,
+                )
+                con.execute(
+                    "INSERT INTO structure_sync_event_member_receipts VALUES ("
+                    + ",".join("?" for _ in range(14)) + ")",
+                    (*receipt, _structure_event_member_receipt_digest(receipt)),
+                )
+            updated = con.execute(
+                "UPDATE structure_sync_event_member_progress SET event_cursor=?,"
+                "member_ordinal=?,rows_written=?,member_byte_offset=?,member_state=?,"
+                "diagnostic_state=?,checkpoint_at_ms=?,completed_at_ms=? WHERE "
+                "window_id=? AND event_cursor=? AND member_ordinal=? AND rows_written=? "
+                "AND member_byte_offset=? AND member_state=? AND diagnostic_state=? "
+                "AND checkpoint_at_ms=? AND completed_at_ms IS NULL AND failure_reason IS NULL",
+                (cursor, stored_ordinal, chain.count, stored_offset, next_state,
+                 invalid_chain.to_json(), now_ms, now_ms if complete else None,
+                 window_id, *progress[:7]),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("structure-event-member-cursor-race")
+            con.execute("COMMIT")
+            return {"sealed": complete, "complete": complete,
+                    "rows_written": len(rows), "member_ordinal": terminal_ordinal,
+                    "member_byte_offset": stored_offset}
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def structure_event_member_status(self, *, window_id: str) -> dict[str, object]:
+        """Expose only receipt-authenticated sidecar evidence."""
+        invalid = {"sealed": False, "complete": False,
+                   "reason": "structure-event-member-receipt-invalid"}
+        with sqlite3.connect(self._db_path) as con:
+            window = con.execute(
+                "SELECT status,checkpoint_at_ms FROM structure_sync_windows WHERE id=?",
+                (window_id,),
+            ).fetchone()
+            progress = con.execute(
+                "SELECT event_cursor,member_ordinal,rows_written,member_byte_offset,"
+                "member_state,diagnostic_state,checkpoint_at_ms,completed_at_ms,"
+                "failure_reason FROM structure_sync_event_member_progress WHERE window_id=?",
+                (window_id,),
+            ).fetchone()
+            receipt = con.execute(
+                "SELECT * FROM structure_sync_event_member_receipts WHERE window_id=?",
+                (window_id,),
+            ).fetchone()
+            if receipt is None:
+                if progress is None:
+                    return {"sealed": False, "complete": False,
+                            "rows_written": 0, "member_ordinal": 0}
+                if progress[8] is not None:
+                    return {"sealed": False, "complete": False,
+                            "failure_reason": str(progress[8])}
+                if progress[7] is None:
+                    return {"sealed": False, "complete": False,
+                            "rows_written": int(progress[2]),
+                            "event_cursor": str(progress[0]),
+                            "member_ordinal": int(progress[1]),
+                            "member_byte_offset": int(progress[3])}
+                return invalid
+            try:
+                if (window is None or window[0] not in {"complete", "published"}
+                        or progress is None or progress[7] is None
+                        or progress[8] is not None or receipt[0] != window_id
+                        or receipt[4] != STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT
+                        or receipt[13] != _structure_event_member_receipt_digest(
+                            tuple(receipt[:13]))
+                        or progress[0] != receipt[9]
+                        or int(progress[1]) != int(receipt[10])
+                        or int(progress[2]) != int(receipt[5])
+                        or int(progress[3]) != int(receipt[11])):
+                    return invalid
+                chain, count, root, identity, checkpoint = (
+                    _read_event_member_progress_state(str(progress[4]))
+                )
+                diagnostic = RowChainSHA256.from_json(
+                    str(progress[5]), expected_domain="diagnostic/unclassified"
+                )
+                source = _structure_event_source_identity(
+                    con, window_id=window_id, checkpoint_at_ms=int(window[1])
+                )
+                if (source != (count, root, identity)
+                        or checkpoint != int(window[1])
+                        or (count, root, identity) != tuple(receipt[1:4])
+                        or chain.count != int(receipt[5])
+                        or chain.hexdigest() != receipt[6]
+                        or diagnostic.count != int(receipt[7])
+                        or diagnostic.hexdigest() != receipt[8]):
+                    return invalid
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return invalid
+            return {"sealed": True, "complete": True,
+                    "rows_written": int(receipt[5]),
+                    "invalid_member_count": int(receipt[7]),
+                    "event_cursor": str(receipt[9]),
+                    "member_ordinal": int(receipt[10]),
+                    "member_byte_offset": int(receipt[11]),
+                    "sealed_at_ms": int(receipt[12]),
+                    "receipt_digest": str(receipt[13])}
 
     def advance_structure_event_market_backfill(
         self,

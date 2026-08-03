@@ -568,6 +568,38 @@ def test_health_binds_stable_machine_and_boot_identity(
     assert probe["bootId"] == strict["bootId"]
 
 
+def test_event_member_health_recovers_after_validated_seal(
+    daemon_settings_for_test: Any, http_test_client: TestClient,
+) -> None:
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
+            "VALUES ('member-window','open',1,2)"
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_staging VALUES "
+            "('member-window','event-1','{\"markets\":[]}',NULL,1)"
+        )
+        con.execute("UPDATE structure_sync_windows SET status='complete'")
+    recovering = http_test_client.get("/healthz").json()["checks"][
+        "snapshot:structure_event_members"
+    ][0]
+    assert (recovering["observedValue"], recovering["status"]) == (
+        "recovering", "warn",
+    )
+    store.advance_structure_event_member_staging_chunk(window_id="member-window")
+    for path in ("/health", "/healthz"):
+        sealed = http_test_client.get(path).json()["checks"][
+            "snapshot:structure_event_members"
+        ][0]
+        assert (sealed["observedValue"], sealed["status"], sealed["output"]) == (
+            "sealed", "pass", "rows=0 invalid=0",
+        )
+
+
 def test_health_exposes_release_bound_qualification_policy(
     daemon_settings_for_test: Any,
     http_test_client: TestClient,

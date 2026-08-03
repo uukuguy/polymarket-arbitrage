@@ -85,6 +85,21 @@ def test_l1_quote_age_failure_pushes() -> None:
     assert "quote" in reason.lower()
 
 
+def test_event_member_failure_preempts_generic_snapshot_cancellation() -> None:
+    health = _health(status="fail", checks={
+        "snapshot:structure_event_members": _check(
+            "invalid", status="fail",
+            output="structure-event-member-receipt-invalid",
+        ),
+        "snapshot:last_success_age_seconds": _check(100000.0, status="fail"),
+        "snapshot:latest_attempt": _check("cancelled", status="fail"),
+    })
+    assert WATCHER.decide_l1(health) == (
+        "push", "L1 Structure event-member sidecar failed "
+        "(structure-event-member-receipt-invalid)",
+    )
+
+
 def test_l1_quote_refresh_transition_does_not_alert() -> None:
     health = _health(
         status="warn",

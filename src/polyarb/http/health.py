@@ -1368,6 +1368,44 @@ def _build_health_checks(
         }
     ]
 
+    member_value, member_status, member_output = "idle", "pass", None
+    if sync_window is not None and str(sync_window["status"]) in {"complete", "published"}:
+        try:
+            evidence = store.structure_event_member_status(
+                window_id=str(sync_window["id"])
+            )
+            if evidence.get("sealed") is True:
+                member_value = "sealed"
+                member_output = (
+                    f"rows={int(evidence['rows_written'])} "
+                    f"invalid={int(evidence['invalid_member_count'])}"
+                )
+            elif evidence.get("failure_reason") is not None:
+                member_value, member_status = "failed", "fail"
+                member_output = str(evidence["failure_reason"])
+            elif evidence.get("reason") is not None:
+                member_value, member_status = "invalid", "fail"
+                member_output = str(evidence["reason"])
+            else:
+                member_value, member_status = "recovering", "warn"
+                member_output = (
+                    f"cursor={evidence.get('event_cursor', '')} "
+                    f"member_ordinal={int(evidence.get('member_ordinal', 0))} "
+                    f"rows={int(evidence.get('rows_written', 0))}"
+                )
+        except (OSError, sqlite3.Error, TypeError, ValueError):
+            member_value, member_status = "invalid", "fail"
+            member_output = "structure-event-member-receipt-invalid"
+    overall = _severity(overall, member_status)
+    checks["snapshot:structure_event_members"] = [{
+        "componentId": "structure-event-member-sidecar",
+        "componentType": "datastore",
+        "observedValue": member_value,
+        "status": member_status,
+        **({"output": member_output} if member_output is not None else {}),
+        "time": _utc_now_iso(),
+    }]
+
     try:
         generation_status = store.structure_generation_status(
             retain_generations=int(
