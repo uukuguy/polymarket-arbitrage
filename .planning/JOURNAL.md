@@ -5979,3 +5979,42 @@ natural-generation/two-minute UAT. Then execute
 `docs/superpowers/plans/2026-08-01-m1-candidate-lifecycle-queue.md` and final
 M1 acceptance. Preserve the five unstaged user-owned `.superpowers/sdd/*`
 files.
+
+## SESSION 128 — 2026-08-04 (M1 core-goal live calibration)
+
+- [GOAL] The persistent objective remains `active`: production-stable cloud
+  opportunity watching, durable opportunity tracking, and an M2-grade live
+  data foundation are not yet accepted. Repository plan bookkeeping is 99%,
+  but that percentage is not a production-readiness verdict.
+- [LIVE PROGRESS] Release 233 still exposes exact source `06d3f92...`.
+  Post-deploy window `0f39efd3...` naturally sealed the event-member sidecar
+  at `2026-08-03T18:18:14Z` with 153,525 rows and 86,894 invalid diagnostics.
+  At `18:19:28Z` the next generation was actively writing `event_tags` at
+  cursor 191,381. No manual pointer write, restart, or forced advance was used.
+- [NOT ACCEPTED] The current pointer remained generation 865, classifier-v2
+  authorization was still absent, Quote remained disabled, and the production
+  opportunity endpoint still returned HTTP 503. Generation-read cutover,
+  Quote restoration, a complete natural-generation/two-minute UAT, the entire
+  candidate-lifecycle queue plan, and its final three-cycle UAT remain open.
+- [NEW HARD RISK] Four child hard timeouts were separated by multiple
+  successful durable sidecar checkpoints, yet `snapshot:failure_counter`
+  remained 4/5 after the sidecar sealed. This is not yet proven to implement
+  consecutive-failure semantics and could spuriously enter RECOVERING on the
+  next intermittent timeout. Final production acceptance requires this risk to
+  be closed by code-path evidence or a TDD repair and exact-release proof.
+- [RETENTION] `snapshot:structure_generation_evidence` remained FAIL with nine
+  retained generations and seven reclaimable; earlier FK cleanup failures are
+  therefore still an open production defect, not a harmless warning.
+- [HYGIENE] `make planning-status` reports 84 plans and no drift; hooks point to
+  `.githooks`. The five user-owned `.superpowers/sdd/*` modifications remain
+  untouched.
+
+### [NEXT — CURRENT]
+
+Continue observing release 233 without manual recovery. First command:
+`curl -fsS --max-time 20 https://polyarb-l1.fly.dev/healthz`.
+Require the in-flight generation to publish and classifier-v2 to seal. In
+parallel with that evidence, audit the failure-counter reset semantics and the
+retention FK chain; either prove both safe or repair them under TDD before the
+generation-read/Quote cutovers. Candidate lifecycle and final M1 UAT remain the
+last product gate.
