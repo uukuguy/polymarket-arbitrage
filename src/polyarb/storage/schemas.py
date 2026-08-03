@@ -2938,8 +2938,9 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
     (
         "after-sidecar-update-trigger-create",
         "CREATE TRIGGER trg_structure_event_member_staging_update_guard BEFORE UPDATE ON "
-        "structure_sync_event_member_staging WHEN OLD.window_id!=NEW.window_id OR "
-        "OLD.event_id!=NEW.event_id OR OLD.member_ordinal!=NEW.member_ordinal OR "
+        "structure_sync_event_member_staging WHEN OLD.window_id IS NOT NEW.window_id OR "
+        "OLD.event_id IS NOT NEW.event_id OR "
+        "OLD.member_ordinal IS NOT NEW.member_ordinal OR "
         "EXISTS (SELECT 1 FROM structure_sync_event_member_receipts WHERE "
         "window_id IN (OLD.window_id,NEW.window_id)) OR "
         "(SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='open' OR "

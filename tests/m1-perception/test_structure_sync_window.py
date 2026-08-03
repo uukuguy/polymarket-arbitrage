@@ -550,6 +550,33 @@ def test_event_member_immutable_rejects_identity_and_target_authority_bypass(
             )
 
 
+@pytest.mark.parametrize("identity_column", ("window_id", "event_id", "member_ordinal"))
+def test_event_member_immutable_rejects_null_identity_with_stable_error(
+    tmp_path,
+    identity_column,
+) -> None:
+    store = SQLiteStore(tmp_path / f"{identity_column}.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
+            "VALUES ('open-window','open',1,1)"
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_member_staging VALUES "
+            "('open-window','event-1',0,4,'market-1','market-1',NULL,NULL,1,0,"
+            "'{}','" + "a" * 64 + "')"
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="^structure-event-member-staging-frozen$",
+        ):
+            con.execute(
+                f"UPDATE structure_sync_event_member_staging SET {identity_column}=NULL "
+                "WHERE window_id='open-window'"
+            )
+
+
 def test_event_member_rollback_labels_every_schema_statement() -> None:
     assert all(label is not None for label, _sql in STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS)
 
