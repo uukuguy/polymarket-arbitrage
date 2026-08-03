@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import sqlite3
@@ -3688,6 +3689,242 @@ def test_generation_publication_attempt_switches_all_reads_after_terminal_receip
 
     assert store.current_structure_generation()["snapshot_id"] == 11
     assert store.current_generation_market_ids() == ("new-market",)
+
+
+@pytest.mark.asyncio
+async def test_historical_wait_natural_publish_supersedes_active_drift_and_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import (
+        IsolatedStructureDriftCheckpoint,
+        SnapshotScheduler,
+    )
+    from polyarb.validator.category import SnapshotStatus
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    old_publication = _publish_generation(
+        store,
+        snapshot_id=10,
+        market_id="old-market",
+        now_ms=10_000,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO snapshot_source_coverage(snapshot_id,completed,market_items,"
+            "event_items) VALUES (10,1,1,1)"
+        )
+        counts = json.loads(
+            con.execute(
+                "SELECT certification_counts_json FROM structure_publications "
+                "WHERE publication_id=?",
+                (old_publication.publication_id,),
+            ).fetchone()[0]
+        )
+        counts.update({"source_events": 1, "source_markets": 1})
+        con.execute(
+            "UPDATE structure_publications SET certification_counts_json=? "
+            "WHERE publication_id=?",
+            (json.dumps(counts, sort_keys=True), old_publication.publication_id),
+        )
+    old_comparison_id = store.initialize_structure_drift_comparison(now_ms=10_100)
+    successor = _begin_generation(
+        store,
+        snapshot_id=11,
+        market_id="new-market",
+        now_ms=11_000,
+    )
+    _append_generation_truth(
+        store,
+        successor,
+        snapshot_id=11,
+        market_id="new-market",
+        now_ms=11_004,
+    )
+    _certify(store, successor, now_ms=11_008)
+    with sqlite3.connect(store.db_path) as con:
+        counts = json.loads(
+            con.execute(
+                "SELECT certification_counts_json FROM structure_publications "
+                "WHERE publication_id=?",
+                (successor.publication_id,),
+            ).fetchone()[0]
+        )
+        counts.update({"source_events": 1, "source_markets": 1})
+        con.execute(
+            "UPDATE structure_publications SET certification_counts_json=? "
+            "WHERE publication_id=?",
+            (json.dumps(counts, sort_keys=True), successor.publication_id),
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        old_before = con.execute(
+            "SELECT * FROM structure_generation_drift_progress WHERE comparison_id=?",
+            (old_comparison_id,),
+        ).fetchone()
+        pointer_before = con.execute(
+            "SELECT * FROM current_structure_generation WHERE id=1"
+        ).fetchone()
+        publication_before = con.execute(
+            "SELECT * FROM structure_publications WHERE publication_id=?",
+            (successor.publication_id,),
+        ).fetchone()
+        con.execute(
+            "CREATE TRIGGER reject_pointer_after_drift_supersession "
+            "BEFORE UPDATE OF snapshot_id ON current_structure_generation "
+            "BEGIN SELECT RAISE(ABORT,'injected-pointer-switch-failure'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="injected-pointer-switch-failure"):
+        store.publish_structure_generation(successor.publication_id, now_ms=11_090)
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT * FROM structure_generation_drift_progress WHERE comparison_id=?",
+            (old_comparison_id,),
+        ).fetchone() == old_before
+        assert con.execute(
+            "SELECT * FROM current_structure_generation WHERE id=1"
+        ).fetchone() == pointer_before
+        assert con.execute(
+            "SELECT * FROM structure_publications WHERE publication_id=?",
+            (successor.publication_id,),
+        ).fetchone() == publication_before
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_terminal_receipts "
+            "WHERE comparison_id=?",
+            (old_comparison_id,),
+        ).fetchone()[0] == 0
+        con.execute("DROP TRIGGER reject_pointer_after_drift_supersession")
+
+        columns = [
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_progress)"
+            )
+        ]
+        expressions = [
+            "?" if column in {"comparison_id", "classifier_contract_version"}
+            else column
+            for column in columns
+        ]
+        con.execute(
+            "INSERT INTO structure_generation_drift_progress("
+            + ",".join(columns)
+            + ") SELECT "
+            + ",".join(expressions)
+            + " FROM structure_generation_drift_progress WHERE comparison_id=?",
+            ("second-active", "structure-drift-classifier-v1", old_comparison_id),
+        )
+        active_before = con.execute(
+            "SELECT * FROM structure_generation_drift_progress WHERE phase NOT IN "
+            "('sealed','stale') ORDER BY comparison_id"
+        ).fetchall()
+    with pytest.raises(ValueError, match="structure-drift-multiple-active-identities"):
+        store.publish_structure_generation(successor.publication_id, now_ms=11_091)
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT * FROM structure_generation_drift_progress WHERE phase NOT IN "
+            "('sealed','stale') ORDER BY comparison_id"
+        ).fetchall() == active_before
+        assert con.execute(
+            "SELECT * FROM current_structure_generation WHERE id=1"
+        ).fetchone() == pointer_before
+        assert con.execute(
+            "SELECT * FROM structure_publications WHERE publication_id=?",
+            (successor.publication_id,),
+        ).fetchone() == publication_before
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_terminal_receipts"
+        ).fetchone()[0] == 0
+        con.execute(
+            "DELETE FROM structure_generation_drift_progress WHERE comparison_id=?",
+            ("second-active",),
+        )
+
+    natural_member_status = store.structure_event_member_status
+
+    def member_status(*, window_id: str, **kwargs):
+        if window_id == old_publication.window_id:
+            return {
+                "sealed": False,
+                "state": "waiting-natural-window",
+                "authenticated": True,
+                "reason": "structure-event-source-receipt-unavailable",
+            }
+        return natural_member_status(window_id=window_id, **kwargs)
+
+    store.structure_event_member_status = member_status
+    settings = SimpleNamespace(
+        structure_sync_enabled=True,
+        legacy_structure_reconciliation_enabled=False,
+        structure_generation_drift_compare_enabled=True,
+        structure_generation_drift_max_rows=500,
+        structure_generation_drift_max_chunks_per_tick=100,
+        structure_generation_drift_slice_s=45.0,
+        scheduler_interval_s=300,
+        snapshot_timeout_s=240,
+        db_path=store.db_path,
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+
+    async def publish_successor():
+        store.publish_structure_generation(successor.publication_id, now_ms=11_100)
+        return SimpleNamespace(status=SnapshotStatus.OK, snapshot_id=11)
+
+    scheduler._run_snapshot = AsyncMock(side_effect=publish_successor)
+    assert await scheduler._tick_once(queued_at_ms=11_090) is True
+    scheduler._run_snapshot.assert_awaited_once()
+
+    drift_child = AsyncMock(
+        return_value=IsolatedStructureDriftCheckpoint(
+            phase="source-events",
+            rows_processed=1,
+            chunks_processed=1,
+            ready=False,
+            deferred=False,
+            defer_reason=None,
+            stop_reason="max-chunks",
+            elapsed_ms=1,
+        )
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "run_structure_drift_in_subprocess",
+        drift_child,
+    )
+    scheduler._run_snapshot = AsyncMock()
+    assert await scheduler._tick_once(queued_at_ms=11_200) is True
+
+    scheduler._run_snapshot.assert_not_awaited()
+    drift_child.assert_awaited_once()
+    with sqlite3.connect(store.db_path) as con:
+        old = con.execute(
+            "SELECT phase,terminal_reason FROM structure_generation_drift_progress "
+            "WHERE comparison_id=?",
+            (old_comparison_id,),
+        ).fetchone()
+        active = con.execute(
+            "SELECT comparison_id,generation_snapshot_id,phase FROM "
+            "structure_generation_drift_progress WHERE phase NOT IN ('sealed','stale')"
+        ).fetchall()
+        forged_terminal_receipts = con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_terminal_receipts "
+            "WHERE comparison_id=?",
+            (old_comparison_id,),
+        ).fetchone()[0]
+    assert old == ("stale", "drift-current-generation-superseded")
+    assert len(active) == 1
+    assert active[0][0] != old_comparison_id
+    assert active[0][1:] == (11, "source-events")
+    assert forged_terminal_receipts == 0
 
 
 def test_generation_publication_attempt_rolls_back_pointer_switch_exception(

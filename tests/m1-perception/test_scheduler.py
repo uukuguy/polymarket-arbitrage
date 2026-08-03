@@ -310,6 +310,63 @@ async def test_event_source_unavailable_historical_window_is_not_retried() -> No
 
 
 @pytest.mark.asyncio
+async def test_historical_memberless_drift_yields_to_natural_snapshot(
+    daemon_settings_for_test,
+) -> None:
+    """A pre-contract current window must not deadlock creation of its successor."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={
+            "structure_sync_enabled": True,
+            "structure_generation_drift_compare_enabled": True,
+        }
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    _seed_snapshot(store, 1)
+    store.get_latest_structure_sync = MagicMock(
+        return_value={"id": "historical-window", "status": "complete"}
+    )
+    store.structure_event_member_status = MagicMock(
+        return_value={
+            "sealed": False,
+            "state": "waiting-natural-window",
+            "authenticated": True,
+            "reason": "structure-event-source-receipt-unavailable",
+        }
+    )
+    store.structure_generation_drift_status = MagicMock(
+        return_value={
+            "authorized": False,
+            "phase": "fresh-projection-members",
+            "reason": "structure-drift-incomplete",
+            "progress_id": "comparison-v2",
+            "window_id": "historical-window",
+        }
+    )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v2"
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+    scheduler._run_snapshot = AsyncMock(
+        return_value=_FakeResult(SnapshotStatus.OK, snapshot_id=1)
+    )
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is True
+
+    scheduler._run_snapshot.assert_awaited_once()
+    store.initialize_structure_drift_comparison.assert_not_called()
+    defer = store.get_latest_structure_defer()
+    assert defer is not None
+    assert defer["reason"] == "structure-drift:waiting-natural-window"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("tamper", ["checkpoint", "source", "missing-progress"])
 async def test_event_member_invalid_authority_blocks_scheduler_without_advancing(
     daemon_settings_for_test: Any, tamper: str,

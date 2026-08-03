@@ -11023,6 +11023,28 @@ class SQLiteStore:
                 "market_view_published=1,is_valid=1,snapshot_status='ok' WHERE id=?",
                 (now_ms, actual["markets"], snapshot_id),
             )
+            active_drift = con.execute(
+                "SELECT comparison_id,generation_snapshot_id,publication_id FROM "
+                "structure_generation_drift_progress WHERE phase NOT IN "
+                "('sealed','stale') LIMIT 2"
+            ).fetchall()
+            if len(active_drift) > 1:
+                raise ValueError("structure-drift-multiple-active-identities")
+            if active_drift and (
+                int(active_drift[0][1]) != snapshot_id
+                or str(active_drift[0][2]) != publication_id
+            ):
+                superseded = con.execute(
+                    "UPDATE structure_generation_drift_progress SET phase='stale',"
+                    "terminal_reason='drift-current-generation-superseded',"
+                    "checkpoint_at_ms=? WHERE comparison_id=? AND phase NOT IN "
+                    "('sealed','stale')",
+                    (now_ms, str(active_drift[0][0])),
+                )
+                if superseded.rowcount != 1:
+                    raise StructurePublicationCursorError(
+                        "structure-drift-cursor-mismatch"
+                    )
             con.execute(
                 "INSERT INTO current_structure_generation(id,snapshot_id,publication_id,"
                 "validation_hash,counts_json,certification_component,"

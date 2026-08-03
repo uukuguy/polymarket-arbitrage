@@ -128,3 +128,16 @@ class roots 则证明“相对旧数据的完整对称差可解释”。
 classifier-v2 各自 warm 并完整跑三次。2026-08-03 实测 old v1 `152.796017s`、v2 `45.139646s`，
 `3.385x`；最坏 100-chunk slice `7.437705s < 45s`，projection 最坏 17 SELECT/call。它是 release SHA
 资格，不是每两分钟运行的生产健康探针。
+
+### 为什么 `waiting-natural-window` 时 drift 也必须让路？
+
+调度顺序是 member sidecar → drift → snapshot。历史 window 没有 natural source receipt 时，member sidecar
+不能合法补造；如果只有 member 分支返回、drift 仍占住第二道门，classifier 扫完 source 后会在
+`fresh-projection-members` 永久缺少 sealed member authority。每次重试都只产生 0-row `identity-stale`，而真正能
+生成新 receipt 的 snapshot 永远排不到。
+
+因此 `src/polyarb/daemon/scheduler.py:1212` 对经过认证的历史迁移态做精确让路：写入 defer breadcrumb，然后
+继续正常 snapshot。它不把旧 window 变成可信、不删除已算的 v2 progress，也不切 pointer；等 natural
+publication 真正切换 pointer 时，`publish_structure_generation` 在同一事务把旧 active comparison 终结为
+`drift-current-generation-superseded`，但不伪造 authorization receipt。下一 tick 才从新 identity 建立唯一 v2。
+若状态不完整、未认证或读取失败，仍然阻断而不是猜测。这是“为恢复链让路”，不是把安全门降级。

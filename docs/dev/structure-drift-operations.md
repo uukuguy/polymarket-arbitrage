@@ -151,3 +151,12 @@ relation/sidecar bulk probe 最多读取 `2 * candidate_count + 1` 条；出现 
   改回 active，也不要因此切换或暂停 legacy serving plane。
 - `structure-event-member-receipt-invalid`：核对同窗 source receipt、member checkpoint 和 sealed digest；不要
   从历史 event JSON 补 receipt，也不要绕过 sidecar gate。
+- `waiting-natural-window` 不能只让 event-member child 停止。若当前 drift identity 也绑定这个经过认证的历史
+  window，drift 必须记录 `structure-drift:waiting-natural-window` 并把 producer slot 让给正常 snapshot；否则
+  classifier 会在 `fresh-projection-members` 因缺 sealed sidecar 永久 `identity-stale`，同时又因 drift 优先级
+  阻止能产生 sidecar 的下一代 natural window。只有 `state=waiting-natural-window`、`authenticated=true`、
+  `reason=structure-event-source-receipt-unavailable` 三者同时成立才允许让路；部分/损坏 evidence 仍 fail closed。
+  该让路不回填历史 window、不修改 pointer，也不授权 read/Quote 切换。后续 natural publication 真正切换
+  pointer 时，会在同一 SQLite 事务把旧 active comparison 标为
+  `stale / drift-current-generation-superseded`；事务失败则 pointer 与 stale 更新一起回滚。supersession 不生成
+  drift-safe receipt，新的 current identity 下一 tick 只创建一个 v2 comparison。

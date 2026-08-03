@@ -1493,3 +1493,24 @@ success is not user receipt/read evidence.
   Polywatch validates that relationship. It suppresses a healthy bounded Quote
   transition, but an unreachable opportunity endpoint now alerts even during
   refresh because continuous serving is the feature's core promise.
+
+### §2.21 A migration wait must yield every upstream priority gate (2026-08-04)
+
+- Production classifier-v2 exposed a scheduler deadlock hidden by isolated
+  tests: event-member derivation correctly treated a pre-contract window as
+  `waiting-natural-window`, but the next-priority drift child still consumed
+  every scheduler tick. It reached the sidecar-dependent projection phase,
+  deferred as `identity-stale`, and prevented the snapshot producer that alone
+  could create a new authoritative window.
+- A wait-state contract must be checked across the whole admission chain, not
+  only in the component that first detects it. The safe pass-through predicate
+  is the exact authenticated triple `waiting-natural-window` +
+  `structure-event-source-receipt-unavailable` + `authenticated=true`.
+  Anything weaker remains fail-closed.
+- Yielding means scheduling a natural successor, not repairing history. The
+  old window, pointer, receipts, and stale classifier evidence remain
+  immutable; durable defer evidence explains why drift temporarily ceded the
+  producer slot. The eventual pointer switch atomically terminalizes the old
+  active comparison without creating an authorization receipt. A failed
+  pointer transaction rolls both changes back; the next tick creates exactly
+  one v2 comparison for the new current identity.

@@ -1209,6 +1209,46 @@ class SnapshotScheduler:
             "structure-drift-incomplete",
         }:
             return None
+        window_id = status.get("window_id")
+        if isinstance(window_id, str) and window_id:
+            try:
+                member_status = await asyncio.to_thread(
+                    self._sqlite_store.structure_event_member_status,
+                    window_id=window_id,
+                )
+            except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+                await self._record_structure_defer(
+                    reason="structure-drift-status-unavailable",
+                    queued_at_ms=queued_at_ms,
+                    current_comparison_id=(
+                        str(status["progress_id"])
+                        if status.get("progress_id") is not None
+                        else None
+                    ),
+                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                )
+                logger.warning(
+                    "structure drift member authority unavailable "
+                    f"kind={type(error).__name__}"
+                )
+                return True
+            if (
+                member_status.get("state") == "waiting-natural-window"
+                and member_status.get("authenticated") is True
+                and member_status.get("reason")
+                == "structure-event-source-receipt-unavailable"
+            ):
+                await self._record_structure_defer(
+                    reason="structure-drift:waiting-natural-window",
+                    queued_at_ms=queued_at_ms,
+                    current_comparison_id=(
+                        str(status["progress_id"])
+                        if status.get("progress_id") is not None
+                        else None
+                    ),
+                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                )
+                return None
         reason = self._quote_priority_reason()
         if reason is not None:
             await self._record_structure_defer(
