@@ -3143,6 +3143,8 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "CHECK(active_named_count>=0),membership_hash TEXT NOT NULL "
         "CHECK(length(membership_hash)=64),quality TEXT NOT NULL CHECK(quality IN "
         "('complete-supported','complete-unsupported','incomplete-source')),reason TEXT,"
+        "tradable_open_named_count INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(tradable_open_named_count>=0),"
         "PRIMARY KEY(window_id,event_id,group_id))",
     ),
     (
@@ -3157,7 +3159,9 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "CHECK(invalid_member_count>=0),truth_count INTEGER NOT NULL DEFAULT 0 "
         "CHECK(truth_count>=0),truth_state TEXT NOT NULL,checkpoint_at_ms INTEGER NOT NULL "
         "CHECK(checkpoint_at_ms>=0),completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR "
-        "completed_at_ms>=0),checkpoint_digest TEXT NOT NULL)",
+        "completed_at_ms>=0),checkpoint_digest TEXT NOT NULL,"
+        "tradable_open_named_count INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(tradable_open_named_count>=0))",
     ),
     (
         "after-receipt-table",
@@ -3193,6 +3197,13 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "member_ordinal)",
     ),
     (
+        "after-group-truth-insert-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_group_truth_insert_guard "
+        "BEFORE INSERT ON structure_sync_event_group_truth_staging WHEN EXISTS (SELECT 1 "
+        "FROM structure_sync_event_member_receipts WHERE window_id=NEW.window_id) BEGIN "
+        "SELECT RAISE(ABORT,'structure-event-group-truth-frozen'); END",
+    ),
+    (
         "after-group-truth-update-guard",
         "CREATE TRIGGER IF NOT EXISTS trg_structure_event_group_truth_update_guard "
         "BEFORE UPDATE ON structure_sync_event_group_truth_staging BEGIN SELECT "
@@ -3204,6 +3215,28 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "BEFORE DELETE ON structure_sync_event_group_truth_staging WHEN EXISTS (SELECT 1 "
         "FROM structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN "
         "SELECT RAISE(ABORT,'structure-event-group-truth-frozen'); END",
+    ),
+    (
+        "after-group-progress-insert-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_group_truth_progress_insert_guard "
+        "BEFORE INSERT ON structure_sync_event_group_truth_progress WHEN EXISTS (SELECT 1 "
+        "FROM structure_sync_event_member_receipts WHERE window_id=NEW.window_id) BEGIN "
+        "SELECT RAISE(ABORT,'structure-event-group-truth-progress-frozen'); END",
+    ),
+    (
+        "after-group-progress-update-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_group_truth_progress_update_guard "
+        "BEFORE UPDATE ON structure_sync_event_group_truth_progress WHEN EXISTS (SELECT 1 "
+        "FROM structure_sync_event_member_receipts WHERE window_id IN "
+        "(OLD.window_id,NEW.window_id)) BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-group-truth-progress-frozen'); END",
+    ),
+    (
+        "after-group-progress-delete-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_group_truth_progress_delete_guard "
+        "BEFORE DELETE ON structure_sync_event_group_truth_progress WHEN EXISTS (SELECT 1 "
+        "FROM structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN "
+        "SELECT RAISE(ABORT,'structure-event-group-truth-progress-frozen'); END",
     ),
     (
         "after-projection-index-drop",

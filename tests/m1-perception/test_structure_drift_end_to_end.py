@@ -1060,12 +1060,12 @@ def _reshape_as_production_845_848(store: SQLiteStore) -> None:
             "SELECT * FROM structure_sync_event_group_truth_progress "
             "WHERE window_id='window-97b'"
         ).fetchone())
-        group[-1] = sqlite_store_module._structure_event_group_truth_checkpoint_digest((
-            source_receipt[-1], *group[1:11],
+        group[13] = sqlite_store_module._structure_event_group_truth_checkpoint_digest((
+            source_receipt[-1], *group[1:11], group[14],
         ))
         con.execute(
             "UPDATE structure_sync_event_group_truth_progress SET checkpoint_digest=? "
-            "WHERE window_id='window-97b'", (group[-1],)
+            "WHERE window_id='window-97b'", (group[13],)
         )
         con.execute(
             "UPDATE structure_publications SET publication_id='publication-848',"
@@ -2535,10 +2535,18 @@ def test_v2_drift_commitments_are_chunk_partition_independent(tmp_path: Path) ->
         "diagnostic_root",
         "diagnostic_samples_json",
         "diagnostic_samples_digest",
+        "receipt_digest",
     )
     observed: list[tuple[object, ...]] = []
+    base = _drift_store(tmp_path / "sealed-source")
     for max_rows in (1, 17, 500):
-        store = _drift_store(tmp_path / f"rows-{max_rows}")
+        clone_path = tmp_path / f"rows-{max_rows}" / "drift-e2e.db"
+        clone_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(base.db_path) as source, sqlite3.connect(
+            clone_path
+        ) as destination:
+            source.backup(destination)
+        store = SQLiteStore(clone_path)
         comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
         for now_ms in range(3_001, 3_100):
             chunk = store.advance_structure_drift_comparison_chunk(
@@ -2556,8 +2564,13 @@ def test_v2_drift_commitments_are_chunk_partition_independent(tmp_path: Path) ->
                 "structure_generation_drift_receipts WHERE comparison_id=?",
                 (comparison_id,),
             ).fetchone()
+            terminal_reason = con.execute(
+                "SELECT terminal_reason FROM structure_generation_drift_progress "
+                "WHERE comparison_id=?",
+                (comparison_id,),
+            ).fetchone()[0]
         assert row is not None
-        observed.append(tuple(row))
+        observed.append((*tuple(row), terminal_reason))
 
     assert observed[0] == observed[1] == observed[2]
 

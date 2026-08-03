@@ -299,9 +299,10 @@ def test_projection_union_excludes_only_certified_event_only_member(
     assert chunk.candidates_processed == 3
     assert chunk.cursor is None
     selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
-    # Seven fixed authority/source queries precede at most ten bulk candidate
+    # Eight fixed authority/source queries (including terminal group-progress
+    # authentication) precede at most ten bulk candidate
     # queries.  Neither budget scales with the number of members in the page.
-    assert len(selects) <= 17
+    assert len(selects) <= 18
     assert not any("json_each" in sql.lower() for sql in statements)
     assert not any("payload_json,'$.markets'" in sql for sql in statements)
     assert not any(" WHERE relation.market_id='" in sql for sql in selects)
@@ -444,7 +445,7 @@ def test_event_only_keyset_is_complete_with_adversarial_order_and_null_ordinal(
         selects = [
             sql for sql in statements if sql.lstrip().upper().startswith("SELECT")
         ]
-        assert len(selects) <= 17
+        assert len(selects) <= 18
         traced_selects.extend(selects)
         seen.extend(item.envelope.market_id for item in chunk.diagnostics)
         cursor = chunk.cursor

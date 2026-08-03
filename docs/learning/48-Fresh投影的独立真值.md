@@ -30,6 +30,18 @@ event、member sidecar 以及封住它们的 receipt；generation truth 只在�
 
 因此重启只重读当前 checkpoint 后的成员，不重扫已完成前缀。
 
+## `active` 不等于可交易
+
+`active_named_count` 是历史契约字段，定义仍是“named 且 active”；它不能单独决定
+`complete-supported`，因为 `active=True, closed=True` 仍不可交易。source sidecar 另存
+`tradable_open_named_count`，其条件与 normalizer 完全一致：
+
+`member_kind == named && active && !closed`
+
+只有 `tradable_open_named_count == expected_member_count` 的 standard group 才 supported。
+active-closed、inactive-open、other/unnamed 任一成员都会把整组降为
+`complete-unsupported`，同时保留原始 `active_named_count` 供审计。
+
 ## 三方交叉绑定
 
 classifier 到达 `sealed` 或 `stale` 后，status 必须同时看到：
@@ -38,6 +50,11 @@ classifier 到达 `sealed` 或 `stale` 后，status 必须同时看到：
 
 缺失、替换、混搭或篡改任意一边，status 都只返回
 `structure-drift-member-receipt-invalid`，不会泄露旧 class counts 或 diagnostic samples。
+
+member authority 自身也采用同一纪律：receipt 出现后，group truth staging 与 progress 的
+insert/replace/update/delete 都被冻结；status 必须重新读取 completed progress，验证
+checkpoint、空闲增量 SHA 状态、truth count/root，并与 receipt 的 expected count/root
+一致。不能因为 receipt 已带 expected 值就跳过 progress 认证。
 
 ## 设计取舍
 
@@ -54,6 +71,7 @@ classifier 到达 `sealed` 或 `stale` 后，status 必须同时看到：
 2. generation truth 被改写后，fresh root 为什么必须保持不变？
 3. stale 结果为什么也必须绑定当前 member receipt，而不只是 sealed 授权？
 4. checkpoint 保存 SHA 内部状态，相比保存已扫描成员列表解决了什么生产问题？
+5. 为什么 `active_named_count == expected_member_count` 仍不能证明一组可交易？
 
 ## FAQ 增量
 

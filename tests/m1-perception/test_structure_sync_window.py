@@ -20,6 +20,7 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT,
     STRUCTURE_EVENT_SOURCE_CONTRACT,
 )
+from polyarb.perception.structure_drift import project_legacy_compatible_event
 from polyarb.perception.structure_event_members import (
     StructureEventMemberProgress,
     StructureEventMemberReceipt,
@@ -659,6 +660,9 @@ def test_event_member_migration_is_idempotent_and_schema_locked(tmp_path) -> Non
         assert _schema_objects(
             lhs, "structure_sync_event_conflict"
         ) == _schema_objects(rhs, "structure_sync_event_conflict")
+        assert _schema_objects(
+            lhs, "structure_sync_event_group_truth"
+        ) == _schema_objects(rhs, "structure_sync_event_group_truth")
         assert _event_member_migration_business_rows(rhs) == business_before
 
 
@@ -689,6 +693,44 @@ def test_event_conflict_merkle_receipt_migration_fault_rolls_back(tmp_path) -> N
         assert tuple(con.execute(
             "SELECT type,name,sql FROM sqlite_master ORDER BY type,name"
         )) == schema_before
+
+
+@pytest.mark.parametrize(
+    ("table", "fault_point"),
+    [
+        (
+            "structure_sync_event_group_truth_staging",
+            "after-group-truth-tradable_open_named_count",
+        ),
+        (
+            "structure_sync_event_group_truth_progress",
+            "after-group-progress-tradable_open_named_count",
+        ),
+    ],
+)
+def test_event_group_truth_column_migration_fault_rolls_back(
+    tmp_path, table, fault_point,
+) -> None:
+    store = SQLiteStore(tmp_path / f"{table}.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(f"ALTER TABLE {table} DROP COLUMN tradable_open_named_count")
+        schema_before = tuple(
+            con.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")
+        )
+
+        def fail_here(point: str) -> None:
+            if point == fault_point:
+                raise RuntimeError(point)
+
+        with pytest.raises(RuntimeError, match=fault_point):
+            sqlite_store_module._migrate_structure_event_member_schema(
+                con,
+                fault_hook=fail_here,
+            )
+        assert tuple(
+            con.execute("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")
+        ) == schema_before
 
 
 @pytest.mark.parametrize(
@@ -2444,6 +2486,105 @@ def _seed_event_member_window(store: SQLiteStore, count: int) -> str:
     return window_id
 
 
+@pytest.mark.parametrize("limit", [1, 17, 500])
+@pytest.mark.parametrize(
+    ("member", "expected_active_named", "expected_tradable", "expected_quality"),
+    [
+        (
+            {"id": "m", "negRiskOther": False, "active": True, "closed": False},
+            1, 1, "complete-supported",
+        ),
+        (
+            {"id": "m", "negRiskOther": False, "active": True, "closed": True},
+            1, 0, "complete-unsupported",
+        ),
+        (
+            {"id": "m", "negRiskOther": False, "active": False, "closed": False},
+            0, 0, "complete-unsupported",
+        ),
+        (
+            {"id": "m", "negRiskOther": True, "active": True, "closed": False},
+            0, 0, "complete-unsupported",
+        ),
+    ],
+    ids=["named-open", "named-closed", "named-inactive", "other-open"],
+)
+def test_source_group_truth_matches_raw_generation_tradability_across_restarts(
+    tmp_path,
+    limit,
+    member,
+    expected_active_named,
+    expected_tradable,
+    expected_quality,
+) -> None:
+    store = SQLiteStore(tmp_path / f"truth-{limit}.db")
+    store.init_schema()
+    event = {
+        "id": "e",
+        "negRisk": True,
+        "enableNegRisk": True,
+        "negRiskAugmented": False,
+        "negRiskMarketID": "g",
+        "markets": [member],
+    }
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    store.commit_structure_event_page(
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[event],
+        finished_at_ms=2,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_sync_windows SET status='complete' WHERE id=?",
+            (window_id,),
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_market_backfill_progress("
+            "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
+            "VALUES (?,?,?,?)",
+            (window_id, 2, 2, 2),
+        )
+    phases = []
+    for _ in range(16):
+        store = SQLiteStore(store.db_path)
+        result = store.advance_structure_event_member_staging_chunk(
+            window_id=window_id, limit=limit,
+        )
+        assert result.get("reason") is None
+        assert result.get("failure_reason") is None
+        assert int(result["rows_written"]) <= limit
+        phases.append(str(result["state"]))
+        if result.get("sealed") is True:
+            break
+    else:
+        pytest.fail(f"source group truth did not seal: {phases}")
+    canonical = project_legacy_compatible_event(
+        event,
+        event_source_ordinal=1,
+        complete_market_ids=frozenset({"m"}),
+    ).truths[0]
+    with sqlite3.connect(store.db_path) as con:
+        source = con.execute(
+            "SELECT expected_member_count,active_named_count,"
+            "tradable_open_named_count,membership_hash,quality,reason FROM "
+            "structure_sync_event_group_truth_staging WHERE window_id=?",
+            (window_id,),
+        ).fetchone()
+    assert source == (
+        canonical.expected_member_count,
+        expected_active_named,
+        expected_tradable,
+        canonical.membership_hash,
+        expected_quality,
+        canonical.reason,
+    )
+    assert canonical.active_named_count == expected_active_named
+    assert canonical.quality == expected_quality
+
+
 def test_event_member_derivation_is_bounded_500_500_200(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "members.db")
     store.init_schema()
@@ -2663,6 +2804,127 @@ def test_event_conflict_summary_is_frozen_after_receipt(tmp_path, operation) -> 
         match="^structure-event-conflict-summary-frozen$",
     ):
         con.execute(*statements[operation])
+
+
+@pytest.mark.parametrize("operation", ["insert", "update", "delete", "replace"])
+def test_event_group_truth_staging_is_frozen_after_receipt(
+    tmp_path, operation,
+) -> None:
+    store = SQLiteStore(tmp_path / f"group-truth-frozen-{operation}.db")
+    store.init_schema()
+    window_id = _seed_event_member_window(store, 1)
+    _advance_event_members_until_sealed(store, window_id, max_chunks=4)
+    statements = {
+        "insert": (
+            "INSERT INTO structure_sync_event_group_truth_staging("
+            "window_id,event_id,group_id,neg_risk_type,expected_member_count,"
+            "active_named_count,membership_hash,quality,reason,"
+            "tradable_open_named_count) VALUES (?,?,?,'standard',1,1,?,"
+            "'complete-supported',NULL,1)",
+            (window_id, "other-event", "other-group", "a" * 64),
+        ),
+        "update": (
+            "UPDATE structure_sync_event_group_truth_staging SET quality="
+            "'complete-unsupported' WHERE window_id=?",
+            (window_id,),
+        ),
+        "delete": (
+            "DELETE FROM structure_sync_event_group_truth_staging WHERE window_id=?",
+            (window_id,),
+        ),
+        "replace": (
+            "INSERT OR REPLACE INTO structure_sync_event_group_truth_staging("
+            "window_id,event_id,group_id,neg_risk_type,expected_member_count,"
+            "active_named_count,membership_hash,quality,reason,"
+            "tradable_open_named_count) SELECT window_id,event_id,group_id,"
+            "neg_risk_type,expected_member_count,active_named_count,membership_hash,"
+            "quality,reason,tradable_open_named_count FROM "
+            "structure_sync_event_group_truth_staging WHERE window_id=?",
+            (window_id,),
+        ),
+    }
+    with sqlite3.connect(store.db_path) as con, pytest.raises(
+        sqlite3.IntegrityError,
+        match="^structure-event-group-truth-frozen$",
+    ):
+        con.execute(*statements[operation])
+
+
+@pytest.mark.parametrize("operation", ["insert", "update", "delete", "replace"])
+def test_event_group_truth_progress_is_frozen_after_receipt(
+    tmp_path, operation,
+) -> None:
+    store = SQLiteStore(tmp_path / f"group-progress-frozen-{operation}.db")
+    store.init_schema()
+    window_id = _seed_event_member_window(store, 1)
+    _advance_event_members_until_sealed(store, window_id, max_chunks=4)
+    statements = {
+        "insert": (
+            "INSERT INTO structure_sync_event_group_truth_progress SELECT * FROM "
+            "structure_sync_event_group_truth_progress WHERE window_id=?",
+            (window_id,),
+        ),
+        "update": (
+            "UPDATE structure_sync_event_group_truth_progress SET truth_count="
+            "truth_count+1 WHERE window_id=?",
+            (window_id,),
+        ),
+        "delete": (
+            "DELETE FROM structure_sync_event_group_truth_progress WHERE window_id=?",
+            (window_id,),
+        ),
+        "replace": (
+            "INSERT OR REPLACE INTO structure_sync_event_group_truth_progress "
+            "SELECT * FROM structure_sync_event_group_truth_progress WHERE window_id=?",
+            (window_id,),
+        ),
+    }
+    with sqlite3.connect(store.db_path) as con, pytest.raises(
+        sqlite3.IntegrityError,
+        match="^structure-event-group-truth-progress-frozen$",
+    ):
+        con.execute(*statements[operation])
+
+
+@pytest.mark.parametrize(
+    "tamper", ["progress-checkpoint", "progress-delete", "mixed-root"],
+)
+def test_event_group_truth_terminal_tamper_fails_closed_without_evidence(
+    tmp_path, tamper,
+) -> None:
+    store = SQLiteStore(tmp_path / f"group-terminal-{tamper}.db")
+    store.init_schema()
+    window_id = _seed_event_member_window(store, 1)
+    _advance_event_members_until_sealed(store, window_id, max_chunks=4)
+    with sqlite3.connect(store.db_path) as con:
+        if tamper == "progress-delete":
+            con.execute(
+                "DROP TRIGGER trg_structure_event_group_truth_progress_delete_guard"
+            )
+            con.execute(
+                "DELETE FROM structure_sync_event_group_truth_progress WHERE window_id=?",
+                (window_id,),
+            )
+        else:
+            con.execute(
+                "DROP TRIGGER trg_structure_event_group_truth_progress_update_guard"
+            )
+            assignment = (
+                "checkpoint_digest='" + "e" * 64 + "'"
+                if tamper == "progress-checkpoint"
+                else "truth_count=truth_count+1"
+            )
+            con.execute(
+                "UPDATE structure_sync_event_group_truth_progress SET "
+                + assignment
+                + " WHERE window_id=?",
+                (window_id,),
+            )
+    assert store.structure_event_member_status(window_id=window_id) == {
+        "sealed": False,
+        "complete": False,
+        "reason": "structure-event-member-receipt-invalid",
+    }
 
 
 @pytest.mark.parametrize("limit", [1, 17, 500])

@@ -201,29 +201,46 @@ def _validated_structure_event_group_truth(
     *,
     expected: tuple[int, str] | None = None,
 ) -> tuple[int, str]:
+    progress = con.execute(
+        "SELECT event_cursor,group_cursor,market_cursor,member_ordinal,"
+        "membership_state,member_count,active_named_count,invalid_member_count,"
+        "truth_count,truth_state,completed_at_ms,checkpoint_digest,"
+        "tradable_open_named_count FROM structure_sync_event_group_truth_progress "
+        "WHERE window_id=?",
+        (window_id,),
+    ).fetchone()
+    member_progress = con.execute(
+        "SELECT source_receipt_digest FROM structure_sync_event_member_progress "
+        "WHERE window_id=?",
+        (window_id,),
+    ).fetchone()
+    if progress is None or member_progress is None or progress[10] is None:
+        raise ValueError("structure-event-group-truth-incomplete")
+    membership = SerializableSHA256.from_json(str(progress[4]))
+    stored = RowChainSHA256.from_json(
+        str(progress[9]), expected_domain="source-event"
+    )
+    checkpoint = _structure_event_group_truth_checkpoint_digest((
+        member_progress[0], *progress[:10], progress[12],
+    ))
+    if (
+        stored.count != int(progress[8])
+        or progress[11] != checkpoint
+        or membership.to_json() != SerializableSHA256.new().to_json()
+        or any(int(progress[index]) != 0 for index in (5, 6, 7, 12))
+    ):
+        raise ValueError("structure-event-group-truth-invalid")
+    actual_pair = (stored.count, stored.hexdigest())
     if expected is not None:
         if (
             type(expected[0]) is not int
             or expected[0] < 0
             or not isinstance(expected[1], str)
             or len(expected[1]) != 64
+            or expected != actual_pair
         ):
             raise ValueError("structure-event-group-truth-invalid")
-        return expected
-    progress = None
-    progress = con.execute(
-        "SELECT truth_count,truth_state,completed_at_ms FROM "
-        "structure_sync_event_group_truth_progress WHERE window_id=?",
-        (window_id,),
-    ).fetchone()
-    if progress is None or progress[2] is None:
-        raise ValueError("structure-event-group-truth-incomplete")
-    stored = RowChainSHA256.from_json(
-        str(progress[1]), expected_domain="source-event"
-    )
-    if stored.count != int(progress[0]):
-        raise ValueError("structure-event-group-truth-invalid")
-    return stored.count, stored.hexdigest()
+    return actual_pair
 
 
 def _event_conflict_leaf_hash(
@@ -489,6 +506,32 @@ def _migrate_structure_event_member_schema(
                 )
                 if fault_hook is not None:
                     fault_hook(f"after-receipt-{column}")
+        group_truth_columns = {
+            str(row[1]) for row in con.execute(
+                "PRAGMA table_info(structure_sync_event_group_truth_staging)"
+            )
+        }
+        if "tradable_open_named_count" not in group_truth_columns:
+            con.execute(
+                "ALTER TABLE structure_sync_event_group_truth_staging ADD COLUMN "
+                "tradable_open_named_count INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(tradable_open_named_count>=0)"
+            )
+            if fault_hook is not None:
+                fault_hook("after-group-truth-tradable_open_named_count")
+        group_progress_columns = {
+            str(row[1]) for row in con.execute(
+                "PRAGMA table_info(structure_sync_event_group_truth_progress)"
+            )
+        }
+        if "tradable_open_named_count" not in group_progress_columns:
+            con.execute(
+                "ALTER TABLE structure_sync_event_group_truth_progress ADD COLUMN "
+                "tradable_open_named_count INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(tradable_open_named_count>=0)"
+            )
+            if fault_hook is not None:
+                fault_hook("after-group-progress-tradable_open_named_count")
         con.execute("RELEASE SAVEPOINT structure_event_member_schema_migration")
     except BaseException:
         con.execute("ROLLBACK TO SAVEPOINT structure_event_member_schema_migration")
@@ -3934,7 +3977,8 @@ class SQLiteStore:
                 "SELECT event_cursor,group_cursor,market_cursor,member_ordinal,"
                 "membership_state,member_count,active_named_count,invalid_member_count,"
                 "truth_count,truth_state,checkpoint_at_ms,completed_at_ms,"
-                "checkpoint_digest FROM structure_sync_event_group_truth_progress "
+                "checkpoint_digest,tradable_open_named_count FROM "
+                "structure_sync_event_group_truth_progress "
                 "WHERE window_id=?",
                 (window_id,),
             ).fetchone()
@@ -3952,15 +3996,15 @@ class SQLiteStore:
                 truth_state = RowChainSHA256.new("source-event").to_json()
                 group_checkpoint = _structure_event_group_truth_checkpoint_digest((
                     member_progress[7], "", "", "", -1, membership_state,
-                    0, 0, 0, 0, truth_state,
+                    0, 0, 0, 0, truth_state, 0,
                 ))
                 con.execute("BEGIN IMMEDIATE")
                 con.execute(
                     "INSERT OR IGNORE INTO structure_sync_event_group_truth_progress "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         window_id, "", "", "", -1, membership_state, 0, 0, 0, 0,
-                        truth_state, now_ms, None, group_checkpoint,
+                        truth_state, now_ms, None, group_checkpoint, 0,
                     ),
                 )
                 con.execute("COMMIT")
@@ -3968,7 +4012,7 @@ class SQLiteStore:
                     "SELECT event_cursor,group_cursor,market_cursor,member_ordinal,"
                     "membership_state,member_count,active_named_count,"
                     "invalid_member_count,truth_count,truth_state,checkpoint_at_ms,"
-                    "completed_at_ms,checkpoint_digest FROM "
+                    "completed_at_ms,checkpoint_digest,tradable_open_named_count FROM "
                     "structure_sync_event_group_truth_progress WHERE window_id=?",
                     (window_id,),
                 ).fetchone()
@@ -3983,7 +4027,7 @@ class SQLiteStore:
             if member_phase != "group-truth":
                 raise ValueError("structure-event-group-truth-phase-invalid")
             expected_checkpoint = _structure_event_group_truth_checkpoint_digest((
-                member_progress[7], *progress[:10],
+                member_progress[7], *progress[:10], progress[13],
             ))
             if progress[12] != expected_checkpoint:
                 raise ValueError("structure-event-group-truth-checkpoint-invalid")
@@ -4043,16 +4087,19 @@ class SQLiteStore:
             member_count = int(progress[5])
             active_named_count = int(progress[6])
             invalid_count = int(progress[7])
+            tradable_open_named_count = int(progress[13])
             truth_rows: list[tuple[object, ...]] = []
 
             def start_group(event_id: str, group_id: str) -> None:
                 nonlocal membership, member_count, active_named_count, invalid_count
+                nonlocal tradable_open_named_count
                 membership = SerializableSHA256.new()
                 prefix = json.dumps(
                     [event_id, group_id], ensure_ascii=False, separators=(",", ":")
                 )[:-1] + ",["
                 membership.update(prefix.encode())
                 member_count = active_named_count = invalid_count = 0
+                tradable_open_named_count = 0
 
             def finish_group(event_id: str, group_id: str) -> None:
                 nonlocal membership
@@ -4077,7 +4124,7 @@ class SQLiteStore:
                     quality, reason = (
                         "complete-unsupported", "augmented-neg-risk-not-supported"
                     )
-                elif active_named_count == member_count:
+                elif tradable_open_named_count == member_count:
                     quality, reason = "complete-supported", None
                 else:
                     quality, reason = (
@@ -4089,6 +4136,7 @@ class SQLiteStore:
                         window_id, event_id, group_id,
                         "augmented" if augmented else "standard", member_count,
                         active_named_count, membership_root, quality, reason,
+                        tradable_open_named_count,
                     )
                     truth_rows.append(truth)
                     truth_chain.update(("structure-event-source-group-truth-v1", *truth[1:]))
@@ -4117,6 +4165,9 @@ class SQLiteStore:
                     active_named_count += int(
                         member_kind == "named" and active == 1
                     )
+                    tradable_open_named_count += int(
+                        member_kind == "named" and active == 1 and closed == 0
+                    )
                 else:
                     invalid_count += 1
                 cursor_event, cursor_group = key
@@ -4134,38 +4185,42 @@ class SQLiteStore:
                 current_key = None
                 membership = SerializableSHA256.new()
                 member_count = active_named_count = invalid_count = 0
+                tradable_open_named_count = 0
             next_truth_count = truth_chain.count
             next_checkpoint = _structure_event_group_truth_checkpoint_digest((
                 member_progress[7], cursor_event, cursor_group, cursor_market,
                 cursor_ordinal, membership.to_json(), member_count,
                 active_named_count, invalid_count, next_truth_count,
-                truth_chain.to_json(),
+                truth_chain.to_json(), tradable_open_named_count,
             ))
             con.execute("BEGIN IMMEDIATE")
             current = con.execute(
                 "SELECT event_cursor,group_cursor,market_cursor,member_ordinal,"
                 "membership_state,member_count,active_named_count,invalid_member_count,"
                 "truth_count,truth_state,checkpoint_at_ms,completed_at_ms,"
-                "checkpoint_digest FROM structure_sync_event_group_truth_progress "
+                "checkpoint_digest,tradable_open_named_count FROM "
+                "structure_sync_event_group_truth_progress "
                 "WHERE window_id=?", (window_id,),
             ).fetchone()
             if current != progress:
                 raise ValueError("structure-event-group-truth-cursor-race")
             con.executemany(
                 "INSERT INTO structure_sync_event_group_truth_staging VALUES "
-                "(?,?,?,?,?,?,?,?,?)", truth_rows,
+                "(?,?,?,?,?,?,?,?,?,?)", truth_rows,
             )
             con.execute(
                 "UPDATE structure_sync_event_group_truth_progress SET event_cursor=?,"
                 "group_cursor=?,market_cursor=?,member_ordinal=?,membership_state=?,"
                 "member_count=?,active_named_count=?,invalid_member_count=?,truth_count=?,"
-                "truth_state=?,checkpoint_at_ms=?,completed_at_ms=?,checkpoint_digest=? "
+                "truth_state=?,checkpoint_at_ms=?,completed_at_ms=?,checkpoint_digest=?,"
+                "tradable_open_named_count=? "
                 "WHERE window_id=?",
                 (
                     cursor_event, cursor_group, cursor_market, cursor_ordinal,
                     membership.to_json(), member_count, active_named_count, invalid_count,
                     next_truth_count, truth_chain.to_json(), now_ms,
-                    now_ms if complete else None, next_checkpoint, window_id,
+                    now_ms if complete else None, next_checkpoint,
+                    tradable_open_named_count, window_id,
                 ),
             )
             if complete:
@@ -12883,15 +12938,15 @@ class SQLiteStore:
                     truth_state = RowChainSHA256.new("source-event").to_json()
                     group_checkpoint = _structure_event_group_truth_checkpoint_digest((
                         receipt_digest, "", "", "", -1, membership_state,
-                        0, 0, 0, 0, truth_state,
+                        0, 0, 0, 0, truth_state, 0,
                     ))
                     con.execute(
                         "INSERT INTO structure_sync_event_group_truth_progress VALUES "
-                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             window_id, "", "", "", -1, membership_state,
                             0, 0, 0, 0, truth_state, finished_at_ms, None,
-                            group_checkpoint,
+                            group_checkpoint, 0,
                         ),
                     )
             con.execute(
