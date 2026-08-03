@@ -59,6 +59,7 @@
 | 45 | [Quote 投影与阶段收据](45-Quote投影与阶段收据.md) | 目标索引投影 / Structure revision fence / run-bound source receipt / 采集阶段 checkpoint / 原子发布边界 |
 | 46 | [Structure 漂移安全切换](46-Structure漂移安全切换.md) | 同窗 raw/gen 双 root / 完整 temporal 分类 / scheduler child slice / Quote 优先 / sealed receipt |
 | 47 | [Classifier-v2 诊断收据](47-Classifier-v2诊断收据.md) | 完整 sidecar projection / fresh-group-ineligible / atomic terminal receipt / 认证 status |
+| 48 | [Fresh 投影的独立真值](48-Fresh投影的独立真值.md) | source-only group truth / bounded SHA checkpoint / member receipt root / sealed-stale 三方交叉绑定 |
 
 ## Phase 02.1 教学增量（2026-05）
 

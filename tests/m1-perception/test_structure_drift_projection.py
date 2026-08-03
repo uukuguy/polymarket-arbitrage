@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import polyarb.storage.sqlite_store as sqlite_store_module
-from polyarb.perception.market_truth import membership_hash
+from polyarb.perception.market_truth import EventMember, membership_hash
 from polyarb.perception.structure_drift import (
     StructuralMemberIdentity,
     classify_structure_member_drift,
@@ -312,6 +312,50 @@ def test_projection_union_excludes_only_certified_event_only_member(
             for row in con.execute("EXPLAIN QUERY PLAN " + sql)
         )
     assert "USE TEMP B-TREE FOR ORDER BY" not in plans
+
+
+def test_raw_source_group_truth_is_exact_and_controls_fresh_eligibility(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "standard").mkdir()
+    (tmp_path / "augmented").mkdir()
+    standard = _published_source_store(tmp_path / "standard", event_count=1)
+    augmented = _published_source_store(
+        tmp_path / "augmented",
+        event_count=1,
+        raw_event_overrides={"negRiskAugmented": True},
+    )
+    with sqlite3.connect(standard.db_path) as con:
+        truth = con.execute(
+            "SELECT neg_risk_type,quality,membership_hash FROM "
+            "structure_sync_event_group_truth_staging WHERE window_id='window-1'"
+        ).fetchone()
+    expected_hash = membership_hash(
+        "event-000",
+        "group-000",
+        (
+            EventMember(
+                event_id="event-000",
+                group_id="group-000",
+                market_id="market-000",
+                member_kind="named",
+                active=True,
+                closed=False,
+            ),
+        ),
+    )
+    assert truth == ("standard", "complete-supported", expected_hash)
+    standard_chunk = standard.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1", generation_snapshot_id=1,
+        cursor=None, limit=500,
+    )
+    augmented_chunk = augmented.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1", generation_snapshot_id=1,
+        cursor=None, limit=500,
+    )
+    assert [member.market_id for member in standard_chunk.members] == ["market-000"]
+    assert augmented_chunk.members == ()
+    assert augmented_chunk.diagnostics
 
 
 def test_projection_preserves_exact_eleven_field_identity(tmp_path: Path) -> None:

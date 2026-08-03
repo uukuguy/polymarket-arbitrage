@@ -47,6 +47,7 @@ _TERMINAL_RECEIPT_FIELDS = (
     "pointer_validation_hash",
     "generation_certification_hash",
     "source_identity_hash",
+    "projection_member_receipt_digest",
     "terminal_reason",
     "class_counts_json",
     "class_digests_json",
@@ -150,14 +151,17 @@ def test_terminal_receipt_schema_rejects_update_and_delete(tmp_path: Path) -> No
             "SELECT hash_algorithm,classifier_contract_version,legacy_snapshot_id,"
             "generation_snapshot_id,publication_id,window_id,"
             "normalization_contract_version,exact_receipt_digest,"
-            "pointer_validation_hash,generation_certification_hash FROM "
+            "pointer_validation_hash,generation_certification_hash,"
+            "(SELECT receipt_digest FROM structure_sync_event_member_receipts member "
+            "WHERE member.window_id=structure_generation_drift_progress.window_id) FROM "
             "structure_generation_drift_progress WHERE comparison_id=?",
             (comparison_id,),
         ).fetchone()
         values: tuple[object, ...] = (
             comparison_id,
-            *row,
+            *row[:10],
             "a" * 64,
+            row[10],
             "drift-unclassified",
             "{}",
             "{}",
@@ -235,7 +239,9 @@ def _terminal_receipt_payload(
         "SELECT hash_algorithm,classifier_contract_version,legacy_snapshot_id,"
         "generation_snapshot_id,publication_id,window_id,"
         "normalization_contract_version,exact_receipt_digest,"
-        "pointer_validation_hash,generation_certification_hash FROM "
+        "pointer_validation_hash,generation_certification_hash,"
+        "(SELECT receipt_digest FROM structure_sync_event_member_receipts member "
+        "WHERE member.window_id=structure_generation_drift_progress.window_id) FROM "
         "structure_generation_drift_progress WHERE comparison_id=?",
         (comparison_id,),
     ).fetchone()
@@ -244,8 +250,9 @@ def _terminal_receipt_payload(
     )
     values: tuple[object, ...] = (
         comparison_id,
-        *row,
+        *row[:10],
         "a" * 64,
+        row[10],
         "drift-unclassified",
         '{"unclassified":1}',
         '{"unclassified":"' + "c" * 64 + '"}',
@@ -295,7 +302,8 @@ def test_terminal_receipt_status_tamper_fails_closed(
             "terminal_reason='drift-unclassified',class_counts_json=?,"
             "class_digests_json=?,diagnostic_counts_json=?,diagnostic_root=?,"
             "diagnostic_samples_json=?,diagnostic_samples_digest=?,"
-            "source_identity_hash=?,checkpoint_at_ms=3002 WHERE comparison_id=?",
+            "source_identity_hash=?,projection_member_receipt_digest=?,"
+            "checkpoint_at_ms=3002 WHERE comparison_id=?",
             (
                 payload["class_counts_json"],
                 payload["class_digests_json"],
@@ -304,6 +312,7 @@ def test_terminal_receipt_status_tamper_fails_closed(
                 payload["diagnostic_samples_json"],
                 payload["diagnostic_samples_digest"],
                 payload["source_identity_hash"],
+                payload["projection_member_receipt_digest"],
                 comparison_id,
             ),
         )
@@ -346,7 +355,8 @@ def test_valid_terminal_receipt_status_exposes_authenticated_evidence(
             "UPDATE structure_generation_drift_progress SET phase='stale',"
             "terminal_reason=?,class_counts_json=?,class_digests_json=?,"
             "diagnostic_counts_json=?,diagnostic_root=?,diagnostic_samples_json=?,"
-            "diagnostic_samples_digest=?,source_identity_hash=?,checkpoint_at_ms=? "
+            "diagnostic_samples_digest=?,source_identity_hash=?,"
+            "projection_member_receipt_digest=?,checkpoint_at_ms=? "
             "WHERE comparison_id=?",
             (
                 payload["terminal_reason"],
@@ -357,6 +367,7 @@ def test_valid_terminal_receipt_status_exposes_authenticated_evidence(
                 payload["diagnostic_samples_json"],
                 payload["diagnostic_samples_digest"],
                 payload["source_identity_hash"],
+                payload["projection_member_receipt_digest"],
                 payload["checkpoint_at_ms"],
                 comparison_id,
             ),
@@ -377,7 +388,8 @@ def test_mixed_terminal_receipt_with_valid_digest_fails_closed(tmp_path: Path) -
             "UPDATE structure_generation_drift_progress SET phase='stale',"
             "terminal_reason=?,class_counts_json=?,class_digests_json=?,"
             "diagnostic_counts_json=?,diagnostic_root=?,diagnostic_samples_json=?,"
-            "diagnostic_samples_digest=?,source_identity_hash=?,checkpoint_at_ms=? "
+            "diagnostic_samples_digest=?,source_identity_hash=?,"
+            "projection_member_receipt_digest=?,checkpoint_at_ms=? "
             "WHERE comparison_id=?",
             (
                 payload["terminal_reason"],
@@ -388,6 +400,7 @@ def test_mixed_terminal_receipt_with_valid_digest_fails_closed(tmp_path: Path) -
                 payload["diagnostic_samples_json"],
                 payload["diagnostic_samples_digest"],
                 payload["source_identity_hash"],
+                payload["projection_member_receipt_digest"],
                 payload["checkpoint_at_ms"],
                 comparison_id,
             ),
@@ -939,14 +952,121 @@ def _reshape_as_production_845_848(store: SQLiteStore) -> None:
             "UPDATE structure_sync_windows SET id='window-97b',"
             "published_snapshot_id=848 WHERE id='window-2'"
         )
-        for table in (
+        authority_tables = (
             "structure_sync_event_staging",
             "structure_sync_event_market_staging",
             "structure_sync_market_staging",
-        ):
+            "structure_sync_event_metadata_staging",
+            "structure_sync_event_source_progress",
+            "structure_sync_event_source_receipts",
+            "structure_sync_event_conflict_summaries",
+            "structure_sync_event_conflict_proofs",
+            "structure_sync_event_conflict_merkle_nodes",
+            "structure_sync_event_member_staging",
+            "structure_sync_event_member_progress",
+            "structure_sync_event_member_receipts",
+            "structure_sync_event_group_truth_staging",
+            "structure_sync_event_group_truth_progress",
+            "structure_sync_event_market_backfill_progress",
+        )
+        for table in authority_tables:
             con.execute(
                 f"UPDATE {table} SET window_id='window-97b' WHERE window_id='window-2'"
             )
+        source_receipt = list(con.execute(
+            "SELECT * FROM structure_sync_event_source_receipts "
+            "WHERE window_id='window-97b'"
+        ).fetchone())
+        source_receipt[-1] = sqlite_store_module._structure_event_source_receipt_digest(
+            tuple(source_receipt[:-1])
+        )
+        con.execute(
+            "UPDATE structure_sync_event_source_receipts SET receipt_digest=? "
+            "WHERE window_id='window-97b'", (source_receipt[-1],)
+        )
+        source_identity = hashlib.sha256(json.dumps(
+            ("window-97b", source_receipt[1], source_receipt[2], source_receipt[-1]),
+            separators=(",", ":"),
+        ).encode()).hexdigest()
+        member = list(con.execute(
+            "SELECT * FROM structure_sync_event_member_receipts "
+            "WHERE window_id='window-97b'"
+        ).fetchone())
+        summaries = con.execute(
+            "SELECT event_id,global_conflict FROM "
+            "structure_sync_event_conflict_summaries WHERE window_id='window-97b' "
+            "ORDER BY event_id"
+        ).fetchall()
+        leaves = [
+            sqlite_store_module._event_conflict_leaf_hash(
+                window_id="window-97b", event_id=str(event_id),
+                global_conflict=bool(global_conflict),
+            )
+            for event_id, global_conflict in summaries
+        ]
+        conflict_merkle_root, conflict_proofs = (
+            sqlite_store_module._event_conflict_merkle_proofs(leaves)
+        )
+        for index, ((event_id, _global_conflict), leaf_hash, proof_json) in enumerate(
+            zip(summaries, leaves, conflict_proofs, strict=True)
+        ):
+            con.execute(
+                "UPDATE structure_sync_event_conflict_proofs SET leaf_index=?,"
+                "leaf_hash=?,proof_json=? WHERE window_id='window-97b' AND event_id=?",
+                (index, leaf_hash, proof_json, event_id),
+            )
+        member[3] = source_identity
+        member[16] = conflict_merkle_root
+        member[13] = sqlite_store_module._structure_event_member_receipt_digest(
+            tuple(member[:13]), event_conflict_count=int(member[14]),
+            event_conflict_root=str(member[15]),
+            event_conflict_merkle_root=str(member[16]),
+            source_group_truth_count=int(member[17]),
+            source_group_truth_root=str(member[18]),
+        )
+        con.execute(
+            "UPDATE structure_sync_event_member_receipts SET source_identity_hash=?,"
+            "receipt_digest=?,event_conflict_merkle_root=? WHERE window_id='window-97b'",
+            (source_identity, member[13], conflict_merkle_root),
+        )
+        member_progress = list(con.execute(
+            "SELECT * FROM structure_sync_event_member_progress "
+            "WHERE window_id='window-97b'"
+        ).fetchone())
+        state = list(sqlite_store_module._read_event_member_progress_state(
+            str(member_progress[5])
+        ))
+        state[3] = source_identity
+        member_state = sqlite_store_module._event_member_progress_state(
+            member_chain=state[0], source_event_count=state[1],
+            source_event_root=state[2], source_identity_hash=state[3],
+            window_checkpoint_at_ms=state[4], phase=state[5],
+            conflict_cursor=state[6], event_conflict_chain=state[7],
+            merkle_level=state[8], merkle_cursor=state[9], merkle_width=state[10],
+            merkle_pending_index=state[11], merkle_pending_hash=state[12],
+            proof_cursor=state[13], proof_count=state[14],
+        )
+        member_checkpoint = sqlite_store_module._structure_event_member_checkpoint_digest((
+            source_receipt[-1], member_progress[1], int(member_progress[2]),
+            int(member_progress[10]), int(member_progress[4]), int(member_progress[3]),
+            member_progress[12], member_state, member_progress[6],
+        ))
+        con.execute(
+            "UPDATE structure_sync_event_member_progress SET member_state=?,"
+            "source_receipt_digest=?,checkpoint_digest=? WHERE window_id='window-97b'",
+            (member_state, source_receipt[-1], member_checkpoint),
+        )
+        group = list(con.execute(
+            "SELECT * FROM structure_sync_event_group_truth_progress "
+            "WHERE window_id='window-97b'"
+        ).fetchone())
+        group[-1] = sqlite_store_module._structure_event_group_truth_checkpoint_digest((
+            source_receipt[-1], *group[1:11],
+        ))
+        con.execute(
+            "UPDATE structure_sync_event_group_truth_progress SET checkpoint_digest=? "
+            "WHERE window_id='window-97b'", (group[-1],)
+        )
         con.execute(
             "UPDATE structure_publications SET publication_id='publication-848',"
             "window_id='window-97b',snapshot_id=848 WHERE "
@@ -1210,6 +1330,7 @@ _DRIFT_RECEIPT_V2_DIGEST_FIELDS = (
     "source_event_hash",
     "source_market_hash",
     "source_identity_hash",
+    "projection_member_receipt_digest",
     "projection_universe_hash",
     "projection_group_truth_hash",
     "generation_universe_hash",
@@ -1660,23 +1781,56 @@ def test_v2_insert_failure_rolls_back_v1_supersession(tmp_path: Path) -> None:
         ]
 
 
+@pytest.mark.parametrize(
+    "failure_point",
+    (
+        "after-fresh-projection-progress-rename",
+        "after-fresh-projection-progress-copy",
+        "after-fresh-projection-progress-index-create",
+    ),
+)
 def test_fresh_projection_phase_migration_rolls_back_and_preserves_audit_rows(
     tmp_path: Path,
+    failure_point: str,
 ) -> None:
     store = _drift_store(tmp_path)
     comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
     with sqlite3.connect(store.db_path) as con:
-        sql = con.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND "
-            "name='structure_generation_drift_progress'"
-        ).fetchone()[0]
-        old_sql = str(sql).replace("'fresh-projection-members',", "", 1)
         columns = [
             str(row[1])
             for row in con.execute(
                 "PRAGMA table_info(structure_generation_drift_progress)"
             )
         ]
+        source_row = dict(zip(
+            columns,
+            con.execute("SELECT * FROM structure_generation_drift_progress").fetchone(),
+            strict=True,
+        ))
+        historical_ids = (comparison_id, "b" * 64, "c" * 64)
+        for historical_id, algorithm, classifier, phase in (
+            (historical_ids[1], "row-chain-sha256-v2", STRUCTURE_DRIFT_CLASSIFIER_V1, "sealed"),
+            (historical_ids[2], "serializable-sha256-v1", STRUCTURE_DRIFT_CLASSIFIER_V1, "stale"),
+        ):
+            row = {
+                **source_row,
+                "comparison_id": historical_id,
+                "hash_algorithm": algorithm,
+                "classifier_contract_version": classifier,
+                "phase": phase,
+                "terminal_reason": "legacy-terminal-reason-unspecified",
+            }
+            con.execute(
+                "INSERT INTO structure_generation_drift_progress("
+                + ",".join(columns) + ") VALUES ("
+                + ",".join("?" for _ in columns) + ")",
+                tuple(row[column] for column in columns),
+            )
+        sql = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND "
+            "name='structure_generation_drift_progress'"
+        ).fetchone()[0]
+        old_sql = str(sql).replace("'fresh-projection-members',", "", 1)
         column_sql = ",".join(columns)
         con.execute("DROP INDEX idx_structure_drift_progress_active")
         con.execute(
@@ -1699,7 +1853,7 @@ def test_fresh_projection_phase_migration_rolls_back_and_preserves_audit_rows(
         )
 
         def fail(point: str) -> None:
-            if point == "after-fresh-projection-progress-rename":
+            if point == failure_point:
                 raise RuntimeError("injected-fresh-phase-migration-failure")
 
         with pytest.raises(
@@ -1715,7 +1869,8 @@ def test_fresh_projection_phase_migration_rolls_back_and_preserves_audit_rows(
         assert "fresh-projection-members" not in rolled_back_sql
         assert con.execute(
             "SELECT comparison_id FROM structure_generation_drift_progress"
-        ).fetchall() == [(comparison_id,)]
+            " ORDER BY comparison_id"
+        ).fetchall() == [(value,) for value in sorted(historical_ids)]
 
         sqlite_store_module._migrate_structure_drift_fresh_projection_phase(con)
         upgraded_sql = con.execute(
@@ -1723,9 +1878,24 @@ def test_fresh_projection_phase_migration_rolls_back_and_preserves_audit_rows(
             "name='structure_generation_drift_progress'"
         ).fetchone()[0]
         assert "fresh-projection-members" in upgraded_sql
+        assert upgraded_sql == sql
         assert con.execute(
             "SELECT comparison_id FROM structure_generation_drift_progress"
-        ).fetchall() == [(comparison_id,)]
+            " ORDER BY comparison_id"
+        ).fetchall() == [(value,) for value in sorted(historical_ids)]
+        con.execute("PRAGMA foreign_keys=ON")
+        assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+        signature_before = con.execute(
+            "SELECT sql FROM sqlite_master WHERE name IN "
+            "('structure_generation_drift_progress','idx_structure_drift_progress_active') "
+            "ORDER BY type,name"
+        ).fetchall()
+        sqlite_store_module._migrate_structure_drift_fresh_projection_phase(con)
+        assert con.execute(
+            "SELECT sql FROM sqlite_master WHERE name IN "
+            "('structure_generation_drift_progress','idx_structure_drift_progress_active') "
+            "ORDER BY type,name"
+        ).fetchall() == signature_before
 
 
 def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> None:
@@ -1748,6 +1918,10 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
             (progress[1], progress[2]),
         ).fetchone()
         source_hashes = ("1" * 64, "2" * 64, "3" * 64)
+        member_receipt_digest = str(con.execute(
+            "SELECT receipt_digest FROM structure_sync_event_member_receipts "
+            "WHERE window_id=?", (str(progress[3]),),
+        ).fetchone()[0])
         sealed_class_counts = {
             "shared": 1,
             "fresh-addition": 0,
@@ -1788,6 +1962,7 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
             "source_event_hash": source_hashes[0],
             "source_market_hash": source_hashes[1],
             "source_identity_hash": source_hashes[2],
+            "projection_member_receipt_digest": member_receipt_digest,
             "projection_universe_hash": "4" * 64,
             "projection_group_truth_hash": "5" * 64,
             "generation_universe_hash": "6" * 64,
@@ -1838,10 +2013,12 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
         con.execute(
             "UPDATE structure_generation_drift_progress SET phase='sealed',"
             "source_event_hash=?,source_market_hash=?,source_identity_hash=?,"
-            "class_counts_json=?,class_digests_json=?,diagnostic_root=? "
+            "projection_member_receipt_digest=?,class_counts_json=?,"
+            "class_digests_json=?,diagnostic_root=? "
             "WHERE comparison_id=?",
             (
                 *source_hashes,
+                member_receipt_digest,
                 json.dumps(
                     {
                         **{
@@ -2358,7 +2535,6 @@ def test_v2_drift_commitments_are_chunk_partition_independent(tmp_path: Path) ->
         "diagnostic_root",
         "diagnostic_samples_json",
         "diagnostic_samples_digest",
-        "receipt_digest",
     )
     observed: list[tuple[object, ...]] = []
     for max_rows in (1, 17, 500):
@@ -2475,6 +2651,101 @@ def test_two_member_sibling_recovery_seals_v2_reconstruction(
     assert all(isinstance(value, str) and len(value) == 64 for value in row[2:4])
     assert json.loads(row[4]) == {}
     assert immutable_after == immutable_before
+
+
+def test_generation_truth_tamper_cannot_steer_fresh_projection_but_blocks_final_auth(
+    tmp_path: Path,
+) -> None:
+    stores = {
+        "baseline": _drift_store(tmp_path / "baseline", sibling_recovery=True),
+        "tampered": _drift_store(tmp_path / "tampered", sibling_recovery=True),
+    }
+    with sqlite3.connect(stores["tampered"].db_path) as con:
+        for (trigger,) in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND "
+            "tbl_name='structure_generation_group_truth'"
+        ).fetchall():
+            con.execute(f'DROP TRIGGER "{trigger}"')
+        con.execute(
+            "UPDATE structure_generation_group_truth SET membership_hash=? "
+            "WHERE snapshot_id=2 AND event_id='event-main'",
+            ("f" * 64,),
+        )
+
+    projection_evidence: dict[str, tuple[object, ...]] = {}
+    comparison_ids = {}
+    for label, store in stores.items():
+        comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+        comparison_ids[label] = comparison_id
+        for now_ms in range(3_001, 3_050):
+            store.advance_structure_drift_comparison_chunk(
+                comparison_id, max_rows=1, now_ms=now_ms
+            )
+            with sqlite3.connect(store.db_path) as con:
+                phase, counts_json, digests_json, diagnostic_counts_json = con.execute(
+                    "SELECT phase,class_counts_json,class_digests_json,"
+                    "diagnostic_counts_json FROM structure_generation_drift_progress "
+                    "WHERE comparison_id=?", (comparison_id,),
+                ).fetchone()
+            if phase == "generation-members":
+                counts = json.loads(counts_json)
+                digests = json.loads(digests_json)
+                projection_evidence[label] = (
+                    counts["projection_member_count"],
+                    digests["projection_member_root"],
+                    diagnostic_counts_json,
+                )
+                break
+        else:
+            pytest.fail("fresh projection did not checkpoint")
+
+    assert projection_evidence["baseline"] == projection_evidence["tampered"]
+    assert _run_drift_to_terminal(
+        stores["baseline"], comparison_ids["baseline"], start_ms=3_100
+    ) == "sealed"
+    assert _run_drift_to_terminal(
+        stores["tampered"], comparison_ids["tampered"], start_ms=3_100
+    ) == "stale"
+    tampered_status = stores["tampered"].structure_generation_drift_status()
+    assert tampered_status["authorized"] is False
+
+
+@pytest.mark.parametrize("terminal", ("sealed", "stale"))
+@pytest.mark.parametrize("tamper", ("missing-member-receipt", "progress-digest"))
+def test_terminal_authority_revalidates_current_member_receipt_without_leaking_evidence(
+    tmp_path: Path,
+    terminal: str,
+    tamper: str,
+) -> None:
+    store = _drift_store(
+        tmp_path,
+        omit_generation_market_id="addition" if terminal == "stale" else None,
+    )
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    assert _run_drift_to_terminal(store, comparison_id) == terminal
+    with sqlite3.connect(store.db_path) as con:
+        if tamper == "missing-member-receipt":
+            for (trigger,) in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger' AND "
+                "tbl_name='structure_sync_event_member_receipts'"
+            ).fetchall():
+                con.execute(f'DROP TRIGGER "{trigger}"')
+            con.execute(
+                "DELETE FROM structure_sync_event_member_receipts WHERE window_id='window-2'"
+            )
+        else:
+            con.execute(
+                "UPDATE structure_generation_drift_progress SET "
+                "projection_member_receipt_digest=? WHERE comparison_id=?",
+                ("e" * 64, comparison_id),
+            )
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is False
+    assert status["reason"] == "structure-drift-member-receipt-invalid"
+    assert "class_counts" not in status
+    assert "class_digests" not in status
+    assert "diagnostic_counts" not in status
+    assert "diagnostic_samples" not in status
 
 
 def test_generation_omission_finalizes_with_projection_missing_diagnostic(

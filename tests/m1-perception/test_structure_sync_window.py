@@ -54,6 +54,46 @@ def _schema_objects(con: sqlite3.Connection, prefix: str) -> tuple[tuple[str, st
     )
 
 
+_EVENT_MEMBER_PHASE_RANK = {
+    "deriving-members": 0,
+    "deriving-group-truth": 1,
+    "sealing-conflicts": 2,
+    "sealing-conflict-merkle": 3,
+    "sealing-conflict-proofs": 4,
+    "sealed": 5,
+}
+
+
+def _advance_event_members_until_sealed(
+    store: SQLiteStore,
+    window_id: str,
+    *,
+    limit: int = 500,
+    max_chunks: int = 32,
+) -> list[dict[str, object]]:
+    """Advance every authenticated phase with a strict progress bound."""
+    results: list[dict[str, object]] = []
+    last_rank = -1
+    for _ in range(max_chunks):
+        result = store.advance_structure_event_member_staging_chunk(
+            window_id=window_id, limit=limit,
+        )
+        assert result.get("reason") is None
+        assert result.get("failure_reason") is None
+        state = str(result["state"])
+        assert state in _EVENT_MEMBER_PHASE_RANK
+        rank = _EVENT_MEMBER_PHASE_RANK[state]
+        assert rank >= last_rank, (results, result)
+        last_rank = rank
+        results.append(result)
+        if result.get("sealed") is True:
+            assert result.get("complete") is True
+            return results
+    pytest.fail(
+        f"event-member authority did not seal within {max_chunks} chunks: {results}"
+    )
+
+
 # Verbatim relevant predecessor definitions copied from schemas.py at 9b117d4.
 # Tests never shell out to git and therefore remain deterministic after history pruning.
 _NINE_B117D4_EVENT_MEMBER_PREDECESSOR_DDL = """
@@ -453,7 +493,12 @@ def test_event_member_immutable_preserves_duplicate_ordinals_and_replace_guard(t
             0, "0" * 64, "0" * 64,
         )
         receipt_insert = (
-            "INSERT INTO structure_sync_event_member_receipts "
+            "INSERT INTO structure_sync_event_member_receipts("
+            "window_id,source_event_count,source_event_root,source_identity_hash,"
+            "metadata_contract,member_row_count,member_row_root,invalid_member_count,"
+            "invalid_member_root,terminal_event_cursor,terminal_member_ordinal,"
+            "terminal_member_byte_offset,sealed_at_ms,receipt_digest,"
+            "event_conflict_count,event_conflict_root,event_conflict_merkle_root) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         )
         con.execute(receipt_insert, receipt)
@@ -542,7 +587,12 @@ def test_event_member_immutable_rejects_identity_and_target_authority_bypass(
             "'{}','" + "d" * 64 + "')"
         )
         con.execute(
-            "INSERT INTO structure_sync_event_member_receipts VALUES "
+            "INSERT INTO structure_sync_event_member_receipts("
+            "window_id,source_event_count,source_event_root,source_identity_hash,"
+            "metadata_contract,member_row_count,member_row_root,invalid_member_count,"
+            "invalid_member_root,terminal_event_cursor,terminal_member_ordinal,"
+            "terminal_member_byte_offset,sealed_at_ms,receipt_digest,"
+            "event_conflict_count,event_conflict_root,event_conflict_merkle_root) VALUES "
             "('sealed-window',1,'" + "1" * 64 + "','" + "2" * 64
             + "','structure-event-member-staging-v1',1,'" + "3" * 64
             + "',0,'" + "4" * 64 + "','event-1',1,10,2,'" + "5" * 64
@@ -2408,8 +2458,15 @@ def test_event_member_derivation_is_bounded_500_500_200(tmp_path) -> None:
         store = SQLiteStore(store.db_path)
     assert [(r["rows_written"], r["member_ordinal"], r["complete"])
             for r in runs] == [(500, 499, False), (500, 999, False),
-                               (200, 1199, True)]
+                               (200, 1199, False)]
     assert counters == [500, 500, 200]
+    sealing = _advance_event_members_until_sealed(
+        store, window_id, max_chunks=8,
+    )
+    assert [run["state"] for run in sealing] == [
+        "deriving-group-truth", "deriving-group-truth",
+        "sealing-conflicts", "sealed",
+    ]
     assert store.structure_event_member_status(window_id=window_id)["sealed"] is True
     with sqlite3.connect(store.db_path) as con:
         assert [r[0] for r in con.execute(
@@ -2472,6 +2529,10 @@ def test_event_member_1200_full_bounded_counters_and_reopen_boundaries(
     assert decode_deltas == inspected == [500, 500, 200]
     assert max(candidate_deltas) <= 500
     assert whole_event_loads == 0
+    sealing = _advance_event_members_until_sealed(
+        store, window_id, max_chunks=8,
+    )
+    assert [run["state"] for run in sealing][-1] == "sealed"
     assert store.structure_event_member_status(window_id=window_id)["sealed"] is True
 
 
@@ -2480,6 +2541,18 @@ def test_event_member_cas_fault_is_atomic(tmp_path, fault) -> None:
     store = SQLiteStore(tmp_path / f"{fault}.db")
     store.init_schema()
     window_id = _seed_event_member_window(store, 2)
+    if fault == "receipt":
+        phases = []
+        for _ in range(4):
+            result = store.advance_structure_event_member_staging_chunk(
+                window_id=window_id,
+            )
+            assert result.get("reason") is None
+            assert result.get("failure_reason") is None
+            phases.append(result["state"])
+            if result["state"] == "sealing-conflicts":
+                break
+        assert phases == ["deriving-group-truth", "sealing-conflicts"]
     table = {"write": "structure_sync_event_member_staging",
              "progress": "structure_sync_event_member_progress",
              "receipt": "structure_sync_event_member_receipts"}[fault]
@@ -2487,16 +2560,25 @@ def test_event_member_cas_fault_is_atomic(tmp_path, fault) -> None:
     with sqlite3.connect(store.db_path) as con:
         con.execute(f"CREATE TRIGGER injected BEFORE {operation} ON {table} "
                     "BEGIN SELECT RAISE(ABORT,'injected-fault'); END")
+        before_progress = con.execute(
+            "SELECT * FROM structure_sync_event_member_progress WHERE window_id=?",
+            (window_id,),
+        ).fetchone()
+        before_member_count = con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_member_staging WHERE window_id=?",
+            (window_id,),
+        ).fetchone()[0]
     with pytest.raises(sqlite3.IntegrityError, match="injected-fault"):
         store.advance_structure_event_member_staging_chunk(window_id=window_id)
     with sqlite3.connect(store.db_path) as con:
         assert con.execute(
-            "SELECT COUNT(*) FROM structure_sync_event_member_staging"
-        ).fetchone()[0] == 0
+            "SELECT COUNT(*) FROM structure_sync_event_member_staging WHERE window_id=?",
+            (window_id,),
+        ).fetchone()[0] == before_member_count
         assert con.execute(
-            "SELECT event_cursor,member_ordinal,rows_written,member_byte_offset,"
-            "completed_at_ms FROM structure_sync_event_member_progress"
-        ).fetchone() == ("", 0, 0, 0, None)
+            "SELECT * FROM structure_sync_event_member_progress WHERE window_id=?",
+            (window_id,),
+        ).fetchone() == before_progress
         assert con.execute(
             "SELECT COUNT(*) FROM structure_sync_event_member_receipts"
         ).fetchone()[0] == 0
@@ -2508,13 +2590,14 @@ def test_event_member_cas_fault_is_atomic(tmp_path, fault) -> None:
     "invalid_member_count", "invalid_member_root", "terminal_event_cursor",
     "terminal_member_ordinal", "terminal_member_byte_offset", "sealed_at_ms",
     "receipt_digest", "event_conflict_count", "event_conflict_root",
-    "event_conflict_merkle_root",
+    "event_conflict_merkle_root", "source_group_truth_count",
+    "source_group_truth_root",
 ])
 def test_event_member_receipt_tamper_fails_closed(tmp_path, field) -> None:
     store = SQLiteStore(tmp_path / f"receipt-{field}.db")
     store.init_schema()
     window_id = _seed_event_member_window(store, 1)
-    store.advance_structure_event_member_staging_chunk(window_id=window_id)
+    _advance_event_members_until_sealed(store, window_id, max_chunks=4)
     with sqlite3.connect(store.db_path) as con:
         row = con.execute("SELECT * FROM structure_sync_event_member_receipts").fetchone()
         assert row[13] == sqlite_store_module._structure_event_member_receipt_digest(
@@ -2522,6 +2605,8 @@ def test_event_member_receipt_tamper_fails_closed(tmp_path, field) -> None:
             event_conflict_count=int(row[14]),
             event_conflict_root=str(row[15]),
             event_conflict_merkle_root=str(row[16]),
+            source_group_truth_count=int(row[17]),
+            source_group_truth_root=str(row[18]),
         )
         columns = [r[1] for r in con.execute(
             "PRAGMA table_info(structure_sync_event_member_receipts)"
@@ -2547,9 +2632,12 @@ def test_event_conflict_summary_is_frozen_after_receipt(tmp_path, operation) -> 
     store = SQLiteStore(tmp_path / f"conflict-frozen-{operation}.db")
     store.init_schema()
     window_id = _seed_event_member_window(store, 1)
-    assert store.advance_structure_event_member_staging_chunk(
-        window_id=window_id
-    )["sealed"] is True
+    sealing = _advance_event_members_until_sealed(
+        store, window_id, max_chunks=4,
+    )
+    assert [run["state"] for run in sealing] == [
+        "deriving-group-truth", "sealing-conflicts", "sealed",
+    ]
     statements = {
         "insert": (
             "INSERT INTO structure_sync_event_conflict_summaries VALUES (?,?,0)",
@@ -2879,7 +2967,13 @@ def test_event_member_multi_event_chunk_spends_one_shared_budget(tmp_path) -> No
         window_id=window_id, limit=5,
     )
     assert (first["rows_written"], first["complete"]) == (5, False)
-    assert (second["rows_written"], second["complete"]) == (2, True)
+    assert (second["rows_written"], second["complete"]) == (2, False)
+    sealing = _advance_event_members_until_sealed(
+        store, window_id, limit=5, max_chunks=4,
+    )
+    assert [run["state"] for run in sealing] == [
+        "deriving-group-truth", "sealing-conflicts", "sealed",
+    ]
 
 
 def test_event_member_utf8_resume_uses_authenticated_character_offset(monkeypatch) -> None:
@@ -3134,7 +3228,7 @@ def test_event_member_mixed_terminal_authority_fails_closed(tmp_path, missing) -
     store = SQLiteStore(tmp_path / f"member-mixed-{missing}.db")
     store.init_schema()
     window_id = _seed_event_member_window(store, 1)
-    store.advance_structure_event_member_staging_chunk(window_id=window_id)
+    _advance_event_members_until_sealed(store, window_id, max_chunks=4)
     with sqlite3.connect(store.db_path) as con:
         if missing == "progress":
             con.execute(

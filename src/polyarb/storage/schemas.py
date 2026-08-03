@@ -3134,6 +3134,32 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "parent_payload_hash TEXT NOT NULL DEFAULT '',checkpoint_digest TEXT NOT NULL DEFAULT '')",
     ),
     (
+        "after-group-truth-table",
+        "CREATE TABLE IF NOT EXISTS structure_sync_event_group_truth_staging ("
+        "window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),"
+        "event_id TEXT NOT NULL,group_id TEXT NOT NULL,neg_risk_type TEXT NOT NULL "
+        "CHECK(neg_risk_type IN ('standard','augmented')),expected_member_count INTEGER "
+        "NOT NULL CHECK(expected_member_count>=0),active_named_count INTEGER NOT NULL "
+        "CHECK(active_named_count>=0),membership_hash TEXT NOT NULL "
+        "CHECK(length(membership_hash)=64),quality TEXT NOT NULL CHECK(quality IN "
+        "('complete-supported','complete-unsupported','incomplete-source')),reason TEXT,"
+        "PRIMARY KEY(window_id,event_id,group_id))",
+    ),
+    (
+        "after-group-truth-progress-table",
+        "CREATE TABLE IF NOT EXISTS structure_sync_event_group_truth_progress ("
+        "window_id TEXT PRIMARY KEY REFERENCES structure_sync_windows(id) ON DELETE CASCADE,"
+        "event_cursor TEXT NOT NULL DEFAULT '',group_cursor TEXT NOT NULL DEFAULT '',"
+        "market_cursor TEXT NOT NULL DEFAULT '',member_ordinal INTEGER NOT NULL DEFAULT -1 "
+        "CHECK(member_ordinal>=-1),membership_state TEXT NOT NULL,member_count INTEGER NOT NULL "
+        "DEFAULT 0 CHECK(member_count>=0),active_named_count INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(active_named_count>=0),invalid_member_count INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(invalid_member_count>=0),truth_count INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(truth_count>=0),truth_state TEXT NOT NULL,checkpoint_at_ms INTEGER NOT NULL "
+        "CHECK(checkpoint_at_ms>=0),completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR "
+        "completed_at_ms>=0),checkpoint_digest TEXT NOT NULL)",
+    ),
+    (
         "after-receipt-table",
         "CREATE TABLE IF NOT EXISTS structure_sync_event_member_receipts ("
         "window_id TEXT PRIMARY KEY REFERENCES structure_sync_windows(id),"
@@ -3154,7 +3180,30 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "'0000000000000000000000000000000000000000000000000000000000000000' "
         "CHECK(length(event_conflict_root)=64),event_conflict_merkle_root TEXT NOT NULL "
         "DEFAULT '0000000000000000000000000000000000000000000000000000000000000000' "
-        "CHECK(length(event_conflict_merkle_root)=64))",
+        "CHECK(length(event_conflict_merkle_root)=64),source_group_truth_count INTEGER "
+        "NOT NULL DEFAULT 0 CHECK(source_group_truth_count>=0),source_group_truth_root "
+        "TEXT NOT NULL DEFAULT "
+        "'0000000000000000000000000000000000000000000000000000000000000000' "
+        "CHECK(length(source_group_truth_root)=64))",
+    ),
+    (
+        "after-group-scan-index",
+        "CREATE INDEX IF NOT EXISTS idx_structure_event_member_group_scan ON "
+        "structure_sync_event_member_staging(window_id,event_id,group_id,market_sort_key,"
+        "member_ordinal)",
+    ),
+    (
+        "after-group-truth-update-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_group_truth_update_guard "
+        "BEFORE UPDATE ON structure_sync_event_group_truth_staging BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-group-truth-frozen'); END",
+    ),
+    (
+        "after-group-truth-delete-guard",
+        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_group_truth_delete_guard "
+        "BEFORE DELETE ON structure_sync_event_group_truth_staging WHEN EXISTS (SELECT 1 "
+        "FROM structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN "
+        "SELECT RAISE(ABORT,'structure-event-group-truth-frozen'); END",
     ),
     (
         "after-projection-index-drop",
@@ -3530,6 +3579,10 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_progress (
         CHECK(length(diagnostic_samples_digest)=64),
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms >= 0),
+    projection_member_receipt_digest TEXT CHECK(
+        projection_member_receipt_digest IS NULL OR
+        length(projection_member_receipt_digest)=64
+    ),
     UNIQUE(
         legacy_snapshot_id,generation_snapshot_id,publication_id,window_id,
         normalization_contract_version,exact_receipt_digest,
@@ -3599,6 +3652,10 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_receipts (
     unclassified_count INTEGER NOT NULL CHECK(unclassified_count=0),
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
     receipt_digest TEXT NOT NULL CHECK(length(receipt_digest)=64),
+    projection_member_receipt_digest TEXT CHECK(
+        projection_member_receipt_digest IS NULL OR
+        length(projection_member_receipt_digest)=64
+    ),
     CHECK(published_snapshot_id=generation_snapshot_id),
     UNIQUE(
         legacy_snapshot_id,generation_snapshot_id,publication_id,window_id,
@@ -3636,7 +3693,11 @@ CREATE TABLE IF NOT EXISTS structure_generation_drift_terminal_receipts (
     diagnostic_samples_digest TEXT NOT NULL CHECK(length(diagnostic_samples_digest)=64),
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms>=0),
     checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms>=0),
-    receipt_digest TEXT NOT NULL CHECK(length(receipt_digest)=64)
+    receipt_digest TEXT NOT NULL CHECK(length(receipt_digest)=64),
+    projection_member_receipt_digest TEXT CHECK(
+        projection_member_receipt_digest IS NULL OR
+        length(projection_member_receipt_digest)=64
+    )
 );
 CREATE TRIGGER IF NOT EXISTS trg_structure_drift_terminal_receipt_update
 BEFORE UPDATE ON structure_generation_drift_terminal_receipts

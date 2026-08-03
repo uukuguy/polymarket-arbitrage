@@ -170,15 +170,60 @@ def _structure_event_member_receipt_digest(
     event_conflict_count: int,
     event_conflict_root: str,
     event_conflict_merkle_root: str,
+    source_group_truth_count: int = 0,
+    source_group_truth_root: str = "0" * 64,
 ) -> str:
     if len(values) != len(_STRUCTURE_EVENT_MEMBER_RECEIPT_FIELDS):
         raise ValueError("invalid-structure-event-member-receipt-fields")
     return hashlib.sha256(json.dumps(
         (*values, "structure-event-global-conflict-v1", event_conflict_count,
-         event_conflict_root, event_conflict_merkle_root),
+         event_conflict_root, event_conflict_merkle_root,
+         "structure-event-source-group-truth-v1", source_group_truth_count,
+         source_group_truth_root),
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()).hexdigest()
+
+
+def _structure_event_group_truth_checkpoint_digest(
+    values: tuple[object, ...],
+) -> str:
+    return hashlib.sha256(json.dumps(
+        ("structure-event-source-group-truth-checkpoint-v1", *values),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
+def _validated_structure_event_group_truth(
+    con: sqlite3.Connection,
+    window_id: str,
+    *,
+    expected: tuple[int, str] | None = None,
+) -> tuple[int, str]:
+    if expected is not None:
+        if (
+            type(expected[0]) is not int
+            or expected[0] < 0
+            or not isinstance(expected[1], str)
+            or len(expected[1]) != 64
+        ):
+            raise ValueError("structure-event-group-truth-invalid")
+        return expected
+    progress = None
+    progress = con.execute(
+        "SELECT truth_count,truth_state,completed_at_ms FROM "
+        "structure_sync_event_group_truth_progress WHERE window_id=?",
+        (window_id,),
+    ).fetchone()
+    if progress is None or progress[2] is None:
+        raise ValueError("structure-event-group-truth-incomplete")
+    stored = RowChainSHA256.from_json(
+        str(progress[1]), expected_domain="source-event"
+    )
+    if stored.count != int(progress[0]):
+        raise ValueError("structure-event-group-truth-invalid")
+    return stored.count, stored.hexdigest()
 
 
 def _event_conflict_leaf_hash(
@@ -337,7 +382,9 @@ def _read_event_member_progress_state(
                 or checkpoint < 0 or not isinstance(root, str) or len(root) != 64
                 or not isinstance(identity, str) or len(identity) != 64):
             raise ValueError
-        if phase not in {"members", "conflicts", "merkle", "proofs", "complete"}:
+        if phase not in {
+            "members", "group-truth", "conflicts", "merkle", "proofs", "complete"
+        }:
             raise ValueError
         if (
             not isinstance(conflict_cursor, str)
@@ -424,6 +471,12 @@ def _migrate_structure_event_member_schema(
             ),
             (
                 "event_conflict_merkle_root",
+                "TEXT NOT NULL DEFAULT "
+                "'0000000000000000000000000000000000000000000000000000000000000000'",
+            ),
+            ("source_group_truth_count", "INTEGER NOT NULL DEFAULT 0"),
+            (
+                "source_group_truth_root",
                 "TEXT NOT NULL DEFAULT "
                 "'0000000000000000000000000000000000000000000000000000000000000000'",
             ),
@@ -1010,16 +1063,27 @@ def _migrate_structure_drift_classifier_v2(
                 empty_samples_digest,
             ),
         )
-        for row in con.execute(
-            "SELECT " + ",".join(_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS) + " FROM "
-            "structure_generation_drift_receipts"
-        ).fetchall():
-            payload = dict(zip(_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS, row, strict=True))
-            con.execute(
-                "UPDATE structure_generation_drift_receipts SET receipt_digest=? "
-                "WHERE comparison_id=?",
-                (_structure_drift_receipt_digest(payload), str(payload["comparison_id"])),
+        migrated_receipt_columns = {
+            str(row[1]) for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_receipts)"
             )
+        }
+        if set(_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS) <= migrated_receipt_columns:
+            for row in con.execute(
+                "SELECT " + ",".join(_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS)
+                + " FROM structure_generation_drift_receipts"
+            ).fetchall():
+                payload = dict(zip(
+                    _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS, row, strict=True
+                ))
+                con.execute(
+                    "UPDATE structure_generation_drift_receipts SET receipt_digest=? "
+                    "WHERE comparison_id=?",
+                    (
+                        _structure_drift_receipt_digest(payload),
+                        str(payload["comparison_id"]),
+                    ),
+                )
         con.execute("DROP TABLE structure_generation_drift_receipts_classifier_v1")
         con.execute(
             "CREATE TRIGGER trg_structure_drift_receipt_update BEFORE UPDATE ON "
@@ -1137,11 +1201,42 @@ def _migrate_structure_drift_fresh_projection_phase(
             "structure_generation_drift_progress(checkpoint_at_ms DESC,comparison_id) "
             "WHERE phase NOT IN ('sealed','stale')"
         )
+        if fault_hook is not None:
+            fault_hook("after-fresh-projection-progress-index-create")
         con.execute("RELEASE SAVEPOINT structure_drift_fresh_projection_phase_migration")
     except BaseException:
         con.execute("ROLLBACK TO SAVEPOINT structure_drift_fresh_projection_phase_migration")
         con.execute("RELEASE SAVEPOINT structure_drift_fresh_projection_phase_migration")
         raise
+
+
+def _migrate_structure_drift_member_receipt_binding(
+    con: sqlite3.Connection,
+) -> None:
+    """Add the sidecar receipt cross-binding to every drift authority shape."""
+    definitions = {
+        "structure_generation_drift_progress": (
+            "projection_member_receipt_digest TEXT CHECK("
+            "projection_member_receipt_digest IS NULL OR "
+            "length(projection_member_receipt_digest)=64)"
+        ),
+        "structure_generation_drift_receipts": (
+            "projection_member_receipt_digest TEXT CHECK("
+            "projection_member_receipt_digest IS NULL OR "
+            "length(projection_member_receipt_digest)=64)"
+        ),
+        "structure_generation_drift_terminal_receipts": (
+            "projection_member_receipt_digest TEXT CHECK("
+            "projection_member_receipt_digest IS NULL OR "
+            "length(projection_member_receipt_digest)=64)"
+        ),
+    }
+    for table, definition in definitions.items():
+        columns = {
+            str(row[1]) for row in con.execute(f"PRAGMA table_info({table})")
+        }
+        if columns and "projection_member_receipt_digest" not in columns:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
 
 def _install_structure_generation_freeze_triggers(con: sqlite3.Connection) -> None:
@@ -1358,6 +1453,7 @@ _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS = (
     "source_event_hash",
     "source_market_hash",
     "source_identity_hash",
+    "projection_member_receipt_digest",
     "projection_universe_hash",
     "projection_group_truth_hash",
     "generation_universe_hash",
@@ -1403,6 +1499,7 @@ _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS = (
     "pointer_validation_hash",
     "generation_certification_hash",
     "source_identity_hash",
+    "projection_member_receipt_digest",
     "terminal_reason",
     "class_counts_json",
     "class_digests_json",
@@ -2794,6 +2891,7 @@ class SQLiteStore:
             _migrate_structure_drift_hash_v2(con)
             _migrate_structure_drift_classifier_v2(con)
             _migrate_structure_drift_fresh_projection_phase(con)
+            _migrate_structure_drift_member_receipt_binding(con)
             con.executescript(STRUCTURE_GENERATIONS_DDL)
             con.execute("ANALYZE idx_structure_generation_memberships_drift_scan")
             con.execute("ANALYZE idx_event_market_memberships_drift_scan")
@@ -3158,6 +3256,10 @@ class SQLiteStore:
                 raise ValueError("structure-event-member-progress-invalid")
             if phase == "complete":
                 raise ValueError("structure-event-member-progress-invalid")
+            if phase == "group-truth":
+                return self._advance_structure_event_group_truth_chunk(
+                    window_id=window_id, limit=limit, now_ms=now_ms
+                )
             if phase == "merkle":
                 children = con.execute(
                     "SELECT node_index,node_hash FROM "
@@ -3366,6 +3468,9 @@ class SQLiteStore:
                     proof_updates,
                 )
                 if proofs_complete:
+                    group_count, group_root = _validated_structure_event_group_truth(
+                        con, window_id
+                    )
                     receipt = (
                         window_id, source_count, source_root, source_identity,
                         STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT, chain.count,
@@ -3378,12 +3483,14 @@ class SQLiteStore:
                         event_conflict_count=conflict_chain.count,
                         event_conflict_root=conflict_chain.hexdigest(),
                         event_conflict_merkle_root=merkle_root,
+                        source_group_truth_count=group_count,
+                        source_group_truth_root=group_root,
                     )
                     con.execute(
                         "INSERT INTO structure_sync_event_member_receipts VALUES ("
-                        + ",".join("?" for _ in range(17)) + ")",
+                        + ",".join("?" for _ in range(19)) + ")",
                         (*receipt, receipt_digest, conflict_chain.count,
-                         conflict_chain.hexdigest(), merkle_root),
+                         conflict_chain.hexdigest(), merkle_root, group_count, group_root),
                     )
                 updated = con.execute(
                     "UPDATE structure_sync_event_member_progress SET member_state=?,"
@@ -3504,6 +3611,9 @@ class SQLiteStore:
                     ],
                 )
                 if conflict_complete:
+                    group_count, group_root = _validated_structure_event_group_truth(
+                        con, window_id
+                    )
                     receipt = (
                         window_id, source_count, source_root, source_identity,
                         STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT, chain.count,
@@ -3516,12 +3626,14 @@ class SQLiteStore:
                         event_conflict_count=conflict_chain.count,
                         event_conflict_root=conflict_chain.hexdigest(),
                         event_conflict_merkle_root=merkle_root,
+                        source_group_truth_count=group_count,
+                        source_group_truth_root=group_root,
                     )
                     con.execute(
                         "INSERT INTO structure_sync_event_member_receipts VALUES ("
-                        + ",".join("?" for _ in range(17)) + ")",
+                        + ",".join("?" for _ in range(19)) + ")",
                         (*receipt, receipt_digest, conflict_chain.count,
-                         conflict_chain.hexdigest(), merkle_root),
+                         conflict_chain.hexdigest(), merkle_root, group_count, group_root),
                     )
                 updated = con.execute(
                     "UPDATE structure_sync_event_member_progress SET member_state=?,"
@@ -3642,7 +3754,7 @@ class SQLiteStore:
             conflict_rows: list[tuple[object, ...]] = []
             merkle_root = ""
             conflict_proofs: list[tuple[object, ...]] = []
-            if complete:
+            if complete and phase == "conflicts":
                 conflict_rows = con.execute(
                     "SELECT event_id,global_conflict FROM "
                     "structure_sync_event_conflict_summaries WHERE window_id=? "
@@ -3702,7 +3814,7 @@ class SQLiteStore:
                 phase=(
                     "complete" if conflict_complete
                     else "merkle" if summaries_complete
-                    else "conflicts" if complete else "members"
+                    else "group-truth" if complete else "members"
                 ),
                 conflict_cursor=(
                     str(conflict_rows[-1][0]) if conflict_rows else ""
@@ -3726,7 +3838,7 @@ class SQLiteStore:
                   r.market_id, r.market_sort_key, r.group_id, r.member_kind,
                   r.active, r.closed, r.payload_json, r.payload_hash) for r in rows],
             )
-            if complete:
+            if conflict_proofs:
                 con.executemany(
                     "INSERT INTO structure_sync_event_conflict_proofs VALUES (?,?,?,?,?) "
                     "ON CONFLICT(window_id,event_id) DO UPDATE SET "
@@ -3753,6 +3865,9 @@ class SQLiteStore:
                 invalid_chain.to_json(),
             ))
             if conflict_complete:
+                group_count, group_root = _validated_structure_event_group_truth(
+                    con, window_id
+                )
                 receipt = (
                     window_id, source_count, source_root, source_identity,
                     STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT, chain.count,
@@ -3765,12 +3880,14 @@ class SQLiteStore:
                     event_conflict_count=conflict_chain.count,
                     event_conflict_root=conflict_chain.hexdigest(),
                     event_conflict_merkle_root=merkle_root,
+                    source_group_truth_count=group_count,
+                    source_group_truth_root=group_root,
                 )
                 con.execute(
                     "INSERT INTO structure_sync_event_member_receipts VALUES ("
-                    + ",".join("?" for _ in range(17)) + ")",
+                    + ",".join("?" for _ in range(19)) + ")",
                     (*receipt, receipt_digest, conflict_chain.count,
-                     conflict_chain.hexdigest(), merkle_root),
+                     conflict_chain.hexdigest(), merkle_root, group_count, group_root),
                 )
             updated = con.execute(
                 "UPDATE structure_sync_event_member_progress SET event_cursor=?,"
@@ -3793,8 +3910,294 @@ class SQLiteStore:
                     "member_byte_offset": stored_offset,
                     "state": (
                         "sealed" if conflict_complete
-                        else "sealing-conflicts" if complete else "deriving-members"
+                        else "deriving-group-truth" if complete
+                        else "deriving-members"
                     )}
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def _advance_structure_event_group_truth_chunk(
+        self,
+        *,
+        window_id: str,
+        limit: int,
+        now_ms: int,
+    ) -> dict[str, object]:
+        """Derive receipt-bound source group truth with at most ``limit`` members."""
+        con = self._connect_writer()
+        try:
+            progress = con.execute(
+                "SELECT event_cursor,group_cursor,market_cursor,member_ordinal,"
+                "membership_state,member_count,active_named_count,invalid_member_count,"
+                "truth_count,truth_state,checkpoint_at_ms,completed_at_ms,"
+                "checkpoint_digest FROM structure_sync_event_group_truth_progress "
+                "WHERE window_id=?",
+                (window_id,),
+            ).fetchone()
+            member_progress = con.execute(
+                "SELECT event_cursor,member_ordinal,rows_written,member_byte_offset,"
+                "member_state,diagnostic_state,member_character_offset,"
+                "source_receipt_digest,parent_payload_hash,checkpoint_digest "
+                "FROM structure_sync_event_member_progress WHERE window_id=?",
+                (window_id,),
+            ).fetchone()
+            if member_progress is None:
+                raise ValueError("structure-event-group-truth-progress-invalid")
+            if progress is None:
+                membership_state = SerializableSHA256.new().to_json()
+                truth_state = RowChainSHA256.new("source-event").to_json()
+                group_checkpoint = _structure_event_group_truth_checkpoint_digest((
+                    member_progress[7], "", "", "", -1, membership_state,
+                    0, 0, 0, 0, truth_state,
+                ))
+                con.execute("BEGIN IMMEDIATE")
+                con.execute(
+                    "INSERT OR IGNORE INTO structure_sync_event_group_truth_progress "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        window_id, "", "", "", -1, membership_state, 0, 0, 0, 0,
+                        truth_state, now_ms, None, group_checkpoint,
+                    ),
+                )
+                con.execute("COMMIT")
+                progress = con.execute(
+                    "SELECT event_cursor,group_cursor,market_cursor,member_ordinal,"
+                    "membership_state,member_count,active_named_count,"
+                    "invalid_member_count,truth_count,truth_state,checkpoint_at_ms,"
+                    "completed_at_ms,checkpoint_digest FROM "
+                    "structure_sync_event_group_truth_progress WHERE window_id=?",
+                    (window_id,),
+                ).fetchone()
+            if progress is None or progress[11] is not None:
+                raise ValueError("structure-event-group-truth-progress-invalid")
+            (
+                member_chain, source_count, source_root, source_identity, checkpoint,
+                member_phase, conflict_cursor, conflict_chain, merkle_level,
+                merkle_cursor, merkle_width, merkle_pending_index,
+                merkle_pending_hash, proof_cursor, proof_count,
+            ) = _read_event_member_progress_state(str(member_progress[4]))
+            if member_phase != "group-truth":
+                raise ValueError("structure-event-group-truth-phase-invalid")
+            expected_checkpoint = _structure_event_group_truth_checkpoint_digest((
+                member_progress[7], *progress[:10],
+            ))
+            if progress[12] != expected_checkpoint:
+                raise ValueError("structure-event-group-truth-checkpoint-invalid")
+            membership = SerializableSHA256.from_json(str(progress[4]))
+            truth_chain = RowChainSHA256.from_json(
+                str(progress[9]), expected_domain="source-event"
+            )
+            if truth_chain.count != int(progress[8]):
+                raise ValueError("structure-event-group-truth-progress-invalid")
+            cursor_event, cursor_group, cursor_market, cursor_ordinal = (
+                str(progress[0]), str(progress[1]), str(progress[2]), int(progress[3])
+            )
+            rows = con.execute(
+                "SELECT member.event_id,COALESCE(member.group_id,''),"
+                "member.market_sort_key,member.member_ordinal,member.market_id,"
+                "member.member_kind,member.active,member.closed FROM "
+                "structure_sync_event_member_staging member WHERE member.window_id=? AND "
+                "(?='' OR member.event_id>? OR (member.event_id=? AND "
+                "(COALESCE(member.group_id,'')>? OR (COALESCE(member.group_id,'')=? AND "
+                "(member.market_sort_key>? OR (member.market_sort_key=? AND "
+                "member.member_ordinal>?)))))) ORDER BY member.event_id,"
+                "COALESCE(member.group_id,''),member.market_sort_key,member.member_ordinal "
+                "LIMIT ?",
+                (
+                    window_id, cursor_event, cursor_event, cursor_event, cursor_group,
+                    cursor_group, cursor_market, cursor_market, cursor_ordinal, limit + 1,
+                ),
+            ).fetchall()
+            selected, lookahead = rows[:limit], rows[limit:]
+            event_ids = sorted({
+                str(row[0]) for row in selected
+            } | ({cursor_event} if cursor_event else set()))
+            flag_rows: dict[str, tuple[object, ...]] = {}
+            if event_ids:
+                placeholders = ",".join("?" for _ in event_ids)
+                for row in con.execute(
+                    "SELECT event_id,json_type(payload_json,'$.negRisk'),"
+                    "json_extract(payload_json,'$.negRisk'),"
+                    "json_type(payload_json,'$.enableNegRisk'),"
+                    "json_extract(payload_json,'$.enableNegRisk'),"
+                    "json_type(payload_json,'$.negRiskAugmented'),"
+                    "json_extract(payload_json,'$.negRiskAugmented') FROM "
+                    "structure_sync_event_staging WHERE window_id=? AND "
+                    f"event_id IN ({placeholders})",
+                    (window_id, *event_ids),
+                ):
+                    flag_rows[str(row[0])] = tuple(row[1:])
+
+            serialized_membership = json.loads(str(progress[4]))
+            current_key = (
+                (cursor_event, cursor_group)
+                if cursor_event
+                and isinstance(serialized_membership, dict)
+                and int(serialized_membership.get("byte_count", 0)) > 0
+                else None
+            )
+            member_count = int(progress[5])
+            active_named_count = int(progress[6])
+            invalid_count = int(progress[7])
+            truth_rows: list[tuple[object, ...]] = []
+
+            def start_group(event_id: str, group_id: str) -> None:
+                nonlocal membership, member_count, active_named_count, invalid_count
+                membership = SerializableSHA256.new()
+                prefix = json.dumps(
+                    [event_id, group_id], ensure_ascii=False, separators=(",", ":")
+                )[:-1] + ",["
+                membership.update(prefix.encode())
+                member_count = active_named_count = invalid_count = 0
+
+            def finish_group(event_id: str, group_id: str) -> None:
+                nonlocal membership
+                membership.update(b"]]")
+                membership_root = membership.hexdigest()
+                flags = flag_rows.get(event_id)
+                flags_valid = (
+                    flags is not None
+                    and flags[0] in {"true", "false"}
+                    and flags[2] in {"true", "false"}
+                    and flags[4] in {"true", "false"}
+                    and flags[1] == 1
+                    and flags[3] == 1
+                )
+                augmented = flags is not None and flags[5] == 1
+                if not group_id or not flags_valid or invalid_count or member_count == 0:
+                    quality, reason = "incomplete-source", (
+                        "event-neg-risk-flags-invalid"
+                        if not flags_valid else "event-membership-member-invalid"
+                    )
+                elif augmented:
+                    quality, reason = (
+                        "complete-unsupported", "augmented-neg-risk-not-supported"
+                    )
+                elif active_named_count == member_count:
+                    quality, reason = "complete-supported", None
+                else:
+                    quality, reason = (
+                        "complete-unsupported",
+                        "standard-neg-risk-has-non-tradable-members",
+                    )
+                if group_id:
+                    truth = (
+                        window_id, event_id, group_id,
+                        "augmented" if augmented else "standard", member_count,
+                        active_named_count, membership_root, quality, reason,
+                    )
+                    truth_rows.append(truth)
+                    truth_chain.update(("structure-event-source-group-truth-v1", *truth[1:]))
+
+            for row in selected:
+                key = (str(row[0]), str(row[1]))
+                if current_key != key:
+                    if current_key is not None:
+                        finish_group(*current_key)
+                    start_group(*key)
+                    current_key = key
+                market_id, member_kind, active, closed = row[4:8]
+                valid = (
+                    isinstance(market_id, str) and bool(market_id)
+                    and member_kind in {"named", "other", "inactive-reserved"}
+                    and active in {0, 1} and closed in {0, 1}
+                )
+                if valid:
+                    if member_count:
+                        membership.update(b",")
+                    membership.update(json.dumps(
+                        (str(market_id), str(member_kind), bool(active), bool(closed)),
+                        ensure_ascii=False, separators=(",", ":"),
+                    ).encode())
+                    member_count += 1
+                    active_named_count += int(
+                        member_kind == "named" and active == 1
+                    )
+                else:
+                    invalid_count += 1
+                cursor_event, cursor_group = key
+                cursor_market, cursor_ordinal = str(row[2]), int(row[3])
+            complete = not lookahead
+            if current_key is not None and (
+                complete
+                or (
+                    lookahead
+                    and (str(lookahead[0][0]), str(lookahead[0][1]))
+                    != current_key
+                )
+            ):
+                finish_group(*current_key)
+                current_key = None
+                membership = SerializableSHA256.new()
+                member_count = active_named_count = invalid_count = 0
+            next_truth_count = truth_chain.count
+            next_checkpoint = _structure_event_group_truth_checkpoint_digest((
+                member_progress[7], cursor_event, cursor_group, cursor_market,
+                cursor_ordinal, membership.to_json(), member_count,
+                active_named_count, invalid_count, next_truth_count,
+                truth_chain.to_json(),
+            ))
+            con.execute("BEGIN IMMEDIATE")
+            current = con.execute(
+                "SELECT event_cursor,group_cursor,market_cursor,member_ordinal,"
+                "membership_state,member_count,active_named_count,invalid_member_count,"
+                "truth_count,truth_state,checkpoint_at_ms,completed_at_ms,"
+                "checkpoint_digest FROM structure_sync_event_group_truth_progress "
+                "WHERE window_id=?", (window_id,),
+            ).fetchone()
+            if current != progress:
+                raise ValueError("structure-event-group-truth-cursor-race")
+            con.executemany(
+                "INSERT INTO structure_sync_event_group_truth_staging VALUES "
+                "(?,?,?,?,?,?,?,?,?)", truth_rows,
+            )
+            con.execute(
+                "UPDATE structure_sync_event_group_truth_progress SET event_cursor=?,"
+                "group_cursor=?,market_cursor=?,member_ordinal=?,membership_state=?,"
+                "member_count=?,active_named_count=?,invalid_member_count=?,truth_count=?,"
+                "truth_state=?,checkpoint_at_ms=?,completed_at_ms=?,checkpoint_digest=? "
+                "WHERE window_id=?",
+                (
+                    cursor_event, cursor_group, cursor_market, cursor_ordinal,
+                    membership.to_json(), member_count, active_named_count, invalid_count,
+                    next_truth_count, truth_chain.to_json(), now_ms,
+                    now_ms if complete else None, next_checkpoint, window_id,
+                ),
+            )
+            if complete:
+                next_member_state = _event_member_progress_state(
+                    member_chain=member_chain, source_event_count=source_count,
+                    source_event_root=source_root, source_identity_hash=source_identity,
+                    window_checkpoint_at_ms=checkpoint, phase="conflicts",
+                    conflict_cursor=conflict_cursor,
+                    event_conflict_chain=conflict_chain,
+                    merkle_level=merkle_level, merkle_cursor=merkle_cursor,
+                    merkle_width=merkle_width,
+                    merkle_pending_index=merkle_pending_index,
+                    merkle_pending_hash=merkle_pending_hash,
+                    proof_cursor=proof_cursor, proof_count=proof_count,
+                )
+                next_member_checkpoint = _structure_event_member_checkpoint_digest((
+                    member_progress[7], member_progress[0], int(member_progress[1]),
+                    int(member_progress[6]), int(member_progress[3]),
+                    int(member_progress[2]), member_progress[8], next_member_state,
+                    member_progress[5],
+                ))
+                con.execute(
+                    "UPDATE structure_sync_event_member_progress SET member_state=?,"
+                    "checkpoint_at_ms=?,checkpoint_digest=? WHERE window_id=?",
+                    (next_member_state, now_ms, next_member_checkpoint, window_id),
+                )
+            con.execute("COMMIT")
+            return {
+                "sealed": False, "complete": False,
+                "rows_written": len(selected),
+                "state": "sealing-conflicts" if complete else "deriving-group-truth",
+            }
         except BaseException:
             if con.in_transaction:
                 con.execute("ROLLBACK")
@@ -3926,6 +4329,8 @@ class SQLiteStore:
                             event_conflict_count=int(receipt[14]),
                             event_conflict_root=str(receipt[15]),
                             event_conflict_merkle_root=str(receipt[16]),
+                            source_group_truth_count=int(receipt[17]),
+                            source_group_truth_root=str(receipt[18]),
                         )
                         or progress[0] != receipt[9]
                         or int(progress[1]) != int(receipt[10])
@@ -3940,6 +4345,10 @@ class SQLiteStore:
                     return invalid
                 assert chain is not None and diagnostic is not None
                 assert conflict_chain is not None
+                group_count, group_root = _validated_structure_event_group_truth(
+                    con, window_id,
+                    expected=(int(receipt[17]), str(receipt[18])),
+                )
                 if ((count, root, identity) != source[:3]
                         or checkpoint < 0
                         or (count, root, identity) != tuple(receipt[1:4])
@@ -3950,7 +4359,9 @@ class SQLiteStore:
                         or phase != "complete"
                         or conflict_chain.count != int(receipt[14])
                         or conflict_chain.hexdigest() != receipt[15]
-                        or conflict_chain.count != source[0]):
+                        or conflict_chain.count != source[0]
+                        or group_count != int(receipt[17])
+                        or group_root != receipt[18]):
                     return invalid
             except (TypeError, ValueError, json.JSONDecodeError):
                 return invalid
@@ -3964,7 +4375,9 @@ class SQLiteStore:
                     "receipt_digest": str(receipt[13]),
                     "event_conflict_count": int(receipt[14]),
                     "event_conflict_root": str(receipt[15]),
-                    "event_conflict_merkle_root": str(receipt[16])}
+                    "event_conflict_merkle_root": str(receipt[16]),
+                    "source_group_truth_count": int(receipt[17]),
+                    "source_group_truth_root": str(receipt[18])}
 
     def advance_structure_event_market_backfill(
         self,
@@ -5799,13 +6212,13 @@ class SQLiteStore:
                     for truth_row in con.execute(
                         "WITH candidate(event_id,group_id) AS (VALUES "
                         + group_values
-                        + ") SELECT truth.event_id,truth.neg_risk_market_id,"
+                        + ") SELECT truth.event_id,truth.group_id,"
                         "truth.neg_risk_type,truth.quality,truth.reason,"
                         "truth.membership_hash FROM candidate JOIN "
-                        "structure_generation_group_truth truth ON "
-                        "truth.snapshot_id=? AND truth.event_id=candidate.event_id AND "
-                        "truth.neg_risk_market_id=candidate.group_id",
-                        (*group_params, generation_snapshot_id),
+                        "structure_sync_event_group_truth_staging truth ON "
+                        "truth.window_id=? AND truth.event_id=candidate.event_id AND "
+                        "truth.group_id=candidate.group_id",
+                        (*group_params, window_id),
                     ):
                         group_truth_by_key[(str(truth_row[0]), str(truth_row[1]))] = (
                             *truth_row[2:],
@@ -6024,10 +6437,11 @@ class SQLiteStore:
                 raw_market = candidate["raw_market"]
                 assert isinstance(raw_market, dict)
                 event_ids = tuple(relations.get(market_id, ()))
-                exact_rows = sidecar_rows_by_market.get(market_id, [])
-                source_row = exact_rows[0] if len(exact_rows) == 1 else None
+                exact_rows = staged_by_market.get(market_id, [])
+                source_row = exact_rows[0] if exact_rows else None
                 source_identity_valid = (
                     source_row is not None
+                    and len(exact_rows) == 1
                     and len(event_ids) == 1
                     and raw_market.get("id") == market_id
                     and source_row[0] == event_ids[0]
@@ -6140,8 +6554,8 @@ class SQLiteStore:
                 )
                 effective_truth = cached_truth or (
                     "standard",
-                    "complete-supported",
-                    None,
+                    "incomplete-source",
+                    "event-membership-missing-or-empty",
                     "",
                 )
                 group_evidence = (
@@ -6186,7 +6600,13 @@ class SQLiteStore:
                         sidecar_market_counts.get(market_id, 0) > 1 and not conflict
                     ),
                     identity_revalidated=True,
-                    invalid_event_membership=not source_identity_valid,
+                    # A globally conflicting identity is valid source evidence of
+                    # that conflict, not an invalid local membership.  Preserve a
+                    # bounded first witness so the stronger conflict diagnosis is
+                    # not masked merely because the market has multiple rows.
+                    invalid_event_membership=(
+                        not source_identity_valid and not conflict
+                    ),
                 )
                 eligible = (
                     member is not None
@@ -6711,7 +7131,8 @@ class SQLiteStore:
                 "class_digests_json=?,diagnostic_counts_json=?,"
                 "diagnostic_digest_state_json=?,diagnostic_root=?,"
                 "diagnostic_samples_json=?,diagnostic_samples_digest=?,"
-                "checkpoint_at_ms=? WHERE comparison_id=? AND "
+                "projection_member_receipt_digest=?,checkpoint_at_ms=? "
+                "WHERE comparison_id=? AND "
                 "phase='fresh-projection-members' AND checkpoint_at_ms=?",
                 (
                     next_phase,
@@ -6726,6 +7147,7 @@ class SQLiteStore:
                     advanced.diagnostic_root if advanced.complete else None,
                     samples_json,
                     hashlib.sha256(samples_json.encode()).hexdigest(),
+                    member_receipt_digest,
                     now_ms,
                     comparison_id,
                     prior_checkpoint,
@@ -7526,6 +7948,7 @@ class SQLiteStore:
                         "source_event_hash": "",
                         "source_market_hash": "",
                         "source_identity_hash": "",
+                        "projection_member_receipt_digest": "",
                         "projection_universe_hash": str(projection_root),
                         "projection_group_truth_hash": str(source_hash),
                         "generation_universe_hash": str(generation_root),
@@ -7561,7 +7984,8 @@ class SQLiteStore:
                     }
                     stored_source = writer.execute(
                         "SELECT source_event_count,source_market_count,source_event_hash,"
-                        "source_market_hash,source_identity_hash FROM "
+                        "source_market_hash,source_identity_hash,"
+                        "projection_member_receipt_digest FROM "
                         "structure_generation_drift_progress WHERE comparison_id=?",
                         (comparison_id,),
                     ).fetchone()
@@ -7575,6 +7999,9 @@ class SQLiteStore:
                     receipt_payload["source_event_hash"] = str(stored_source[2])
                     receipt_payload["source_market_hash"] = str(stored_source[3])
                     receipt_payload["source_identity_hash"] = str(stored_source[4])
+                    receipt_payload["projection_member_receipt_digest"] = str(
+                        stored_source[5]
+                    )
                     receipt_digest = _structure_drift_receipt_digest(receipt_payload)
                     receipt_columns = _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
                     writer.execute(
@@ -7647,6 +8074,9 @@ class SQLiteStore:
                         "pointer_validation_hash": str(progress[6]),
                         "generation_certification_hash": str(progress[7]),
                         "source_identity_hash": str(progress[18]),
+                        "projection_member_receipt_digest": str(
+                            digests.get("projection_member_receipt_digest", "")
+                        ),
                         "terminal_reason": terminal_reason,
                         "class_counts_json": class_counts_json,
                         "class_digests_json": class_digests_json,
@@ -8237,7 +8667,7 @@ class SQLiteStore:
                 "source_market_count,source_event_hash,source_market_hash,"
                 "source_identity_hash,classifier_contract_version,terminal_reason,"
                 "diagnostic_counts_json,diagnostic_root,diagnostic_samples_json,"
-                "diagnostic_samples_digest "
+                "diagnostic_samples_digest,projection_member_receipt_digest "
                 "FROM structure_generation_drift_progress WHERE "
                 "legacy_snapshot_id=? AND generation_snapshot_id=? AND "
                 "publication_id=? AND window_id=? AND "
@@ -8269,6 +8699,29 @@ class SQLiteStore:
                         if not exact_valid
                         else "structure-drift-progress-missing"
                     ),
+                }
+            current_member_status = self.structure_event_member_status(
+                window_id=str(current[4])
+            )
+            current_member_digest = current_member_status.get("receipt_digest")
+            if (
+                progress[1] in {"sealed", "stale"}
+                and (
+                    current_member_status.get("sealed") is not True
+                    or not isinstance(current_member_digest, str)
+                    or len(current_member_digest) != 64
+                    or progress[17] != current_member_digest
+                )
+            ):
+                return {
+                    **base,
+                    "authorization_mode": "none",
+                    "authorized": False,
+                    "progress_id": str(progress[0]),
+                    "hash_algorithm": str(progress[5]),
+                    "checkpoint_at_ms": int(progress[4]),
+                    "phase": str(progress[1]),
+                    "reason": "structure-drift-member-receipt-invalid",
                 }
             try:
                 progress_counts = json.loads(str(progress[2]))
@@ -8390,6 +8843,9 @@ class SQLiteStore:
                         and terminal_payload["generation_certification_hash"]
                         == current[6]
                         and terminal_payload["source_identity_hash"] == progress[10]
+                        and terminal_payload["projection_member_receipt_digest"]
+                        == progress[17]
+                        == current_member_digest
                         and terminal_payload["terminal_reason"] == progress[12]
                         and terminal_payload["class_counts_json"] == progress[2]
                         and terminal_payload["class_digests_json"] == progress[3]
@@ -8562,6 +9018,9 @@ class SQLiteStore:
                 and receipt_payload["source_event_hash"] == progress[8]
                 and receipt_payload["source_market_hash"] == progress[9]
                 and receipt_payload["source_identity_hash"] == progress[10]
+                and receipt_payload["projection_member_receipt_digest"]
+                == progress[17]
+                == current_member_digest
                 and receipt_payload["projection_universe_hash"]
                 == progress_digests.get("projection_member_root")
                 and receipt_payload["generation_universe_hash"]
@@ -9874,9 +10333,14 @@ class SQLiteStore:
             or any(type(value) is not int or value < 0 for value in expected.values())
         ):
             raise ValueError("invalid-structure-publication-metadata")
+        member_status = self.structure_event_member_status(window_id=window_id)
+        if (
+            member_status.get("reason")
+            == "structure-event-source-receipt-unavailable"
+        ):
+            raise ValueError("structure-event-source-receipt-unavailable")
         if not self.structure_event_market_backfill_complete(window_id):
             raise ValueError("structure-bootstrap-incomplete")
-        member_status = self.structure_event_member_status(window_id=window_id)
         if member_status.get("sealed") is not True:
             raise ValueError(
                 str(member_status.get("reason") or member_status.get("failure_reason")
@@ -12414,6 +12878,21 @@ class SQLiteStore:
                         (window_id, "", 0, 0, 0, member_state, diagnostic_state,
                          finished_at_ms, None, None, 0, receipt_digest, "",
                          member_checkpoint),
+                    )
+                    membership_state = SerializableSHA256.new().to_json()
+                    truth_state = RowChainSHA256.new("source-event").to_json()
+                    group_checkpoint = _structure_event_group_truth_checkpoint_digest((
+                        receipt_digest, "", "", "", -1, membership_state,
+                        0, 0, 0, 0, truth_state,
+                    ))
+                    con.execute(
+                        "INSERT INTO structure_sync_event_group_truth_progress VALUES "
+                        "(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            window_id, "", "", "", -1, membership_state,
+                            0, 0, 0, 0, truth_state, finished_at_ms, None,
+                            group_checkpoint,
+                        ),
                     )
             con.execute(
                 "UPDATE structure_sync_windows SET status=?,event_cursor=?,"

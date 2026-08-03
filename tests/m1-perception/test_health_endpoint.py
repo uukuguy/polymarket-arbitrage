@@ -594,7 +594,17 @@ def test_event_member_health_recovers_after_validated_seal(
         max_relationships=500,
         now_ms=3,
     )["completed"] is True
-    store.advance_structure_event_member_staging_chunk(window_id=window_id)
+    phases = []
+    for _ in range(4):
+        result = store.advance_structure_event_member_staging_chunk(
+            window_id=window_id,
+        )
+        assert result.get("reason") is None
+        assert result.get("failure_reason") is None
+        phases.append(result["state"])
+        if result.get("sealed") is True:
+            break
+    assert phases == ["deriving-group-truth", "sealing-conflicts", "sealed"]
     for path in ("/health", "/healthz"):
         sealed = http_test_client.get(path).json()["checks"][
             "snapshot:structure_event_members"

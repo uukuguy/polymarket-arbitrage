@@ -352,7 +352,9 @@ def test_event_conflict_projection_vm_steps_do_not_scale_with_relation_siblings(
         f"siblings_100={small[0]} siblings_50000={large[0]} "
         f"ratio={large[0] / small[0]:.3f}"
     )
-    assert small[1:] == large[1:] == (1_200, 1)
+    # The source-authenticated group truth rejects all 24 active siblings in
+    # the group containing one closed event-only member, plus the sentinel.
+    assert small[1:] == large[1:] == (1_176, 25)
     assert large[0] <= small[0] * 1.05, {"small": small, "large": large}
 
 
