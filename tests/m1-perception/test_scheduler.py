@@ -2106,6 +2106,7 @@ async def test_pending_structure_drift_slice_precedes_snapshot_child(
             "authorized": False,
             "phase": "generation-members",
             "reason": "structure-drift-incomplete",
+            "progress_id": "comparison-v2",
         }
     )
     store.initialize_structure_drift_comparison = MagicMock(
@@ -2167,6 +2168,7 @@ async def test_structure_drift_rechecks_quote_after_shared_lock(
             "authorized": False,
             "phase": "source-events",
             "reason": "structure-drift-incomplete",
+            "progress_id": "comparison-v2",
         }
     )
     store.initialize_structure_drift_comparison = MagicMock(
@@ -2214,6 +2216,7 @@ async def test_structure_drift_quote_due_wins_next_slice_admission(
             "authorized": False,
             "phase": "generation-members",
             "reason": "structure-drift-incomplete",
+            "progress_id": "comparison-v2",
         }
     )
     store.initialize_structure_drift_comparison = MagicMock(
@@ -2270,6 +2273,7 @@ async def test_request_now_reaches_same_structure_drift_child_path(
             "authorized": False,
             "phase": "legacy-members",
             "reason": "structure-drift-incomplete",
+            "progress_id": "comparison-v2",
         }
     )
     store.initialize_structure_drift_comparison = MagicMock(
@@ -2325,6 +2329,7 @@ async def test_structure_drift_cancellation_releases_shared_producer_lock(
             "authorized": False,
             "phase": "source-markets",
             "reason": "structure-drift-incomplete",
+            "progress_id": "comparison-v2",
         }
     )
     store.initialize_structure_drift_comparison = MagicMock(
@@ -2378,15 +2383,33 @@ async def test_structure_drift_terminal_write_failure_is_isolated_and_blocks_res
     )
     store = SQLiteStore(settings.db_path)
     store.init_schema()
-    store.structure_generation_drift_status = MagicMock(
-        return_value={
+    contract_initialized = False
+
+    def current_contract_status() -> dict[str, object]:
+        if not contract_initialized:
+            return {
+                "authorized": False,
+                "phase": None,
+                "reason": "structure-drift-progress-missing",
+            }
+        return {
             "authorized": False,
-            "phase": None,
-            "reason": "structure-drift-progress-missing",
+            "phase": "source-events",
+            "reason": "structure-drift-incomplete",
+            "progress_id": "comparison-v2",
         }
+
+    def initialize_current_contract(*, now_ms: int) -> str:
+        nonlocal contract_initialized
+        assert now_ms > 0
+        contract_initialized = True
+        return "comparison-v2"
+
+    store.structure_generation_drift_status = MagicMock(
+        side_effect=current_contract_status
     )
     store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v2"
+        side_effect=initialize_current_contract
     )
     child = AsyncMock(
         return_value=IsolatedStructureDriftCheckpoint(
@@ -2423,15 +2446,33 @@ async def test_structure_drift_cancel_survives_terminal_write_failure(
     )
     store = SQLiteStore(settings.db_path)
     store.init_schema()
-    store.structure_generation_drift_status = MagicMock(
-        return_value={
+    contract_initialized = False
+
+    def current_contract_status() -> dict[str, object]:
+        if not contract_initialized:
+            return {
+                "authorized": False,
+                "phase": None,
+                "reason": "structure-drift-progress-missing",
+            }
+        return {
             "authorized": False,
-            "phase": None,
-            "reason": "structure-drift-progress-missing",
+            "phase": "source-events",
+            "reason": "structure-drift-incomplete",
+            "progress_id": "comparison-v2",
         }
+
+    def initialize_current_contract(*, now_ms: int) -> str:
+        nonlocal contract_initialized
+        assert now_ms > 0
+        contract_initialized = True
+        return "comparison-v2"
+
+    store.structure_generation_drift_status = MagicMock(
+        side_effect=current_contract_status
     )
     store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v2"
+        side_effect=initialize_current_contract
     )
     monkeypatch.setattr(
         scheduler_module, "run_structure_drift_in_subprocess",
@@ -2447,6 +2488,98 @@ async def test_structure_drift_cancel_survives_terminal_write_failure(
         await scheduler._tick_once(queued_at_ms=1_000)
     assert scheduler._failure_counter == 0
     assert lock.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_structure_drift_identity_change_after_initialize_blocks_snapshot(
+    daemon_settings_for_test, monkeypatch
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import IsolatedStructureDriftCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    statuses = iter(
+        (
+            {
+                "authorized": False,
+                "phase": None,
+                "reason": "structure-drift-progress-missing",
+            },
+            {
+                "authorized": False,
+                "phase": None,
+                "reason": "structure-drift-progress-missing",
+            },
+            {
+                "authorized": False,
+                "phase": None,
+                "reason": "structure-drift-progress-missing",
+            },
+            {
+                "authorized": False,
+                "phase": None,
+                "reason": "structure-drift-progress-missing",
+            },
+            {
+                "authorized": False,
+                "phase": None,
+                "reason": "structure-drift-progress-missing",
+            },
+            {
+                "authorized": False,
+                "phase": "source-events",
+                "reason": "structure-drift-incomplete",
+                "progress_id": "comparison-new",
+            },
+        )
+    )
+    store.structure_generation_drift_status = MagicMock(
+        side_effect=lambda: next(statuses)
+    )
+    store.initialize_structure_drift_comparison = MagicMock(
+        side_effect=("comparison-old", "comparison-new")
+    )
+    drift_child = AsyncMock(
+        return_value=IsolatedStructureDriftCheckpoint(
+            phase="source-events",
+            rows_processed=1,
+            chunks_processed=1,
+            ready=False,
+            deferred=False,
+            defer_reason=None,
+            stop_reason="max-chunks",
+            elapsed_ms=1,
+        )
+    )
+    monkeypatch.setattr(
+        scheduler_module, "run_structure_drift_in_subprocess", drift_child
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+    scheduler._run_snapshot = AsyncMock()
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is True
+    scheduler._run_snapshot.assert_not_awaited()
+    drift_child.assert_not_awaited()
+    assert store.get_latest_structure_drift_attempt() is None
+    defer = store.get_latest_structure_defer()
+    assert defer is not None
+    assert defer["reason"] == "structure-drift-identity-stale"
+
+    assert await scheduler._tick_once(queued_at_ms=2_000) is True
+    scheduler._run_snapshot.assert_not_awaited()
+    drift_child.assert_awaited_once()
+    assert store.get_latest_structure_drift_attempt()["progress_id"] == (
+        "comparison-new"
+    )
 
 
 @pytest.mark.asyncio
@@ -2478,7 +2611,7 @@ async def test_structure_drift_parent_terminalizes_child_failures(
             "authorized": False,
             "phase": "source-events",
             "reason": "structure-drift-incomplete",
-            "progress_id": "progress-1",
+            "progress_id": "comparison-v2",
         }
     )
     store.initialize_structure_drift_comparison = MagicMock(

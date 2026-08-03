@@ -1233,17 +1233,46 @@ class SnapshotScheduler:
                 # Initialization is the writer-side revalidation boundary: it
                 # supersedes only an older active contract and deterministically
                 # inserts-or-finds classifier v2 before attempt admission.
-                await asyncio.to_thread(
+                initialized_comparison_id = await asyncio.to_thread(
                     self._sqlite_store.initialize_structure_drift_comparison,
                     now_ms=int(time.time() * 1_000),
                 )
                 status = await asyncio.to_thread(
                     self._sqlite_store.structure_generation_drift_status
                 )
+                if status.get("progress_id") != initialized_comparison_id:
+                    await self._record_structure_defer(
+                        reason="structure-drift-identity-stale",
+                        queued_at_ms=queued_at_ms,
+                    )
+                    logger.warning(
+                        "structure drift current identity changed after "
+                        "classifier initialization; child not spawned"
+                    )
+                    return True
                 if status.get("authorized") is True or status.get("phase") == "stale":
                     return None
-                if status.get("reason") != "structure-drift-incomplete":
-                    return None
+                if (
+                    status.get("reason") != "structure-drift-incomplete"
+                    or status.get("phase")
+                    not in {
+                        "source-events",
+                        "source-markets",
+                        "fresh-projection-members",
+                        "generation-members",
+                        "legacy-members",
+                        "fresh-group-truth",
+                    }
+                ):
+                    await self._record_structure_defer(
+                        reason="structure-drift-status-unavailable",
+                        queued_at_ms=queued_at_ms,
+                    )
+                    logger.warning(
+                        "structure drift post-initialization status invalid; "
+                        "child not spawned"
+                    )
+                    return True
             except (OSError, sqlite3.Error, TypeError, ValueError) as error:
                 await self._record_structure_defer(
                     reason="structure-drift-status-unavailable",
