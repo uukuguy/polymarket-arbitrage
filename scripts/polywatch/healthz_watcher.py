@@ -76,6 +76,13 @@ STATE_FILE = os.environ.get("POLYWATCH_STATE_FILE", "")
 REMINDER_S = int(os.environ.get("POLYWATCH_REMINDER_S", "1800"))
 COMPONENTS = ("l1", "l2", "opportunity", "dashboard")
 CURRENT_DRIFT_CLASSIFIER_CONTRACT = "structure-drift-classifier-v2"
+_INCIDENT_IDENTITY_FIELDS = (
+    "kind",
+    "comparison_id",
+    "classifier_contract",
+    "terminal_reason",
+    "diagnostic_fingerprint",
+)
 
 # Sentry issue link (well-known: SCHEDULER_PAUSED issue 121111789)
 SENTRY_PAUSED_LINK = (
@@ -298,12 +305,13 @@ def component_notification_decisions(
                 continue
             incoming = incoming_incidents.get(component)
             if isinstance(incoming, Mapping):
-                previous_metadata = {
-                    key: value
-                    for key, value in raw_incident.items()
-                    if key not in {"active", "last_alert_at_s", "delivery_pending"}
-                }
-                if previous_metadata != dict(incoming):
+                previous_identity = tuple(
+                    raw_incident.get(key) for key in _INCIDENT_IDENTITY_FIELDS
+                )
+                incoming_identity = tuple(
+                    incoming.get(key) for key in _INCIDENT_IDENTITY_FIELDS
+                )
+                if previous_identity != incoming_identity:
                     decisions[component] = "alert"
                     continue
             raw_last_alert = raw_incident.get("last_alert_at_s", 0.0)

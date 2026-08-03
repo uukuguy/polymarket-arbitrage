@@ -230,6 +230,57 @@ def test_structure_drift_incident_state_round_trips_and_fingerprints_changes() -
         incident_by_component={"l1": first},
     ) == {"l1": "suppress"}
 
+    advanced_checkpoint = WATCHER.structure_drift_incident(_health(
+        status="fail",
+        checks={"snapshot:structure_generation_drift": _terminal_drift_check(
+            checkpoint_at_ms=10_000,
+        )},
+    ))
+    assert advanced_checkpoint["diagnostic_fingerprint"] == first[
+        "diagnostic_fingerprint"
+    ]
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, restarted, now_s=1_001.0, reminder_s=1_800,
+        incident_by_component={"l1": advanced_checkpoint},
+    ) == {"l1": "suppress"}
+    advanced_state = WATCHER.updated_component_notification_state(
+        {"l1": True},
+        restarted,
+        {"l1": "suppress"},
+        now_s=1_001.0,
+        delivery_ok_by_component={"l1": True},
+        incident_by_component={"l1": advanced_checkpoint},
+    )
+    assert advanced_state["incidents"]["l1"]["checkpoint_at_ms"] == 10_000
+    assert advanced_state["incidents"]["l1"]["required_recovery"][
+        "after_checkpoint_at_ms"
+    ] == 10_000
+    assert advanced_state["incidents"]["l1"]["last_alert_at_s"] == 1_000.0
+    assert WATCHER.component_notification_decisions(
+        {"l1": True}, advanced_state, now_s=2_800.0, reminder_s=1_800,
+        incident_by_component={"l1": advanced_checkpoint},
+    ) == {"l1": "alert"}
+    assert WATCHER.structure_drift_recovery_matches(
+        _health(status="pass", checks={
+            "snapshot:structure_generation_drift": _terminal_drift_check(
+                status="pass",
+                comparison_id="comparison-v2-sealed",
+                checkpoint_at_ms=10_001,
+            )
+        }),
+        advanced_state["incidents"]["l1"],
+    ) is True
+    assert WATCHER.structure_drift_recovery_matches(
+        _health(status="pass", checks={
+            "snapshot:structure_generation_drift": _terminal_drift_check(
+                status="pass",
+                comparison_id="comparison-v2-sealed",
+                checkpoint_at_ms=9_999,
+            )
+        }),
+        advanced_state["incidents"]["l1"],
+    ) is False
+
     changed_comparison = WATCHER.structure_drift_incident(_health(
         status="fail",
         checks={"snapshot:structure_generation_drift": _terminal_drift_check(
