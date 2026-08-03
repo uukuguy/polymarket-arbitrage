@@ -76,6 +76,11 @@ def _published_source_store(
             "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
             "VALUES ('window-1','open',1000,1000)"
         )
+        con.execute(
+            "INSERT INTO structure_sync_event_source_progress "
+            "VALUES ('window-1',0,?,1000)",
+            (RowChainSHA256.new("source-event").to_json(),),
+        )
         event_rows = []
         relation_rows = []
         market_rows = []
@@ -163,26 +168,26 @@ def _published_source_store(
                 ("window-1", market_id, json.dumps(raw_market), index + 1)
             )
         con.executemany(
-            "INSERT INTO structure_sync_event_staging("
-            "window_id,event_id,payload_json,source_ordinal) VALUES (?,?,?,?)",
-            event_rows,
-        )
-        con.executemany(
             "INSERT INTO structure_sync_event_market_staging("
             "window_id,market_id,event_id,source_ordinal) VALUES (?,?,?,?)",
             relation_rows,
         )
-        con.execute(
-            "UPDATE structure_sync_windows SET status='events_complete' WHERE id='window-1'"
-        )
+    store.commit_structure_event_page(
+        window_id="window-1",
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[json.loads(str(row[2])) for row in event_rows],
+        finished_at_ms=1000,
+    )
+    with sqlite3.connect(store.db_path) as con:
         con.executemany(
             "INSERT INTO structure_sync_market_staging("
             "window_id,market_id,payload_json,source_ordinal) VALUES (?,?,?,?)",
             market_rows,
         )
         con.execute(
-            "UPDATE structure_sync_windows SET status='published',"
-            "published_snapshot_id=1 WHERE id='window-1'"
+            "UPDATE structure_sync_windows SET status='complete' WHERE id='window-1'"
         )
         con.execute(
             "INSERT INTO structure_generation_issues("
@@ -221,6 +226,16 @@ def _published_source_store(
             "VALUES ('publication-1','window-1',1,'published','contract-v1','{}','{}',"
             "?,'bounded-complete',?,1000,1001)",
             (digest, digest),
+        )
+    while store.structure_event_member_status(window_id="window-1").get("sealed") is not True:
+        result = store.advance_structure_event_member_staging_chunk(
+            window_id="window-1", limit=500
+        )
+        assert result.get("failure_reason") is None and result.get("reason") is None
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_sync_windows SET status='published',"
+            "published_snapshot_id=1 WHERE id='window-1'"
         )
     return store
 
@@ -268,7 +283,9 @@ def test_projection_union_excludes_only_certified_event_only_member(
     assert chunk.candidates_processed == 3
     assert chunk.cursor is None
     selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
-    assert len(selects) <= 8
+    assert len(selects) <= 10
+    assert not any("json_each" in sql.lower() for sql in statements)
+    assert not any("payload_json,'$.markets'" in sql for sql in statements)
     assert not any(" WHERE relation.market_id='" in sql for sql in selects)
     with sqlite3.connect(store.db_path) as con:
         plans = "\n".join(
@@ -337,8 +354,8 @@ def test_event_only_keyset_is_complete_with_adversarial_order_and_null_ordinal(
     limit: int,
 ) -> None:
     event_only = tuple(
-        (f"event-only-{(index * 283) % 503:04d}", False)
-        for index in range(503)
+        (f"event-only-{(index * 727) % 1201:04d}", False)
+        for index in range(1_200)
     )
     case_path = tmp_path / str(limit)
     case_path.mkdir()
@@ -352,8 +369,8 @@ def test_event_only_keyset_is_complete_with_adversarial_order_and_null_ordinal(
     cursor = None
     seen: list[str] = []
     traced_selects: list[str] = []
-    event_member_cursors: list[int] = []
-    for _ in range(600):
+    event_member_cursors: list[tuple[str, str, int, int]] = []
+    for _ in range(1_300):
         statements: list[str] = []
         chunk = store.fetch_structure_drift_fresh_projection_chunk(
             publication_id="publication-1",
@@ -374,12 +391,20 @@ def test_event_only_keyset_is_complete_with_adversarial_order_and_null_ordinal(
         if cursor.stream == "event-only":
             assert cursor.source_ordinal == 1
             assert cursor.member_ordinal is not None
-            event_member_cursors.append(cursor.member_ordinal)
+            assert cursor.market_id is not None
+            event_member_cursors.append(
+                (
+                    cursor.market_id,
+                    cursor.event_id,
+                    cursor.source_ordinal,
+                    cursor.member_ordinal,
+                )
+            )
     else:
         pytest.fail("fresh projection cursor did not terminate")
 
-    assert len(seen) == 503
-    assert len(set(seen)) == 503
+    assert len(seen) == 1_200
+    assert len(set(seen)) == 1_200
     assert set(seen) == {market_id for market_id, _certified in event_only}
     assert event_member_cursors == sorted(set(event_member_cursors))
     if traced_selects:
@@ -509,7 +534,6 @@ def test_event_only_duplicate_precedes_uncertified_quarantine(tmp_path: Path) ->
             None,
             "active-open-projection-missing",
         ),
-        (None, {"id": None}, None, "invalid-event-membership"),
         (None, {"negRiskMarketID": None}, None, "invalid-event-membership"),
         (None, None, {"active": None}, "invalid-event-membership"),
         (None, None, {"closed": None}, "invalid-event-membership"),
@@ -695,6 +719,54 @@ def test_production_complete_projection_commitment_is_chunk_invariant(
         assert "projection-diagnostic" not in ROW_CHAIN_DOMAINS
         results.append((commitment.member_count, commitment.root))
     assert all(result == results[0] for result in results)
+
+
+def test_projection_commitment_binds_sealed_member_receipt(tmp_path: Path) -> None:
+    store = _published_source_store(tmp_path, event_count=1)
+    commitment = store.advance_structure_drift_fresh_projection_commitment(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        commitment=None,
+        limit=500,
+    )
+    status = store.structure_event_member_status(window_id="window-1")
+    assert commitment.member_receipt_digest == status["receipt_digest"]
+    assert commitment.matches_generation(
+        count=commitment.member_count,
+        root=commitment.root,
+        member_receipt_digest="b" * 64,
+    ) is False
+
+
+@pytest.mark.parametrize("receipt_failure", ["missing", "tampered"])
+def test_projection_rejects_invalid_member_receipt_before_candidate_read(
+    tmp_path: Path, receipt_failure: str
+) -> None:
+    store = _published_source_store(tmp_path, event_count=1)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_event_member_receipt_delete")
+        con.execute("DROP TRIGGER trg_structure_event_member_receipt_update")
+        if receipt_failure == "missing":
+            con.execute(
+                "DELETE FROM structure_sync_event_member_receipts WHERE window_id='window-1'"
+            )
+        else:
+            con.execute(
+                "UPDATE structure_sync_event_member_receipts SET receipt_digest=? "
+                "WHERE window_id='window-1'",
+                ("b" * 64,),
+            )
+    statements: list[str] = []
+    with pytest.raises(ValueError, match="structure-event-member-receipt-invalid"):
+        store.fetch_structure_drift_fresh_projection_chunk(
+            publication_id="publication-1",
+            generation_snapshot_id=1,
+            cursor=None,
+            limit=500,
+            trace_callback=statements.append,
+        )
+    assert not any("structure_sync_market_staging" in sql for sql in statements)
+    assert not any("structure_sync_event_member_staging" in sql for sql in statements)
 
 
 def test_event_projection_removes_only_exact_event_only_evidence_and_rehashes() -> None:

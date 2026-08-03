@@ -154,6 +154,61 @@ def test_projection_row_chain_v2_root_work_is_at_least_twice_as_fast_as_v1() -> 
     assert all(ratio >= 2.0 for ratio in ratios.values()), ratios
 
 
+def test_sealed_sidecar_projection_is_at_least_twice_as_fast_as_raw_event_expansion(
+    tmp_path: Path,
+) -> None:
+    row_count = 12_000
+    payload = json.dumps(
+        {"markets": [{"id": f"market-{index:06d}"} for index in range(row_count)]}
+    )
+    con = sqlite3.connect(tmp_path / "projection-reader-performance.db")
+    con.execute("CREATE TABLE events(payload_json TEXT NOT NULL)")
+    con.execute("INSERT INTO events VALUES (?)", (payload,))
+    con.execute(
+        "CREATE TABLE members(window_id TEXT NOT NULL,market_id TEXT NOT NULL)"
+    )
+    con.executemany(
+        "INSERT INTO members VALUES ('window-1',?)",
+        ((f"market-{index:06d}",) for index in range(row_count)),
+    )
+    con.execute("CREATE INDEX member_projection ON members(window_id,market_id)")
+
+    def raw_projection() -> list[str]:
+        return [
+            str(row[0])
+            for row in con.execute(
+                "SELECT json_extract(member.value,'$.id') FROM events JOIN "
+                "json_each(events.payload_json,'$.markets') member ORDER BY 1"
+            )
+        ]
+
+    def sidecar_projection() -> list[str]:
+        rows: list[str] = []
+        cursor = ""
+        while True:
+            page = [
+                str(row[0])
+                for row in con.execute(
+                    "SELECT market_id FROM members WHERE window_id='window-1' "
+                    "AND market_id>? ORDER BY market_id LIMIT 500",
+                    (cursor,),
+                )
+            ]
+            rows.extend(page)
+            if len(page) < 500:
+                return rows
+            cursor = page[-1]
+
+    assert sidecar_projection() == raw_projection()
+    raw_median = _median_seconds(raw_projection, repeats=3)
+    sidecar_median = _median_seconds(sidecar_projection, repeats=5)
+    assert raw_median / sidecar_median >= 2.0, {
+        "raw_seconds": raw_median,
+        "sidecar_seconds": sidecar_median,
+        "ratio": raw_median / sidecar_median,
+    }
+
+
 def _seed_member_scan_database(store: SQLiteStore, *, row_count: int) -> None:
     members_per_group = 24
     group_count = row_count // members_per_group

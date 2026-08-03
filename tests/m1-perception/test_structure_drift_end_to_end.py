@@ -15,6 +15,7 @@ import polyarb.storage.sqlite_store as sqlite_store_module
 from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V1,
     STRUCTURE_DRIFT_CLASSIFIER_V2,
+    STRUCTURE_EVENT_SOURCE_CONTRACT,
 )
 from polyarb.perception.structure_drift import (
     FreshProjectionCommitment,
@@ -421,6 +422,121 @@ def _raw_market(
     }
 
 
+def _seal_fixture_event_members(store: SQLiteStore, window_id: str) -> None:
+    """Upgrade an old direct-SQL fixture to natural event/member authority."""
+    with sqlite3.connect(store.db_path) as con:
+        rows = con.execute(
+            "SELECT event_id,payload_json,source_ordinal FROM "
+            "structure_sync_event_staging WHERE window_id=? ORDER BY source_ordinal",
+            (window_id,),
+        ).fetchall()
+        source_chain = RowChainSHA256.new("source-event")
+        for event_id, payload_json, ordinal in rows:
+            raw = json.loads(str(payload_json))
+            group_id = raw.get("negRiskMarketID")
+            if not (
+                isinstance(group_id, str)
+                and group_id
+                and group_id.strip() == group_id
+            ):
+                group_id = None
+            payload_hash = hashlib.sha256(str(payload_json).encode()).hexdigest()
+            payload_length = len(str(payload_json).encode())
+            con.execute(
+                "INSERT INTO structure_sync_event_metadata_staging VALUES "
+                "(?,?,?,?,?,?,?)",
+                (
+                    window_id,
+                    event_id,
+                    ordinal,
+                    group_id,
+                    payload_hash,
+                    payload_length,
+                    STRUCTURE_EVENT_SOURCE_CONTRACT,
+                ),
+            )
+            source_chain.update(
+                (
+                    STRUCTURE_EVENT_SOURCE_CONTRACT,
+                    event_id,
+                    ordinal,
+                    group_id,
+                    payload_hash,
+                    payload_length,
+                )
+            )
+        con.execute(
+            "INSERT INTO structure_sync_event_source_progress VALUES (?,?,?,2001)",
+            (window_id, len(rows), source_chain.to_json()),
+        )
+        source_receipt = (
+            window_id,
+            len(rows),
+            source_chain.hexdigest(),
+            1,
+            "",
+            STRUCTURE_EVENT_SOURCE_CONTRACT,
+            2001,
+        )
+        source_digest = sqlite_store_module._structure_event_source_receipt_digest(
+            source_receipt
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_source_receipts VALUES ("
+            + ",".join("?" for _ in range(8))
+            + ")",
+            (*source_receipt, source_digest),
+        )
+        source_identity = hashlib.sha256(
+            json.dumps(
+                (window_id, len(rows), source_chain.hexdigest(), source_digest),
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        member_chain = RowChainSHA256.new("source-event")
+        member_state = sqlite_store_module._event_member_progress_state(
+            member_chain=member_chain,
+            source_event_count=len(rows),
+            source_event_root=source_chain.hexdigest(),
+            source_identity_hash=source_identity,
+            window_checkpoint_at_ms=2001,
+        )
+        diagnostic_state = RowChainSHA256.new("diagnostic/unclassified").to_json()
+        checkpoint = sqlite_store_module._structure_event_member_checkpoint_digest(
+            (source_digest, "", 0, 0, 0, 0, "", member_state, diagnostic_state)
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_member_progress VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                window_id,
+                "",
+                0,
+                0,
+                0,
+                member_state,
+                diagnostic_state,
+                2001,
+                None,
+                None,
+                0,
+                source_digest,
+                "",
+                checkpoint,
+            ),
+        )
+        con.execute(
+            "UPDATE structure_sync_windows SET event_pages=1,event_cursor=NULL "
+            "WHERE id=?",
+            (window_id,),
+        )
+    while store.structure_event_member_status(window_id=window_id).get("sealed") is not True:
+        result = store.advance_structure_event_member_staging_chunk(
+            window_id=window_id, limit=500
+        )
+        assert result.get("reason") is None and result.get("failure_reason") is None
+
+
 def _drift_store(
     tmp_path: Path, *, omit_generation_market_id: str | None = None
 ) -> SQLiteStore:
@@ -717,6 +833,7 @@ def _drift_store(
             "(1,2,'publication-2',?,'{}','bounded-complete',?,2001)",
             (cert, exact_digest),
         )
+    _seal_fixture_event_members(store, "window-2")
     return store
 
 

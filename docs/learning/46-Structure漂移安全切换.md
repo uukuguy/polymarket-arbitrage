@@ -21,6 +21,11 @@ parent 在 spawn 前先取得专用 attempt ownership；任何 child 都必须�
 `drift-hash-algorithm-superseded` terminal evidence，并从 v2 cursor zero 重启。这个动作只换证明算法，
 不会暂停或切换 legacy serving plane；exact authorization 仍是独立路径。
 
+fresh projection 的 event member 来源现在是一张独立 sealed sidecar，而不是运行时展开 parent event JSON。
+采集链是：natural event page → source receipt → 最多 500 行/块的 member 派生 → member receipt → indexed
+anti-join。projection commitment 除了 11-field member count/root，还绑定 member receipt digest；即使两个 window
+碰巧得到相同 count/root，receipt/source 身份不同也不能互认。
+
 ## 代码地图
 
 - `src/polyarb/perception/structure_drift.py`：raw projector、成员分类和 tagged reconstruction roots。
@@ -30,6 +35,8 @@ parent 在 spawn 前先取得专用 attempt ownership；任何 child 都必须�
 - `src/polyarb/daemon/scheduler.py:966`：Quote 双检、共享锁和 drift-first admission。
 - `src/polyarb/http/health.py:616`：disabled/incomplete/sealed/stale 的三态健康投影。
 - `structure_drift_attempts`：最近 100 次 child 的身份、进度、结果和安全 stderr 摘要。
+- `structure_sync_event_member_staging`：逐 ordinal 的 immutable member envelope；projection 不读取 parent
+  `markets` 数组。
 
 ## 审计 root 和比较 mirror 不能混为一谈
 
@@ -54,6 +61,9 @@ class roots 则证明“相对旧数据的完整对称差可解释”。
 - writer busy 不增加 Structure failure counter：已提交 chunk 保留，下次 admission 从 cursor 恢复。
 - timeout ledger 以最后一条 post-CAS marker 为准：marker 已写出就代表该 chunk committed，不能记录成 0 行。
 - 不续跑 v1 cursor：哈希状态不能跨算法解释；保留 stale evidence，再从 v2 cursor zero 重算才可审计。
+- 不扩展旧 relation table：relation 无法表达 null/padded identity、重复 ordinal、member payload hash 和精确恢复
+  cursor；这些正是 fail-closed 诊断与 receipt seal 所需证据。
+- 不为历史 window 合成 sidecar：没有 natural source receipt 就没有可认证的派生起点。
 
 ## 自检题
 
@@ -62,6 +72,7 @@ class roots 则证明“相对旧数据的完整对称差可解释”。
 3. Quote 在 slice 已启动后变 due，为什么不杀 child，而是在下一次 admission 抢占？
 4. `authorization_mode=drift-safe-sealed` 是否自动授权修改 production read mode？
 5. 为什么 `projection_member_root != generation_member_root` 在 v2 中可能正确，而 mirror 不相等一定失败？
+6. 两个 window 的 11-field count/root 相同，为什么 member receipt digest 不同仍必须拒绝复用 commitment？
 
 ## FAQ 增量
 

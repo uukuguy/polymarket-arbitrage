@@ -91,6 +91,7 @@ class FreshProjectionChunk:
 class FreshProjectionCommitment:
     publication_id: str
     generation_snapshot_id: int
+    member_receipt_digest: str
     cursor: FreshProjectionCursor | None
     candidates_processed: int
     member_count: int
@@ -105,12 +106,19 @@ class FreshProjectionCommitment:
         *,
         publication_id: str,
         generation_snapshot_id: int,
+        member_receipt_digest: str,
     ) -> FreshProjectionCommitment:
-        if not publication_id or generation_snapshot_id < 1:
+        if (
+            not publication_id
+            or generation_snapshot_id < 1
+            or not isinstance(member_receipt_digest, str)
+            or len(member_receipt_digest) != 64
+        ):
             raise ValueError("invalid-fresh-projection-commitment-identity")
         return cls(
             publication_id=publication_id,
             generation_snapshot_id=generation_snapshot_id,
+            member_receipt_digest=member_receipt_digest,
             cursor=None,
             candidates_processed=0,
             member_count=0,
@@ -136,7 +144,9 @@ class FreshProjectionCommitment:
             expected_domain="diagnostic/unclassified",
         ).hexdigest()
 
-    def matches_generation(self, *, count: int, root: str) -> bool:
+    def matches_generation(
+        self, *, count: int, root: str, member_receipt_digest: str | None = None
+    ) -> bool:
         return (
             self.complete
             and self.diagnostic_count == 0
@@ -146,6 +156,7 @@ class FreshProjectionCommitment:
             and len(root) == 64
             and self.member_count == count
             and self.root == root
+            and member_receipt_digest == self.member_receipt_digest
         )
 
 
@@ -187,6 +198,7 @@ def advance_fresh_projection_commitment(
     return FreshProjectionCommitment(
         publication_id=commitment.publication_id,
         generation_snapshot_id=commitment.generation_snapshot_id,
+        member_receipt_digest=commitment.member_receipt_digest,
         cursor=chunk.cursor,
         candidates_processed=(
             commitment.candidates_processed + chunk.candidates_processed

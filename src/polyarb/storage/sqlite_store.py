@@ -4593,7 +4593,7 @@ class SQLiteStore:
         limit: int,
         trace_callback: Callable[[str], None] | None = None,
     ) -> FreshProjectionChunk:
-        """Project one bounded, generation-independent fresh-source union chunk."""
+        """Project one bounded fresh-source union from the sealed member sidecar."""
         from polyarb.perception.structure_drift import (
             FreshGroupEvidence,
             FreshMemberEvidence,
@@ -4605,10 +4605,10 @@ class SQLiteStore:
             project_legacy_compatible_market,
         )
         from polyarb.perception.structure_publication import (
-            event_only_member_quarantine_issue,
+            EVENT_ONLY_NEG_RISK_QUARANTINE_REASON,
             market_quarantine_issue,
+            structure_market_source_hash,
         )
-        from polyarb.snapshot.normalizer import normalize_events
 
         if (
             not publication_id
@@ -4631,7 +4631,7 @@ class SQLiteStore:
             ):
                 raise ValueError("invalid-structure-drift-fresh-projection-cursor")
             if cursor.stream == "event-only" and (
-                cursor.market_id is not None
+                cursor.market_id is None
                 or not cursor.event_id
                 or cursor.source_ordinal is None
                 or cursor.member_ordinal is None
@@ -4664,6 +4664,20 @@ class SQLiteStore:
             ):
                 raise ValueError("structure-drift-source-identity-mismatch")
             window_id = str(identity[0])
+
+            # The member receipt and its natural event-source receipt are the
+            # authority for every row below.  Validate them before touching a
+            # candidate table; sealed staging then makes this transaction's
+            # indexed reads stable.
+            member_status = self.structure_event_member_status(window_id=window_id)
+            if member_status.get("sealed") is not True:
+                raise ValueError(
+                    str(
+                        member_status.get("reason")
+                        or member_status.get("failure_reason")
+                        or "structure-event-member-receipt-invalid"
+                    )
+                )
             remaining = limit
             candidates: list[dict[str, object]] = []
 
@@ -4692,7 +4706,7 @@ class SQLiteStore:
                 )
                 remaining -= len(market_rows)
 
-            event_cursor = (
+            sidecar_cursor = (
                 cursor
                 if isinstance(cursor, FreshProjectionCursor)
                 and cursor.stream == "event-only"
@@ -4709,233 +4723,179 @@ class SQLiteStore:
                 ).fetchone()
                 if more_markets is None:
                     event_only_exists = con.execute(
-                        "SELECT 1 FROM structure_sync_event_staging event JOIN "
-                        "json_each(event.payload_json,'$.markets') member LEFT JOIN "
-                        "structure_sync_market_staging market ON market.window_id="
-                        "event.window_id AND market.market_id=json_extract("
-                        "member.value,'$.id') WHERE event.window_id=? AND "
-                        "json_type(member.value,'$.id')='text' AND "
-                        "market.market_id IS NULL LIMIT 1",
+                        "SELECT 1 FROM structure_sync_event_member_staging member "
+                        "LEFT JOIN structure_sync_market_staging market ON "
+                        "market.window_id=member.window_id AND "
+                        "market.market_id=member.market_id WHERE member.window_id=? "
+                        "AND market.market_id IS NULL LIMIT 1",
                         (window_id,),
                     ).fetchone()
                     projection_complete = event_only_exists is None
             if remaining:
-                event_rows: list[tuple[object, ...]] = []
-                if event_cursor is not None:
-                    current = con.execute(
-                        "SELECT event_id,COALESCE(source_ordinal,rowid),payload_json "
-                        "FROM structure_sync_event_staging WHERE window_id=? "
-                        "AND event_id=?",
-                        (window_id, event_cursor.event_id),
-                    ).fetchone()
-                    if current is not None:
-                        if int(current[1]) != int(event_cursor.source_ordinal):
-                            raise ValueError(
-                                "invalid-structure-drift-fresh-projection-cursor"
-                            )
-                        event_rows.append(current)
-                    event_rows.extend(
-                        con.execute(
-                            "SELECT event_id,COALESCE(source_ordinal,rowid),"
-                            "payload_json FROM structure_sync_event_staging "
-                            "WHERE window_id=? AND event_id>? ORDER BY event_id LIMIT ?",
-                            (
-                                window_id,
-                                event_cursor.event_id,
-                                500 - len(event_rows),
-                            ),
-                        ).fetchall()
-                    )
-                else:
-                    event_rows = con.execute(
-                        "SELECT event_id,COALESCE(source_ordinal,rowid),payload_json "
-                        "FROM structure_sync_event_staging WHERE window_id=? "
-                        "ORDER BY event_id LIMIT 500",
-                        (window_id,),
-                    ).fetchall()
-
-                scanned: list[dict[str, object]] = []
-                scan_budget = limit
-                exhausted_loaded_events = True
-                for event_id_raw, source_ordinal_raw, payload_json in event_rows:
-                    event_id = str(event_id_raw)
-                    source_ordinal = int(source_ordinal_raw)
-                    raw_event = json.loads(str(payload_json))
-                    raw_members = raw_event.get("markets")
-                    members_payload = raw_members if isinstance(raw_members, list) else []
-                    start = (
-                        int(event_cursor.member_ordinal) + 1
-                        if event_cursor is not None
-                        and event_id == event_cursor.event_id
-                        else 0
-                    )
-                    if start >= len(members_payload):
-                        scan_cursor = FreshProjectionCursor(
-                            stream="event-only",
-                            market_id=None,
-                            event_id=event_id,
-                            source_ordinal=source_ordinal,
-                            member_ordinal=len(members_payload) - 1,
-                        )
-                        continue
-                    end = min(len(members_payload), start + scan_budget)
-                    identity_ordinals: dict[str, list[int]] = {}
-                    for ordinal, raw_member in enumerate(members_payload):
-                        if isinstance(raw_member, dict) and isinstance(
-                            raw_member.get("id"), str
-                        ):
-                            identity_ordinals.setdefault(
-                                str(raw_member["id"]), []
-                            ).append(ordinal)
-                    for member_ordinal in range(start, end):
-                        raw_member = members_payload[member_ordinal]
-                        market_id = (
-                            str(raw_member["id"])
-                            if isinstance(raw_member, dict)
-                            and isinstance(raw_member.get("id"), str)
-                            else ""
-                        )
-                        scanned.append(
-                            {
-                                "event_id": event_id,
-                                "source_ordinal": source_ordinal,
-                                "member_ordinal": member_ordinal,
-                                "market_id": market_id,
-                                "raw_event": raw_event,
-                                "identity_ordinals": tuple(
-                                    identity_ordinals.get(market_id, ())
-                                ),
-                            }
-                        )
-                    scan_budget -= end - start
-                    scan_cursor = FreshProjectionCursor(
-                        stream="event-only",
-                        market_id=None,
-                        event_id=event_id,
-                        source_ordinal=source_ordinal,
-                        member_ordinal=end - 1,
-                    )
-                    if scan_budget == 0:
-                        exhausted_loaded_events = end == len(members_payload)
-                        if end < len(members_payload):
-                            exhausted_loaded_events = False
-                        break
-
-                scanned_market_ids = sorted(
-                    {
-                        str(item["market_id"])
-                        for item in scanned
-                        if item["market_id"]
-                    }
+                sidecar_columns = (
+                    "member.market_sort_key,member.event_id,member.event_ordinal,"
+                    "member.member_ordinal,member.market_id,member.group_id,"
+                    "member.member_kind,member.active,member.closed,member.payload_json,"
+                    "member.payload_hash,metadata.payload_hash"
                 )
-                present_market_ids: set[str] = set()
-                if scanned_market_ids:
-                    scan_placeholders = ",".join("?" for _ in scanned_market_ids)
-                    present_market_ids = {
-                        str(row[0])
-                        for row in con.execute(
-                            "SELECT market_id FROM structure_sync_market_staging "
-                            f"WHERE window_id=? AND market_id IN ({scan_placeholders})",
-                            (window_id, *scanned_market_ids),
-                        )
-                    }
-                seen_event_only: set[tuple[str, str]] = set()
-                event_only_candidates: list[dict[str, object]] = []
-                for item in scanned:
-                    market_id = str(item["market_id"])
-                    ordinals = item["identity_ordinals"]
-                    assert isinstance(ordinals, tuple)
-                    if (
-                        not market_id
-                        or market_id in present_market_ids
-                        or (str(item["event_id"]), market_id) in seen_event_only
-                        or (ordinals and int(item["member_ordinal"]) != min(ordinals))
-                    ):
-                        continue
-                    seen_event_only.add((str(item["event_id"]), market_id))
-                    event_only_candidates.append(
+                if sidecar_cursor is None:
+                    sidecar_rows = con.execute(
+                        "SELECT " + sidecar_columns + " FROM "
+                        "structure_sync_event_member_staging member JOIN "
+                        "structure_sync_event_metadata_staging metadata ON "
+                        "metadata.window_id=member.window_id AND "
+                        "metadata.event_id=member.event_id LEFT JOIN "
+                        "structure_sync_market_staging market ON "
+                        "market.window_id=member.window_id AND "
+                        "market.market_id=member.market_id WHERE member.window_id=? "
+                        "AND market.market_id IS NULL ORDER BY member.market_sort_key,"
+                        "member.event_id,member.event_ordinal,member.member_ordinal LIMIT ?",
+                        (window_id, remaining),
+                    ).fetchall()
+                else:
+                    sidecar_rows = con.execute(
+                        "SELECT " + sidecar_columns + " FROM "
+                        "structure_sync_event_member_staging member JOIN "
+                        "structure_sync_event_metadata_staging metadata ON "
+                        "metadata.window_id=member.window_id AND "
+                        "metadata.event_id=member.event_id LEFT JOIN "
+                        "structure_sync_market_staging market ON "
+                        "market.window_id=member.window_id AND "
+                        "market.market_id=member.market_id WHERE member.window_id=? "
+                        "AND (member.market_sort_key,member.event_id,member.event_ordinal,"
+                        "member.member_ordinal)>(?,?,?,?) AND market.market_id IS NULL "
+                        "ORDER BY member.market_sort_key,member.event_id,"
+                        "member.event_ordinal,member.member_ordinal LIMIT ?",
+                        (
+                            window_id,
+                            sidecar_cursor.market_id,
+                            sidecar_cursor.event_id,
+                            sidecar_cursor.source_ordinal,
+                            sidecar_cursor.member_ordinal,
+                            remaining,
+                        ),
+                    ).fetchall()
+                for row in sidecar_rows:
+                    candidates.append(
                         {
                             "kind": "event-only",
-                            **item,
-                            "duplicate_identity": len(ordinals) > 1,
+                            "market_sort_key": str(row[0]),
+                            "event_id": str(row[1]),
+                            "source_ordinal": int(row[2]),
+                            "member_ordinal": int(row[3]),
+                            "market_id": "" if row[4] is None else str(row[4]),
+                            "group_id": row[5],
+                            "member_kind": row[6],
+                            "active": None if row[7] is None else bool(row[7]),
+                            "closed": None if row[8] is None else bool(row[8]),
+                            "raw_member": json.loads(str(row[9])),
+                            "raw_market_hash": str(row[10]),
+                            "raw_event_hash": str(row[11]),
                         }
                     )
-                accepted_event_only = event_only_candidates[:remaining]
-                candidates.extend(accepted_event_only)
-                if len(event_only_candidates) > remaining:
-                    last_accepted = accepted_event_only[-1]
+                if sidecar_rows:
+                    last = sidecar_rows[-1]
                     scan_cursor = FreshProjectionCursor(
                         stream="event-only",
-                        market_id=None,
-                        event_id=str(last_accepted["event_id"]),
-                        source_ordinal=int(last_accepted["source_ordinal"]),
-                        member_ordinal=int(last_accepted["member_ordinal"]),
+                        market_id=str(last[0]),
+                        event_id=str(last[1]),
+                        source_ordinal=int(last[2]),
+                        member_ordinal=int(last[3]),
                     )
-                    exhausted_loaded_events = False
-
-                if scan_cursor is None:
-                    projection_complete = True
-                elif exhausted_loaded_events:
                     more = con.execute(
-                        "SELECT 1 FROM structure_sync_event_staging "
-                        "WHERE window_id=? AND event_id>? LIMIT 1",
-                        (window_id, scan_cursor.event_id),
+                        "SELECT 1 FROM structure_sync_event_member_staging member "
+                        "LEFT JOIN structure_sync_market_staging market ON "
+                        "market.window_id=member.window_id AND "
+                        "market.market_id=member.market_id WHERE member.window_id=? "
+                        "AND (member.market_sort_key,member.event_id,member.event_ordinal,"
+                        "member.member_ordinal)>(?,?,?,?) AND market.market_id IS NULL LIMIT 1",
+                        (window_id, last[0], last[1], last[2], last[3]),
                     ).fetchone()
                     projection_complete = more is None
+                else:
+                    projection_complete = True
 
             market_ids = [str(item["market_id"]) for item in candidates]
             relations: dict[str, list[str]] = {}
-            events: dict[str, dict[str, object]] = {}
-            relation_counts: dict[str, int] = {}
+            sidecar_rows_by_market: dict[str, list[tuple[object, ...]]] = {}
+            sidecar_market_counts: dict[str, int] = {}
+            sidecar_identity_counts: dict[tuple[str, str], tuple[int, int]] = {}
+            conflict_events: set[str] = set()
             issues: dict[str, list[tuple[object, ...]]] = {}
             if market_ids:
                 placeholders = ",".join("?" for _ in market_ids)
                 relation_rows = con.execute(
-                    "SELECT relation.market_id,relation.event_id,event.payload_json "
-                    "FROM structure_sync_event_market_staging relation JOIN "
-                    "structure_sync_event_staging event ON "
-                    "event.window_id=relation.window_id AND "
-                    "event.event_id=relation.event_id WHERE relation.window_id=? "
+                    "SELECT relation.market_id,relation.event_id FROM "
+                    "structure_sync_event_market_staging relation WHERE relation.window_id=? "
                     f"AND relation.market_id IN ({placeholders})",
                     (window_id, *market_ids),
                 ).fetchall()
-                for market_id, event_id, payload_json in relation_rows:
+                for market_id, event_id in relation_rows:
                     relations.setdefault(str(market_id), []).append(str(event_id))
-                    events[str(event_id)] = json.loads(str(payload_json))
-
-                group_market_ids: set[str] = set(market_ids)
-                candidate_events = [
-                    item["raw_event"]
-                    for item in candidates
-                    if isinstance(item.get("raw_event"), dict)
-                ]
-                for raw_event in (*events.values(), *candidate_events):
-                    assert isinstance(raw_event, dict)
-                    raw_members = raw_event.get("markets")
-                    if isinstance(raw_members, list):
-                        group_market_ids.update(
-                            str(member["id"])
-                            for member in raw_members
-                            if isinstance(member, dict)
-                            and isinstance(member.get("id"), str)
-                            and member["id"]
+                sidecar_market_counts.update(
+                    {
+                        str(market_id): int(count)
+                        for market_id, count in con.execute(
+                            "SELECT market_id,COUNT(*) FROM "
+                            "structure_sync_event_member_staging WHERE window_id=? AND "
+                            f"market_id IN ({placeholders}) GROUP BY market_id",
+                            (window_id, *market_ids),
                         )
-                sorted_group_market_ids = sorted(group_market_ids)
-                for offset in range(0, len(sorted_group_market_ids), 500):
-                    group_batch = sorted_group_market_ids[offset : offset + 500]
-                    group_placeholders = ",".join("?" for _ in group_batch)
-                    relation_counts.update(
-                        {
-                            str(market_id): int(count)
-                            for market_id, count in con.execute(
-                                "SELECT market_id,COUNT(DISTINCT event_id) FROM "
-                                "structure_sync_event_market_staging WHERE "
-                                f"window_id=? AND market_id IN ({group_placeholders}) "
-                                "GROUP BY market_id",
-                                (window_id, *group_batch),
-                            )
-                        }
+                    }
+                )
+                staged = con.execute(
+                    "SELECT member.market_id,member.event_id,member.event_ordinal,"
+                    "member.member_ordinal,member.group_id,member.member_kind,member.active,"
+                    "member.closed,member.payload_json,member.payload_hash,metadata.payload_hash "
+                    "FROM structure_sync_event_member_staging member JOIN "
+                    "structure_sync_event_metadata_staging metadata ON "
+                    "metadata.window_id=member.window_id AND metadata.event_id=member.event_id "
+                    f"WHERE member.window_id=? AND member.market_id IN ({placeholders}) "
+                    "AND NOT EXISTS (SELECT 1 FROM structure_sync_event_member_staging "
+                    "other WHERE other.window_id=member.window_id AND "
+                    "other.market_id=member.market_id AND other.rowid!=member.rowid) "
+                    "ORDER BY member.market_id LIMIT 500",
+                    (window_id, *market_ids),
+                ).fetchall()
+                for row in staged:
+                    sidecar_rows_by_market.setdefault(str(row[0]), []).append(tuple(row[1:]))
+                for event_id, member_market_id, count, first_ordinal in con.execute(
+                    "SELECT event_id,market_id,COUNT(*),MIN(member_ordinal) FROM "
+                    "structure_sync_event_member_staging WHERE window_id=? AND "
+                    f"market_id IN ({placeholders}) GROUP BY market_id,event_id",
+                    (window_id, *market_ids),
+                ):
+                    sidecar_identity_counts[(str(event_id), str(member_market_id))] = (
+                        int(count), int(first_ordinal)
                     )
+                event_ids = sorted(
+                    {
+                        *(
+                            event_id
+                            for relation_event_ids in relations.values()
+                            for event_id in relation_event_ids
+                        ),
+                        *(
+                            str(item["event_id"])
+                            for item in candidates
+                            if item["kind"] == "event-only"
+                        ),
+                    }
+                )
+                if event_ids:
+                    event_placeholders = ",".join("?" for _ in event_ids)
+                    for (event_id,) in con.execute(
+                        "SELECT member.event_id FROM structure_sync_event_member_staging member "
+                        "WHERE member.window_id=? AND member.event_id IN ("
+                        + event_placeholders
+                        + ") AND EXISTS (SELECT 1 FROM structure_sync_event_market_staging r1 "
+                        "JOIN structure_sync_event_market_staging r2 ON "
+                        "r2.window_id=r1.window_id AND r2.market_id=r1.market_id "
+                        "AND r2.event_id!=r1.event_id WHERE r1.window_id=member.window_id "
+                        "AND r1.market_id=member.market_id) GROUP BY member.event_id",
+                        (window_id, *event_ids),
+                    ):
+                        conflict_events.add(str(event_id))
                 for row in con.execute(
                     "SELECT market_id,layer,category,detail,raw_payload FROM "
                     "structure_generation_issues WHERE snapshot_id=? "
@@ -4949,37 +4909,14 @@ class SQLiteStore:
             for candidate in candidates:
                 market_id = str(candidate["market_id"])
                 if candidate["kind"] == "event-only":
-                    raw_event = candidate["raw_event"]
-                    assert isinstance(raw_event, dict)
-                    raw_members = raw_event.get("markets")
-                    raw_member = (
-                        raw_members[int(candidate["member_ordinal"])]
-                        if isinstance(raw_members, list)
-                        and int(candidate["member_ordinal"]) < len(raw_members)
-                        else {}
-                    )
                     envelope = StructureDriftCandidateEnvelope(
                         side="generation-only",
                         event_id=str(candidate["event_id"]),
-                        group_id=(
-                            str(raw_event["negRiskMarketID"])
-                            if isinstance(raw_event.get("negRiskMarketID"), str)
-                            else None
-                        ),
+                        group_id=candidate["group_id"],
                         market_id=market_id,
-                        member_kind=None,
-                        active=(
-                            raw_member.get("active")
-                            if isinstance(raw_member, dict)
-                            and type(raw_member.get("active")) is bool
-                            else None
-                        ),
-                        closed=(
-                            raw_member.get("closed")
-                            if isinstance(raw_member, dict)
-                            and type(raw_member.get("closed")) is bool
-                            else None
-                        ),
+                        member_kind=candidate["member_kind"],
+                        active=candidate["active"],
+                        closed=candidate["closed"],
                         condition_id=None,
                         yes_token_id=None,
                         no_token_id=None,
@@ -4987,27 +4924,23 @@ class SQLiteStore:
                         incomplete=None,
                         source_ordinal=int(candidate["source_ordinal"]),
                         member_ordinal=int(candidate["member_ordinal"]),
-                        raw_event_hash=hashlib.sha256(
-                            json.dumps(raw_event, sort_keys=True, separators=(",", ":")).encode()
-                        ).hexdigest(),
+                        raw_event_hash=str(candidate["raw_event_hash"]),
                         raw_market_hash=None,
                     )
-                    event_only_group_ids = {
-                        str(item["id"])
-                        for item in (
-                            raw_members if isinstance(raw_members, list) else []
-                        )
-                        if isinstance(item, dict)
-                        and isinstance(item.get("id"), str)
-                    }
-                    global_conflict = len(relations.get(market_id, ())) > 1 or any(
-                        relation_counts.get(item, 0) > 1
-                        for item in event_only_group_ids
+                    identity_count, first_ordinal = sidecar_identity_counts.get(
+                        (str(candidate["event_id"]), market_id), (1, 0)
+                    )
+                    duplicate_identity = identity_count > 1
+                    if duplicate_identity and int(candidate["member_ordinal"]) != first_ordinal:
+                        continue
+                    global_conflict = (
+                        len(set(relations.get(market_id, ()))) > 1
+                        or str(candidate["event_id"]) in conflict_events
                     )
                     group_evidence = (
                         FreshGroupEvidence(
                             event_id=str(candidate["event_id"]),
-                            group_id=str(raw_event["negRiskMarketID"]),
+                            group_id=str(candidate["group_id"]),
                             neg_risk_type="standard",
                             quality="incomplete-source",
                             reason="conflicting-event-membership",
@@ -5015,21 +4948,43 @@ class SQLiteStore:
                             global_relation_conflict=True,
                         )
                         if global_conflict
-                        and isinstance(raw_event.get("negRiskMarketID"), str)
+                        and isinstance(candidate["group_id"], str)
                         else None
                     )
-                    expected = event_only_member_quarantine_issue(
-                        raw_event,
-                        event_source_ordinal=int(candidate["source_ordinal"]),
-                        market_id=market_id,
+                    issue_envelope = {
+                        "event_id": candidate["event_id"],
+                        "event_payload_sha256": candidate["raw_event_hash"],
+                        "event_source_ordinal": candidate["source_ordinal"],
+                        "group_id": candidate["group_id"],
+                        "market_id": market_id,
+                        "member_ordinal": candidate["member_ordinal"],
+                        "member_payload_sha256": candidate["raw_market_hash"],
+                    }
+                    expected_raw = (
+                        f"{EVENT_ONLY_NEG_RISK_QUARANTINE_REASON}:"
+                        f"{structure_market_source_hash(issue_envelope)}"
                     )
-                    certified = expected is not None and (
-                        expected["layer"],
-                        expected["category"],
-                        expected["detail"],
-                        expected["raw_payload"],
-                    ) in issues.get(market_id, ())
-                    duplicate_identity = candidate.get("duplicate_identity") is True
+                    certified = (
+                        envelope.event_id is not None
+                        and envelope.group_id is not None
+                        and envelope.active is True
+                        and envelope.closed is False
+                        and isinstance(candidate["raw_member"], dict)
+                        and type(candidate["raw_member"].get("negRiskOther")) is bool
+                        and any(row[3] == expected_raw for row in issues.get(market_id, ()))
+                    )
+                    sidecar_identity_valid = (
+                        bool(market_id)
+                        and market_id.strip() == market_id
+                        and isinstance(candidate["group_id"], str)
+                        and bool(candidate["group_id"])
+                        and str(candidate["group_id"]).strip()
+                        == candidate["group_id"]
+                        and candidate["member_kind"]
+                        in {"named", "other", "inactive-reserved"}
+                        and type(candidate["active"]) is bool
+                        and type(candidate["closed"]) is bool
+                    )
                     if certified and not global_conflict and not duplicate_identity:
                         continue
                     evidence = FreshMemberEvidence(
@@ -5042,7 +4997,8 @@ class SQLiteStore:
                         market_side_quarantine=False,
                         absent_from_event_catalog=False,
                         absent_from_market_catalog=True,
-                        identity_revalidated=True,
+                        identity_revalidated=sidecar_identity_valid,
+                        invalid_event_membership=not sidecar_identity_valid,
                         duplicate_market_identity=duplicate_identity,
                         uncertified_event_only_member=not certified,
                         group_truth=group_evidence,
@@ -5063,65 +5019,20 @@ class SQLiteStore:
                 raw_market = candidate["raw_market"]
                 assert isinstance(raw_market, dict)
                 event_ids = tuple(relations.get(market_id, ()))
-                raw_events = [events[event_id] for event_id in event_ids]
-                _event_rows, _tags, _mapping, source_members, truths = normalize_events(
-                    raw_events
-                )
-                exact_members = [item for item in source_members if item.market_id == market_id]
-                raw_identity_count = sum(
-                    1
-                    for raw_event in raw_events
-                    for raw_member in (
-                        raw_event.get("markets")
-                        if isinstance(raw_event.get("markets"), list)
-                        else []
-                    )
-                    if isinstance(raw_member, dict)
-                    and raw_member.get("id") == market_id
-                )
-                source_member = exact_members[0] if len(exact_members) == 1 else None
-                raw_source_event = raw_events[0] if len(raw_events) == 1 else None
+                exact_rows = sidecar_rows_by_market.get(market_id, [])
+                source_row = exact_rows[0] if len(exact_rows) == 1 else None
                 source_identity_valid = (
-                    source_member is not None
+                    source_row is not None
                     and len(event_ids) == 1
                     and raw_market.get("id") == market_id
-                    and isinstance(raw_source_event, dict)
-                    and raw_source_event.get("id") == event_ids[0]
-                    and source_member.event_id == event_ids[0]
-                    and source_member.market_id == market_id
-                    and raw_market.get("negRiskMarketID") == source_member.group_id
-                    and raw_source_event.get("negRiskMarketID")
-                    == source_member.group_id
+                    and source_row[0] == event_ids[0]
+                    and isinstance(source_row[3], str) and bool(source_row[3])
+                    and isinstance(source_row[4], str) and bool(source_row[4])
+                    and source_row[5] in (0, 1) and source_row[6] in (0, 1)
+                    and raw_market.get("negRiskMarketID") == source_row[3]
                 )
-                validated_source_member = (
-                    source_member if source_identity_valid else None
-                )
-                truth = (
-                    next(
-                        (
-                            item
-                            for item in truths
-                            if validated_source_member is not None
-                            and item.event_id == validated_source_member.event_id
-                            and item.group_id == validated_source_member.group_id
-                        ),
-                        None,
-                    )
-                    if validated_source_member is not None
-                    else None
-                )
-                group_raw_ids: set[str] = set()
-                if validated_source_member is not None:
-                    source_event = events[validated_source_member.event_id]
-                    raw_group = source_event.get("markets")
-                    if isinstance(raw_group, list):
-                        group_raw_ids = {
-                            str(item["id"])
-                            for item in raw_group
-                            if isinstance(item, dict) and isinstance(item.get("id"), str)
-                        }
-                conflict = len(event_ids) > 1 or any(
-                    relation_counts.get(item, 0) > 1 for item in group_raw_ids
+                conflict = len(set(event_ids)) > 1 or any(
+                    str(row[0]) in conflict_events for row in exact_rows
                 )
                 projected = project_legacy_compatible_market(
                     raw_market,
@@ -5185,63 +5096,58 @@ class SQLiteStore:
                     else None
                 )
                 market_identity_valid = (
-                    validated_source_member is not None
+                    source_identity_valid
                     and row is not None
                     and condition_id is not None
                     and yes_token_id is not None
                     and no_token_id is not None
                     and row.get("market_id") == market_id
-                    and row.get("neg_risk_market_id")
-                    == validated_source_member.group_id
+                    and row.get("neg_risk_market_id") == source_row[3]
                     and type(row.get("neg_risk")) is bool
                     and type(row.get("incomplete")) is bool
                 )
                 member = (
                     StructuralMemberIdentity(
-                        event_id=validated_source_member.event_id,
-                        group_id=validated_source_member.group_id,
-                        market_id=validated_source_member.market_id,
-                        member_kind=validated_source_member.member_kind,
-                        active=validated_source_member.active,
-                        closed=validated_source_member.closed,
+                        event_id=str(source_row[0]),
+                        group_id=str(source_row[3]),
+                        market_id=market_id,
+                        member_kind=str(source_row[4]),
+                        active=bool(source_row[5]),
+                        closed=bool(source_row[6]),
                         condition_id=condition_id,
                         yes_token_id=yes_token_id,
                         no_token_id=no_token_id,
                         neg_risk=bool(row["neg_risk"]),
                         incomplete=bool(row["incomplete"]),
                     )
-                    if validated_source_member is not None and market_identity_valid
+                    if source_identity_valid and market_identity_valid
                     else None
                 )
                 group_evidence = (
                     FreshGroupEvidence(
                         event_id=(
-                            validated_source_member.event_id
-                            if validated_source_member is not None
+                            str(source_row[0])
+                            if source_row is not None
                             else event_ids[0]
                         ),
                         group_id=(
-                            validated_source_member.group_id
-                            if validated_source_member is not None
+                            str(source_row[3])
+                            if source_row is not None
                             else str(raw_market["negRiskMarketID"])
                         ),
-                        neg_risk_type=("standard" if truth is None else truth.neg_risk_type),
+                        neg_risk_type="standard",
                         quality=(
-                            "incomplete-source"
-                            if conflict or truth is None
-                            else truth.quality
+                            "incomplete-source" if conflict else "complete-supported"
                         ),
                         reason=(
                             "conflicting-event-membership"
                             if conflict
-                            else "invalid-event-membership"
-                            if truth is None
-                            else truth.reason
+                            else None
                         ),
-                        membership_hash=("" if truth is None else truth.membership_hash),
+                        membership_hash="",
                         global_relation_conflict=conflict,
                     )
-                    if validated_source_member is not None
+                    if source_identity_valid
                     or (
                         conflict
                         and bool(event_ids)
@@ -5267,9 +5173,7 @@ class SQLiteStore:
                     event_source_count=len(event_ids),
                     exact_source_member=member,
                     group_truth=group_evidence,
-                    duplicate_market_identity=(
-                        len(exact_members) > 1 or raw_identity_count > 1
-                    ),
+                    duplicate_market_identity=sidecar_market_counts.get(market_id, 0) > 1,
                     identity_revalidated=True,
                     invalid_event_membership=not source_identity_valid,
                 )
@@ -5286,36 +5190,25 @@ class SQLiteStore:
                 if eligible:
                     members.append(member)
                 else:
-                    raw_source_event = raw_events[0] if raw_events else {}
-                    raw_source_members = raw_source_event.get("markets")
-                    raw_source_member = next(
-                        (
-                            item
-                            for item in raw_source_members
-                            if isinstance(item, dict) and item.get("id") == market_id
-                        ),
-                        {},
-                    ) if isinstance(raw_source_members, list) else {}
+                    raw_source_member = (
+                        json.loads(str(source_row[7])) if source_row is not None else {}
+                    )
                     diagnostic_member = member or StructureDriftCandidateEnvelope(
                         side="generation-only",
                         event_id=(
-                            str(raw_source_event["id"])
-                            if isinstance(raw_source_event.get("id"), str)
-                            and raw_source_event["id"]
+                            str(source_row[0])
+                            if source_row is not None
                             else None
                         ),
                         group_id=(
-                            str(raw_source_event["negRiskMarketID"])
-                            if isinstance(
-                                raw_source_event.get("negRiskMarketID"), str
-                            )
-                            and raw_source_event["negRiskMarketID"]
+                            str(source_row[3])
+                            if source_row is not None and isinstance(source_row[3], str)
                             else None
                         ),
                         market_id=market_id,
                         member_kind=(
-                            source_member.member_kind
-                            if source_member is not None
+                            str(source_row[4])
+                            if source_row is not None and isinstance(source_row[4], str)
                             else None
                         ),
                         active=(
@@ -5345,7 +5238,9 @@ class SQLiteStore:
                         ),
                         source_ordinal=None,
                         member_ordinal=None,
-                        raw_event_hash=None,
+                        raw_event_hash=(
+                            str(source_row[9]) if source_row is not None else None
+                        ),
                         raw_market_hash=hashlib.sha256(
                             json.dumps(
                                 raw_market,
@@ -5406,13 +5301,30 @@ class SQLiteStore:
             advance_fresh_projection_commitment,
         )
 
+        with sqlite3.connect(self._db_path) as con:
+            identity = con.execute(
+                "SELECT window_id FROM structure_publications WHERE publication_id=? "
+                "AND snapshot_id=? AND status='published'",
+                (publication_id, generation_snapshot_id),
+            ).fetchone()
+        if identity is None:
+            raise ValueError("structure-drift-source-identity-mismatch")
+        member_status = self.structure_event_member_status(window_id=str(identity[0]))
+        if member_status.get("sealed") is not True:
+            raise ValueError(
+                str(member_status.get("reason") or member_status.get("failure_reason")
+                    or "structure-event-member-receipt-invalid")
+            )
+        receipt_digest = str(member_status["receipt_digest"])
         current = commitment or FreshProjectionCommitment.initial(
             publication_id=publication_id,
             generation_snapshot_id=generation_snapshot_id,
+            member_receipt_digest=receipt_digest,
         )
         if (
             current.publication_id != publication_id
             or current.generation_snapshot_id != generation_snapshot_id
+            or current.member_receipt_digest != receipt_digest
         ):
             raise ValueError("fresh-projection-commitment-identity-mismatch")
         if current.complete:

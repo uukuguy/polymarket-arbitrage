@@ -72,9 +72,24 @@ exact release 验证、read-mode 切换计划和回滚证据；本 gate 自身�
 
 ## 故障处理
 
+### Fresh projection 的 sealed sidecar 前置门
+
+fresh projection 不再展开 `structure_sync_event_staging.payload_json.markets`。自然 event page 先生成
+`structure-event-source-v1` receipt；后台以每块最多 500 个 member 派生
+`structure_sync_event_member_staging`，完成后生成 digest-sealed member receipt。projection 只有在 source receipt、
+member progress、member receipt 和 publication 全部属于同一 window 且验证通过时才读 candidate；缺失、混窗、
+混源或篡改统一 fail closed，不返回 count/root/sample，也不修改 generation 表。
+
+event-only anti-join 使用覆盖索引和复合 keyset
+`(market_sort_key,event_id,event_ordinal,member_ordinal)`；首块和续块是两条独立 SQL，没有 nullable-OR、
+`json_each`、逐 member SELECT 或临时排序。历史 window 如果没有自然 source receipt 就保持 unavailable；不能从
+旧 raw payload 合成 receipt。receipt invalid 时保留 legacy serving plane，停止验收并等待新 window。
+
 - `structure-drift-writer-busy`：确认 Quote/其他 writer 所有权；不要并发手动推进。
 - `structure-drift-child-failed`：看 child signal/timeout 分类；SIGKILL 先按 possible cgroup OOM 调查。
 - `unclassified>0` / `overlap-conflict>0`：数据证据失败，不是性能重试问题。
 - checkpoint 超 SLA：确认 scheduler feature flag、defer receipt 和 Quote 持续 due/active 事实。
 - `drift-hash-algorithm-superseded`：确认已有新的 v2 progress 从 cursor zero 推进；不要把旧 v1 stale
   改回 active，也不要因此切换或暂停 legacy serving plane。
+- `structure-event-member-receipt-invalid`：核对同窗 source receipt、member checkpoint 和 sealed digest；不要
+  从历史 event JSON 补 receipt，也不要绕过 sidecar gate。
