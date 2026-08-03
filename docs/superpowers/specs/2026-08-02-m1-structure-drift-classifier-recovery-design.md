@@ -121,6 +121,13 @@ current gate.
 
 ## 4. Complete Independent Fresh Projection
 
+> **2026-08-03 amendment:** raw event JSON cannot provide a true database-side
+> 500-member keyset because SQLite must re-expand the complete array. The
+> approved durable sidecar design is specified in
+> `2026-08-03-m1-durable-event-member-staging-design.md` and is binding for
+> this section. The projection reader must consume a sealed, append-only
+> per-ordinal member sidecar rather than `json_each()` over parent payloads.
+
 Add a bounded `fresh-projection-members` phase before generation-member
 comparison. It scans the pinned staging source by market-ID keyset, never by the
 generation universe.
