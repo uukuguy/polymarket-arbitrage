@@ -13,6 +13,14 @@ from polyarb.clients.gamma_client import (
 )
 from polyarb.perception import structure_publication as structure_publication_module
 from polyarb.perception import structure_sync as structure_sync_module
+from polyarb.perception.structure_contract import (
+    STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT,
+)
+from polyarb.perception.structure_event_members import (
+    StructureEventMemberProgress,
+    StructureEventMemberReceipt,
+    StructureEventMemberRow,
+)
 from polyarb.perception.structure_sync import (
     StagedGammaSource,
     StructureSyncCheckpoint,
@@ -20,11 +28,247 @@ from polyarb.perception.structure_sync import (
     finalize_structure_window,
     run_structure_sync_until_published,
 )
+from polyarb.storage import sqlite_store as sqlite_store_module
 from polyarb.storage.sqlite_store import (
     SQLITE_BUSY_TIMEOUT_S,
     STRUCTURE_EVENT_PAYLOAD_MAX_BYTES,
     SQLiteStore,
 )
+
+
+def _schema_objects(con: sqlite3.Connection, prefix: str) -> tuple[tuple[str, str, str], ...]:
+    return tuple(
+        (str(kind), str(name), " ".join(str(sql).split()))
+        for kind, name, sql in con.execute(
+            "SELECT type,name,sql FROM sqlite_master WHERE name LIKE ? OR tbl_name LIKE ? "
+            "ORDER BY type,name",
+            (f"{prefix}%", f"{prefix}%"),
+        )
+    )
+
+
+def _seed_event_member_migration_business_rows(con: sqlite3.Connection) -> None:
+    con.execute(
+        "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+        "is_valid,parquet_path) VALUES (99,1,2,'full',1,1,'opaque')"
+    )
+    con.execute(
+        "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
+        "VALUES ('legacy-window','open',1,2)"
+    )
+    con.execute(
+        "INSERT INTO structure_sync_event_staging VALUES "
+        "('legacy-window','event-1','{\"id\":\"event-1\"}',NULL,0)"
+    )
+    con.execute(
+        "INSERT INTO structure_sync_event_market_staging VALUES "
+        "('legacy-window','market-1','event-1',0)"
+    )
+    con.execute(
+        "UPDATE structure_sync_windows SET status='events_complete' "
+        "WHERE id='legacy-window'"
+    )
+    con.execute(
+        "INSERT INTO structure_sync_market_staging VALUES "
+        "('legacy-window','market-1','{\"id\":\"market-1\"}',NULL,0)"
+    )
+    con.execute(
+        "UPDATE structure_sync_windows SET status='complete' WHERE id='legacy-window'"
+    )
+    con.execute(
+        "INSERT INTO structure_publications(publication_id,window_id,snapshot_id,status,"
+        "expected_counts_json,committed_counts_json,created_at_ms,checkpoint_at_ms) "
+        "VALUES ('publication-1','legacy-window',99,'normalizing','{}','{}',2,2)"
+    )
+
+
+def _event_member_migration_business_rows(
+    con: sqlite3.Connection,
+) -> tuple[tuple[str, tuple[object, ...]], ...]:
+    tables = (
+        "snapshots",
+        "structure_sync_event_staging",
+        "structure_sync_event_market_staging",
+        "structure_sync_market_staging",
+        "structure_publications",
+    )
+    return tuple((table, tuple(con.execute(f"SELECT * FROM {table}"))) for table in tables)
+
+
+def test_event_member_contract_is_exact_and_immutable() -> None:
+    assert STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT == (
+        "structure-event-member-staging-v1"
+    )
+    row = StructureEventMemberRow(
+        "w", "e", 1, 2, "m", "m", "g", "named", True, False, "{}", "0" * 64
+    )
+    progress = StructureEventMemberProgress(
+        "w", "", 0, 0, 0, "{}", "{}", 1, None, None
+    )
+    receipt = StructureEventMemberReceipt(
+        "w", 1, "1" * 64, "2" * 64, STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT,
+        2, "3" * 64, 0, "4" * 64, "e", 2, 10, 3, "5" * 64,
+    )
+    for value in (row, progress, receipt):
+        with pytest.raises(Exception, match="cannot assign"):
+            value.window_id = "changed"  # type: ignore[misc]
+
+
+def test_event_member_schema_has_canonical_columns_and_indexes(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        columns = tuple(
+            row[1]
+            for row in con.execute("PRAGMA table_info(structure_sync_event_member_staging)")
+        )
+        assert columns == (
+            "window_id", "event_id", "event_ordinal", "member_ordinal", "market_id",
+            "market_sort_key", "group_id", "member_kind", "active", "closed",
+            "payload_json", "payload_hash",
+        )
+        indexes = {
+            row[1]: (
+                bool(row[2]),
+                tuple(
+                    item[2]
+                    for item in con.execute(f"PRAGMA index_info('{row[1]}')")
+                ),
+            )
+            for row in con.execute(
+                "PRAGMA index_list(structure_sync_event_member_staging)"
+            )
+        }
+        primary_key = tuple(
+            row[1]
+            for row in sorted(
+                con.execute("PRAGMA table_info(structure_sync_event_member_staging)"),
+                key=lambda row: row[5],
+            )
+            if row[5]
+        )
+    assert primary_key == ("window_id", "event_id", "member_ordinal")
+    assert (
+        False,
+        ("window_id", "market_sort_key", "event_id", "event_ordinal", "member_ordinal"),
+    ) in indexes.values()
+    assert (False, ("window_id", "event_id", "member_ordinal")) in indexes.values()
+    assert (False, ("window_id", "market_id", "event_id", "member_ordinal")) in indexes.values()
+    assert not any(
+        unique and "market_id" in cols and "member_ordinal" not in cols
+        for unique, cols in indexes.values()
+    )
+
+
+def test_event_member_immutable_preserves_duplicate_ordinals_and_replace_guard(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
+            "VALUES ('w','open',1,1)"
+        )
+        member = (
+            "w", "e", 0, None, "same", "same", None, None, 1, 0, "{}", "a" * 64
+        )
+        for ordinal in (4, 9):
+            con.execute(
+                "INSERT INTO structure_sync_event_member_staging VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                member[:3] + (ordinal,) + member[4:],
+            )
+        assert con.execute(
+            "SELECT member_ordinal FROM structure_sync_event_member_staging ORDER BY member_ordinal"
+        ).fetchall() == [(4,), (9,)]
+        con.execute("UPDATE structure_sync_windows SET status='complete' WHERE id='w'")
+        for sql in (
+            "INSERT INTO structure_sync_event_member_staging VALUES "
+            "('w','e',0,10,'same','same',NULL,NULL,1,0,'{}','"
+            + "b" * 64
+            + "')",
+            "UPDATE structure_sync_event_member_staging SET payload_json='[]' WHERE window_id='w'",
+            "DELETE FROM structure_sync_event_member_staging WHERE window_id='w'",
+        ):
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="structure-event-member-staging-frozen",
+            ):
+                con.execute(sql)
+        receipt = (
+            "w", 1, "1" * 64, "2" * 64, STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT,
+            2, "3" * 64, 0, "4" * 64, "e", 2, 10, 3, "5" * 64,
+        )
+        receipt_insert = (
+            "INSERT INTO structure_sync_event_member_receipts "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        )
+        con.execute(receipt_insert, receipt)
+        original = con.execute("SELECT * FROM structure_sync_event_member_receipts").fetchone()
+        for verb in ("INSERT", "INSERT OR REPLACE"):
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="structure-event-member-receipt-sealed",
+            ):
+                con.execute(receipt_insert.replace("INSERT", verb, 1), receipt)
+        assert (
+            con.execute("SELECT * FROM structure_sync_event_member_receipts").fetchone()
+            == original
+        )
+
+
+def test_event_member_migration_is_idempotent_and_schema_locked(tmp_path) -> None:
+    fresh = SQLiteStore(tmp_path / "fresh.db")
+    fresh.init_schema()
+    migrated = SQLiteStore(tmp_path / "migrated.db")
+    migrated.init_schema()
+    with sqlite3.connect(migrated.db_path) as con:
+        _seed_event_member_migration_business_rows(con)
+        for kind, name, _sql in reversed(_schema_objects(con, "structure_sync_event_member")):
+            con.execute(f"DROP {kind.upper()} IF EXISTS {name}")
+        business_before = _event_member_migration_business_rows(con)
+    migrated.init_schema()
+    migrated.init_schema()
+    with sqlite3.connect(fresh.db_path) as lhs, sqlite3.connect(
+        migrated.db_path
+    ) as rhs:
+        assert _schema_objects(
+            lhs, "structure_sync_event_member"
+        ) == _schema_objects(rhs, "structure_sync_event_member")
+        assert _event_member_migration_business_rows(rhs) == business_before
+
+
+@pytest.mark.parametrize(
+    "fault_point",
+    (
+        "after-sidecar-table", "after-progress-table", "after-receipt-table",
+        "after-sidecar-insert-trigger", "after-sidecar-update-trigger",
+        "after-sidecar-delete-trigger", "after-receipt-insert-trigger",
+        "after-receipt-update-trigger", "after-receipt-delete-trigger",
+    ),
+)
+def test_event_member_rollback_restores_old_schema_and_rows(tmp_path, fault_point) -> None:
+    store = SQLiteStore(tmp_path / f"{fault_point}.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        _seed_event_member_migration_business_rows(con)
+        for kind, name, _sql in reversed(_schema_objects(con, "structure_sync_event_member")):
+            con.execute(f"DROP {kind.upper()} IF EXISTS {name}")
+        schema_before = tuple(con.execute(
+            "SELECT type,name,sql FROM sqlite_master ORDER BY type,name"
+        ))
+        rows_before = _event_member_migration_business_rows(con)
+
+        def fail_here(point: str) -> None:
+            if point == fault_point:
+                raise RuntimeError(point)
+
+        with pytest.raises(RuntimeError, match=fault_point):
+            sqlite_store_module._migrate_structure_event_member_schema(
+                con, fault_hook=fail_here
+            )
+        assert tuple(con.execute(
+            "SELECT type,name,sql FROM sqlite_master ORDER BY type,name"
+        )) == schema_before
+        assert _event_member_migration_business_rows(con) == rows_before
 
 
 def test_structure_window_commits_page_and_resumes_exact_successor_cursor(tmp_path) -> None:

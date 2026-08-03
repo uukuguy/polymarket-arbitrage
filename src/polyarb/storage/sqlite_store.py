@@ -62,6 +62,7 @@ from polyarb.storage.schemas import (
     SNAPSHOT_ATTEMPTS_DDL,
     STRUCTURE_DEFER_RECEIPTS_DDL,
     STRUCTURE_DRIFT_ATTEMPTS_DDL,
+    STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS,
     STRUCTURE_GENERATIONS_DDL,
     STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL,
     STRUCTURE_SYNC_WINDOWS_DDL,
@@ -147,6 +148,25 @@ _EVENT_BOOL_COLUMNS = ("active", "closed")
 _STRUCTURE_COMPONENTS = STRUCTURE_COMPONENTS
 _STRUCTURE_SOURCE_COMPONENTS = STRUCTURE_SOURCE_COMPONENTS
 _STRUCTURE_CERTIFICATION_COMPONENTS = STRUCTURE_CERTIFICATION_COMPONENTS
+
+
+def _migrate_structure_event_member_schema(
+    con: sqlite3.Connection,
+    *,
+    fault_hook: Callable[[str], None] | None = None,
+) -> None:
+    """Install empty canonical event-member authority as one atomic migration."""
+    con.execute("SAVEPOINT structure_event_member_schema_migration")
+    try:
+        for fault_point, statement in STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS:
+            con.execute(statement)
+            if fault_point is not None and fault_hook is not None:
+                fault_hook(fault_point)
+        con.execute("RELEASE SAVEPOINT structure_event_member_schema_migration")
+    except BaseException:
+        con.execute("ROLLBACK TO SAVEPOINT structure_event_member_schema_migration")
+        con.execute("RELEASE SAVEPOINT structure_event_member_schema_migration")
+        raise
 
 
 def _migrate_structure_event_market_progress(con: sqlite3.Connection) -> None:
@@ -2370,6 +2390,7 @@ class SQLiteStore:
             con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
             _migrate_structure_recovery_authority(con)
             _migrate_structure_event_market_progress(con)
+            _migrate_structure_event_member_schema(con)
             _migrate_structure_drift_hash_v2(con)
             _migrate_structure_drift_classifier_v2(con)
             con.executescript(STRUCTURE_GENERATIONS_DDL)
@@ -2565,6 +2586,7 @@ class SQLiteStore:
                 con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
                 _migrate_structure_recovery_authority(con)
                 _migrate_structure_event_market_progress(con)
+                _migrate_structure_event_member_schema(con)
                 con.executescript(STRUCTURE_GENERATIONS_DDL)
                 con.execute(
                     "CREATE VIEW IF NOT EXISTS current_structure_markets AS "

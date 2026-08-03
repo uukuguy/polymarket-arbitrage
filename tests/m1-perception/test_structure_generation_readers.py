@@ -18,12 +18,23 @@ from polyarb.http.market_map import _read_market_map
 from polyarb.routing.focused_quote_collector import SqliteStructureMembershipReader
 from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore, _source_truth_hash
 from polyarb.routing.opportunity_scanner import scan_neg_risk_buy_all
-from polyarb.storage.row_chain_sha256 import RowChainSHA256
+from polyarb.storage.row_chain_sha256 import ROW_CHAIN_DOMAINS, RowChainSHA256
 from polyarb.storage.sqlite_store import (
     SQLiteStore,
     StructureGenerationReadError,
     structure_read_transaction,
 )
+
+EVENT_MEMBER_DOMAINS_BEFORE = frozenset(ROW_CHAIN_DOMAINS)
+
+
+def test_event_member_contract_does_not_expand_row_chain_registry() -> None:
+    from polyarb.perception.structure_contract import (
+        STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT,
+    )
+
+    assert STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT == "structure-event-member-staging-v1"
+    assert ROW_CHAIN_DOMAINS == EVENT_MEMBER_DOMAINS_BEFORE
 
 
 def _seed_structure_revision(

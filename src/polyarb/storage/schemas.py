@@ -2839,6 +2839,133 @@ WHEN (SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)='complet
 BEGIN SELECT RAISE(ABORT,'structure-event-market-staging-frozen'); END;
 """
 
+# Empty, per-ordinal source authority.  Keep these as individual statements so
+# the bootstrap can wrap every fresh and upgrade path in one rollback-safe
+# savepoint; sqlite3.executescript() would implicitly commit that savepoint.
+STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
+    (
+        "after-sidecar-table",
+        "CREATE TABLE IF NOT EXISTS structure_sync_event_member_staging ("
+        "window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),"
+        "event_id TEXT NOT NULL,event_ordinal INTEGER NOT NULL CHECK(event_ordinal>=0),"
+        "member_ordinal INTEGER NOT NULL CHECK(member_ordinal>=0),market_id TEXT,"
+        "market_sort_key TEXT NOT NULL,group_id TEXT,member_kind TEXT,"
+        "active INTEGER CHECK(active IS NULL OR active IN (0,1)),"
+        "closed INTEGER CHECK(closed IS NULL OR closed IN (0,1)),"
+        "payload_json TEXT NOT NULL,payload_hash TEXT NOT NULL "
+        "CHECK(length(payload_hash)=64),PRIMARY KEY(window_id,event_id,member_ordinal))",
+    ),
+    (
+        "after-progress-table",
+        "CREATE TABLE IF NOT EXISTS structure_sync_event_member_progress ("
+        "window_id TEXT PRIMARY KEY REFERENCES structure_sync_windows(id) ON DELETE CASCADE,"
+        "event_cursor TEXT NOT NULL DEFAULT '',member_ordinal INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(member_ordinal>=0),rows_written INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(rows_written>=0),member_byte_offset INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(member_byte_offset>=0),member_state TEXT NOT NULL,diagnostic_state TEXT NOT NULL,"
+        "checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms>=0),"
+        "completed_at_ms INTEGER CHECK(completed_at_ms IS NULL OR completed_at_ms>=0),"
+        "failure_reason TEXT)",
+    ),
+    (
+        "after-receipt-table",
+        "CREATE TABLE IF NOT EXISTS structure_sync_event_member_receipts ("
+        "window_id TEXT PRIMARY KEY REFERENCES structure_sync_windows(id),"
+        "source_event_count INTEGER NOT NULL CHECK(source_event_count>=0),"
+        "source_event_root TEXT NOT NULL CHECK(length(source_event_root)=64),"
+        "source_identity_hash TEXT NOT NULL CHECK(length(source_identity_hash)=64),"
+        "metadata_contract TEXT NOT NULL CHECK(metadata_contract="
+        "'structure-event-member-staging-v1'),member_row_count INTEGER NOT NULL "
+        "CHECK(member_row_count>=0),member_row_root TEXT NOT NULL "
+        "CHECK(length(member_row_root)=64),invalid_member_count INTEGER NOT NULL "
+        "CHECK(invalid_member_count>=0),invalid_member_root TEXT NOT NULL "
+        "CHECK(length(invalid_member_root)=64),terminal_event_cursor TEXT NOT NULL,"
+        "terminal_member_ordinal INTEGER NOT NULL CHECK(terminal_member_ordinal>=0),"
+        "terminal_member_byte_offset INTEGER NOT NULL CHECK(terminal_member_byte_offset>=0),"
+        "sealed_at_ms INTEGER NOT NULL CHECK(sealed_at_ms>=0),receipt_digest TEXT NOT NULL "
+        "CHECK(length(receipt_digest)=64))",
+    ),
+    (None, "DROP INDEX IF EXISTS idx_structure_event_member_projection"),
+    (
+        None,
+        "CREATE INDEX idx_structure_event_member_projection ON "
+        "structure_sync_event_member_staging(window_id,market_sort_key,event_id,"
+        "event_ordinal,member_ordinal)",
+    ),
+    (None, "DROP INDEX IF EXISTS idx_structure_event_member_resume"),
+    (
+        None,
+        "CREATE INDEX idx_structure_event_member_resume ON "
+        "structure_sync_event_member_staging(window_id,event_id,member_ordinal)",
+    ),
+    (None, "DROP INDEX IF EXISTS idx_structure_event_member_market"),
+    (
+        None,
+        "CREATE INDEX idx_structure_event_member_market ON "
+        "structure_sync_event_member_staging(window_id,market_id,event_id,member_ordinal)",
+    ),
+    (None, "DROP INDEX IF EXISTS idx_structure_event_member_progress_active"),
+    (
+        None,
+        "CREATE INDEX idx_structure_event_member_progress_active ON "
+        "structure_sync_event_member_progress(checkpoint_at_ms DESC,window_id DESC) "
+        "WHERE completed_at_ms IS NULL",
+    ),
+    (None, "DROP TRIGGER IF EXISTS trg_structure_event_member_staging_insert_guard"),
+    (
+        "after-sidecar-insert-trigger",
+        "CREATE TRIGGER trg_structure_event_member_staging_insert_guard BEFORE INSERT ON "
+        "structure_sync_event_member_staging WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=NEW.window_id) OR "
+        "((SELECT status FROM structure_sync_windows WHERE id=NEW.window_id)!='open' "
+        "AND NOT EXISTS (SELECT 1 FROM structure_sync_event_member_progress WHERE "
+        "window_id=NEW.window_id AND completed_at_ms IS NULL AND failure_reason IS NULL)) "
+        "BEGIN SELECT RAISE(ABORT,'structure-event-member-staging-frozen'); END",
+    ),
+    (None, "DROP TRIGGER IF EXISTS trg_structure_event_member_staging_update_guard"),
+    (
+        "after-sidecar-update-trigger",
+        "CREATE TRIGGER trg_structure_event_member_staging_update_guard BEFORE UPDATE ON "
+        "structure_sync_event_member_staging WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) OR "
+        "(SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='open' "
+        "BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-member-staging-frozen'); END",
+    ),
+    (None, "DROP TRIGGER IF EXISTS trg_structure_event_member_staging_delete_guard"),
+    (
+        "after-sidecar-delete-trigger",
+        "CREATE TRIGGER trg_structure_event_member_staging_delete_guard BEFORE DELETE ON "
+        "structure_sync_event_member_staging WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) OR "
+        "(SELECT status FROM structure_sync_windows WHERE id=OLD.window_id)!='open' "
+        "BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-member-staging-frozen'); END",
+    ),
+    (None, "DROP TRIGGER IF EXISTS trg_structure_event_member_receipt_insert"),
+    (
+        "after-receipt-insert-trigger",
+        "CREATE TRIGGER trg_structure_event_member_receipt_insert BEFORE INSERT ON "
+        "structure_sync_event_member_receipts WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=NEW.window_id) BEGIN "
+        "SELECT RAISE(ABORT,'structure-event-member-receipt-sealed'); END",
+    ),
+    (None, "DROP TRIGGER IF EXISTS trg_structure_event_member_receipt_update"),
+    (
+        "after-receipt-update-trigger",
+        "CREATE TRIGGER trg_structure_event_member_receipt_update BEFORE UPDATE ON "
+        "structure_sync_event_member_receipts BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-member-receipt-sealed'); END",
+    ),
+    (None, "DROP TRIGGER IF EXISTS trg_structure_event_member_receipt_delete"),
+    (
+        "after-receipt-delete-trigger",
+        "CREATE TRIGGER trg_structure_event_member_receipt_delete BEFORE DELETE ON "
+        "structure_sync_event_member_receipts BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-member-receipt-sealed'); END",
+    ),
+)
+
 # H-011 publication generations.  Bulk rows are keyed by the immutable
 # snapshot generation; online readers reach them only through the singleton
 # pointer.  Schema bootstrap creates empty tables and never performs backfill.

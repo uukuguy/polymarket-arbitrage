@@ -37,6 +37,7 @@ STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S = 10.0
 STRUCTURE_NORMALIZATION_CONTRACT_VERSION = "2026-08-02-event-only-quarantine-v2"
 STRUCTURE_DRIFT_CLASSIFIER_V1 = "structure-drift-classifier-v1"
 STRUCTURE_DRIFT_CLASSIFIER_V2 = "structure-drift-classifier-v2"
+STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT = "structure-event-member-staging-v1"
 STRUCTURE_DRIFT_CLASS_TAGS_V2 = (
     "shared",
     "fresh-addition",
