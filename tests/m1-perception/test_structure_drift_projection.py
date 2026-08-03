@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import polyarb.storage.sqlite_store as sqlite_store_module
 from polyarb.perception.market_truth import membership_hash
 from polyarb.perception.structure_drift import (
     StructuralMemberIdentity,
@@ -283,7 +284,9 @@ def test_projection_union_excludes_only_certified_event_only_member(
     assert chunk.candidates_processed == 3
     assert chunk.cursor is None
     selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
-    assert len(selects) <= 10
+    # Seven fixed authority/source queries precede at most ten bulk candidate
+    # queries.  Neither budget scales with the number of members in the page.
+    assert len(selects) <= 17
     assert not any("json_each" in sql.lower() for sql in statements)
     assert not any("payload_json,'$.markets'" in sql for sql in statements)
     assert not any(" WHERE relation.market_id='" in sql for sql in selects)
@@ -382,7 +385,7 @@ def test_event_only_keyset_is_complete_with_adversarial_order_and_null_ordinal(
         selects = [
             sql for sql in statements if sql.lstrip().upper().startswith("SELECT")
         ]
-        assert len(selects) <= 10
+        assert len(selects) <= 17
         traced_selects.extend(selects)
         seen.extend(item.envelope.market_id for item in chunk.diagnostics)
         cursor = chunk.cursor
@@ -492,6 +495,30 @@ def test_event_only_duplicate_precedes_uncertified_quarantine(tmp_path: Path) ->
         if item.envelope.market_id == "event-only-duplicate"
     ]
     assert [item.code for item in matching] == ["duplicate-market-identity"]
+
+
+def test_event_only_global_conflict_precedes_duplicate_and_quarantine(
+    tmp_path: Path,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=2,
+        event_only_members=(("event-only-certified", False),),
+        duplicate_event_only_identity=True,
+        certified_event_only_conflict=True,
+    )
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+    )
+    matching = [
+        item
+        for item in chunk.diagnostics
+        if item.envelope.market_id == "event-only-certified"
+    ]
+    assert [item.code for item in matching] == ["conflicting-event-membership"]
 
 
 @pytest.mark.parametrize(
@@ -736,6 +763,143 @@ def test_projection_commitment_binds_sealed_member_receipt(tmp_path: Path) -> No
         root=commitment.root,
         member_receipt_digest="b" * 64,
     ) is False
+
+
+def test_1200_row_complete_commitment_oracles_are_chunk_invariant(
+    tmp_path: Path,
+) -> None:
+    event_only = tuple(
+        (f"event-only-{(index * 727) % 1201:04d}", False)
+        for index in range(1_200)
+    )
+    base_path = tmp_path / "base"
+    base_path.mkdir()
+    base = _published_source_store(
+        base_path,
+        event_count=1,
+        event_only_members=event_only,
+    )
+    results = []
+    for limit in (1, 17, 500):
+        case_path = tmp_path / str(limit)
+        case_path.mkdir()
+        with sqlite3.connect(base.db_path) as source, sqlite3.connect(
+            case_path / "drift-source.db"
+        ) as destination:
+            source.backup(destination)
+        store = SQLiteStore(case_path / "drift-source.db")
+        status = store.structure_event_member_status(window_id="window-1")
+        commitment = None
+        cursor_sequence = []
+        samples = []
+        for _ in range(1_300):
+            prior = commitment
+            commitment = store.advance_structure_drift_fresh_projection_commitment(
+                publication_id="publication-1",
+                generation_snapshot_id=1,
+                commitment=commitment,
+                limit=limit,
+            )
+            if commitment.cursor is not None:
+                cursor_sequence.append(
+                    (
+                        commitment.cursor.stream,
+                        commitment.cursor.market_id,
+                        commitment.cursor.event_id,
+                        commitment.cursor.source_ordinal,
+                        commitment.cursor.member_ordinal,
+                    )
+                )
+            if prior is None or len(samples) < 5:
+                chunk = store.fetch_structure_drift_fresh_projection_chunk(
+                    publication_id="publication-1",
+                    generation_snapshot_id=1,
+                    cursor=None if prior is None else prior.cursor,
+                    limit=limit,
+                )
+                samples.extend(
+                    (
+                        item.code,
+                        tuple(item.envelope.identity_fields.values()),
+                        item.envelope.source_ordinal,
+                        item.envelope.member_ordinal,
+                    )
+                    for item in chunk.diagnostics[: 5 - len(samples)]
+                )
+            if commitment.complete:
+                break
+        else:
+            pytest.fail("1,200-row commitment did not terminate")
+        assert commitment.cursor is None
+        assert commitment.member_receipt_digest == status["receipt_digest"]
+        assert commitment.matches_generation(
+            count=commitment.member_count,
+            root=commitment.root,
+            member_receipt_digest=str(status["receipt_digest"]),
+        ) is False  # diagnostics make a dirty projection non-authoritative
+        assert len([item for item in cursor_sequence if item[0] == "market"]) <= 1
+        event_cursors = [item[1:] for item in cursor_sequence if item[0] == "event-only"]
+        assert event_cursors == sorted(set(event_cursors))
+        results.append(
+            (
+                commitment.member_count,
+                commitment.root,
+                commitment.diagnostic_count,
+                commitment.diagnostic_root,
+                tuple(samples),
+                commitment.member_receipt_digest,
+                commitment.complete,
+                commitment.cursor,
+            )
+        )
+    assert all(result[:5] == results[0][:5] for result in results)
+    assert all(result[5:] == results[0][5:] for result in results)
+    assert results[0][0] == 1
+    assert results[0][2] == 1_200
+
+
+@pytest.mark.parametrize("authority_mix", ["window", "source"])
+def test_projection_rejects_resealed_mixed_member_authority_before_candidates(
+    tmp_path: Path, authority_mix: str
+) -> None:
+    store = _published_source_store(tmp_path, event_count=1)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_event_member_receipt_update")
+        columns = [
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_sync_event_member_receipts)"
+            )
+        ]
+        receipt = list(
+            con.execute(
+                "SELECT * FROM structure_sync_event_member_receipts WHERE window_id='window-1'"
+            ).fetchone()
+        )
+        field = "window_id" if authority_mix == "window" else "source_identity_hash"
+        replacement = "window-mixed" if authority_mix == "window" else "b" * 64
+        receipt[columns.index(field)] = replacement
+        receipt[-1] = sqlite_store_module._structure_event_member_receipt_digest(
+            tuple(receipt[:-1])
+        )
+        if authority_mix == "window":
+            con.execute("PRAGMA foreign_keys=OFF")
+        con.execute(
+            f"UPDATE structure_sync_event_member_receipts SET {field}=?,receipt_digest=? "
+            "WHERE window_id='window-1'",
+            (replacement, receipt[-1]),
+        )
+    statements: list[str] = []
+    with pytest.raises(ValueError, match="structure-event-member-receipt-invalid"):
+        store.fetch_structure_drift_fresh_projection_chunk(
+            publication_id="publication-1",
+            generation_snapshot_id=1,
+            cursor=None,
+            limit=500,
+            trace_callback=statements.append,
+        )
+    assert not any("structure_sync_market_staging" in sql for sql in statements)
+    assert not any("structure_sync_event_member_staging" in sql for sql in statements)
 
 
 @pytest.mark.parametrize("receipt_failure", ["missing", "tampered"])

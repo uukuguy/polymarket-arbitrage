@@ -3032,11 +3032,18 @@ class SQLiteStore:
         finally:
             con.close()
 
-    def structure_event_member_status(self, *, window_id: str) -> dict[str, object]:
+    def structure_event_member_status(
+        self,
+        *,
+        window_id: str,
+        trace_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, object]:
         """Expose only receipt-authenticated sidecar evidence."""
         invalid = {"sealed": False, "complete": False,
                    "reason": "structure-event-member-receipt-invalid"}
         with sqlite3.connect(self._db_path) as con:
+            if trace_callback is not None:
+                con.set_trace_callback(trace_callback)
             receipt = con.execute(
                 "SELECT * FROM structure_sync_event_member_receipts WHERE window_id=?",
                 (window_id,),
@@ -4584,7 +4591,61 @@ class SQLiteStore:
             con.execute("COMMIT")
             return result
 
+    def _validated_fresh_projection_member_authority(
+        self,
+        *,
+        publication_id: str,
+        generation_snapshot_id: int,
+        trace_callback: Callable[[str], None] | None,
+    ) -> str:
+        """Return one fully authenticated sidecar receipt before candidate reads."""
+        with sqlite3.connect(self._db_path) as con:
+            if trace_callback is not None:
+                con.set_trace_callback(trace_callback)
+            identity = con.execute(
+                "SELECT window_id FROM structure_publications WHERE publication_id=? "
+                "AND snapshot_id=? AND status='published'",
+                (publication_id, generation_snapshot_id),
+            ).fetchone()
+        if identity is None:
+            raise ValueError("structure-drift-source-identity-mismatch")
+        member_status = self.structure_event_member_status(
+            window_id=str(identity[0]), trace_callback=trace_callback
+        )
+        if member_status.get("sealed") is not True:
+            raise ValueError(
+                str(
+                    member_status.get("reason")
+                    or member_status.get("failure_reason")
+                    or "structure-event-member-receipt-invalid"
+                )
+            )
+        return str(member_status["receipt_digest"])
+
     def fetch_structure_drift_fresh_projection_chunk(
+        self,
+        *,
+        publication_id: str,
+        generation_snapshot_id: int,
+        cursor: FreshProjectionCursor | None,
+        limit: int,
+        trace_callback: Callable[[str], None] | None = None,
+    ) -> FreshProjectionChunk:
+        """Validate sealed authority, then read one bounded sidecar projection chunk."""
+        self._validated_fresh_projection_member_authority(
+            publication_id=publication_id,
+            generation_snapshot_id=generation_snapshot_id,
+            trace_callback=trace_callback,
+        )
+        return self._fetch_structure_drift_fresh_projection_chunk(
+            publication_id=publication_id,
+            generation_snapshot_id=generation_snapshot_id,
+            cursor=cursor,
+            limit=limit,
+            trace_callback=trace_callback,
+        )
+
+    def _fetch_structure_drift_fresh_projection_chunk(
         self,
         *,
         publication_id: str,
@@ -4665,19 +4726,6 @@ class SQLiteStore:
                 raise ValueError("structure-drift-source-identity-mismatch")
             window_id = str(identity[0])
 
-            # The member receipt and its natural event-source receipt are the
-            # authority for every row below.  Validate them before touching a
-            # candidate table; sealed staging then makes this transaction's
-            # indexed reads stable.
-            member_status = self.structure_event_member_status(window_id=window_id)
-            if member_status.get("sealed") is not True:
-                raise ValueError(
-                    str(
-                        member_status.get("reason")
-                        or member_status.get("failure_reason")
-                        or "structure-event-member-receipt-invalid"
-                    )
-                )
             remaining = limit
             candidates: list[dict[str, object]] = []
 
@@ -4999,7 +5047,9 @@ class SQLiteStore:
                         absent_from_market_catalog=True,
                         identity_revalidated=sidecar_identity_valid,
                         invalid_event_membership=not sidecar_identity_valid,
-                        duplicate_market_identity=duplicate_identity,
+                        duplicate_market_identity=(
+                            duplicate_identity and not global_conflict
+                        ),
                         uncertified_event_only_member=not certified,
                         group_truth=group_evidence,
                         source_ordinal=envelope.source_ordinal,
@@ -5173,7 +5223,9 @@ class SQLiteStore:
                     event_source_count=len(event_ids),
                     exact_source_member=member,
                     group_truth=group_evidence,
-                    duplicate_market_identity=sidecar_market_counts.get(market_id, 0) > 1,
+                    duplicate_market_identity=(
+                        sidecar_market_counts.get(market_id, 0) > 1 and not conflict
+                    ),
                     identity_revalidated=True,
                     invalid_event_membership=not source_identity_valid,
                 )
@@ -5301,21 +5353,11 @@ class SQLiteStore:
             advance_fresh_projection_commitment,
         )
 
-        with sqlite3.connect(self._db_path) as con:
-            identity = con.execute(
-                "SELECT window_id FROM structure_publications WHERE publication_id=? "
-                "AND snapshot_id=? AND status='published'",
-                (publication_id, generation_snapshot_id),
-            ).fetchone()
-        if identity is None:
-            raise ValueError("structure-drift-source-identity-mismatch")
-        member_status = self.structure_event_member_status(window_id=str(identity[0]))
-        if member_status.get("sealed") is not True:
-            raise ValueError(
-                str(member_status.get("reason") or member_status.get("failure_reason")
-                    or "structure-event-member-receipt-invalid")
-            )
-        receipt_digest = str(member_status["receipt_digest"])
+        receipt_digest = self._validated_fresh_projection_member_authority(
+            publication_id=publication_id,
+            generation_snapshot_id=generation_snapshot_id,
+            trace_callback=trace_callback,
+        )
         current = commitment or FreshProjectionCommitment.initial(
             publication_id=publication_id,
             generation_snapshot_id=generation_snapshot_id,
@@ -5329,7 +5371,7 @@ class SQLiteStore:
             raise ValueError("fresh-projection-commitment-identity-mismatch")
         if current.complete:
             return current
-        chunk = self.fetch_structure_drift_fresh_projection_chunk(
+        chunk = self._fetch_structure_drift_fresh_projection_chunk(
             publication_id=publication_id,
             generation_snapshot_id=generation_snapshot_id,
             cursor=current.cursor,

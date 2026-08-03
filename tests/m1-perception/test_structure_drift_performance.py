@@ -9,6 +9,12 @@ from pathlib import Path
 
 import pytest
 
+from polyarb.perception.structure_drift import (
+    StructuralMemberIdentity,
+    _member_tuple,
+    project_legacy_compatible_market,
+)
+from polyarb.snapshot.normalizer import normalize_events
 from polyarb.storage.row_chain_sha256 import RowChainSHA256
 from polyarb.storage.serializable_sha256 import SerializableSHA256
 from polyarb.storage.sqlite_store import SQLiteStore
@@ -154,58 +160,233 @@ def test_projection_row_chain_v2_root_work_is_at_least_twice_as_fast_as_v1() -> 
     assert all(ratio >= 2.0 for ratio in ratios.values()), ratios
 
 
-def test_sealed_sidecar_projection_is_at_least_twice_as_fast_as_raw_event_expansion(
+def _seed_projection_gate_database(store: SQLiteStore) -> int:
+    event_count = 50
+    members_per_event = 24
+    row_count = event_count * members_per_event
+    store.init_schema()
+    events = []
+    markets = []
+    relations = []
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO snapshots(id,taken_at_ms,finished_at_ms,mode,market_count,"
+            "market_view_published,data_product,archive_status,snapshot_status,is_valid,"
+            "parquet_path) VALUES (1,1000,1001,'full',?,1,'structure','legacy','ok',1,'')",
+            (row_count,),
+        )
+        con.execute(
+            "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms) "
+            "VALUES ('window-perf','open',1000,1000)"
+        )
+        con.execute(
+            "INSERT INTO structure_sync_event_source_progress VALUES ('window-perf',0,?,1000)",
+            (RowChainSHA256.new("source-event").to_json(),),
+        )
+        for event_index in range(event_count):
+            event_id = f"event-{event_index:04d}"
+            group_id = f"group-{event_index:04d}"
+            members = []
+            for member_index in range(members_per_event):
+                market_index = event_index * members_per_event + member_index
+                market_id = f"market-{market_index:06d}"
+                members.append(
+                    {
+                        "id": market_id,
+                        "active": True,
+                        "closed": False,
+                        "negRiskOther": False,
+                    }
+                )
+                markets.append(
+                    (
+                        "window-perf",
+                        market_id,
+                        json.dumps(
+                            {
+                                "id": market_id,
+                                "conditionId": f"condition-{market_index:06d}",
+                                "clobTokenIds": json.dumps(
+                                    [
+                                        f"yes-{market_index:06d}",
+                                        f"no-{market_index:06d}",
+                                    ]
+                                ),
+                                "active": True,
+                                "closed": False,
+                                "negRisk": True,
+                                "negRiskMarketID": group_id,
+                            }
+                        ),
+                        market_index + 1,
+                    )
+                )
+                relations.append(
+                    ("window-perf", market_id, event_id, event_index + 1)
+                )
+            events.append(
+                {
+                    "id": event_id,
+                    "slug": event_id,
+                    "active": True,
+                    "closed": False,
+                    "negRisk": True,
+                    "enableNegRisk": True,
+                    "negRiskAugmented": False,
+                    "negRiskMarketID": group_id,
+                    "markets": members,
+                }
+            )
+        con.executemany(
+            "INSERT INTO structure_sync_event_market_staging VALUES (?,?,?,?)",
+            relations,
+        )
+    store.commit_structure_event_page(
+        window_id="window-perf",
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=events,
+        finished_at_ms=1001,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.executemany(
+            "INSERT INTO structure_sync_market_staging(window_id,market_id,payload_json,"
+            "source_ordinal) VALUES (?,?,?,?)",
+            markets,
+        )
+        con.execute(
+            "UPDATE structure_sync_windows SET status='complete' WHERE id='window-perf'"
+        )
+    while store.structure_event_member_status(window_id="window-perf").get("sealed") is not True:
+        result = store.advance_structure_event_member_staging_chunk(
+            window_id="window-perf", limit=500
+        )
+        assert result.get("reason") is None and result.get("failure_reason") is None
+    with sqlite3.connect(store.db_path) as con:
+        digest = "a" * 64
+        con.execute(
+            "INSERT INTO structure_publications(publication_id,window_id,snapshot_id,status,"
+            "normalization_contract_version,expected_counts_json,committed_counts_json,"
+            "validation_hash,certification_component,certification_hash,created_at_ms,"
+            "checkpoint_at_ms) VALUES ('publication-perf','window-perf',1,'published',"
+            "'contract-v1','{}','{}',?,'bounded-complete',?,1000,1001)",
+            (digest, digest),
+        )
+        con.execute(
+            "UPDATE structure_sync_windows SET status='published',published_snapshot_id=1 "
+            "WHERE id='window-perf'"
+        )
+    return row_count
+
+
+def test_complete_sealed_sidecar_gate_is_twice_as_fast_as_old_raw_projection(
     tmp_path: Path,
 ) -> None:
-    row_count = 12_000
-    payload = json.dumps(
-        {"markets": [{"id": f"market-{index:06d}"} for index in range(row_count)]}
-    )
-    con = sqlite3.connect(tmp_path / "projection-reader-performance.db")
-    con.execute("CREATE TABLE events(payload_json TEXT NOT NULL)")
-    con.execute("INSERT INTO events VALUES (?)", (payload,))
-    con.execute(
-        "CREATE TABLE members(window_id TEXT NOT NULL,market_id TEXT NOT NULL)"
-    )
-    con.executemany(
-        "INSERT INTO members VALUES ('window-1',?)",
-        ((f"market-{index:06d}",) for index in range(row_count)),
-    )
-    con.execute("CREATE INDEX member_projection ON members(window_id,market_id)")
+    store = SQLiteStore(tmp_path / "projection-gate-performance.db")
+    row_count = _seed_projection_gate_database(store)
 
-    def raw_projection() -> list[str]:
-        return [
-            str(row[0])
-            for row in con.execute(
-                "SELECT json_extract(member.value,'$.id') FROM events JOIN "
-                "json_each(events.payload_json,'$.markets') member ORDER BY 1"
-            )
-        ]
-
-    def sidecar_projection() -> list[str]:
-        rows: list[str] = []
-        cursor = ""
+    def raw_v1_projection() -> tuple[int, str]:
+        raw_events: dict[str, dict[str, object]] = {}
+        after_event_id = None
         while True:
-            page = [
-                str(row[0])
-                for row in con.execute(
-                    "SELECT market_id FROM members WHERE window_id='window-1' "
-                    "AND market_id>? ORDER BY market_id LIMIT 500",
-                    (cursor,),
+            rows = store.fetch_structure_drift_event_source_chunk(
+                publication_id="publication-perf",
+                generation_snapshot_id=1,
+                after_event_id=after_event_id,
+                limit=500,
+            )
+            if not rows:
+                break
+            raw_events.update((str(row[1]), row[2]) for row in rows)
+            after_event_id = str(rows[-1][1])
+        digest = RowChainSHA256.new("projection-member")
+        count = 0
+        after_market_id = None
+        while True:
+            rows = store.fetch_structure_drift_market_source_chunk(
+                publication_id="publication-perf",
+                generation_snapshot_id=1,
+                after_market_id=after_market_id,
+                limit=500,
+            )
+            if not rows:
+                break
+            for market_id, raw_market, event_ids, _taken_at_ms in rows:
+                # This is the rejected v1 shape: normalize the whole parent
+                # sibling array once per market candidate.
+                _events, _tags, _mapping, source_members, _truths = normalize_events(
+                    [raw_events[str(event_ids[0])]]
                 )
-            ]
-            rows.extend(page)
-            if len(page) < 500:
-                return rows
-            cursor = page[-1]
+                source_member = next(
+                    member for member in source_members if member.market_id == market_id
+                )
+                projected = project_legacy_compatible_market(
+                    raw_market, event_ids=event_ids, taken_at_ms=0
+                )
+                assert projected.row is not None
+                row = projected.row
+                member = StructuralMemberIdentity(
+                    event_id=source_member.event_id,
+                    group_id=source_member.group_id,
+                    market_id=source_member.market_id,
+                    member_kind=source_member.member_kind,
+                    active=source_member.active,
+                    closed=source_member.closed,
+                    condition_id=str(row["condition_id"]),
+                    yes_token_id=str(row["yes_token_id"]),
+                    no_token_id=str(row["no_token_id"]),
+                    neg_risk=bool(row["neg_risk"]),
+                    incomplete=bool(row["incomplete"]),
+                )
+                digest.update(_member_tuple(member))
+                count += 1
+            after_market_id = str(rows[-1][0])
+        return count, digest.hexdigest()
 
-    assert sidecar_projection() == raw_projection()
-    raw_median = _median_seconds(raw_projection, repeats=3)
-    sidecar_median = _median_seconds(sidecar_projection, repeats=5)
+    query_statements: list[str] = []
+
+    def sidecar_v2_projection(*, trace: bool = False) -> tuple[int, str]:
+        commitment = None
+        started = time.perf_counter()
+        while commitment is None or not commitment.complete:
+            commitment = store.advance_structure_drift_fresh_projection_commitment(
+                publication_id="publication-perf",
+                generation_snapshot_id=1,
+                commitment=commitment,
+                limit=500,
+                trace_callback=query_statements.append if trace else None,
+            )
+        assert time.perf_counter() - started < 45.0
+        return commitment.member_count, commitment.root
+
+    expected = raw_v1_projection()
+    assert expected == sidecar_v2_projection()
+    assert expected[0] == row_count
+    query_statements.clear()
+    assert sidecar_v2_projection(trace=True) == expected
+    select_count = sum(
+        statement.lstrip().upper().startswith("SELECT")
+        for statement in query_statements
+    )
+    assert select_count > 0
+    assert not any("json_each" in statement.lower() for statement in query_statements)
+
+    raw_median = _median_seconds(raw_v1_projection, repeats=3)
+    sidecar_median = _median_seconds(sidecar_v2_projection, repeats=5)
+    print(
+        "projection-gate-performance "
+        f"rows={row_count} raw_median_s={raw_median:.6f} "
+        f"sidecar_median_s={sidecar_median:.6f} "
+        f"ratio={raw_median / sidecar_median:.2f} "
+        f"v2_selects={select_count}"
+    )
     assert raw_median / sidecar_median >= 2.0, {
+        "rows": row_count,
         "raw_seconds": raw_median,
         "sidecar_seconds": sidecar_median,
         "ratio": raw_median / sidecar_median,
+        "v2_select_count": select_count,
     }
 
 

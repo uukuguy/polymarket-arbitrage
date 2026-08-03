@@ -85,6 +85,12 @@ event-only anti-join 使用覆盖索引和复合 keyset
 `json_each`、逐 member SELECT 或临时排序。历史 window 如果没有自然 source receipt 就保持 unavailable；不能从
 旧 raw payload 合成 receipt。receipt invalid 时保留 legacy serving plane，停止验收并等待新 window。
 
+query budget 必须按两层读：direct reader 每次固定最多 7 条 publication/source/member authority SELECT，加最多
+10 条 bulk candidate/evidence SELECT，总计最多 17；commitment 已验证 receipt 后内部复用该 authority，当前
+production-shaped gate 实测 16 条 SELECT/call。这个常数不会随页内 1/17/500 个 member 增长。不要把旧的
+“≤10”理解成含 receipt gate 的总数；
+它只描述 candidate/evidence 层。任何逐 member 增长都属于回归。
+
 - `structure-drift-writer-busy`：确认 Quote/其他 writer 所有权；不要并发手动推进。
 - `structure-drift-child-failed`：看 child signal/timeout 分类；SIGKILL 先按 possible cgroup OOM 调查。
 - `unclassified>0` / `overlap-conflict>0`：数据证据失败，不是性能重试问题。
