@@ -349,8 +349,11 @@ if not member_status["sealed"]:
 ```
 
 This runs after event staging is frozen and before publication/generation/drift.
-Keep Quote double-priority and attempt ledger semantics unchanged. Same sealed
-source identity is never rederived; a new window starts exactly once.
+Keep Quote double-priority unchanged. Event-member derivation itself has no
+dedicated attempt ledger: it is tracked by defer receipt, the shared scheduler
+failure counter, and `RECOVERING` health. The later classifier-drift child keeps
+its existing dedicated attempt ledger semantics. Same sealed source identity is
+never rederived; a new window starts exactly once.
 
 - [ ] **Step 10: Close health and resident Polywatch chain**
 

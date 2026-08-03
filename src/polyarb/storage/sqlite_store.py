@@ -164,11 +164,19 @@ _STRUCTURE_EVENT_MEMBER_RECEIPT_FIELDS = (
 )
 
 
-def _structure_event_member_receipt_digest(values: tuple[object, ...]) -> str:
+def _structure_event_member_receipt_digest(
+    values: tuple[object, ...],
+    *,
+    event_conflict_count: int,
+    event_conflict_root: str,
+) -> str:
     if len(values) != len(_STRUCTURE_EVENT_MEMBER_RECEIPT_FIELDS):
         raise ValueError("invalid-structure-event-member-receipt-fields")
     return hashlib.sha256(json.dumps(
-        values, ensure_ascii=False, separators=(",", ":")
+        (*values, "structure-event-global-conflict-v1", event_conflict_count,
+         event_conflict_root),
+        ensure_ascii=False,
+        separators=(",", ":"),
     ).encode()).hexdigest()
 
 
@@ -176,38 +184,61 @@ def _event_member_progress_state(
     *, member_chain: RowChainSHA256, source_event_count: int,
     source_event_root: str, source_identity_hash: str,
     window_checkpoint_at_ms: int,
+    phase: str = "members",
+    conflict_cursor: str = "",
+    event_conflict_chain: RowChainSHA256 | None = None,
 ) -> str:
+    conflict_chain = (
+        RowChainSHA256.new("source-event-conflict")
+        if event_conflict_chain is None else event_conflict_chain
+    )
     return json.dumps({
         "member_chain": member_chain.to_json(),
         "source_event_count": source_event_count,
         "source_event_root": source_event_root,
         "source_identity_hash": source_identity_hash,
         "window_checkpoint_at_ms": window_checkpoint_at_ms,
+        "phase": phase,
+        "conflict_cursor": conflict_cursor,
+        "event_conflict_chain": conflict_chain.to_json(),
     }, sort_keys=True, separators=(",", ":"))
 
 
 def _read_event_member_progress_state(
     encoded: str,
-) -> tuple[RowChainSHA256, int, str, str, int]:
+) -> tuple[RowChainSHA256, int, str, str, int, str, str, RowChainSHA256]:
     try:
         state = json.loads(encoded)
         if not isinstance(state, dict) or set(state) != {
             "member_chain", "source_event_count", "source_event_root",
-            "source_identity_hash", "window_checkpoint_at_ms",
+            "source_identity_hash", "window_checkpoint_at_ms", "phase",
+            "conflict_cursor", "event_conflict_chain",
         }:
             raise ValueError
         chain = RowChainSHA256.from_json(
             str(state["member_chain"]), expected_domain="source-event"
         )
+        conflict_chain = RowChainSHA256.from_json(
+            str(state["event_conflict_chain"]),
+            expected_domain="source-event-conflict",
+        )
         count, checkpoint = state["source_event_count"], state["window_checkpoint_at_ms"]
         root, identity = state["source_event_root"], state["source_identity_hash"]
+        phase, conflict_cursor = state["phase"], state["conflict_cursor"]
         if (type(count) is not int or count < 0 or type(checkpoint) is not int
                 or checkpoint < 0 or not isinstance(root, str) or len(root) != 64
                 or not isinstance(identity, str) or len(identity) != 64):
             raise ValueError
+        if phase not in {"members", "conflicts", "complete"}:
+            raise ValueError
+        if not isinstance(conflict_cursor, str):
+            raise ValueError
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise ValueError("structure-event-member-progress-invalid") from error
-    return chain, count, root, identity, checkpoint
+    return (
+        chain, count, root, identity, checkpoint, str(phase),
+        str(conflict_cursor), conflict_chain,
+    )
 
 
 def _migrate_structure_event_member_schema(
@@ -241,6 +272,27 @@ def _migrate_structure_event_member_schema(
                 )
                 if fault_hook is not None:
                     fault_hook(f"after-progress-{column}")
+        receipt_columns = {
+            str(row[1]) for row in con.execute(
+                "PRAGMA table_info(structure_sync_event_member_receipts)"
+            )
+        }
+        receipt_additions = (
+            ("event_conflict_count", "INTEGER NOT NULL DEFAULT 0"),
+            (
+                "event_conflict_root",
+                "TEXT NOT NULL DEFAULT "
+                "'0000000000000000000000000000000000000000000000000000000000000000'",
+            ),
+        )
+        for column, ddl in receipt_additions:
+            if column not in receipt_columns:
+                con.execute(
+                    f"ALTER TABLE structure_sync_event_member_receipts "
+                    f"ADD COLUMN {column} {ddl}"
+                )
+                if fault_hook is not None:
+                    fault_hook(f"after-receipt-{column}")
         con.execute("RELEASE SAVEPOINT structure_event_member_schema_migration")
     except BaseException:
         con.execute("ROLLBACK TO SAVEPOINT structure_event_member_schema_migration")
@@ -2864,7 +2916,10 @@ class SQLiteStore:
             ))
             if progress[10] != source[3] or progress[12] != expected_checkpoint:
                 raise ValueError("structure-event-member-checkpoint-invalid")
-            chain, source_count, source_root, source_identity, checkpoint = (
+            (
+                chain, source_count, source_root, source_identity, checkpoint,
+                phase, conflict_cursor, conflict_chain,
+            ) = (
                 _read_event_member_progress_state(str(progress[4]))
             )
             invalid_chain = RowChainSHA256.from_json(
@@ -2872,6 +2927,87 @@ class SQLiteStore:
             )
             if chain.count != int(progress[2]):
                 raise ValueError("structure-event-member-progress-invalid")
+            if phase == "complete":
+                raise ValueError("structure-event-member-progress-invalid")
+            if phase == "conflicts":
+                conflict_rows = con.execute(
+                    "SELECT event_id,global_conflict FROM "
+                    "structure_sync_event_conflict_summaries WHERE window_id=? "
+                    "AND event_id>? ORDER BY event_id LIMIT ?",
+                    (window_id, conflict_cursor, limit),
+                ).fetchall()
+                for event_id, global_conflict in conflict_rows:
+                    conflict_chain.update((
+                        "structure-event-global-conflict-v1",
+                        str(event_id),
+                        bool(global_conflict),
+                    ))
+                next_conflict_cursor = (
+                    conflict_cursor
+                    if not conflict_rows else str(conflict_rows[-1][0])
+                )
+                conflict_complete = con.execute(
+                    "SELECT 1 FROM structure_sync_event_conflict_summaries "
+                    "WHERE window_id=? AND event_id>? LIMIT 1",
+                    (window_id, next_conflict_cursor),
+                ).fetchone() is None
+                if conflict_complete and conflict_chain.count != source_count:
+                    raise ValueError("structure-event-conflict-summary-invalid")
+                next_state = _event_member_progress_state(
+                    member_chain=chain,
+                    source_event_count=source_count,
+                    source_event_root=source_root,
+                    source_identity_hash=source_identity,
+                    window_checkpoint_at_ms=checkpoint,
+                    phase="complete" if conflict_complete else "conflicts",
+                    conflict_cursor=next_conflict_cursor,
+                    event_conflict_chain=conflict_chain,
+                )
+                checkpoint_digest = _structure_event_member_checkpoint_digest((
+                    source[3], progress[0], int(progress[1]), int(progress[9]),
+                    int(progress[3]), int(progress[2]), progress[11], next_state,
+                    progress[5],
+                ))
+                con.execute("BEGIN IMMEDIATE")
+                if con.execute(progress_sql, (window_id,)).fetchone() != progress:
+                    raise ValueError("structure-event-member-cursor-race")
+                if conflict_complete:
+                    receipt = (
+                        window_id, source_count, source_root, source_identity,
+                        STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT, chain.count,
+                        chain.hexdigest(), invalid_chain.count,
+                        invalid_chain.hexdigest(), str(progress[0]), int(progress[1]),
+                        int(progress[3]), now_ms,
+                    )
+                    receipt_digest = _structure_event_member_receipt_digest(
+                        receipt,
+                        event_conflict_count=conflict_chain.count,
+                        event_conflict_root=conflict_chain.hexdigest(),
+                    )
+                    con.execute(
+                        "INSERT INTO structure_sync_event_member_receipts VALUES ("
+                        + ",".join("?" for _ in range(16)) + ")",
+                        (*receipt, receipt_digest, conflict_chain.count,
+                         conflict_chain.hexdigest()),
+                    )
+                updated = con.execute(
+                    "UPDATE structure_sync_event_member_progress SET member_state=?,"
+                    "checkpoint_at_ms=?,completed_at_ms=?,checkpoint_digest=? WHERE "
+                    "window_id=? AND completed_at_ms IS NULL AND failure_reason IS NULL",
+                    (next_state, now_ms, now_ms if conflict_complete else None,
+                     checkpoint_digest, window_id),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError("structure-event-member-cursor-race")
+                con.execute("COMMIT")
+                return {
+                    "sealed": conflict_complete,
+                    "complete": conflict_complete,
+                    "rows_written": len(conflict_rows),
+                    "member_ordinal": int(progress[1]),
+                    "member_byte_offset": int(progress[3]),
+                    "state": "sealed" if conflict_complete else "sealing-conflicts",
+                }
             rows = []
             remaining = limit
             terminal_ordinal, terminal_offset = max(0, ordinal - 1), byte_offset
@@ -2964,10 +3100,39 @@ class SQLiteStore:
                 "SELECT 1 FROM structure_sync_event_staging WHERE window_id=? "
                 "AND event_id>? LIMIT 1", (window_id, cursor),
             ).fetchone() is None
+            conflict_complete = False
+            conflict_rows: list[tuple[object, ...]] = []
+            if complete:
+                conflict_rows = con.execute(
+                    "SELECT event_id,global_conflict FROM "
+                    "structure_sync_event_conflict_summaries WHERE window_id=? "
+                    "ORDER BY event_id LIMIT ?",
+                    (window_id, limit),
+                ).fetchall()
+                for event_id, global_conflict in conflict_rows:
+                    conflict_chain.update((
+                        "structure-event-global-conflict-v1",
+                        str(event_id),
+                        bool(global_conflict),
+                    ))
+                conflict_complete = (
+                    conflict_chain.count == source_count
+                    and len(conflict_rows) <= limit
+                )
+                if conflict_chain.count > source_count:
+                    raise ValueError("structure-event-conflict-summary-invalid")
             next_state = _event_member_progress_state(
                 member_chain=chain, source_event_count=source_count,
                 source_event_root=source_root, source_identity_hash=source_identity,
                 window_checkpoint_at_ms=checkpoint,
+                phase=(
+                    "complete" if conflict_complete
+                    else "conflicts" if complete else "members"
+                ),
+                conflict_cursor=(
+                    str(conflict_rows[-1][0]) if conflict_rows else ""
+                ),
+                event_conflict_chain=conflict_chain,
             )
             con.execute("BEGIN IMMEDIATE")
             if con.execute(progress_sql, (window_id,)).fetchone() != progress:
@@ -2996,17 +3161,24 @@ class SQLiteStore:
                 stored_offset, chain.count, stored_parent_hash, next_state,
                 invalid_chain.to_json(),
             ))
-            if complete:
+            if conflict_complete:
                 receipt = (
                     window_id, source_count, source_root, source_identity,
                     STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT, chain.count,
-                    chain.hexdigest(), invalid_chain.count, invalid_chain.hexdigest(),
-                    cursor, terminal_ordinal, terminal_offset, now_ms,
+                    chain.hexdigest(), invalid_chain.count,
+                    invalid_chain.hexdigest(), cursor, terminal_ordinal,
+                    terminal_offset, now_ms,
+                )
+                receipt_digest = _structure_event_member_receipt_digest(
+                    receipt,
+                    event_conflict_count=conflict_chain.count,
+                    event_conflict_root=conflict_chain.hexdigest(),
                 )
                 con.execute(
                     "INSERT INTO structure_sync_event_member_receipts VALUES ("
-                    + ",".join("?" for _ in range(14)) + ")",
-                    (*receipt, _structure_event_member_receipt_digest(receipt)),
+                    + ",".join("?" for _ in range(16)) + ")",
+                    (*receipt, receipt_digest, conflict_chain.count,
+                     conflict_chain.hexdigest()),
                 )
             updated = con.execute(
                 "UPDATE structure_sync_event_member_progress SET event_cursor=?,"
@@ -3016,16 +3188,21 @@ class SQLiteStore:
                 "parent_payload_hash=?,checkpoint_digest=? WHERE "
                 "window_id=? AND completed_at_ms IS NULL AND failure_reason IS NULL",
                 (cursor, stored_ordinal, chain.count, stored_offset, next_state,
-                 invalid_chain.to_json(), now_ms, now_ms if complete else None,
+                 invalid_chain.to_json(), now_ms,
+                 now_ms if conflict_complete else None,
                  stored_character_offset, source[3], stored_parent_hash,
                  checkpoint_digest, window_id),
             )
             if updated.rowcount != 1:
                 raise ValueError("structure-event-member-cursor-race")
             con.execute("COMMIT")
-            return {"sealed": complete, "complete": complete,
+            return {"sealed": conflict_complete, "complete": conflict_complete,
                     "rows_written": len(rows), "member_ordinal": terminal_ordinal,
-                    "member_byte_offset": stored_offset}
+                    "member_byte_offset": stored_offset,
+                    "state": (
+                        "sealed" if conflict_complete
+                        else "sealing-conflicts" if complete else "deriving-members"
+                    )}
         except BaseException:
             if con.in_transaction:
                 con.execute("ROLLBACK")
@@ -3068,8 +3245,9 @@ class SQLiteStore:
                 "structure_sync_event_member_progress WHERE window_id=?",
                 (window_id,),
             ).fetchone()
-            chain = diagnostic = None
+            chain = diagnostic = conflict_chain = None
             count = root = identity = checkpoint = None
+            phase = conflict_cursor = None
             if progress is not None:
                 try:
                     expected_checkpoint = _structure_event_member_checkpoint_digest((
@@ -3077,7 +3255,10 @@ class SQLiteStore:
                         int(progress[9]), int(progress[3]), int(progress[2]),
                         progress[11], progress[4], progress[5],
                     ))
-                    chain, count, root, identity, checkpoint = (
+                    (
+                        chain, count, root, identity, checkpoint, phase,
+                        conflict_cursor, conflict_chain,
+                    ) = (
                         _read_event_member_progress_state(str(progress[4]))
                     )
                     diagnostic = RowChainSHA256.from_json(
@@ -3124,7 +3305,10 @@ class SQLiteStore:
                         or progress[8] is not None or receipt[0] != window_id
                         or receipt[4] != STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT
                         or receipt[13] != _structure_event_member_receipt_digest(
-                            tuple(receipt[:13]))
+                            tuple(receipt[:13]),
+                            event_conflict_count=int(receipt[14]),
+                            event_conflict_root=str(receipt[15]),
+                        )
                         or progress[0] != receipt[9]
                         or int(progress[1]) != int(receipt[10])
                         or int(progress[2]) != int(receipt[5])
@@ -3137,13 +3321,18 @@ class SQLiteStore:
                         ))):
                     return invalid
                 assert chain is not None and diagnostic is not None
+                assert conflict_chain is not None
                 if ((count, root, identity) != source[:3]
                         or checkpoint < 0
                         or (count, root, identity) != tuple(receipt[1:4])
                         or chain.count != int(receipt[5])
                         or chain.hexdigest() != receipt[6]
                         or diagnostic.count != int(receipt[7])
-                        or diagnostic.hexdigest() != receipt[8]):
+                        or diagnostic.hexdigest() != receipt[8]
+                        or phase != "complete"
+                        or conflict_chain.count != int(receipt[14])
+                        or conflict_chain.hexdigest() != receipt[15]
+                        or conflict_chain.count != source[0]):
                     return invalid
             except (TypeError, ValueError, json.JSONDecodeError):
                 return invalid
@@ -3154,7 +3343,9 @@ class SQLiteStore:
                     "member_ordinal": int(receipt[10]),
                     "member_byte_offset": int(receipt[11]),
                     "sealed_at_ms": int(receipt[12]),
-                    "receipt_digest": str(receipt[13])}
+                    "receipt_digest": str(receipt[13]),
+                    "event_conflict_count": int(receipt[14]),
+                    "event_conflict_root": str(receipt[15])}
 
     def advance_structure_event_market_backfill(
         self,
@@ -4633,6 +4824,7 @@ class SQLiteStore:
         limit: int,
         trace_callback: Callable[[str], None] | None = None,
         inspection_callback: Callable[[str, int], None] | None = None,
+        sqlite_progress_callback: Callable[[], int] | None = None,
     ) -> FreshProjectionChunk:
         """Validate sealed authority, then read one bounded sidecar projection chunk."""
         self._validated_fresh_projection_member_authority(
@@ -4647,6 +4839,7 @@ class SQLiteStore:
             limit=limit,
             trace_callback=trace_callback,
             inspection_callback=inspection_callback,
+            sqlite_progress_callback=sqlite_progress_callback,
         )
 
     def _fetch_structure_drift_fresh_projection_chunk(
@@ -4658,6 +4851,7 @@ class SQLiteStore:
         limit: int,
         trace_callback: Callable[[str], None] | None = None,
         inspection_callback: Callable[[str, int], None] | None = None,
+        sqlite_progress_callback: Callable[[], int] | None = None,
     ) -> FreshProjectionChunk:
         """Project one bounded fresh-source union from the sealed member sidecar."""
         from polyarb.perception.structure_drift import (
@@ -4707,6 +4901,8 @@ class SQLiteStore:
         with sqlite3.connect(self._db_path) as con:
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
+            if sqlite_progress_callback is not None:
+                con.set_progress_handler(sqlite_progress_callback, 1)
             con.execute("BEGIN")
             identity = con.execute(
                 "SELECT p.window_id,p.status,p.normalization_contract_version,"
@@ -5000,21 +5196,22 @@ class SQLiteStore:
                     for item in candidates if item["kind"] == "event-only"
                 })
                 if event_ids:
-                    event_values = ",".join("(?)" for _ in event_ids)
+                    event_placeholders = ",".join("?" for _ in event_ids)
                     conflict_rows = con.execute(
-                        "WITH candidate(event_id) AS (VALUES " + event_values + ") "
-                        "SELECT candidate.event_id FROM candidate WHERE EXISTS (SELECT 1 "
-                        "FROM structure_sync_event_market_staging relation WHERE "
-                        "relation.window_id=? AND relation.event_id=candidate.event_id AND "
-                        "EXISTS (SELECT 1 FROM structure_sync_event_market_staging other "
-                        "WHERE other.window_id=relation.window_id AND "
-                        "other.market_id=relation.market_id AND "
-                        "other.event_id!=relation.event_id LIMIT 1) LIMIT 1)",
-                        (*event_ids, window_id),
+                        "SELECT event_id,global_conflict FROM "
+                        "structure_sync_event_conflict_summaries WHERE window_id=? AND "
+                        f"event_id IN ({event_placeholders})",
+                        (window_id, *event_ids),
                     ).fetchall()
+                    if len(conflict_rows) != len(event_ids):
+                        raise ValueError("structure-event-conflict-summary-invalid")
                     if inspection_callback is not None:
                         inspection_callback("conflict-events", len(conflict_rows))
-                    conflict_events.update(str(row[0]) for row in conflict_rows)
+                    conflict_events.update(
+                        str(event_id)
+                        for event_id, global_conflict in conflict_rows
+                        if bool(global_conflict)
+                    )
                 issue_keys = []
                 for item in candidates:
                     if item["kind"] != "event-only":
@@ -10783,6 +10980,7 @@ class SQLiteStore:
                 delete_placeholders = ",".join("?" for _ in to_delete)
                 for table in (
                     "structure_sync_event_member_receipts",
+                    "structure_sync_event_conflict_summaries",
                     "structure_sync_event_member_staging",
                     "structure_sync_event_source_receipts",
                     "structure_sync_event_metadata_staging",
@@ -10849,6 +11047,7 @@ class SQLiteStore:
                 placeholders = ",".join("?" for _ in to_delete)
                 for table in (
                     "structure_sync_event_member_receipts",
+                    "structure_sync_event_conflict_summaries",
                     "structure_sync_event_member_staging",
                     "structure_sync_event_source_receipts",
                     "structure_sync_event_metadata_staging",

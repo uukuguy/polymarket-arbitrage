@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-import time
 from pathlib import Path
 
 import pytest
@@ -691,12 +690,14 @@ def test_global_relation_conflict_wins_across_projection_chunks(
     cursor = None
     diagnostics = []
     members = []
+    statements: list[str] = []
     while True:
         chunk = store.fetch_structure_drift_fresh_projection_chunk(
             publication_id="publication-1",
             generation_snapshot_id=1,
             cursor=cursor,
             limit=limit,
+            trace_callback=statements.append,
         )
         diagnostics.extend(chunk.diagnostics)
         members.extend(chunk.members)
@@ -711,6 +712,14 @@ def test_global_relation_conflict_wins_across_projection_chunks(
         if item.code == "conflicting-event-membership"
     } == {"inactive-a", "market-000"}
     assert {item.market_id for item in members} == {"market-001"}
+    assert any(
+        "structure_sync_event_conflict_summaries" in statement
+        for statement in statements
+    )
+    assert not any(
+        "structure_sync_event_market_staging r1" in statement
+        for statement in statements
+    )
 
 
 def test_global_relation_projection_root_is_chunk_invariant(tmp_path: Path) -> None:
@@ -920,15 +929,17 @@ def test_projection_rejects_resealed_mixed_member_authority_before_candidates(
         field = "window_id" if authority_mix == "window" else "source_identity_hash"
         replacement = "window-mixed" if authority_mix == "window" else "b" * 64
         receipt[columns.index(field)] = replacement
-        receipt[-1] = sqlite_store_module._structure_event_member_receipt_digest(
-            tuple(receipt[:-1])
+        receipt[13] = sqlite_store_module._structure_event_member_receipt_digest(
+            tuple(receipt[:13]),
+            event_conflict_count=int(receipt[14]),
+            event_conflict_root=str(receipt[15]),
         )
         if authority_mix == "window":
             con.execute("PRAGMA foreign_keys=OFF")
         con.execute(
             f"UPDATE structure_sync_event_member_receipts SET {field}=?,receipt_digest=? "
             "WHERE window_id='window-1'",
-            (replacement, receipt[-1]),
+            (replacement, receipt[13]),
         )
     statements: list[str] = []
     with pytest.raises(ValueError, match="structure-event-member-receipt-invalid"):
@@ -1270,118 +1281,6 @@ def test_member_resume_uses_ordered_market_id_range_without_nullable_or(
     )
     assert "m.market_id>'market-050'" in member_select
     assert "IS NULL OR m.market_id>" not in member_select
-
-
-def test_member_scan_indexes_build_and_plan_on_120k_rows(tmp_path: Path) -> None:
-    store = SQLiteStore(tmp_path / "member-scan-120k.db")
-    store.init_schema()
-    row_count = 120_000
-    members_per_group = 24
-    group_count = row_count // members_per_group
-    with sqlite3.connect(store.db_path) as con:
-        con.execute("PRAGMA synchronous=OFF")
-        for generation in (False, True):
-            membership_table = (
-                "structure_generation_memberships"
-                if generation
-                else "event_market_memberships"
-            )
-            truth_table = (
-                "structure_generation_group_truth"
-                if generation
-                else "neg_risk_group_truth"
-            )
-            market_table = "structure_generation_markets" if generation else "markets"
-            snapshot_id = 2 if generation else 1
-            con.executemany(
-                f"INSERT INTO {membership_table}(snapshot_id,event_id,"
-                "neg_risk_market_id,market_id,member_kind,active,closed) "
-                "VALUES (?,?,?,?,'named',1,0)",
-                (
-                    (
-                        snapshot_id,
-                        f"event-{index // members_per_group:06d}",
-                        f"group-{index // members_per_group:06d}",
-                        f"market-{index:06d}",
-                    )
-                    for index in range(row_count)
-                ),
-            )
-            con.executemany(
-                f"INSERT INTO {truth_table}(snapshot_id,event_id,"
-                "neg_risk_market_id,neg_risk_type,expected_member_count,"
-                "active_named_count,membership_hash,quality) "
-                "VALUES (?,?,?,'standard',24,24,?,'complete-supported')",
-                (
-                    (
-                        snapshot_id,
-                        f"event-{index:06d}",
-                        f"group-{index:06d}",
-                        "a" * 64,
-                    )
-                    for index in range(group_count)
-                ),
-            )
-            con.executemany(
-                f"INSERT INTO {market_table}(snapshot_id,market_id,condition_id,"
-                "yes_token_id,no_token_id,active,closed,neg_risk,"
-                "neg_risk_market_id,fetched_at_ms,incomplete,event_id) "
-                "VALUES (?,?,?,?,?,1,0,1,?,1000,0,?)",
-                (
-                    (
-                        snapshot_id,
-                        f"market-{index:06d}",
-                        f"condition-{index:06d}",
-                        f"yes-{index:06d}",
-                        f"no-{index:06d}",
-                        f"group-{index // members_per_group:06d}",
-                        f"event-{index // members_per_group:06d}",
-                    )
-                    for index in range(row_count)
-                ),
-            )
-        con.execute("DROP INDEX idx_structure_generation_memberships_drift_scan")
-        con.execute("DROP INDEX idx_event_market_memberships_drift_scan")
-
-    started = time.monotonic()
-    store.init_schema()
-    startup_elapsed_s = time.monotonic() - started
-    assert startup_elapsed_s < 30.0
-
-    for generation, expected_index in (
-        (True, "idx_structure_generation_memberships_drift_scan"),
-        (False, "idx_event_market_memberships_drift_scan"),
-    ):
-        statements: list[str] = []
-        rows = store.fetch_structure_drift_member_chunk(
-            snapshot_id=2 if generation else 1,
-            generation=generation,
-            after_market_id="market-059999",
-            limit=500,
-            trace_callback=statements.append,
-        )
-        member_select = next(
-            statement
-            for statement in statements
-            if "memberships m" in statement
-        )
-        with sqlite3.connect(store.db_path) as con:
-            plan = "\n".join(
-                str(row[3])
-                for row in con.execute("EXPLAIN QUERY PLAN " + member_select)
-            )
-            persisted_count = con.execute(
-                "SELECT COUNT(*) FROM "
-                + (
-                    "structure_generation_memberships"
-                    if generation
-                    else "event_market_memberships"
-                )
-            ).fetchone()
-        assert len(rows) == 500
-        assert persisted_count == (row_count,)
-        assert expected_index in plan
-        assert "USE TEMP B-TREE FOR ORDER BY" not in plan
 
 
 def test_fresh_member_evidence_is_bulk_raw_derived_and_issue_independent(

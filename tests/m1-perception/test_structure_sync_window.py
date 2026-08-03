@@ -450,10 +450,11 @@ def test_event_member_immutable_preserves_duplicate_ordinals_and_replace_guard(t
         receipt = (
             "w", 1, "1" * 64, "2" * 64, STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT,
             2, "3" * 64, 0, "4" * 64, "e", 2, 10, 3, "5" * 64,
+            0, "0" * 64,
         )
         receipt_insert = (
             "INSERT INTO structure_sync_event_member_receipts "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         )
         con.execute(receipt_insert, receipt)
         original = con.execute("SELECT * FROM structure_sync_event_member_receipts").fetchone()
@@ -544,7 +545,8 @@ def test_event_member_immutable_rejects_identity_and_target_authority_bypass(
             "INSERT INTO structure_sync_event_member_receipts VALUES "
             "('sealed-window',1,'" + "1" * 64 + "','" + "2" * 64
             + "','structure-event-member-staging-v1',1,'" + "3" * 64
-            + "',0,'" + "4" * 64 + "','event-1',1,10,2,'" + "5" * 64 + "')"
+            + "',0,'" + "4" * 64 + "','event-1',1,10,2,'" + "5" * 64
+            + "',0,'" + "0" * 64 + "')"
         )
         with pytest.raises(
             sqlite3.IntegrityError,
@@ -2464,7 +2466,7 @@ def test_event_member_cas_fault_is_atomic(tmp_path, fault) -> None:
     "metadata_contract", "member_row_count", "member_row_root",
     "invalid_member_count", "invalid_member_root", "terminal_event_cursor",
     "terminal_member_ordinal", "terminal_member_byte_offset", "sealed_at_ms",
-    "receipt_digest",
+    "receipt_digest", "event_conflict_count", "event_conflict_root",
 ])
 def test_event_member_receipt_tamper_fails_closed(tmp_path, field) -> None:
     store = SQLiteStore(tmp_path / f"receipt-{field}.db")
@@ -2473,9 +2475,11 @@ def test_event_member_receipt_tamper_fails_closed(tmp_path, field) -> None:
     store.advance_structure_event_member_staging_chunk(window_id=window_id)
     with sqlite3.connect(store.db_path) as con:
         row = con.execute("SELECT * FROM structure_sync_event_member_receipts").fetchone()
-        assert row[-1] == hashlib.sha256(json.dumps(
-            tuple(row[:-1]), ensure_ascii=False, separators=(",", ":")
-        ).encode()).hexdigest()
+        assert row[13] == sqlite_store_module._structure_event_member_receipt_digest(
+            tuple(row[:13]),
+            event_conflict_count=int(row[14]),
+            event_conflict_root=str(row[15]),
+        )
         columns = [r[1] for r in con.execute(
             "PRAGMA table_info(structure_sync_event_member_receipts)"
         )]
@@ -2493,6 +2497,81 @@ def test_event_member_receipt_tamper_fails_closed(tmp_path, field) -> None:
     )
     assert status == {"sealed": False, "complete": False,
                       "reason": "structure-event-member-receipt-invalid"}
+
+
+@pytest.mark.parametrize("operation", ["insert", "update", "delete", "replace"])
+def test_event_conflict_summary_is_frozen_after_receipt(tmp_path, operation) -> None:
+    store = SQLiteStore(tmp_path / f"conflict-frozen-{operation}.db")
+    store.init_schema()
+    window_id = _seed_event_member_window(store, 1)
+    assert store.advance_structure_event_member_staging_chunk(
+        window_id=window_id
+    )["sealed"] is True
+    statements = {
+        "insert": (
+            "INSERT INTO structure_sync_event_conflict_summaries VALUES (?,?,0)",
+            (window_id, "other-event"),
+        ),
+        "update": (
+            "UPDATE structure_sync_event_conflict_summaries SET global_conflict=1 "
+            "WHERE window_id=?",
+            (window_id,),
+        ),
+        "delete": (
+            "DELETE FROM structure_sync_event_conflict_summaries WHERE window_id=?",
+            (window_id,),
+        ),
+        "replace": (
+            "INSERT OR REPLACE INTO structure_sync_event_conflict_summaries "
+            "VALUES (?,?,1)",
+            (window_id, "e"),
+        ),
+    }
+    with sqlite3.connect(store.db_path) as con, pytest.raises(
+        sqlite3.IntegrityError,
+        match="^structure-event-conflict-summary-frozen$",
+    ):
+        con.execute(*statements[operation])
+
+
+def test_event_conflict_summary_sealing_resumes_in_500_row_chunks(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "conflict-bounded.db")
+    store.init_schema()
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    events = [
+        {"id": f"event-{index:04d}", "markets": []}
+        for index in range(501)
+    ]
+    store.commit_structure_event_page(
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=events,
+        finished_at_ms=2,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_sync_windows SET status='complete' WHERE id=?",
+            (window_id,),
+        )
+    first = store.advance_structure_event_member_staging_chunk(
+        window_id=window_id, limit=500
+    )
+    second = store.advance_structure_event_member_staging_chunk(
+        window_id=window_id, limit=500
+    )
+    third = store.advance_structure_event_member_staging_chunk(
+        window_id=window_id, limit=500
+    )
+    assert (first["sealed"], first["rows_written"]) == (False, 0)
+    assert (second["sealed"], second["rows_written"], second["state"]) == (
+        False, 0, "sealing-conflicts"
+    )
+    assert (third["sealed"], third["rows_written"]) == (True, 1)
+    assert store.structure_event_member_status(window_id=window_id)[
+        "event_conflict_count"
+    ] == 501
 
 
 def test_event_source_authority_seals_with_natural_event_page(tmp_path) -> None:
@@ -2566,6 +2645,66 @@ def test_event_source_authority_fault_rolls_back_page_and_cursor(tmp_path, fault
             "SELECT COUNT(*) FROM structure_sync_event_source_receipts WHERE window_id=?",
             (window_id,),
         ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_conflict_summaries WHERE window_id=?",
+            (window_id,),
+        ).fetchone()[0] == 0
+
+
+def test_event_relation_conflict_summary_updates_both_parents_atomically(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "relation-conflict-atomic.db")
+    store.init_schema()
+    window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO structure_sync_event_market_staging VALUES (?,?,?,?)",
+            (window_id, "market-shared", "a", 1),
+        )
+        con.execute(
+            "CREATE TRIGGER injected_conflict_fault BEFORE INSERT ON "
+            "structure_sync_event_conflict_summaries BEGIN SELECT "
+            "RAISE(ABORT,'conflict-injected-fault'); END"
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="conflict-injected-fault"):
+            con.execute(
+                "INSERT INTO structure_sync_event_market_staging VALUES (?,?,?,?)",
+                (window_id, "market-shared", "b", 2),
+            )
+        assert con.execute(
+            "SELECT event_id,global_conflict FROM "
+            "structure_sync_event_conflict_summaries ORDER BY event_id"
+        ).fetchall() == []
+        assert con.execute(
+            "SELECT event_id FROM structure_sync_event_market_staging "
+            "WHERE market_id='market-shared' ORDER BY event_id"
+        ).fetchall() == [("a",)]
+        con.execute("DROP TRIGGER injected_conflict_fault")
+        con.execute(
+            "INSERT INTO structure_sync_event_market_staging VALUES (?,?,?,?)",
+            (window_id, "market-shared", "b", 2),
+        )
+        assert con.execute(
+            "SELECT event_id,global_conflict FROM "
+            "structure_sync_event_conflict_summaries ORDER BY event_id"
+        ).fetchall() == [("a", 1), ("b", 1)]
+    store.commit_structure_event_page(
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[{"id": "a", "markets": []}, {"id": "b", "markets": []}],
+        finished_at_ms=2,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT event_id,global_conflict FROM "
+            "structure_sync_event_conflict_summaries ORDER BY event_id"
+        ).fetchall() == [("a", 1), ("b", 1)]
+        assert con.execute(
+            "SELECT event_count FROM structure_sync_event_source_receipts "
+            "WHERE window_id=?",
+            (window_id,),
+        ).fetchone() == (2,)
 
 
 def test_historical_window_without_source_receipt_is_unavailable(tmp_path) -> None:

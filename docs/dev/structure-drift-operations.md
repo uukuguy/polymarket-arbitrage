@@ -83,6 +83,11 @@ fresh projection 不再展开 `structure_sync_event_staging.payload_json.markets
 member progress、member receipt 和 publication 全部属于同一 window 且验证通过时才读 candidate；缺失、混窗、
 混源或篡改统一 fail closed，不返回 count/root/sample，也不修改 generation 表。
 
+member seal 还会按 `event_id` 认证持久化的 global-conflict summary：每次最多推进 500 行，count/root 进入 member
+receipt digest。projection 只按 `(window_id,event_id)` 主键读取该摘要，不再扫描某个 event 的全部 relation siblings。
+event-member scheduler child 没有专用 attempt ledger；运维跟踪依赖 defer receipt、共享 scheduler failure counter
+和 `RECOVERING` health。专用 `structure_drift_attempts` 只属于后续 classifier-drift child，不要把两条执行链混为一谈。
+
 event-only anti-join 使用覆盖索引和复合 keyset
 `(market_sort_key,event_id,event_ordinal,member_ordinal)`；首块和续块是两条独立 SQL，没有 nullable-OR、
 `json_each`、逐 member SELECT 或临时排序。历史 window 如果完全没有 source metadata/progress/receipt，会显示

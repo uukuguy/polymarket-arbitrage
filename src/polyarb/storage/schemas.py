@@ -2861,6 +2861,76 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "event_state TEXT NOT NULL,checkpoint_at_ms INTEGER NOT NULL CHECK(checkpoint_at_ms>=0))",
     ),
     (
+        "after-event-conflict-summary-table",
+        "CREATE TABLE IF NOT EXISTS structure_sync_event_conflict_summaries ("
+        "window_id TEXT NOT NULL REFERENCES structure_sync_windows(id),"
+        "event_id TEXT NOT NULL,global_conflict INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(global_conflict IN (0,1)),PRIMARY KEY(window_id,event_id))",
+    ),
+    (
+        "after-event-conflict-metadata-trigger-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_conflict_metadata_insert",
+    ),
+    (
+        "after-event-conflict-metadata-trigger-create",
+        "CREATE TRIGGER trg_structure_event_conflict_metadata_insert AFTER INSERT ON "
+        "structure_sync_event_metadata_staging BEGIN INSERT OR IGNORE INTO "
+        "structure_sync_event_conflict_summaries VALUES (NEW.window_id,NEW.event_id,0); END",
+    ),
+    (
+        "after-event-conflict-relation-trigger-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_conflict_relation_insert",
+    ),
+    (
+        "after-event-conflict-relation-trigger-create",
+        "CREATE TRIGGER trg_structure_event_conflict_relation_insert AFTER INSERT ON "
+        "structure_sync_event_market_staging WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_market_staging other WHERE other.window_id=NEW.window_id "
+        "AND other.market_id=NEW.market_id AND other.event_id!=NEW.event_id LIMIT 1) "
+        "BEGIN INSERT INTO structure_sync_event_conflict_summaries VALUES "
+        "(NEW.window_id,NEW.event_id,1) ON CONFLICT(window_id,event_id) DO UPDATE SET "
+        "global_conflict=1; INSERT INTO structure_sync_event_conflict_summaries SELECT "
+        "NEW.window_id,other.event_id,1 FROM "
+        "structure_sync_event_market_staging other WHERE other.window_id=NEW.window_id "
+        "AND other.market_id=NEW.market_id AND other.event_id!=NEW.event_id "
+        "ORDER BY other.event_id LIMIT 1 ON CONFLICT(window_id,event_id) DO UPDATE SET "
+        "global_conflict=1; END",
+    ),
+    (
+        "after-event-conflict-summary-insert-guard-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_conflict_summary_insert_guard",
+    ),
+    (
+        "after-event-conflict-summary-insert-guard-create",
+        "CREATE TRIGGER trg_structure_event_conflict_summary_insert_guard BEFORE INSERT ON "
+        "structure_sync_event_conflict_summaries WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=NEW.window_id) BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-conflict-summary-frozen'); END",
+    ),
+    (
+        "after-event-conflict-summary-update-guard-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_conflict_summary_update_guard",
+    ),
+    (
+        "after-event-conflict-summary-update-guard-create",
+        "CREATE TRIGGER trg_structure_event_conflict_summary_update_guard BEFORE UPDATE ON "
+        "structure_sync_event_conflict_summaries WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) OR "
+        "OLD.window_id IS NOT NEW.window_id OR OLD.event_id IS NOT NEW.event_id BEGIN SELECT "
+        "RAISE(ABORT,'structure-event-conflict-summary-frozen'); END",
+    ),
+    (
+        "after-event-conflict-summary-delete-guard-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_conflict_summary_delete_guard",
+    ),
+    (
+        "after-event-conflict-summary-delete-guard-create",
+        "CREATE TRIGGER trg_structure_event_conflict_summary_delete_guard BEFORE DELETE ON "
+        "structure_sync_event_conflict_summaries WHEN EXISTS (SELECT 1 FROM "
+        "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN "
+        "SELECT RAISE(ABORT,'structure-event-conflict-summary-frozen'); END",
+    ),
+    (
         "after-event-source-receipt-table",
         "CREATE TABLE IF NOT EXISTS structure_sync_event_source_receipts ("
         "window_id TEXT PRIMARY KEY REFERENCES structure_sync_windows(id),"
@@ -2954,7 +3024,10 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "terminal_member_ordinal INTEGER NOT NULL CHECK(terminal_member_ordinal>=0),"
         "terminal_member_byte_offset INTEGER NOT NULL CHECK(terminal_member_byte_offset>=0),"
         "sealed_at_ms INTEGER NOT NULL CHECK(sealed_at_ms>=0),receipt_digest TEXT NOT NULL "
-        "CHECK(length(receipt_digest)=64))",
+        "CHECK(length(receipt_digest)=64),event_conflict_count INTEGER NOT NULL DEFAULT 0 "
+        "CHECK(event_conflict_count>=0),event_conflict_root TEXT NOT NULL DEFAULT "
+        "'0000000000000000000000000000000000000000000000000000000000000000' "
+        "CHECK(length(event_conflict_root)=64))",
     ),
     (
         "after-projection-index-drop",

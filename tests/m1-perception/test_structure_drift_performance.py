@@ -160,7 +160,11 @@ def test_projection_row_chain_v2_root_work_is_at_least_twice_as_fast_as_v1() -> 
     assert all(ratio >= 2.0 for ratio in ratios.values()), ratios
 
 
-def _seed_projection_gate_database(store: SQLiteStore) -> int:
+def _seed_projection_gate_database(
+    store: SQLiteStore,
+    *,
+    no_conflict_event_siblings: int | None = None,
+) -> int:
     event_count = 50
     members_per_event = 24
     row_count = event_count * members_per_event
@@ -237,6 +241,24 @@ def _seed_projection_gate_database(store: SQLiteStore) -> int:
                     "markets": members,
                 }
             )
+        if no_conflict_event_siblings is not None:
+            events[0]["markets"].append(
+                {
+                    "id": "event-only-vm-sentinel",
+                    "active": False,
+                    "closed": True,
+                    "negRiskOther": False,
+                }
+            )
+            relations.extend(
+                (
+                    "window-perf",
+                    f"no-conflict-sibling-{index:06d}",
+                    "event-0000",
+                    1,
+                )
+                for index in range(no_conflict_event_siblings)
+            )
         con.executemany(
             "INSERT INTO structure_sync_event_market_staging VALUES (?,?,?,?)",
             relations,
@@ -278,6 +300,55 @@ def _seed_projection_gate_database(store: SQLiteStore) -> int:
             "WHERE id='window-perf'"
         )
     return row_count
+
+
+def test_event_conflict_projection_vm_steps_do_not_scale_with_relation_siblings(
+    tmp_path: Path,
+) -> None:
+    stores = {
+        sibling_count: SQLiteStore(tmp_path / f"siblings-{sibling_count}.db")
+        for sibling_count in (100, 50_000)
+    }
+    for sibling_count, store in stores.items():
+        _seed_projection_gate_database(
+            store,
+            no_conflict_event_siblings=sibling_count,
+        )
+
+    def project_vm_steps(store: SQLiteStore) -> tuple[int, int, int]:
+        vm_steps = 0
+
+        def progress() -> int:
+            nonlocal vm_steps
+            vm_steps += 1
+            return 0
+
+        cursor = None
+        member_count = diagnostic_count = 0
+        while True:
+            chunk = store.fetch_structure_drift_fresh_projection_chunk(
+                publication_id="publication-perf",
+                generation_snapshot_id=1,
+                cursor=cursor,
+                limit=500,
+                sqlite_progress_callback=progress,
+            )
+            member_count += len(chunk.members)
+            diagnostic_count += len(chunk.diagnostics)
+            if chunk.cursor is None:
+                break
+            cursor = chunk.cursor
+        return vm_steps, member_count, diagnostic_count
+
+    small = project_vm_steps(stores[100])
+    large = project_vm_steps(stores[50_000])
+    print(
+        "event-conflict-summary-vm-steps "
+        f"siblings_100={small[0]} siblings_50000={large[0]} "
+        f"ratio={large[0] / small[0]:.3f}"
+    )
+    assert small[1:] == large[1:] == (1_200, 1)
+    assert large[0] <= small[0] * 1.05, {"small": small, "large": large}
 
 
 def test_complete_sealed_sidecar_gate_is_twice_as_fast_as_old_raw_projection(

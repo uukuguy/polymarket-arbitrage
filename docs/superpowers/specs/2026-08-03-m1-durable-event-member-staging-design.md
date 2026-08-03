@@ -252,10 +252,12 @@ Quote priority, producer lock, 500 rows, 100 chunks, 45-second cooperative
 slice, and 75-second parent timeout remain unchanged.
 
 Before the member receipt seals, status is recovering with exact progress.
-Deterministic receipt/source mismatch is fail-closed. Operational failure flows
-through the existing attempt ledger and Structure health component so resident
-Polywatch can alert, deduplicate, remind, and clear naturally; there is no
-manual pointer or publication repair path.
+Deterministic receipt/source mismatch is fail-closed. This scheduler child does
+not own a dedicated attempt ledger: defer receipt plus the shared scheduler
+failure counter and `RECOVERING` health state are its durable operational
+signals. Resident Polywatch alerts, deduplicates, reminds, and clears from that
+health chain; there is no manual pointer or publication repair path. The
+separate classifier-drift child retains its existing dedicated attempt ledger.
 
 ## 8. Verification Contract
 
