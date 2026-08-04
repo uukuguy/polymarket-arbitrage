@@ -1067,6 +1067,13 @@ class SnapshotScheduler:
         except Exception:
             logger.warning("could not persist scheduler state to DB")
 
+    def _record_durable_progress(self) -> None:
+        """Break a failure streak without certifying full scheduler recovery."""
+        if self._failure_counter == 0:
+            return
+        self._failure_counter = 0
+        self._persist_counter()
+
     async def _resolve_structure_timeout_s(self) -> float:
         publication = await asyncio.to_thread(
             self._sqlite_store.get_latest_structure_publication
@@ -1498,6 +1505,7 @@ class SnapshotScheduler:
                 failure_kind=None,
                 stderr=checkpoint.stderr,
             )
+            self._record_durable_progress()
             logger.info(
                 "structure drift slice checkpointed "
                 f"phase={checkpoint.phase} rows={checkpoint.rows_processed} "
@@ -1593,6 +1601,8 @@ class SnapshotScheduler:
                     reason="structure-event-members:writer-busy",
                     queued_at_ms=queued_at_ms,
                 )
+            else:
+                self._record_durable_progress()
             logger.info(
                 "structure event-member slice checkpointed "
                 f"rows={checkpoint.rows_processed} chunks={checkpoint.chunks_processed} "
@@ -1750,6 +1760,8 @@ class SnapshotScheduler:
                     elapsed_ms=result.elapsed_ms,
                     chunks_processed=chunks_processed,
                 )
+                if result.stage != "superseded":
+                    self._record_durable_progress()
                 self._checkpoint_pending = True
                 message = (
                     "snapshot tick checkpointed: "
@@ -1764,7 +1776,8 @@ class SnapshotScheduler:
                     )
                 else:
                     logger.info(message)
-                self._persist_counter()
+                if result.stage == "superseded":
+                    self._persist_counter()
                 return True
             result_status = getattr(result, "status", None)
 

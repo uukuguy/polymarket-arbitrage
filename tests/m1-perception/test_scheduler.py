@@ -98,7 +98,10 @@ async def test_event_member_sidecar_precedes_structure_drift(
 
     calls: list[str] = []
     store = MagicMock()
-    store.get_scheduler_state.return_value = None
+    store.get_scheduler_state.return_value = {
+        "state": "RECOVERING",
+        "failure_counter": 4,
+    }
     store.get_snapshot_attempts.return_value = []
     store.get_latest_structure_schedule_adjustment.return_value = None
     store.recover_orphaned_structure_drift_attempts.return_value = 0
@@ -130,6 +133,8 @@ async def test_event_member_sidecar_precedes_structure_drift(
     assert await scheduler._tick_once(queued_at_ms=1) is True
     assert calls == ["members"]
     store.begin_snapshot_attempt.assert_not_called()
+    assert scheduler._failure_counter == 0
+    assert scheduler.state == SchedulerState.RECOVERING
 
 
 @pytest.mark.asyncio
@@ -2253,6 +2258,9 @@ async def test_pending_structure_drift_slice_precedes_snapshot_child(
         sqlite_store=store,
         producer_lock=producer_lock,
     )
+    scheduler._failure_counter = 4
+    scheduler.state = SchedulerState.RECOVERING
+    scheduler._persist_counter()
     scheduler._run_snapshot = AsyncMock()
 
     assert await scheduler._tick_once(queued_at_ms=1_000) is True
@@ -2268,6 +2276,7 @@ async def test_pending_structure_drift_slice_precedes_snapshot_child(
     )
     assert producer_lock.locked() is False
     assert scheduler._failure_counter == 0
+    assert scheduler.state == SchedulerState.RECOVERING
     assert store.get_latest_structure_drift_attempt()["outcome"] == "checkpointed"
     store.initialize_structure_drift_comparison.assert_called_once()
 
@@ -3501,6 +3510,79 @@ async def test_structure_checkpoint_releases_slot_without_failure_or_alert(
     assert scheduler.state == SchedulerState.RUNNING
     assert scheduler._checkpoint_pending is True
     heartbeat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_structure_checkpoint_breaks_failure_streak_without_claiming_recovery(
+    daemon_settings_for_test: Any,
+) -> None:
+    """Durable progress disproves a consecutive streak, not RECOVERING state."""
+    from polyarb.daemon.scheduler import IsolatedStructureCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    store.upsert_scheduler_state(state="RECOVERING", failure_counter=4)
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+    )
+    scheduler._run_snapshot = AsyncMock(
+        return_value=IsolatedStructureCheckpoint(
+            window_id="window-progress",
+            stage="events",
+            pages_processed=1,
+            elapsed_ms=10,
+        )
+    )
+
+    assert await scheduler._tick_once(queued_at_ms=1) is True
+
+    assert scheduler._failure_counter == 0
+    assert scheduler.state == SchedulerState.RECOVERING
+    persisted = store.get_scheduler_state()
+    assert persisted["state"] == "RECOVERING"
+    assert persisted["failure_counter"] == 0
+
+
+@pytest.mark.asyncio
+async def test_failure_checkpoint_failure_is_one_consecutive_failure(
+    daemon_settings_for_test: Any,
+) -> None:
+    from polyarb.daemon.scheduler import IsolatedStructureCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+    )
+    failed = SimpleNamespace(
+        status=SnapshotStatus.FAILED,
+        snapshot_id=None,
+        last_stage="gamma-events",
+        elapsed_ms=10,
+    )
+    scheduler._run_snapshot = AsyncMock(
+        side_effect=(
+            failed,
+            IsolatedStructureCheckpoint(
+                window_id="window-progress",
+                stage="events",
+                pages_processed=1,
+                elapsed_ms=10,
+            ),
+            failed,
+        )
+    )
+
+    assert await scheduler._tick_once(queued_at_ms=1) is True
+    assert scheduler._failure_counter == 1
+    assert await scheduler._tick_once(queued_at_ms=2) is True
+    assert scheduler._failure_counter == 0
+    assert await scheduler._tick_once(queued_at_ms=3) is True
+    assert scheduler._failure_counter == 1
 
 
 @pytest.mark.asyncio
