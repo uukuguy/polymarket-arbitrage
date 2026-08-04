@@ -213,43 +213,6 @@ def _checkpoint_component(component: str) -> str:
     return "legacy-universe" if component == "comparison" else component
 
 
-def _durable_publication_checkpoint(
-    store: SQLiteStore,
-    window_id: str,
-) -> StructurePublicationCheckpoint:
-    progress = store.get_structure_publication_progress(window_id)
-    if progress is None:
-        raise ValueError("structure-publication-slice-made-no-progress")
-    publication = progress.publication
-    if publication.status == "ready":
-        stage, component, cursor = "ready", None, None
-    else:
-        certification = store.structure_certification_checkpoint(
-            publication.publication_id
-        )
-        if certification is not None:
-            stage = "certifying"
-            component = _checkpoint_component(certification[0])
-            cursor = certification[1]
-        else:
-            stage = "normalizing"
-            component = progress.component or STRUCTURE_COMPONENTS[0]
-            cursor = progress.cursor
-            if cursor is not None and cursor.endswith("|done"):
-                index = STRUCTURE_COMPONENTS.index(component)
-                if index + 1 < len(STRUCTURE_COMPONENTS):
-                    component = STRUCTURE_COMPONENTS[index + 1]
-    return StructurePublicationCheckpoint(
-        stage=stage,
-        component=component,
-        rows_processed=0,
-        cursor=cursor,
-        publication_id=publication.publication_id,
-        chunks_processed=0,
-        elapsed_ms=0,
-    )
-
-
 def _member_row(member: EventMember) -> dict[str, object]:
     return {
         "event_id": member.event_id,
@@ -613,7 +576,7 @@ def run_structure_publication_slice(
             break
 
     if final_checkpoint is None:
-        return _durable_publication_checkpoint(store, window_id)
+        raise ValueError("structure-publication-slice-made-no-progress")
     elapsed_ms = max(0, int(elapsed_s * 1_000))
     return StructurePublicationCheckpoint(
         stage=final_checkpoint.stage,

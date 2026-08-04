@@ -326,7 +326,7 @@ def test_group_truth_500_event_chunk_uses_bounded_bulk_duplicate_lookup(
     assert elapsed_s < 10.0
 
 
-def test_publication_slice_with_insufficient_remaining_time_is_zero_chunk(
+def test_publication_slice_with_insufficient_remaining_time_is_not_progress(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "state.db")
@@ -339,19 +339,18 @@ def test_publication_slice_with_insufficient_remaining_time_is_zero_chunk(
     )
     before = store.get_structure_publication_progress(publication.window_id)
 
-    result = run_structure_publication_slice(
-        type("Settings", (), {"db_path": store.db_path})(),
-        publication.window_id,
-        max_rows=500,
-        max_elapsed_s=9.0,
-        store=store,
-    )
+    with pytest.raises(
+        ValueError, match="structure-publication-slice-made-no-progress"
+    ):
+        run_structure_publication_slice(
+            type("Settings", (), {"db_path": store.db_path})(),
+            publication.window_id,
+            max_rows=500,
+            max_elapsed_s=9.0,
+            store=store,
+        )
     after = store.get_structure_publication_progress(publication.window_id)
 
-    assert result.chunks_processed == 0
-    assert result.rows_processed == 0
-    assert result.stage == "normalizing"
-    assert result.component == "events"
     assert after == before
 
 

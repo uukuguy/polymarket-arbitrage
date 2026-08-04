@@ -527,6 +527,7 @@ def structure_generation_cleanup(
 def structure_sync(
     json_output: bool = typer.Option(False, "--json"),
     low_priority: bool = typer.Option(False, "--low-priority", hidden=True),
+    schema_ready: bool = typer.Option(False, "--schema-ready", hidden=True),
     max_pages: int | None = typer.Option(
         None,
         "--max-pages",
@@ -558,6 +559,7 @@ def structure_sync(
                 max_pages=max_pages,
                 max_elapsed_s=max_elapsed_seconds,
                 max_publication_rows=max_publication_rows,
+                schema_ready=schema_ready,
             )
         )
     except Exception as error:  # noqa: BLE001 - process boundary owns the protocol

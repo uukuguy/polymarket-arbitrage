@@ -1287,6 +1287,7 @@ async def test_snapshot_pipeline_runs_in_isolated_subprocess(
         "structure-sync",
         "--json",
         "--low-priority",
+        "--schema-ready",
         "--max-pages",
         "40",
         "--max-elapsed-seconds",

@@ -995,6 +995,48 @@ async def test_structure_sync_checkpoints_on_elapsed_wall_clock(
     assert cursors == [None, "event-2"]
 
 
+async def test_scheduler_schema_ready_contract_skips_child_schema_migration(
+    settings_for_test,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+
+    def unexpected_schema_migration(_self) -> None:
+        raise AssertionError("scheduler child must trust the parent startup migration")
+
+    monkeypatch.setattr(
+        SQLiteStore,
+        "init_structure_sync_schema",
+        unexpected_schema_migration,
+    )
+
+    class Gamma:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def fetch_active_event_page(self, cursor, limit):
+            return EventPage((), cursor, None, True, 10, 20)
+
+        async def fetch_active_market_page(self, cursor, limit):
+            return MarketPage((), cursor, None, True, 30, 40)
+
+    with patch(
+        "polyarb.perception.structure_sync.GammaClient",
+        return_value=Gamma(),
+    ):
+        result = await run_structure_sync_until_published(
+            settings_for_test,
+            max_pages=1,
+            schema_ready=True,
+        )
+
+    assert isinstance(result, StructureSyncCheckpoint)
+
+
 async def test_bounded_slice_uses_remaining_time_for_publication(
     settings_for_test,
 ) -> None:

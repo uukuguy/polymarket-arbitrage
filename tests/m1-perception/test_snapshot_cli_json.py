@@ -244,6 +244,33 @@ def test_structure_sync_cli_returns_certified_snapshot_json(monkeypatch) -> None
     assert json.loads(result.stdout)["snapshot_id"] == 800
 
 
+def test_structure_sync_cli_forwards_scheduler_schema_ready_contract(monkeypatch) -> None:
+    monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
+    monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
+    result_object = SimpleNamespace(
+        is_valid=True,
+        issue_categories={},
+        issue_count=0,
+        market_count=1,
+        mode="full",
+        parquet_path=None,
+        snapshot_id=801,
+        status="ok",
+    )
+    runner = AsyncMock(return_value=result_object)
+    with patch(
+        "polyarb.snapshot.cli.run_structure_sync_until_published",
+        new=runner,
+    ):
+        result = CliRunner().invoke(
+            app, ["structure-sync", "--json", "--schema-ready"]
+        )
+
+    assert result.exit_code == 0
+    runner.assert_awaited_once()
+    assert runner.await_args.kwargs["schema_ready"] is True
+
+
 def test_structure_sync_cli_returns_bounded_failure_json(monkeypatch) -> None:
     """Exceptions must not become an unbounded Rich traceback and empty stdout."""
     monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")

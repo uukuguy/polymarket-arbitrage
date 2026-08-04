@@ -580,6 +580,7 @@ async def run_snapshot_in_subprocess(
         "structure-sync",
         "--json",
         "--low-priority",
+        "--schema-ready",
         "--max-pages",
         str(STRUCTURE_SLICE_MAX_PAGES),
         "--max-elapsed-seconds",

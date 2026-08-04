@@ -252,6 +252,7 @@ async def run_structure_sync_until_published(
     max_pages: int | None = None,
     max_elapsed_s: float | None = None,
     max_publication_rows: int = 500,
+    schema_ready: bool = False,
 ):
     """Checkpoint pages until publication or one cooperative slice ends."""
     if max_pages is not None and max_pages < 1:
@@ -262,7 +263,8 @@ async def run_structure_sync_until_published(
         raise ValueError("structure-publication-max-rows-must-be-positive")
     slice_started = _monotonic()
     store = SQLiteStore(settings.db_path)
-    store.init_structure_sync_schema()
+    if not schema_ready:
+        store.init_structure_sync_schema()
     latest = store.get_latest_structure_sync()
     bootstrap_chunks = 0
     bootstrap_complete = bool(
