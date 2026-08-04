@@ -751,6 +751,7 @@ def test_generation_cleanup_runtime_is_restart_safe_and_single_owner(
         "recover_structure_generation_cleanup_runtime",
         "begin_structure_generation_cleanup_attempt",
         "finish_structure_generation_cleanup_attempt",
+        "defer_structure_generation_cleanup_runtime",
     ):
         assert hasattr(store, method_name), method_name
 
@@ -798,6 +799,15 @@ def test_generation_cleanup_runtime_is_restart_safe_and_single_owner(
     assert recovered["consecutive_failures"] == 2
     assert recovered["next_attempt_at_ms"] == 330
     assert recovered["error_kind"] == "worker-restarted"
+    deferred = SQLiteStore(path).defer_structure_generation_cleanup_runtime(
+        now_ms=330,
+        next_attempt_at_ms=400,
+        error_kind="quote-priority",
+    )
+    assert deferred["state"] == "backoff"
+    assert deferred["consecutive_failures"] == 2
+    assert deferred["next_attempt_at_ms"] == 400
+    assert deferred["error_kind"] == "quote-priority"
 
 
 def test_generation_cleanup_fails_closed_on_unauthenticated_candidate(

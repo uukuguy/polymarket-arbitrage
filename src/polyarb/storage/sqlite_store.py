@@ -11608,6 +11608,40 @@ class SQLiteStore:
         finally:
             con.close()
 
+    def defer_structure_generation_cleanup_runtime(
+        self,
+        *,
+        now_ms: int,
+        next_attempt_at_ms: int,
+        error_kind: str,
+    ) -> dict[str, object]:
+        """Persist a non-failure admission defer without stealing an owner."""
+        if (
+            type(now_ms) is not int
+            or now_ms < 0
+            or type(next_attempt_at_ms) is not int
+            or next_attempt_at_ms < now_ms
+            or not 1 <= len(error_kind) <= 64
+        ):
+            raise ValueError("invalid-cleanup-runtime-defer")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute(
+                "UPDATE structure_generation_cleanup_runtime SET state='backoff',"
+                "next_attempt_at_ms=?,rows_deleted=0,error_kind=?,checkpoint_at_ms=? "
+                "WHERE id=1 AND state IN ('idle','backoff')",
+                (next_attempt_at_ms, error_kind, now_ms),
+            )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+        return self.structure_generation_cleanup_runtime_status()
+
     def finish_structure_generation_cleanup_attempt(
         self,
         *,
