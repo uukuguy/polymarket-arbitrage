@@ -6053,3 +6053,35 @@ Obtain approval for recommended recovery/retention design A, write and commit
 the focused spec, then produce a TDD implementation plan. Keep release 233
 under read-only observation in parallel; do not cut over generation reads or
 enable Quote before the natural drift seal and maintenance risks are closed.
+
+## SESSION 130 — 2026-08-04 (recovery/retention design A written)
+
+- [APPROVED] The user approved recommended design A: exact durable-progress
+  streak reset, proof-preserving FK-safe retention, and one resident
+  Quote-aware generation-cleanup owner.
+- [SPEC] The focused written design is
+  `docs/superpowers/specs/2026-08-04-m1-recovery-retention-maintenance-design.md`.
+  It defines scheduler state semantics, staging proof skeletons, snapshot/Quote
+  ownership, durable cleanup runtime health, Polywatch chain truth, lifecycle,
+  RED tests, and protected production acceptance.
+- [SELF-REVIEW] Exact PK evidence showed natural generation 866 published with
+  297,526 bulk rows; the first one-second active-loop draft could not keep up
+  with the 300-second Structure cadence. The spec now requires a 50 ms fairness
+  yield and proves a production-shaped 300,000-row generation drains within
+  240 seconds while Quote can preempt after the current 500-row transaction.
+- [LIVE] Production later advanced naturally to generation 867. The scheduler
+  completed a certified snapshot and reset its counter to zero; classifier-v2
+  comparison `f6b7a142...` was actively progressing in `generation-members`
+  for exact generation 867. This natural reset avoids an immediate false
+  RECOVERING event but does not remove the code defect exposed by the prior
+  separated timeout/checkpoint sequence.
+- [BOUNDARY] No runtime code, production configuration, pointer, cleanup, Quote,
+  or read-mode mutation was performed. Written-spec review remains the
+  brainstorming gate before `writing-plans`.
+
+### [NEXT — CURRENT]
+
+After the user approves the written spec, invoke `writing-plans`, create and
+commit the TDD implementation plan, then execute its first RED test. Continue
+read-only observation of classifier-v2 in parallel; do not cut over reads or
+enable Quote before the natural seal and maintenance exact-SHA proof.
