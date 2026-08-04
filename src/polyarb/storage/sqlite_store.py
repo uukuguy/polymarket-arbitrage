@@ -99,8 +99,9 @@ _SNAPSHOT_ATTEMPT_STDERR_TAIL_RE = re.compile(
     r"structure-sync-failure failure_kind=(?:membership-invalid(?: "
     r"membership_kind=(?:active-market-missing|group-truth|market-identity|"
     r"terminal-invariant) key_sha256=[0-9a-f]{64})?|generation-count-mismatch|"
-    r"generation-incomplete|generation-validation-issues|source-truth-invalid|"
-    r"sqlite-busy|structure-child-error|structure-publication-not-writing))"
+    r"generation-incomplete|generation-validation-issues|pointer-switch-deadline|"
+    r"source-truth-invalid|sqlite-busy|structure-child-error|"
+    r"structure-publication-not-writing))"
     r"|structure-publication-superseded publication_id=[0-9a-f]{32}"
 )
 _STRUCTURE_DRIFT_SAFE_MARKER_RE = re.compile(

@@ -3574,6 +3574,57 @@ async def test_structure_checkpoint_breaks_failure_streak_without_claiming_recov
 
 
 @pytest.mark.asyncio
+async def test_pointer_switch_recovery_persists_failure_then_certified_success(
+    daemon_settings_for_test: Any,
+) -> None:
+    from polyarb.daemon.scheduler import SnapshotSubprocessError
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    _seed_snapshot(store, 868)
+    store.upsert_scheduler_state(state="RECOVERING", failure_counter=4)
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+    )
+    scheduler._run_snapshot = AsyncMock(
+        side_effect=(
+            SnapshotSubprocessError(
+                "pointer-switch-deadline",
+                elapsed_ms=15_000,
+                stderr=(
+                    b"structure-sync-failure "
+                    b"failure_kind=pointer-switch-deadline\n"
+                ),
+            ),
+            _FakeResult(SnapshotStatus.OK, snapshot_id=868),
+        )
+    )
+
+    assert await scheduler._tick_once(queued_at_ms=1) is True
+    failed_attempt = store.get_latest_snapshot_attempt()
+    assert failed_attempt is not None
+    assert failed_attempt["outcome"] == "failed"
+    assert failed_attempt["failure_kind"] == (
+        "snapshot-subprocess-pointer-switch-deadline"
+    )
+    assert scheduler.state == SchedulerState.RECOVERING
+    assert scheduler._failure_counter == 5
+
+    assert await scheduler._tick_once(queued_at_ms=2) is True
+    succeeded_attempt = store.get_latest_snapshot_attempt()
+    assert succeeded_attempt is not None
+    assert succeeded_attempt["outcome"] == "succeeded"
+    assert succeeded_attempt["snapshot_id"] == 868
+    assert scheduler.state == SchedulerState.RUNNING
+    assert scheduler._failure_counter == 0
+    persisted = store.get_scheduler_state()
+    assert persisted["state"] == "RUNNING"
+    assert persisted["failure_counter"] == 0
+
+
+@pytest.mark.asyncio
 async def test_failure_checkpoint_failure_is_one_consecutive_failure(
     daemon_settings_for_test: Any,
 ) -> None:
