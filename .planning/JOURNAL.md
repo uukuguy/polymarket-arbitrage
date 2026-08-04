@@ -6123,3 +6123,42 @@ SHA, and observe natural cleanup/recovery with Quote disabled and read mode
 legacy. Do not advance pointers or manually run cleanup. After maintenance UAT,
 resume the protected classifier-v2 -> generation-read -> Quote -> opportunity
 candidate-lifecycle sequence.
+
+## SESSION 132 — 2026-08-04 (release 234 production slice-budget defect)
+
+- [DEPLOYED] User-approved exact SHA
+  `23ece7048e5ddd5e6b4d42a8d34492785ebda2c9` became Fly release 234 with image
+  digest `sha256:405f85e373e52f6f0258eb9bbe10a8b29b1c2de77795e43e6d3de7cfd6e3ea3c`.
+  App/cron machines started, the app service check passed, and public health
+  reported the exact release. Quote remained off and generation reads legacy.
+- [PROVED] Natural durable Structure progress reset the scheduler failure
+  counter from 5 to 0. Resident cleanup repeatedly checkpointed with
+  `consecutive_failures=0`, without manual cleanup, restart, or pointer writes.
+- [REJECTED] A ten-minute timestamped trace showed generation 868 returning
+  repeated zero-row checkpoints while its durable cursor stayed frozen at
+  `issues|1835728`. Cleanup made only sparse 500-row progress and generation
+  pressure remained retained=9/reclaimable=7; maintenance UAT therefore did
+  not pass.
+- [ROOT CAUSE] Isolated scheduler children repeated the multi-gigabyte
+  Structure schema reconciliation inside every 45-second slice. That consumed
+  the useful budget, while a zero-chunk result was incorrectly accepted as
+  durable progress.
+- [FIXED LOCAL] Commit `e436187` adds an internal schema-ready parent/child
+  contract, preserves standalone CLI initialization, and turns a zero-chunk
+  publication slice into a real retry/alert failure instead of false progress.
+- [FULL GATE] Four related files passed completely. Final M1 JUnit: 2,780
+  tests, zero failures/errors, two skips, 1298.338s. Canonical Ruff and the M1
+  manual contract pass. The five user-owned `.superpowers/sdd/*` files remain
+  untouched.
+- [GOAL] Persistent M1 production goal remains active. Release 234 is reachable
+  but not accepted; no generation-read or Quote cutover is authorized.
+
+### [NEXT — CURRENT]
+
+Commit this session's SUMMARY/JOURNAL evidence, obtain explicit
+`DEPLOY_SHA_APPROVE <new exact 40-char HEAD>`, and deploy only that SHA with the
+same protected flags. First production gate: generation 868 must naturally
+advance beyond `issues|1835728` and complete while cleanup continues fairly.
+Then require retained<=2/reclaimable=0, maintenance alert/recovery evidence,
+classifier-v2 seal, generation-read cutover, Quote restoration, opportunity
+UAT, candidate lifecycle queue, and final three-cycle M1 acceptance.
