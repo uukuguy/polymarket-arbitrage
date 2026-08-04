@@ -6162,3 +6162,54 @@ advance beyond `issues|1835728` and complete while cleanup continues fairly.
 Then require retained<=2/reclaimable=0, maintenance alert/recovery evidence,
 classifier-v2 seal, generation-read cutover, Quote restoration, opportunity
 UAT, candidate lifecycle queue, and final three-cycle M1 acceptance.
+
+## SESSION 133 — 2026-08-04 (release 235 pointer deadline defect closed locally)
+
+- [DEPLOYED] User-approved exact SHA
+  `b96478ad9797550c00851281182f47ddcee1b7c7` became Fly release 235. Both
+  machines ran image tag `deployment-01KZ5PKW8ZHFGCFFV1YNXX88TN`, digest
+  `sha256:30e6bdd8094fc37f0c66e0763fe3550a4c0ee4e6470da3a8612604212902b448`.
+  Protected flags remained Quote off, generation reads legacy, cleanup on.
+- [PROVED] Generation 868 escaped the prior zero-row loop and advanced through
+  real 2.5k–50k row slices until comparison completed. Resident cleanup kept
+  advancing independently; no manual pointer write, restart, or cleanup run
+  was used.
+- [REJECTED] The ready publication could not switch its pointer because the
+  scheduler applied a 15-second deadline to the entire Structure child. Each
+  child died before its first marker (`stderr_bytes=0`, no stage/chunks), so
+  failure attempts accumulated without a path back to normal. Release 235 did
+  not pass maintenance production acceptance.
+- [FIXED LOCAL] The approved dual-deadline design now gives the complete child
+  75 seconds, the atomic pointer transaction 15 seconds, and the SQLite writer
+  lock 5 seconds. A progress handler and explicit checks roll back every
+  authority mutation on deadline. `pointer-switch-deadline` is persisted as a
+  terminal attempt; a later certified snapshot returns the scheduler to
+  `RUNNING` and resets the failure counter.
+- [OPERATIONS] Health exposes all three exact budgets. The learning handbook
+  now states that operators do not manually write the pointer or restart on a
+  single bounded failure; repeated failures follow the writer-contention/I/O
+  incident chain while natural cadence retries.
+- [FULL GATE] Focused scheduler/health/CLI/publication/Fly tests, canonical
+  Ruff, M1 manual contract, and 84-plan planning audit passed. The first full
+  M1 run had one timing-only performance-gate miss (`1.44x` versus required
+  `2x`); isolated rerun passed at `2.73x`. A fresh second full M1 run completed
+  at 100% with exit 0 and JUnit
+  `/tmp/m1-pointer-switch-junit-rerun.xml`.
+- [BOUNDARY] Release 235 remains the live, rejected release. No new deploy,
+  read cutover, Quote enablement, pointer mutation, restart, or manual cleanup
+  occurred. The five user-owned dirty `.superpowers/sdd/*` files remain
+  untouched.
+- [GOAL] The persistent goal remains active. The next exact-SHA maintenance
+  deployment must prove natural pointer recovery and cleanup convergence;
+  classifier/read/Quote/opportunity lifecycle UAT remains downstream.
+
+### [NEXT — CURRENT]
+
+Commit this JOURNAL evidence and obtain explicit
+`DEPLOY_SHA_APPROVE <new exact 40-char HEAD>`. Deploy only that SHA with the
+same protected flags. Require a natural ready publication to switch within the
+15-second transaction boundary, a terminal success attempt, scheduler
+`RUNNING/failure_counter=0`, retained<=2/reclaimable=0, and stable public
+health without manual intervention. Only then resume classifier-v2 seal,
+generation-read cutover, Quote restoration, opportunity endpoint/candidate
+lifecycle, and final three-cycle M1 acceptance.
