@@ -31,6 +31,7 @@ separate production contracts:
 | `40ee2f1` | run bounded cleanup continuously below Quote priority |
 | `88a8a8a` | wire lifecycle, configuration, health, Makefile help, and Polywatch |
 | `00fdfee` | prove 300k-row throughput, fairness, restart, and operator model |
+| `302d1bc` | keep the protected Fly maintenance cutover on legacy reads with Quote off |
 
 Design and plan anchors: `836ca4b` and `9d30d63`.
 
@@ -53,6 +54,8 @@ Fresh GREEN evidence:
   authenticated phase and preserves current/rollback rows;
 - `uv run pytest -q tests/m1-perception --junitxml=/tmp/m1-recovery-retention-full.xml`:
   `2778` tests, `0` failures, `0` errors, `2` skipped, `1278.093s`;
+- after the review fix, `/tmp/m1-recovery-retention-final.xml` records the same
+  `2778` tests, `0` failures, `0` errors, `2` skipped, `1282.986s`;
 - `uv run ruff check src tests scripts`: clean;
 - `make docs-m1-check`: `M1 manual contract: OK`;
 - `make planning-status`: no drift across 84 plans;
@@ -72,7 +75,7 @@ Plain `git diff --check` also reports a pre-existing EOF blank line in the user-
 Scope: all 25 files changed from root-cause record `23cbe82` through `00fdfee`.
 
 - CRITICAL: 0
-- HIGH: 0
+- HIGH: 1 found and fixed
 - MEDIUM: 0
 - LOW: 0
 - Recommendation: APPROVE for protected maintenance deployment after exact-SHA authorization.
@@ -83,6 +86,11 @@ snapshots are excluded before purge; cleanup admission authenticates existing co
 retention floor; Quote is checked before and after lock acquisition; runtime errors persist beyond
 logs; health reads the worker-mutated singleton; and lifecycle creates/cancels/gathers at most one
 in-daemon owner.
+
+The HIGH finding was a stale deployment contract in `fly.toml`: Quote was still enabled, so a
+maintenance deploy would have violated the two-step rollout. RED proved `true != false`; commit
+`302d1bc` now pins Structure enabled, generation reads to `legacy`, Quote disabled, and cleanup to
+`true/500/0.05/30/5`. The deployment-contract test and complete 2778-test M1 gate then passed.
 
 ## Design deviations
 

@@ -6085,3 +6085,41 @@ After the user approves the written spec, invoke `writing-plans`, create and
 commit the TDD implementation plan, then execute its first RED test. Continue
 read-only observation of classifier-v2 in parallel; do not cut over reads or
 enable Quote before the natural seal and maintenance exact-SHA proof.
+
+## SESSION 131 — 2026-08-04 (resident maintenance local closure)
+
+- [IMPLEMENTED] Durable non-deferred Structure/member/drift progress now resets
+  only the consecutive failure counter and preserves `RECOVERING`. Structure
+  staging reclamation retains authority/proof skeletons; snapshot retention
+  retires aligned attempts and defers to actual Quote-run ownership.
+- [RESIDENT OWNER] Generation cleanup now has restart-persistent runtime truth,
+  a single daemon lifecycle owner, Quote double-check priority, 500-row bounded
+  transactions, exponential retry, health chain-truth, and Polywatch
+  alert/recovery.
+- [PRODUCTION-SHAPED] Approximately 300,000 real SQLite rows converged in
+  15.21s against the 240s gate, with every transaction <=500 rows, Quote
+  acquiring the lock before the next transaction, restart resume, retained
+  <=2, and reclaimable=0.
+- [FULL GATE] The final post-review JUnit contains 2,778 M1 tests, zero
+  failures/errors, two skips, and 1282.986s runtime. Ruff is clean for the
+  canonical `src tests scripts` scope; docs/manual and 84-plan planning gates
+  pass. Repository-wide Ruff still has 20 unrelated historical findings under
+  unchanged `alembic/` and `tools/climb/`.
+- [REVIEW FIX] Inline review found the protected Fly config still enabled
+  Quote. TDD commit `302d1bc` explicitly pins Structure on, legacy generation
+  reads, Quote off, and cleanup `true/500/0.05/30/5`; the full gate was rerun.
+- [BOUNDARY] No Fly deploy, pointer write, evidence deletion, restart, read
+  cutover, or Quote enablement occurred. The five user-owned dirty
+  `.superpowers/sdd/*` files remain untouched.
+- [GOAL] The persistent goal remains active. Maintenance production evidence,
+  classifier/read/Quote cutover, opportunity endpoint UAT, and candidate
+  lifecycle queue acceptance are still required.
+
+### [NEXT — CURRENT]
+
+Obtain explicit `DEPLOY_SHA_APPROVE <exact 40-char HEAD>` authorization. Then
+start with `make deploy`, verify Fly release/image identity equals the approved
+SHA, and observe natural cleanup/recovery with Quote disabled and read mode
+legacy. Do not advance pointers or manually run cleanup. After maintenance UAT,
+resume the protected classifier-v2 -> generation-read -> Quote -> opportunity
+candidate-lifecycle sequence.
