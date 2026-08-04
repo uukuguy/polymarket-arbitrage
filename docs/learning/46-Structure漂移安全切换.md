@@ -58,6 +58,9 @@ self-duplicate，会让下一块首个 child 生成重复 parent，且 root 随 
 - `src/polyarb/storage/sqlite_store.py:7244`：v1→v2 contract supersession 与 same-contract no-retry 初始化。
 - `src/polyarb/storage/sqlite_store.py:8213`：classification、diagnostics 和 generation mirror 同 CAS 推进。
 - `src/polyarb/storage/sqlite_store.py:8640`：只读 current/terminal receipt verifier。
+- `src/polyarb/storage/sqlite_store.py:10982`：15 秒 pointer transaction deadline、5 秒 writer lock timeout、
+  SQLite progress interrupt 与全 authority rollback。
+- `src/polyarb/perception/structure_publication.py:468`：publication 显式传入共享期限合同，避免调用层漂移。
 - `src/polyarb/perception/structure_drift.py:637`：diagnostic first-match priority；同文件 `:926` 是互斥分类器。
 - `src/polyarb/snapshot/cli.py:346`：scheduler-only cooperative child slice。
 - `src/polyarb/daemon/scheduler.py:377`：隔离 child 与 TERM/KILL 边界；同文件 `:1183` 是 Quote 双检 admission。
@@ -141,3 +144,26 @@ classifier-v2 各自 warm 并完整跑三次。2026-08-03 实测 old v1 `152.796
 publication 真正切换 pointer 时，`publish_structure_generation` 在同一事务把旧 active comparison 终结为
 `drift-current-generation-superseded`，但不伪造 authorization receipt。下一 tick 才从新 identity 建立唯一 v2。
 若状态不完整、未认证或读取失败，仍然阻断而不是猜测。这是“为恢复链让路”，不是把安全门降级。
+
+### 为什么 child 是 75 秒，pointer transaction 却只有 15 秒？
+
+它们保护的是两个不同阶段。75 秒是整个 generation child 的外层 hard limit，允许分页、比较和验证完成；
+进入 pointer switch 后，真正需要原子完成的只有 `snapshots`、current pointer、publication、window 和 active drift
+这些 authority 写入，所以事务最多 15 秒，等待 writer lock 最多 5 秒。三项共享合同定义在
+`src/polyarb/perception/structure_contract.py:37`，health 的 `snapshot:schedule` 会同时输出：
+
+```text
+generation_child_hard_limit_s=75
+pointer_switch_transaction_deadline_s=15
+pointer_switch_writer_lock_timeout_s=5
+```
+
+事务内每个 authority 写入前后都有显式 deadline 检查，SQLite progress handler 还会中断单条超时语句；任何
+超时统一回滚并产生 `pointer-switch-deadline`。scheduler 把它持久化为
+`snapshot-subprocess-pointer-switch-deadline` terminal attempt，保留旧 pointer，下一次 natural cadence 自动重试；
+后续认证快照成功才回到 `RUNNING` 并清零连续失败计数。
+
+运维上不要手工写 pointer，也不要因为一次该错误就重启机器。先核对上述三个 health 字段和 terminal attempt；
+只有错误持续跨多个 natural cadence，才按 writer contention / SQLite I/O incident 跟踪。维护发布期间仍保持
+`POLYARB_STRUCTURE_GENERATION_READ_MODE=legacy`、Quote worker disabled、cleanup enabled；pointer 成功切换不等于
+擅自打开 generation read 或 Quote。
