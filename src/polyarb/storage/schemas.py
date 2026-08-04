@@ -2720,7 +2720,10 @@ CREATE TABLE IF NOT EXISTS structure_sync_windows (
     event_pages INTEGER NOT NULL DEFAULT 0 CHECK(event_pages >= 0),
     market_pages INTEGER NOT NULL DEFAULT 0 CHECK(market_pages >= 0),
     published_snapshot_id INTEGER REFERENCES snapshots(id),
-    failure_reason TEXT
+    failure_reason TEXT,
+    staging_reclaimed_at_ms INTEGER CHECK(
+        staging_reclaimed_at_ms IS NULL OR staging_reclaimed_at_ms >= 0
+    )
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_structure_sync_one_open_window
 ON structure_sync_windows(status) WHERE status IN ('open','events_complete');
@@ -2930,10 +2933,16 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "RAISE(ABORT,'structure-event-conflict-merkle-node-frozen'); END",
     ),
     (
-        "after-event-conflict-merkle-node-delete-guard",
-        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_conflict_merkle_node_delete_guard "
+        "after-event-conflict-merkle-node-delete-guard-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_conflict_merkle_node_delete_guard",
+    ),
+    (
+        "after-event-conflict-merkle-node-delete-guard-create",
+        "CREATE TRIGGER trg_structure_event_conflict_merkle_node_delete_guard "
         "BEFORE DELETE ON structure_sync_event_conflict_merkle_nodes WHEN EXISTS (SELECT 1 "
-        "FROM structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN "
+        "FROM structure_sync_event_member_receipts WHERE window_id=OLD.window_id) AND "
+        "(SELECT staging_reclaimed_at_ms FROM structure_sync_windows WHERE "
+        "id=OLD.window_id) IS NULL BEGIN "
         "SELECT RAISE(ABORT,'structure-event-conflict-merkle-node-frozen'); END",
     ),
     (
@@ -2944,7 +2953,9 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "after-event-conflict-proof-delete-guard-create",
         "CREATE TRIGGER trg_structure_event_conflict_proof_delete_guard BEFORE DELETE ON "
         "structure_sync_event_conflict_proofs WHEN EXISTS (SELECT 1 FROM "
-        "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN "
+        "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) AND "
+        "(SELECT staging_reclaimed_at_ms FROM structure_sync_windows WHERE "
+        "id=OLD.window_id) IS NULL BEGIN "
         "SELECT RAISE(ABORT,'structure-event-conflict-proof-frozen'); END",
     ),
     (
@@ -3051,10 +3062,16 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "'structure-event-conflict-tampered' WHERE window_id=NEW.window_id; END",
     ),
     (
-        "after-event-conflict-proof-audit-delete",
-        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_conflict_proof_audit_delete "
+        "after-event-conflict-proof-audit-delete-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_conflict_proof_audit_delete",
+    ),
+    (
+        "after-event-conflict-proof-audit-delete-create",
+        "CREATE TRIGGER trg_structure_event_conflict_proof_audit_delete "
         "AFTER DELETE ON structure_sync_event_conflict_proofs WHEN EXISTS (SELECT 1 FROM "
-        "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN UPDATE "
+        "structure_sync_event_member_receipts WHERE window_id=OLD.window_id) AND "
+        "(SELECT staging_reclaimed_at_ms FROM structure_sync_windows WHERE "
+        "id=OLD.window_id) IS NULL BEGIN UPDATE "
         "structure_sync_event_member_progress SET checkpoint_digest="
         "'structure-event-conflict-tampered' WHERE window_id=OLD.window_id; END",
     ),
@@ -3213,10 +3230,16 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "RAISE(ABORT,'structure-event-group-truth-frozen'); END",
     ),
     (
-        "after-group-truth-delete-guard",
-        "CREATE TRIGGER IF NOT EXISTS trg_structure_event_group_truth_delete_guard "
+        "after-group-truth-delete-guard-drop",
+        "DROP TRIGGER IF EXISTS trg_structure_event_group_truth_delete_guard",
+    ),
+    (
+        "after-group-truth-delete-guard-create",
+        "CREATE TRIGGER trg_structure_event_group_truth_delete_guard "
         "BEFORE DELETE ON structure_sync_event_group_truth_staging WHEN EXISTS (SELECT 1 "
-        "FROM structure_sync_event_member_receipts WHERE window_id=OLD.window_id) BEGIN "
+        "FROM structure_sync_event_member_receipts WHERE window_id=OLD.window_id) AND "
+        "(SELECT staging_reclaimed_at_ms FROM structure_sync_windows WHERE "
+        "id=OLD.window_id) IS NULL BEGIN "
         "SELECT RAISE(ABORT,'structure-event-group-truth-frozen'); END",
     ),
     (

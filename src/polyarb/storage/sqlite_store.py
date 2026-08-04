@@ -2969,6 +2969,12 @@ class SQLiteStore:
             _ensure_column("snapshots", "supabase_mirror_at_ms", "INTEGER")
             _ensure_column("snapshots", "parquet_r2_url", "TEXT")
             _ensure_column(
+                "structure_sync_windows",
+                "staging_reclaimed_at_ms",
+                "INTEGER CHECK(staging_reclaimed_at_ms IS NULL OR "
+                "staging_reclaimed_at_ms >= 0)",
+            )
+            _ensure_column(
                 "neg_risk_quote_attempts",
                 "quote_run_identity",
                 "INTEGER",
@@ -3140,6 +3146,17 @@ class SQLiteStore:
             )
             if has_snapshot_schema:
                 con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
+                window_columns = {
+                    str(row[1])
+                    for row in con.execute("PRAGMA table_info(structure_sync_windows)")
+                }
+                if "staging_reclaimed_at_ms" not in window_columns:
+                    con.execute(
+                        "ALTER TABLE structure_sync_windows ADD COLUMN "
+                        "staging_reclaimed_at_ms INTEGER CHECK("
+                        "staging_reclaimed_at_ms IS NULL OR "
+                        "staging_reclaimed_at_ms >= 0)"
+                    )
                 _migrate_structure_recovery_authority(con)
                 _migrate_structure_event_market_progress(con)
                 _migrate_structure_event_member_schema(con)
@@ -4302,7 +4319,8 @@ class SQLiteStore:
                         "state": "waiting-natural-window", "authenticated": True,
                         "reason": "structure-event-source-receipt-unavailable"}
             window = con.execute(
-                "SELECT checkpoint_at_ms FROM structure_sync_windows WHERE id=?",
+                "SELECT checkpoint_at_ms,staging_reclaimed_at_ms "
+                "FROM structure_sync_windows WHERE id=?",
                 (window_id,),
             ).fetchone()
             backfill = con.execute(
@@ -4334,6 +4352,7 @@ class SQLiteStore:
             chain = diagnostic = conflict_chain = None
             count = root = identity = checkpoint = None
             phase = conflict_cursor = None
+            staging_reclaimed = window is not None and window[1] is not None
             if progress is not None:
                 try:
                     expected_checkpoint = _structure_event_member_checkpoint_digest((
@@ -4354,7 +4373,7 @@ class SQLiteStore:
                         str(progress[5]), expected_domain="diagnostic/unclassified"
                     )
                     parent = (
-                        None if not progress[0] else con.execute(
+                        None if staging_reclaimed or not progress[0] else con.execute(
                             "SELECT payload_hash FROM structure_sync_event_metadata_staging "
                             "WHERE window_id=? AND event_id=?",
                             (window_id, progress[0]),
@@ -4366,10 +4385,16 @@ class SQLiteStore:
                         or chain.count != int(progress[2])
                         or (count, root, identity) != source[:3]
                         or checkpoint is None or int(checkpoint) < 0
-                        or (not progress[0] and progress[11] != "")
-                        or (progress[0] and (
-                            parent is None or str(parent[0]) != str(progress[11])
-                        ))
+                        or (
+                            not staging_reclaimed
+                            and not progress[0]
+                            and progress[11] != ""
+                        )
+                        or (
+                            not staging_reclaimed
+                            and progress[0]
+                            and (parent is None or str(parent[0]) != str(progress[11]))
+                        )
                     ):
                         raise ValueError("structure-event-member-checkpoint-invalid")
                 except (TypeError, ValueError, json.JSONDecodeError):
@@ -4414,11 +4439,14 @@ class SQLiteStore:
                     return invalid
                 assert chain is not None and diagnostic is not None
                 assert conflict_chain is not None
-                group_count, group_root = _validated_structure_event_group_truth(
-                    con, window_id,
-                    expected=(int(receipt[17]), str(receipt[18])),
-                    source_receipt_digest=str(progress[10]),
-                )
+                if staging_reclaimed:
+                    group_count, group_root = int(receipt[17]), str(receipt[18])
+                else:
+                    group_count, group_root = _validated_structure_event_group_truth(
+                        con, window_id,
+                        expected=(int(receipt[17]), str(receipt[18])),
+                        source_receipt_digest=str(progress[10]),
+                    )
                 if ((count, root, identity) != source[:3]
                         or checkpoint < 0
                         or (count, root, identity) != tuple(receipt[1:4])
@@ -12526,7 +12554,7 @@ class SQLiteStore:
         keep_last: int = 1,
         max_windows_per_run: int = 1,
     ) -> tuple[int, list[str]]:
-        """Delete a bounded batch of raw staging already bound to snapshots."""
+        """Reclaim a bounded batch of staging while retaining window authority."""
         if keep_last < 1:
             raise ValueError("keep_last must be positive")
         if max_windows_per_run < 1:
@@ -12551,25 +12579,28 @@ class SQLiteStore:
                     "SELECT id FROM structure_sync_windows "
                     "WHERE status='published' "
                     f"AND id NOT IN ({placeholders}) "
+                    "AND staging_reclaimed_at_ms IS NULL "
                     "AND NOT EXISTS (SELECT 1 FROM "
                     "structure_generation_drift_progress progress "
                     "WHERE progress.window_id=structure_sync_windows.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM "
-                    "structure_generation_drift_receipts receipt "
-                    "WHERE receipt.window_id=structure_sync_windows.id) "
                     "ORDER BY checkpoint_at_ms,id LIMIT ?",
                     (*keep_ids, max_windows_per_run),
                 )
             ]
             if to_delete:
                 delete_placeholders = ",".join("?" for _ in to_delete)
+                reclaimed_at_ms = int(time.time() * 1_000)
+                con.execute(
+                    "UPDATE structure_sync_windows SET staging_reclaimed_at_ms=? "
+                    f"WHERE id IN ({delete_placeholders}) AND status='published' "
+                    "AND staging_reclaimed_at_ms IS NULL",
+                    (reclaimed_at_ms, *to_delete),
+                )
                 for table in (
-                    "structure_sync_event_member_receipts",
                     "structure_sync_event_conflict_proofs",
                     "structure_sync_event_conflict_merkle_nodes",
-                    "structure_sync_event_conflict_summaries",
                     "structure_sync_event_member_staging",
-                    "structure_sync_event_source_receipts",
+                    "structure_sync_event_group_truth_staging",
                     "structure_sync_event_metadata_staging",
                 ):
                     con.execute(
@@ -12591,11 +12622,6 @@ class SQLiteStore:
                     f"WHERE window_id IN ({delete_placeholders})",
                     to_delete,
                 )
-                con.execute(
-                    "DELETE FROM structure_sync_windows "
-                    f"WHERE id IN ({delete_placeholders}) AND status='published'",
-                    to_delete,
-                )
             con.execute("COMMIT")
         except BaseException:
             if con.in_transaction:
@@ -12606,7 +12632,7 @@ class SQLiteStore:
 
         if to_delete:
             logger.info(
-                "structure staging retention deleted "
+                "structure staging retention reclaimed "
                 f"{len(to_delete)} published windows ids={to_delete}"
             )
         return len(to_delete), to_delete
@@ -12616,7 +12642,7 @@ class SQLiteStore:
         *,
         max_windows_per_run: int = 1,
     ) -> tuple[int, list[str]]:
-        """Reclaim staging from failed windows after fresh truth is certified."""
+        """Reclaim failed-window staging while retaining failure authority."""
         if max_windows_per_run < 1:
             raise ValueError("max_windows_per_run must be positive")
         con = self._connect_writer()
@@ -12626,19 +12652,25 @@ class SQLiteStore:
                 str(row[0])
                 for row in con.execute(
                     "SELECT id FROM structure_sync_windows WHERE status='failed' "
+                    "AND staging_reclaimed_at_ms IS NULL "
                     "ORDER BY checkpoint_at_ms,id LIMIT ?",
                     (max_windows_per_run,),
                 )
             ]
             if to_delete:
                 placeholders = ",".join("?" for _ in to_delete)
+                reclaimed_at_ms = int(time.time() * 1_000)
+                con.execute(
+                    "UPDATE structure_sync_windows SET staging_reclaimed_at_ms=? "
+                    f"WHERE id IN ({placeholders}) AND status='failed' "
+                    "AND staging_reclaimed_at_ms IS NULL",
+                    (reclaimed_at_ms, *to_delete),
+                )
                 for table in (
-                    "structure_sync_event_member_receipts",
                     "structure_sync_event_conflict_proofs",
                     "structure_sync_event_conflict_merkle_nodes",
-                    "structure_sync_event_conflict_summaries",
                     "structure_sync_event_member_staging",
-                    "structure_sync_event_source_receipts",
+                    "structure_sync_event_group_truth_staging",
                     "structure_sync_event_metadata_staging",
                 ):
                     con.execute(
@@ -12657,11 +12689,6 @@ class SQLiteStore:
                 con.execute(
                     "DELETE FROM structure_sync_market_staging "
                     f"WHERE window_id IN ({placeholders})",
-                    to_delete,
-                )
-                con.execute(
-                    "DELETE FROM structure_sync_windows "
-                    f"WHERE id IN ({placeholders}) AND status='failed'",
                     to_delete,
                 )
             con.execute("COMMIT")

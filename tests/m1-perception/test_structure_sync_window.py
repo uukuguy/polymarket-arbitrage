@@ -1199,7 +1199,7 @@ def test_recovery_root_partial_migration_repairs_existing_null(tmp_path) -> None
         ).fetchone() == (window["id"],)
 
 
-def test_published_structure_retention_is_bounded_and_keeps_latest_window(
+def test_published_structure_retention_reclaims_payload_and_keeps_window_identity(
     tmp_path,
 ) -> None:
     db_path = tmp_path / "state.db"
@@ -1254,12 +1254,12 @@ def test_published_structure_retention_is_bounded_and_keeps_latest_window(
         )
         window_ids.append(window_id)
 
-    deleted, deleted_ids = store.purge_published_structure_sync_windows(
+    reclaimed, reclaimed_ids = store.purge_published_structure_sync_windows(
         keep_last=1,
         max_windows_per_run=1,
     )
 
-    assert (deleted, deleted_ids) == (1, [window_ids[0]])
+    assert (reclaimed, reclaimed_ids) == (1, [window_ids[0]])
     with sqlite3.connect(db_path) as con:
         assert con.execute(
             "SELECT COUNT(*) FROM structure_sync_event_staging WHERE window_id=?",
@@ -1282,7 +1282,15 @@ def test_published_structure_retention_is_bounded_and_keeps_latest_window(
             for row in con.execute(
                 "SELECT id FROM structure_sync_windows ORDER BY checkpoint_at_ms"
             )
-        ] == window_ids[1:]
+        ] == window_ids
+        assert con.execute(
+            "SELECT staging_reclaimed_at_ms FROM structure_sync_windows WHERE id=?",
+            (window_ids[0],),
+        ).fetchone()[0] is not None
+        assert con.execute(
+            "SELECT staging_reclaimed_at_ms FROM structure_sync_windows WHERE id=?",
+            (window_ids[1],),
+        ).fetchone() == (None,)
 
     assert store.purge_published_structure_sync_windows(
         keep_last=1,
@@ -1291,7 +1299,76 @@ def test_published_structure_retention_is_bounded_and_keeps_latest_window(
     assert store.get_latest_structure_sync()["id"] == window_ids[2]
 
 
-def test_failed_structure_retention_reclaims_staging_and_window(tmp_path) -> None:
+def test_published_retention_preserves_sealed_member_receipt_authority(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "sealed-retention.db")
+    store.init_schema()
+    old_window_id = _seed_event_member_window(store, 2)
+    _advance_event_members_until_sealed(store, old_window_id)
+    assert store.structure_event_member_status(window_id=old_window_id)["sealed"] is True
+
+    with sqlite3.connect(store.db_path) as con:
+        old_snapshot_id = int(con.execute(
+            "INSERT INTO snapshots(taken_at_ms,finished_at_ms,mode,market_count,"
+            "is_valid,parquet_path) VALUES (10,11,'full',0,1,'old.parquet') "
+            "RETURNING id"
+        ).fetchone()[0])
+    store.mark_structure_sync_published(
+        window_id=old_window_id,
+        snapshot_id=old_snapshot_id,
+        published_at_ms=12,
+    )
+
+    latest_window_id = _seed_event_member_window(store, 0)
+    with sqlite3.connect(store.db_path) as con:
+        latest_snapshot_id = int(con.execute(
+            "INSERT INTO snapshots(taken_at_ms,finished_at_ms,mode,market_count,"
+            "is_valid,parquet_path) VALUES (20,21,'full',0,1,'latest.parquet') "
+            "RETURNING id"
+        ).fetchone()[0])
+    store.mark_structure_sync_published(
+        window_id=latest_window_id,
+        snapshot_id=latest_snapshot_id,
+        published_at_ms=22,
+    )
+
+    try:
+        result = store.purge_published_structure_sync_windows(
+            keep_last=1,
+            max_windows_per_run=1,
+        )
+    except sqlite3.IntegrityError as error:
+        pytest.fail(f"authenticated staging reclamation raised {error}")
+
+    assert result == (1, [old_window_id])
+    retained_status = store.structure_event_member_status(window_id=old_window_id)
+    assert retained_status["sealed"] is True, retained_status
+    with sqlite3.connect(store.db_path) as con:
+        for table in (
+            "structure_sync_event_staging",
+            "structure_sync_event_market_staging",
+            "structure_sync_event_metadata_staging",
+            "structure_sync_event_member_staging",
+            "structure_sync_event_group_truth_staging",
+            "structure_sync_event_conflict_proofs",
+            "structure_sync_event_conflict_merkle_nodes",
+        ):
+            assert con.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE window_id=?",  # noqa: S608
+                (old_window_id,),
+            ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_member_receipts "
+            "WHERE window_id=?",
+            (old_window_id,),
+        ).fetchone() == (1,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_conflict_summaries "
+            "WHERE window_id=?",
+            (old_window_id,),
+        ).fetchone() == (1,)
+
+
+def test_failed_structure_retention_reclaims_staging_and_keeps_window(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()
     old = store.begin_or_resume_structure_sync(started_at_ms=100)
@@ -1324,7 +1401,11 @@ def test_failed_structure_retention_reclaims_staging_and_window(tmp_path) -> Non
         assert con.execute(
             "SELECT COUNT(*) FROM structure_sync_windows WHERE id=?",
             (old["id"],),
-        ).fetchone()[0] == 0
+        ).fetchone()[0] == 1
+        assert con.execute(
+            "SELECT staging_reclaimed_at_ms FROM structure_sync_windows WHERE id=?",
+            (old["id"],),
+        ).fetchone()[0] is not None
         assert con.execute(
             "SELECT COUNT(*) FROM structure_sync_event_staging WHERE window_id=?",
             (old["id"],),
@@ -1340,6 +1421,18 @@ def test_failed_structure_retention_reclaims_staging_and_window(tmp_path) -> Non
         assert con.execute(
             "SELECT COUNT(*) FROM structure_sync_windows WHERE status='open'"
         ).fetchone()[0] == 1
+
+
+def test_structure_sync_window_schema_has_reclamation_marker(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+
+    with sqlite3.connect(store.db_path) as con:
+        columns = {
+            row[1] for row in con.execute("PRAGMA table_info(structure_sync_windows)")
+        }
+
+    assert "staging_reclaimed_at_ms" in columns
 
 
 async def test_rejected_cursor_restarts_once_then_rebuilds_from_first_page(

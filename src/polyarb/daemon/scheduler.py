@@ -1847,26 +1847,27 @@ class SnapshotScheduler:
                     # but its failure remains visible in production logs.
                     logger.warning(f"snapshot retention failed: {e!r}")
                 try:
-                    deleted_failed, _ = await asyncio.to_thread(
+                    reclaimed_failed, _ = await asyncio.to_thread(
                         self._sqlite_store.purge_failed_structure_sync_windows,
                         max_windows_per_run=1,
                     )
-                    if deleted_failed:
+                    if reclaimed_failed:
                         logger.info(
-                            f"structure staging retention deleted {deleted_failed} failed window"
+                            "structure staging retention reclaimed payload for "
+                            f"{reclaimed_failed} failed window"
                         )
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"failed structure staging retention failed: {e!r}")
                 try:
-                    deleted_windows, _ = await asyncio.to_thread(
+                    reclaimed_windows, _ = await asyncio.to_thread(
                         self._sqlite_store.purge_published_structure_sync_windows,
                         keep_last=1,
                         max_windows_per_run=1,
                     )
-                    if deleted_windows:
+                    if reclaimed_windows:
                         logger.info(
-                            "structure staging retention deleted "
-                            f"{deleted_windows} expired published window"
+                            "structure staging retention reclaimed payload for "
+                            f"{reclaimed_windows} expired published window"
                         )
                 except Exception as e:  # noqa: BLE001
                     # The certified snapshot remains valid; the next successful

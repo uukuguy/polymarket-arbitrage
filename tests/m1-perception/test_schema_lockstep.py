@@ -258,6 +258,64 @@ def test_structure_generation_tables_are_declared_and_created(tmp_path: Path) ->
     }
 
 
+def test_structure_window_direct_foreign_keys_have_retention_ownership(
+    tmp_path: Path,
+) -> None:
+    """A new window child must declare whether retention deletes or keeps it."""
+    heavy_reclaimed = {
+        "structure_sync_event_staging",
+        "structure_sync_market_staging",
+        "structure_sync_event_market_staging",
+        "structure_sync_event_metadata_staging",
+        "structure_sync_event_member_staging",
+        "structure_sync_event_group_truth_staging",
+        "structure_sync_event_conflict_proofs",
+        "structure_sync_event_conflict_merkle_nodes",
+    }
+    proof_retained = {
+        "structure_sync_event_market_backfill_progress",
+        "structure_sync_event_source_progress",
+        "structure_sync_event_conflict_summaries",
+        "structure_sync_event_source_receipts",
+        "structure_sync_event_member_progress",
+        "structure_sync_event_group_truth_progress",
+        "structure_sync_event_member_receipts",
+    }
+    independently_protected = {
+        "structure_publications",
+        "structure_generation_drift_progress",
+        "structure_generation_drift_receipts",
+        "structure_generation_drift_terminal_receipts",
+    }
+    classifications = (
+        heavy_reclaimed,
+        proof_retained,
+        independently_protected,
+    )
+    assert not any(left & right for index, left in enumerate(classifications)
+                   for right in classifications[index + 1:])
+
+    store = SQLiteStore(tmp_path / "window-fks.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        tables = {
+            str(row[0])
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        direct_children = {
+            table
+            for table in tables
+            for foreign_key in con.execute(f"PRAGMA foreign_key_list({table})")
+            if foreign_key[2] == "structure_sync_windows"
+            and foreign_key[3] == "window_id"
+            and foreign_key[4] == "id"
+        }
+
+    assert direct_children == set().union(*classifications)
+
+
 def _ddl_markets_columns() -> list[str]:
     return _ddl_table_columns("markets")
 
