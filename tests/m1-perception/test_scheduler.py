@@ -2243,7 +2243,7 @@ async def test_pending_structure_drift_slice_precedes_snapshot_child(
     child = AsyncMock(
         return_value=IsolatedStructureDriftCheckpoint(
             phase="legacy-members",
-            rows_processed=50_000,
+            rows_processed=0,
             chunks_processed=100,
             ready=False,
             deferred=False,
@@ -2281,6 +2281,71 @@ async def test_pending_structure_drift_slice_precedes_snapshot_child(
     assert scheduler._checkpoint_pending is True
     assert store.get_latest_structure_drift_attempt()["outcome"] == "checkpointed"
     store.initialize_structure_drift_comparison.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "chunks_processed", "ready", "stop_reason"),
+    [
+        ("stale", 1, False, "stale"),
+        (None, 0, False, "not-pending"),
+        ("source-events", 0, False, "max-elapsed-seconds"),
+        ("source-events", 1, True, "max-chunks"),
+    ],
+)
+async def test_structure_drift_does_not_immediately_resume_without_durable_progress(
+    daemon_settings_for_test,
+    monkeypatch,
+    phase: str | None,
+    chunks_processed: int,
+    ready: bool,
+    stop_reason: str,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import IsolatedStructureDriftCheckpoint
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    store.structure_generation_drift_status = MagicMock(
+        return_value={
+            "authorized": False,
+            "phase": "source-events",
+            "reason": "structure-drift-incomplete",
+            "progress_id": "comparison-v2",
+        }
+    )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v2"
+    )
+    child = AsyncMock(
+        return_value=IsolatedStructureDriftCheckpoint(
+            phase=phase,
+            rows_processed=0,
+            chunks_processed=chunks_processed,
+            ready=ready,
+            deferred=False,
+            defer_reason=None,
+            stop_reason=stop_reason,
+            elapsed_ms=1,
+        )
+    )
+    monkeypatch.setattr(scheduler_module, "run_structure_drift_in_subprocess", child)
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+    scheduler._run_snapshot = AsyncMock()
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is True
+
+    child.assert_awaited_once()
+    scheduler._run_snapshot.assert_not_awaited()
+    assert scheduler._checkpoint_pending is False
 
 
 @pytest.mark.asyncio

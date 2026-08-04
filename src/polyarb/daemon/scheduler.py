@@ -1508,7 +1508,20 @@ class SnapshotScheduler:
                 f"phase={checkpoint.phase} rows={checkpoint.rows_processed} "
                 f"chunks={checkpoint.chunks_processed} stop={checkpoint.stop_reason}"
             )
-            if not checkpoint.ready:
+            if (
+                not checkpoint.ready
+                and checkpoint.stop_reason in {"max-chunks", "max-elapsed-seconds"}
+                and checkpoint.chunks_processed > 0
+                and checkpoint.phase
+                in {
+                    "source-events",
+                    "source-markets",
+                    "fresh-projection-members",
+                    "generation-members",
+                    "legacy-members",
+                    "fresh-group-truth",
+                }
+            ):
                 # Match event-member and Structure publication continuations:
                 # durable non-terminal progress resumes after 100ms, while the
                 # next admission still rechecks every Quote-priority gate.

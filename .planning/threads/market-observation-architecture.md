@@ -1566,8 +1566,14 @@ success is not user receipt/read evidence.
 - The chain-truth test for cooperative work is therefore not only “did the
   cursor move?” It is “did durable non-terminal progress select the documented
   continuation cadence?” Event-member and Structure checkpoints already chose
-  100 ms; classifier drift must use the same signal.
+  100 ms; classifier drift must use the same signal. For drift, that means an
+  active phase stopped by `max-chunks` or `max-elapsed-seconds` after at least
+  one committed chunk and `ready=false`; no single signal is sufficient by
+  itself. A committed chunk may legitimately process zero rows while advancing
+  a phase boundary, so continuation must key on chunk commitment rather than
+  row count.
 - Immediate follow-up does not weaken Quote priority. Every slice releases the
   producer lock, and the next admission repeats both Quote active/due checks
-  before and after acquiring it. Terminal, deferred, and failed paths keep their
-  existing scheduling and incident semantics.
+  before and after acquiring it. `stale`, `not-pending`, zero-progress,
+  deferred, and failed paths keep their existing scheduling and incident
+  semantics.

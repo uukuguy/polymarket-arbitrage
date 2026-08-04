@@ -6244,20 +6244,28 @@ lifecycle, and final three-cycle M1 acceptance.
   `_checkpoint_pending=True`, so the resident loop slept the full 300-second
   cadence despite the approved 100 ms follow-up contract. This is a latency and
   prolonged-warn defect, not corrupt data or mixed serving.
-- [FIXED LOCAL/TDD] A RED scheduler assertion reproduced the false flag. The
-  minimal fix sets it only after durable, non-terminal drift progress; all Quote
-  priority admission checks remain intact. Forty drift/member tests, complete
-  scheduler/Quote/health files, Ruff, and scoped diff checks pass.
-- [FULL GATE] Full M1 JUnit contains 2,785 tests, zero failures/errors, two
-  skips, and `1245.124s`. The five user-owned `.superpowers/sdd/*` files remain
-  untouched.
+- [FIXED LOCAL/TDD] A RED scheduler assertion reproduced the false flag. An
+  independent review then rejected the broad `not ready` predicate because it
+  also matched `stale` and `not-pending`. Three negative RED cases reproduced
+  terminal, no-work, and zero-progress behavior. The corrected predicate now
+  selects immediate follow-up only for an active phase stopped by a bounded
+  limit after at least one committed chunk; all Quote priority admission checks
+  remain intact. A second review then found a parser-valid contradictory
+  `ready=true` bounded result; a fourth negative RED case reproduced it and the
+  explicit `not ready` guard now excludes it. The positive boundary now also
+  proves a committed zero-row phase transition still gets immediate follow-up.
+- [FULL GATE] After both review corrections, the complete scheduler file passed
+  and final M1 JUnit contains 3,784 tests, zero failures/errors, two skips, and
+  `1589.612s`. Ruff, scoped diff, `.githooks`, docs, and the 84-plan planning
+  audit pass. The five user-owned `.superpowers/sdd/*` files remain untouched.
 - [BOUNDARY] Release 237 remains live, safe, and slow. No generation-read or
   Quote cutover is authorized. The persistent M1 goal remains active.
 
 ### [NEXT — CURRENT]
 
-Commit the classifier immediate-followup hotfix and evidence, run final docs and
-planning gates, and obtain `DEPLOY_SHA_APPROVE <new exact 40-char HEAD>`.
+Complete the post-review full M1 gate and independent re-review, commit the
+classifier immediate-followup correction and evidence, and obtain
+`DEPLOY_SHA_APPROVE <new exact 40-char HEAD>`.
 Deploy only that SHA with drift enabled, legacy reads, Quote disabled, and the
 same image/config protections. Require rapid natural classifier-v2 seal and a
 passing read-only comparator before any separate generation-read cutover.
