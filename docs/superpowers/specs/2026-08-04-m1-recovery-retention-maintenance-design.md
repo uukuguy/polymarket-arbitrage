@@ -1,7 +1,7 @@
 # M1 Recovery Streak and Resident Retention Maintenance Design
 
 **Date:** 2026-08-04  
-**Status:** direction approved; written-spec review pending  
+**Status:** approved for implementation
 **Scope:** M1 L1 scheduler recovery truth, Structure staging retention, legacy
 snapshot retention, and resident Structure-generation evidence cleanup
 
@@ -203,7 +203,8 @@ defaults:
 - capped retry delay and a health failure threshold.
 
 `daemon.main` constructs and starts the worker only in the in-process L1
-producer topology, passes its runtime to the HTTP app, and includes it in the
+producer topology, exposes its durable runtime to the HTTP app through the
+shared SQLite store, and includes it in the
 same cancellation and five-second graceful-shutdown gather as the scheduler
 and Quote worker. Isolated-supervisor mode must either own an equivalent
 explicit worker process or report cleanup disabled; it cannot accidentally run
