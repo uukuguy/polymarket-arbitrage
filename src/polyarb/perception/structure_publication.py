@@ -14,6 +14,8 @@ from polyarb.perception.market_truth import EventMember, GroupTruth, membership_
 from polyarb.perception.structure_contract import (
     STRUCTURE_COMPONENTS,
     STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+    STRUCTURE_POINTER_SWITCH_TRANSACTION_DEADLINE_S,
+    STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S,
     STRUCTURE_PUBLICATION_MAX_ROWS,
     STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S,
 )
@@ -463,7 +465,12 @@ def run_structure_publication_step(
             publication.publication_id,
         )
     if publication.status == "ready":
-        snapshot_id = store.publish_structure_generation(publication.publication_id, now_ms)
+        snapshot_id = store.publish_structure_generation(
+            publication.publication_id,
+            now_ms,
+            transaction_deadline_s=STRUCTURE_POINTER_SWITCH_TRANSACTION_DEADLINE_S,
+            writer_lock_timeout_s=STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S,
+        )
         refreshed = store.get_structure_publication_progress(window_id)
         assert refreshed is not None and snapshot_id == publication.snapshot_id
         return _result(store, refreshed.publication)

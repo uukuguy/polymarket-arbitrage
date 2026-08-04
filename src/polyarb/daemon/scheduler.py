@@ -47,8 +47,6 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V2,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
     STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
-    STRUCTURE_POINTER_SWITCH_TRANSACTION_DEADLINE_S,
-    STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S,
     valid_structure_publication_checkpoint,
 )
 from polyarb.validator.category import SnapshotStatus
@@ -151,7 +149,7 @@ _STRUCTURE_FAILURE_MARKER_RE = re.compile(
     rb"(?:membership-invalid(?: membership_kind=(?:active-market-missing|group-truth|"
     rb"market-identity|terminal-invariant) key_sha256=[0-9a-f]{64})?|"
     rb"generation-count-mismatch|generation-incomplete|generation-validation-issues|"
-    rb"source-truth-invalid|sqlite-busy|structure-child-error|"
+    rb"pointer-switch-deadline|source-truth-invalid|sqlite-busy|structure-child-error|"
     rb"structure-publication-not-writing)$",
     re.MULTILINE,
 )
@@ -699,9 +697,10 @@ async def run_snapshot_in_subprocess(
             not in {
                 "generation-count-mismatch",
                 "generation-incomplete",
-                "generation-validation-issues",
-                "membership-invalid",
-                "source-truth-invalid",
+                    "generation-validation-issues",
+                    "membership-invalid",
+                    "pointer-switch-deadline",
+                    "source-truth-invalid",
                 "sqlite-busy",
                 "structure-child-error",
                 "structure-publication-not-writing",

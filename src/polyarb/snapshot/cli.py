@@ -48,6 +48,7 @@ _STRUCTURE_FAILURE_KINDS = frozenset(
         "generation-incomplete",
         "generation-validation-issues",
         "membership-invalid",
+        "pointer-switch-deadline",
         "source-truth-invalid",
         "structure-publication-not-writing",
     }

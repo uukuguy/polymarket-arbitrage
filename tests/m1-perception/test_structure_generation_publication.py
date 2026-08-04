@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import polyarb.perception.structure_publication as structure_publication_module
+import polyarb.storage.sqlite_store as sqlite_store_module
 from polyarb.perception.market_truth import EventMember, membership_hash
 from polyarb.perception.structure_publication import (
     StructurePublicationCheckpoint,
@@ -3682,12 +3683,132 @@ def test_generation_publication_attempt_switches_all_reads_after_terminal_receip
         store.publish_structure_generation(
             publication_id=publication.publication_id,
             now_ms=11_009,
+            transaction_deadline_s=15.0,
+            writer_lock_timeout_s=5.0,
         )
         == 11
     )
 
     assert store.current_structure_generation()["snapshot_id"] == 11
     assert store.current_generation_market_ids() == ("new-market",)
+
+
+def test_pointer_switch_deadline_rolls_back_all_authority(tmp_path: Path) -> None:
+    assert hasattr(sqlite_store_module, "StructurePointerSwitchDeadlineError")
+    deadline_error = sqlite_store_module.StructurePointerSwitchDeadlineError
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    _publish_generation(
+        store,
+        snapshot_id=10,
+        market_id="old-market",
+        now_ms=10_000,
+    )
+    publication = _begin_generation(
+        store,
+        snapshot_id=11,
+        market_id="new-market",
+        now_ms=11_000,
+    )
+    _append_generation_truth(
+        store,
+        publication,
+        snapshot_id=11,
+        market_id="new-market",
+        now_ms=11_004,
+    )
+    _certify(store, publication, now_ms=11_008)
+
+    with sqlite3.connect(store.db_path) as con:
+        pointer_before = con.execute(
+            "SELECT * FROM current_structure_generation WHERE id=1"
+        ).fetchone()
+        publication_before = con.execute(
+            "SELECT status,published_at_ms,checkpoint_at_ms FROM "
+            "structure_publications WHERE publication_id=?",
+            (publication.publication_id,),
+        ).fetchone()
+        snapshot_before = con.execute(
+            "SELECT finished_at_ms,market_view_published,is_valid,snapshot_status "
+            "FROM snapshots WHERE id=11"
+        ).fetchone()
+        window_before = con.execute(
+            "SELECT status,published_snapshot_id,checkpoint_at_ms FROM "
+            "structure_sync_windows WHERE id=?",
+            (publication.window_id,),
+        ).fetchone()
+
+    ticks = iter((0.0, 0.0, 16.0, 16.0, 16.0))
+
+    with pytest.raises(deadline_error, match="pointer-switch-deadline"):
+        store.publish_structure_generation(
+            publication.publication_id,
+            now_ms=11_009,
+            transaction_deadline_s=15.0,
+            writer_lock_timeout_s=5.0,
+            monotonic=lambda: next(ticks, 16.0),
+        )
+
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT * FROM current_structure_generation WHERE id=1"
+        ).fetchone() == pointer_before
+        assert con.execute(
+            "SELECT status,published_at_ms,checkpoint_at_ms FROM "
+            "structure_publications WHERE publication_id=?",
+            (publication.publication_id,),
+        ).fetchone() == publication_before
+        assert con.execute(
+            "SELECT finished_at_ms,market_view_published,is_valid,snapshot_status "
+            "FROM snapshots WHERE id=11"
+        ).fetchone() == snapshot_before
+        assert con.execute(
+            "SELECT status,published_snapshot_id,checkpoint_at_ms FROM "
+            "structure_sync_windows WHERE id=?",
+            (publication.window_id,),
+        ).fetchone() == window_before
+
+
+def test_pointer_switch_writer_lock_timeout_preserves_authority(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    _publish_generation(
+        store,
+        snapshot_id=10,
+        market_id="old-market",
+        now_ms=10_000,
+    )
+    publication = _begin_generation(
+        store,
+        snapshot_id=11,
+        market_id="new-market",
+        now_ms=11_000,
+    )
+    _append_generation_truth(
+        store,
+        publication,
+        snapshot_id=11,
+        market_id="new-market",
+        now_ms=11_004,
+    )
+    _certify(store, publication, now_ms=11_008)
+
+    blocker = sqlite3.connect(store.db_path, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            store.publish_structure_generation(
+                publication.publication_id,
+                now_ms=11_009,
+                transaction_deadline_s=15.0,
+                writer_lock_timeout_s=0.01,
+            )
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+    assert store.current_structure_generation()["snapshot_id"] == 10
+    assert store.get_latest_structure_publication().status == "ready"
 
 
 @pytest.mark.asyncio

@@ -3189,6 +3189,33 @@ async def test_snapshot_subprocess_accepts_bounded_child_failure_contract() -> N
 
 
 @pytest.mark.asyncio
+async def test_snapshot_subprocess_accepts_pointer_switch_deadline() -> None:
+    from polyarb.daemon.scheduler import (
+        SnapshotSubprocessError,
+        run_snapshot_in_subprocess,
+    )
+
+    stderr = b"structure-sync-failure failure_kind=pointer-switch-deadline\n"
+
+    async def spawn(*_args, **_kwargs):
+        return _FakeProcess(
+            {"failed": True, "failure_kind": "pointer-switch-deadline"},
+            returncode=1,
+            stderr=stderr,
+        )
+
+    with pytest.raises(
+        SnapshotSubprocessError,
+        match="snapshot-subprocess-pointer-switch-deadline",
+    ) as raised:
+        await run_snapshot_in_subprocess(spawn=spawn)
+
+    assert raised.value.stderr_tail == (
+        "structure-sync-failure failure_kind=pointer-switch-deadline"
+    )
+
+
+@pytest.mark.asyncio
 async def test_snapshot_subprocess_accepts_allowlisted_membership_evidence_marker() -> (
     None
 ):

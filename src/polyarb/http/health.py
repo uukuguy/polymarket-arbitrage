@@ -59,7 +59,12 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from polyarb.perception.structure_contract import STRUCTURE_DRIFT_CLASSIFIER_V2
+from polyarb.perception.structure_contract import (
+    STRUCTURE_DRIFT_CLASSIFIER_V2,
+    STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
+    STRUCTURE_POINTER_SWITCH_TRANSACTION_DEADLINE_S,
+    STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S,
+)
 from polyarb.routing.feed_handoff import decide_feed_availability
 
 HEALTH_CONTENT_TYPE = "application/health+json"
@@ -1278,9 +1283,6 @@ def _build_health_checks(
     # ── Check 2.5: parent-observed scheduler attempt truth ───────────────
     from polyarb.daemon.scheduler import (
         SNAPSHOT_SUBPROCESS_TIMEOUT_S,
-        STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
-        STRUCTURE_POINTER_SWITCH_TRANSACTION_DEADLINE_S,
-        STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S,
         STRUCTURE_SLICE_MAX_ELAPSED_S,
         structure_attempt_slot_budget_s,
     )

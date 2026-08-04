@@ -2011,6 +2011,10 @@ class StructurePublicationCursorError(ValueError):
     """A bounded write did not continue the publication's durable cursor."""
 
 
+class StructurePointerSwitchDeadlineError(ValueError):
+    """Atomic generation-pointer transaction exceeded its authority budget."""
+
+
 class StructureMembershipInvalidError(ValueError):
     """A bounded membership failure safe to expose across the child protocol."""
 
@@ -10979,16 +10983,36 @@ class SQLiteStore:
         publication_id: str,
         now_ms: int,
         *,
+        transaction_deadline_s: float = 15.0,
+        writer_lock_timeout_s: float = 5.0,
         trace_callback: Callable[[str], None] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> int:
         """Atomically publish metadata and switch the singleton generation pointer."""
         if not publication_id or now_ms < 0:
             raise ValueError("invalid-structure-publication")
-        con = self._connect_writer()
+        if (
+            transaction_deadline_s <= 0
+            or writer_lock_timeout_s <= 0
+            or writer_lock_timeout_s > transaction_deadline_s
+        ):
+            raise ValueError("invalid-pointer-switch-deadline")
+        deadline = monotonic() + transaction_deadline_s
+        con = self._connect_writer(timeout_s=writer_lock_timeout_s)
+
+        def ensure_deadline() -> None:
+            if monotonic() >= deadline:
+                raise StructurePointerSwitchDeadlineError(
+                    "pointer-switch-deadline"
+                )
+
         try:
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
+            con.set_progress_handler(lambda: int(monotonic() >= deadline), 1_000)
+            ensure_deadline()
             con.execute("BEGIN IMMEDIATE")
+            ensure_deadline()
             publication = con.execute(
                 "SELECT snapshot_id,window_id,status,expected_counts_json,"
                 "committed_counts_json,validation_hash,certification_component,"
@@ -11046,6 +11070,7 @@ class SQLiteStore:
                 or receipt[8] != publication[5]
             ):
                 raise ValueError("structure-publication-comparison-receipt-mismatch")
+            ensure_deadline()
             con.execute(
                 "UPDATE snapshots SET finished_at_ms=?,market_count=?,"
                 "market_view_published=1,is_valid=1,snapshot_status='ok' WHERE id=?",
@@ -11062,6 +11087,7 @@ class SQLiteStore:
                 int(active_drift[0][1]) != snapshot_id
                 or str(active_drift[0][2]) != publication_id
             ):
+                ensure_deadline()
                 superseded = con.execute(
                     "UPDATE structure_generation_drift_progress SET phase='stale',"
                     "terminal_reason='drift-current-generation-superseded',"
@@ -11073,6 +11099,7 @@ class SQLiteStore:
                     raise StructurePublicationCursorError(
                         "structure-drift-cursor-mismatch"
                     )
+            ensure_deadline()
             con.execute(
                 "INSERT INTO current_structure_generation(id,snapshot_id,publication_id,"
                 "validation_hash,counts_json,certification_component,"
@@ -11094,11 +11121,13 @@ class SQLiteStore:
                     now_ms,
                 ),
             )
+            ensure_deadline()
             con.execute(
                 "UPDATE structure_publications SET status='published',published_at_ms=?,"
                 "checkpoint_at_ms=? WHERE publication_id=?",
                 (now_ms, now_ms, publication_id),
             )
+            ensure_deadline()
             window_update = con.execute(
                 "UPDATE structure_sync_windows SET status='published',"
                 "published_snapshot_id=?,checkpoint_at_ms=? WHERE id=? AND status='complete'",
@@ -11106,13 +11135,24 @@ class SQLiteStore:
             )
             if window_update.rowcount != 1:
                 raise ValueError("structure-sync-window-not-complete")
+            ensure_deadline()
             con.execute("COMMIT")
             return snapshot_id
-        except BaseException:
+        except BaseException as error:
+            con.set_progress_handler(None, 0)
             if con.in_transaction:
                 con.execute("ROLLBACK")
+            if (
+                isinstance(error, sqlite3.OperationalError)
+                and "interrupted" in str(error).lower()
+                and monotonic() >= deadline
+            ):
+                raise StructurePointerSwitchDeadlineError(
+                    "pointer-switch-deadline"
+                ) from error
             raise
         finally:
+            con.set_progress_handler(None, 0)
             con.close()
 
     def current_structure_generation(self) -> dict[str, object] | None:
