@@ -1555,3 +1555,19 @@ success is not user receipt/read evidence.
   fixture that changed generation payload without resealing both expected and committed counts
   reproduced `generation-count-contract-mismatch`; treating only unchanged pressure as a loop
   condition turned a correct fail-closed response into a false performance timeout.
+
+### §2.24 Bounded slices also need an explicit continuation signal (2026-08-04)
+
+- A bounded child can be perfectly restart-safe and still make production
+  recovery unacceptably slow. Release 237 advanced classifier-v2 by thousands of
+  rows per slice, but each successful non-terminal slice slept the ordinary
+  300-second Structure cadence because its path omitted the resident loop's
+  `_checkpoint_pending` signal.
+- The chain-truth test for cooperative work is therefore not only “did the
+  cursor move?” It is “did durable non-terminal progress select the documented
+  continuation cadence?” Event-member and Structure checkpoints already chose
+  100 ms; classifier drift must use the same signal.
+- Immediate follow-up does not weaken Quote priority. Every slice releases the
+  producer lock, and the next admission repeats both Quote active/due checks
+  before and after acquiring it. Terminal, deferred, and failed paths keep their
+  existing scheduling and incident semantics.

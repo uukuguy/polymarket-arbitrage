@@ -6213,3 +6213,51 @@ same protected flags. Require a natural ready publication to switch within the
 health without manual intervention. Only then resume classifier-v2 seal,
 generation-read cutover, Quote restoration, opportunity endpoint/candidate
 lifecycle, and final three-cycle M1 acceptance.
+
+## SESSION 134 — 2026-08-04 (release 236 maintenance accepted; classifier follow-up hotfix)
+
+- [DEPLOYED] User-approved exact SHA
+  `c45dd166b07c6386a07c218bd3d63e578980c621` became Fly release 236 using
+  image `deployment-01KZ6AXD2KWAKJ651MA32EZ1C0`, digest
+  `sha256:cb11f1ab3a2056811c699a3ec060b475dfdaddeb4c3fe48c370eca27dfc181ea`.
+  Both app and cron reported the exact SHA; Quote remained off, generation
+  reads remained legacy, and cleanup stayed enabled at `500/0.05/30/5`.
+- [MAINTENANCE PASS] Natural publication
+  `7116e07224704da1a0b7430878b37e55` certified and compared generation 871,
+  then atomically switched pointer 870 -> 871. Publication status is
+  `published`, comparison is sealed, quarantine is 192, terminal snapshot
+  success reset the scheduler counter to zero, and no pointer write, restart,
+  forced advance, or manual cleanup was used.
+- [SELF-HEALING PASS] Resident cleanup naturally reclaimed generation 869 and
+  wrote cleanup receipt `9ce79a6e...`; retained/reclaimable converged to `2/0`
+  with no active cleanup progress. Writer contention produced real stale
+  alerts, later checkpoints resumed automatically, consecutive cleanup failures
+  stayed zero, and final cleanup health returned pass. The following natural
+  event-member window sealed 161,774 rows with 92,656 invalid diagnostics.
+- [CLASSIFIER ENABLED] Config-only Fly release 237 reused the exact same image
+  and release SHA and enabled only classifier-v2. Both machines retained
+  `read_mode=legacy`, `Quote=false`, and cleanup enabled. Comparator initially
+  failed closed with `structure-drift-progress-missing`, then scheduler-owned
+  comparison `fc79e976...` started from zero.
+- [PRODUCTION DEFECT] Attempts 259-262 advanced real source-events/source-markets
+  rows but started roughly five minutes apart. The drift checkpoint path omitted
+  `_checkpoint_pending=True`, so the resident loop slept the full 300-second
+  cadence despite the approved 100 ms follow-up contract. This is a latency and
+  prolonged-warn defect, not corrupt data or mixed serving.
+- [FIXED LOCAL/TDD] A RED scheduler assertion reproduced the false flag. The
+  minimal fix sets it only after durable, non-terminal drift progress; all Quote
+  priority admission checks remain intact. Forty drift/member tests, complete
+  scheduler/Quote/health files, Ruff, and scoped diff checks pass.
+- [FULL GATE] Full M1 JUnit contains 2,785 tests, zero failures/errors, two
+  skips, and `1245.124s`. The five user-owned `.superpowers/sdd/*` files remain
+  untouched.
+- [BOUNDARY] Release 237 remains live, safe, and slow. No generation-read or
+  Quote cutover is authorized. The persistent M1 goal remains active.
+
+### [NEXT — CURRENT]
+
+Commit the classifier immediate-followup hotfix and evidence, run final docs and
+planning gates, and obtain `DEPLOY_SHA_APPROVE <new exact 40-char HEAD>`.
+Deploy only that SHA with drift enabled, legacy reads, Quote disabled, and the
+same image/config protections. Require rapid natural classifier-v2 seal and a
+passing read-only comparator before any separate generation-read cutover.

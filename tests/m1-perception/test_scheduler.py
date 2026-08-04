@@ -2278,6 +2278,7 @@ async def test_pending_structure_drift_slice_precedes_snapshot_child(
     assert producer_lock.locked() is False
     assert scheduler._failure_counter == 0
     assert scheduler.state == SchedulerState.RECOVERING
+    assert scheduler._checkpoint_pending is True
     assert store.get_latest_structure_drift_attempt()["outcome"] == "checkpointed"
     store.initialize_structure_drift_comparison.assert_called_once()
 

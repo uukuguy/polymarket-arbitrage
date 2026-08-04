@@ -1508,6 +1508,11 @@ class SnapshotScheduler:
                 f"phase={checkpoint.phase} rows={checkpoint.rows_processed} "
                 f"chunks={checkpoint.chunks_processed} stop={checkpoint.stop_reason}"
             )
+            if not checkpoint.ready:
+                # Match event-member and Structure publication continuations:
+                # durable non-terminal progress resumes after 100ms, while the
+                # next admission still rechecks every Quote-priority gate.
+                self._checkpoint_pending = True
             return True
         finally:
             self._release_producer_slot()
