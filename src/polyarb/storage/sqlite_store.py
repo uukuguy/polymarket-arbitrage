@@ -13843,6 +13843,8 @@ class SQLiteStore:
                         "cr.generation_snapshot_id=s.id OR cr.legacy_snapshot_id=s.id) "
                         "AND NOT EXISTS (SELECT 1 FROM structure_sync_windows sw "
                         "WHERE sw.published_snapshot_id=s.id) "
+                        "AND NOT EXISTS (SELECT 1 FROM neg_risk_quote_runs qr "
+                        "WHERE qr.universe_snapshot_id=s.id) "
                         "AND NOT EXISTS (SELECT 1 FROM structure_generation_events ge "
                         "WHERE ge.snapshot_id=s.id) "
                         "AND NOT EXISTS (SELECT 1 FROM structure_generation_event_tags gt "
@@ -13888,6 +13890,11 @@ class SQLiteStore:
                     return (0, to_delete)
 
                 id_placeholders = ",".join("?" for _ in to_delete)
+                con.execute(
+                    "DELETE FROM snapshot_attempts "
+                    f"WHERE snapshot_id IN ({id_placeholders})",
+                    to_delete,
+                )
                 con.execute(
                     f"DELETE FROM validation_issues WHERE snapshot_id IN ({id_placeholders})",
                     to_delete,

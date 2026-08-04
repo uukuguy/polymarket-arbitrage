@@ -316,6 +316,64 @@ def test_structure_window_direct_foreign_keys_have_retention_ownership(
     assert direct_children == set().union(*classifications)
 
 
+def test_snapshot_direct_foreign_keys_have_retention_ownership(tmp_path: Path) -> None:
+    transactionally_deleted = {
+        ("events", "snapshot_id"),
+        ("event_tags", "snapshot_id"),
+        ("markets", "snapshot_id"),
+        ("validation_issues", "snapshot_id"),
+        ("snapshot_source_coverage", "snapshot_id"),
+        ("event_market_memberships", "snapshot_id"),
+        ("neg_risk_group_truth", "snapshot_id"),
+        ("snapshot_attempts", "snapshot_id"),
+    }
+    candidate_protectors = {
+        ("neg_risk_quote_runs", "universe_snapshot_id"),
+        ("structure_sync_windows", "published_snapshot_id"),
+        ("structure_publications", "snapshot_id"),
+        ("structure_generation_events", "snapshot_id"),
+        ("structure_generation_event_tags", "snapshot_id"),
+        ("structure_generation_memberships", "snapshot_id"),
+        ("structure_generation_group_truth", "snapshot_id"),
+        ("structure_generation_markets", "snapshot_id"),
+        ("structure_generation_issues", "snapshot_id"),
+        ("current_structure_generation", "snapshot_id"),
+        ("structure_generation_comparison_receipts", "legacy_snapshot_id"),
+        ("structure_generation_comparison_receipts", "generation_snapshot_id"),
+        ("structure_generation_comparison_progress", "legacy_snapshot_id"),
+        ("structure_generation_comparison_progress", "generation_snapshot_id"),
+        ("structure_generation_drift_progress", "legacy_snapshot_id"),
+        ("structure_generation_drift_progress", "generation_snapshot_id"),
+        ("structure_generation_drift_receipts", "legacy_snapshot_id"),
+        ("structure_generation_drift_receipts", "generation_snapshot_id"),
+        ("structure_generation_drift_receipts", "published_snapshot_id"),
+        ("structure_generation_drift_terminal_receipts", "legacy_snapshot_id"),
+        ("structure_generation_drift_terminal_receipts", "generation_snapshot_id"),
+        ("structure_generation_cleanup_receipts", "generation_snapshot_id"),
+        ("structure_generation_cleanup_progress", "generation_snapshot_id"),
+        ("structure_generation_cleanup_observations", "generation_snapshot_id"),
+    }
+    assert transactionally_deleted.isdisjoint(candidate_protectors)
+
+    store = SQLiteStore(tmp_path / "snapshot-fks.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        tables = {
+            str(row[0])
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        direct_foreign_keys = {
+            (table, str(foreign_key[3]))
+            for table in tables
+            for foreign_key in con.execute(f"PRAGMA foreign_key_list({table})")
+            if foreign_key[2] == "snapshots" and foreign_key[4] == "id"
+        }
+
+    assert direct_foreign_keys == transactionally_deleted | candidate_protectors
+
+
 def _ddl_markets_columns() -> list[str]:
     return _ddl_table_columns("markets")
 

@@ -211,6 +211,115 @@ def test_purge_old_snapshots_bounds_each_transaction(store: SQLiteStore) -> None
         assert con.execute("SELECT count(*) FROM snapshots").fetchone()[0] == 25
 
 
+def test_purge_old_snapshots_retires_owned_snapshot_attempts(
+    store: SQLiteStore,
+) -> None:
+    old_ms = int((time.time() - 8 * 86_400) * 1000)
+    old_snapshot_id = store.write_snapshot(
+        taken_at_ms=old_ms,
+        finished_at_ms=old_ms,
+        mode="subset",
+        parquet_path="",
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        **_complete_publication(),
+    )
+    store.write_snapshot(
+        taken_at_ms=int(time.time() * 1000),
+        finished_at_ms=int(time.time() * 1000),
+        mode="subset",
+        parquet_path="",
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        **_complete_publication(),
+    )
+    attempt_id = store.begin_snapshot_attempt(started_at_ms=old_ms)
+    store.finish_snapshot_attempt(
+        attempt_id=attempt_id,
+        outcome="succeeded",
+        finished_at_ms=old_ms + 1,
+        snapshot_id=old_snapshot_id,
+        failure_kind=None,
+    )
+
+    try:
+        result = store.purge_old_snapshots(
+            older_than_days=7,
+            keep_last=1,
+            max_snapshots_per_run=1,
+        )
+    except sqlite3.IntegrityError as error:
+        pytest.fail(f"snapshot-owned attempt retirement raised {error}")
+
+    assert result == (1, [old_snapshot_id])
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM snapshot_attempts WHERE id=?",
+            (attempt_id,),
+        ).fetchone() == (0,)
+
+
+def test_purge_old_snapshots_defers_to_quote_run_retention(
+    store: SQLiteStore,
+) -> None:
+    from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore
+
+    old_ms = int((time.time() - 8 * 86_400) * 1000)
+    old_snapshot_id = store.write_snapshot(
+        taken_at_ms=old_ms,
+        finished_at_ms=old_ms,
+        mode="subset",
+        parquet_path="",
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        **_complete_publication(),
+    )
+    store.write_snapshot(
+        taken_at_ms=int(time.time() * 1000),
+        finished_at_ms=int(time.time() * 1000),
+        mode="subset",
+        parquet_path="",
+        is_valid=True,
+        market_rows=[],
+        issues=[],
+        **_complete_publication(),
+    )
+    with sqlite3.connect(store.db_path) as con:
+        quote_run_id = int(con.execute(
+            "INSERT INTO neg_risk_quote_runs("
+            "universe_snapshot_id,universe_taken_at_ms,quoted_at_ms,"
+            "requested_token_count,successful_response_count,lease_expires_at_ms,"
+            "status,completed_at_ms) VALUES (?,?,?,0,0,0,'complete',?) RETURNING id",
+            (old_snapshot_id, old_ms, old_ms, old_ms + 1),
+        ).fetchone()[0])
+
+    try:
+        protected = store.purge_old_snapshots(
+            older_than_days=7,
+            keep_last=1,
+            max_snapshots_per_run=1,
+        )
+    except sqlite3.IntegrityError as error:
+        pytest.fail(f"Quote-owned snapshot candidate was not excluded: {error}")
+    assert protected == (0, [])
+
+    quote_store = NegRiskQuoteStore(store.db_path)
+    assert quote_store.purge_old_runs(keep_last_per_status=0, max_runs=1) == 1
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_quote_runs WHERE id=?",
+            (quote_run_id,),
+        ).fetchone() == (0,)
+    assert store.purge_old_snapshots(
+        older_than_days=7,
+        keep_last=1,
+        max_snapshots_per_run=1,
+    ) == (1, [old_snapshot_id])
+
+
 def test_purge_old_snapshots_never_unlinks_no_archive_product_sentinel(
     store: SQLiteStore, tmp_path: Path
 ) -> None:
