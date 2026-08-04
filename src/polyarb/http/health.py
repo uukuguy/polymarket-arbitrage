@@ -1279,7 +1279,8 @@ def _build_health_checks(
     from polyarb.daemon.scheduler import (
         SNAPSHOT_SUBPROCESS_TIMEOUT_S,
         STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
-        STRUCTURE_POINTER_SWITCH_HARD_DEADLINE_S,
+        STRUCTURE_POINTER_SWITCH_TRANSACTION_DEADLINE_S,
+        STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S,
         STRUCTURE_SLICE_MAX_ELAPSED_S,
         structure_attempt_slot_budget_s,
     )
@@ -1321,8 +1322,10 @@ def _build_health_checks(
                 f"generation_checkpoint_budget_s={int(STRUCTURE_SLICE_MAX_ELAPSED_S)} "
                 f"generation_child_hard_limit_s="
                 f"{int(STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S)} "
-                f"pointer_switch_hard_deadline_s="
-                f"{int(STRUCTURE_POINTER_SWITCH_HARD_DEADLINE_S)} "
+                f"pointer_switch_transaction_deadline_s="
+                f"{int(STRUCTURE_POINTER_SWITCH_TRANSACTION_DEADLINE_S)} "
+                f"pointer_switch_writer_lock_timeout_s="
+                f"{int(STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S)} "
                 f"configured_cadence_s={configured_cadence_s} "
                 f"effective_cadence_s={effective_cadence_s} "
                 f"success_samples={success_sample_count} "

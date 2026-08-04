@@ -1392,7 +1392,8 @@ def test_health_uses_effective_snapshot_timeout_and_surfaces_schedule(
         "configured_timeout_s=240 effective_timeout_s=288 "
         "producer_slot_budget_s=75 attempt_timeout_s=75 "
         "generation_checkpoint_budget_s=45 generation_child_hard_limit_s=75 "
-        "pointer_switch_hard_deadline_s=15 "
+        "pointer_switch_transaction_deadline_s=15 "
+        "pointer_switch_writer_lock_timeout_s=5 "
         "configured_cadence_s=3600 effective_cadence_s=348 "
         "success_samples=10 success_p95_s=236 reason=timeout-backoff"
     )
@@ -1415,7 +1416,9 @@ def test_health_surfaces_short_incomplete_structure_slice_budget(
     assert "producer_slot_budget_s=75 attempt_timeout_s=75" in schedule["output"]
     assert "generation_checkpoint_budget_s=45" in schedule["output"]
     assert "generation_child_hard_limit_s=75" in schedule["output"]
-    assert "pointer_switch_hard_deadline_s=15" in schedule["output"]
+    assert "pointer_switch_transaction_deadline_s=15" in schedule["output"]
+    assert "pointer_switch_writer_lock_timeout_s=5" in schedule["output"]
+    assert "pointer_switch_hard_deadline_s" not in schedule["output"]
     assert "finalizer_slot_budget_s" not in schedule["output"]
 
 
@@ -1434,7 +1437,9 @@ def test_health_surfaces_bounded_generation_publication_budgets(
 
     assert "generation_checkpoint_budget_s=45" in schedule["output"]
     assert "generation_child_hard_limit_s=75" in schedule["output"]
-    assert "pointer_switch_hard_deadline_s=15" in schedule["output"]
+    assert "pointer_switch_transaction_deadline_s=15" in schedule["output"]
+    assert "pointer_switch_writer_lock_timeout_s=5" in schedule["output"]
+    assert "pointer_switch_hard_deadline_s" not in schedule["output"]
     assert "finalizer_slot_budget_s" not in schedule["output"]
 
 

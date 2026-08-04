@@ -46,6 +46,9 @@ from polyarb.daemon.structure_schedule import derive_structure_schedule
 from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V2,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
+    STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
+    STRUCTURE_POINTER_SWITCH_TRANSACTION_DEADLINE_S,
+    STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S,
     valid_structure_publication_checkpoint,
 )
 from polyarb.validator.category import SnapshotStatus
@@ -109,8 +112,6 @@ SNAPSHOT_SUBPROCESS_TIMEOUT_S = 240.0
 # A longer adaptive snapshot timeout may improve completion probability, but
 # it must never let one Structure child monopolize that lane past the amount
 # production can absorb without violating the 300-second Quote hard SLA.
-STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S = 75.0
-STRUCTURE_POINTER_SWITCH_HARD_DEADLINE_S = 15.0
 STRUCTURE_SLICE_MAX_PAGES = 40
 STRUCTURE_SLICE_MAX_ELAPSED_S = 45.0
 STRUCTURE_DEFER_RETRY_DELAY_S = 5.0
@@ -128,12 +129,8 @@ def recovery_retry_delay_s(failure_counter: int) -> float:
 
 
 def structure_attempt_slot_budget_s(publication_status: object) -> float:
-    """Select one hard child budget without crossing publication stages."""
-    return (
-        STRUCTURE_POINTER_SWITCH_HARD_DEADLINE_S
-        if publication_status == "ready"
-        else STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S
-    )
+    """Bound the complete child; pointer transaction timing is store-owned."""
+    return STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S
 
 
 _SNAPSHOT_STAGE_MARKER_RE = re.compile(

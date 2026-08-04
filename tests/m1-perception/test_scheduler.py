@@ -2037,7 +2037,7 @@ async def test_incomplete_structure_slice_has_shorter_producer_slot_budget(
 
 
 @pytest.mark.asyncio
-async def test_ready_structure_publication_uses_pointer_switch_hard_budget(
+async def test_ready_structure_publication_keeps_child_hard_envelope(
     daemon_settings_for_test,
     monkeypatch,
 ) -> None:
@@ -2060,7 +2060,7 @@ async def test_ready_structure_publication_uses_pointer_switch_hard_budget(
 
     await scheduler._run_snapshot()
 
-    assert observed_timeout_s == 15
+    assert observed_timeout_s == 75
 
 
 def test_structure_defer_receipts_are_restart_visible_and_bounded(
