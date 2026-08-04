@@ -256,7 +256,7 @@ structure-generation-compare:
 structure-generation-drift-compare:
 	@uv run python -m polyarb.snapshot structure-generation-drift-compare
 
-## structure-generation-cleanup: Advance one bounded evidence cleanup phase; preserves current + rollback floor and immutable proof skeleton.
+## structure-generation-cleanup: Diagnose/advance one cleanup chunk; daemon normally owns continuous bounded cleanup.
 structure-generation-cleanup:
 	@uv run python -m polyarb.snapshot structure-generation-cleanup --max-rows "$(or $(max_rows),500)" --retain-generations "$(or $(retain_generations),2)"
 

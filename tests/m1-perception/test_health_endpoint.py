@@ -20,6 +20,7 @@ from starlette.testclient import TestClient
 
 from polyarb.http import health as health_module
 from polyarb.http.opportunity_read_health import OpportunityReadHealth
+from polyarb.storage.sqlite_store import SQLiteStore
 
 
 def _read_market_truth_health(path: Path, *, now_s: float):
@@ -233,6 +234,69 @@ def test_structure_generation_health_exposes_stalled_publication_and_cleanup_pre
         "blocked_reason=generation-entered-retention-floor"
         in checks["snapshot:structure_generation_evidence"][0]["output"]
     )
+
+
+def test_structure_generation_status_carries_cleanup_runtime_chain_truth(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    assert store.begin_structure_generation_cleanup_attempt(now_ms=1_000)
+    store.finish_structure_generation_cleanup_attempt(
+        state="backoff",
+        now_ms=1_001,
+        next_attempt_at_ms=2_001,
+        generation_snapshot_id=None,
+        phase=None,
+        rows_deleted=0,
+        error_kind="RuntimeError",
+        increment_failure=True,
+    )
+
+    status = store.structure_generation_status()
+
+    assert status["cleanup_runtime"]["state"] == "backoff"
+    assert status["cleanup_runtime"]["consecutive_failures"] == 1
+    assert status["cleanup_runtime"]["checkpoint_at_ms"] == 1_001
+
+
+@pytest.mark.parametrize(
+    ("runtime", "enabled", "expected"),
+    (
+        ({"state": "idle", "consecutive_failures": 0, "checkpoint_at_ms": 99_000}, True, "pass"),
+        ({"state": "backoff", "consecutive_failures": 1, "checkpoint_at_ms": 99_000}, True, "warn"),
+        ({"state": "blocked", "consecutive_failures": 1, "checkpoint_at_ms": 99_000}, True, "fail"),
+        ({"state": "backoff", "consecutive_failures": 3, "checkpoint_at_ms": 99_000}, True, "fail"),
+        (None, True, "fail"),
+        (None, False, "pass"),
+    ),
+)
+def test_structure_generation_cleanup_runtime_health(
+    runtime: dict | None,
+    enabled: bool,
+    expected: str,
+) -> None:
+    checks = health_module._structure_generation_health_checks(
+        {
+            "pointer_snapshot_id": None,
+            "publication": None,
+            "comparison": None,
+            "cleanup_runtime": runtime,
+            "retained_generation_count_lower_bound": 0,
+            "retained_generation_count_is_exact": True,
+            "reclaimable_generation_count_lower_bound": 0,
+            "retention_floor": 2,
+        },
+        now_ms=100_000,
+        read_mode="legacy",
+        publication_sla_s=100,
+        pressure_warn_count=4,
+        pressure_fail_count=8,
+        cleanup_enabled=enabled,
+        cleanup_failure_threshold=3,
+        cleanup_stale_s=60,
+    )
+    check = checks["snapshot:structure_generation_cleanup_runtime"][0]
+    assert check["status"] == expected
+    assert f"enabled={str(enabled).lower()}" in check["output"]
 
 
 def test_structure_generation_health_fails_stale_active_comparison() -> None:

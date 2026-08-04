@@ -664,6 +664,14 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
     if members and members.get("status") == "fail":
         output = members.get("output") or "structure-event-member-receipt-invalid"
         return "push", f"L1 Structure event-member sidecar failed ({output})"
+    cleanup_runtime = _extract_check(
+        healthz,
+        "snapshot:structure_generation_cleanup_runtime",
+        {},
+    )
+    if cleanup_runtime and cleanup_runtime.get("status") == "fail":
+        output = cleanup_runtime.get("output") or "cleanup-runtime-unavailable"
+        return "push", f"L1 Structure generation cleanup failed ({output})"
     drift = _extract_check(healthz, "snapshot:structure_generation_drift", {})
     if drift and drift.get("status") == "fail":
         output = str(drift.get("output") or "")

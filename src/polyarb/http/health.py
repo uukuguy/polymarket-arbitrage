@@ -438,6 +438,9 @@ def _structure_generation_health_checks(
     publication_sla_s: int,
     pressure_warn_count: int,
     pressure_fail_count: int,
+    cleanup_enabled: bool = True,
+    cleanup_failure_threshold: int = 3,
+    cleanup_stale_s: float = 90.0,
 ) -> dict[str, list[dict[str, Any]]]:
     """Project generation rollout metadata without scanning immutable bulk rows."""
     publication = status.get("publication")
@@ -585,6 +588,53 @@ def _structure_generation_health_checks(
         f"cleanup_checkpoint_at_ms={cleanup_checkpoint} "
         f"blocked_reason={blocked_reason}"
     )
+    cleanup_runtime = status.get("cleanup_runtime")
+    runtime_state = None
+    runtime_failures = 0
+    runtime_checkpoint = None
+    runtime_age_s = None
+    runtime_error = None
+    if isinstance(cleanup_runtime, dict):
+        runtime_state = cleanup_runtime.get("state")
+        runtime_failures = int(cleanup_runtime.get("consecutive_failures") or 0)
+        runtime_checkpoint = cleanup_runtime.get("checkpoint_at_ms")
+        runtime_error = cleanup_runtime.get("error_kind")
+        if isinstance(runtime_checkpoint, int):
+            runtime_age_s = max(0.0, (now_ms - runtime_checkpoint) / 1_000)
+    runtime_next_attempt = (
+        cleanup_runtime.get("next_attempt_at_ms")
+        if isinstance(cleanup_runtime, dict)
+        else None
+    )
+    if not cleanup_enabled:
+        runtime_status = "pass"
+        runtime_observed: object = "disabled"
+    elif not isinstance(cleanup_runtime, dict):
+        runtime_status = "fail"
+        runtime_observed = "missing"
+    elif runtime_state == "blocked" or runtime_failures >= cleanup_failure_threshold:
+        runtime_status = "fail"
+        runtime_observed = str(runtime_state)
+    elif (
+        reclaimable > 0
+        and (runtime_age_s is None or runtime_age_s > cleanup_stale_s)
+    ):
+        runtime_status = "fail"
+        runtime_observed = "stale"
+    elif runtime_state in {"backoff", "running"} or reclaimable > 0:
+        runtime_status = "warn"
+        runtime_observed = str(runtime_state)
+    else:
+        runtime_status = "pass"
+        runtime_observed = str(runtime_state)
+    runtime_output = (
+        f"enabled={str(cleanup_enabled).lower()} state={runtime_state} "
+        f"consecutive_failures={runtime_failures} "
+        f"failure_threshold={cleanup_failure_threshold} "
+        f"checkpoint_at_ms={runtime_checkpoint} checkpoint_age_seconds={runtime_age_s} "
+        f"next_attempt_at_ms={runtime_next_attempt} "
+        f"reclaimable={reclaimable} error_kind={runtime_error}"
+    )
     timestamp = _utc_now_iso()
     return {
         "snapshot:structure_generation": [
@@ -614,6 +664,16 @@ def _structure_generation_health_checks(
                 "observedValue": retained,
                 "status": evidence_status,
                 "output": evidence_output,
+                "time": timestamp,
+            }
+        ],
+        "snapshot:structure_generation_cleanup_runtime": [
+            {
+                "componentId": "structure-generation-cleanup-runtime",
+                "componentType": "system",
+                "observedValue": runtime_observed,
+                "status": runtime_status,
+                "output": runtime_output,
                 "time": timestamp,
             }
         ],
@@ -1532,6 +1592,32 @@ def _build_health_checks(
             ),
             pressure_fail_count=int(
                 getattr(settings, "structure_generation_pressure_fail_count", 8)
+            ),
+            cleanup_enabled=bool(
+                getattr(settings, "structure_generation_cleanup_enabled", True)
+                and (
+                    getattr(settings, "structure_sync_enabled", False)
+                    or getattr(
+                        settings, "legacy_structure_reconciliation_enabled", False
+                    )
+                )
+                and not getattr(
+                    settings, "opportunity_producer_supervisor_enabled", False
+                )
+            ),
+            cleanup_failure_threshold=int(
+                getattr(settings, "structure_generation_cleanup_failure_threshold", 3)
+            ),
+            cleanup_stale_s=max(
+                60.0,
+                float(
+                    getattr(
+                        settings,
+                        "structure_generation_cleanup_idle_interval_s",
+                        30.0,
+                    )
+                )
+                * 3,
             ),
         )
     except (OSError, sqlite3.Error, TypeError, ValueError) as error:

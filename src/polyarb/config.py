@@ -162,6 +162,23 @@ class Settings(BaseSettings):
     structure_generation_pressure_warn_count: int = Field(default=4, ge=2)
     structure_generation_pressure_fail_count: int = Field(default=8, ge=3)
     structure_generation_cleanup_max_rows: int = Field(default=500, ge=1)
+    structure_generation_cleanup_enabled: bool = True
+    structure_generation_cleanup_active_interval_s: float = Field(
+        default=0.05, gt=0, allow_inf_nan=False
+    )
+    structure_generation_cleanup_idle_interval_s: float = Field(
+        default=30.0, gt=0, allow_inf_nan=False
+    )
+    structure_generation_cleanup_writer_busy_interval_s: float = Field(
+        default=5.0, gt=0, allow_inf_nan=False
+    )
+    structure_generation_cleanup_retry_initial_s: float = Field(
+        default=1.0, gt=0, allow_inf_nan=False
+    )
+    structure_generation_cleanup_retry_max_s: float = Field(
+        default=30.0, gt=0, allow_inf_nan=False
+    )
+    structure_generation_cleanup_failure_threshold: int = Field(default=3, ge=1)
     structure_generation_drift_compare_enabled: bool = False
     structure_generation_drift_max_rows: int = Field(default=500, ge=1, le=500)
     structure_generation_drift_max_chunks_per_tick: int = Field(
@@ -458,6 +475,14 @@ class Settings(BaseSettings):
         if self.candidate_high_interval_s > self.candidate_quote_hard_stale_s:
             raise ValueError(
                 "candidate_high_interval_s must not exceed candidate_quote_hard_stale_s"
+            )
+        if (
+            self.structure_generation_cleanup_retry_initial_s
+            > self.structure_generation_cleanup_retry_max_s
+        ):
+            raise ValueError(
+                "structure_generation_cleanup_retry_initial_s must not exceed "
+                "structure_generation_cleanup_retry_max_s"
             )
         if self.candidate_reserved_non_high_slots >= self.candidate_cycle_max_groups:
             raise ValueError(

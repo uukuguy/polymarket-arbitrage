@@ -38,6 +38,27 @@ def test_quote_runtime_snapshot_exposes_pipeline_activity() -> None:
     assert runtime.snapshot().pipeline_active is False
 
 
+def test_generation_cleanup_settings_are_bounded_and_enabled_by_default() -> None:
+    settings = Settings()
+
+    assert settings.structure_generation_cleanup_enabled is True
+    assert settings.structure_generation_cleanup_max_rows == 500
+    assert settings.structure_generation_cleanup_active_interval_s == 0.05
+    assert settings.structure_generation_cleanup_idle_interval_s == 30.0
+    assert settings.structure_generation_cleanup_writer_busy_interval_s == 5.0
+    assert settings.structure_generation_cleanup_retry_initial_s == 1.0
+    assert settings.structure_generation_cleanup_retry_max_s == 30.0
+    assert settings.structure_generation_cleanup_failure_threshold == 3
+
+
+def test_generation_cleanup_retry_range_rejects_inverted_bounds() -> None:
+    with pytest.raises(ValueError, match="cleanup_retry_initial"):
+        Settings(
+            structure_generation_cleanup_retry_initial_s=31,
+            structure_generation_cleanup_retry_max_s=30,
+        )
+
+
 def test_create_app_exposes_candidate_watcher_runtime(tmp_path) -> None:
     settings = Settings(db_path=tmp_path / "state.db")
     store = SQLiteStore(settings.db_path)
@@ -99,6 +120,69 @@ async def test_l1_start_helper_runs_quote_worker_and_task_is_cancellable() -> No
     worker.run.assert_awaited_once_with(stop_event)
 
 
+async def test_generation_cleanup_start_helper_is_optional_and_cancellable() -> None:
+    from polyarb.daemon.main import _start_generation_cleanup_worker
+
+    stop_event = asyncio.Event()
+    assert _start_generation_cleanup_worker(None, stop_event) is None
+
+    entered = asyncio.Event()
+
+    async def run(_stop_event: asyncio.Event) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    worker = MagicMock()
+    worker.run = AsyncMock(side_effect=run)
+    task = _start_generation_cleanup_worker(worker, stop_event)
+    assert task is not None
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    results = await asyncio.gather(task, return_exceptions=True)
+    assert isinstance(results[0], asyncio.CancelledError)
+    worker.run.assert_awaited_once_with(stop_event)
+
+
+def test_generation_cleanup_owner_is_disabled_for_isolated_or_legacy_topology() -> None:
+    from polyarb.daemon.main import _build_generation_cleanup_worker
+
+    settings = Settings()
+    store = MagicMock()
+    lock = asyncio.Lock()
+    runtime = MagicMock()
+
+    assert (
+        _build_generation_cleanup_worker(
+            settings,
+            store,
+            lock,
+            runtime,
+            isolated_producers=True,
+            structure_sync_enabled=True,
+        )
+        is None
+    )
+    assert (
+        _build_generation_cleanup_worker(
+            settings,
+            store,
+            lock,
+            runtime,
+            isolated_producers=False,
+            structure_sync_enabled=False,
+        )
+        is None
+    )
+    assert _build_generation_cleanup_worker(
+        settings,
+        store,
+        lock,
+        runtime,
+        isolated_producers=False,
+        structure_sync_enabled=True,
+    ) is not None
+
+
 def test_l1_main_owns_quote_worker_shutdown() -> None:
     from polyarb.daemon import main
 
@@ -108,6 +192,16 @@ def test_l1_main_owns_quote_worker_shutdown() -> None:
     assert "_start_quote_worker(quote_worker, stop_event)" in source
     assert "quote_worker_task.cancel()" in source
     assert "quote_worker_task" in source.partition("asyncio.gather(")[2]
+
+
+def test_l1_main_owns_generation_cleanup_worker_shutdown() -> None:
+    from polyarb.daemon import main
+
+    source = inspect.getsource(main.main)
+    assert "_build_generation_cleanup_worker(" in source
+    assert "_start_generation_cleanup_worker(cleanup_worker, stop_event)" in source
+    assert "cleanup_worker_task.cancel()" in source
+    assert "cleanup_worker_task" in source.partition("asyncio.gather(")[2]
 
 
 def test_l1_main_feature_flags_candidate_watcher_as_sibling_task() -> None:

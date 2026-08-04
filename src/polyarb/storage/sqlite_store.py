@@ -11200,6 +11200,12 @@ class SQLiteStore:
                 "SELECT generation_snapshot_id,phase,rows_deleted,checkpoint_at_ms,"
                 "blocked_reason FROM structure_generation_cleanup_progress LIMIT 1"
             ).fetchone()
+            cleanup_runtime = con.execute(
+                "SELECT state,consecutive_failures,last_attempt_at_ms,"
+                "last_success_at_ms,next_attempt_at_ms,generation_snapshot_id,phase,"
+                "rows_deleted,error_kind,checkpoint_at_ms FROM "
+                "structure_generation_cleanup_runtime WHERE id=1"
+            ).fetchone()
             bootstrap = con.execute(
                 "SELECT progress.window_id,progress.event_cursor,"
                 "progress.member_offset,progress.events_processed,"
@@ -11517,6 +11523,13 @@ class SQLiteStore:
                 "blocked_reason": active_cleanup[4],
             },
             "cleanup_blocked_reason": cleanup_blocked_reason,
+            "cleanup_runtime": (
+                None
+                if cleanup_runtime is None
+                else self._structure_generation_cleanup_runtime_from_row(
+                    tuple(cleanup_runtime)
+                )
+            ),
             "retained_generation_count_lower_bound": retained_lower_bound,
             "retained_generation_count_is_exact": probe_exact,
             "retention_floor_generation_ids": retention_floor_ids,

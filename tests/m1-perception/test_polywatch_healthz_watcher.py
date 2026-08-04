@@ -123,6 +123,46 @@ def test_event_member_waiting_natural_window_does_not_alert() -> None:
     assert "sidecar failed" not in reason
 
 
+def test_generation_cleanup_runtime_failure_alerts_and_recovery_is_healthy() -> None:
+    base_checks = {
+        "snapshot:last_success_age_seconds": _check(60.0),
+        "market_truth:coverage": _check("complete"),
+        "quote_feed:last_complete_age_seconds": _check(60.0),
+        "quote_feed:collector_state": _check("running"),
+    }
+    failed = _health(
+        status="fail",
+        checks={
+            **base_checks,
+            "snapshot:structure_generation_cleanup_runtime": _check(
+                "backoff",
+                status="fail",
+                output=(
+                    "enabled=true state=backoff consecutive_failures=3 "
+                    "failure_threshold=3 error_kind=RuntimeError"
+                ),
+            ),
+        },
+    )
+    recovered = _health(
+        checks={
+            **base_checks,
+            "snapshot:structure_generation_cleanup_runtime": _check(
+                "idle",
+                output="enabled=true state=idle consecutive_failures=0",
+            ),
+        },
+    )
+
+    assert WATCHER.decide_l1(failed) == (
+        "push",
+        "L1 Structure generation cleanup failed "
+        "(enabled=true state=backoff consecutive_failures=3 "
+        "failure_threshold=3 error_kind=RuntimeError)",
+    )
+    assert WATCHER.decide_l1(recovered)[0] == "noop"
+
+
 def test_event_member_component_first_suppress_reminder_recovery_lifecycle() -> None:
     health = _health(status="fail", checks={
         "snapshot:structure_event_members": _check(

@@ -33,6 +33,7 @@ import uvicorn
 from loguru import logger
 
 from polyarb.config import load_settings
+from polyarb.daemon.generation_cleanup_worker import StructureGenerationCleanupWorker
 from polyarb.daemon.opportunity_watcher import (
     OpportunityWatcher,
     build_focused_opportunity_watcher,
@@ -494,6 +495,39 @@ def _start_structure_scheduler(
     return asyncio.create_task(scheduler.run(stop_event))
 
 
+def _build_generation_cleanup_worker(
+    settings,
+    sqlite_store: SQLiteStore,
+    producer_lock: asyncio.Lock,
+    quote_worker_runtime,
+    *,
+    isolated_producers: bool,
+    structure_sync_enabled: bool,
+) -> StructureGenerationCleanupWorker | None:
+    """Create the single cleanup owner only beside generation publication."""
+    if (
+        isolated_producers
+        or not structure_sync_enabled
+        or not settings.structure_generation_cleanup_enabled
+    ):
+        return None
+    return StructureGenerationCleanupWorker(
+        settings=settings,
+        sqlite_store=sqlite_store,
+        producer_lock=producer_lock,
+        quote_worker_runtime=quote_worker_runtime,
+    )
+
+
+def _start_generation_cleanup_worker(
+    worker: StructureGenerationCleanupWorker | None,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    if worker is None:
+        return None
+    return asyncio.create_task(worker.run(stop_event))
+
+
 async def main() -> int:
     # MUST be first — sets up JSON stdout sink + InterceptHandler
     init_logging()
@@ -542,6 +576,14 @@ async def main() -> int:
         quote_worker_runtime=(
             quote_worker.runtime if quote_worker is not None else None
         ),
+    )
+    cleanup_worker = _build_generation_cleanup_worker(
+        settings,
+        sqlite_store,
+        producer_lock,
+        quote_worker.runtime if quote_worker is not None else None,
+        isolated_producers=isolated_producers,
+        structure_sync_enabled=scheduler.structure_sync_enabled,
     )
     app = create_app(
         scheduler=scheduler,
@@ -596,6 +638,7 @@ async def main() -> int:
         None if isolated_producers else _start_structure_scheduler(scheduler, stop_event)
     )
     quote_worker_task = _start_quote_worker(quote_worker, stop_event)
+    cleanup_worker_task = _start_generation_cleanup_worker(cleanup_worker, stop_event)
     focused_watcher_task = _start_opportunity_watcher(
         None if isolated_producers else focused_watcher,
         stop_event,
@@ -635,6 +678,8 @@ async def main() -> int:
         reconciliation_task.cancel()
     if quote_worker_task is not None:
         quote_worker_task.cancel()
+    if cleanup_worker_task is not None:
+        cleanup_worker_task.cancel()
     for task in supervised_tasks:
         task.cancel()
     if resource_task is not None:
@@ -651,6 +696,7 @@ async def main() -> int:
                 *([scheduler_task] if scheduler_task is not None else []),
                 *([focused_watcher_task] if focused_watcher_task is not None else []),
                 *([quote_worker_task] if quote_worker_task is not None else []),
+                *([cleanup_worker_task] if cleanup_worker_task is not None else []),
                 *([candidate_watcher_task] if candidate_watcher_task is not None else []),
                 *([discovery_task] if discovery_task is not None else []),
                 *([reconciliation_task] if reconciliation_task is not None else []),
