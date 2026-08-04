@@ -1537,3 +1537,21 @@ success is not user receipt/read evidence.
   retained generations and seven reclaimable indefinitely. The production
   contract needs a low-priority, Quote-aware resident maintenance loop with
   bounded transactions, durable cursor/health truth, retry, and alert recovery.
+
+### §2.23 Maintenance chain-truth needs three independent facts (2026-08-04)
+
+- Authority evidence, replayable payload, and operational runtime have different retention
+  lifecycles. Reclaiming bulk generation/staging rows must preserve the publication/comparison/
+  cleanup proof skeleton; retaining that skeleton does not require retaining every replay row.
+- Pressure alone cannot prove that maintenance is alive. A singleton runtime row must be mutated
+  by the resident owner and read in the same bounded generation-status transaction used by health.
+  Health combines runtime state/failure/checkpoint age with reclaimable pressure; Polywatch reads
+  that exact sub-check for alert and recovery.
+- Quote fairness is an admission contract, not a sleep interval. Check priority before and after
+  acquiring the shared producer lock, bound one cleanup transaction to 500 rows, then release the
+  lock. Cancellation waits for the SQLite thread before release so a background transaction never
+  outlives ownership.
+- Production-shaped acceptance must fail immediately on authenticated `blocked` results. A test
+  fixture that changed generation payload without resealing both expected and committed counts
+  reproduced `generation-count-contract-mismatch`; treating only unchanged pressure as a loop
+  condition turned a correct fail-closed response into a false performance timeout.

@@ -17,6 +17,35 @@ This subsystem never reads or writes wallet keys, balances, signing material,
 orders, fills, positions, or trades. Its only mutation surface is the
 disabled-by-default upstream-fault control plane and its append-only evidence.
 
+## Resident Structure retention maintenance
+
+正常生产不需要 cron 或人工反复执行清理。主 M1 daemon 在 Structure generation publication
+开启、且未启用 isolated producer topology 时，唯一持有常驻 cleanup worker。它每个事务最多
+删除 500 行，始终保留 current + rollback 两代，并在每个事务之间让 Quote 优先。
+
+检查 `/healthz` 的两个子检查：
+
+- `snapshot:structure_generation_evidence`：retained/reclaimable pressure 与当前 cleanup phase；
+- `snapshot:structure_generation_cleanup_runtime`：owner 的 idle/running/backoff/blocked、连续失败、
+  checkpoint age、next attempt 和 error kind。
+
+正常无 pressure 时 runtime 为 `idle/pass`。有 pressure 且刚开始/继续收敛可短暂 `warn`。
+`blocked`、连续失败达到 `POLYARB_STRUCTURE_GENERATION_CLEANUP_FAILURE_THRESHOLD`（默认 3），
+或有 reclaimable pressure 但 checkpoint 超过 `max(60s, 3 × idle interval)`，均为 `fail`，
+Polywatch 会产生 L1 alert；状态恢复后走同一 component recovery lifecycle。
+
+人工命令仅用于安全诊断或推进一个有界 chunk：
+
+```bash
+make structure-generation-status
+make structure-generation-cleanup max_rows=500 retain_generations=2
+```
+
+不要循环该命令、不要直接改 pointer/receipt、不要删除 SQLite 行来“解除 blocked”。先保存 health
+输出与 runtime error；writer-busy 等待 resident retry，unexpected backoff 检查错误根因，authenticated
+blocked 按 receipt/contract mismatch 处理。生产验收门为约 300,000 行在 240 秒内收敛、每事务
+不超过 500 行、最终 retained <= 2/reclaimable = 0，且 Quote 在当前事务后、下一事务前获得锁。
+
 ## Local gate
 
 ```bash

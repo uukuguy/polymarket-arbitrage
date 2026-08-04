@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -14,6 +18,7 @@ import polyarb.http.market_map as market_map_module
 import polyarb.routing.focused_quote_collector as focused_module
 import polyarb.storage.sqlite_store as sqlite_store_module
 from polyarb.config import Settings
+from polyarb.daemon.generation_cleanup_worker import StructureGenerationCleanupWorker
 from polyarb.http.market_map import _read_market_map
 from polyarb.routing.focused_quote_collector import SqliteStructureMembershipReader
 from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore, _source_truth_hash
@@ -268,6 +273,71 @@ def _seed_structure_revision(
         # This fixture seeds the immutable result of a completed legacy
         # publication directly instead of going through write_snapshot().
         con.execute("DELETE FROM legacy_structure_revision_dirty WHERE id=1")
+
+
+def _inflate_authenticated_generation_issues(
+    path: Path,
+    *,
+    snapshot_id: int,
+    issue_count: int,
+) -> None:
+    """Add production-shaped payload, then reseal its existing authority."""
+    store = SQLiteStore(path)
+    with sqlite3.connect(path) as con:
+        con.execute("DROP TRIGGER trg_structure_generation_issues_frozen_insert")
+        con.execute("DROP TRIGGER trg_structure_comparison_receipt_update")
+        con.executemany(
+            "INSERT INTO structure_generation_issues("
+            "snapshot_id,issue_index,layer,category,market_id,detail,raw_payload) "
+            "VALUES (?,?,'production-shape','maintenance',NULL,'replayable','{}')",
+            ((snapshot_id, index) for index in range(1, issue_count + 1)),
+        )
+        counts = store._generation_counts(con, snapshot_id)
+        generation_hash = store._generation_hash(con, snapshot_id)
+        counts_json = json.dumps(counts, sort_keys=True, separators=(",", ":"))
+        receipt = con.execute(
+            "SELECT publication_id,legacy_snapshot_id,legacy_market_count,"
+            "generation_market_count,legacy_universe_hash,generation_universe_hash,"
+            "legacy_source_truth_hash,generation_source_truth_hash,created_at_ms "
+            "FROM structure_generation_comparison_receipts "
+            "WHERE generation_snapshot_id=?",
+            (snapshot_id,),
+        ).fetchone()
+        assert receipt is not None
+        receipt_digest = sqlite_store_module._comparison_receipt_digest(
+            generation_snapshot_id=snapshot_id,
+            publication_id=str(receipt[0]),
+            legacy_snapshot_id=int(receipt[1]),
+            legacy_market_count=int(receipt[2]),
+            generation_market_count=int(receipt[3]),
+            legacy_universe_hash=str(receipt[4]),
+            generation_universe_hash=str(receipt[5]),
+            legacy_source_truth_hash=str(receipt[6]),
+            generation_source_truth_hash=str(receipt[7]),
+            generation_validation_hash=generation_hash,
+            created_at_ms=int(receipt[8]),
+        )
+        con.execute(
+            "UPDATE structure_publications SET expected_counts_json=?,"
+            "committed_counts_json=?,"
+            "validation_hash=?,certification_hash=?,certification_counts_json=? "
+            "WHERE snapshot_id=?",
+            (
+                counts_json,
+                counts_json,
+                generation_hash,
+                generation_hash,
+                counts_json,
+                snapshot_id,
+            ),
+        )
+        con.execute(
+            "UPDATE structure_generation_comparison_receipts SET "
+            "generation_validation_hash=?,receipt_digest=? "
+            "WHERE generation_snapshot_id=?",
+            (generation_hash, receipt_digest, snapshot_id),
+        )
+    store.init_schema()
 
 
 @pytest.fixture
@@ -717,6 +787,115 @@ def test_generation_operations_report_pressure_and_reclaim_one_safe_chain(
                 "UPDATE structure_generation_cleanup_receipts SET reclaimed_at_ms=0 "
                 "WHERE generation_snapshot_id=1"
             )
+
+
+@pytest.mark.asyncio
+async def test_cleanup_production_pressure_drains_300k_rows_with_quote_fairness(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "generation-cleanup-production-shape.db"
+    store = SQLiteStore(path)
+    store.init_schema()
+    _seed_structure_revision(path, snapshot_id=1, market_suffix="old", point_current=False)
+    _seed_structure_revision(path, snapshot_id=2, market_suffix="rollback", point_current=False)
+    _seed_structure_revision(path, snapshot_id=3, market_suffix="current", point_current=True)
+    _inflate_authenticated_generation_issues(
+        path,
+        snapshot_id=1,
+        issue_count=300_000,
+    )
+
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+
+    class ObservedStore:
+        def __init__(self, inner: SQLiteStore) -> None:
+            self.inner = inner
+            self.rows_deleted: list[int] = []
+            self.cleanup_calls = 0
+
+        def __getattr__(self, name: str):
+            return getattr(self.inner, name)
+
+        def cleanup_structure_generation_evidence(self, **kwargs):
+            self.cleanup_calls += 1
+            if self.cleanup_calls == 1:
+                cleanup_started.set()
+                assert release_cleanup.wait(timeout=5)
+            result = self.inner.cleanup_structure_generation_evidence(**kwargs)
+            assert result["blocked"] is False, result["blocked_reason"]
+            self.rows_deleted.append(int(result["rows_deleted"]))
+            return result
+
+    observed_store = ObservedStore(store)
+    quote_runtime = MagicMock()
+    quote_runtime.pipeline_active.return_value = False
+    quote_runtime.pipeline_due.return_value = False
+    producer_lock = asyncio.Lock()
+    clock_value = 10_000
+
+    def clock_ms() -> int:
+        nonlocal clock_value
+        clock_value += 100
+        return clock_value
+
+    worker = StructureGenerationCleanupWorker(
+        settings=Settings(),
+        sqlite_store=observed_store,
+        producer_lock=producer_lock,
+        quote_worker_runtime=quote_runtime,
+        clock_ms=clock_ms,
+    )
+    started_at = time.monotonic()
+    first_tick = asyncio.create_task(worker._tick())
+    assert await asyncio.to_thread(cleanup_started.wait, 5)
+
+    quote_acquired = asyncio.Event()
+
+    async def acquire_quote_slot() -> None:
+        async with producer_lock:
+            quote_acquired.set()
+
+    quote_waiter = asyncio.create_task(acquire_quote_slot())
+    await asyncio.sleep(0)
+    release_cleanup.set()
+    await first_tick
+    second_tick = asyncio.create_task(worker._tick())
+    await asyncio.wait_for(quote_acquired.wait(), timeout=5)
+    assert observed_store.cleanup_calls == 1
+    await quote_waiter
+    await second_tick
+
+    # Simulate a process restart after authenticated partial progress. The new
+    # store/worker must resume the exact phase without widening the floor.
+    observed_store.inner = SQLiteStore(path)
+    worker = StructureGenerationCleanupWorker(
+        settings=Settings(),
+        sqlite_store=observed_store,
+        producer_lock=producer_lock,
+        quote_worker_runtime=quote_runtime,
+        clock_ms=clock_ms,
+    )
+
+    while (
+        store.structure_generation_status(retain_generations=2)[
+            "reclaimable_generation_count_lower_bound"
+        ]
+        > 0
+    ):
+        await worker._tick()
+
+    elapsed_s = time.monotonic() - started_at
+    final_status = store.structure_generation_status(retain_generations=2)
+    assert elapsed_s < 240
+    assert final_status["retained_generation_count_lower_bound"] <= 2
+    assert final_status["reclaimable_generation_count_lower_bound"] == 0
+    assert max(observed_store.rows_deleted) <= 500
+    with sqlite3.connect(path) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_markets "
+            "WHERE snapshot_id IN (2,3)"
+        ).fetchone() == (4,)
 
 
 def test_generation_cleanup_runtime_schema_initializes_idle_singleton(
