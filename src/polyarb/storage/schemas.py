@@ -3812,6 +3812,27 @@ CREATE TABLE IF NOT EXISTS structure_generation_cleanup_observations (
 CREATE INDEX IF NOT EXISTS idx_structure_cleanup_observations_latest
 ON structure_generation_cleanup_observations(id DESC);
 
+CREATE TABLE IF NOT EXISTS structure_generation_cleanup_runtime (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    state TEXT NOT NULL CHECK(state IN ('idle','running','backoff','blocked')),
+    consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK(consecutive_failures>=0),
+    last_attempt_at_ms INTEGER CHECK(last_attempt_at_ms IS NULL OR last_attempt_at_ms>=0),
+    last_success_at_ms INTEGER CHECK(last_success_at_ms IS NULL OR last_success_at_ms>=0),
+    next_attempt_at_ms INTEGER NOT NULL DEFAULT 0 CHECK(next_attempt_at_ms>=0),
+    generation_snapshot_id INTEGER CHECK(
+        generation_snapshot_id IS NULL OR generation_snapshot_id>0
+    ),
+    phase TEXT CHECK(phase IS NULL OR phase IN (
+        'events','event_tags','memberships','group_truth','markets','issues','complete'
+    )),
+    rows_deleted INTEGER NOT NULL DEFAULT 0 CHECK(rows_deleted>=0),
+    error_kind TEXT CHECK(error_kind IS NULL OR length(error_kind) BETWEEN 1 AND 64),
+    checkpoint_at_ms INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_at_ms>=0)
+);
+INSERT OR IGNORE INTO structure_generation_cleanup_runtime(
+    id,state,consecutive_failures,next_attempt_at_ms,rows_deleted,checkpoint_at_ms
+) VALUES (1,'idle',0,0,0,0);
+
 """
 
 # ─────────────────────────────────────────────────────────────────────────────

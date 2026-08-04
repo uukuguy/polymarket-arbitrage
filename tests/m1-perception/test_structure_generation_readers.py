@@ -345,8 +345,17 @@ def test_drift_receipt_is_append_only(generation_db: Path) -> None:
     deleted, window_ids = SQLiteStore(
         generation_db
     ).purge_published_structure_sync_windows(keep_last=1, max_windows_per_run=1)
-    assert deleted == 0
-    assert window_ids == []
+    assert deleted == 1
+    assert window_ids == ["test-window-1"]
+    with sqlite3.connect(generation_db) as con:
+        assert con.execute(
+            "SELECT staging_reclaimed_at_ms FROM structure_sync_windows "
+            "WHERE id='test-window-1'"
+        ).fetchone()[0] is not None
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_generation_drift_receipts "
+            "WHERE comparison_id='drift-1'"
+        ).fetchone() == (1,)
 
 
 def test_drift_schema_initialization_does_not_create_progress(
@@ -646,6 +655,7 @@ def test_generation_operations_report_pressure_and_reclaim_one_safe_chain(
         )
         steps.append(cleanup)
         assert cleanup["rows_deleted"] <= 1
+        assert cleanup.get("generation_snapshot_id") == 1
         if len(steps) == 1:
             with pytest.raises(
                 StructureGenerationReadError,
@@ -671,6 +681,7 @@ def test_generation_operations_report_pressure_and_reclaim_one_safe_chain(
     assert replay["reclaimed_generation_ids"] == []
     assert replay["retained_generation_ids"] == [3, 2]
     assert replay["rows_deleted"] == 0
+    assert replay.get("generation_snapshot_id") is None
     with pytest.raises(
         StructureGenerationReadError,
         match="generation-evidence-reclaimed",
@@ -706,6 +717,87 @@ def test_generation_operations_report_pressure_and_reclaim_one_safe_chain(
                 "UPDATE structure_generation_cleanup_receipts SET reclaimed_at_ms=0 "
                 "WHERE generation_snapshot_id=1"
             )
+
+
+def test_generation_cleanup_runtime_schema_initializes_idle_singleton(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "cleanup-runtime.db"
+    SQLiteStore(path).init_schema()
+
+    with sqlite3.connect(path) as con:
+        assert con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='structure_generation_cleanup_runtime'"
+        ).fetchone() == (1,)
+        row = con.execute(
+            "SELECT id,state,consecutive_failures,last_attempt_at_ms,"
+            "last_success_at_ms,next_attempt_at_ms,generation_snapshot_id,phase,"
+            "rows_deleted,error_kind,checkpoint_at_ms "
+            "FROM structure_generation_cleanup_runtime"
+        ).fetchone()
+
+    assert row == (1, "idle", 0, None, None, 0, None, None, 0, None, 0)
+
+
+def test_generation_cleanup_runtime_is_restart_safe_and_single_owner(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "cleanup-runtime-state.db"
+    store = SQLiteStore(path)
+    store.init_schema()
+    for method_name in (
+        "structure_generation_cleanup_runtime_status",
+        "recover_structure_generation_cleanup_runtime",
+        "begin_structure_generation_cleanup_attempt",
+        "finish_structure_generation_cleanup_attempt",
+    ):
+        assert hasattr(store, method_name), method_name
+
+    assert store.begin_structure_generation_cleanup_attempt(now_ms=100) is True
+    assert SQLiteStore(path).begin_structure_generation_cleanup_attempt(now_ms=100) is False
+    running = SQLiteStore(path).structure_generation_cleanup_runtime_status()
+    assert running["state"] == "running"
+    assert running["last_attempt_at_ms"] == 100
+
+    succeeded = store.finish_structure_generation_cleanup_attempt(
+        state="idle",
+        now_ms=110,
+        next_attempt_at_ms=160,
+        generation_snapshot_id=7,
+        phase="events",
+        rows_deleted=500,
+        error_kind=None,
+        increment_failure=False,
+    )
+    assert succeeded["state"] == "idle"
+    assert succeeded["consecutive_failures"] == 0
+    assert succeeded["last_success_at_ms"] == 110
+    assert store.begin_structure_generation_cleanup_attempt(now_ms=159) is False
+    assert store.begin_structure_generation_cleanup_attempt(now_ms=160) is True
+
+    failed = store.finish_structure_generation_cleanup_attempt(
+        state="backoff",
+        now_ms=170,
+        next_attempt_at_ms=270,
+        generation_snapshot_id=7,
+        phase="markets",
+        rows_deleted=0,
+        error_kind="RuntimeError",
+        increment_failure=True,
+    )
+    assert failed["consecutive_failures"] == 1
+    assert failed["last_success_at_ms"] == 110
+    assert store.begin_structure_generation_cleanup_attempt(now_ms=270) is True
+
+    recovered = SQLiteStore(path).recover_structure_generation_cleanup_runtime(
+        now_ms=280,
+        retry_delay_ms=50,
+    )
+    assert recovered["state"] == "backoff"
+    assert recovered["consecutive_failures"] == 2
+    assert recovered["next_attempt_at_ms"] == 330
+    assert recovered["error_kind"] == "worker-restarted"
 
 
 def test_generation_cleanup_fails_closed_on_unauthenticated_candidate(

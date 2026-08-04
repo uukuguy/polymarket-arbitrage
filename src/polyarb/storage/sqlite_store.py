@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from loguru import logger
 
@@ -11526,6 +11526,166 @@ class SQLiteStore:
             "retention_floor": retain_generations,
         }
 
+    @staticmethod
+    def _structure_generation_cleanup_runtime_from_row(
+        row: tuple[object, ...],
+    ) -> dict[str, object]:
+        return {
+            "state": str(row[0]),
+            "consecutive_failures": int(row[1]),
+            "last_attempt_at_ms": None if row[2] is None else int(row[2]),
+            "last_success_at_ms": None if row[3] is None else int(row[3]),
+            "next_attempt_at_ms": int(row[4]),
+            "generation_snapshot_id": None if row[5] is None else int(row[5]),
+            "phase": None if row[6] is None else str(row[6]),
+            "rows_deleted": int(row[7]),
+            "error_kind": None if row[8] is None else str(row[8]),
+            "checkpoint_at_ms": int(row[9]),
+        }
+
+    def structure_generation_cleanup_runtime_status(self) -> dict[str, object]:
+        """Read restart-persistent operational truth for resident cleanup."""
+        with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as con:
+            row = con.execute(
+                "SELECT state,consecutive_failures,last_attempt_at_ms,"
+                "last_success_at_ms,next_attempt_at_ms,generation_snapshot_id,phase,"
+                "rows_deleted,error_kind,checkpoint_at_ms FROM "
+                "structure_generation_cleanup_runtime WHERE id=1"
+            ).fetchone()
+        if row is None:
+            raise ValueError("structure-generation-cleanup-runtime-missing")
+        return self._structure_generation_cleanup_runtime_from_row(tuple(row))
+
+    def recover_structure_generation_cleanup_runtime(
+        self,
+        *,
+        now_ms: int,
+        retry_delay_ms: int,
+    ) -> dict[str, object]:
+        """Turn an orphaned running owner into a bounded restart retry."""
+        if type(now_ms) is not int or now_ms < 0:
+            raise ValueError("invalid-cleanup-runtime-time")
+        if type(retry_delay_ms) is not int or retry_delay_ms < 1:
+            raise ValueError("invalid-cleanup-runtime-retry-delay")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute(
+                "UPDATE structure_generation_cleanup_runtime SET state='backoff',"
+                "consecutive_failures=consecutive_failures+1,next_attempt_at_ms=?,"
+                "rows_deleted=0,error_kind='worker-restarted',checkpoint_at_ms=? "
+                "WHERE id=1 AND state='running'",
+                (now_ms + retry_delay_ms, now_ms),
+            )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+        return self.structure_generation_cleanup_runtime_status()
+
+    def begin_structure_generation_cleanup_attempt(self, *, now_ms: int) -> bool:
+        """Atomically admit one due cleanup owner across daemon instances."""
+        if type(now_ms) is not int or now_ms < 0:
+            raise ValueError("invalid-cleanup-runtime-time")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            changed = con.execute(
+                "UPDATE structure_generation_cleanup_runtime SET state='running',"
+                "last_attempt_at_ms=?,rows_deleted=0,error_kind=NULL,checkpoint_at_ms=? "
+                "WHERE id=1 AND state!='running' AND next_attempt_at_ms<=?",
+                (now_ms, now_ms, now_ms),
+            )
+            con.execute("COMMIT")
+            return changed.rowcount == 1
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
+    def finish_structure_generation_cleanup_attempt(
+        self,
+        *,
+        state: Literal["idle", "backoff", "blocked"],
+        now_ms: int,
+        next_attempt_at_ms: int,
+        generation_snapshot_id: int | None,
+        phase: str | None,
+        rows_deleted: int,
+        error_kind: str | None,
+        increment_failure: bool,
+    ) -> dict[str, object]:
+        """Terminalize the current cleanup owner with bounded runtime evidence."""
+        if state not in {"idle", "backoff", "blocked"}:
+            raise ValueError("invalid-cleanup-runtime-state")
+        if (
+            type(now_ms) is not int
+            or now_ms < 0
+            or type(next_attempt_at_ms) is not int
+            or next_attempt_at_ms < now_ms
+            or type(rows_deleted) is not int
+            or rows_deleted < 0
+            or type(increment_failure) is not bool
+        ):
+            raise ValueError("invalid-cleanup-runtime-terminal-evidence")
+        if generation_snapshot_id is not None and (
+            type(generation_snapshot_id) is not int or generation_snapshot_id < 1
+        ):
+            raise ValueError("invalid-cleanup-runtime-generation")
+        allowed_phases = {
+            "events",
+            "event_tags",
+            "memberships",
+            "group_truth",
+            "markets",
+            "issues",
+            "complete",
+        }
+        if phase is not None and phase not in allowed_phases:
+            raise ValueError("invalid-cleanup-runtime-phase")
+        if error_kind is not None and not 1 <= len(error_kind) <= 64:
+            raise ValueError("invalid-cleanup-runtime-error-kind")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            changed = con.execute(
+                "UPDATE structure_generation_cleanup_runtime SET state=?,"
+                "consecutive_failures=CASE WHEN ? THEN consecutive_failures+1 "
+                "WHEN ?='idle' THEN 0 ELSE consecutive_failures END,"
+                "last_success_at_ms=CASE WHEN ?='idle' THEN ? "
+                "ELSE last_success_at_ms END,next_attempt_at_ms=?,"
+                "generation_snapshot_id=?,phase=?,rows_deleted=?,error_kind=?,"
+                "checkpoint_at_ms=? WHERE id=1 AND state='running'",
+                (
+                    state,
+                    increment_failure,
+                    state,
+                    state,
+                    now_ms,
+                    next_attempt_at_ms,
+                    generation_snapshot_id,
+                    phase,
+                    rows_deleted,
+                    error_kind,
+                    now_ms,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise ValueError("structure-generation-cleanup-runtime-not-running")
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+        return self.structure_generation_cleanup_runtime_status()
+
     def structure_generation_query_plans(
         self,
         *,
@@ -11654,6 +11814,7 @@ class SQLiteStore:
                     return {
                         "blocked": False,
                         "blocked_reason": None,
+                        "generation_snapshot_id": None,
                         "phase": None,
                         "rows_deleted": 0,
                         "reclaimed_generation_ids": [],
@@ -11725,6 +11886,7 @@ class SQLiteStore:
                     return {
                         "blocked": True,
                         "blocked_reason": blocked_reason,
+                        "generation_snapshot_id": snapshot_id,
                         "phase": None,
                         "rows_deleted": 0,
                         "reclaimed_generation_ids": [],
@@ -11767,6 +11929,7 @@ class SQLiteStore:
                 return {
                     "blocked": True,
                     "blocked_reason": active_auth_error,
+                    "generation_snapshot_id": snapshot_id,
                     "phase": phase,
                     "rows_deleted": 0,
                     "reclaimed_generation_ids": [],
@@ -11789,6 +11952,7 @@ class SQLiteStore:
                 return {
                     "blocked": True,
                     "blocked_reason": "generation-entered-retention-floor",
+                    "generation_snapshot_id": snapshot_id,
                     "phase": phase,
                     "rows_deleted": 0,
                     "reclaimed_generation_ids": [],
@@ -11862,6 +12026,7 @@ class SQLiteStore:
             return {
                 "blocked": False,
                 "blocked_reason": None,
+                "generation_snapshot_id": snapshot_id,
                 "phase": next_phase,
                 "rows_deleted": int(deleted),
                 "reclaimed_generation_ids": reclaimed,
