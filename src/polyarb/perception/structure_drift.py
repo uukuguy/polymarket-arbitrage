@@ -228,6 +228,14 @@ def advance_fresh_projection_commitment(
         STRUCTURE_DRIFT_CLASSIFIER_V3,
     }:
         raise ValueError("invalid-structure-drift-classifier-contract")
+    if (
+        commitment.classifier_contract_version == STRUCTURE_DRIFT_CLASSIFIER_V3
+        and commitment.candidates_processed
+        != commitment.member_count
+        + commitment.exclusion_count
+        + commitment.diagnostic_count
+    ):
+        raise ValueError("fresh-projection-candidate-conservation")
     member_digest = RowChainSHA256.from_json(
         commitment.member_digest_state,
         expected_domain="projection-member",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,20 @@ def test_v3_projection_commitment_rejects_nonconserving_chunk() -> None:
                 diagnostics=(),
                 candidates_processed=1,
                 exclusions=(),
+            ),
+        )
+
+
+def test_v3_projection_commitment_rejects_nonconserving_input_state() -> None:
+    commitment = replace(_v3_commitment(), candidates_processed=1)
+    with pytest.raises(ValueError, match="fresh-projection-candidate-conservation"):
+        advance_fresh_projection_commitment(
+            commitment,
+            FreshProjectionChunk(
+                cursor=None,
+                members=(_member("repairing-member"),),
+                diagnostics=(),
+                candidates_processed=0,
             ),
         )
 
