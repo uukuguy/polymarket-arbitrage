@@ -44,7 +44,7 @@ from loguru import logger
 
 from polyarb.daemon.structure_schedule import derive_structure_schedule
 from polyarb.perception.structure_contract import (
-    STRUCTURE_DRIFT_CLASSIFIER_V2,
+    STRUCTURE_DRIFT_CLASSIFIER_V3,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
     STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
     valid_structure_publication_checkpoint,
@@ -60,6 +60,15 @@ class SchedulerState(StrEnum):
     # Kept only to read historical state written before H-011.  New code must
     # migrate it to RECOVERING rather than preserve a terminal producer stop.
     PAUSED = "PAUSED"
+
+
+def _structure_drift_defer_contract(status: dict[str, object]) -> str:
+    contract = status.get("classifier_contract_version")
+    return (
+        contract
+        if isinstance(contract, str) and contract
+        else STRUCTURE_DRIFT_CLASSIFIER_V3
+    )
 
 
 class SnapshotSubprocessError(RuntimeError):
@@ -1200,7 +1209,7 @@ class SnapshotScheduler:
             await self._record_structure_defer(
                 reason="structure-drift-status-unavailable",
                 queued_at_ms=queued_at_ms,
-                classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V3,
             )
             logger.warning(
                 f"structure drift status unavailable kind={type(error).__name__}"
@@ -1229,7 +1238,9 @@ class SnapshotScheduler:
                         if status.get("progress_id") is not None
                         else None
                     ),
-                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                    classifier_contract_version=_structure_drift_defer_contract(
+                        status
+                    ),
                 )
                 logger.warning(
                     "structure drift member authority unavailable "
@@ -1250,7 +1261,9 @@ class SnapshotScheduler:
                         if status.get("progress_id") is not None
                         else None
                     ),
-                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                    classifier_contract_version=_structure_drift_defer_contract(
+                        status
+                    ),
                 )
                 return None
         reason = self._quote_priority_reason()
@@ -1259,7 +1272,7 @@ class SnapshotScheduler:
                 reason=f"structure-drift:{reason}",
                 queued_at_ms=queued_at_ms,
                 current_comparison_id=status.get("progress_id"),
-                classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                classifier_contract_version=_structure_drift_defer_contract(status),
             )
             return False
         if self._producer_lock is not None:
@@ -1272,7 +1285,9 @@ class SnapshotScheduler:
                     reason=f"structure-drift:{reason}",
                     queued_at_ms=queued_at_ms,
                     current_comparison_id=status.get("progress_id"),
-                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                    classifier_contract_version=_structure_drift_defer_contract(
+                        status
+                    ),
                 )
                 return False
             initialized_comparison_id: str | None = None
@@ -1303,7 +1318,9 @@ class SnapshotScheduler:
                         queued_at_ms=queued_at_ms,
                         initialized_comparison_id=initialized_comparison_id,
                         current_comparison_id=status.get("progress_id"),
-                        classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                        classifier_contract_version=_structure_drift_defer_contract(
+                            status
+                        ),
                     )
                     logger.warning(
                         "structure drift current identity changed after "
@@ -1329,7 +1346,9 @@ class SnapshotScheduler:
                         queued_at_ms=queued_at_ms,
                         initialized_comparison_id=initialized_comparison_id,
                         current_comparison_id=status.get("progress_id"),
-                        classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                        classifier_contract_version=_structure_drift_defer_contract(
+                            status
+                        ),
                     )
                     logger.warning(
                         "structure drift post-initialization status invalid; "
@@ -1341,7 +1360,7 @@ class SnapshotScheduler:
                     reason="structure-drift-status-unavailable",
                     queued_at_ms=queued_at_ms,
                     initialized_comparison_id=initialized_comparison_id,
-                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V3,
                 )
                 logger.warning(
                     "structure drift current-contract initialization unavailable "
@@ -1488,7 +1507,9 @@ class SnapshotScheduler:
                     queued_at_ms=queued_at_ms,
                     initialized_comparison_id=initialized_comparison_id,
                     current_comparison_id=initialized_comparison_id,
-                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                    classifier_contract_version=_structure_drift_defer_contract(
+                        status
+                    ),
                 )
                 return True
             self._finish_structure_drift_attempt(

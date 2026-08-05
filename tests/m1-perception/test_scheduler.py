@@ -2316,6 +2316,7 @@ async def test_structure_drift_does_not_immediately_resume_without_durable_progr
             "phase": "source-events",
             "reason": "structure-drift-incomplete",
             "progress_id": "comparison-v2",
+            "classifier_contract_version": "structure-drift-classifier-v3",
         }
     )
     store.initialize_structure_drift_comparison = MagicMock(
@@ -2349,9 +2350,14 @@ async def test_structure_drift_does_not_immediately_resume_without_durable_progr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "classifier_contract",
+    ("structure-drift-classifier-v2", "structure-drift-classifier-v3"),
+)
 async def test_structure_drift_rechecks_quote_after_shared_lock(
     daemon_settings_for_test,
     monkeypatch,
+    classifier_contract: str,
 ) -> None:
     from polyarb.daemon import scheduler as scheduler_module
     from polyarb.storage.sqlite_store import SQLiteStore
@@ -2367,6 +2373,7 @@ async def test_structure_drift_rechecks_quote_after_shared_lock(
             "phase": "source-events",
             "reason": "structure-drift-incomplete",
             "progress_id": "comparison-v2",
+            "classifier_contract_version": classifier_contract,
         }
     )
     store.initialize_structure_drift_comparison = MagicMock(
@@ -2391,6 +2398,7 @@ async def test_structure_drift_rechecks_quote_after_shared_lock(
     receipt = store.get_latest_structure_defer()
     assert receipt is not None
     assert receipt["reason"] == "structure-drift:quote-pipeline-active"
+    assert receipt["classifier_contract_version"] == classifier_contract
     assert scheduler._failure_counter == 0
     store.initialize_structure_drift_comparison.assert_not_called()
 
@@ -2718,6 +2726,7 @@ async def test_structure_drift_identity_change_after_initialize_blocks_snapshot(
                 "phase": "source-events",
                 "reason": "structure-drift-incomplete",
                 "progress_id": "comparison-new",
+                "classifier_contract_version": "structure-drift-classifier-v3",
             },
             {
                 "authorized": False,
@@ -2734,6 +2743,7 @@ async def test_structure_drift_identity_change_after_initialize_blocks_snapshot(
                 "phase": "source-events",
                 "reason": "structure-drift-incomplete",
                 "progress_id": "comparison-new",
+                "classifier_contract_version": "structure-drift-classifier-v3",
             },
         )
     )
@@ -2775,7 +2785,7 @@ async def test_structure_drift_identity_change_after_initialize_blocks_snapshot(
     assert defer["initialized_comparison_id"] == "comparison-old"
     assert defer["current_comparison_id"] == "comparison-new"
     assert defer["classifier_contract_version"] == (
-        "structure-drift-classifier-v2"
+        "structure-drift-classifier-v3"
     )
 
     assert await scheduler._tick_once(queued_at_ms=2_000) is True
@@ -2814,6 +2824,7 @@ async def test_post_initialize_status_unavailable_defer_binds_current_identity(
             "phase": "unexpected-phase",
             "reason": "structure-drift-incomplete",
             "progress_id": "comparison-v2",
+            "classifier_contract_version": "structure-drift-classifier-v3",
         },
     ))
     store.structure_generation_drift_status = MagicMock(
@@ -2837,9 +2848,102 @@ async def test_post_initialize_status_unavailable_defer_binds_current_identity(
     assert defer["initialized_comparison_id"] == "comparison-v2"
     assert defer["current_comparison_id"] == "comparison-v2"
     assert defer["classifier_contract_version"] == (
-        "structure-drift-classifier-v2"
+        "structure-drift-classifier-v3"
     )
     scheduler._run_snapshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_drift_status_defer_uses_expected_v3_contract(
+    daemon_settings_for_test,
+) -> None:
+    from polyarb.daemon.scheduler import SnapshotScheduler
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    store.structure_generation_drift_status = MagicMock(
+        side_effect=sqlite3.OperationalError("status unavailable")
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+    scheduler._run_snapshot = AsyncMock()
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is True
+
+    defer = store.get_latest_structure_defer()
+    assert defer is not None
+    assert defer["reason"] == "structure-drift-status-unavailable"
+    assert defer["classifier_contract_version"] == (
+        "structure-drift-classifier-v3"
+    )
+
+
+@pytest.mark.asyncio
+async def test_drift_child_defer_preserves_current_v3_contract(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import (
+        IsolatedStructureDriftCheckpoint,
+        SnapshotScheduler,
+    )
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    status = {
+        "authorized": False,
+        "phase": "source-events",
+        "reason": "structure-drift-incomplete",
+        "progress_id": "comparison-v3",
+        "classifier_contract_version": "structure-drift-classifier-v3",
+    }
+    store.structure_generation_drift_status = MagicMock(return_value=status)
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v3"
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "run_structure_drift_in_subprocess",
+        AsyncMock(
+            return_value=IsolatedStructureDriftCheckpoint(
+                phase="source-events",
+                rows_processed=0,
+                chunks_processed=0,
+                ready=False,
+                deferred=True,
+                defer_reason="writer-busy",
+                stop_reason="writer-busy",
+                elapsed_ms=1,
+            )
+        ),
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+    scheduler._run_snapshot = AsyncMock()
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is True
+
+    defer = store.get_latest_structure_defer()
+    assert defer is not None
+    assert defer["reason"] == "structure-drift-writer-busy"
+    assert defer["classifier_contract_version"] == (
+        "structure-drift-classifier-v3"
+    )
 
 
 @pytest.mark.asyncio
