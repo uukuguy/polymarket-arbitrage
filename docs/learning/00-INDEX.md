@@ -61,6 +61,7 @@
 | 47 | [Classifier-v2 诊断收据](47-Classifier-v2诊断收据.md) | 完整 sidecar projection / fresh-group-ineligible / atomic terminal receipt / 认证 status |
 | 48 | [Fresh 投影的独立真值](48-Fresh投影的独立真值.md) | source-only group truth / bounded SHA checkpoint / member receipt root / sealed-stale 三方交叉绑定 |
 | 49 | [常驻保留维护](49-常驻保留维护.md) | authority/payload/runtime 三层 / Quote 优先 / 500 行事务 / backoff、告警与恢复 / 30 万行验收 |
+| 50 | [Classifier-v3 候选守恒](50-Classifier-v3候选守恒.md) | complete scan 与策略域的区别 / candidate 三出口守恒 / 七类 expected exclusion / 166,926 行 chunk-invariant 证明 |
 
 ## Phase 02.1 教学增量（2026-05）
 
