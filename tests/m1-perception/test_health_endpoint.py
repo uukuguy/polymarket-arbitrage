@@ -509,6 +509,67 @@ def test_structure_drift_health_projects_authenticated_terminal_evidence() -> No
     assert check["checkpointAtMs"] == 9_000
 
 
+def test_structure_drift_health_projects_only_v3_aggregate_evidence() -> None:
+    check = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "none",
+            "authorized": False,
+            "checkpoint_at_ms": 9_000,
+            "classifier_contract_version": "structure-drift-classifier-v3",
+            "diagnostic_counts": {"forged-label": 999},
+            "diagnostic_root": "d" * 64,
+            "diagnostic_samples": {"forged-label": [{"secret": "leak"}]},
+            "diagnostic_total": 3,
+            "phase": "stale",
+            "progress_id": "comparison-v3-terminal",
+            "reason": "structure-drift-terminal-stale",
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+
+    assert check["status"] == "fail"
+    assert check["diagnosticTotal"] == 3
+    assert check["diagnosticRoot"] == "d" * 64
+    assert "diagnosticCounts" not in check
+    assert "diagnosticSamples" not in check
+    assert "forged-label" not in check["output"]
+    assert "secret" not in check["output"]
+
+
+def test_structure_drift_health_malformed_v3_never_falls_back_to_keyed_evidence(
+) -> None:
+    check = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "none",
+            "authorized": False,
+            "checkpoint_at_ms": 9_000,
+            "classifier_contract_version": "structure-drift-classifier-v3",
+            "diagnostic_counts": {"forged-label": 999},
+            "diagnostic_samples": {"forged-label": [{"secret": "leak"}]},
+            "phase": "stale",
+            "progress_id": "comparison-v3-terminal",
+            "reason": "structure-drift-terminal-stale",
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+
+    assert check["status"] == "fail"
+    assert check["observedValue"] == "terminal-stale"
+    assert "forged-label" not in check["output"]
+    assert "secret" not in check["output"]
+    for field in (
+        "diagnosticCounts",
+        "diagnosticSamples",
+        "diagnosticTotal",
+        "diagnosticRoot",
+    ):
+        assert field not in check
+
+
 @pytest.mark.parametrize(
     "status_reason",
     (

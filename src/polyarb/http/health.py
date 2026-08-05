@@ -60,6 +60,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from polyarb.perception.structure_contract import (
+    STRUCTURE_DRIFT_CLASSIFIER_V1,
     STRUCTURE_DRIFT_CLASSIFIER_V2,
     STRUCTURE_DRIFT_CLASSIFIER_V3,
     STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
@@ -781,7 +782,14 @@ def _structure_drift_health_check(
             diagnostic_root = status.get("diagnostic_root")
             observed = "terminal-stale"
             diagnostic_total = status.get("diagnostic_total")
-            if isinstance(diagnostic_total, int):
+            v3_aggregate_valid = (
+                type(diagnostic_total) is int
+                and diagnostic_total >= 0
+                and isinstance(diagnostic_root, str)
+                and len(diagnostic_root) == 64
+                and all(character in "0123456789abcdef" for character in diagnostic_root)
+            )
+            if contract == STRUCTURE_DRIFT_CLASSIFIER_V3 and v3_aggregate_valid:
                 output = (
                     f"contract={contract} comparison={comparison_id} reason={reason} "
                     f"diagnostic_total={diagnostic_total} "
@@ -796,7 +804,10 @@ def _structure_drift_health_check(
                     "diagnosticRoot": diagnostic_root,
                     "checkpointAtMs": checkpoint,
                 }
-            else:
+            elif contract in {
+                STRUCTURE_DRIFT_CLASSIFIER_V1,
+                STRUCTURE_DRIFT_CLASSIFIER_V2,
+            }:
                 diagnostic_counts = status.get("diagnostic_counts", {})
                 diagnostic_samples = status.get("diagnostic_samples", {})
                 output = (
@@ -815,6 +826,17 @@ def _structure_drift_health_check(
                     "diagnosticCounts": diagnostic_counts,
                     "diagnosticRoot": diagnostic_root,
                     "diagnosticSamples": diagnostic_samples,
+                    "checkpointAtMs": checkpoint,
+                }
+            else:
+                output = (
+                    f"contract={contract} comparison={comparison_id} reason={reason} "
+                    f"checkpoint_at_ms={checkpoint} diagnostic_evidence=unavailable"
+                )
+                extra = {
+                    "classifierContract": contract,
+                    "comparisonId": comparison_id,
+                    "terminalReason": reason,
                     "checkpointAtMs": checkpoint,
                 }
         else:
