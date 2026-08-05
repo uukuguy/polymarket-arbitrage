@@ -19,7 +19,7 @@ expected exclusion、unresolved diagnostic。只有三者严格守恒，且 diag
   closed-taxonomy reason；`:342` 定义 reason-domain canonical tuple。
 - `src/polyarb/storage/sqlite_store.py:6960`：event-only 候选的有序 v3 partition；
   `:7394` 是 market 候选的有序 partition。未知、畸形、冲突和伪 quarantine 仍走 diagnostic。
-- `src/polyarb/storage/sqlite_store.py:7935`：`BEGIN IMMEDIATE` + checkpoint CAS；`:7945`
+- `src/polyarb/storage/sqlite_store.py:7938`：`BEGIN IMMEDIATE` + checkpoint CAS；`:7945`
   起把候选数、三类状态和 reason roots 在同一事务写入。
 - `src/polyarb/storage/sqlite_store.py:8636`：receipt finalizer 复核三方守恒、独立 source
   candidate count 和每个 reason 的 count/root。
@@ -72,8 +72,9 @@ unresolved，并阻止授权。warning 只是展示严重度，不是经过收�
 
 测试不保存生产 payload，也不把 166,926 个对象同时放进内存。确定性生成器每次最多物化
 `limit <= 500` 个 outcome；driver 验证每次游标精确前进、页数等于 `ceil(166926 / limit)`，因此
-reader 若忽略 cursor 或 limit 会立即失败。golden root 由独立实现的 one-shot canonical-tuple
-RowChain oracle 产生，再与三个增量 checkpoint 路径交叉核对。
+reader 若忽略 cursor 或 limit 会立即失败。golden root 由只读 primitive index、逐字段写明位置的
+test-only tuple constructors 和独立 RowChain 字节实现产生；它不调用生产 tuple helper，也不构造
+生产 outcome/dataclass，再与三个增量 checkpoint 路径交叉核对。
 
 ## 设计取舍
 

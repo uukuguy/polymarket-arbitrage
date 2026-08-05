@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import statistics
+import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from polyarb.perception import structure_drift as structure_drift_module
 from polyarb.perception.structure_contract import STRUCTURE_DRIFT_CLASSIFIER_V3
 from polyarb.perception.structure_drift import (
     FreshGroupEvidence,
@@ -23,7 +25,6 @@ from polyarb.perception.structure_drift import (
     _member_tuple,
     advance_fresh_projection_commitment,
     project_legacy_compatible_market,
-    structure_projection_exclusion_tuple,
 )
 from polyarb.snapshot.normalizer import normalize_events
 from polyarb.storage import sqlite_store as sqlite_store_module
@@ -726,7 +727,9 @@ def _seed_production_shaped_classifier_database(store: SQLiteStore) -> dict[str,
     }
 
 
-def _run_production_shaped_classifier_benchmark(tmp_path: Path) -> dict[str, float]:
+def _run_production_shaped_classifier_benchmark(
+    tmp_path: Path,
+) -> dict[str, float | int | bool]:
     template = SQLiteStore(tmp_path / "classifier-template.db")
     shape = _seed_production_shaped_classifier_database(template)
 
@@ -1062,6 +1065,11 @@ def _run_production_shaped_classifier_benchmark(tmp_path: Path) -> dict[str, flo
         for key, value in query_plan_evidence.items()
         for expected in (False if key == "candidate_count_scans_market" else True,)
     ), query_plan_evidence
+    candidate_count_antijoin_indexed = (
+        query_plan_evidence["candidate_count_uses_sidecar_index"]
+        and query_plan_evidence["candidate_count_uses_market_index"]
+        and not query_plan_evidence["candidate_count_scans_market"]
+    )
     stage_medians: dict[str, float] = {}
     for stage in (
         "fresh-projection-members",
@@ -1079,7 +1087,7 @@ def _run_production_shaped_classifier_benchmark(tmp_path: Path) -> dict[str, flo
     terminal_receipts = {sample[4] for sample in v2_samples}
     assert terminals == {"stale"}
     assert terminal_receipts == {1}
-    evidence: dict[str, float] = {
+    evidence: dict[str, float | int | bool] = {
         **shape,
         "old_complete_gate_median_s": statistics.median(old_samples),
         "classifier_v2_complete_gate_median_s": statistics.median(
@@ -1103,7 +1111,7 @@ def _run_production_shaped_classifier_benchmark(tmp_path: Path) -> dict[str, flo
         "projection_page_query_count_max": max(page_select_counts),
         "projection_event_only_query_count_min": min(event_only_select_counts),
         "projection_event_only_query_count_max": max(event_only_select_counts),
-        "candidate_count_antijoin_indexed": 1,
+        "candidate_count_antijoin_indexed": candidate_count_antijoin_indexed,
     }
     print(
         "classifier-v2-production-gate "
@@ -1137,7 +1145,7 @@ def test_120k_production_shaped_complete_classifier_gate(tmp_path: Path) -> None
         "projection_event_only_query_count_max"
     ]
     assert evidence["projection_event_only_query_count_max"] == 20
-    assert evidence["candidate_count_antijoin_indexed"] == 1
+    assert evidence["candidate_count_antijoin_indexed"] is True
 
 
 def _seed_member_scan_database(store: SQLiteStore, *, row_count: int) -> None:
@@ -1471,11 +1479,86 @@ def _production_v3_exclusion(index: int) -> FreshProjectionExclusion:
     )
 
 
+def _independent_production_v3_member_tuple(index: int) -> tuple[object, ...]:
+    group_index = index // 24
+    return (
+        f"production-event-{group_index:05d}",
+        f"production-group-{group_index:05d}",
+        f"production-market-{index:06d}",
+        "named",
+        True,
+        False,
+        f"production-condition-{index:06d}",
+        f"production-yes-{index:06d}",
+        f"production-no-{index:06d}",
+        True,
+        False,
+    )
+
+
+def _independent_production_v3_reason(index: int) -> tuple[str, int]:
+    reason_index = index - PRODUCTION_V3_ELIGIBLE
+    for reason, count in PRODUCTION_V3_PARTITION.items():
+        if reason_index < count:
+            return reason, reason_index
+        reason_index -= count
+    raise AssertionError(f"candidate index outside independent partition: {index}")
+
+
+def _independent_production_v3_exclusion_tuple(
+    index: int,
+) -> tuple[object, ...]:
+    reason, reason_index = _independent_production_v3_reason(index)
+    event_only = reason in {
+        "non-neg-risk-event-member",
+        "current-nontradable-event-member",
+        "event-only-quarantine",
+    }
+    group_index = index // 24
+    event_id = f"production-event-{group_index:05d}"
+    group_id = f"production-group-{group_index:05d}"
+    market_id = f"production-market-{index:06d}"
+    raw_hash = hashlib.sha256(f"{reason}:{reason_index}".encode()).hexdigest()
+    augmented = reason == "augmented-group"
+    group_ineligible = reason == "fresh-group-ineligible"
+    return (
+        reason,
+        "event-only" if event_only else "market",
+        event_id,
+        group_id,
+        market_id,
+        "named",
+        reason != "current-nontradable-event-member",
+        reason == "current-nontradable-event-member",
+        None if event_only else f"production-condition-{index:06d}",
+        None if event_only else f"production-yes-{index:06d}",
+        None if event_only else f"production-no-{index:06d}",
+        False if reason == "non-neg-risk-market" else None if event_only else True,
+        None if event_only else False,
+        index if event_only else None,
+        reason_index if event_only else None,
+        raw_hash if event_only else None,
+        raw_hash,
+        event_id if augmented or group_ineligible else None,
+        group_id if augmented or group_ineligible else None,
+        "augmented" if augmented else "standard" if group_ineligible else None,
+        "complete-unsupported" if augmented or group_ineligible else None,
+        (
+            "augmented-neg-risk-not-supported"
+            if augmented
+            else "standard-neg-risk-has-non-tradable-members"
+            if group_ineligible
+            else None
+        ),
+        raw_hash if augmented or group_ineligible else None,
+    )
+
+
 def _independent_production_v3_roots() -> tuple[str, dict[str, str]]:
     member_root = _independent_row_chain_root(
         "projection-member",
         (
-            _member_tuple(_production_v3_member(index))
+            _independent_production_v3_member_tuple(index)
             for index in range(PRODUCTION_V3_ELIGIBLE)
         ),
     )
@@ -1485,7 +1568,7 @@ def _independent_production_v3_roots() -> tuple[str, dict[str, str]]:
         exclusion_roots[reason] = _independent_row_chain_root(
             f"projection-exclusion/{reason}",
             (
-                structure_projection_exclusion_tuple(_production_v3_exclusion(index))
+                _independent_production_v3_exclusion_tuple(index)
                 for index in range(start, start + count)
             ),
         )
@@ -1588,54 +1671,113 @@ def _commit_production_v3_partition(*, limit: int) -> _ProductionPartitionEviden
 
 def _explain_query_plan(
     con: sqlite3.Connection,
-    sql: str,
-    parameters: tuple[object, ...],
+    statement: str,
 ) -> str:
     return "\n".join(
         str(row[3])
-        for row in con.execute("EXPLAIN QUERY PLAN " + sql, parameters)
+        for row in con.execute("EXPLAIN QUERY PLAN " + statement)
     )
+
+
+def _captured_select(
+    statements: Sequence[str],
+    *,
+    starts_with: str,
+    contains: tuple[str, ...] = (),
+) -> str:
+    matches = []
+    for statement in statements:
+        normalized = " ".join(statement.split())
+        if normalized.startswith(starts_with) and all(
+            fragment in normalized for fragment in contains
+        ):
+            matches.append(statement)
+    assert len(matches) == 1, {
+        "contains": contains,
+        "matches": matches,
+        "starts_with": starts_with,
+    }
+    return matches[0]
 
 
 def _fresh_projection_query_plan_evidence(db_path: Path) -> dict[str, bool]:
-    market_page_sql = (
-        "SELECT market_id,payload_json FROM structure_sync_market_staging "
-        "WHERE window_id=? ORDER BY market_id LIMIT ?"
+    store = SQLiteStore(db_path)
+    market_trace: list[str] = []
+    market_chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-perf",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
+        trace_callback=market_trace.append,
     )
-    event_only_page_sql = (
-        "SELECT member.market_sort_key,member.event_id,member.event_ordinal,"
-        "member.member_ordinal,member.market_id FROM "
-        "structure_sync_event_member_staging member JOIN "
-        "structure_sync_event_metadata_staging metadata ON "
-        "metadata.window_id=member.window_id AND metadata.event_id=member.event_id "
-        "LEFT JOIN structure_sync_market_staging market ON "
-        "market.window_id=member.window_id AND market.market_id=member.market_id "
-        "WHERE member.window_id=? AND market.market_id IS NULL ORDER BY "
-        "member.market_sort_key,member.event_id,member.event_ordinal,"
-        "member.member_ordinal LIMIT ?"
+    event_only_trace: list[str] = []
+    event_only_chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-perf",
+        generation_snapshot_id=1,
+        cursor=FreshProjectionCursor(
+            stream="market",
+            market_id="market-orphan",
+            event_id=None,
+            source_ordinal=None,
+            member_ordinal=None,
+        ),
+        limit=500,
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
+        trace_callback=event_only_trace.append,
     )
-    candidate_count_antijoin_sql = (
-        "SELECT COUNT(*) FROM structure_sync_event_member_staging member "
-        "WHERE member.window_id=? AND NOT EXISTS (SELECT 1 FROM "
-        "structure_sync_market_staging market WHERE "
-        "market.window_id=member.window_id AND market.market_id=member.market_id)"
+    count_trace: list[str] = []
+    with sqlite3.connect(db_path) as con:
+        con.set_trace_callback(count_trace.append)
+        expected_candidates = (
+            sqlite_store_module._fresh_projection_expected_candidate_count(
+                con,
+                window_id="window-perf",
+            )
+        )
+        con.set_trace_callback(None)
+    assert 0 < market_chunk.candidates_processed <= 500
+    assert event_only_chunk.candidates_processed == 1
+    assert expected_candidates > 0
+    assert 0 < len(market_trace) <= 64
+    assert 0 < len(event_only_trace) <= 64
+    assert len(count_trace) == 2
+
+    market_page_statement = _captured_select(
+        market_trace,
+        starts_with=(
+            "SELECT market_id,payload_json FROM structure_sync_market_staging"
+        ),
+        contains=("ORDER BY market_id LIMIT",),
+    )
+    event_only_page_statement = _captured_select(
+        event_only_trace,
+        starts_with=(
+            "SELECT member.market_sort_key,member.event_id,member.event_ordinal,"
+            "member.member_ordinal"
+        ),
+        contains=(
+            "structure_sync_event_member_staging member",
+            "market.market_id IS NULL",
+            "ORDER BY member.market_sort_key",
+        ),
+    )
+    market_count_statement = _captured_select(
+        count_trace,
+        starts_with="SELECT COUNT(*) FROM structure_sync_market_staging",
+    )
+    candidate_count_statement = _captured_select(
+        count_trace,
+        starts_with=(
+            "SELECT COUNT(*) FROM structure_sync_event_member_staging member"
+        ),
+        contains=("NOT EXISTS", "structure_sync_market_staging market"),
     )
     with sqlite3.connect(db_path) as con:
-        market_plan = _explain_query_plan(
-            con,
-            market_page_sql,
-            ("window-perf", 500),
-        )
-        event_only_plan = _explain_query_plan(
-            con,
-            event_only_page_sql,
-            ("window-perf", 500),
-        )
-        candidate_count_plan = _explain_query_plan(
-            con,
-            candidate_count_antijoin_sql,
-            ("window-perf",),
-        )
+        market_plan = _explain_query_plan(con, market_page_statement)
+        event_only_plan = _explain_query_plan(con, event_only_page_statement)
+        market_count_plan = _explain_query_plan(con, market_count_statement)
+        candidate_count_plan = _explain_query_plan(con, candidate_count_statement)
     normalized_count_plan = candidate_count_plan.upper()
     print(
         "fresh-projection-query-plans "
@@ -1643,6 +1785,7 @@ def _fresh_projection_query_plan_evidence(db_path: Path) -> dict[str, bool]:
             {
                 "candidate_count": candidate_count_plan.splitlines(),
                 "event_only_page": event_only_plan.splitlines(),
+                "market_count": market_count_plan.splitlines(),
                 "market_page": market_plan.splitlines(),
             },
             sort_keys=True,
@@ -1656,6 +1799,13 @@ def _fresh_projection_query_plan_evidence(db_path: Path) -> dict[str, bool]:
         ),
         "event_only_page_uses_projection_index": (
             "idx_structure_event_member_projection" in event_only_plan
+        ),
+        "event_only_page_uses_market_index": (
+            "sqlite_autoindex_structure_sync_market_staging_1" in event_only_plan
+        ),
+        "candidate_market_count_uses_staging_index": (
+            "sqlite_autoindex_structure_sync_market_staging_1"
+            in market_count_plan
         ),
         "candidate_count_uses_sidecar_index": (
             "idx_structure_event_member_market" in candidate_count_plan
@@ -1701,12 +1851,113 @@ def test_120k_production_shaped_candidate_count_antijoin_uses_indexes(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "candidate-count-plan.db")
-    store.init_schema()
+    _seed_projection_gate_database(
+        store,
+        event_count=3,
+        event_only_market_index=48,
+        add_orphan_market=True,
+    )
 
     evidence = _fresh_projection_query_plan_evidence(store.db_path)
 
     assert evidence["market_page_uses_staging_index"] is True
     assert evidence["event_only_page_uses_projection_index"] is True
+    assert evidence["event_only_page_uses_market_index"] is True
+    assert evidence["candidate_market_count_uses_staging_index"] is True
     assert evidence["candidate_count_uses_sidecar_index"] is True
     assert evidence["candidate_count_uses_market_index"] is True
     assert evidence["candidate_count_scans_market"] is False
+
+
+def test_166926_member_golden_is_independent_of_production_tuple_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = structure_drift_module._member_tuple
+
+    def reordered(member: StructuralMemberIdentity) -> tuple[object, ...]:
+        row = original(member)
+        return (*row[1:], row[0])
+
+    monkeypatch.setattr(structure_drift_module, "_member_tuple", reordered)
+    monkeypatch.setattr(sys.modules[__name__], "_member_tuple", reordered)
+
+    member_root, _exclusion_roots = _independent_production_v3_roots()
+    incremental = _commit_production_v3_partition(limit=500).commitment
+
+    assert member_root == EXPECTED_PRODUCTION_MEMBER_ROOT
+    assert incremental.root != EXPECTED_PRODUCTION_MEMBER_ROOT
+
+
+def test_166926_exclusion_goldens_are_independent_of_production_tuple_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = structure_drift_module.structure_projection_exclusion_tuple
+
+    def reordered(exclusion: FreshProjectionExclusion) -> tuple[object, ...]:
+        row = original(exclusion)
+        return (row[1], row[0], *row[2:])
+
+    monkeypatch.setattr(
+        structure_drift_module,
+        "structure_projection_exclusion_tuple",
+        reordered,
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "structure_projection_exclusion_tuple",
+        reordered,
+        raising=False,
+    )
+
+    _member_root, exclusion_roots = _independent_production_v3_roots()
+    incremental = _commit_production_v3_partition(limit=500).commitment
+
+    assert exclusion_roots == EXPECTED_PRODUCTION_EXCLUSION_ROOTS
+    assert incremental.exclusion_roots != EXPECTED_PRODUCTION_EXCLUSION_ROOTS
+
+
+def test_120k_query_plans_are_captured_from_production_queries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SQLiteStore(tmp_path / "captured-query-plan.db")
+    _seed_projection_gate_database(
+        store,
+        event_count=3,
+        event_only_market_index=48,
+        add_orphan_market=True,
+    )
+    reader_calls: list[FreshProjectionCursor | None] = []
+    count_calls: list[str] = []
+    original_reader = SQLiteStore.fetch_structure_drift_fresh_projection_chunk
+    original_count = sqlite_store_module._fresh_projection_expected_candidate_count
+
+    def traced_reader(
+        self: SQLiteStore, **kwargs: object
+    ) -> FreshProjectionChunk:
+        cursor = kwargs.get("cursor")
+        assert cursor is None or isinstance(cursor, FreshProjectionCursor)
+        reader_calls.append(cursor)
+        return original_reader(self, **kwargs)
+
+    def traced_count(con: sqlite3.Connection, *, window_id: str) -> int:
+        count_calls.append(window_id)
+        return original_count(con, window_id=window_id)
+
+    monkeypatch.setattr(
+        SQLiteStore,
+        "fetch_structure_drift_fresh_projection_chunk",
+        traced_reader,
+    )
+    monkeypatch.setattr(
+        sqlite_store_module,
+        "_fresh_projection_expected_candidate_count",
+        traced_count,
+    )
+
+    _fresh_projection_query_plan_evidence(store.db_path)
+
+    assert len(reader_calls) == 2
+    assert reader_calls[0] is None
+    assert reader_calls[1] is not None
+    assert count_calls == ["window-perf"]
