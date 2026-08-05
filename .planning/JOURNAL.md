@@ -6269,3 +6269,41 @@ classifier immediate-followup correction and evidence, and obtain
 Deploy only that SHA with drift enabled, legacy reads, Quote disabled, and the
 same image/config protections. Require rapid natural classifier-v2 seal and a
 passing read-only comparator before any separate generation-read cutover.
+
+## SESSION 135 — 2026-08-05 (classifier-v3 exact candidate conservation qualified locally)
+
+- [FIXED LOCAL] Classifier-v3 now partitions the complete frozen source into a
+  closed eligible domain: `166,926 = 41,768 eligible + 125,158 authenticated
+  exclusions + 0 diagnostics`. Seven exclusion reasons, cursor/restart
+  uniqueness, independent source-count revalidation, v2 immutable supersession,
+  and contract-bound scheduler defer evidence are committed in the reviewed
+  range `e8ee0fe..4657529`.
+- [CHAIN TRUTH] Sealed v3 status/health requires the receipt, exact identity,
+  class reconstruction, candidate conservation, independent source count, and
+  all seven reason chains. Stale v3 deliberately publishes only generic stale
+  plus independently authenticated aggregate diagnostic total/root; no
+  unauthenticated semantic labels fall through status or health.
+- [PRODUCTION SHAPE] An independent primitive byte-level oracle proves exact
+  roots and conservation for limits 1/17/500. Real production SQL trace and
+  EXPLAIN gates prove indexed market/event keyset scans, no per-sidecar market
+  scan, no member full scan, no temp sort, and page size <=500. The final 120k
+  focused gate took 814.46 seconds.
+- [FULL GATE] Final focused scope collected 534 tests and exited 0. Final full
+  M1 result is `2887 passed, 1 skipped, 1 xfailed` in 1282.46 seconds with zero
+  failures/errors. Ruff, compileall, docs/manual, hooks, and the 84-plan
+  planning audit pass. Independent full-range review reports READY TO MERGE
+  with no Critical, Important, or Minor findings.
+- [BOUNDARY] No deploy, Fly/config mutation, pointer write, Structure read-mode
+  change, Quote enablement, restart, manual cleanup, or production data mutation
+  occurred. Legacy reads and Quote-off remain the protected rollout posture.
+- [GOAL] The persistent M1 production goal remains active. Local classifier-v3
+  qualification is complete; production v3 seal/health/continuation/no-busy-loop
+  proof and downstream read/Quote/opportunity acceptance remain required.
+
+### [NEXT — CURRENT]
+
+Obtain `DEPLOY_SHA_APPROVE <exact final 40-char HEAD>`. Deploy only that exact
+SHA with drift enabled, Structure reads on legacy, Quote disabled, and existing
+cleanup protections. Prove natural v3 seal, authenticated health, immediate
+checkpoint continuation, and terminal no-busy-loop before any separate
+generation-read or Quote cutover.
