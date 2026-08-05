@@ -1060,10 +1060,15 @@ def _run_production_shaped_classifier_benchmark(
     }
     assert event_only_select_counts == {20}, event_only_page_shapes
     query_plan_evidence = _fresh_projection_query_plan_evidence(template.db_path)
+    false_plan_evidence = {
+        "candidate_count_scans_market",
+        "event_only_page_scans_member",
+        "event_only_page_uses_temp_sort",
+    }
     assert all(
         value is expected
         for key, value in query_plan_evidence.items()
-        for expected in (False if key == "candidate_count_scans_market" else True,)
+        for expected in (key not in false_plan_evidence,)
     ), query_plan_evidence
     candidate_count_antijoin_indexed = (
         query_plan_evidence["candidate_count_uses_sidecar_index"]
@@ -1320,14 +1325,23 @@ def test_120k_member_scan_covering_index_is_at_least_twice_as_fast(
 PRODUCTION_V3_PARTITION = {
     "non-neg-risk-market": 82_346,
     "market-side-quarantine": 193,
-    "non-neg-risk-event-member": 13_655,
-    "current-nontradable-event-member": 17_515,
     "augmented-group": 11_069,
     "fresh-group-ineligible": 312,
+    "non-neg-risk-event-member": 13_655,
+    "current-nontradable-event-member": 17_515,
     "event-only-quarantine": 68,
 }
 PRODUCTION_V3_ELIGIBLE = 41_768
 PRODUCTION_V3_CANDIDATES = 166_926
+PRODUCTION_V3_EVENT_ONLY_START = PRODUCTION_V3_ELIGIBLE + sum(
+    PRODUCTION_V3_PARTITION[reason]
+    for reason in (
+        "non-neg-risk-market",
+        "market-side-quarantine",
+        "augmented-group",
+        "fresh-group-ineligible",
+    )
+)
 EXPECTED_PRODUCTION_MEMBER_ROOT = (
     "af94bd2afee226e0ad45f3ef5df35b270e2367dc06f272516f32dcb5efe38f28"
 )
@@ -1338,20 +1352,20 @@ EXPECTED_PRODUCTION_EXCLUSION_ROOTS = {
     "market-side-quarantine": (
         "0336420644307f8b71089704c5e56d5dd14fa379c4a4884615ed653dfb1b2bd5"
     ),
-    "non-neg-risk-event-member": (
-        "5e87e006ee7729fba18ebecd495cff89cd0a4c52508d22305c06b1cc791128df"
-    ),
-    "current-nontradable-event-member": (
-        "1e208c57e24351c928af16809d467f4de2db9016f710c618efa7e9fad60e983d"
-    ),
     "augmented-group": (
-        "73da7e8151eb8bf6b2d6557c7cb2e57cb4a0356b20424c8069e85d30d2652371"
+        "31490bdc42043375f33d393a83be590353baf79180358ec6bd73b344a475b912"
     ),
     "fresh-group-ineligible": (
-        "e37d5465cd6ee78440f1420955025d844eface03e3692a3aa89c6d652863d4c5"
+        "5fb541a71d4d6412802dbb6662b8422667c3f2ff4a9b87cfb44516da84f9f1af"
+    ),
+    "non-neg-risk-event-member": (
+        "43a4314c4c2cbad9d7f7bf319660a3cfb2d2541fc19dc2e4b074ad40ef3a969f"
+    ),
+    "current-nontradable-event-member": (
+        "72a6d8ffae143939cada101aec162dfdb6522080d33419b83ce893988e41d697"
     ),
     "event-only-quarantine": (
-        "4329f70bde1f78ae3d39d447f68fcd9dd7571a10b950d1e26c5d056e6dae4c18"
+        "1752753f4acf5772387e35bd95b640b271170cc919cafedea4e383544827595e"
     ),
 }
 
@@ -1433,9 +1447,18 @@ def _production_v3_exclusion(index: int) -> FreshProjectionExclusion:
         "current-nontradable-event-member",
         "event-only-quarantine",
     }
-    group_index = index // 24
-    event_id = f"production-event-{group_index:05d}"
-    group_id = f"production-group-{group_index:05d}"
+    event_only_index = index - PRODUCTION_V3_EVENT_ONLY_START
+    group_index = event_only_index // 24 if event_only else index // 24
+    event_id = (
+        f"production-event-only-{group_index:05d}"
+        if event_only
+        else f"production-event-{group_index:05d}"
+    )
+    group_id = (
+        f"production-group-event-only-{group_index:05d}"
+        if event_only
+        else f"production-group-{group_index:05d}"
+    )
     raw_hash = hashlib.sha256(f"{reason}:{reason_index}".encode()).hexdigest()
     envelope = StructureDriftCandidateEnvelope(
         side="generation-only",
@@ -1450,8 +1473,8 @@ def _production_v3_exclusion(index: int) -> FreshProjectionExclusion:
         no_token_id=None if event_only else f"production-no-{index:06d}",
         neg_risk=False if reason == "non-neg-risk-market" else None if event_only else True,
         incomplete=None if event_only else False,
-        source_ordinal=index if event_only else None,
-        member_ordinal=reason_index if event_only else None,
+        source_ordinal=group_index if event_only else None,
+        member_ordinal=event_only_index % 24 if event_only else None,
         raw_event_hash=raw_hash if event_only else None,
         raw_market_hash=raw_hash,
     )
@@ -1514,9 +1537,18 @@ def _independent_production_v3_exclusion_tuple(
         "current-nontradable-event-member",
         "event-only-quarantine",
     }
-    group_index = index // 24
-    event_id = f"production-event-{group_index:05d}"
-    group_id = f"production-group-{group_index:05d}"
+    event_only_index = index - PRODUCTION_V3_EVENT_ONLY_START
+    group_index = event_only_index // 24 if event_only else index // 24
+    event_id = (
+        f"production-event-only-{group_index:05d}"
+        if event_only
+        else f"production-event-{group_index:05d}"
+    )
+    group_id = (
+        f"production-group-event-only-{group_index:05d}"
+        if event_only
+        else f"production-group-{group_index:05d}"
+    )
     market_id = f"production-market-{index:06d}"
     raw_hash = hashlib.sha256(f"{reason}:{reason_index}".encode()).hexdigest()
     augmented = reason == "augmented-group"
@@ -1535,8 +1567,8 @@ def _independent_production_v3_exclusion_tuple(
         None if event_only else f"production-no-{index:06d}",
         False if reason == "non-neg-risk-market" else None if event_only else True,
         None if event_only else False,
-        index if event_only else None,
-        reason_index if event_only else None,
+        group_index if event_only else None,
+        event_only_index % 24 if event_only else None,
         raw_hash if event_only else None,
         raw_hash,
         event_id if augmented or group_ineligible else None,
@@ -1624,22 +1656,18 @@ def _fetch_production_v3_partition_chunk(
                 member_ordinal=None,
             )
         else:
-            reason, reason_index = _production_v3_reason(last_index)
-            event_only = reason in {
-                "non-neg-risk-event-member",
-                "current-nontradable-event-member",
-                "event-only-quarantine",
-            }
+            exclusion = _production_v3_exclusion(last_index)
+            event_only = exclusion.stream == "event-only"
             next_cursor = FreshProjectionCursor(
                 stream="event-only" if event_only else "market",
                 market_id=f"production-market-{last_index:06d}",
-                event_id=(
-                    f"production-event-{last_index // 24:05d}"
-                    if event_only
-                    else None
+                event_id=exclusion.envelope.event_id if event_only else None,
+                source_ordinal=(
+                    exclusion.envelope.source_ordinal if event_only else None
                 ),
-                source_ordinal=last_index if event_only else None,
-                member_ordinal=reason_index if event_only else None,
+                member_ordinal=(
+                    exclusion.envelope.member_ordinal if event_only else None
+                ),
             )
     return FreshProjectionChunk(
         cursor=next_cursor,
@@ -1742,11 +1770,11 @@ def _fresh_projection_query_plan_evidence(db_path: Path) -> dict[str, bool]:
         publication_id="publication-perf",
         generation_snapshot_id=1,
         cursor=FreshProjectionCursor(
-            stream="market",
-            market_id="market-orphan",
-            event_id=None,
-            source_ordinal=None,
-            member_ordinal=None,
+            stream="event-only",
+            market_id="market-before-event-only",
+            event_id="event-0001",
+            source_ordinal=2,
+            member_ordinal=0,
         ),
         limit=500,
         classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
@@ -1784,6 +1812,7 @@ def _fresh_projection_query_plan_evidence(db_path: Path) -> dict[str, bool]:
         ),
         contains=(
             "structure_sync_event_member_staging member",
+            "(member.event_id,member.member_ordinal,member.event_ordinal)>",
             "market.market_id IS NULL",
             "ORDER BY member.event_id,member.member_ordinal,member.event_ordinal",
         ),
@@ -1805,6 +1834,16 @@ def _fresh_projection_query_plan_evidence(db_path: Path) -> dict[str, bool]:
         market_count_plan = _explain_query_plan(con, market_count_statement)
         candidate_count_plan = _explain_query_plan(con, candidate_count_statement)
     normalized_count_plan = candidate_count_plan.upper()
+    normalized_event_only_plan = event_only_plan.upper()
+    event_only_searches = [
+        line
+        for line in event_only_plan.splitlines()
+        if line.upper().startswith("SEARCH MEMBER USING ")
+    ]
+    event_only_keyset_indexes = (
+        "idx_structure_event_member_resume",
+        "sqlite_autoindex_structure_sync_event_member_staging_1",
+    )
     print(
         "fresh-projection-query-plans "
         + json.dumps(
@@ -1823,8 +1862,14 @@ def _fresh_projection_query_plan_evidence(db_path: Path) -> dict[str, bool]:
         "market_page_uses_staging_index": (
             "sqlite_autoindex_structure_sync_market_staging_1" in market_plan
         ),
-        "event_only_page_uses_projection_index": (
-            "idx_structure_event_member_resume" in event_only_plan
+        "event_only_page_uses_keyset_index": any(
+            any(index_name in line for index_name in event_only_keyset_indexes)
+            for line in event_only_searches
+        ),
+        "event_only_page_scans_member": "SCAN MEMBER" in normalized_event_only_plan,
+        "event_only_page_uses_temp_sort": (
+            "USE TEMP B-TREE" in normalized_event_only_plan
+            or "SORT" in normalized_event_only_plan
         ),
         "event_only_page_uses_market_index": (
             "sqlite_autoindex_structure_sync_market_staging_1" in event_only_plan
@@ -1849,6 +1894,47 @@ def test_166926_production_shaped_v3_goldens_use_independent_oracle() -> None:
 
     assert member_root == EXPECTED_PRODUCTION_MEMBER_ROOT
     assert exclusion_roots == EXPECTED_PRODUCTION_EXCLUSION_ROOTS
+
+
+def test_166926_production_shaped_v3_uses_canonical_stream_order() -> None:
+    expected_reason_order = (
+        "non-neg-risk-market",
+        "market-side-quarantine",
+        "augmented-group",
+        "fresh-group-ineligible",
+        "non-neg-risk-event-member",
+        "current-nontradable-event-member",
+        "event-only-quarantine",
+    )
+    observed_reason_order = []
+    observed_stream_order = []
+    index = PRODUCTION_V3_ELIGIBLE
+    while index < PRODUCTION_V3_CANDIDATES:
+        reason, _reason_index = _production_v3_reason(index)
+        observed_reason_order.append(reason)
+        observed_stream_order.append(_production_v3_exclusion(index).stream)
+        index += PRODUCTION_V3_PARTITION[reason]
+
+    assert tuple(observed_reason_order) == expected_reason_order
+    assert tuple(observed_stream_order) == (
+        "market",
+        "market",
+        "market",
+        "market",
+        "event-only",
+        "event-only",
+        "event-only",
+    )
+    assert _production_v3_member(PRODUCTION_V3_ELIGIBLE - 1).market_id.endswith(
+        f"{PRODUCTION_V3_ELIGIBLE - 1:06d}"
+    )
+    assert _production_v3_exclusion(PRODUCTION_V3_EVENT_ONLY_START - 1).stream == (
+        "market"
+    )
+    assert _production_v3_exclusion(PRODUCTION_V3_EVENT_ONLY_START).stream == (
+        "event-only"
+    )
+    assert index == PRODUCTION_V3_CANDIDATES
 
 
 @pytest.mark.parametrize("limit", [1, 17, 500])
@@ -1887,7 +1973,9 @@ def test_120k_production_shaped_candidate_count_antijoin_uses_indexes(
     evidence = _fresh_projection_query_plan_evidence(store.db_path)
 
     assert evidence["market_page_uses_staging_index"] is True
-    assert evidence["event_only_page_uses_projection_index"] is True
+    assert evidence["event_only_page_uses_keyset_index"] is True
+    assert evidence["event_only_page_scans_member"] is False
+    assert evidence["event_only_page_uses_temp_sort"] is False
     assert evidence["event_only_page_uses_market_index"] is True
     assert evidence["candidate_market_count_uses_staging_index"] is True
     assert evidence["candidate_count_uses_sidecar_index"] is True
