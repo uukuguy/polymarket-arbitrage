@@ -1578,14 +1578,22 @@ def _independent_production_v3_roots() -> tuple[str, dict[str, str]]:
 
 
 def _cursor_position(cursor: FreshProjectionCursor) -> int:
-    prefix = "production-candidate-"
+    prefix = "production-market-"
     if (
-        cursor.stream != "market"
-        or cursor.market_id is None
+        cursor.market_id is None
         or not cursor.market_id.startswith(prefix)
-        or cursor.event_id is not None
+    ):
+        raise AssertionError(f"invalid synthetic production cursor: {cursor!r}")
+    if cursor.stream == "market" and (
+        cursor.event_id is not None
         or cursor.source_ordinal is not None
         or cursor.member_ordinal is not None
+    ):
+        raise AssertionError(f"invalid synthetic production cursor: {cursor!r}")
+    if cursor.stream == "event-only" and (
+        cursor.event_id is None
+        or cursor.source_ordinal is None
+        or cursor.member_ordinal is None
     ):
         raise AssertionError(f"invalid synthetic production cursor: {cursor!r}")
     return int(cursor.market_id.removeprefix(prefix))
@@ -1604,17 +1612,35 @@ def _fetch_production_v3_partition_chunk(
             members.append(_production_v3_member(index))
         else:
             exclusions.append(_production_v3_exclusion(index))
-    next_cursor = (
-        None
-        if stop == PRODUCTION_V3_CANDIDATES
-        else FreshProjectionCursor(
-            stream="market",
-            market_id=f"production-candidate-{stop - 1:06d}",
-            event_id=None,
-            source_ordinal=None,
-            member_ordinal=None,
-        )
-    )
+    next_cursor = None
+    if stop != PRODUCTION_V3_CANDIDATES:
+        last_index = stop - 1
+        if last_index < PRODUCTION_V3_ELIGIBLE:
+            next_cursor = FreshProjectionCursor(
+                stream="market",
+                market_id=f"production-market-{last_index:06d}",
+                event_id=None,
+                source_ordinal=None,
+                member_ordinal=None,
+            )
+        else:
+            reason, reason_index = _production_v3_reason(last_index)
+            event_only = reason in {
+                "non-neg-risk-event-member",
+                "current-nontradable-event-member",
+                "event-only-quarantine",
+            }
+            next_cursor = FreshProjectionCursor(
+                stream="event-only" if event_only else "market",
+                market_id=f"production-market-{last_index:06d}",
+                event_id=(
+                    f"production-event-{last_index // 24:05d}"
+                    if event_only
+                    else None
+                ),
+                source_ordinal=last_index if event_only else None,
+                member_ordinal=reason_index if event_only else None,
+            )
     return FreshProjectionChunk(
         cursor=next_cursor,
         members=tuple(members),
@@ -1759,7 +1785,7 @@ def _fresh_projection_query_plan_evidence(db_path: Path) -> dict[str, bool]:
         contains=(
             "structure_sync_event_member_staging member",
             "market.market_id IS NULL",
-            "ORDER BY member.market_sort_key",
+            "ORDER BY member.event_id,member.member_ordinal,member.event_ordinal",
         ),
     )
     market_count_statement = _captured_select(
@@ -1798,7 +1824,7 @@ def _fresh_projection_query_plan_evidence(db_path: Path) -> dict[str, bool]:
             "sqlite_autoindex_structure_sync_market_staging_1" in market_plan
         ),
         "event_only_page_uses_projection_index": (
-            "idx_structure_event_member_projection" in event_only_plan
+            "idx_structure_event_member_resume" in event_only_plan
         ),
         "event_only_page_uses_market_index": (
             "sqlite_autoindex_structure_sync_market_staging_1" in event_only_plan

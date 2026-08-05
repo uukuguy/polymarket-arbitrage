@@ -236,6 +236,23 @@ def advance_fresh_projection_commitment(
         + commitment.diagnostic_count
     ):
         raise ValueError("fresh-projection-candidate-conservation")
+    if commitment.classifier_contract_version == STRUCTURE_DRIFT_CLASSIFIER_V3:
+        candidate_keys = _fresh_projection_chunk_candidate_keys(chunk)
+        if len(candidate_keys) != len(set(candidate_keys)):
+            raise ValueError("fresh-projection-candidate-duplicate")
+        ordered_keys = sorted(candidate_keys)
+        if commitment.candidates_processed:
+            if commitment.cursor is None:
+                raise ValueError("fresh-projection-candidate-cursor-missing")
+            if ordered_keys and ordered_keys[0] <= _fresh_projection_cursor_key(
+                commitment.cursor
+            ):
+                raise ValueError("fresh-projection-candidate-overlap")
+        if chunk.cursor is not None and (
+            not ordered_keys
+            or _fresh_projection_cursor_key(chunk.cursor) != ordered_keys[-1]
+        ):
+            raise ValueError("fresh-projection-candidate-cursor-mismatch")
     member_digest = RowChainSHA256.from_json(
         commitment.member_digest_state,
         expected_domain="projection-member",
@@ -323,6 +340,75 @@ def advance_fresh_projection_commitment(
         diagnostic_digest_state=diagnostic_digest.to_json(),
         complete=chunk.cursor is None,
     )
+
+
+FreshProjectionCandidateKey = tuple[int, str, int, int]
+
+
+def _fresh_projection_market_key(market_id: str) -> FreshProjectionCandidateKey:
+    if not isinstance(market_id, str) or not market_id:
+        raise ValueError("invalid-fresh-projection-candidate-key")
+    return (0, market_id, -1, -1)
+
+
+def _fresh_projection_event_only_key(
+    envelope: StructureDriftCandidateEnvelope,
+) -> FreshProjectionCandidateKey:
+    if (
+        not isinstance(envelope.event_id, str)
+        or not envelope.event_id
+        or type(envelope.source_ordinal) is not int
+        or envelope.source_ordinal < 0
+        or type(envelope.member_ordinal) is not int
+        or envelope.member_ordinal < 0
+    ):
+        raise ValueError("invalid-fresh-projection-candidate-key")
+    return (
+        1,
+        envelope.event_id,
+        envelope.member_ordinal,
+        envelope.source_ordinal,
+    )
+
+
+def _fresh_projection_cursor_key(
+    cursor: FreshProjectionCursor,
+) -> FreshProjectionCandidateKey:
+    if cursor.stream == "market":
+        if cursor.market_id is None:
+            raise ValueError("invalid-fresh-projection-candidate-cursor")
+        return _fresh_projection_market_key(cursor.market_id)
+    if (
+        cursor.stream != "event-only"
+        or cursor.event_id is None
+        or type(cursor.source_ordinal) is not int
+        or type(cursor.member_ordinal) is not int
+    ):
+        raise ValueError("invalid-fresh-projection-candidate-cursor")
+    return (1, cursor.event_id, cursor.member_ordinal, cursor.source_ordinal)
+
+
+def _fresh_projection_chunk_candidate_keys(
+    chunk: FreshProjectionChunk,
+) -> tuple[FreshProjectionCandidateKey, ...]:
+    keys = [_fresh_projection_market_key(member.market_id) for member in chunk.members]
+    for exclusion in chunk.exclusions:
+        keys.append(
+            _fresh_projection_market_key(exclusion.envelope.market_id)
+            if exclusion.stream == "market"
+            else _fresh_projection_event_only_key(exclusion.envelope)
+        )
+    for diagnostic in chunk.diagnostics:
+        envelope = diagnostic.envelope
+        has_event_ordinal = (
+            envelope.source_ordinal is not None or envelope.member_ordinal is not None
+        )
+        keys.append(
+            _fresh_projection_event_only_key(envelope)
+            if has_event_ordinal
+            else _fresh_projection_market_key(envelope.market_id)
+        )
+    return tuple(keys)
 
 
 @dataclass(frozen=True)

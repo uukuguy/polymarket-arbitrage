@@ -3787,10 +3787,25 @@ def test_v3_checkpoint_conserves_one_member_and_every_exclusion_reason(
                 members=(),
                 diagnostics=(),
                 candidates_processed=1,
-                exclusions=(replace(template, reason=reason),),
+                exclusions=(
+                    replace(
+                        template,
+                        reason=reason,
+                        envelope=replace(
+                            template.envelope,
+                            market_id=f"synthetic-{index:02d}",
+                        ),
+                    ),
+                ),
             )
-            for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+            for index, reason in enumerate(
+                STRUCTURE_PROJECTION_EXCLUSION_REASONS, start=1
+            )
         ),
+    )
+    source_keys = ("shared",) + tuple(
+        f"synthetic-{index:02d}"
+        for index in range(1, len(STRUCTURE_PROJECTION_EXCLUSION_REASONS) + 1)
     )
     fetch_limits: list[int] = []
 
@@ -3807,7 +3822,7 @@ def test_v3_checkpoint_conserves_one_member_and_every_exclusion_reason(
         else:
             assert cursor.stream == "market"
             assert cursor.market_id is not None
-            start = int(cursor.market_id.removeprefix("mixed-candidate-"))
+            start = source_keys.index(cursor.market_id) + 1
         end = min(start + limit, len(outcomes))
         page = outcomes[start:end]
         assert 1 <= len(page) <= limit
@@ -3815,9 +3830,9 @@ def test_v3_checkpoint_conserves_one_member_and_every_exclusion_reason(
             cursor=(
                 None
                 if end == len(outcomes)
-                else FreshProjectionCursor(
-                    stream="market",
-                    market_id=f"mixed-candidate-{end}",
+                    else FreshProjectionCursor(
+                        stream="market",
+                        market_id=source_keys[end - 1],
                     event_id=None,
                     source_ordinal=None,
                     member_ordinal=None,

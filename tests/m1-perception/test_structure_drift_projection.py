@@ -17,6 +17,7 @@ from polyarb.perception.structure_contract import (
 from polyarb.perception.structure_drift import (
     FreshProjectionChunk,
     FreshProjectionCommitment,
+    FreshProjectionCursor,
     FreshProjectionExclusion,
     StructuralMemberIdentity,
     StructureDriftCandidateEnvelope,
@@ -151,6 +152,131 @@ def test_v3_projection_commitment_rejects_nonconserving_input_state() -> None:
                 members=(_member("repairing-member"),),
                 diagnostics=(),
                 candidates_processed=0,
+            ),
+        )
+
+
+def test_v3_projection_rejects_cross_outcome_duplicate_that_balances_count() -> None:
+    member = _member("candidate-a")
+    exclusion = FreshProjectionExclusion(
+        reason="non-neg-risk-market",
+        stream="market",
+        envelope=_candidate_envelope("candidate-a"),
+        group_truth=None,
+    )
+
+    with pytest.raises(ValueError, match="fresh-projection-candidate-duplicate"):
+        advance_fresh_projection_commitment(
+            _v3_commitment(),
+            FreshProjectionChunk(
+                cursor=None,
+                members=(member,),
+                diagnostics=(),
+                candidates_processed=2,
+                exclusions=(exclusion,),
+            ),
+        )
+
+
+@pytest.mark.parametrize("outcome", ("member", "exclusion", "diagnostic"))
+def test_v3_projection_rejects_duplicate_within_one_outcome(outcome: str) -> None:
+    member = _member("candidate-a")
+    exclusion = FreshProjectionExclusion(
+        reason="non-neg-risk-market",
+        stream="market",
+        envelope=_candidate_envelope("candidate-a"),
+        group_truth=None,
+    )
+    diagnostic = diagnose_unresolved_member(
+        side="generation-only",
+        member=_candidate_envelope("candidate-a"),
+        evidence=None,
+        authorized_removal_reasons=(),
+    )
+    outcomes = {
+        "member": ((member, member), (), ()),
+        "exclusion": ((), (exclusion, exclusion), ()),
+        "diagnostic": ((), (), (diagnostic, diagnostic)),
+    }
+    members, exclusions, diagnostics = outcomes[outcome]
+
+    with pytest.raises(ValueError, match="fresh-projection-candidate-duplicate"):
+        advance_fresh_projection_commitment(
+            _v3_commitment(),
+            FreshProjectionChunk(
+                cursor=None,
+                members=members,
+                diagnostics=diagnostics,
+                candidates_processed=2,
+                exclusions=exclusions,
+            ),
+        )
+
+
+def test_v3_projection_preserves_duplicate_sidecar_diagnostics_by_source_ordinal() -> None:
+    envelope = replace(
+        _candidate_envelope("candidate-a"),
+        event_id="event-a",
+        source_ordinal=3,
+        member_ordinal=5,
+    )
+    diagnostics = tuple(
+        diagnose_unresolved_member(
+            side="generation-only",
+            member=replace(envelope, member_ordinal=member_ordinal),
+            evidence=None,
+            authorized_removal_reasons=(),
+        )
+        for member_ordinal in (5, 6)
+    )
+
+    advanced = advance_fresh_projection_commitment(
+        _v3_commitment(),
+        FreshProjectionChunk(
+            cursor=None,
+            members=(),
+            diagnostics=diagnostics,
+            candidates_processed=2,
+        ),
+    )
+
+    assert advanced.diagnostic_count == 2
+
+
+def test_v3_projection_rejects_chunk_boundary_overlap_after_restart() -> None:
+    first = advance_fresh_projection_commitment(
+        _v3_commitment(),
+        FreshProjectionChunk(
+            cursor=FreshProjectionCursor(
+                stream="market",
+                market_id="candidate-a",
+                event_id=None,
+                source_ordinal=None,
+                member_ordinal=None,
+            ),
+            members=(_member("candidate-a"),),
+            diagnostics=(),
+            candidates_processed=1,
+        ),
+    )
+    restarted = replace(first)
+
+    with pytest.raises(ValueError, match="fresh-projection-candidate-overlap"):
+        advance_fresh_projection_commitment(
+            restarted,
+            FreshProjectionChunk(
+                cursor=None,
+                members=(),
+                diagnostics=(),
+                candidates_processed=1,
+                exclusions=(
+                    FreshProjectionExclusion(
+                        reason="non-neg-risk-market",
+                        stream="market",
+                        envelope=_candidate_envelope("candidate-a"),
+                        group_truth=None,
+                    ),
+                ),
             ),
         )
 
@@ -1002,10 +1128,10 @@ def test_event_only_keyset_is_complete_with_adversarial_order_and_null_ordinal(
             assert cursor.market_id is not None
             event_member_cursors.append(
                 (
-                    cursor.market_id,
                     cursor.event_id,
-                    cursor.source_ordinal,
                     cursor.member_ordinal,
+                    cursor.source_ordinal,
+                    cursor.market_id,
                 )
             )
     else:
@@ -1598,7 +1724,11 @@ def test_1200_row_complete_commitment_oracles_are_chunk_invariant(
             member_receipt_digest=str(status["receipt_digest"]),
         ) is False  # diagnostics make a dirty projection non-authoritative
         assert len([item for item in cursor_sequence if item[0] == "market"]) <= 1
-        event_cursors = [item[1:] for item in cursor_sequence if item[0] == "event-only"]
+        event_cursors = [
+            (item[2], item[4], item[3], item[1])
+            for item in cursor_sequence
+            if item[0] == "event-only"
+        ]
         assert event_cursors == sorted(set(event_cursors))
         results.append(
             (

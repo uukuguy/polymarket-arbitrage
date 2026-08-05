@@ -6446,8 +6446,8 @@ class SQLiteStore:
                         "structure_sync_market_staging market ON "
                         "market.window_id=member.window_id AND "
                         "market.market_id=member.market_id WHERE member.window_id=? "
-                        "AND market.market_id IS NULL ORDER BY member.market_sort_key,"
-                        "member.event_id,member.event_ordinal,member.member_ordinal LIMIT ?",
+                        "AND market.market_id IS NULL ORDER BY member.event_id,"
+                        "member.member_ordinal,member.event_ordinal LIMIT ?",
                         (window_id, remaining),
                     ).fetchall()
                 else:
@@ -6460,16 +6460,14 @@ class SQLiteStore:
                         "structure_sync_market_staging market ON "
                         "market.window_id=member.window_id AND "
                         "market.market_id=member.market_id WHERE member.window_id=? "
-                        "AND (member.market_sort_key,member.event_id,member.event_ordinal,"
-                        "member.member_ordinal)>(?,?,?,?) AND market.market_id IS NULL "
-                        "ORDER BY member.market_sort_key,member.event_id,"
-                        "member.event_ordinal,member.member_ordinal LIMIT ?",
+                        "AND (member.event_id,member.member_ordinal,member.event_ordinal)"
+                        ">(?,?,?) AND market.market_id IS NULL ORDER BY member.event_id,"
+                        "member.member_ordinal,member.event_ordinal LIMIT ?",
                         (
                             window_id,
-                            sidecar_cursor.market_id,
                             sidecar_cursor.event_id,
-                            sidecar_cursor.source_ordinal,
                             sidecar_cursor.member_ordinal,
+                            sidecar_cursor.source_ordinal,
                             remaining,
                         ),
                     ).fetchall()
@@ -6505,9 +6503,9 @@ class SQLiteStore:
                         "LEFT JOIN structure_sync_market_staging market ON "
                         "market.window_id=member.window_id AND "
                         "market.market_id=member.market_id WHERE member.window_id=? "
-                        "AND (member.market_sort_key,member.event_id,member.event_ordinal,"
-                        "member.member_ordinal)>(?,?,?,?) AND market.market_id IS NULL LIMIT 1",
-                        (window_id, last[0], last[1], last[2], last[3]),
+                        "AND (member.event_id,member.member_ordinal,member.event_ordinal)"
+                        ">(?,?,?) AND market.market_id IS NULL LIMIT 1",
+                        (window_id, last[1], last[3], last[2]),
                     ).fetchone()
                     projection_complete = more is None
                 else:
