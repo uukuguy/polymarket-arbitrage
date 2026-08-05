@@ -24,6 +24,7 @@ from polyarb.perception.structure_contract import (
 from polyarb.perception.structure_drift import (
     FreshProjectionChunk,
     FreshProjectionCommitment,
+    FreshProjectionCursor,
     _member_tuple,
     project_legacy_compatible_event,
     project_legacy_compatible_market,
@@ -3270,10 +3271,124 @@ def test_v3_checkpoint_commitments_are_chunk_partition_independent(
 
 def test_v3_checkpoint_conserves_one_member_and_every_exclusion_reason(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: list[tuple[object, ...]] = []
     base = _drift_store(tmp_path / "mixed-source")
     expected_counts = {reason: 1 for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS}
+    real_chunk = base._fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-2",
+        generation_snapshot_id=2,
+        cursor=None,
+        limit=500,
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
+    )
+    member = next(
+        item
+        for item in base.fetch_structure_drift_member_chunk(
+            snapshot_id=2,
+            generation=True,
+            after_market_id=None,
+            limit=500,
+        )
+        if item.market_id == "shared"
+    )
+    template = real_chunk.exclusions[0]
+    outcomes = (
+        FreshProjectionChunk(
+            cursor=None,
+            members=(member,),
+            diagnostics=(),
+            candidates_processed=1,
+        ),
+        *(
+            FreshProjectionChunk(
+                cursor=None,
+                members=(),
+                diagnostics=(),
+                candidates_processed=1,
+                exclusions=(replace(template, reason=reason),),
+            )
+            for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+        ),
+    )
+    fetch_limits: list[int] = []
+
+    def fetch_mixed(
+        _store: SQLiteStore,
+        *,
+        cursor: FreshProjectionCursor | None,
+        limit: int,
+        **_kwargs: object,
+    ) -> FreshProjectionChunk:
+        fetch_limits.append(limit)
+        if cursor is None:
+            start = 0
+        else:
+            assert cursor.stream == "market"
+            assert cursor.market_id is not None
+            start = int(cursor.market_id.removeprefix("mixed-candidate-"))
+        end = min(start + limit, len(outcomes))
+        page = outcomes[start:end]
+        assert 1 <= len(page) <= limit
+        return FreshProjectionChunk(
+            cursor=(
+                None
+                if end == len(outcomes)
+                else FreshProjectionCursor(
+                    stream="market",
+                    market_id=f"mixed-candidate-{end}",
+                    event_id=None,
+                    source_ordinal=None,
+                    member_ordinal=None,
+                )
+            ),
+            members=tuple(item for chunk in page for item in chunk.members),
+            diagnostics=(),
+            candidates_processed=len(page),
+            exclusions=tuple(item for chunk in page for item in chunk.exclusions),
+        )
+
+    monkeypatch.setattr(
+        SQLiteStore,
+        "_fetch_structure_drift_fresh_projection_chunk",
+        fetch_mixed,
+    )
+    real_fetch_members_by_id = SQLiteStore.fetch_structure_drift_members_by_id
+
+    def fetch_members_by_id(
+        store: SQLiteStore,
+        *,
+        snapshot_id: int,
+        generation: bool,
+        market_ids: list[str],
+    ) -> list[object]:
+        if generation and snapshot_id == 2 and market_ids == ["shared"]:
+            return [member]
+        return real_fetch_members_by_id(
+            store,
+            snapshot_id=snapshot_id,
+            generation=generation,
+            market_ids=market_ids,
+        )
+
+    monkeypatch.setattr(
+        SQLiteStore,
+        "fetch_structure_drift_members_by_id",
+        fetch_members_by_id,
+    )
+
+    def expected_candidate_count(
+        _con: sqlite3.Connection, *, window_id: str
+    ) -> int:
+        assert window_id == "window-2"
+        return len(outcomes)
+
+    monkeypatch.setattr(
+        sqlite_store_module,
+        "_fresh_projection_expected_candidate_count",
+        expected_candidate_count,
+    )
     for max_rows in (1, 17, 500):
         clone_path = tmp_path / f"mixed-{max_rows}" / "drift-e2e.db"
         clone_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3297,50 +3412,108 @@ def test_v3_checkpoint_conserves_one_member_and_every_exclusion_reason(
                 comparison_id, max_rows=max_rows, now_ms=now_ms
             )
             now_ms += 1
-        real_chunk = store._fetch_structure_drift_fresh_projection_chunk(
-            publication_id="publication-2",
-            generation_snapshot_id=2,
-            cursor=None,
-            limit=500,
-            classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
-        )
-        member = real_chunk.members[0]
-        template = real_chunk.exclusions[0]
-        mixed_chunk = FreshProjectionChunk(
-            cursor=None,
-            members=(member,),
-            diagnostics=(),
-            candidates_processed=8,
-            exclusions=tuple(
-                replace(template, reason=reason)
+        projection_checkpoints: list[tuple[int, int, dict[str, int]]] = []
+        while True:
+            store.advance_structure_drift_comparison_chunk(
+                comparison_id, max_rows=max_rows, now_ms=now_ms
+            )
+            now_ms += 1
+            with sqlite3.connect(store.db_path) as con:
+                row = con.execute(
+                    "SELECT phase,projection_candidate_count,"
+                    "projection_exclusion_count,projection_exclusion_counts_json,"
+                    "projection_exclusion_digest_states_json,class_counts_json FROM "
+                    "structure_generation_drift_progress WHERE comparison_id=?",
+                    (comparison_id,),
+                ).fetchone()
+            assert row is not None
+            exclusion_counts = json.loads(str(row[3]))
+            exclusion_states = json.loads(str(row[4]))
+            assert {
+                reason: RowChainSHA256.from_json(
+                    exclusion_states[reason],
+                    expected_domain=f"projection-exclusion/{reason}",
+                ).count
                 for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
-            ),
-        )
+            } == exclusion_counts
+            projection_checkpoints.append(
+                (int(row[1]), int(row[2]), exclusion_counts)
+            )
+            store = SQLiteStore(clone_path)
+            if row[0] != "fresh-projection-members":
+                assert json.loads(str(row[5]))["projection_member_count"] == 1
+                break
+        if max_rows == 1:
+            assert len(projection_checkpoints) == 8
+            assert [checkpoint[0] for checkpoint in projection_checkpoints] == list(
+                range(1, 9)
+            )
+            assert [checkpoint[1] for checkpoint in projection_checkpoints] == [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+            ]
+            assert {
+                reason
+                for _, _, counts in projection_checkpoints
+                for reason, count in counts.items()
+                if count
+            } == set(STRUCTURE_PROJECTION_EXCLUSION_REASONS)
 
-        def fetch_mixed(**_kwargs: object) -> FreshProjectionChunk:
-            return mixed_chunk
-
-        store._fetch_structure_drift_fresh_projection_chunk = fetch_mixed  # type: ignore[method-assign]
-        store.advance_structure_drift_comparison_chunk(
-            comparison_id, max_rows=max_rows, now_ms=now_ms
-        )
+        while True:
+            chunk = store.advance_structure_drift_comparison_chunk(
+                comparison_id, max_rows=max_rows, now_ms=now_ms
+            )
+            now_ms += 1
+            store = SQLiteStore(clone_path)
+            if chunk.component in {"sealed", "stale"}:
+                break
+        with sqlite3.connect(store.db_path) as con:
+            terminal_reason = con.execute(
+                "SELECT terminal_reason FROM structure_generation_drift_progress "
+                "WHERE comparison_id=?",
+                (comparison_id,),
+            ).fetchone()[0]
+        assert chunk.component == "stale"
+        assert terminal_reason == "drift-unclassified"
         status = store.structure_generation_drift_status()
+        assert status["authorized"] is False
+        assert status["reason"] == "drift-unclassified"
         assert status["projection_candidate_count"] == 8
-        assert status["projection_member_count"] == 1
         assert status["projection_exclusion_count"] == 7
         assert status["projection_diagnostic_count"] == 0
         assert status["projection_exclusion_counts"] == expected_counts
+        with sqlite3.connect(store.db_path) as con:
+            progress = con.execute(
+                "SELECT projection_candidate_count,projection_exclusion_count,"
+                "projection_exclusion_counts_json,projection_exclusion_roots_json "
+                "FROM structure_generation_drift_progress WHERE comparison_id=?",
+                (comparison_id,),
+            ).fetchone()
+            receipt = con.execute(
+                "SELECT projection_candidate_count,projection_exclusion_count,"
+                "projection_exclusion_counts_json,projection_exclusion_roots_json "
+                "FROM structure_generation_drift_terminal_receipts "
+                "WHERE comparison_id=?",
+                (comparison_id,),
+            ).fetchone()
+        assert progress is not None
+        assert receipt is not None
+        assert tuple(progress) == tuple(receipt)
+        assert int(progress[0]) - int(progress[1]) == 1
         observed.append(
             (
-                status["projection_candidate_count"],
-                status["projection_member_count"],
-                status["projection_exclusion_count"],
+                *tuple(progress),
                 status["projection_diagnostic_count"],
-                status["projection_exclusion_counts_json"],
-                status["projection_exclusion_roots_json"],
             )
         )
 
+    assert set(fetch_limits) == {1, 17, 500}
     assert observed[0] == observed[1] == observed[2]
 
 
