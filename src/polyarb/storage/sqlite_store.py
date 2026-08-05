@@ -3324,6 +3324,7 @@ class SQLiteStore:
                 _migrate_structure_event_market_progress(con)
                 _migrate_structure_event_member_schema(con)
                 con.executescript(STRUCTURE_GENERATIONS_DDL)
+                _migrate_structure_drift_classifier_v3_exclusions(con)
                 con.execute(
                     "CREATE VIEW IF NOT EXISTS current_structure_markets AS "
                     "SELECT markets.* FROM structure_generation_markets markets "

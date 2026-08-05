@@ -1690,6 +1690,47 @@ def test_v3_migration_preserves_v2_receipt_bytes_and_adds_nullable_fields(
                 con.execute(statement, (comparison_id,))
 
 
+def test_v3_migration_lightweight_structure_sync_schema_converges(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "minimal-existing-snapshots.db"
+    with sqlite3.connect(db_path) as con:
+        con.execute("CREATE TABLE snapshots(id INTEGER PRIMARY KEY)")
+
+    SQLiteStore(db_path).init_structure_sync_schema()
+
+    with sqlite3.connect(db_path) as con:
+        assert _V3_RECEIPT_EXCLUSION_FIELDS <= _columns(
+            con, "structure_generation_drift_receipts"
+        )
+        assert _V3_RECEIPT_EXCLUSION_FIELDS <= _columns(
+            con, "structure_generation_drift_terminal_receipts"
+        )
+        assert _V3_PROGRESS_EXCLUSION_FIELDS <= _columns(
+            con, "structure_generation_drift_progress"
+        )
+        triggers = {
+            str(name): str(sql)
+            for name, sql in con.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND "
+                "tbl_name IN ('structure_generation_drift_receipts',"
+                "'structure_generation_drift_terminal_receipts')"
+            )
+        }
+
+    assert set(triggers) == {
+        "trg_structure_drift_receipt_update",
+        "trg_structure_drift_receipt_delete",
+        "trg_structure_drift_terminal_receipt_update",
+        "trg_structure_drift_terminal_receipt_delete",
+        "trg_structure_drift_terminal_receipt_insert",
+    }
+    assert all("receipt-sealed" in sql for sql in triggers.values())
+    full_db_path = tmp_path / "fresh-full-schema.db"
+    SQLiteStore(full_db_path).init_schema()
+    assert _authority_signature(db_path) == _authority_signature(full_db_path)
+
+
 @pytest.mark.parametrize(
     "fault_point",
     (
@@ -1730,9 +1771,25 @@ def test_v3_receipt_digest_binds_every_exclusion_field() -> None:
 
 def test_v2_receipt_digest_field_oracle_is_unchanged() -> None:
     payload = _valid_v2_authorization_payload()
+    assert sqlite_store_module._structure_drift_receipt_fields(
+        STRUCTURE_DRIFT_CLASSIFIER_V2
+    ) == _DRIFT_RECEIPT_V2_DIGEST_FIELDS
     assert sqlite_store_module._structure_drift_receipt_digest(
         payload
     ) == _existing_v2_digest(payload, _DRIFT_RECEIPT_V2_DIGEST_FIELDS)
+
+
+def test_v1_receipt_digest_field_oracle_is_unchanged() -> None:
+    payload = _digest_payload(
+        _DRIFT_RECEIPT_V2_DIGEST_FIELDS, STRUCTURE_DRIFT_CLASSIFIER_V1
+    )
+    assert sqlite_store_module._structure_drift_receipt_fields(
+        STRUCTURE_DRIFT_CLASSIFIER_V1
+    ) == _DRIFT_RECEIPT_V2_DIGEST_FIELDS
+    expected = _independent_sha256(
+        tuple(payload[field] for field in _DRIFT_RECEIPT_V2_DIGEST_FIELDS)
+    )
+    assert sqlite_store_module._structure_drift_receipt_digest(payload) == expected
 
 
 def test_v3_receipt_digest_terminal_binds_every_exclusion_field() -> None:
@@ -1751,9 +1808,26 @@ def test_v3_receipt_digest_terminal_binds_every_exclusion_field() -> None:
 
 def test_v2_receipt_digest_field_oracle_terminal_is_unchanged() -> None:
     payload = _valid_v2_terminal_payload()
+    assert sqlite_store_module._structure_drift_terminal_receipt_fields(
+        STRUCTURE_DRIFT_CLASSIFIER_V2
+    ) == _TERMINAL_RECEIPT_FIELDS
     assert sqlite_store_module._structure_drift_terminal_receipt_digest(
         payload
     ) == _existing_v2_digest(payload, _TERMINAL_RECEIPT_FIELDS)
+
+
+def test_v1_receipt_digest_field_oracle_terminal_is_unchanged() -> None:
+    payload = _digest_payload(_TERMINAL_RECEIPT_FIELDS, STRUCTURE_DRIFT_CLASSIFIER_V1)
+    assert sqlite_store_module._structure_drift_terminal_receipt_fields(
+        STRUCTURE_DRIFT_CLASSIFIER_V1
+    ) == _TERMINAL_RECEIPT_FIELDS
+    expected = _independent_sha256(
+        tuple(payload[field] for field in _TERMINAL_RECEIPT_FIELDS)
+    )
+    assert (
+        sqlite_store_module._structure_drift_terminal_receipt_digest(payload)
+        == expected
+    )
 
 
 def _authority_signature(path: Path) -> dict[str, tuple[tuple[object, ...], ...]]:

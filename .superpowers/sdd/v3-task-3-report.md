@@ -83,3 +83,49 @@ uv run pytest -q tests/m1-perception/test_structure_generation_readers.py
 None for Task 3. Task 4 must populate all four receipt fields for v3 rows and
 use `_structure_drift_receipt_fields()` /
 `_structure_drift_terminal_receipt_fields()` at write and read boundaries.
+
+## Review-fix evidence — lightweight schema convergence and v1 oracles
+
+- RED added `test_v3_migration_lightweight_structure_sync_schema_converges`
+  against a database containing only `snapshots(id)`. The exact lightweight
+  `init_structure_sync_schema()` entry point failed because all four v3 receipt
+  columns were absent.
+- GREEN calls `_migrate_structure_drift_classifier_v3_exclusions(con)`
+  immediately after `STRUCTURE_GENERATIONS_DDL` in the existing-schema branch.
+  The migration's savepoint installs the columns before views/readers and
+  restores the five immutable receipt triggers before release.
+- The regression asserts every v3 progress/authorization/terminal field, the
+  exact five trigger names and seal messages, then compares the complete
+  authority column/index/trigger signature with a fresh full `init_schema()`
+  database.
+- Added independent v1 authorization and terminal SHA-256 oracles. Test-owned
+  fixed tuples prove both v1 and v2 select the same historical field order;
+  expected digests are computed directly with `hashlib.sha256`, never with a
+  production digest helper.
+
+Exact RED/GREEN and final verification:
+
+```text
+uv run pytest -q tests/m1-perception/test_structure_drift_end_to_end.py \
+  -k 'v3_migration or v3_receipt_digest or v2_receipt_digest_field or v1_receipt_digest_field'
+# RED: 1 failed, 10 passed (lightweight entry point missing v3 columns)
+# GREEN: 11 passed
+
+uv run pytest -q tests/m1-perception/test_structure_drift_end_to_end.py
+# 110 tests collected; exit 0
+
+uv run pytest -q tests/m1-perception/test_structure_generation_readers.py \
+  tests/m1-perception/test_structure_sync_window.py
+# 350 tests collected; exit 0
+
+uv run ruff check src/polyarb/storage/sqlite_store.py \
+  tests/m1-perception/test_structure_drift_end_to_end.py \
+  tests/m1-perception/test_structure_generation_readers.py \
+  tests/m1-perception/test_structure_sync_window.py
+# All checks passed
+
+git diff --check -- src/polyarb/storage/sqlite_store.py \
+  tests/m1-perception/test_structure_drift_end_to_end.py \
+  .superpowers/sdd/v3-task-3-report.md
+# exit 0
+```
