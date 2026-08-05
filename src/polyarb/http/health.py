@@ -779,6 +779,7 @@ def _structure_drift_health_check(
         contract = status.get("classifier_contract_version")
         comparison_id = status.get("progress_id")
         if phase == "stale":
+            v3_public_reason = "structure-drift-terminal-stale"
             diagnostic_root = status.get("diagnostic_root")
             observed = "terminal-stale"
             diagnostic_total = status.get("diagnostic_total")
@@ -791,7 +792,8 @@ def _structure_drift_health_check(
             )
             if contract == STRUCTURE_DRIFT_CLASSIFIER_V3 and v3_aggregate_valid:
                 output = (
-                    f"contract={contract} comparison={comparison_id} reason={reason} "
+                    f"contract={contract} comparison={comparison_id} "
+                    f"reason={v3_public_reason} "
                     f"diagnostic_total={diagnostic_total} "
                     f"diagnostic_root={diagnostic_root} "
                     f"checkpoint_at_ms={checkpoint}"
@@ -799,7 +801,7 @@ def _structure_drift_health_check(
                 extra = {
                     "classifierContract": contract,
                     "comparisonId": comparison_id,
-                    "terminalReason": reason,
+                    "terminalReason": v3_public_reason,
                     "diagnosticTotal": diagnostic_total,
                     "diagnosticRoot": diagnostic_root,
                     "checkpointAtMs": checkpoint,
@@ -828,15 +830,26 @@ def _structure_drift_health_check(
                     "diagnosticSamples": diagnostic_samples,
                     "checkpointAtMs": checkpoint,
                 }
-            else:
+            elif contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
                 output = (
-                    f"contract={contract} comparison={comparison_id} reason={reason} "
+                    f"contract={contract} comparison={comparison_id} "
+                    f"reason={v3_public_reason} "
                     f"checkpoint_at_ms={checkpoint} diagnostic_evidence=unavailable"
                 )
                 extra = {
                     "classifierContract": contract,
                     "comparisonId": comparison_id,
-                    "terminalReason": reason,
+                    "terminalReason": v3_public_reason,
+                    "checkpointAtMs": checkpoint,
+                }
+            else:
+                output = (
+                    f"contract={contract} comparison={comparison_id} "
+                    f"checkpoint_at_ms={checkpoint} diagnostic_evidence=unavailable"
+                )
+                extra = {
+                    "classifierContract": contract,
+                    "comparisonId": comparison_id,
                     "checkpointAtMs": checkpoint,
                 }
         else:

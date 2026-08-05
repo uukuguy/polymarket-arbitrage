@@ -7,6 +7,7 @@ HTTP 200 for pass/warn, 503 for fail.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -568,6 +569,79 @@ def test_structure_drift_health_malformed_v3_never_falls_back_to_keyed_evidence(
         "diagnosticRoot",
     ):
         assert field not in check
+
+
+def test_structure_drift_health_v3_aggregate_canonicalizes_supplied_reason() -> None:
+    secret = "FORGED_REASON_SECRET"
+    check = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "none",
+            "authorized": False,
+            "checkpoint_at_ms": 9_000,
+            "classifier_contract_version": "structure-drift-classifier-v3",
+            "diagnostic_root": "d" * 64,
+            "diagnostic_total": 3,
+            "phase": "stale",
+            "progress_id": "comparison-v3-terminal",
+            "reason": secret,
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+
+    assert check["status"] == "fail"
+    assert check["terminalReason"] == "structure-drift-terminal-stale"
+    assert secret not in json.dumps(check, sort_keys=True)
+
+
+def test_structure_drift_health_malformed_v3_canonicalizes_supplied_reason() -> None:
+    secret = "FORGED_REASON_SECRET"
+    check = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "none",
+            "authorized": False,
+            "checkpoint_at_ms": 9_000,
+            "classifier_contract_version": "structure-drift-classifier-v3",
+            "diagnostic_counts": {"forged-label": 999},
+            "diagnostic_samples": {"forged-label": [{"secret": "leak"}]},
+            "phase": "stale",
+            "progress_id": "comparison-v3-terminal",
+            "reason": secret,
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+
+    assert check["status"] == "fail"
+    assert check["terminalReason"] == "structure-drift-terminal-stale"
+    rendered = json.dumps(check, sort_keys=True)
+    assert secret not in rendered
+    assert "forged-label" not in rendered
+    assert "leak" not in rendered
+
+
+def test_structure_drift_health_unknown_contract_never_echoes_reason() -> None:
+    secret = "FORGED_REASON_SECRET"
+    check = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "none",
+            "authorized": False,
+            "checkpoint_at_ms": 9_000,
+            "classifier_contract_version": "attacker-contract",
+            "phase": "stale",
+            "progress_id": "comparison-unknown-terminal",
+            "reason": secret,
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+
+    assert check["status"] == "fail"
+    assert "terminalReason" not in check
+    assert secret not in json.dumps(check, sort_keys=True)
 
 
 @pytest.mark.parametrize(
