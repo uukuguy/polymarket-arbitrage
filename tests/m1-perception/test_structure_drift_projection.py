@@ -20,6 +20,7 @@ from polyarb.perception.structure_drift import (
     FreshProjectionExclusion,
     StructuralMemberIdentity,
     StructureDriftCandidateEnvelope,
+    StructureDriftDiagnostic,
     advance_fresh_projection_commitment,
     classify_structure_member_drift,
     diagnose_unresolved_member,
@@ -28,7 +29,10 @@ from polyarb.perception.structure_drift import (
     project_legacy_compatible_market,
     structure_projection_exclusion_tuple,
 )
-from polyarb.perception.structure_publication import event_only_member_quarantine_issue
+from polyarb.perception.structure_publication import (
+    event_only_member_quarantine_issue,
+    market_quarantine_issue,
+)
 from polyarb.storage.row_chain_sha256 import ROW_CHAIN_DOMAINS, RowChainSHA256
 from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -212,6 +216,9 @@ def _published_source_store(
     raw_market_overrides: dict[str, object] | None = None,
     raw_event_overrides: dict[str, object] | None = None,
     raw_member_overrides: dict[str, object] | None = None,
+    orphan_market: bool = False,
+    tamper_market_issue: bool = False,
+    tamper_event_issue: bool = False,
 ) -> SQLiteStore:
     store = SQLiteStore(tmp_path / "drift-source.db")
     store.init_schema()
@@ -276,9 +283,11 @@ def _published_source_store(
                 raw_event["markets"].extend(
                     {
                         "id": market_id,
-                        "active": True,
-                        "closed": False,
-                        "negRiskOther": False,
+                        "active": (raw_member_overrides or {}).get("active", True),
+                        "closed": (raw_member_overrides or {}).get("closed", False),
+                        "negRiskOther": (raw_member_overrides or {}).get(
+                            "negRiskOther", False
+                        ),
                     }
                     for market_id, _certified in event_only_members
                 )
@@ -308,7 +317,8 @@ def _published_source_store(
                     None if index == 0 and null_event_source_ordinal else index + 1,
                 )
             )
-            relation_rows.append(("window-1", market_id, event_id, index + 1))
+            if not (index == 0 and orphan_market):
+                relation_rows.append(("window-1", market_id, event_id, index + 1))
             if index == 0:
                 relation_rows.extend(
                     ("window-1", market_id, event_id, index + 1)
@@ -359,6 +369,27 @@ def _published_source_store(
             "snapshot_id,issue_index,layer,category,market_id,detail,raw_payload) "
             "VALUES (1,1,1,'api_jitter','forged','forged','forged')"
         )
+        if orphan_market:
+            raw_market = json.loads(str(market_rows[0][2]))
+            issue = market_quarantine_issue("market-000", raw_market, ())
+            assert issue is not None
+            raw_payload = str(issue["raw_payload"])
+            if tamper_market_issue:
+                raw_payload = raw_payload[:-1] + (
+                    "0" if raw_payload[-1] != "0" else "1"
+                )
+            con.execute(
+                "INSERT INTO structure_generation_issues(snapshot_id,issue_index,"
+                "layer,category,market_id,detail,raw_payload) VALUES (1,?,?,?,?,?,?)",
+                (
+                    2,
+                    issue["layer"],
+                    issue["category"],
+                    issue["market_id"],
+                    issue["detail"],
+                    raw_payload,
+                ),
+            )
         for issue_index, (market_id, certified) in enumerate(
             event_only_members, start=100
         ):
@@ -371,6 +402,11 @@ def _published_source_store(
                 market_id=market_id,
             )
             assert issue is not None
+            raw_payload = str(issue["raw_payload"])
+            if tamper_event_issue:
+                raw_payload = raw_payload[:-1] + (
+                    "0" if raw_payload[-1] != "0" else "1"
+                )
             con.execute(
                 "INSERT INTO structure_generation_issues(snapshot_id,issue_index,"
                 "layer,category,market_id,detail,raw_payload) VALUES (1,?,?,?,?,?,?)",
@@ -380,7 +416,7 @@ def _published_source_store(
                     issue["category"],
                     market_id,
                     issue["detail"],
-                    issue["raw_payload"],
+                    raw_payload,
                 ),
             )
         con.execute(
@@ -403,6 +439,241 @@ def _published_source_store(
             "published_snapshot_id=1 WHERE id='window-1'"
         )
     return store
+
+
+def _fetch_v3_chunk(store: SQLiteStore) -> FreshProjectionChunk:
+    return store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
+    )
+
+
+def test_projection_reader_rejects_unknown_classifier_contract(tmp_path: Path) -> None:
+    store = _published_source_store(tmp_path, event_count=1)
+    with pytest.raises(
+        ValueError,
+        match="^invalid-structure-drift-classifier-contract$",
+    ):
+        store.fetch_structure_drift_fresh_projection_chunk(
+            publication_id="publication-1",
+            generation_snapshot_id=1,
+            cursor=None,
+            limit=500,
+            classifier_contract="structure-drift-classifier-v999",
+        )
+
+
+def _all_v3_chunks(store: SQLiteStore) -> FreshProjectionChunk:
+    cursor = None
+    members: list[StructuralMemberIdentity] = []
+    exclusions: list[FreshProjectionExclusion] = []
+    diagnostics: list[StructureDriftDiagnostic] = []
+    processed = 0
+    while True:
+        chunk = store.fetch_structure_drift_fresh_projection_chunk(
+            publication_id="publication-1",
+            generation_snapshot_id=1,
+            cursor=cursor,
+            limit=500,
+            classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
+        )
+        members.extend(chunk.members)
+        exclusions.extend(chunk.exclusions)
+        diagnostics.extend(chunk.diagnostics)
+        processed += chunk.candidates_processed
+        assert (
+            len(chunk.members) + len(chunk.exclusions) + len(chunk.diagnostics)
+            == chunk.candidates_processed
+        )
+        cursor = chunk.cursor
+        if cursor is None:
+            return FreshProjectionChunk(
+                cursor=None,
+                members=tuple(members),
+                diagnostics=tuple(diagnostics),
+                candidates_processed=processed,
+                exclusions=tuple(exclusions),
+            )
+
+
+@pytest.mark.parametrize(
+    ("store_kwargs", "reason"),
+    [
+        ({"raw_market_overrides": {"negRisk": False}}, "non-neg-risk-market"),
+        ({"orphan_market": True}, "market-side-quarantine"),
+        ({"raw_event_overrides": {"negRiskAugmented": True}}, "augmented-group"),
+        (
+            {"raw_member_overrides": {"active": False}},
+            "fresh-group-ineligible",
+        ),
+    ],
+)
+def test_v3_market_candidate_has_expected_exclusion(
+    tmp_path: Path,
+    store_kwargs: dict[str, object],
+    reason: str,
+) -> None:
+    store = _published_source_store(tmp_path, event_count=1, **store_kwargs)
+    chunk = _fetch_v3_chunk(store)
+    assert chunk.members == ()
+    assert [row.reason for row in chunk.exclusions] == [reason]
+    assert chunk.diagnostics == ()
+    assert chunk.candidates_processed == 1
+
+
+def test_v3_missing_neg_risk_boolean_is_not_an_expected_exclusion(
+    tmp_path: Path,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=1,
+        raw_market_overrides={"negRisk": None},
+    )
+    chunk = _fetch_v3_chunk(store)
+    assert chunk.exclusions == ()
+    assert [row.code for row in chunk.diagnostics] == [
+        "invalid-neg-risk-classification"
+    ]
+
+
+def test_v3_tampered_market_quarantine_is_not_an_expected_exclusion(
+    tmp_path: Path,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=1,
+        orphan_market=True,
+        tamper_market_issue=True,
+    )
+    chunk = _fetch_v3_chunk(store)
+    assert chunk.exclusions == ()
+    assert [row.code for row in chunk.diagnostics] == ["invalid-event-membership"]
+
+
+@pytest.mark.parametrize(
+    ("event_overrides", "member_overrides", "issue", "reason"),
+    [
+        (
+            {"negRisk": False, "enableNegRisk": False, "negRiskMarketID": None},
+            {"active": True, "closed": False},
+            False,
+            "non-neg-risk-event-member",
+        ),
+        (
+            {},
+            {"active": False, "closed": False},
+            False,
+            "current-nontradable-event-member",
+        ),
+        (
+            {},
+            {"active": True, "closed": True},
+            False,
+            "current-nontradable-event-member",
+        ),
+        ({}, {"active": True, "closed": False}, True, "event-only-quarantine"),
+    ],
+)
+def test_v3_event_only_candidate_has_one_expected_outcome(
+    tmp_path: Path,
+    event_overrides: dict[str, object],
+    member_overrides: dict[str, object],
+    issue: bool,
+    reason: str,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=1,
+        raw_event_overrides=event_overrides,
+        raw_member_overrides=member_overrides,
+        event_only_members=(("event-only", issue),),
+    )
+    event_only = _all_v3_chunks(store).exclusions
+    assert [row.reason for row in event_only if row.stream == "event-only"] == [reason]
+
+
+def test_v3_tampered_event_quarantine_is_not_an_expected_exclusion(
+    tmp_path: Path,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=1,
+        event_only_members=(("event-only", True),),
+        tamper_event_issue=True,
+    )
+    chunk = _all_v3_chunks(store)
+    matching = [
+        row for row in chunk.diagnostics if row.envelope.market_id == "event-only"
+    ]
+    assert [row.reason for row in chunk.exclusions if row.stream == "event-only"] == []
+    assert [row.code for row in matching] == ["uncertified-event-only-member"]
+
+
+def test_v3_contradictory_ordinary_event_is_not_an_expected_exclusion(
+    tmp_path: Path,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=1,
+        raw_event_overrides={"negRisk": False, "enableNegRisk": False},
+        event_only_members=(("event-only", False),),
+    )
+    chunk = _all_v3_chunks(store)
+    matching = [
+        row for row in chunk.diagnostics if row.envelope.market_id == "event-only"
+    ]
+    assert [row.reason for row in chunk.exclusions if row.stream == "event-only"] == []
+    assert [row.code for row in matching] == ["invalid-neg-risk-classification"]
+
+
+@pytest.mark.parametrize(
+    ("store_kwargs", "code"),
+    [
+        (
+            {
+                "raw_member_overrides": {"active": None},
+                "event_only_members": (("event-only", False),),
+            },
+            "evidence-missing",
+        ),
+        (
+            {
+                "duplicate_event_only_identity": True,
+                "event_only_members": (("event-only", False),),
+            },
+            "duplicate-market-identity",
+        ),
+        (
+            {
+                "event_count": 2,
+                "certified_event_only_conflict": True,
+                "event_only_members": (("event-only-certified", True),),
+            },
+            "conflicting-event-membership",
+        ),
+        (
+            {"event_only_members": (("event-only", False),)},
+            "uncertified-event-only-member",
+        ),
+    ],
+)
+def test_v3_event_only_candidate_defect_is_not_expected_exclusion(
+    tmp_path: Path,
+    store_kwargs: dict[str, object],
+    code: str,
+) -> None:
+    event_count = int(store_kwargs.pop("event_count", 1))
+    store = _published_source_store(tmp_path, event_count=event_count, **store_kwargs)
+    chunk = _all_v3_chunks(store)
+    matching = [
+        row for row in chunk.diagnostics if row.envelope.market_id.startswith("event-only")
+    ]
+    assert chunk.exclusions == ()
+    assert matching
+    assert {row.code for row in matching} == {code}
 
 
 def test_projection_union_excludes_only_certified_event_only_member(

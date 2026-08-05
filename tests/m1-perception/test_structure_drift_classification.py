@@ -122,6 +122,30 @@ def _v2_evidence(
     return replace(base, **changes)
 
 
+def test_unknown_unsupported_reason_precedes_quarantine_lookalike() -> None:
+    member = _member()
+    evidence = _v2_evidence(
+        member,
+        market_side_quarantine=True,
+        group_truth=FreshGroupEvidence(
+            event_id=member.event_id,
+            group_id=member.group_id,
+            neg_risk_type="standard",
+            quality="complete-unsupported",
+            reason="unknown-reason",
+            membership_hash="a" * 64,
+            global_relation_conflict=False,
+        ),
+    )
+    diagnostic = diagnose_unresolved_member(
+        side="generation-only",
+        member=member,
+        evidence=evidence,
+        authorized_removal_reasons=(),
+    )
+    assert diagnostic.code == "group-complete-unsupported-unknown-reason"
+
+
 def test_group_ineligible_active_sibling_is_classified_by_v2() -> None:
     inactive = replace(_member("market-a"), active=False)
     active = _member("market-b")

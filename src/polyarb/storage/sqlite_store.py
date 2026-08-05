@@ -39,6 +39,7 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_COMPONENTS,
     STRUCTURE_DRIFT_CLASSIFIER_V1,
     STRUCTURE_DRIFT_CLASSIFIER_V2,
+    STRUCTURE_DRIFT_CLASSIFIER_V3,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_MEMBER_WORK,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_PAYLOAD_BYTES,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
@@ -5957,11 +5958,17 @@ class SQLiteStore:
         generation_snapshot_id: int,
         cursor: FreshProjectionCursor | None,
         limit: int,
+        classifier_contract: str = STRUCTURE_DRIFT_CLASSIFIER_V2,
         trace_callback: Callable[[str], None] | None = None,
         inspection_callback: Callable[[str, int], None] | None = None,
         sqlite_progress_callback: Callable[[], int] | None = None,
     ) -> FreshProjectionChunk:
         """Validate sealed authority, then read one bounded sidecar projection chunk."""
+        if classifier_contract not in {
+            STRUCTURE_DRIFT_CLASSIFIER_V2,
+            STRUCTURE_DRIFT_CLASSIFIER_V3,
+        }:
+            raise ValueError("invalid-structure-drift-classifier-contract")
         self._validated_fresh_projection_member_authority(
             publication_id=publication_id,
             generation_snapshot_id=generation_snapshot_id,
@@ -5972,6 +5979,7 @@ class SQLiteStore:
             generation_snapshot_id=generation_snapshot_id,
             cursor=cursor,
             limit=limit,
+            classifier_contract=classifier_contract,
             trace_callback=trace_callback,
             inspection_callback=inspection_callback,
             sqlite_progress_callback=sqlite_progress_callback,
@@ -5984,6 +5992,7 @@ class SQLiteStore:
         generation_snapshot_id: int,
         cursor: FreshProjectionCursor | None,
         limit: int,
+        classifier_contract: str = STRUCTURE_DRIFT_CLASSIFIER_V2,
         trace_callback: Callable[[str], None] | None = None,
         inspection_callback: Callable[[str, int], None] | None = None,
         sqlite_progress_callback: Callable[[], int] | None = None,
@@ -5994,6 +6003,7 @@ class SQLiteStore:
             FreshMemberEvidence,
             FreshProjectionChunk,
             FreshProjectionCursor,
+            FreshProjectionExclusion,
             StructuralMemberIdentity,
             StructureDriftCandidateEnvelope,
             diagnose_unresolved_member,
@@ -6001,10 +6011,16 @@ class SQLiteStore:
         )
         from polyarb.perception.structure_publication import (
             EVENT_ONLY_NEG_RISK_QUARANTINE_REASON,
+            event_only_member_quarantine_issue,
             market_quarantine_issue,
             structure_market_source_hash,
         )
 
+        if classifier_contract not in {
+            STRUCTURE_DRIFT_CLASSIFIER_V2,
+            STRUCTURE_DRIFT_CLASSIFIER_V3,
+        }:
+            raise ValueError("invalid-structure-drift-classifier-contract")
         if (
             not publication_id
             or generation_snapshot_id < 1
@@ -6212,8 +6228,56 @@ class SQLiteStore:
             group_truth_by_key: dict[tuple[str, str], tuple[object, ...]] = {}
             conflict_events: set[str] = set()
             certified_event_keys: set[tuple[str, int, int]] = set()
+            generation_issues_by_market: dict[
+                str, set[tuple[object, ...]]
+            ] = {}
+            raw_events_by_id: dict[str, dict[str, object]] = {}
+            generated_market_ids: set[str] = set()
+            generated_membership_ids: set[str] = set()
             if market_ids:
                 placeholders = ",".join("?" for _ in market_ids)
+                if classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
+                    for issue_row in con.execute(
+                        "SELECT layer,category,market_id,detail,raw_payload FROM "
+                        "structure_generation_issues WHERE snapshot_id=? AND "
+                        f"market_id IN ({placeholders})",
+                        (generation_snapshot_id, *market_ids),
+                    ):
+                        generation_issues_by_market.setdefault(
+                            str(issue_row[2]), set()
+                        ).add(tuple(issue_row))
+                    generated_market_ids.update(
+                        str(row[0])
+                        for row in con.execute(
+                            "SELECT market_id FROM structure_generation_markets WHERE "
+                            f"snapshot_id=? AND market_id IN ({placeholders})",
+                            (generation_snapshot_id, *market_ids),
+                        )
+                    )
+                    generated_membership_ids.update(
+                        str(row[0])
+                        for row in con.execute(
+                            "SELECT market_id FROM structure_generation_memberships WHERE "
+                            f"snapshot_id=? AND market_id IN ({placeholders})",
+                            (generation_snapshot_id, *market_ids),
+                        )
+                    )
+                    candidate_event_ids = sorted({
+                        str(item["event_id"])
+                        for item in candidates
+                        if item["kind"] == "event-only"
+                    })
+                    if candidate_event_ids:
+                        event_placeholders = ",".join("?" for _ in candidate_event_ids)
+                        for event_id, payload_json in con.execute(
+                            "SELECT event_id,payload_json FROM "
+                            "structure_sync_event_staging WHERE window_id=? AND "
+                            f"event_id IN ({event_placeholders})",
+                            (window_id, *candidate_event_ids),
+                        ):
+                            payload = json.loads(str(payload_json))
+                            if isinstance(payload, dict):
+                                raw_events_by_id[str(event_id)] = payload
                 witness_limit = 2 * len(market_ids)
                 relation_probe = con.execute(
                     "SELECT market_id,event_id FROM "
@@ -6434,6 +6498,19 @@ class SQLiteStore:
 
             members: list[StructuralMemberIdentity] = []
             diagnostics = []
+            exclusions: list[FreshProjectionExclusion] = []
+
+            def add_exclusion(
+                *,
+                reason: str,
+                stream: Literal["market", "event-only"],
+                envelope: StructureDriftCandidateEnvelope,
+                truth: FreshGroupEvidence | None,
+            ) -> None:
+                exclusions.append(
+                    FreshProjectionExclusion(reason, stream, envelope, truth)
+                )
+
             for candidate in candidates:
                 market_id = str(candidate["market_id"])
                 if candidate["kind"] == "event-only":
@@ -6455,11 +6532,16 @@ class SQLiteStore:
                         raw_event_hash=str(candidate["raw_event_hash"]),
                         raw_market_hash=None,
                     )
+                    raw_event = raw_events_by_id.get(str(candidate["event_id"]))
                     identity_count, first_ordinal = sidecar_identity_counts.get(
                         (str(candidate["event_id"]), market_id), (1, 0)
                     )
                     duplicate_identity = identity_count > 1
-                    if duplicate_identity and int(candidate["member_ordinal"]) != first_ordinal:
+                    if (
+                        classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V2
+                        and duplicate_identity
+                        and int(candidate["member_ordinal"]) != first_ordinal
+                    ):
                         continue
                     global_conflict = (
                         len(set(relations.get(market_id, ()))) > 1
@@ -6479,6 +6561,28 @@ class SQLiteStore:
                         and isinstance(candidate["group_id"], str)
                         else None
                     )
+                    if (
+                        classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3
+                        and group_evidence is None
+                        and isinstance(candidate["group_id"], str)
+                    ):
+                        cached_event_truth = group_truth_by_key.get(
+                            (str(candidate["event_id"]), str(candidate["group_id"]))
+                        )
+                        if cached_event_truth is not None:
+                            group_evidence = FreshGroupEvidence(
+                                event_id=str(candidate["event_id"]),
+                                group_id=str(candidate["group_id"]),
+                                neg_risk_type=str(cached_event_truth[0]),
+                                quality=str(cached_event_truth[1]),
+                                reason=(
+                                    None
+                                    if cached_event_truth[2] is None
+                                    else str(cached_event_truth[2])
+                                ),
+                                membership_hash=str(cached_event_truth[3]),
+                                global_relation_conflict=False,
+                            )
                     certified = (
                         envelope.event_id is not None
                         and envelope.group_id is not None
@@ -6504,6 +6608,151 @@ class SQLiteStore:
                         and type(candidate["active"]) is bool
                         and type(candidate["closed"]) is bool
                     )
+                    if classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
+                        ordinary_event = (
+                            raw_event is not None
+                            and raw_event.get("negRisk") is False
+                            and raw_event.get("enableNegRisk") is False
+                            and raw_event.get("negRiskMarketID") is None
+                        )
+                        standard_event = (
+                            raw_event is not None
+                            and raw_event.get("negRisk") is True
+                            and raw_event.get("enableNegRisk") is True
+                            and isinstance(raw_event.get("negRiskMarketID"), str)
+                            and bool(raw_event["negRiskMarketID"])
+                            and raw_event["negRiskMarketID"].strip()
+                            == raw_event["negRiskMarketID"]
+                            and raw_event.get("negRiskMarketID")
+                            == candidate["group_id"]
+                        )
+                        expected_issue = (
+                            None
+                            if raw_event is None
+                            else event_only_member_quarantine_issue(
+                                raw_event,
+                                event_source_ordinal=int(candidate["source_ordinal"]),
+                                market_id=market_id,
+                            )
+                        )
+                        exact_quarantine = (
+                            expected_issue is not None
+                            and (
+                                expected_issue["layer"],
+                                expected_issue["category"],
+                                expected_issue["market_id"],
+                                expected_issue["detail"],
+                                expected_issue["raw_payload"],
+                            )
+                            in generation_issues_by_market.get(market_id, set())
+                            and market_id not in generated_market_ids
+                            and market_id not in generated_membership_ids
+                        )
+                        approved_group = (
+                            group_evidence is not None
+                            and not group_evidence.global_relation_conflict
+                        )
+                        evidence = FreshMemberEvidence(
+                            source_present=True,
+                            current_active=envelope.active is True,
+                            current_closed=envelope.closed is True,
+                            projector_matches=False,
+                            generation_certified=True,
+                            event_only_quarantine=exact_quarantine,
+                            market_side_quarantine=False,
+                            absent_from_event_catalog=False,
+                            absent_from_market_catalog=True,
+                            identity_revalidated=sidecar_identity_valid,
+                            invalid_neg_risk_classification=not (
+                                ordinary_event or standard_event
+                            ),
+                            invalid_event_membership=(
+                                not sidecar_identity_valid and not global_conflict
+                            ),
+                            duplicate_market_identity=(
+                                duplicate_identity and not global_conflict
+                            ),
+                            uncertified_event_only_member=(
+                                standard_event
+                                and sidecar_identity_valid
+                                and not global_conflict
+                                and not duplicate_identity
+                                and approved_group
+                                and group_evidence is not None
+                                and group_evidence.neg_risk_type == "standard"
+                                and group_evidence.quality == "complete-supported"
+                                and not exact_quarantine
+                            ),
+                            group_truth=group_evidence,
+                            source_ordinal=envelope.source_ordinal,
+                            member_ordinal=envelope.member_ordinal,
+                            raw_event_hash=envelope.raw_event_hash,
+                        )
+
+                        def diagnose_event_only() -> None:
+                            diagnostics.append(
+                                diagnose_unresolved_member(
+                                    side="generation-only",
+                                    member=envelope,
+                                    evidence=evidence,
+                                    authorized_removal_reasons=(),
+                                )
+                            )
+
+                        if not (ordinary_event or standard_event):
+                            diagnose_event_only()
+                        elif ordinary_event:
+                            add_exclusion(
+                                reason="non-neg-risk-event-member",
+                                stream="event-only",
+                                envelope=envelope,
+                                truth=None,
+                            )
+                        elif not sidecar_identity_valid or global_conflict or duplicate_identity:
+                            diagnose_event_only()
+                        elif envelope.active is not True or envelope.closed is not False:
+                            add_exclusion(
+                                reason="current-nontradable-event-member",
+                                stream="event-only",
+                                envelope=envelope,
+                                truth=group_evidence,
+                            )
+                        elif (
+                            group_evidence is not None
+                            and group_evidence.neg_risk_type == "augmented"
+                            and group_evidence.quality == "complete-unsupported"
+                            and group_evidence.reason
+                            == "augmented-neg-risk-not-supported"
+                        ):
+                            add_exclusion(
+                                reason="augmented-group",
+                                stream="event-only",
+                                envelope=envelope,
+                                truth=group_evidence,
+                            )
+                        elif (
+                            group_evidence is not None
+                            and group_evidence.neg_risk_type == "standard"
+                            and group_evidence.quality == "complete-unsupported"
+                            and group_evidence.reason
+                            == "standard-neg-risk-has-non-tradable-members"
+                        ):
+                            add_exclusion(
+                                reason="fresh-group-ineligible",
+                                stream="event-only",
+                                envelope=envelope,
+                                truth=group_evidence,
+                            )
+                        elif exact_quarantine:
+                            add_exclusion(
+                                reason="event-only-quarantine",
+                                stream="event-only",
+                                envelope=envelope,
+                                truth=group_evidence,
+                            )
+                        else:
+                            diagnose_event_only()
+                        continue
                     if certified and not global_conflict and not duplicate_identity:
                         continue
                     evidence = FreshMemberEvidence(
@@ -6682,6 +6931,75 @@ class SQLiteStore:
                     if truth_identity is not None
                     else None
                 )
+                raw_source_member = (
+                    json.loads(str(source_row[7])) if source_row is not None else {}
+                )
+                diagnostic_envelope = StructureDriftCandidateEnvelope(
+                    side="generation-only",
+                    event_id=(
+                        str(source_row[0]) if source_row is not None else None
+                    ),
+                    group_id=(
+                        str(source_row[3])
+                        if source_row is not None and isinstance(source_row[3], str)
+                        else None
+                    ),
+                    market_id=market_id,
+                    member_kind=(
+                        str(source_row[4])
+                        if source_row is not None and isinstance(source_row[4], str)
+                        else None
+                    ),
+                    active=(
+                        raw_source_member.get("active")
+                        if type(raw_source_member.get("active")) is bool
+                        else None
+                    ),
+                    closed=(
+                        raw_source_member.get("closed")
+                        if type(raw_source_member.get("closed")) is bool
+                        else None
+                    ),
+                    condition_id=condition_id,
+                    yes_token_id=yes_token_id,
+                    no_token_id=no_token_id,
+                    neg_risk=(
+                        row.get("neg_risk")
+                        if row is not None and type(row.get("neg_risk")) is bool
+                        else None
+                    ),
+                    incomplete=(
+                        row.get("incomplete")
+                        if row is not None and type(row.get("incomplete")) is bool
+                        else None
+                    ),
+                    source_ordinal=None,
+                    member_ordinal=None,
+                    raw_event_hash=(
+                        str(source_row[9]) if source_row is not None else None
+                    ),
+                    raw_market_hash=hashlib.sha256(
+                        json.dumps(
+                            raw_market,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest(),
+                )
+                expected_market_issue = market_quarantine_issue(
+                    market_id, raw_market, event_ids
+                )
+                exact_market_quarantine = (
+                    expected_market_issue is not None
+                    and (
+                        expected_market_issue["layer"],
+                        expected_market_issue["category"],
+                        expected_market_issue["market_id"],
+                        expected_market_issue["detail"],
+                        expected_market_issue["raw_payload"],
+                    )
+                    in generation_issues_by_market.get(market_id, set())
+                )
                 evidence = FreshMemberEvidence(
                     source_present=True,
                     current_active=raw_market.get("active") is True,
@@ -6690,8 +7008,9 @@ class SQLiteStore:
                     generation_certified=True,
                     event_only_quarantine=False,
                     market_side_quarantine=(
-                        market_quarantine_issue(market_id, raw_market, event_ids)
-                        is not None
+                        exact_market_quarantine
+                        if classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3
+                        else expected_market_issue is not None
                     ),
                     absent_from_event_catalog=not event_ids,
                     absent_from_market_catalog=False,
@@ -6710,7 +7029,89 @@ class SQLiteStore:
                     invalid_event_membership=(
                         not source_identity_valid and not conflict
                     ),
+                    invalid_neg_risk_classification=(
+                        classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3
+                        and type(raw_market.get("negRisk")) is not bool
+                    ),
                 )
+                if classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
+                    if type(raw_market.get("negRisk")) is not bool:
+                        diagnostics.append(
+                            diagnose_unresolved_member(
+                                side="generation-only",
+                                member=diagnostic_envelope,
+                                evidence=evidence,
+                                authorized_removal_reasons=(),
+                            )
+                        )
+                    elif raw_market.get("negRisk") is False:
+                        add_exclusion(
+                            reason="non-neg-risk-market",
+                            stream="market",
+                            envelope=diagnostic_envelope,
+                            truth=None,
+                        )
+                    elif exact_market_quarantine:
+                        add_exclusion(
+                            reason="market-side-quarantine",
+                            stream="market",
+                            envelope=diagnostic_envelope,
+                            truth=None,
+                        )
+                    elif (
+                        member is None
+                        or group_evidence is None
+                        or group_evidence.global_relation_conflict
+                        or evidence.duplicate_market_identity
+                    ):
+                        diagnostics.append(
+                            diagnose_unresolved_member(
+                                side="generation-only",
+                                member=diagnostic_envelope,
+                                evidence=evidence,
+                                authorized_removal_reasons=(),
+                            )
+                        )
+                    elif (
+                        group_evidence.neg_risk_type == "augmented"
+                        and group_evidence.quality == "complete-unsupported"
+                        and group_evidence.reason == "augmented-neg-risk-not-supported"
+                    ):
+                        add_exclusion(
+                            reason="augmented-group",
+                            stream="market",
+                            envelope=diagnostic_envelope,
+                            truth=group_evidence,
+                        )
+                    elif (
+                        group_evidence.neg_risk_type == "standard"
+                        and group_evidence.quality == "complete-unsupported"
+                        and group_evidence.reason
+                        == "standard-neg-risk-has-non-tradable-members"
+                    ):
+                        add_exclusion(
+                            reason="fresh-group-ineligible",
+                            stream="market",
+                            envelope=diagnostic_envelope,
+                            truth=group_evidence,
+                        )
+                    elif (
+                        group_evidence.neg_risk_type == "standard"
+                        and group_evidence.quality == "complete-supported"
+                        and evidence.current_active
+                        and not evidence.current_closed
+                    ):
+                        members.append(member)
+                    else:
+                        diagnostics.append(
+                            diagnose_unresolved_member(
+                                side="generation-only",
+                                member=diagnostic_envelope,
+                                evidence=evidence,
+                                authorized_removal_reasons=(),
+                            )
+                        )
+                    continue
                 eligible = (
                     member is not None
                     and group_evidence is not None
@@ -6724,65 +7125,7 @@ class SQLiteStore:
                 if eligible:
                     members.append(member)
                 else:
-                    raw_source_member = (
-                        json.loads(str(source_row[7])) if source_row is not None else {}
-                    )
-                    diagnostic_member = member or StructureDriftCandidateEnvelope(
-                        side="generation-only",
-                        event_id=(
-                            str(source_row[0])
-                            if source_row is not None
-                            else None
-                        ),
-                        group_id=(
-                            str(source_row[3])
-                            if source_row is not None and isinstance(source_row[3], str)
-                            else None
-                        ),
-                        market_id=market_id,
-                        member_kind=(
-                            str(source_row[4])
-                            if source_row is not None and isinstance(source_row[4], str)
-                            else None
-                        ),
-                        active=(
-                            raw_source_member.get("active")
-                            if type(raw_source_member.get("active")) is bool
-                            else None
-                        ),
-                        closed=(
-                            raw_source_member.get("closed")
-                            if type(raw_source_member.get("closed")) is bool
-                            else None
-                        ),
-                        condition_id=condition_id,
-                        yes_token_id=yes_token_id,
-                        no_token_id=no_token_id,
-                        neg_risk=(
-                            row.get("neg_risk")
-                            if row is not None
-                            and type(row.get("neg_risk")) is bool
-                            else None
-                        ),
-                        incomplete=(
-                            row.get("incomplete")
-                            if row is not None
-                            and type(row.get("incomplete")) is bool
-                            else None
-                        ),
-                        source_ordinal=None,
-                        member_ordinal=None,
-                        raw_event_hash=(
-                            str(source_row[9]) if source_row is not None else None
-                        ),
-                        raw_market_hash=hashlib.sha256(
-                            json.dumps(
-                                raw_market,
-                                sort_keys=True,
-                                separators=(",", ":"),
-                            ).encode()
-                        ).hexdigest(),
-                    )
+                    diagnostic_member = member or diagnostic_envelope
                     diagnostics.append(
                         diagnose_unresolved_member(
                             side="generation-only",
@@ -6818,6 +7161,7 @@ class SQLiteStore:
                 members=tuple(members),
                 diagnostics=tuple(diagnostics),
                 candidates_processed=len(candidates),
+                exclusions=tuple(exclusions),
             )
 
     def advance_structure_drift_fresh_projection_commitment(
