@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,8 +19,10 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V2,
     STRUCTURE_DRIFT_CLASSIFIER_V3,
     STRUCTURE_EVENT_SOURCE_CONTRACT,
+    STRUCTURE_PROJECTION_EXCLUSION_REASONS,
 )
 from polyarb.perception.structure_drift import (
+    FreshProjectionChunk,
     FreshProjectionCommitment,
     _member_tuple,
     project_legacy_compatible_event,
@@ -170,42 +173,20 @@ def test_terminal_receipt_schema_rejects_update_and_delete(tmp_path: Path) -> No
     store = _drift_store(tmp_path)
     comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
     with sqlite3.connect(store.db_path) as con:
-        row = con.execute(
-            "SELECT hash_algorithm,classifier_contract_version,legacy_snapshot_id,"
-            "generation_snapshot_id,publication_id,window_id,"
-            "normalization_contract_version,exact_receipt_digest,"
-            "pointer_validation_hash,generation_certification_hash,"
-            "(SELECT receipt_digest FROM structure_sync_event_member_receipts member "
-            "WHERE member.window_id=structure_generation_drift_progress.window_id) FROM "
-            "structure_generation_drift_progress WHERE comparison_id=?",
-            (comparison_id,),
-        ).fetchone()
-        values: tuple[object, ...] = (
-            comparison_id,
-            *row[:10],
-            "a" * 64,
-            row[10],
-            "drift-unclassified",
-            "{}",
-            "{}",
-            "{}",
-            "b" * 64,
-            "{}",
-            hashlib.sha256(b"{}").hexdigest(),
-            3_001,
-            3_002,
+        payload = _terminal_receipt_payload(con, comparison_id)
+        terminal_fields = sqlite_store_module._structure_drift_terminal_receipt_fields(
+            STRUCTURE_DRIFT_CLASSIFIER_V3
         )
-        payload = dict(zip(_TERMINAL_RECEIPT_FIELDS, values, strict=True))
         receipt_digest = sqlite_store_module._structure_drift_terminal_receipt_digest(
             payload
         )
         con.execute(
             "INSERT INTO structure_generation_drift_terminal_receipts("
-            + ",".join(_TERMINAL_RECEIPT_FIELDS)
+            + ",".join(terminal_fields)
             + ",receipt_digest) VALUES ("
-            + ",".join("?" for _ in range(len(values) + 1))
+            + ",".join("?" for _ in range(len(payload) + 1))
             + ")",
-            (*values, receipt_digest),
+            (*(payload[field] for field in terminal_fields), receipt_digest),
         )
         sealed_row = con.execute(
             "SELECT * FROM structure_generation_drift_terminal_receipts "
@@ -214,21 +195,24 @@ def test_terminal_receipt_schema_rejects_update_and_delete(tmp_path: Path) -> No
         ).fetchone()
         for statement in (
             "INSERT INTO structure_generation_drift_terminal_receipts("
-            + ",".join(_TERMINAL_RECEIPT_FIELDS)
+            + ",".join(terminal_fields)
             + ",receipt_digest) VALUES ("
-            + ",".join("?" for _ in range(len(values) + 1))
+            + ",".join("?" for _ in range(len(payload) + 1))
             + ")",
             "INSERT OR REPLACE INTO structure_generation_drift_terminal_receipts("
-            + ",".join(_TERMINAL_RECEIPT_FIELDS)
+            + ",".join(terminal_fields)
             + ",receipt_digest) VALUES ("
-            + ",".join("?" for _ in range(len(values) + 1))
+            + ",".join("?" for _ in range(len(payload) + 1))
             + ")",
         ):
             with pytest.raises(
                 sqlite3.IntegrityError,
                 match="structure-drift-terminal-receipt-sealed",
             ):
-                con.execute(statement, (*values, "f" * 64))
+                con.execute(
+                    statement,
+                    (*(payload[field] for field in terminal_fields), "f" * 64),
+                )
         assert con.execute(
             "SELECT * FROM structure_generation_drift_terminal_receipts "
             "WHERE comparison_id=?",
@@ -264,7 +248,9 @@ def _terminal_receipt_payload(
         "normalization_contract_version,exact_receipt_digest,"
         "pointer_validation_hash,generation_certification_hash,"
         "(SELECT receipt_digest FROM structure_sync_event_member_receipts member "
-        "WHERE member.window_id=structure_generation_drift_progress.window_id) FROM "
+        "WHERE member.window_id=structure_generation_drift_progress.window_id),"
+        "projection_candidate_count,projection_exclusion_count,"
+        "projection_exclusion_counts_json,projection_exclusion_roots_json FROM "
         "structure_generation_drift_progress WHERE comparison_id=?",
         (comparison_id,),
     ).fetchone()
@@ -286,7 +272,17 @@ def _terminal_receipt_payload(
         3_001,
         3_002,
     )
-    return dict(zip(_TERMINAL_RECEIPT_FIELDS, values, strict=True))
+    payload = dict(zip(_TERMINAL_RECEIPT_FIELDS, values, strict=True))
+    if row[1] == STRUCTURE_DRIFT_CLASSIFIER_V3:
+        payload.update(
+            {
+                "projection_candidate_count": row[11],
+                "projection_exclusion_count": row[12],
+                "projection_exclusion_counts_json": row[13],
+                "projection_exclusion_roots_json": row[14],
+            }
+        )
+    return payload
 
 
 def _insert_terminal_receipt(
@@ -296,20 +292,28 @@ def _insert_terminal_receipt(
     receipt_digest = sqlite_store_module._structure_drift_terminal_receipt_digest(
         payload
     )
+    fields = sqlite_store_module._structure_drift_terminal_receipt_fields(
+        str(payload["classifier_contract_version"])
+    )
     con.execute(
         "INSERT INTO structure_generation_drift_terminal_receipts("
-        + ",".join(_TERMINAL_RECEIPT_FIELDS)
+        + ",".join(fields)
         + ",receipt_digest) VALUES ("
         + ",".join("?" for _ in range(len(payload) + 1))
         + ")",
-        (*(payload[field] for field in _TERMINAL_RECEIPT_FIELDS), receipt_digest),
+        (*(payload[field] for field in fields), receipt_digest),
     )
     return receipt_digest
 
 
 @pytest.mark.parametrize(
     "tamper_field",
-    (*_TERMINAL_RECEIPT_FIELDS, "receipt_digest", "missing"),
+    (
+        *_TERMINAL_RECEIPT_FIELDS,
+        *_V3_RECEIPT_EXCLUSION_FIELDS,
+        "receipt_digest",
+        "missing",
+    ),
 )
 def test_terminal_receipt_status_tamper_fails_closed(
     tmp_path: Path,
@@ -863,6 +867,28 @@ def _drift_store(
                 + ")",
                 tuple(projection.row.values()),
             )
+        generation_issues = [
+            issue for projection in event_projections for issue in projection.issues
+        ] + [
+            projection.issue
+            for projection in market_projections.values()
+            if projection.issue is not None
+        ]
+        con.executemany(
+            "INSERT INTO structure_generation_issues(snapshot_id,issue_index,layer,"
+            "category,market_id,detail,raw_payload) VALUES (2,?,?,?,?,?,?)",
+            (
+                (
+                    issue_index,
+                    int(issue["layer"]),
+                    str(issue["category"]),
+                    issue.get("market_id"),
+                    issue.get("detail"),
+                    issue.get("raw_payload"),
+                )
+                for issue_index, issue in enumerate(generation_issues)
+            ),
+        )
         con.execute(
             "INSERT INTO structure_sync_windows(id,status,started_at_ms,checkpoint_at_ms,"
             "published_snapshot_id) VALUES ('window-2','open',2000,2001,NULL)"
@@ -1017,6 +1043,7 @@ def _reshape_as_production_845_848(store: SQLiteStore) -> None:
             "structure_generation_memberships",
             "structure_generation_group_truth",
             "structure_generation_markets",
+            "structure_generation_issues",
         ):
             con.execute(f"UPDATE {table} SET snapshot_id=848 WHERE snapshot_id=2")
         con.execute(
@@ -1579,6 +1606,27 @@ def _pre_v3_receipt_store(
 ) -> tuple[SQLiteStore, tuple[object, ...], tuple[object, ...]]:
     store = _drift_store(tmp_path)
     comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    with sqlite3.connect(store.db_path) as con:
+        progress = con.execute(
+            "SELECT generation_snapshot_id,publication_id,window_id,"
+            "normalization_contract_version,exact_receipt_digest,"
+            "pointer_validation_hash,generation_certification_hash,"
+            "source_event_count,source_market_count FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        legacy_identity = store._comparison_legacy_identity(con)
+        assert progress is not None and legacy_identity is not None
+        v2_id = sqlite_store_module._structure_drift_comparison_id(
+            (*legacy_identity, *progress, sqlite_store_module.ROW_CHAIN_SHA256_V2),
+            classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+        )
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET comparison_id=?,"
+            "classifier_contract_version=? WHERE comparison_id=?",
+            (v2_id, STRUCTURE_DRIFT_CLASSIFIER_V2, comparison_id),
+        )
+    comparison_id = v2_id
     _install_sealed_drift_authority(store, comparison_id)
     with sqlite3.connect(store.db_path) as con:
         payload = _terminal_receipt_payload(con, comparison_id)
@@ -1688,6 +1736,26 @@ def test_v3_migration_preserves_v2_receipt_bytes_and_adds_nullable_fields(
         ):
             with pytest.raises(sqlite3.IntegrityError, match="receipt-sealed"):
                 con.execute(statement, (comparison_id,))
+
+
+def test_terminal_v2_identity_starts_v3_without_mutating_v2(
+    tmp_path: Path,
+) -> None:
+    store, _, terminal_before = _pre_v3_receipt_store(tmp_path)
+    v2_id = str(terminal_before[0])
+    store.init_schema()
+
+    v3_id = store.initialize_structure_drift_comparison(now_ms=4_000)
+
+    assert v3_id != v2_id
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT classifier_contract_version FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (v3_id,),
+        ).fetchone() == (STRUCTURE_DRIFT_CLASSIFIER_V3,)
+        assert _terminal_bytes(con, v2_id) == terminal_before
+    assert store.initialize_structure_drift_comparison(now_ms=4_001) == v3_id
 
 
 def test_v3_migration_lightweight_structure_sync_schema_converges(
@@ -1947,7 +2015,7 @@ def test_classifier_migration_rollback_restores_authority_and_business_rows(
     store.init_schema()
 
 
-def test_migrated_active_classifier_v1_is_superseded_before_v2_initialization(
+def test_migrated_active_classifier_v1_is_superseded_before_v3_initialization(
     tmp_path: Path,
 ) -> None:
     store = _drift_store(tmp_path)
@@ -1963,9 +2031,9 @@ def test_migrated_active_classifier_v1_is_superseded_before_v2_initialization(
             (legacy_comparison_id, STRUCTURE_DRIFT_CLASSIFIER_V1),
         )
 
-    v2_comparison_id = store.initialize_structure_drift_comparison(now_ms=3_001)
+    v3_comparison_id = store.initialize_structure_drift_comparison(now_ms=3_001)
 
-    assert v2_comparison_id != legacy_comparison_id
+    assert v3_comparison_id != legacy_comparison_id
     with sqlite3.connect(store.db_path) as con:
         rows = con.execute(
             "SELECT comparison_id,classifier_contract_version,phase,terminal_reason "
@@ -1980,8 +2048,8 @@ def test_migrated_active_classifier_v1_is_superseded_before_v2_initialization(
             "drift-classifier-contract-superseded",
         ),
         (
-            v2_comparison_id,
-            STRUCTURE_DRIFT_CLASSIFIER_V2,
+            v3_comparison_id,
+            STRUCTURE_DRIFT_CLASSIFIER_V3,
             "source-events",
             None,
         ),
@@ -2205,7 +2273,7 @@ def test_v2_insert_failure_rolls_back_v1_supersession(tmp_path: Path) -> None:
         ]
 
 
-def test_current_stale_v1_initializes_and_advances_v2_without_mutating_v1(
+def test_current_stale_v1_initializes_and_advances_v3_without_mutating_v1(
     tmp_path: Path,
 ) -> None:
     store = _drift_store(tmp_path)
@@ -2232,18 +2300,18 @@ def test_current_stale_v1_initializes_and_advances_v2_without_mutating_v1(
             "SELECT * FROM structure_generation_drift_progress WHERE comparison_id=?",
             (v1_comparison_id,),
         ).fetchone()
-        v2_rows = con.execute(
+        v3_rows = con.execute(
             "SELECT comparison_id,phase FROM structure_generation_drift_progress "
             "WHERE classifier_contract_version=?",
-            (STRUCTURE_DRIFT_CLASSIFIER_V2,),
+            (STRUCTURE_DRIFT_CLASSIFIER_V3,),
         ).fetchall()
     assert v1_after == v1_before
-    assert len(v2_rows) == 1
-    assert v2_rows[0][1] in {"source-events", "source-markets"}
+    assert len(v3_rows) == 1
+    assert v3_rows[0][1] in {"source-events", "source-markets"}
 
 
 @pytest.mark.asyncio
-async def test_concurrent_scheduler_ticks_start_one_real_v2_child(
+async def test_concurrent_scheduler_ticks_start_one_real_v3_child(
     tmp_path: Path,
 ) -> None:
     from polyarb.daemon.scheduler import SnapshotScheduler
@@ -2275,7 +2343,7 @@ async def test_concurrent_scheduler_ticks_start_one_real_v2_child(
         progress = con.execute(
             "SELECT comparison_id FROM structure_generation_drift_progress WHERE "
             "classifier_contract_version=?",
-            (STRUCTURE_DRIFT_CLASSIFIER_V2,),
+            (STRUCTURE_DRIFT_CLASSIFIER_V3,),
         ).fetchall()
         assert len(progress) == 1
         assert con.execute(
@@ -2319,7 +2387,7 @@ async def test_same_contract_stale_does_not_spawn_real_scheduler_retry(
         assert con.execute(
             "SELECT COUNT(*) FROM structure_generation_drift_progress WHERE "
             "classifier_contract_version=?",
-            (STRUCTURE_DRIFT_CLASSIFIER_V2,),
+            (STRUCTURE_DRIFT_CLASSIFIER_V3,),
         ).fetchone() == (1,)
         assert con.execute(
             "SELECT COUNT(*) FROM structure_drift_attempts"
@@ -2327,7 +2395,7 @@ async def test_same_contract_stale_does_not_spawn_real_scheduler_retry(
 
 
 @pytest.mark.asyncio
-async def test_scheduler_v2_initialization_fault_rolls_back_before_child_attempt(
+async def test_scheduler_v3_initialization_fault_rolls_back_before_child_attempt(
     tmp_path: Path,
 ) -> None:
     from polyarb.daemon.scheduler import SnapshotScheduler
@@ -2342,10 +2410,10 @@ async def test_scheduler_v2_initialization_fault_rolls_back_before_child_attempt
             (v1_comparison_id, STRUCTURE_DRIFT_CLASSIFIER_V1, original_id),
         )
         con.execute(
-            "CREATE TRIGGER reject_scheduler_v2_progress BEFORE INSERT ON "
+            "CREATE TRIGGER reject_scheduler_v3_progress BEFORE INSERT ON "
             "structure_generation_drift_progress WHEN "
-            "NEW.classifier_contract_version='structure-drift-classifier-v2' "
-            "BEGIN SELECT RAISE(ABORT,'injected-scheduler-v2-failure'); END"
+            "NEW.classifier_contract_version='structure-drift-classifier-v3' "
+            "BEGIN SELECT RAISE(ABORT,'injected-scheduler-v3-failure'); END"
         )
         v1_before = con.execute(
             "SELECT * FROM structure_generation_drift_progress WHERE comparison_id=?",
@@ -2374,7 +2442,7 @@ async def test_scheduler_v2_initialization_fault_rolls_back_before_child_attempt
         assert con.execute(
             "SELECT COUNT(*) FROM structure_generation_drift_progress WHERE "
             "classifier_contract_version=?",
-            (STRUCTURE_DRIFT_CLASSIFIER_V2,),
+            (STRUCTURE_DRIFT_CLASSIFIER_V3,),
         ).fetchone() == (0,)
         assert con.execute(
             "SELECT COUNT(*) FROM structure_drift_attempts"
@@ -2502,15 +2570,20 @@ def test_fresh_projection_phase_migration_rolls_back_and_preserves_audit_rows(
 
 
 def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> None:
-    digest_fields = _DRIFT_RECEIPT_V2_DIGEST_FIELDS
     with sqlite3.connect(store.db_path) as con:
         progress = con.execute(
             "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,"
             "window_id,normalization_contract_version,exact_receipt_digest,"
-            "pointer_validation_hash,generation_certification_hash FROM "
+            "pointer_validation_hash,generation_certification_hash,"
+            "classifier_contract_version,projection_candidate_count,"
+            "projection_exclusion_count,projection_exclusion_counts_json,"
+            "projection_exclusion_roots_json FROM "
             "structure_generation_drift_progress WHERE comparison_id=?",
             (comparison_id,),
         ).fetchone()
+        digest_fields = sqlite_store_module._structure_drift_receipt_fields(
+            str(progress[8])
+        )
         exact = con.execute(
             "SELECT snapshot.taken_at_ms,snapshot.finished_at_ms,"
             "receipt.legacy_market_count,receipt.legacy_universe_hash,"
@@ -2545,7 +2618,7 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
         payload: dict[str, object] = {
             "comparison_id": comparison_id,
             "hash_algorithm": "row-chain-sha256-v2",
-            "classifier_contract_version": STRUCTURE_DRIFT_CLASSIFIER_V2,
+            "classifier_contract_version": str(progress[8]),
             "legacy_snapshot_id": int(progress[0]),
             "legacy_taken_at_ms": int(exact[0]),
             "legacy_finished_at_ms": int(exact[1]),
@@ -2588,11 +2661,12 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
             "generation_reconstruction_root": "9" * 64,
             "overlap_conflict_count": 0,
             "unclassified_count": 0,
+            "projection_candidate_count": int(progress[9]),
+            "projection_exclusion_count": int(progress[10]),
+            "projection_exclusion_counts_json": str(progress[11]),
+            "projection_exclusion_roots_json": str(progress[12]),
             "created_at_ms": 3_001,
         }
-        assert tuple(
-            sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
-        ) == digest_fields
         receipt_digest = hashlib.sha256(
             json.dumps(
                 tuple(payload[field] for field in digest_fields),
@@ -2663,8 +2737,15 @@ def _rewrite_drift_receipt(
     comparison_id: str,
     **changes: object,
 ) -> None:
-    digest_fields = _DRIFT_RECEIPT_V2_DIGEST_FIELDS
     with sqlite3.connect(store.db_path) as con:
+        contract = con.execute(
+            "SELECT classifier_contract_version FROM "
+            "structure_generation_drift_receipts WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()[0]
+        digest_fields = sqlite_store_module._structure_drift_receipt_fields(
+            str(contract)
+        )
         con.execute("DROP TRIGGER trg_structure_drift_receipt_update")
         row = con.execute(
             "SELECT " + ",".join(digest_fields) + " FROM "
@@ -3040,18 +3121,21 @@ def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
         "sealed",
     } <= observed_phases
     with sqlite3.connect(store.db_path) as con:
+        receipt_fields = sqlite_store_module._structure_drift_receipt_fields(
+            STRUCTURE_DRIFT_CLASSIFIER_V3
+        )
         row = con.execute(
             "SELECT "
-            + ",".join(sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS)
+            + ",".join(receipt_fields)
             + ",receipt_digest,class_counts_json FROM "
             "structure_generation_drift_receipts WHERE comparison_id=?",
             (comparison_id,),
         ).fetchone()
     assert row is not None
-    field_count = len(sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS)
+    field_count = len(receipt_fields)
     payload = dict(
         zip(
-            sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS,
+            receipt_fields,
             row[:field_count],
             strict=True,
         )
@@ -3117,7 +3201,9 @@ def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
     assert tampered_status["reason"] == "structure-drift-receipt-invalid"
 
 
-def test_v2_drift_commitments_are_chunk_partition_independent(tmp_path: Path) -> None:
+def test_v3_checkpoint_commitments_are_chunk_partition_independent(
+    tmp_path: Path,
+) -> None:
     commitment_fields = (
         "source_event_hash",
         "source_market_hash",
@@ -3138,6 +3224,10 @@ def test_v2_drift_commitments_are_chunk_partition_independent(tmp_path: Path) ->
         "diagnostic_root",
         "diagnostic_samples_json",
         "diagnostic_samples_digest",
+        "projection_candidate_count",
+        "projection_exclusion_count",
+        "projection_exclusion_counts_json",
+        "projection_exclusion_roots_json",
         "receipt_digest",
     )
     observed: list[tuple[object, ...]] = []
@@ -3178,6 +3268,82 @@ def test_v2_drift_commitments_are_chunk_partition_independent(tmp_path: Path) ->
     assert observed[0] == observed[1] == observed[2]
 
 
+def test_v3_checkpoint_conserves_one_member_and_every_exclusion_reason(
+    tmp_path: Path,
+) -> None:
+    observed: list[tuple[object, ...]] = []
+    base = _drift_store(tmp_path / "mixed-source")
+    expected_counts = {reason: 1 for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS}
+    for max_rows in (1, 17, 500):
+        clone_path = tmp_path / f"mixed-{max_rows}" / "drift-e2e.db"
+        clone_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(base.db_path) as source, sqlite3.connect(
+            clone_path
+        ) as destination:
+            source.backup(destination)
+        store = SQLiteStore(clone_path)
+        comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+        now_ms = 3_001
+        while True:
+            with sqlite3.connect(store.db_path) as con:
+                phase = con.execute(
+                    "SELECT phase FROM structure_generation_drift_progress "
+                    "WHERE comparison_id=?",
+                    (comparison_id,),
+                ).fetchone()[0]
+            if phase == "fresh-projection-members":
+                break
+            store.advance_structure_drift_comparison_chunk(
+                comparison_id, max_rows=max_rows, now_ms=now_ms
+            )
+            now_ms += 1
+        real_chunk = store._fetch_structure_drift_fresh_projection_chunk(
+            publication_id="publication-2",
+            generation_snapshot_id=2,
+            cursor=None,
+            limit=500,
+            classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
+        )
+        member = real_chunk.members[0]
+        template = real_chunk.exclusions[0]
+        mixed_chunk = FreshProjectionChunk(
+            cursor=None,
+            members=(member,),
+            diagnostics=(),
+            candidates_processed=8,
+            exclusions=tuple(
+                replace(template, reason=reason)
+                for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+            ),
+        )
+
+        def fetch_mixed(**_kwargs: object) -> FreshProjectionChunk:
+            return mixed_chunk
+
+        store._fetch_structure_drift_fresh_projection_chunk = fetch_mixed  # type: ignore[method-assign]
+        store.advance_structure_drift_comparison_chunk(
+            comparison_id, max_rows=max_rows, now_ms=now_ms
+        )
+        status = store.structure_generation_drift_status()
+        assert status["projection_candidate_count"] == 8
+        assert status["projection_member_count"] == 1
+        assert status["projection_exclusion_count"] == 7
+        assert status["projection_diagnostic_count"] == 0
+        assert status["projection_exclusion_counts"] == expected_counts
+        observed.append(
+            (
+                status["projection_candidate_count"],
+                status["projection_member_count"],
+                status["projection_exclusion_count"],
+                status["projection_diagnostic_count"],
+                status["projection_exclusion_counts_json"],
+                status["projection_exclusion_roots_json"],
+            )
+        )
+
+    assert observed[0] == observed[1] == observed[2]
+
+
 def _run_drift_to_terminal(
     store: SQLiteStore, comparison_id: str, *, start_ms: int = 3_001
 ) -> str:
@@ -3188,6 +3354,99 @@ def _run_drift_to_terminal(
         if chunk.component in {"sealed", "stale"}:
             return chunk.component
     pytest.fail("drift comparison did not terminate")
+
+
+def _advance_to_v3_finalization_checkpoint(
+    store: SQLiteStore, comparison_id: str
+) -> int:
+    now_ms = 3_001
+    while True:
+        with sqlite3.connect(store.db_path) as con:
+            phase = con.execute(
+                "SELECT phase FROM structure_generation_drift_progress "
+                "WHERE comparison_id=?",
+                (comparison_id,),
+            ).fetchone()[0]
+        if phase == "fresh-group-truth":
+            break
+        store.advance_structure_drift_comparison_chunk(
+            comparison_id, max_rows=500, now_ms=now_ms
+        )
+        now_ms += 1
+    chunk = store.advance_structure_drift_comparison_chunk(
+        comparison_id, max_rows=500, now_ms=now_ms
+    )
+    assert chunk.component == "fresh-group-truth"
+    return now_ms + 1
+
+
+@pytest.mark.parametrize(
+    ("tamper", "reason"),
+    (
+        (
+            "candidate-conservation",
+            "structure-drift-candidate-conservation-invalid",
+        ),
+        ("candidate-source-count", "structure-drift-candidate-source-count-invalid"),
+        ("exclusion-root", "structure-drift-exclusion-commitment-invalid"),
+    ),
+)
+def test_v3_candidate_conservation_finalizer_rejects_independent_tamper(
+    tmp_path: Path,
+    tamper: str,
+    reason: str,
+) -> None:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    now_ms = _advance_to_v3_finalization_checkpoint(store, comparison_id)
+    with sqlite3.connect(store.db_path) as con:
+        if tamper == "candidate-conservation":
+            con.execute(
+                "UPDATE structure_generation_drift_progress SET "
+                "projection_candidate_count=projection_candidate_count+1 "
+                "WHERE comparison_id=?",
+                (comparison_id,),
+            )
+        elif tamper == "candidate-source-count":
+            counts = json.loads(
+                con.execute(
+                    "SELECT class_counts_json FROM "
+                    "structure_generation_drift_progress WHERE comparison_id=?",
+                    (comparison_id,),
+                ).fetchone()[0]
+            )
+            counts["projection_member_count"] -= 1
+            con.execute(
+                "UPDATE structure_generation_drift_progress SET "
+                "projection_candidate_count=projection_candidate_count-1,"
+                "class_counts_json=? WHERE comparison_id=?",
+                (
+                    json.dumps(counts, sort_keys=True, separators=(",", ":")),
+                    comparison_id,
+                ),
+            )
+        else:
+            roots = json.loads(
+                con.execute(
+                    "SELECT projection_exclusion_roots_json FROM "
+                    "structure_generation_drift_progress WHERE comparison_id=?",
+                    (comparison_id,),
+                ).fetchone()[0]
+            )
+            roots["non-neg-risk-market"] = "f" * 64
+            con.execute(
+                "UPDATE structure_generation_drift_progress SET "
+                "projection_exclusion_roots_json=? WHERE comparison_id=?",
+                (
+                    json.dumps(roots, sort_keys=True, separators=(",", ":")),
+                    comparison_id,
+                ),
+            )
+
+    with pytest.raises(ValueError, match=reason):
+        store.advance_structure_drift_comparison_chunk(
+            comparison_id, max_rows=500, now_ms=now_ms
+        )
 
 
 def test_stale_overlap_finalization_atomically_seals_terminal_receipt(

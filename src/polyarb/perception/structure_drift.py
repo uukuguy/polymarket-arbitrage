@@ -1093,9 +1093,13 @@ def classify_structure_member_drift(
     if classifier_contract not in {
         STRUCTURE_DRIFT_CLASSIFIER_V1,
         STRUCTURE_DRIFT_CLASSIFIER_V2,
+        STRUCTURE_DRIFT_CLASSIFIER_V3,
     }:
         raise ValueError("invalid-structure-drift-classifier-contract")
-    classifier_v2 = classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V2
+    strict_classifier = classifier_contract in {
+        STRUCTURE_DRIFT_CLASSIFIER_V2,
+        STRUCTURE_DRIFT_CLASSIFIER_V3,
+    }
     duplicate_ids = {
         market_id
         for counts in (
@@ -1116,7 +1120,7 @@ def classify_structure_member_drift(
         generation_by_id.get(market_id) or legacy_by_id[market_id]
         for market_id in sorted(duplicate_ids)
     ]
-    if classifier_v2:
+    if strict_classifier:
         for member in unclassified:
             member_evidence = _duplicate_identity_evidence(
                 member,
@@ -1143,7 +1147,7 @@ def classify_structure_member_drift(
                 shared.append(generation_member)
             else:
                 conflicts.append(generation_member)
-                if classifier_v2:
+                if strict_classifier:
                     member_evidence = _duplicate_identity_evidence(
                         generation_member,
                         evidence.get(market_id),
@@ -1166,7 +1170,7 @@ def classify_structure_member_drift(
                     evidence=member_evidence,
                     authorized_removal_reasons=(),
                 )
-                if classifier_v2
+                if strict_classifier
                 else None
             )
             if blocker is not None:
@@ -1176,12 +1180,12 @@ def classify_structure_member_drift(
             if member_evidence is not None and _is_fresh_addition(
                 generation_member,
                 member_evidence,
-                classifier_v2=classifier_v2,
+                classifier_v2=strict_classifier,
             ):
                 additions.append(generation_member)
             else:
                 unclassified.append(generation_member)
-                if classifier_v2:
+                if strict_classifier:
                     diagnostics.append(
                         diagnose_unresolved_member(
                             side="generation-only",
@@ -1194,7 +1198,7 @@ def classify_structure_member_drift(
         assert legacy_member is not None
         reasons = () if member_evidence is None else _legacy_removal_reasons(member_evidence)
         if (
-            classifier_v2
+            strict_classifier
             and member_evidence is not None
             and _is_fresh_group_ineligible(legacy_member, member_evidence)
         ):
@@ -1206,7 +1210,7 @@ def classify_structure_member_drift(
                 evidence=member_evidence,
                 authorized_removal_reasons=reasons,
             )
-            if classifier_v2
+            if strict_classifier
             else None
         )
         if blocker is not None:
@@ -1217,7 +1221,7 @@ def classify_structure_member_drift(
             removals.setdefault(reasons[0], []).append(legacy_member)
         else:
             unclassified.append(legacy_member)
-            if classifier_v2:
+            if strict_classifier:
                 diagnostics.append(
                     diagnose_unresolved_member(
                         side="legacy-only",

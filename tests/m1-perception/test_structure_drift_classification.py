@@ -10,6 +10,7 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASS_TAGS_V2,
     STRUCTURE_DRIFT_CLASSIFIER_V1,
     STRUCTURE_DRIFT_CLASSIFIER_V2,
+    STRUCTURE_DRIFT_CLASSIFIER_V3,
     STRUCTURE_DRIFT_DIAGNOSTIC_CODES,
 )
 from polyarb.perception.structure_drift import (
@@ -212,6 +213,36 @@ def test_group_ineligible_active_sibling_remains_unclassified_by_default_v1() ->
     assert result.legacy_removal_counts == {}
     assert result.unclassified == (member,)
     assert result.diagnostics == ()
+
+
+def test_classifier_v3_uses_exact_v2_strict_member_semantics() -> None:
+    shared = _member("shared")
+    addition = _member("addition")
+    removal = _member("removal")
+    legacy_conflict = _member("conflict")
+    generation_conflict = replace(legacy_conflict, yes_token_id="changed")
+    kwargs = {
+        "legacy": (shared, removal, legacy_conflict),
+        "generation": (shared, addition, generation_conflict),
+        "evidence": {
+            "addition": _v2_evidence(addition),
+            "removal": replace(_v2_evidence(removal), current_active=False),
+            "conflict": _v2_evidence(generation_conflict),
+        },
+    }
+    v2 = classify_structure_member_drift(
+        **kwargs, classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V2
+    )
+    v3 = classify_structure_member_drift(
+        **kwargs, classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3
+    )
+
+    assert v3 == v2
+    assert v3.shared == (shared,)
+    assert v3.fresh_additions == (addition,)
+    assert v3.legacy_removal_counts == {"current-nontradable": 1}
+    assert v3.overlap_conflicts == (generation_conflict,)
+    assert v3.diagnostics
 
 
 def test_global_conflict_precedes_local_group_ineligible_reason() -> None:

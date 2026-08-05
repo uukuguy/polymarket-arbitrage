@@ -46,6 +46,7 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT,
     STRUCTURE_EVENT_SOURCE_CONTRACT,
     STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+    STRUCTURE_PROJECTION_EXCLUSION_REASONS,
     STRUCTURE_PUBLICATION_MAX_ROWS,
     STRUCTURE_SOURCE_COMPONENTS,
 )
@@ -1737,6 +1738,7 @@ def _structure_drift_comparison_id(
     if classifier_contract_version not in {
         STRUCTURE_DRIFT_CLASSIFIER_V1,
         STRUCTURE_DRIFT_CLASSIFIER_V2,
+        STRUCTURE_DRIFT_CLASSIFIER_V3,
     }:
         raise ValueError("invalid-structure-drift-classifier-contract")
     return hashlib.sha256(
@@ -1746,6 +1748,24 @@ def _structure_drift_comparison_id(
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
+
+
+def _fresh_projection_expected_candidate_count(
+    con: sqlite3.Connection, *, window_id: str
+) -> int:
+    """Count the complete frozen market plus event-only projection source."""
+    market_count = con.execute(
+        "SELECT COUNT(*) FROM structure_sync_market_staging WHERE window_id=?",
+        (window_id,),
+    ).fetchone()[0]
+    event_only_count = con.execute(
+        "SELECT COUNT(*) FROM structure_sync_event_member_staging member "
+        "WHERE member.window_id=? AND NOT EXISTS (SELECT 1 FROM "
+        "structure_sync_market_staging market WHERE market.window_id=member.window_id "
+        "AND market.market_id=member.market_id)",
+        (window_id,),
+    ).fetchone()[0]
+    return int(market_count) + int(event_only_count)
 
 
 def _bootstrap_rotation_digest(
@@ -7642,11 +7662,18 @@ class SQLiteStore:
                 "SELECT generation_snapshot_id,publication_id,phase,row_cursor_json,"
                 "class_counts_json,class_digests_json,diagnostic_counts_json,"
                 "diagnostic_digest_state_json,diagnostic_samples_json,checkpoint_at_ms,"
-                "legacy_snapshot_id "
+                "legacy_snapshot_id,classifier_contract_version,"
+                "projection_candidate_count,projection_exclusion_count,"
+                "projection_exclusion_counts_json,projection_exclusion_roots_json,"
+                "projection_exclusion_digest_states_json "
                 "FROM structure_generation_drift_progress WHERE comparison_id=?",
                 (comparison_id,),
             ).fetchone()
-        if progress is None or progress[2] != "fresh-projection-members":
+        if (
+            progress is None
+            or progress[2] != "fresh-projection-members"
+            or progress[11] != STRUCTURE_DRIFT_CLASSIFIER_V3
+        ):
             raise ValueError("structure-drift-fresh-projection-phase-invalid")
         counts = json.loads(str(progress[4]))
         digests = json.loads(str(progress[5]))
@@ -7689,10 +7716,14 @@ class SQLiteStore:
             publication_id=str(progress[1]),
             generation_snapshot_id=int(progress[0]),
             member_receipt_digest=member_receipt_digest,
+            classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V3,
             cursor=cursor,
-            candidates_processed=int(counts.get("projection_candidate_count", 0)),
+            candidates_processed=int(progress[12]),
             member_count=int(counts.get("projection_member_count", 0)),
             member_digest_state=member_state,
+            exclusion_count=int(progress[13]),
+            exclusion_counts_json=str(progress[14]),
+            exclusion_digest_states_json=str(progress[16]),
             diagnostic_count=int(counts.get("projection_diagnostic_count", 0)),
             diagnostic_digest_state=str(progress[7]),
             complete=False,
@@ -7702,23 +7733,9 @@ class SQLiteStore:
             generation_snapshot_id=int(progress[0]),
             cursor=cursor,
             limit=max_rows,
+            classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
         )
-        diagnostic_market_ids = sorted(
-            {item.envelope.market_id for item in chunk.diagnostics}
-        )
-        legacy_ids = {
-            item.market_id
-            for item in self.fetch_structure_drift_members_by_id(
-                snapshot_id=int(progress[10]),
-                generation=False,
-                market_ids=diagnostic_market_ids,
-            )
-        }
-        unresolved_diagnostics = tuple(
-            item
-            for item in chunk.diagnostics
-            if item.envelope.market_id not in legacy_ids
-        )
+        unresolved_diagnostics = tuple(chunk.diagnostics)
         projected_ids = [item.market_id for item in chunk.members]
         generation_ids = {
             item.market_id
@@ -7736,11 +7753,15 @@ class SQLiteStore:
                 if item.market_id not in generation_ids
             ),
         )
+        committed_members = tuple(
+            item for item in chunk.members if item.market_id in generation_ids
+        )
         commitment_chunk = FreshProjectionChunk(
             cursor=chunk.cursor,
-            members=chunk.members,
+            members=committed_members,
             diagnostics=unresolved_diagnostics,
             candidates_processed=chunk.candidates_processed,
+            exclusions=chunk.exclusions,
         )
         advanced = advance_fresh_projection_commitment(commitment, commitment_chunk)
         for diagnostic in unresolved_diagnostics:
@@ -7760,6 +7781,7 @@ class SQLiteStore:
         counts["projection_candidate_count"] = advanced.candidates_processed
         counts["projection_member_count"] = advanced.member_count
         counts["projection_diagnostic_count"] = advanced.diagnostic_count
+        exclusion_roots_json = str(progress[15])
         digests["projection_member_receipt_digest"] = member_receipt_digest
         digests["projection_member_state"] = advanced.member_digest_state
         cursor_json = None
@@ -7785,6 +7807,11 @@ class SQLiteStore:
             next_phase = "generation-members"
             next_digest = RowChainSHA256.new("generation-group-truth").to_json()
             cursor_json = None
+            exclusion_roots_json = json.dumps(
+                advanced.exclusion_roots,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         samples_json = json.dumps(
             diagnostic_samples, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
@@ -7798,7 +7825,10 @@ class SQLiteStore:
                 "class_digests_json=?,diagnostic_counts_json=?,"
                 "diagnostic_digest_state_json=?,diagnostic_root=?,"
                 "diagnostic_samples_json=?,diagnostic_samples_digest=?,"
-                "projection_member_receipt_digest=?,checkpoint_at_ms=? "
+                "projection_member_receipt_digest=?,projection_candidate_count=?,"
+                "projection_exclusion_count=?,projection_exclusion_counts_json=?,"
+                "projection_exclusion_roots_json=?,"
+                "projection_exclusion_digest_states_json=?,checkpoint_at_ms=? "
                 "WHERE comparison_id=? AND "
                 "phase='fresh-projection-members' AND checkpoint_at_ms=?",
                 (
@@ -7815,6 +7845,11 @@ class SQLiteStore:
                     samples_json,
                     hashlib.sha256(samples_json.encode()).hexdigest(),
                     member_receipt_digest,
+                    advanced.candidates_processed,
+                    advanced.exclusion_count,
+                    advanced.exclusion_counts_json,
+                    exclusion_roots_json,
+                    advanced.exclusion_digest_states_json,
                     now_ms,
                     comparison_id,
                     prior_checkpoint,
@@ -7931,7 +7966,7 @@ class SQLiteStore:
             )
             comparison_id = _structure_drift_comparison_id(
                 identity,
-                classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V3,
             )
             active = con.execute(
                 "SELECT comparison_id,hash_algorithm,classifier_contract_version FROM "
@@ -7940,7 +7975,7 @@ class SQLiteStore:
             ).fetchone()
             if active is not None and (
                 active[1] == "serializable-sha256-v1"
-                or active[2] != STRUCTURE_DRIFT_CLASSIFIER_V2
+                or active[2] != STRUCTURE_DRIFT_CLASSIFIER_V3
             ):
                 superseded_reason = (
                     "drift-hash-algorithm-superseded"
@@ -7963,6 +7998,21 @@ class SQLiteStore:
                 raise ValueError("structure-drift-active-identity-mismatch")
             source_state = RowChainSHA256.new("source-event")
             group_state = RowChainSHA256.new("source-group-truth")
+            exclusion_counts_json = json.dumps(
+                {reason: 0 for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            exclusion_states_json = json.dumps(
+                {
+                    reason: RowChainSHA256.new(
+                        f"projection-exclusion/{reason}"
+                    ).to_json()
+                    for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
             con.execute(
                 "INSERT OR IGNORE INTO structure_generation_drift_progress("
                 "comparison_id,hash_algorithm,classifier_contract_version,"
@@ -7975,12 +8025,16 @@ class SQLiteStore:
                 "digest_state_json,class_counts_json,class_digests_json,"
                 "diagnostic_counts_json,diagnostic_digest_state_json,diagnostic_root,"
                 "diagnostic_samples_json,diagnostic_samples_digest,created_at_ms,"
-                "checkpoint_at_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,"
-                "'source-events',NULL,?,?,?,?,?,NULL,?,?,?,?)",
+                "checkpoint_at_ms,projection_candidate_count,"
+                "projection_exclusion_count,projection_exclusion_counts_json,"
+                "projection_exclusion_roots_json,"
+                "projection_exclusion_digest_states_json) VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,'source-events',NULL,"
+                "?,?,?,?,?,NULL,?,?,?,?,0,0,?, '{}',?)",
                 (
                     comparison_id,
                     ROW_CHAIN_SHA256_V2,
-                    STRUCTURE_DRIFT_CLASSIFIER_V2,
+                    STRUCTURE_DRIFT_CLASSIFIER_V3,
                     int(row[12]),
                     int(row[0]),
                     str(row[1]),
@@ -8013,6 +8067,8 @@ class SQLiteStore:
                     hashlib.sha256(b"{}").hexdigest(),
                     now_ms,
                     now_ms,
+                    exclusion_counts_json,
+                    exclusion_states_json,
                 ),
             )
             con.execute("COMMIT")
@@ -8300,7 +8356,11 @@ class SQLiteStore:
                 "row_cursor_json,digest_state_json,class_counts_json,"
                 "class_digests_json,checkpoint_at_ms,diagnostic_counts_json,"
                 "diagnostic_digest_state_json,diagnostic_samples_json,"
-                "diagnostic_samples_digest,source_identity_hash,created_at_ms FROM "
+                "diagnostic_samples_digest,source_identity_hash,created_at_ms,"
+                "classifier_contract_version,projection_candidate_count,"
+                "projection_exclusion_count,projection_exclusion_counts_json,"
+                "projection_exclusion_roots_json,"
+                "projection_exclusion_digest_states_json FROM "
                 "structure_generation_drift_progress WHERE comparison_id=?",
                 (comparison_id,),
             ).fetchone()
@@ -8456,6 +8516,74 @@ class SQLiteStore:
                 if diagnostic_digest.count != diagnostic_total:
                     raise ValueError("structure-drift-progress-invalid")
                 final_diagnostic_root = diagnostic_digest.hexdigest()
+                projection_candidate_count = progress[21]
+                projection_exclusion_count = progress[22]
+                try:
+                    projection_exclusion_counts = json.loads(str(progress[23]))
+                    projection_exclusion_roots = json.loads(str(progress[24]))
+                    projection_exclusion_states = json.loads(str(progress[25]))
+                except (TypeError, json.JSONDecodeError) as error:
+                    raise ValueError(
+                        "structure-drift-exclusion-commitment-invalid"
+                    ) from error
+                projection_member_count = counts.get("projection_member_count")
+                projection_diagnostic_count = counts.get(
+                    "projection_diagnostic_count"
+                )
+                if (
+                    type(projection_candidate_count) is not int
+                    or type(projection_member_count) is not int
+                    or type(projection_exclusion_count) is not int
+                    or type(projection_diagnostic_count) is not int
+                    or projection_candidate_count
+                    != projection_member_count
+                    + projection_exclusion_count
+                    + projection_diagnostic_count
+                ):
+                    raise ValueError(
+                        "structure-drift-candidate-conservation-invalid"
+                    )
+                if projection_candidate_count != _fresh_projection_expected_candidate_count(
+                    writer, window_id=str(progress[3])
+                ):
+                    raise ValueError("structure-drift-candidate-source-count-invalid")
+                exclusion_commitment_valid = (
+                    isinstance(projection_exclusion_counts, dict)
+                    and isinstance(projection_exclusion_roots, dict)
+                    and isinstance(projection_exclusion_states, dict)
+                    and set(projection_exclusion_counts)
+                    == set(STRUCTURE_PROJECTION_EXCLUSION_REASONS)
+                    and set(projection_exclusion_roots)
+                    == set(STRUCTURE_PROJECTION_EXCLUSION_REASONS)
+                    and set(projection_exclusion_states)
+                    == set(STRUCTURE_PROJECTION_EXCLUSION_REASONS)
+                    and all(
+                        type(projection_exclusion_counts[reason]) is int
+                        and projection_exclusion_counts[reason] >= 0
+                        for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+                    )
+                    and sum(projection_exclusion_counts.values())
+                    == projection_exclusion_count
+                )
+                if exclusion_commitment_valid:
+                    try:
+                        for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS:
+                            exclusion_digest = RowChainSHA256.from_json(
+                                str(projection_exclusion_states[reason]),
+                                expected_domain=f"projection-exclusion/{reason}",
+                            )
+                            if (
+                                exclusion_digest.count
+                                != projection_exclusion_counts[reason]
+                                or exclusion_digest.hexdigest()
+                                != projection_exclusion_roots[reason]
+                            ):
+                                exclusion_commitment_valid = False
+                                break
+                    except (TypeError, ValueError):
+                        exclusion_commitment_valid = False
+                if not exclusion_commitment_valid:
+                    raise ValueError("structure-drift-exclusion-commitment-invalid")
                 if (
                     not isinstance(source_hash, str)
                     or len(source_hash) != 64
@@ -8593,7 +8721,7 @@ class SQLiteStore:
                     receipt_payload: dict[str, object] = {
                         "comparison_id": comparison_id,
                         "hash_algorithm": ROW_CHAIN_SHA256_V2,
-                        "classifier_contract_version": STRUCTURE_DRIFT_CLASSIFIER_V2,
+                        "classifier_contract_version": STRUCTURE_DRIFT_CLASSIFIER_V3,
                         "legacy_snapshot_id": int(progress[0]),
                         "legacy_taken_at_ms": int(exact[4]),
                         "legacy_finished_at_ms": int(exact[5]),
@@ -8647,6 +8775,10 @@ class SQLiteStore:
                         ),
                         "overlap_conflict_count": 0,
                         "unclassified_count": 0,
+                        "projection_candidate_count": projection_candidate_count,
+                        "projection_exclusion_count": projection_exclusion_count,
+                        "projection_exclusion_counts_json": str(progress[23]),
+                        "projection_exclusion_roots_json": str(progress[24]),
                         "created_at_ms": int(progress[19]),
                     }
                     stored_source = writer.execute(
@@ -8670,7 +8802,9 @@ class SQLiteStore:
                         stored_source[5]
                     )
                     receipt_digest = _structure_drift_receipt_digest(receipt_payload)
-                    receipt_columns = _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
+                    receipt_columns = _structure_drift_receipt_fields(
+                        STRUCTURE_DRIFT_CLASSIFIER_V3
+                    )
                     writer.execute(
                         "INSERT INTO structure_generation_drift_receipts("
                         + ",".join(receipt_columns)
@@ -8731,7 +8865,7 @@ class SQLiteStore:
                     terminal_payload: dict[str, object] = {
                         "comparison_id": comparison_id,
                         "hash_algorithm": ROW_CHAIN_SHA256_V2,
-                        "classifier_contract_version": STRUCTURE_DRIFT_CLASSIFIER_V2,
+                        "classifier_contract_version": STRUCTURE_DRIFT_CLASSIFIER_V3,
                         "legacy_snapshot_id": int(progress[0]),
                         "generation_snapshot_id": int(progress[1]),
                         "publication_id": str(progress[2]),
@@ -8751,13 +8885,19 @@ class SQLiteStore:
                         "diagnostic_root": final_diagnostic_root,
                         "diagnostic_samples_json": str(progress[16]),
                         "diagnostic_samples_digest": str(progress[17]),
+                        "projection_candidate_count": projection_candidate_count,
+                        "projection_exclusion_count": projection_exclusion_count,
+                        "projection_exclusion_counts_json": str(progress[23]),
+                        "projection_exclusion_roots_json": str(progress[24]),
                         "created_at_ms": int(progress[19]),
                         "checkpoint_at_ms": now_ms,
                     }
                     terminal_digest = _structure_drift_terminal_receipt_digest(
                         terminal_payload
                     )
-                    terminal_columns = _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS
+                    terminal_columns = _structure_drift_terminal_receipt_fields(
+                        STRUCTURE_DRIFT_CLASSIFIER_V3
+                    )
                     writer.execute(
                         "INSERT INTO structure_generation_drift_terminal_receipts("
                         + ",".join(terminal_columns)
@@ -8879,7 +9019,7 @@ class SQLiteStore:
                 legacy=tuple(counterpart),
                 generation=classified_rows,
                 evidence=evidence,
-                classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
             )
             generation_count = counts.get("generation_member_count", 0)
             if type(generation_count) is not int or generation_count < 0:
@@ -8946,7 +9086,7 @@ class SQLiteStore:
                 legacy=classified_rows,
                 generation=(),
                 evidence=evidence,
-                classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V2,
+                classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
             )
 
         for diagnostic in result.diagnostics:
@@ -9336,7 +9476,10 @@ class SQLiteStore:
                 "source_market_count,source_event_hash,source_market_hash,"
                 "source_identity_hash,classifier_contract_version,terminal_reason,"
                 "diagnostic_counts_json,diagnostic_root,diagnostic_samples_json,"
-                "diagnostic_samples_digest,projection_member_receipt_digest "
+                "diagnostic_samples_digest,projection_member_receipt_digest,"
+                "projection_candidate_count,projection_exclusion_count,"
+                "projection_exclusion_counts_json,projection_exclusion_roots_json,"
+                "projection_exclusion_digest_states_json "
                 "FROM structure_generation_drift_progress WHERE "
                 "legacy_snapshot_id=? AND generation_snapshot_id=? AND "
                 "publication_id=? AND window_id=? AND "
@@ -9354,7 +9497,7 @@ class SQLiteStore:
                     str(current[2]),
                     str(current[6]),
                     ROW_CHAIN_SHA256_V2,
-                    STRUCTURE_DRIFT_CLASSIFIER_V2,
+                    STRUCTURE_DRIFT_CLASSIFIER_V3,
                 ),
             ).fetchone()
             if progress is None:
@@ -9395,8 +9538,18 @@ class SQLiteStore:
             try:
                 progress_counts = json.loads(str(progress[2]))
                 progress_digests = json.loads(str(progress[3]))
+                progress_exclusion_counts = json.loads(str(progress[20]))
+                progress_exclusion_roots = json.loads(str(progress[21]))
+                progress_exclusion_states = json.loads(str(progress[22]))
                 if not isinstance(progress_counts, dict) or not isinstance(
                     progress_digests, dict
+                ) or not all(
+                    isinstance(value, dict)
+                    for value in (
+                        progress_exclusion_counts,
+                        progress_exclusion_roots,
+                        progress_exclusion_states,
+                    )
                 ):
                     raise ValueError("structure-drift-progress-invalid")
             except (TypeError, ValueError, json.JSONDecodeError):
@@ -9410,9 +9563,27 @@ class SQLiteStore:
                     "phase": str(progress[1]),
                     "reason": "structure-drift-progress-invalid",
                 }
+            projection_status = {
+                "classifier_contract_version": str(progress[11]),
+                "projection_candidate_count": int(progress[18]),
+                "projection_member_count": int(
+                    progress_counts.get("projection_member_count", 0)
+                ),
+                "projection_exclusion_count": int(progress[19]),
+                "projection_diagnostic_count": int(
+                    progress_counts.get("projection_diagnostic_count", 0)
+                ),
+                "projection_exclusion_counts": progress_exclusion_counts,
+                "projection_exclusion_roots": progress_exclusion_roots,
+                "projection_exclusion_counts_json": str(progress[20]),
+                "projection_exclusion_roots_json": str(progress[21]),
+                "projection_exclusion_digest_states_json": str(progress[22]),
+            }
             receipt_row = con.execute(
                 "SELECT "
-                + ",".join(_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS)
+                + ",".join(
+                    _structure_drift_receipt_fields(STRUCTURE_DRIFT_CLASSIFIER_V3)
+                )
                 + ",receipt_digest FROM structure_generation_drift_receipts "
                 "WHERE comparison_id=?",
                 (str(progress[0]),),
@@ -9448,7 +9619,11 @@ class SQLiteStore:
             if progress[1] == "stale":
                 terminal_row = con.execute(
                     "SELECT "
-                    + ",".join(_STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS)
+                    + ",".join(
+                        _structure_drift_terminal_receipt_fields(
+                            STRUCTURE_DRIFT_CLASSIFIER_V3
+                        )
+                    )
                     + ",receipt_digest FROM "
                     "structure_generation_drift_terminal_receipts WHERE "
                     "comparison_id=?",
@@ -9461,7 +9636,9 @@ class SQLiteStore:
                 if terminal_row is not None:
                     terminal_payload = dict(
                         zip(
-                            _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS,
+                            _structure_drift_terminal_receipt_fields(
+                                STRUCTURE_DRIFT_CLASSIFIER_V3
+                            ),
                             terminal_row[:-1],
                             strict=True,
                         )
@@ -9504,7 +9681,7 @@ class SQLiteStore:
                         and terminal_payload["hash_algorithm"] == progress[5]
                         and terminal_payload["classifier_contract_version"]
                         == progress[11]
-                        == STRUCTURE_DRIFT_CLASSIFIER_V2
+                        == STRUCTURE_DRIFT_CLASSIFIER_V3
                         and terminal_payload["legacy_snapshot_id"] == legacy[0]
                         and terminal_payload["generation_snapshot_id"] == current[0]
                         and terminal_payload["publication_id"] == current[1]
@@ -9526,6 +9703,14 @@ class SQLiteStore:
                         and terminal_payload["diagnostic_root"] == progress[14]
                         and terminal_payload["diagnostic_samples_json"] == progress[15]
                         and terminal_payload["diagnostic_samples_digest"] == progress[16]
+                        and terminal_payload["projection_candidate_count"]
+                        == progress[18]
+                        and terminal_payload["projection_exclusion_count"]
+                        == progress[19]
+                        and terminal_payload["projection_exclusion_counts_json"]
+                        == progress[20]
+                        and terminal_payload["projection_exclusion_roots_json"]
+                        == progress[21]
                         and terminal_payload["checkpoint_at_ms"] == progress[4]
                         and terminal_payload["diagnostic_samples_digest"]
                         == hashlib.sha256(
@@ -9535,6 +9720,7 @@ class SQLiteStore:
                 if not terminal_valid:
                     return {
                         **base,
+                        **projection_status,
                         "authorization_mode": "none",
                         "authorized": False,
                         "progress_id": str(progress[0]),
@@ -9546,6 +9732,7 @@ class SQLiteStore:
                     }
                 return {
                     **base,
+                    **projection_status,
                     "authorization_mode": "none",
                     "authorized": False,
                     "progress_id": str(progress[0]),
@@ -9567,6 +9754,7 @@ class SQLiteStore:
             if progress[1] != "sealed" or receipt_row is None:
                 return {
                     **base,
+                    **projection_status,
                     "authorization_mode": "none",
                     "authorized": False,
                     "progress_id": str(progress[0]),
@@ -9582,7 +9770,9 @@ class SQLiteStore:
                 }
             receipt_payload = dict(
                 zip(
-                    _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS,
+                    _structure_drift_receipt_fields(
+                        STRUCTURE_DRIFT_CLASSIFIER_V3
+                    ),
                     receipt_row[:-1],
                     strict=True,
                 )
@@ -9680,7 +9870,7 @@ class SQLiteStore:
                 and receipt_payload["hash_algorithm"] == progress[5]
                 and receipt_payload["hash_algorithm"] == ROW_CHAIN_SHA256_V2
                 and receipt_payload["classifier_contract_version"] == progress[11]
-                and progress[11] == STRUCTURE_DRIFT_CLASSIFIER_V2
+                and progress[11] == STRUCTURE_DRIFT_CLASSIFIER_V3
                 and receipt_payload["legacy_snapshot_id"] == legacy[0]
                 and receipt_payload["generation_snapshot_id"] == current[0]
                 and receipt_payload["publication_id"] == current[1]
@@ -9740,12 +9930,17 @@ class SQLiteStore:
                 and receipt_payload["diagnostic_root"] == progress[14]
                 and receipt_payload["diagnostic_samples_json"] == progress[15]
                 and receipt_payload["diagnostic_samples_digest"] == progress[16]
+                and receipt_payload["projection_candidate_count"] == progress[18]
+                and receipt_payload["projection_exclusion_count"] == progress[19]
+                and receipt_payload["projection_exclusion_counts_json"] == progress[20]
+                and receipt_payload["projection_exclusion_roots_json"] == progress[21]
                 and receipt_payload["diagnostic_samples_digest"]
                 == hashlib.sha256(str(progress[15]).encode()).hexdigest()
                 and progress_digests.get("receipt_digest") == receipt_row[-1]
             )
             return {
                 **base,
+                **projection_status,
                 "authorization_mode": (
                     "drift-safe-sealed" if receipt_valid else "none"
                 ),
