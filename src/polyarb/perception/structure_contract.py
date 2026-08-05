@@ -40,6 +40,16 @@ STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S = 5.0
 STRUCTURE_NORMALIZATION_CONTRACT_VERSION = "2026-08-02-event-only-quarantine-v2"
 STRUCTURE_DRIFT_CLASSIFIER_V1 = "structure-drift-classifier-v1"
 STRUCTURE_DRIFT_CLASSIFIER_V2 = "structure-drift-classifier-v2"
+STRUCTURE_DRIFT_CLASSIFIER_V3 = "structure-drift-classifier-v3"
+STRUCTURE_PROJECTION_EXCLUSION_REASONS = (
+    "non-neg-risk-market",
+    "market-side-quarantine",
+    "non-neg-risk-event-member",
+    "current-nontradable-event-member",
+    "augmented-group",
+    "fresh-group-ineligible",
+    "event-only-quarantine",
+)
 STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT = "structure-event-member-staging-v1"
 STRUCTURE_EVENT_SOURCE_CONTRACT = "structure-event-source-v1"
 STRUCTURE_DRIFT_CLASS_TAGS_V2 = (

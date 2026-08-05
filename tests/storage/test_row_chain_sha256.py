@@ -12,6 +12,17 @@ from polyarb.storage.row_chain_sha256 import (
 )
 
 PREFIX = b"polyarb.structure-drift.row-chain-sha256-v2\x00"
+CLASSIFIER_V3_DOMAINS = frozenset(
+    {
+        "projection-exclusion/non-neg-risk-market",
+        "projection-exclusion/market-side-quarantine",
+        "projection-exclusion/non-neg-risk-event-member",
+        "projection-exclusion/current-nontradable-event-member",
+        "projection-exclusion/augmented-group",
+        "projection-exclusion/fresh-group-ineligible",
+        "projection-exclusion/event-only-quarantine",
+    }
+)
 EXPECTED_DOMAINS = frozenset(
     {
         "source-event",
@@ -33,6 +44,7 @@ EXPECTED_DOMAINS = frozenset(
         "class/overlap-conflict",
         "class/unclassified",
         "diagnostic/unclassified",
+        *CLASSIFIER_V3_DOMAINS,
     }
 )
 
@@ -70,12 +82,12 @@ def test_row_chain_registry_and_algorithm_are_frozen() -> None:
     assert ROW_CHAIN_DOMAINS == EXPECTED_DOMAINS
 
 
-def test_domain_registry_adds_only_classifier_v2_domains() -> None:
-    old_domains = EXPECTED_DOMAINS - {
+def test_domain_registry_adds_only_classifier_v2_and_v3_domains() -> None:
+    old_domains = EXPECTED_DOMAINS - CLASSIFIER_V3_DOMAINS - {
         "class/fresh-group-ineligible",
         "diagnostic/unclassified",
     }
-    assert ROW_CHAIN_DOMAINS - old_domains == {
+    assert ROW_CHAIN_DOMAINS - old_domains == CLASSIFIER_V3_DOMAINS | {
         "class/fresh-group-ineligible",
         "diagnostic/unclassified",
     }

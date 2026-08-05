@@ -9,16 +9,150 @@ import pytest
 
 import polyarb.storage.sqlite_store as sqlite_store_module
 from polyarb.perception.market_truth import EventMember, membership_hash
+from polyarb.perception.structure_contract import (
+    STRUCTURE_DRIFT_CLASSIFIER_V3,
+    STRUCTURE_PROJECTION_EXCLUSION_REASONS,
+)
 from polyarb.perception.structure_drift import (
+    FreshProjectionChunk,
+    FreshProjectionCommitment,
+    FreshProjectionExclusion,
     StructuralMemberIdentity,
+    StructureDriftCandidateEnvelope,
+    advance_fresh_projection_commitment,
     classify_structure_member_drift,
+    diagnose_unresolved_member,
     hash_legacy_compatible_projection,
     project_legacy_compatible_event,
     project_legacy_compatible_market,
+    structure_projection_exclusion_tuple,
 )
 from polyarb.perception.structure_publication import event_only_member_quarantine_issue
 from polyarb.storage.row_chain_sha256 import ROW_CHAIN_DOMAINS, RowChainSHA256
 from polyarb.storage.sqlite_store import SQLiteStore
+
+
+def _member(market_id: str) -> StructuralMemberIdentity:
+    return StructuralMemberIdentity(
+        event_id="event-1",
+        group_id="group-1",
+        market_id=market_id,
+        member_kind="named",
+        active=True,
+        closed=False,
+        condition_id=f"condition-{market_id}",
+        yes_token_id=f"yes-{market_id}",
+        no_token_id=f"no-{market_id}",
+        neg_risk=True,
+        incomplete=False,
+    )
+
+
+def _candidate_envelope(market_id: str) -> StructureDriftCandidateEnvelope:
+    return StructureDriftCandidateEnvelope(
+        side="generation-only",
+        event_id=None,
+        group_id=None,
+        market_id=market_id,
+        member_kind=None,
+        active=None,
+        closed=None,
+        condition_id=None,
+        yes_token_id=None,
+        no_token_id=None,
+        neg_risk=None,
+        incomplete=None,
+        source_ordinal=None,
+        member_ordinal=None,
+        raw_event_hash=None,
+        raw_market_hash="b" * 64,
+    )
+
+
+def _v3_commitment() -> FreshProjectionCommitment:
+    return FreshProjectionCommitment.initial(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        member_receipt_digest="a" * 64,
+        classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V3,
+    )
+
+
+def test_v3_projection_commitment_conserves_all_candidate_outcomes() -> None:
+    member = _member("eligible")
+    envelope = _candidate_envelope("ordinary")
+    exclusion = FreshProjectionExclusion(
+        reason="non-neg-risk-market",
+        stream="market",
+        envelope=envelope,
+        group_truth=None,
+    )
+    diagnostic = diagnose_unresolved_member(
+        side="generation-only",
+        member=_candidate_envelope("unknown"),
+        evidence=None,
+        authorized_removal_reasons=(),
+    )
+    commitment = FreshProjectionCommitment.initial(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        member_receipt_digest="a" * 64,
+        classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V3,
+    )
+    advanced = advance_fresh_projection_commitment(
+        commitment,
+        FreshProjectionChunk(
+            cursor=None,
+            members=(member,),
+            diagnostics=(diagnostic,),
+            candidates_processed=3,
+            exclusions=(exclusion,),
+        ),
+    )
+    assert advanced.complete is True
+    assert advanced.candidates_processed == 3
+    assert advanced.member_count == 1
+    assert advanced.exclusion_count == 1
+    assert advanced.diagnostic_count == 1
+    assert advanced.exclusion_counts == {"non-neg-risk-market": 1}
+    assert set(advanced.exclusion_roots) == {"non-neg-risk-market"}
+    assert structure_projection_exclusion_tuple(exclusion)[0] == (
+        "non-neg-risk-market"
+    )
+
+
+def test_v3_projection_commitment_rejects_nonconserving_chunk() -> None:
+    commitment = _v3_commitment()
+    with pytest.raises(ValueError, match="fresh-projection-candidate-conservation"):
+        advance_fresh_projection_commitment(
+            commitment,
+            FreshProjectionChunk(
+                cursor=None,
+                members=(),
+                diagnostics=(),
+                candidates_processed=1,
+                exclusions=(),
+            ),
+        )
+
+
+def test_v3_projection_exclusion_reason_is_closed() -> None:
+    assert STRUCTURE_PROJECTION_EXCLUSION_REASONS == (
+        "non-neg-risk-market",
+        "market-side-quarantine",
+        "non-neg-risk-event-member",
+        "current-nontradable-event-member",
+        "augmented-group",
+        "fresh-group-ineligible",
+        "event-only-quarantine",
+    )
+    with pytest.raises(ValueError, match="invalid-projection-exclusion-reason"):
+        FreshProjectionExclusion(
+            reason="other",
+            stream="market",
+            envelope=_candidate_envelope("other"),
+            group_truth=None,
+        )
 
 
 def _raw_event() -> dict[str, object]:

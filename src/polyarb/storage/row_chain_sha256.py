@@ -28,6 +28,13 @@ ROW_CHAIN_DOMAINS = frozenset(
         "class/overlap-conflict",
         "class/unclassified",
         "diagnostic/unclassified",
+        "projection-exclusion/non-neg-risk-market",
+        "projection-exclusion/market-side-quarantine",
+        "projection-exclusion/non-neg-risk-event-member",
+        "projection-exclusion/current-nontradable-event-member",
+        "projection-exclusion/augmented-group",
+        "projection-exclusion/fresh-group-ineligible",
+        "projection-exclusion/event-only-quarantine",
     }
 )
 

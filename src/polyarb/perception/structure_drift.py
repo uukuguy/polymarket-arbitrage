@@ -6,14 +6,16 @@ import hashlib
 import json
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from polyarb.perception.market_truth import EventMember, GroupTruth
 from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V1,
     STRUCTURE_DRIFT_CLASSIFIER_V2,
+    STRUCTURE_DRIFT_CLASSIFIER_V3,
     STRUCTURE_DRIFT_DIAGNOSTIC_CODES,
+    STRUCTURE_PROJECTION_EXCLUSION_REASONS,
 )
 from polyarb.perception.structure_publication import (
     event_only_member_quarantine_issue,
@@ -74,6 +76,7 @@ class FreshProjectionChunk:
     members: tuple[StructuralMemberIdentity, ...]
     diagnostics: tuple[StructureDriftDiagnostic, ...]
     candidates_processed: int
+    exclusions: tuple[FreshProjectionExclusion, ...] = ()
 
     @property
     def count(self) -> int:
@@ -92,10 +95,17 @@ class FreshProjectionCommitment:
     publication_id: str
     generation_snapshot_id: int
     member_receipt_digest: str
+    classifier_contract_version: str = field(
+        default=STRUCTURE_DRIFT_CLASSIFIER_V2,
+        kw_only=True,
+    )
     cursor: FreshProjectionCursor | None
     candidates_processed: int
     member_count: int
     member_digest_state: str
+    exclusion_count: int = field(default=0, kw_only=True)
+    exclusion_counts_json: str = field(default="{}", kw_only=True)
+    exclusion_digest_states_json: str = field(default="{}", kw_only=True)
     diagnostic_count: int
     diagnostic_digest_state: str
     complete: bool
@@ -107,22 +117,31 @@ class FreshProjectionCommitment:
         publication_id: str,
         generation_snapshot_id: int,
         member_receipt_digest: str,
+        classifier_contract_version: str = STRUCTURE_DRIFT_CLASSIFIER_V2,
     ) -> FreshProjectionCommitment:
         if (
             not publication_id
             or generation_snapshot_id < 1
             or not isinstance(member_receipt_digest, str)
             or len(member_receipt_digest) != 64
+            or classifier_contract_version not in {
+                STRUCTURE_DRIFT_CLASSIFIER_V2,
+                STRUCTURE_DRIFT_CLASSIFIER_V3,
+            }
         ):
             raise ValueError("invalid-fresh-projection-commitment-identity")
         return cls(
             publication_id=publication_id,
             generation_snapshot_id=generation_snapshot_id,
             member_receipt_digest=member_receipt_digest,
+            classifier_contract_version=classifier_contract_version,
             cursor=None,
             candidates_processed=0,
             member_count=0,
             member_digest_state=RowChainSHA256.new("projection-member").to_json(),
+            exclusion_count=0,
+            exclusion_counts_json="{}",
+            exclusion_digest_states_json="{}",
             diagnostic_count=0,
             diagnostic_digest_state=RowChainSHA256.new(
                 "diagnostic/unclassified"
@@ -143,6 +162,43 @@ class FreshProjectionCommitment:
             self.diagnostic_digest_state,
             expected_domain="diagnostic/unclassified",
         ).hexdigest()
+
+    @property
+    def exclusion_counts(self) -> dict[str, int]:
+        try:
+            counts = json.loads(self.exclusion_counts_json)
+            if (
+                not isinstance(counts, dict)
+                or any(key not in STRUCTURE_PROJECTION_EXCLUSION_REASONS for key in counts)
+                or any(type(value) is not int or value < 0 for value in counts.values())
+                or sum(counts.values()) != self.exclusion_count
+            ):
+                raise ValueError
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("invalid-fresh-projection-exclusion-counts") from error
+        return counts
+
+    @property
+    def exclusion_roots(self) -> dict[str, str]:
+        counts = self.exclusion_counts
+        try:
+            states = json.loads(self.exclusion_digest_states_json)
+            if not isinstance(states, dict) or set(states) != set(counts):
+                raise ValueError
+            roots = {}
+            for reason, encoded in states.items():
+                if not isinstance(encoded, str):
+                    raise ValueError
+                digest = RowChainSHA256.from_json(
+                    encoded,
+                    expected_domain=f"projection-exclusion/{reason}",
+                )
+                if digest.count != counts[reason]:
+                    raise ValueError
+                roots[reason] = digest.hexdigest()
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("invalid-fresh-projection-exclusion-states") from error
+        return roots
 
     def matches_generation(
         self, *, count: int, root: str, member_receipt_digest: str | None = None
@@ -167,6 +223,11 @@ def advance_fresh_projection_commitment(
     """Advance a bounded canonical projection commitment without retaining rows."""
     if commitment.complete:
         raise ValueError("fresh-projection-commitment-complete")
+    if commitment.classifier_contract_version not in {
+        STRUCTURE_DRIFT_CLASSIFIER_V2,
+        STRUCTURE_DRIFT_CLASSIFIER_V3,
+    }:
+        raise ValueError("invalid-structure-drift-classifier-contract")
     member_digest = RowChainSHA256.from_json(
         commitment.member_digest_state,
         expected_domain="projection-member",
@@ -183,21 +244,111 @@ def advance_fresh_projection_commitment(
         raise ValueError("fresh-projection-diagnostic-state-count-mismatch")
     if not 0 <= chunk.candidates_processed <= 500:
         raise ValueError("invalid-fresh-projection-chunk-count")
+    exclusion_counts = commitment.exclusion_counts
+    try:
+        exclusion_states = json.loads(commitment.exclusion_digest_states_json)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("invalid-fresh-projection-exclusion-states") from error
+    if not isinstance(exclusion_states, dict) or set(exclusion_states) != set(
+        exclusion_counts
+    ):
+        raise ValueError("invalid-fresh-projection-exclusion-states")
+    exclusion_digests = {}
+    for reason, encoded in exclusion_states.items():
+        if not isinstance(encoded, str):
+            raise ValueError("invalid-fresh-projection-exclusion-states")
+        digest = RowChainSHA256.from_json(
+            encoded,
+            expected_domain=f"projection-exclusion/{reason}",
+        )
+        if digest.count != exclusion_counts[reason]:
+            raise ValueError("fresh-projection-exclusion-state-count-mismatch")
+        exclusion_digests[reason] = digest
+    for exclusion in chunk.exclusions:
+        reason = exclusion.reason
+        digest = exclusion_digests.setdefault(
+            reason,
+            RowChainSHA256.new(f"projection-exclusion/{reason}"),
+        )
+        digest.update(structure_projection_exclusion_tuple(exclusion))
+        exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
     for diagnostic in chunk.diagnostics:
         diagnostic_digest.update(structure_drift_diagnostic_tuple(diagnostic))
+    advanced_candidates_processed = (
+        commitment.candidates_processed + chunk.candidates_processed
+    )
+    advanced_member_count = commitment.member_count + len(chunk.members)
+    advanced_exclusion_count = commitment.exclusion_count + len(chunk.exclusions)
+    advanced_diagnostic_count = commitment.diagnostic_count + len(chunk.diagnostics)
+    if (
+        commitment.classifier_contract_version == STRUCTURE_DRIFT_CLASSIFIER_V3
+        and advanced_candidates_processed
+        != advanced_member_count
+        + advanced_exclusion_count
+        + advanced_diagnostic_count
+    ):
+        raise ValueError("fresh-projection-candidate-conservation")
     return FreshProjectionCommitment(
         publication_id=commitment.publication_id,
         generation_snapshot_id=commitment.generation_snapshot_id,
         member_receipt_digest=commitment.member_receipt_digest,
+        classifier_contract_version=commitment.classifier_contract_version,
         cursor=chunk.cursor,
-        candidates_processed=(
-            commitment.candidates_processed + chunk.candidates_processed
-        ),
-        member_count=commitment.member_count + len(chunk.members),
+        candidates_processed=advanced_candidates_processed,
+        member_count=advanced_member_count,
         member_digest_state=member_digest.to_json(),
-        diagnostic_count=commitment.diagnostic_count + len(chunk.diagnostics),
+        exclusion_count=advanced_exclusion_count,
+        exclusion_counts_json=json.dumps(
+            exclusion_counts,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        exclusion_digest_states_json=json.dumps(
+            {
+                reason: digest.to_json()
+                for reason, digest in exclusion_digests.items()
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        diagnostic_count=advanced_diagnostic_count,
         diagnostic_digest_state=diagnostic_digest.to_json(),
         complete=chunk.cursor is None,
+    )
+
+
+@dataclass(frozen=True)
+class FreshProjectionExclusion:
+    reason: str
+    stream: Literal["market", "event-only"]
+    envelope: StructureDriftCandidateEnvelope
+    group_truth: FreshGroupEvidence | None
+
+    def __post_init__(self) -> None:
+        if self.reason not in STRUCTURE_PROJECTION_EXCLUSION_REASONS:
+            raise ValueError("invalid-projection-exclusion-reason")
+        if self.stream not in {"market", "event-only"}:
+            raise ValueError("invalid-projection-exclusion-stream")
+
+
+def structure_projection_exclusion_tuple(
+    exclusion: FreshProjectionExclusion,
+) -> tuple[object, ...]:
+    truth = exclusion.group_truth
+    return (
+        exclusion.reason,
+        exclusion.stream,
+        *exclusion.envelope.identity_fields.values(),
+        exclusion.envelope.source_ordinal,
+        exclusion.envelope.member_ordinal,
+        exclusion.envelope.raw_event_hash,
+        exclusion.envelope.raw_market_hash,
+        None if truth is None else truth.event_id,
+        None if truth is None else truth.group_id,
+        None if truth is None else truth.neg_risk_type,
+        None if truth is None else truth.quality,
+        None if truth is None else truth.reason,
+        None if truth is None else truth.membership_hash,
     )
 
 
