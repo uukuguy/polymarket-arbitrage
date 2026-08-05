@@ -243,6 +243,17 @@ def _terminal_receipt_payload(
     con: sqlite3.Connection,
     comparison_id: str,
 ) -> dict[str, object]:
+    window_id = str(
+        con.execute(
+            "SELECT window_id FROM structure_generation_drift_progress "
+            "WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()[0]
+    )
+    candidate_count = sqlite_store_module._fresh_projection_expected_candidate_count(
+        con, window_id=window_id
+    )
+    exclusion_count = candidate_count - 1
     exclusion_counts = {
         reason: 0 for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
     }
@@ -250,6 +261,14 @@ def _terminal_receipt_payload(
         reason: RowChainSHA256.new(f"projection-exclusion/{reason}").to_json()
         for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
     }
+    exclusion_chain = RowChainSHA256.from_json(
+        exclusion_states["non-neg-risk-market"],
+        expected_domain="projection-exclusion/non-neg-risk-market",
+    )
+    for index in range(exclusion_count):
+        exclusion_chain.update(("fixture-exclusion", index))
+    exclusion_counts["non-neg-risk-market"] = exclusion_count
+    exclusion_states["non-neg-risk-market"] = exclusion_chain.to_json()
     exclusion_roots = {
         reason: RowChainSHA256.from_json(
             exclusion_states[reason],
@@ -261,10 +280,13 @@ def _terminal_receipt_payload(
     diagnostic_state.update(("other-zero-removal-reason", "m1"))
     con.execute(
         "UPDATE structure_generation_drift_progress SET "
+        "projection_candidate_count=?,projection_exclusion_count=?,"
         "projection_exclusion_counts_json=?,projection_exclusion_roots_json=?,"
         "projection_exclusion_digest_states_json=?,"
         "diagnostic_digest_state_json=? WHERE comparison_id=?",
         (
+            candidate_count,
+            exclusion_count,
             json.dumps(exclusion_counts, sort_keys=True, separators=(",", ":")),
             json.dumps(exclusion_roots, sort_keys=True, separators=(",", ":")),
             json.dumps(exclusion_states, sort_keys=True, separators=(",", ":")),
@@ -3027,6 +3049,19 @@ def test_fresh_projection_phase_migration_rolls_back_and_preserves_audit_rows(
 
 def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> None:
     with sqlite3.connect(store.db_path) as con:
+        window_id = str(
+            con.execute(
+                "SELECT window_id FROM structure_generation_drift_progress "
+                "WHERE comparison_id=?",
+                (comparison_id,),
+            ).fetchone()[0]
+        )
+        candidate_count = (
+            sqlite_store_module._fresh_projection_expected_candidate_count(
+                con, window_id=window_id
+            )
+        )
+        exclusion_count = candidate_count - 1
         exclusion_counts = {
             reason: 0 for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
         }
@@ -3034,6 +3069,14 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
             reason: RowChainSHA256.new(f"projection-exclusion/{reason}").to_json()
             for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
         }
+        exclusion_chain = RowChainSHA256.from_json(
+            exclusion_states["non-neg-risk-market"],
+            expected_domain="projection-exclusion/non-neg-risk-market",
+        )
+        for index in range(exclusion_count):
+            exclusion_chain.update(("fixture-exclusion", index))
+        exclusion_counts["non-neg-risk-market"] = exclusion_count
+        exclusion_states["non-neg-risk-market"] = exclusion_chain.to_json()
         exclusion_roots = {
             reason: RowChainSHA256.from_json(
                 exclusion_states[reason],
@@ -3043,10 +3086,13 @@ def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> N
         }
         con.execute(
             "UPDATE structure_generation_drift_progress SET "
-            "projection_candidate_count=1,projection_exclusion_counts_json=?,"
+            "projection_candidate_count=?,projection_exclusion_count=?,"
+            "projection_exclusion_counts_json=?,"
             "projection_exclusion_roots_json=?,"
             "projection_exclusion_digest_states_json=? WHERE comparison_id=?",
             (
+                candidate_count,
+                exclusion_count,
                 json.dumps(exclusion_counts, sort_keys=True, separators=(",", ":")),
                 json.dumps(exclusion_roots, sort_keys=True, separators=(",", ":")),
                 json.dumps(exclusion_states, sort_keys=True, separators=(",", ":")),
