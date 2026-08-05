@@ -616,6 +616,41 @@ def test_structure_drift_health_projects_later_authenticated_seal_as_healthy() -
     assert "comparison=comparison-v2-sealed" in check["output"]
 
 
+def test_health_expected_exclusions_are_observable_but_not_failure() -> None:
+    counts = {
+        "augmented-group": 1,
+        "market-side-quarantine": 2,
+    }
+    roots = {
+        "augmented-group": "a" * 64,
+        "market-side-quarantine": "b" * 64,
+    }
+    check = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "drift-safe-sealed",
+            "authorized": True,
+            "checkpoint_at_ms": 9_000,
+            "classifier_contract_version": "structure-drift-classifier-v3",
+            "phase": "sealed",
+            "progress_id": "comparison-v3-sealed",
+            "projection_candidate_count": 4,
+            "projection_exclusion_count": 3,
+            "projection_exclusion_counts": counts,
+            "projection_exclusion_roots": roots,
+            "reason": None,
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+
+    assert check["status"] == "pass"
+    assert check["projectionCandidateCount"] == 4
+    assert check["projectionExclusionCount"] == 3
+    assert check["projectionExclusionCounts"] == counts
+    assert check["projectionExclusionRoots"] == roots
+
+
 @pytest.mark.parametrize("endpoint", ("/health", "/healthz"))
 def test_both_health_endpoints_publish_the_same_authenticated_drift_terminal(
     endpoint: str,
@@ -1542,6 +1577,13 @@ def test_unbound_legacy_drift_defer_is_not_hidden_by_unrelated_seal(
         (
             "drift-safe-sealed",
             "sealed",
+            "comparison-new",
+            "structure-drift-classifier-v3",
+            True,
+        ),
+        (
+            "drift-safe-sealed",
+            "sealed",
             "comparison-wrong",
             "structure-drift-classifier-v2",
             False,
@@ -1576,6 +1618,11 @@ def test_only_identity_bound_current_contract_seal_supersedes_drift_defer(
     from polyarb.storage.sqlite_store import SQLiteStore
 
     now_ms = int(time.time() * 1_000)
+    defer_contract = (
+        "structure-drift-classifier-v3"
+        if contract == "structure-drift-classifier-v3"
+        else "structure-drift-classifier-v2"
+    )
     daemon_settings_for_test.structure_generation_drift_compare_enabled = True
     SQLiteStore(daemon_settings_for_test.db_path).record_structure_defer(
         reason="structure-drift-identity-stale",
@@ -1583,7 +1630,7 @@ def test_only_identity_bound_current_contract_seal_supersedes_drift_defer(
         observed_at_ms=now_ms - 9_000,
         initialized_comparison_id="comparison-old",
         current_comparison_id="comparison-new",
-        classifier_contract_version="structure-drift-classifier-v2",
+        classifier_contract_version=defer_contract,
     )
     store = http_test_client.app.state.sqlite_store
     monkeypatch.setattr(
@@ -1612,9 +1659,7 @@ def test_only_identity_bound_current_contract_seal_supersedes_drift_defer(
         defer_check = checks["snapshot:producer_defer"][0]
         assert defer_check["initializedComparisonId"] == "comparison-old"
         assert defer_check["currentComparisonId"] == "comparison-new"
-        assert defer_check["classifierContract"] == (
-            "structure-drift-classifier-v2"
-        )
+        assert defer_check["classifierContract"] == defer_contract
 
 
 def test_health_fails_a_stalled_snapshot_attempt_while_truth_is_fresh(

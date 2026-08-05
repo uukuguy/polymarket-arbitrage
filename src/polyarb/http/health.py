@@ -61,6 +61,7 @@ from starlette.responses import JSONResponse
 
 from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V2,
+    STRUCTURE_DRIFT_CLASSIFIER_V3,
     STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
     STRUCTURE_POINTER_SWITCH_TRANSACTION_DEADLINE_S,
     STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S,
@@ -820,6 +821,27 @@ def _structure_drift_health_check(
                 "comparisonId": comparison_id,
                 "checkpointAtMs": checkpoint,
             }
+            if (
+                authorized
+                and phase == "sealed"
+                and contract == STRUCTURE_DRIFT_CLASSIFIER_V3
+            ):
+                extra.update(
+                    {
+                        "projectionCandidateCount": status.get(
+                            "projection_candidate_count"
+                        ),
+                        "projectionExclusionCount": status.get(
+                            "projection_exclusion_count"
+                        ),
+                        "projectionExclusionCounts": status.get(
+                            "projection_exclusion_counts"
+                        ),
+                        "projectionExclusionRoots": status.get(
+                            "projection_exclusion_roots"
+                        ),
+                    }
+                )
     return {
         "snapshot:structure_generation_drift": [
             {
@@ -1363,7 +1385,8 @@ def _build_health_checks(
         and drift_status.get("phase") == "sealed"
         and latest_defer.get("classifier_contract_version")
         == drift_status.get("classifier_contract_version")
-        == STRUCTURE_DRIFT_CLASSIFIER_V2
+        and drift_status.get("classifier_contract_version")
+        in {STRUCTURE_DRIFT_CLASSIFIER_V2, STRUCTURE_DRIFT_CLASSIFIER_V3}
         and latest_defer.get("current_comparison_id")
         == drift_status.get("progress_id")
     )

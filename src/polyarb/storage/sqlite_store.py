@@ -9563,21 +9563,91 @@ class SQLiteStore:
                     "phase": str(progress[1]),
                     "reason": "structure-drift-progress-invalid",
                 }
+            projection_candidate_count = progress[18]
+            projection_exclusion_count = progress[19]
+            projection_diagnostic_count = progress_counts.get(
+                "projection_diagnostic_count", 0
+            )
+            projection_member_count = progress_counts.get(
+                "projection_member_count",
+                (
+                    projection_candidate_count - projection_exclusion_count
+                    if type(projection_candidate_count) is int
+                    and type(projection_exclusion_count) is int
+                    else None
+                ),
+            )
+            progress_exclusion_evidence_valid = (
+                type(projection_candidate_count) is int
+                and projection_candidate_count >= 0
+                and type(projection_member_count) is int
+                and projection_member_count >= 0
+                and type(projection_exclusion_count) is int
+                and projection_exclusion_count >= 0
+                and type(projection_diagnostic_count) is int
+                and projection_diagnostic_count >= 0
+                and projection_candidate_count
+                == projection_member_count
+                + projection_exclusion_count
+                + projection_diagnostic_count
+                and set(progress_exclusion_counts)
+                == set(STRUCTURE_PROJECTION_EXCLUSION_REASONS)
+                and set(progress_exclusion_roots)
+                == set(STRUCTURE_PROJECTION_EXCLUSION_REASONS)
+                and set(progress_exclusion_states)
+                == set(STRUCTURE_PROJECTION_EXCLUSION_REASONS)
+                and all(
+                    type(progress_exclusion_counts[reason]) is int
+                    and progress_exclusion_counts[reason] >= 0
+                    and isinstance(progress_exclusion_roots[reason], str)
+                    and len(progress_exclusion_roots[reason]) == 64
+                    and isinstance(progress_exclusion_states[reason], str)
+                    for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+                )
+                and sum(progress_exclusion_counts.values())
+                == projection_exclusion_count
+            )
+            if progress_exclusion_evidence_valid:
+                try:
+                    progress_exclusion_evidence_valid = all(
+                        (
+                            exclusion_digest := RowChainSHA256.from_json(
+                                progress_exclusion_states[reason],
+                                expected_domain=f"projection-exclusion/{reason}",
+                            )
+                        ).count
+                        == progress_exclusion_counts[reason]
+                        and exclusion_digest.hexdigest()
+                        == progress_exclusion_roots[reason]
+                        for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+                    )
+                except (TypeError, ValueError):
+                    progress_exclusion_evidence_valid = False
+            exposed_exclusion_counts = (
+                {
+                    reason: progress_exclusion_counts[reason]
+                    for reason in sorted(STRUCTURE_PROJECTION_EXCLUSION_REASONS)
+                    if progress_exclusion_counts[reason] > 0
+                }
+                if progress_exclusion_evidence_valid
+                else {}
+            )
+            exposed_exclusion_roots = (
+                {
+                    reason: progress_exclusion_roots[reason]
+                    for reason in exposed_exclusion_counts
+                }
+                if progress_exclusion_evidence_valid
+                else {}
+            )
             projection_status = {
                 "classifier_contract_version": str(progress[11]),
-                "projection_candidate_count": int(progress[18]),
-                "projection_member_count": int(
-                    progress_counts.get("projection_member_count", 0)
-                ),
-                "projection_exclusion_count": int(progress[19]),
-                "projection_diagnostic_count": int(
-                    progress_counts.get("projection_diagnostic_count", 0)
-                ),
-                "projection_exclusion_counts": progress_exclusion_counts,
-                "projection_exclusion_roots": progress_exclusion_roots,
-                "projection_exclusion_counts_json": str(progress[20]),
-                "projection_exclusion_roots_json": str(progress[21]),
-                "projection_exclusion_digest_states_json": str(progress[22]),
+                "projection_candidate_count": projection_candidate_count,
+                "projection_member_count": projection_member_count,
+                "projection_exclusion_count": projection_exclusion_count,
+                "projection_diagnostic_count": projection_diagnostic_count,
+                "projection_exclusion_counts": exposed_exclusion_counts,
+                "projection_exclusion_roots": exposed_exclusion_roots,
             }
             receipt_row = con.execute(
                 "SELECT "
@@ -9675,6 +9745,7 @@ class SQLiteStore:
                         expected_terminal_digest = None
                     terminal_valid = (
                         terminal_shape_valid
+                        and progress_exclusion_evidence_valid
                         and expected_terminal_digest is not None
                         and terminal_row[-1] == expected_terminal_digest
                         and terminal_payload["comparison_id"] == progress[0]
@@ -9720,7 +9791,6 @@ class SQLiteStore:
                 if not terminal_valid:
                     return {
                         **base,
-                        **projection_status,
                         "authorization_mode": "none",
                         "authorized": False,
                         "progress_id": str(progress[0]),
@@ -9754,7 +9824,6 @@ class SQLiteStore:
             if progress[1] != "sealed" or receipt_row is None:
                 return {
                     **base,
-                    **projection_status,
                     "authorization_mode": "none",
                     "authorized": False,
                     "progress_id": str(progress[0]),
@@ -9864,7 +9933,8 @@ class SQLiteStore:
                 + receipt_class_counts.get("fresh-addition", -1)
             )
             receipt_valid = (
-                expected_receipt_digest is not None
+                progress_exclusion_evidence_valid
+                and expected_receipt_digest is not None
                 and receipt_row[-1] == expected_receipt_digest
                 and receipt_payload["comparison_id"] == progress[0]
                 and receipt_payload["hash_algorithm"] == progress[5]
@@ -9940,7 +10010,7 @@ class SQLiteStore:
             )
             return {
                 **base,
-                **projection_status,
+                **(projection_status if receipt_valid else {}),
                 "authorization_mode": (
                     "drift-safe-sealed" if receipt_valid else "none"
                 ),

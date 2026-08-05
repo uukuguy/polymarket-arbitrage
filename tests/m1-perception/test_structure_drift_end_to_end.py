@@ -243,6 +243,31 @@ def _terminal_receipt_payload(
     con: sqlite3.Connection,
     comparison_id: str,
 ) -> dict[str, object]:
+    exclusion_counts = {
+        reason: 0 for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+    }
+    exclusion_states = {
+        reason: RowChainSHA256.new(f"projection-exclusion/{reason}").to_json()
+        for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+    }
+    exclusion_roots = {
+        reason: RowChainSHA256.from_json(
+            exclusion_states[reason],
+            expected_domain=f"projection-exclusion/{reason}",
+        ).hexdigest()
+        for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+    }
+    con.execute(
+        "UPDATE structure_generation_drift_progress SET "
+        "projection_exclusion_counts_json=?,projection_exclusion_roots_json=?,"
+        "projection_exclusion_digest_states_json=? WHERE comparison_id=?",
+        (
+            json.dumps(exclusion_counts, sort_keys=True, separators=(",", ":")),
+            json.dumps(exclusion_roots, sort_keys=True, separators=(",", ":")),
+            json.dumps(exclusion_states, sort_keys=True, separators=(",", ":")),
+            comparison_id,
+        ),
+    )
     row = con.execute(
         "SELECT hash_algorithm,classifier_contract_version,legacy_snapshot_id,"
         "generation_snapshot_id,publication_id,window_id,"
@@ -2572,6 +2597,32 @@ def test_fresh_projection_phase_migration_rolls_back_and_preserves_audit_rows(
 
 def _install_sealed_drift_authority(store: SQLiteStore, comparison_id: str) -> None:
     with sqlite3.connect(store.db_path) as con:
+        exclusion_counts = {
+            reason: 0 for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+        }
+        exclusion_states = {
+            reason: RowChainSHA256.new(f"projection-exclusion/{reason}").to_json()
+            for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+        }
+        exclusion_roots = {
+            reason: RowChainSHA256.from_json(
+                exclusion_states[reason],
+                expected_domain=f"projection-exclusion/{reason}",
+            ).hexdigest()
+            for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
+        }
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET "
+            "projection_candidate_count=1,projection_exclusion_counts_json=?,"
+            "projection_exclusion_roots_json=?,"
+            "projection_exclusion_digest_states_json=? WHERE comparison_id=?",
+            (
+                json.dumps(exclusion_counts, sort_keys=True, separators=(",", ":")),
+                json.dumps(exclusion_roots, sort_keys=True, separators=(",", ":")),
+                json.dumps(exclusion_states, sort_keys=True, separators=(",", ":")),
+                comparison_id,
+            ),
+        )
         progress = con.execute(
             "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,"
             "window_id,normalization_contract_version,exact_receipt_digest,"
@@ -3527,6 +3578,265 @@ def _run_drift_to_terminal(
         if chunk.component in {"sealed", "stale"}:
             return chunk.component
     pytest.fail("drift comparison did not terminate")
+
+
+def _sealed_v3_store(tmp_path: Path) -> tuple[SQLiteStore, str]:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    assert _run_drift_to_terminal(store, comparison_id) == "sealed"
+    return store, comparison_id
+
+
+def _rewrite_v3_exclusion_evidence(
+    store: SQLiteStore,
+    comparison_id: str,
+    *,
+    counts: dict[str, int] | None = None,
+    roots: dict[str, str] | None = None,
+    null_field: str | None = None,
+    corrupt_digest: bool = False,
+) -> None:
+    fields = sqlite_store_module._structure_drift_receipt_fields(
+        STRUCTURE_DRIFT_CLASSIFIER_V3
+    )
+    with sqlite3.connect(store.db_path) as con:
+        row = con.execute(
+            "SELECT " + ",".join(fields) + " FROM "
+            "structure_generation_drift_receipts WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        assert row is not None
+        payload = dict(zip(fields, row, strict=True))
+        if counts is not None:
+            encoded_counts = json.dumps(counts, sort_keys=True, separators=(",", ":"))
+            payload["projection_exclusion_counts_json"] = encoded_counts
+            con.execute(
+                "UPDATE structure_generation_drift_progress SET "
+                "projection_exclusion_counts_json=? WHERE comparison_id=?",
+                (encoded_counts, comparison_id),
+            )
+        if roots is not None:
+            encoded_roots = json.dumps(roots, sort_keys=True, separators=(",", ":"))
+            payload["projection_exclusion_roots_json"] = encoded_roots
+            con.execute(
+                "UPDATE structure_generation_drift_progress SET "
+                "projection_exclusion_roots_json=? WHERE comparison_id=?",
+                (encoded_roots, comparison_id),
+            )
+        if null_field is not None:
+            payload[null_field] = None
+        digest = sqlite_store_module._structure_drift_receipt_digest(payload)
+        if corrupt_digest:
+            digest = "f" * 64 if digest != "f" * 64 else "e" * 64
+        con.execute("DROP TRIGGER trg_structure_drift_receipt_update")
+        assignments = [
+            "projection_exclusion_counts_json=?",
+            "projection_exclusion_roots_json=?",
+            "receipt_digest=?",
+        ]
+        values: list[object] = [
+            payload["projection_exclusion_counts_json"],
+            payload["projection_exclusion_roots_json"],
+            digest,
+        ]
+        if null_field is not None:
+            assignments.append(f"{null_field}=?")
+            values.append(None)
+        con.execute(
+            "UPDATE structure_generation_drift_receipts SET "
+            + ",".join(assignments)
+            + " WHERE comparison_id=?",
+            (*values, comparison_id),
+        )
+
+
+def test_v3_sealed_status_exposes_authenticated_expected_exclusions(
+    tmp_path: Path,
+) -> None:
+    store, _ = _sealed_v3_store(tmp_path)
+
+    status = store.structure_generation_drift_status()
+
+    assert status["authorized"] is True
+    assert status["classifier_contract_version"] == STRUCTURE_DRIFT_CLASSIFIER_V3
+    assert status["projection_candidate_count"] == (
+        status["projection_member_count"]
+        + status["projection_exclusion_count"]
+        + status["projection_diagnostic_count"]
+    )
+    assert sum(status["projection_exclusion_counts"].values()) == (
+        status["projection_exclusion_count"]
+    )
+    assert list(status["projection_exclusion_counts"]) == sorted(
+        status["projection_exclusion_counts"]
+    )
+    assert set(status["projection_exclusion_counts"]) == set(
+        status["projection_exclusion_roots"]
+    )
+    assert all(value > 0 for value in status["projection_exclusion_counts"].values())
+
+
+@pytest.mark.parametrize("tamper", ("unknown-reason", "missing-reason", "count-sum", "one-root"))
+def test_v3_sealed_status_rejects_semantic_exclusion_tamper(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    store, comparison_id = _sealed_v3_store(tmp_path)
+    status = store.structure_generation_drift_status()
+    counts = dict(status["projection_exclusion_counts"])
+    roots = dict(status["projection_exclusion_roots"])
+    with sqlite3.connect(store.db_path) as con:
+        raw_counts = json.loads(
+            con.execute(
+                "SELECT projection_exclusion_counts_json FROM "
+                "structure_generation_drift_receipts WHERE comparison_id=?",
+                (comparison_id,),
+            ).fetchone()[0]
+        )
+        raw_roots = json.loads(
+            con.execute(
+                "SELECT projection_exclusion_roots_json FROM "
+                "structure_generation_drift_receipts WHERE comparison_id=?",
+                (comparison_id,),
+            ).fetchone()[0]
+        )
+    if tamper == "unknown-reason":
+        raw_counts["unknown-reason"] = 1
+        raw_roots["unknown-reason"] = "a" * 64
+    elif tamper == "missing-reason":
+        raw_counts.pop(STRUCTURE_PROJECTION_EXCLUSION_REASONS[0])
+        raw_roots.pop(STRUCTURE_PROJECTION_EXCLUSION_REASONS[0])
+    elif tamper == "count-sum":
+        reason = next(iter(counts))
+        raw_counts[reason] += 1
+    else:
+        reason = next(iter(roots))
+        raw_roots[reason] = "f" * 64
+    _rewrite_v3_exclusion_evidence(
+        store,
+        comparison_id,
+        counts=raw_counts,
+        roots=raw_roots,
+    )
+
+    tampered = store.structure_generation_drift_status()
+
+    assert tampered["authorized"] is False
+    assert tampered["reason"] == "structure-drift-receipt-invalid"
+    assert "projection_exclusion_counts" not in tampered
+    assert "projection_exclusion_roots" not in tampered
+
+
+def test_v3_sealed_status_rejects_receipt_digest_tamper(tmp_path: Path) -> None:
+    store, comparison_id = _sealed_v3_store(tmp_path)
+    _rewrite_v3_exclusion_evidence(store, comparison_id, corrupt_digest=True)
+
+    status = store.structure_generation_drift_status()
+
+    assert status["authorized"] is False
+    assert status["reason"] == "structure-drift-receipt-invalid"
+    assert "projection_candidate_count" not in status
+
+
+def test_invalid_v3_receipt_never_falls_back_to_valid_v2_authority(
+    tmp_path: Path,
+) -> None:
+    store, comparison_id = _sealed_v3_store(tmp_path)
+    v2_comparison_id = "2" * 64
+    with sqlite3.connect(store.db_path) as con:
+        progress_columns = [
+            str(row[1])
+            for row in con.execute(
+                "PRAGMA table_info(structure_generation_drift_progress)"
+            )
+        ]
+        progress_row = con.execute(
+            "SELECT * FROM structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        assert progress_row is not None
+        historical_progress = dict(
+            zip(progress_columns, progress_row, strict=True)
+        )
+        historical_progress.update(
+            comparison_id=v2_comparison_id,
+            classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V2,
+        )
+        con.execute(
+            "INSERT INTO structure_generation_drift_progress("
+            + ",".join(progress_columns)
+            + ") VALUES ("
+            + ",".join("?" for _ in progress_columns)
+            + ")",
+            tuple(historical_progress[column] for column in progress_columns),
+        )
+        v3_fields = sqlite_store_module._structure_drift_receipt_fields(
+            STRUCTURE_DRIFT_CLASSIFIER_V3
+        )
+        receipt_row = con.execute(
+            "SELECT " + ",".join(v3_fields) + " FROM "
+            "structure_generation_drift_receipts WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        assert receipt_row is not None
+        v3_payload = dict(zip(v3_fields, receipt_row, strict=True))
+        v2_fields = sqlite_store_module._structure_drift_receipt_fields(
+            STRUCTURE_DRIFT_CLASSIFIER_V2
+        )
+        v2_payload = {
+            field: (
+                v2_comparison_id
+                if field == "comparison_id"
+                else STRUCTURE_DRIFT_CLASSIFIER_V2
+                if field == "classifier_contract_version"
+                else v3_payload[field]
+            )
+            for field in v2_fields
+        }
+        v2_digest = sqlite_store_module._structure_drift_receipt_digest(v2_payload)
+        con.execute(
+            "INSERT INTO structure_generation_drift_receipts("
+            + ",".join(v2_fields)
+            + ",receipt_digest) VALUES ("
+            + ",".join("?" for _ in range(len(v2_fields) + 1))
+            + ")",
+            (*(v2_payload[field] for field in v2_fields), v2_digest),
+        )
+    _rewrite_v3_exclusion_evidence(store, comparison_id, corrupt_digest=True)
+
+    status = store.structure_generation_drift_status()
+
+    assert status["authorized"] is False
+    assert status["reason"] == "structure-drift-receipt-invalid"
+    assert status["progress_id"] == comparison_id
+    assert status["progress_id"] != v2_comparison_id
+
+
+@pytest.mark.parametrize(
+    "null_field",
+    (
+        "projection_candidate_count",
+        "projection_exclusion_count",
+        "projection_exclusion_counts_json",
+        "projection_exclusion_roots_json",
+    ),
+)
+def test_v3_sealed_status_rejects_null_v3_receipt_fields(
+    tmp_path: Path,
+    null_field: str,
+) -> None:
+    store, comparison_id = _sealed_v3_store(tmp_path)
+    _rewrite_v3_exclusion_evidence(
+        store,
+        comparison_id,
+        null_field=null_field,
+    )
+
+    status = store.structure_generation_drift_status()
+
+    assert status["authorized"] is False
+    assert status["reason"] == "structure-drift-receipt-invalid"
+    assert "projection_exclusion_count" not in status
 
 
 def _advance_to_v3_finalization_checkpoint(
