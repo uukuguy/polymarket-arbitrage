@@ -371,6 +371,7 @@ def _rewrite_stale_terminal_class_evidence(
     *,
     class_counts: dict[str, object],
     class_digests: dict[str, object],
+    terminal_reason: str | None = None,
 ) -> None:
     fields = sqlite_store_module._structure_drift_terminal_receipt_fields(
         STRUCTURE_DRIFT_CLASSIFIER_V3
@@ -387,18 +388,28 @@ def _rewrite_stale_terminal_class_evidence(
         payload = dict(zip(fields, row, strict=True))
         payload["class_counts_json"] = counts_json
         payload["class_digests_json"] = digests_json
+        if terminal_reason is not None:
+            payload["terminal_reason"] = terminal_reason
         digest = sqlite_store_module._structure_drift_terminal_receipt_digest(payload)
         con.execute("DROP TRIGGER trg_structure_drift_terminal_receipt_update")
         con.execute(
             "UPDATE structure_generation_drift_terminal_receipts SET "
-            "class_counts_json=?,class_digests_json=?,receipt_digest=? "
+            "class_counts_json=?,class_digests_json=?,terminal_reason=?,"
+            "receipt_digest=? "
             "WHERE comparison_id=?",
-            (counts_json, digests_json, digest, comparison_id),
+            (
+                counts_json,
+                digests_json,
+                payload["terminal_reason"],
+                digest,
+                comparison_id,
+            ),
         )
         con.execute(
             "UPDATE structure_generation_drift_progress SET "
-            "class_counts_json=?,class_digests_json=? WHERE comparison_id=?",
-            (counts_json, digests_json, comparison_id),
+            "class_counts_json=?,class_digests_json=?,terminal_reason=? "
+            "WHERE comparison_id=?",
+            (counts_json, digests_json, payload["terminal_reason"], comparison_id),
         )
 
 
@@ -487,6 +498,21 @@ def _stale_terminal_class_evidence(
     return json.loads(str(row[0])), json.loads(str(row[1]))
 
 
+def _stale_terminal_diagnostic_evidence(
+    store: SQLiteStore,
+    comparison_id: str,
+) -> tuple[dict[str, object], str, dict[str, object]]:
+    with sqlite3.connect(store.db_path) as con:
+        row = con.execute(
+            "SELECT diagnostic_counts_json,diagnostic_root,diagnostic_samples_json "
+            "FROM structure_generation_drift_terminal_receipts "
+            "WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+    assert row is not None
+    return json.loads(str(row[0])), str(row[1]), json.loads(str(row[2]))
+
+
 def _assert_stale_terminal_evidence_unavailable(status: dict[str, object]) -> None:
     assert status["authorized"] is False
     assert status["reason"] == "structure-drift-terminal-receipt-invalid"
@@ -508,10 +534,10 @@ def _assert_stale_terminal_evidence_unavailable(status: dict[str, object]) -> No
 
 
 def _assert_stale_terminal_public_evidence_suppressed(
-    status: dict[str, object], *, expected_reason: str
+    status: dict[str, object],
 ) -> None:
     assert status["authorized"] is False
-    assert status["reason"] == expected_reason
+    assert status["reason"] == "structure-drift-terminal-stale"
     for field in (
         "class_counts",
         "class_digests",
@@ -523,6 +549,78 @@ def _assert_stale_terminal_public_evidence_suppressed(
         "projection_exclusion_roots",
     ):
         assert field not in status
+
+
+def _assert_stale_terminal_public_aggregate(
+    status: dict[str, object], *, expected_total: int, expected_root: str
+) -> None:
+    _assert_stale_terminal_public_evidence_suppressed(
+        status,
+    )
+    assert status["diagnostic_total"] == expected_total
+    assert status["diagnostic_root"] == expected_root
+    assert "diagnostic_counts" not in status
+    assert "diagnostic_samples" not in status
+    assert "diagnostic_samples_digest" not in status
+
+
+def test_stale_terminal_relabel_cannot_change_public_semantics(tmp_path: Path) -> None:
+    store, comparison_id = _stale_unclassified_v3_store(tmp_path)
+    counts, root, samples = _stale_terminal_diagnostic_evidence(store, comparison_id)
+    total = sum(int(value) for value in counts.values())
+    sample_values = [sample for values in samples.values() for sample in values]
+    _rewrite_stale_terminal_diagnostic_evidence(
+        store,
+        comparison_id,
+        diagnostic_counts={"forged-semantic-label": total},
+        diagnostic_root=root,
+        diagnostic_samples={"forged-semantic-label": sample_values},
+    )
+
+    status = store.structure_generation_drift_status()
+    _assert_stale_terminal_public_aggregate(
+        status,
+        expected_total=total,
+        expected_root=root,
+    )
+    check = health_module._structure_drift_health_check(
+        status,
+        enabled=True,
+        now_ms=4_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+    assert check["status"] == "fail"
+    assert check["terminalReason"] == "structure-drift-terminal-stale"
+    assert check["diagnosticTotal"] == total
+    assert "diagnosticCounts" not in check
+    assert "diagnosticSamples" not in check
+    assert "forged-semantic-label" not in check["output"]
+
+
+def test_stale_terminal_joint_overlap_forgery_cannot_change_public_reason(
+    tmp_path: Path,
+) -> None:
+    store, comparison_id = _stale_unclassified_v3_store(tmp_path)
+    counts, digests = _stale_terminal_class_evidence(store, comparison_id)
+    diagnostic_counts, root, _ = _stale_terminal_diagnostic_evidence(
+        store, comparison_id
+    )
+    total = sum(int(value) for value in diagnostic_counts.values())
+    counts["overlap-conflict"] = 1
+    digests["overlap-conflict"] = "f" * 64
+    _rewrite_stale_terminal_class_evidence(
+        store,
+        comparison_id,
+        class_counts=counts,
+        class_digests=digests,
+        terminal_reason="drift-overlap-conflict",
+    )
+
+    _assert_stale_terminal_public_aggregate(
+        store.structure_generation_drift_status(),
+        expected_total=total,
+        expected_root=root,
+    )
 
 
 def test_stale_terminal_suppresses_well_formed_wrong_positive_root(
@@ -540,7 +638,6 @@ def test_stale_terminal_suppresses_well_formed_wrong_positive_root(
 
     _assert_stale_terminal_public_evidence_suppressed(
         store.structure_generation_drift_status(),
-        expected_reason="drift-overlap-conflict",
     )
 
 
@@ -560,7 +657,6 @@ def test_stale_unclassified_suppresses_well_formed_count_and_root_injection(
 
     _assert_stale_terminal_public_evidence_suppressed(
         store.structure_generation_drift_status(),
-        expected_reason="drift-unclassified",
     )
 
 
@@ -653,7 +749,6 @@ def test_stale_terminal_rejects_invalid_class_commitment(
     if tamper == "reconstruction-count":
         _assert_stale_terminal_public_evidence_suppressed(
             status,
-            expected_reason="drift-overlap-conflict",
         )
     else:
         _assert_stale_terminal_evidence_unavailable(status)
@@ -764,12 +859,11 @@ def test_valid_terminal_receipt_status_exposes_authenticated_evidence(
             ),
         )
     status = store.structure_generation_drift_status()
-    assert status["reason"] == "drift-unclassified"
     assert status["terminal_receipt_digest"] == receipt_digest
-    assert status["diagnostic_counts"] == {"other-zero-removal-reason": 1}
-    _assert_stale_terminal_public_evidence_suppressed(
+    _assert_stale_terminal_public_aggregate(
         status,
-        expected_reason="drift-unclassified",
+        expected_total=1,
+        expected_root=str(payload["diagnostic_root"]),
     )
     check = health_module._structure_drift_health_check(
         status,
@@ -779,8 +873,10 @@ def test_valid_terminal_receipt_status_exposes_authenticated_evidence(
     )["snapshot:structure_generation_drift"][0]
     assert check["observedValue"] == "terminal-stale"
     assert check["comparisonId"] == comparison_id
-    assert check["terminalReason"] == "drift-unclassified"
-    assert check["diagnosticCounts"] == {"other-zero-removal-reason": 1}
+    assert check["terminalReason"] == "structure-drift-terminal-stale"
+    assert check["diagnosticTotal"] == 1
+    assert "diagnosticCounts" not in check
+    assert "diagnosticSamples" not in check
     assert check["diagnosticRoot"] == payload["diagnostic_root"]
     assert check["checkpointAtMs"] == payload["checkpoint_at_ms"]
 
@@ -806,7 +902,10 @@ def test_valid_terminal_receipt_status_exposes_authenticated_evidence(
             "snapshot:structure_generation_drift"
         ][0]
         assert endpoint_check["comparisonId"] == comparison_id
+        assert endpoint_check["diagnosticTotal"] == 1
         assert endpoint_check["diagnosticRoot"] == payload["diagnostic_root"]
+        assert "diagnosticCounts" not in endpoint_check
+        assert "diagnosticSamples" not in endpoint_check
         assert endpoint_check["checkpointAtMs"] == payload["checkpoint_at_ms"]
 
 
@@ -3865,7 +3964,6 @@ def test_v3_checkpoint_conserves_one_member_and_every_exclusion_reason(
         status = store.structure_generation_drift_status()
         _assert_stale_terminal_public_evidence_suppressed(
             status,
-            expected_reason="drift-unclassified",
         )
         with sqlite3.connect(store.db_path) as con:
             progress = con.execute(
@@ -4282,8 +4380,14 @@ def test_stale_overlap_finalization_atomically_seals_terminal_receipt(
     assert progress == ("stale", "drift-overlap-conflict")
     assert receipts == 1
     status = store.structure_generation_drift_status()
-    assert status["reason"] == "drift-overlap-conflict"
-    assert status["diagnostic_counts"]
+    diagnostic_counts, diagnostic_root, _ = _stale_terminal_diagnostic_evidence(
+        store, comparison_id
+    )
+    _assert_stale_terminal_public_aggregate(
+        status,
+        expected_total=sum(int(value) for value in diagnostic_counts.values()),
+        expected_root=diagnostic_root,
+    )
 
 
 def test_two_member_sibling_recovery_seals_v2_reconstruction(
@@ -4437,11 +4541,12 @@ def test_generation_omission_finalizes_with_projection_missing_diagnostic(
 
     assert _run_drift_to_terminal(store, comparison_id) == "stale"
     status = store.structure_generation_drift_status()
-    assert status["reason"] == "drift-unclassified"
-    assert status["diagnostic_counts"] == {
-        "active-open-projection-missing": 1
-    }
-    assert len(status["diagnostic_samples"]["active-open-projection-missing"]) == 1
+    _, diagnostic_root, _ = _stale_terminal_diagnostic_evidence(store, comparison_id)
+    _assert_stale_terminal_public_aggregate(
+        status,
+        expected_total=1,
+        expected_root=diagnostic_root,
+    )
 
 
 def test_terminal_receipt_insert_failure_rolls_back_stale_transition(

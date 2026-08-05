@@ -9944,16 +9944,12 @@ class SQLiteStore:
                     "progress_id": str(progress[0]),
                     "hash_algorithm": str(progress[5]),
                     "classifier_contract_version": str(progress[11]),
-                    "diagnostic_counts": diagnostic_counts,
-                    "diagnostic_root": str(terminal_payload["diagnostic_root"]),
-                    "diagnostic_samples": diagnostic_samples,
-                    "diagnostic_samples_digest": str(
-                        terminal_payload["diagnostic_samples_digest"]
-                    ),
+                    "diagnostic_total": diagnostic_digest.count,
+                    "diagnostic_root": diagnostic_digest.hexdigest(),
                     "terminal_receipt_digest": str(terminal_row[-1]),
                     "checkpoint_at_ms": int(progress[4]),
                     "phase": "stale",
-                    "reason": str(progress[12]),
+                    "reason": "structure-drift-terminal-stale",
                 }
             if progress[1] != "sealed" or receipt_row is None:
                 return {

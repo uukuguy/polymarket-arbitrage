@@ -778,28 +778,45 @@ def _structure_drift_health_check(
         contract = status.get("classifier_contract_version")
         comparison_id = status.get("progress_id")
         if phase == "stale":
-            diagnostic_counts = status.get("diagnostic_counts", {})
             diagnostic_root = status.get("diagnostic_root")
-            diagnostic_samples = status.get("diagnostic_samples", {})
             observed = "terminal-stale"
-            output = (
-                f"contract={contract} comparison={comparison_id} reason={reason} "
-                "diagnostic_counts="
-                f"{json.dumps(diagnostic_counts, sort_keys=True, separators=(',', ':'))} "
-                f"diagnostic_root={diagnostic_root} "
-                f"checkpoint_at_ms={checkpoint} "
-                "diagnostic_samples="
-                f"{json.dumps(diagnostic_samples, sort_keys=True, separators=(',', ':'))}"
-            )
-            extra = {
-                "classifierContract": contract,
-                "comparisonId": comparison_id,
-                "terminalReason": reason,
-                "diagnosticCounts": diagnostic_counts,
-                "diagnosticRoot": diagnostic_root,
-                "diagnosticSamples": diagnostic_samples,
-                "checkpointAtMs": checkpoint,
-            }
+            diagnostic_total = status.get("diagnostic_total")
+            if isinstance(diagnostic_total, int):
+                output = (
+                    f"contract={contract} comparison={comparison_id} reason={reason} "
+                    f"diagnostic_total={diagnostic_total} "
+                    f"diagnostic_root={diagnostic_root} "
+                    f"checkpoint_at_ms={checkpoint}"
+                )
+                extra = {
+                    "classifierContract": contract,
+                    "comparisonId": comparison_id,
+                    "terminalReason": reason,
+                    "diagnosticTotal": diagnostic_total,
+                    "diagnosticRoot": diagnostic_root,
+                    "checkpointAtMs": checkpoint,
+                }
+            else:
+                diagnostic_counts = status.get("diagnostic_counts", {})
+                diagnostic_samples = status.get("diagnostic_samples", {})
+                output = (
+                    f"contract={contract} comparison={comparison_id} reason={reason} "
+                    "diagnostic_counts="
+                    f"{json.dumps(diagnostic_counts, sort_keys=True, separators=(',', ':'))} "
+                    f"diagnostic_root={diagnostic_root} "
+                    f"checkpoint_at_ms={checkpoint} "
+                    "diagnostic_samples="
+                    f"{json.dumps(diagnostic_samples, sort_keys=True, separators=(',', ':'))}"
+                )
+                extra = {
+                    "classifierContract": contract,
+                    "comparisonId": comparison_id,
+                    "terminalReason": reason,
+                    "diagnosticCounts": diagnostic_counts,
+                    "diagnosticRoot": diagnostic_root,
+                    "diagnosticSamples": diagnostic_samples,
+                    "checkpointAtMs": checkpoint,
+                }
         else:
             observed = status.get("authorization_mode")
             output = (
