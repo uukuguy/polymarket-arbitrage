@@ -444,12 +444,21 @@ def test_drift_schema_initialization_does_not_create_progress(
 def test_drift_receipt_digest_authenticates_every_field() -> None:
     fields = sqlite_store_module._STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS
     payload = {field: index for index, field in enumerate(fields)}
+    payload["classifier_contract_version"] = (
+        sqlite_store_module.STRUCTURE_DRIFT_CLASSIFIER_V2
+    )
     original = sqlite_store_module._structure_drift_receipt_digest(payload)
     assert len(original) == 64
     for field in fields:
         changed = dict(payload)
         changed[field] = f"changed-{field}"
-        assert sqlite_store_module._structure_drift_receipt_digest(changed) != original
+        if field == "classifier_contract_version":
+            with pytest.raises(
+                ValueError, match="invalid-structure-drift-classifier-contract"
+            ):
+                sqlite_store_module._structure_drift_receipt_digest(changed)
+        else:
+            assert sqlite_store_module._structure_drift_receipt_digest(changed) != original
     with pytest.raises(ValueError, match="invalid-structure-drift-receipt-fields"):
         sqlite_store_module._structure_drift_receipt_digest(
             {**payload, "unexpected": "field"}

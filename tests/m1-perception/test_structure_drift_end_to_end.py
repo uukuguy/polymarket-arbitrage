@@ -16,6 +16,7 @@ from polyarb.http import health as health_module
 from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V1,
     STRUCTURE_DRIFT_CLASSIFIER_V2,
+    STRUCTURE_DRIFT_CLASSIFIER_V3,
     STRUCTURE_EVENT_SOURCE_CONTRACT,
 )
 from polyarb.perception.structure_drift import (
@@ -59,6 +60,16 @@ _TERMINAL_RECEIPT_FIELDS = (
     "created_at_ms",
     "checkpoint_at_ms",
 )
+_V3_RECEIPT_EXCLUSION_FIELDS = {
+    "projection_candidate_count",
+    "projection_exclusion_count",
+    "projection_exclusion_counts_json",
+    "projection_exclusion_roots_json",
+}
+_V3_PROGRESS_EXCLUSION_FIELDS = {
+    *_V3_RECEIPT_EXCLUSION_FIELDS,
+    "projection_exclusion_digest_states_json",
+}
 
 
 def test_classifier_schema_versions_authority_and_seals_terminal_receipts(
@@ -94,7 +105,12 @@ def test_classifier_schema_versions_authority_and_seals_terminal_receipts(
         }
     assert _CLASSIFIER_PROGRESS_FIELDS <= progress
     assert "classifier_contract_version" in authorization
-    assert set(_TERMINAL_RECEIPT_FIELDS) | {"receipt_digest"} == set(terminal)
+    assert (
+        set(_TERMINAL_RECEIPT_FIELDS)
+        | _V3_RECEIPT_EXCLUSION_FIELDS
+        | {"receipt_digest"}
+        == set(terminal)
+    )
     assert set(terminal_triggers) == {
         "trg_structure_drift_terminal_receipt_update",
         "trg_structure_drift_terminal_receipt_delete",
@@ -124,13 +140,13 @@ def test_terminal_receipt_digest_has_independent_fixed_field_oracle() -> None:
     }
     payload["legacy_snapshot_id"] = 1
     payload["generation_snapshot_id"] = 2
+    payload["classifier_contract_version"] = STRUCTURE_DRIFT_CLASSIFIER_V2
     values = tuple(payload[field] for field in _TERMINAL_RECEIPT_FIELDS)
     expected = hashlib.sha256(
         json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()
     ).hexdigest()
     assert sqlite_store_module._structure_drift_terminal_receipt_digest(payload) == expected
     for field in (
-        "classifier_contract_version",
         "terminal_reason",
         "diagnostic_counts_json",
         "diagnostic_root",
@@ -141,6 +157,12 @@ def test_terminal_receipt_digest_has_independent_fixed_field_oracle() -> None:
         assert (
             sqlite_store_module._structure_drift_terminal_receipt_digest(changed)
             != expected
+        )
+    with pytest.raises(
+        ValueError, match="invalid-structure-drift-classifier-contract"
+    ):
+        sqlite_store_module._structure_drift_terminal_receipt_digest(
+            {**payload, "classifier_contract_version": "changed-contract"}
         )
 
 
@@ -1400,6 +1422,23 @@ _DRIFT_RECEIPT_V2_DIGEST_FIELDS = (
     "unclassified_count",
     "created_at_ms",
 )
+_DRIFT_RECEIPT_V3_DIGEST_FIELDS = (
+    *_DRIFT_RECEIPT_V2_DIGEST_FIELDS[:-1],
+    "projection_candidate_count",
+    "projection_exclusion_count",
+    "projection_exclusion_counts_json",
+    "projection_exclusion_roots_json",
+    "created_at_ms",
+)
+_TERMINAL_RECEIPT_V3_FIELDS = (
+    *_TERMINAL_RECEIPT_FIELDS[:-2],
+    "projection_candidate_count",
+    "projection_exclusion_count",
+    "projection_exclusion_counts_json",
+    "projection_exclusion_roots_json",
+    "created_at_ms",
+    "checkpoint_at_ms",
+)
 _V1_RECEIPT_COLUMNS = tuple(
     field
     for field in _DRIFT_RECEIPT_V2_DIGEST_FIELDS
@@ -1453,6 +1492,268 @@ def _downgrade_to_classifier_v1_shape(store: SQLiteStore) -> None:
         con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_update")
         con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_delete")
         con.execute("DROP TABLE IF EXISTS structure_generation_drift_terminal_receipts")
+
+
+def _columns(con: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in con.execute(f"PRAGMA table_info({table})")}
+
+
+def _downgrade_to_classifier_v2_shape(store: SQLiteStore) -> None:
+    table_fields = {
+        "structure_generation_drift_progress": _V3_PROGRESS_EXCLUSION_FIELDS,
+        "structure_generation_drift_receipts": _V3_RECEIPT_EXCLUSION_FIELDS,
+        "structure_generation_drift_terminal_receipts": (
+            _V3_RECEIPT_EXCLUSION_FIELDS
+        ),
+    }
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP INDEX IF EXISTS idx_structure_drift_progress_active")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_receipt_update")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_receipt_delete")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_update")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_delete")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_insert")
+        for table, omitted in table_fields.items():
+            existing = _columns(con, table)
+            for column in omitted:
+                if column in existing:
+                    con.execute(
+                        f"ALTER TABLE {table} DROP COLUMN {column}"  # noqa: S608
+                    )
+        con.execute(
+            "CREATE INDEX idx_structure_drift_progress_active ON "
+            "structure_generation_drift_progress(checkpoint_at_ms DESC,comparison_id) "
+            "WHERE phase NOT IN ('sealed','stale')"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_receipt_update BEFORE UPDATE ON "
+            "structure_generation_drift_receipts BEGIN SELECT "
+            "RAISE(ABORT,'structure-drift-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_receipt_delete BEFORE DELETE ON "
+            "structure_generation_drift_receipts BEGIN SELECT "
+            "RAISE(ABORT,'structure-drift-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_terminal_receipt_update BEFORE UPDATE ON "
+            "structure_generation_drift_terminal_receipts BEGIN SELECT RAISE(ABORT,"
+            "'structure-drift-terminal-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_terminal_receipt_delete BEFORE DELETE ON "
+            "structure_generation_drift_terminal_receipts BEGIN SELECT RAISE(ABORT,"
+            "'structure-drift-terminal-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_terminal_receipt_insert BEFORE INSERT ON "
+            "structure_generation_drift_terminal_receipts WHEN EXISTS (SELECT 1 FROM "
+            "structure_generation_drift_terminal_receipts WHERE comparison_id="
+            "NEW.comparison_id) BEGIN SELECT RAISE(ABORT,"
+            "'structure-drift-terminal-receipt-sealed'); END"
+        )
+
+
+def _receipt_bytes(con: sqlite3.Connection, comparison_id: str) -> tuple[object, ...]:
+    row = con.execute(
+        "SELECT " + ",".join((*_DRIFT_RECEIPT_V2_DIGEST_FIELDS, "receipt_digest"))
+        + " FROM structure_generation_drift_receipts WHERE comparison_id=?",
+        (comparison_id,),
+    ).fetchone()
+    assert row is not None
+    return tuple(row)
+
+
+def _terminal_bytes(con: sqlite3.Connection, comparison_id: str) -> tuple[object, ...]:
+    row = con.execute(
+        "SELECT " + ",".join((*_TERMINAL_RECEIPT_FIELDS, "receipt_digest"))
+        + " FROM structure_generation_drift_terminal_receipts WHERE comparison_id=?",
+        (comparison_id,),
+    ).fetchone()
+    assert row is not None
+    return tuple(row)
+
+
+def _pre_v3_receipt_store(
+    tmp_path: Path,
+) -> tuple[SQLiteStore, tuple[object, ...], tuple[object, ...]]:
+    store = _drift_store(tmp_path)
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    _install_sealed_drift_authority(store, comparison_id)
+    with sqlite3.connect(store.db_path) as con:
+        payload = _terminal_receipt_payload(con, comparison_id)
+        _insert_terminal_receipt(con, payload)
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET phase='stale',"
+            "terminal_reason=?,checkpoint_at_ms=? WHERE comparison_id=?",
+            (payload["terminal_reason"], payload["checkpoint_at_ms"], comparison_id),
+        )
+    _downgrade_to_classifier_v2_shape(store)
+    with sqlite3.connect(store.db_path) as con:
+        authorization = _receipt_bytes(con, comparison_id)
+        terminal = _terminal_bytes(con, comparison_id)
+    return store, authorization, terminal
+
+
+def _independent_sha256(values: tuple[object, ...]) -> str:
+    return hashlib.sha256(
+        json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _changed(value: object) -> object:
+    if type(value) is int:
+        return value + 1
+    return f"changed-{value}"
+
+
+def _digest_payload(fields: tuple[str, ...], contract: str) -> dict[str, object]:
+    payload = {
+        field: index if field.endswith("_count") or field.endswith("_ms") else field
+        for index, field in enumerate(fields)
+    }
+    payload["classifier_contract_version"] = contract
+    return payload
+
+
+def _valid_v2_authorization_payload() -> dict[str, object]:
+    return _digest_payload(
+        _DRIFT_RECEIPT_V2_DIGEST_FIELDS, STRUCTURE_DRIFT_CLASSIFIER_V2
+    )
+
+
+def _valid_v3_authorization_payload() -> dict[str, object]:
+    return _digest_payload(
+        _DRIFT_RECEIPT_V3_DIGEST_FIELDS, STRUCTURE_DRIFT_CLASSIFIER_V3
+    )
+
+
+def _valid_v2_terminal_payload() -> dict[str, object]:
+    return _digest_payload(_TERMINAL_RECEIPT_FIELDS, STRUCTURE_DRIFT_CLASSIFIER_V2)
+
+
+def _valid_v3_terminal_payload() -> dict[str, object]:
+    return _digest_payload(_TERMINAL_RECEIPT_V3_FIELDS, STRUCTURE_DRIFT_CLASSIFIER_V3)
+
+
+def _existing_v2_digest(payload: dict[str, object], fields: tuple[str, ...]) -> str:
+    return _independent_sha256(tuple(payload[field] for field in fields))
+
+
+def test_v3_migration_preserves_v2_receipt_bytes_and_adds_nullable_fields(
+    tmp_path: Path,
+) -> None:
+    store, v2_authorization, v2_terminal = _pre_v3_receipt_store(tmp_path)
+    comparison_id = str(v2_authorization[0])
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        assert _V3_RECEIPT_EXCLUSION_FIELDS <= _columns(
+            con, "structure_generation_drift_receipts"
+        )
+        assert _V3_RECEIPT_EXCLUSION_FIELDS <= _columns(
+            con, "structure_generation_drift_terminal_receipts"
+        )
+        assert _V3_PROGRESS_EXCLUSION_FIELDS <= _columns(
+            con, "structure_generation_drift_progress"
+        )
+        assert _receipt_bytes(con, comparison_id) == v2_authorization
+        assert _terminal_bytes(con, comparison_id) == v2_terminal
+        assert con.execute(
+            "SELECT projection_candidate_count,projection_exclusion_count,"
+            "projection_exclusion_counts_json,projection_exclusion_roots_json FROM "
+            "structure_generation_drift_receipts WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone() == (None, None, None, None)
+        assert con.execute(
+            "SELECT projection_candidate_count,projection_exclusion_count,"
+            "projection_exclusion_counts_json,projection_exclusion_roots_json FROM "
+            "structure_generation_drift_terminal_receipts WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone() == (None, None, None, None)
+        assert con.execute(
+            "SELECT projection_candidate_count,projection_exclusion_count,"
+            "projection_exclusion_counts_json,projection_exclusion_roots_json,"
+            "projection_exclusion_digest_states_json FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone() == (0, 0, "{}", "{}", "{}")
+        for statement in (
+            "UPDATE structure_generation_drift_receipts SET created_at_ms=1 "
+            "WHERE comparison_id=?",
+            "DELETE FROM structure_generation_drift_receipts WHERE comparison_id=?",
+            "UPDATE structure_generation_drift_terminal_receipts SET created_at_ms=1 "
+            "WHERE comparison_id=?",
+            "DELETE FROM structure_generation_drift_terminal_receipts "
+            "WHERE comparison_id=?",
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="receipt-sealed"):
+                con.execute(statement, (comparison_id,))
+
+
+@pytest.mark.parametrize(
+    "fault_point",
+    (
+        "after-authorization-columns",
+        "after-terminal-columns",
+        "after-progress-columns",
+    ),
+)
+def test_v3_migration_fault_rolls_back_to_exact_v2_authority_shape(
+    tmp_path: Path,
+    fault_point: str,
+) -> None:
+    store, _, _ = _pre_v3_receipt_store(tmp_path)
+    before = _authority_signature(store.db_path)
+    with sqlite3.connect(store.db_path) as con:
+        def inject(step: str) -> None:
+            if step == fault_point:
+                raise RuntimeError(f"injected-{fault_point}")
+
+        with pytest.raises(RuntimeError, match=f"injected-{fault_point}"):
+            sqlite_store_module._migrate_structure_drift_classifier_v3_exclusions(
+                con, fault_hook=inject
+            )
+    assert _authority_signature(store.db_path) == before
+
+
+def test_v3_receipt_digest_binds_every_exclusion_field() -> None:
+    payload = _valid_v3_authorization_payload()
+    expected = _independent_sha256(
+        tuple(payload[field] for field in _DRIFT_RECEIPT_V3_DIGEST_FIELDS)
+    )
+    assert sqlite_store_module._structure_drift_receipt_digest(payload) == expected
+    for field in _V3_RECEIPT_EXCLUSION_FIELDS:
+        assert sqlite_store_module._structure_drift_receipt_digest(
+            {**payload, field: _changed(payload[field])}
+        ) != expected
+
+
+def test_v2_receipt_digest_field_oracle_is_unchanged() -> None:
+    payload = _valid_v2_authorization_payload()
+    assert sqlite_store_module._structure_drift_receipt_digest(
+        payload
+    ) == _existing_v2_digest(payload, _DRIFT_RECEIPT_V2_DIGEST_FIELDS)
+
+
+def test_v3_receipt_digest_terminal_binds_every_exclusion_field() -> None:
+    payload = _valid_v3_terminal_payload()
+    expected = _independent_sha256(
+        tuple(payload[field] for field in _TERMINAL_RECEIPT_V3_FIELDS)
+    )
+    assert sqlite_store_module._structure_drift_terminal_receipt_digest(
+        payload
+    ) == expected
+    for field in _V3_RECEIPT_EXCLUSION_FIELDS:
+        assert sqlite_store_module._structure_drift_terminal_receipt_digest(
+            {**payload, field: _changed(payload[field])}
+        ) != expected
+
+
+def test_v2_receipt_digest_field_oracle_terminal_is_unchanged() -> None:
+    payload = _valid_v2_terminal_payload()
+    assert sqlite_store_module._structure_drift_terminal_receipt_digest(
+        payload
+    ) == _existing_v2_digest(payload, _TERMINAL_RECEIPT_FIELDS)
 
 
 def _authority_signature(path: Path) -> dict[str, tuple[tuple[object, ...], ...]]:

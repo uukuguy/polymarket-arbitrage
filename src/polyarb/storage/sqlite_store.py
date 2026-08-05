@@ -1196,6 +1196,121 @@ def _migrate_structure_drift_classifier_v2(
         raise
 
 
+def _migrate_structure_drift_classifier_v3_exclusions(
+    con: sqlite3.Connection,
+    *,
+    fault_hook: Callable[[str], None] | None = None,
+) -> None:
+    """Add v3 exclusion evidence without rewriting historical receipts."""
+    tables = (
+        "structure_generation_drift_receipts",
+        "structure_generation_drift_terminal_receipts",
+        "structure_generation_drift_progress",
+    )
+    columns = {
+        table: {
+            str(row[1]) for row in con.execute(f"PRAGMA table_info({table})")
+        }
+        for table in tables
+    }
+    if any(not columns[table] for table in tables):
+        return
+    receipt_columns = {
+        "projection_candidate_count": (
+            "INTEGER CHECK(projection_candidate_count IS NULL OR "
+            "projection_candidate_count>=0)"
+        ),
+        "projection_exclusion_count": (
+            "INTEGER CHECK(projection_exclusion_count IS NULL OR "
+            "projection_exclusion_count>=0)"
+        ),
+        "projection_exclusion_counts_json": "TEXT",
+        "projection_exclusion_roots_json": "TEXT",
+    }
+    progress_columns = {
+        "projection_candidate_count": (
+            "INTEGER NOT NULL DEFAULT 0 CHECK(projection_candidate_count>=0)"
+        ),
+        "projection_exclusion_count": (
+            "INTEGER NOT NULL DEFAULT 0 CHECK(projection_exclusion_count>=0)"
+        ),
+        "projection_exclusion_counts_json": "TEXT NOT NULL DEFAULT '{}'",
+        "projection_exclusion_roots_json": "TEXT NOT NULL DEFAULT '{}'",
+        "projection_exclusion_digest_states_json": "TEXT NOT NULL DEFAULT '{}'",
+    }
+    if (
+        set(receipt_columns) <= columns[tables[0]]
+        and set(receipt_columns) <= columns[tables[1]]
+        and set(progress_columns) <= columns[tables[2]]
+    ):
+        return
+    con.execute("SAVEPOINT structure_drift_classifier_v3_exclusions_migration")
+    try:
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_receipt_update")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_receipt_delete")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_update")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_delete")
+        con.execute("DROP TRIGGER IF EXISTS trg_structure_drift_terminal_receipt_insert")
+        for column, ddl in receipt_columns.items():
+            if column not in columns[tables[0]]:
+                con.execute(
+                    "ALTER TABLE structure_generation_drift_receipts "
+                    f"ADD COLUMN {column} {ddl}"
+                )
+        if fault_hook is not None:
+            fault_hook("after-authorization-columns")
+        for column, ddl in receipt_columns.items():
+            if column not in columns[tables[1]]:
+                con.execute(
+                    "ALTER TABLE structure_generation_drift_terminal_receipts "
+                    f"ADD COLUMN {column} {ddl}"
+                )
+        if fault_hook is not None:
+            fault_hook("after-terminal-columns")
+        for column, ddl in progress_columns.items():
+            if column not in columns[tables[2]]:
+                con.execute(
+                    "ALTER TABLE structure_generation_drift_progress "
+                    f"ADD COLUMN {column} {ddl}"
+                )
+        if fault_hook is not None:
+            fault_hook("after-progress-columns")
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_receipt_update BEFORE UPDATE ON "
+            "structure_generation_drift_receipts BEGIN SELECT "
+            "RAISE(ABORT,'structure-drift-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_receipt_delete BEFORE DELETE ON "
+            "structure_generation_drift_receipts BEGIN SELECT "
+            "RAISE(ABORT,'structure-drift-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_terminal_receipt_update BEFORE UPDATE ON "
+            "structure_generation_drift_terminal_receipts BEGIN SELECT RAISE(ABORT,"
+            "'structure-drift-terminal-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_terminal_receipt_delete BEFORE DELETE ON "
+            "structure_generation_drift_terminal_receipts BEGIN SELECT RAISE(ABORT,"
+            "'structure-drift-terminal-receipt-sealed'); END"
+        )
+        con.execute(
+            "CREATE TRIGGER trg_structure_drift_terminal_receipt_insert BEFORE INSERT ON "
+            "structure_generation_drift_terminal_receipts WHEN EXISTS (SELECT 1 FROM "
+            "structure_generation_drift_terminal_receipts WHERE comparison_id="
+            "NEW.comparison_id) BEGIN SELECT RAISE(ABORT,"
+            "'structure-drift-terminal-receipt-sealed'); END"
+        )
+        con.execute("RELEASE SAVEPOINT structure_drift_classifier_v3_exclusions_migration")
+    except BaseException:
+        con.execute(
+            "ROLLBACK TO SAVEPOINT structure_drift_classifier_v3_exclusions_migration"
+        )
+        con.execute("RELEASE SAVEPOINT structure_drift_classifier_v3_exclusions_migration")
+        raise
+
+
 def _migrate_structure_drift_fresh_projection_phase(
     con: sqlite3.Connection,
     *,
@@ -1480,7 +1595,7 @@ def _validated_structure_event_source_receipt(
     return int(row[1]), str(row[2]), identity, str(row[7])
 
 
-_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS = (
+_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS_V2 = (
     "comparison_id",
     "hash_algorithm",
     "classifier_contract_version",
@@ -1524,19 +1639,42 @@ _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS = (
     "unclassified_count",
     "created_at_ms",
 )
+_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS_V3 = (
+    *_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS_V2[:-1],
+    "projection_candidate_count",
+    "projection_exclusion_count",
+    "projection_exclusion_counts_json",
+    "projection_exclusion_roots_json",
+    "created_at_ms",
+)
+# Compatibility for the v2-only write path replaced in the next task.
+_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS = _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS_V2
 
 
-def _structure_drift_receipt_digest(payload: Mapping[str, object]) -> str:
-    """Authenticate every field in one sealed drift-safe authorization."""
-    if set(payload) != set(_STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS):
-        raise ValueError("invalid-structure-drift-receipt-fields")
-    values = tuple(payload[field] for field in _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS)
+def _canonical_tuple_sha256(values: tuple[object, ...]) -> str:
     return hashlib.sha256(
         json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()
     ).hexdigest()
 
 
-_STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS = (
+def _structure_drift_receipt_fields(contract: str) -> tuple[str, ...]:
+    if contract in {STRUCTURE_DRIFT_CLASSIFIER_V1, STRUCTURE_DRIFT_CLASSIFIER_V2}:
+        return _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS_V2
+    if contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
+        return _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS_V3
+    raise ValueError("invalid-structure-drift-classifier-contract")
+
+
+def _structure_drift_receipt_digest(payload: Mapping[str, object]) -> str:
+    """Authenticate every field in one sealed drift-safe authorization."""
+    contract = str(payload.get("classifier_contract_version") or "")
+    fields = _structure_drift_receipt_fields(contract)
+    if set(payload) != set(fields):
+        raise ValueError("invalid-structure-drift-receipt-fields")
+    return _canonical_tuple_sha256(tuple(payload[field] for field in fields))
+
+
+_STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS_V2 = (
     "comparison_id",
     "hash_algorithm",
     "classifier_contract_version",
@@ -1560,18 +1698,36 @@ _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS = (
     "created_at_ms",
     "checkpoint_at_ms",
 )
+_STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS_V3 = (
+    *_STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS_V2[:-2],
+    "projection_candidate_count",
+    "projection_exclusion_count",
+    "projection_exclusion_counts_json",
+    "projection_exclusion_roots_json",
+    "created_at_ms",
+    "checkpoint_at_ms",
+)
+# Compatibility for the v2-only write path replaced in the next task.
+_STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS = (
+    _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS_V2
+)
+
+
+def _structure_drift_terminal_receipt_fields(contract: str) -> tuple[str, ...]:
+    if contract in {STRUCTURE_DRIFT_CLASSIFIER_V1, STRUCTURE_DRIFT_CLASSIFIER_V2}:
+        return _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS_V2
+    if contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
+        return _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS_V3
+    raise ValueError("invalid-structure-drift-classifier-contract")
 
 
 def _structure_drift_terminal_receipt_digest(payload: Mapping[str, object]) -> str:
     """Authenticate every field in one immutable stale terminal receipt."""
-    if set(payload) != set(_STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS):
+    contract = str(payload.get("classifier_contract_version") or "")
+    fields = _structure_drift_terminal_receipt_fields(contract)
+    if set(payload) != set(fields):
         raise ValueError("invalid-structure-drift-terminal-receipt-fields")
-    values = tuple(
-        payload[field] for field in _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS
-    )
-    return hashlib.sha256(
-        json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode()
-    ).hexdigest()
+    return _canonical_tuple_sha256(tuple(payload[field] for field in fields))
 
 
 def _structure_drift_comparison_id(
@@ -2947,6 +3103,7 @@ class SQLiteStore:
             _migrate_structure_drift_fresh_projection_phase(con)
             _migrate_structure_drift_member_receipt_binding(con)
             con.executescript(STRUCTURE_GENERATIONS_DDL)
+            _migrate_structure_drift_classifier_v3_exclusions(con)
             con.execute("ANALYZE idx_structure_generation_memberships_drift_scan")
             con.execute("ANALYZE idx_event_market_memberships_drift_scan")
             con.execute(
@@ -9332,11 +9489,15 @@ class SQLiteStore:
                         )
                     except (TypeError, ValueError, json.JSONDecodeError):
                         terminal_shape_valid = False
-                    expected_terminal_digest = (
-                        _structure_drift_terminal_receipt_digest(terminal_payload)
-                    )
+                    try:
+                        expected_terminal_digest = (
+                            _structure_drift_terminal_receipt_digest(terminal_payload)
+                        )
+                    except ValueError:
+                        expected_terminal_digest = None
                     terminal_valid = (
                         terminal_shape_valid
+                        and expected_terminal_digest is not None
                         and terminal_row[-1] == expected_terminal_digest
                         and terminal_payload["comparison_id"] == progress[0]
                         and terminal_payload["hash_algorithm"] == progress[5]
@@ -9425,7 +9586,10 @@ class SQLiteStore:
                     strict=True,
                 )
             )
-            expected_receipt_digest = _structure_drift_receipt_digest(receipt_payload)
+            try:
+                expected_receipt_digest = _structure_drift_receipt_digest(receipt_payload)
+            except ValueError:
+                expected_receipt_digest = None
             try:
                 receipt_class_counts = json.loads(
                     str(receipt_payload["class_counts_json"])
@@ -9509,7 +9673,8 @@ class SQLiteStore:
                 + receipt_class_counts.get("fresh-addition", -1)
             )
             receipt_valid = (
-                receipt_row[-1] == expected_receipt_digest
+                expected_receipt_digest is not None
+                and receipt_row[-1] == expected_receipt_digest
                 and receipt_payload["comparison_id"] == progress[0]
                 and receipt_payload["hash_algorithm"] == progress[5]
                 and receipt_payload["hash_algorithm"] == ROW_CHAIN_SHA256_V2
