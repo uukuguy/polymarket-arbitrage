@@ -354,6 +354,13 @@ def _stale_overlap_v3_store(tmp_path: Path) -> tuple[SQLiteStore, str]:
     return store, comparison_id
 
 
+def _stale_unclassified_v3_store(tmp_path: Path) -> tuple[SQLiteStore, str]:
+    store = _drift_store(tmp_path, omit_generation_market_id="addition")
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    assert _run_drift_to_terminal(store, comparison_id) == "stale"
+    return store, comparison_id
+
+
 def _rewrite_stale_terminal_class_evidence(
     store: SQLiteStore,
     comparison_id: str,
@@ -391,6 +398,20 @@ def _rewrite_stale_terminal_class_evidence(
         )
 
 
+def _stale_terminal_class_evidence(
+    store: SQLiteStore,
+    comparison_id: str,
+) -> tuple[dict[str, object], dict[str, object]]:
+    with sqlite3.connect(store.db_path) as con:
+        row = con.execute(
+            "SELECT class_counts_json,class_digests_json FROM "
+            "structure_generation_drift_terminal_receipts WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+    assert row is not None
+    return json.loads(str(row[0])), json.loads(str(row[1]))
+
+
 def _assert_stale_terminal_evidence_unavailable(status: dict[str, object]) -> None:
     assert status["authorized"] is False
     assert status["reason"] == "structure-drift-terminal-receipt-invalid"
@@ -398,11 +419,70 @@ def _assert_stale_terminal_evidence_unavailable(status: dict[str, object]) -> No
         "class_counts",
         "class_digests",
         "projection_candidate_count",
+        "projection_member_count",
         "projection_exclusion_count",
+        "projection_diagnostic_count",
         "projection_exclusion_counts",
         "projection_exclusion_roots",
     ):
         assert field not in status
+
+
+def _assert_stale_terminal_public_evidence_suppressed(
+    status: dict[str, object], *, expected_reason: str
+) -> None:
+    assert status["authorized"] is False
+    assert status["reason"] == expected_reason
+    for field in (
+        "class_counts",
+        "class_digests",
+        "projection_candidate_count",
+        "projection_member_count",
+        "projection_exclusion_count",
+        "projection_diagnostic_count",
+        "projection_exclusion_counts",
+        "projection_exclusion_roots",
+    ):
+        assert field not in status
+
+
+def test_stale_terminal_suppresses_well_formed_wrong_positive_root(
+    tmp_path: Path,
+) -> None:
+    store, comparison_id = _stale_overlap_v3_store(tmp_path)
+    counts, digests = _stale_terminal_class_evidence(store, comparison_id)
+    digests["overlap-conflict"] = "f" * 64
+    _rewrite_stale_terminal_class_evidence(
+        store,
+        comparison_id,
+        class_counts=counts,
+        class_digests=digests,
+    )
+
+    _assert_stale_terminal_public_evidence_suppressed(
+        store.structure_generation_drift_status(),
+        expected_reason="drift-overlap-conflict",
+    )
+
+
+def test_stale_unclassified_suppresses_well_formed_count_and_root_injection(
+    tmp_path: Path,
+) -> None:
+    store, comparison_id = _stale_unclassified_v3_store(tmp_path)
+    counts, digests = _stale_terminal_class_evidence(store, comparison_id)
+    counts["fresh-addition"] = 100
+    digests["fresh-addition"] = "e" * 64
+    _rewrite_stale_terminal_class_evidence(
+        store,
+        comparison_id,
+        class_counts=counts,
+        class_digests=digests,
+    )
+
+    _assert_stale_terminal_public_evidence_suppressed(
+        store.structure_generation_drift_status(),
+        expected_reason="drift-unclassified",
+    )
 
 
 def test_stale_terminal_rejects_joint_invented_class_count_forgery(
@@ -437,9 +517,7 @@ def test_stale_terminal_rejects_invalid_class_commitment(
     tamper: str,
 ) -> None:
     store, comparison_id = _stale_overlap_v3_store(tmp_path)
-    status = store.structure_generation_drift_status()
-    counts = dict(status["class_counts"])
-    digests = dict(status["class_digests"])
+    counts, digests = _stale_terminal_class_evidence(store, comparison_id)
     if tamper == "negative-count":
         counts["overlap-conflict"] = -1
     elif tamper == "bool-count":
@@ -460,9 +538,14 @@ def test_stale_terminal_rejects_invalid_class_commitment(
         class_digests=digests,
     )
 
-    _assert_stale_terminal_evidence_unavailable(
-        store.structure_generation_drift_status()
-    )
+    status = store.structure_generation_drift_status()
+    if tamper == "reconstruction-count":
+        _assert_stale_terminal_public_evidence_suppressed(
+            status,
+            expected_reason="drift-overlap-conflict",
+        )
+    else:
+        _assert_stale_terminal_evidence_unavailable(status)
 
 
 @pytest.mark.parametrize(
@@ -573,6 +656,10 @@ def test_valid_terminal_receipt_status_exposes_authenticated_evidence(
     assert status["reason"] == "drift-unclassified"
     assert status["terminal_receipt_digest"] == receipt_digest
     assert status["diagnostic_counts"] == {"other-zero-removal-reason": 1}
+    _assert_stale_terminal_public_evidence_suppressed(
+        status,
+        expected_reason="drift-unclassified",
+    )
     check = health_module._structure_drift_health_check(
         status,
         enabled=True,
@@ -3459,7 +3546,6 @@ def test_v3_checkpoint_conserves_one_member_and_every_exclusion_reason(
 ) -> None:
     observed: list[tuple[object, ...]] = []
     base = _drift_store(tmp_path / "mixed-source")
-    expected_counts = {reason: 1 for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS}
     real_chunk = base._fetch_structure_drift_fresh_projection_chunk(
         publication_id="publication-2",
         generation_snapshot_id=2,
@@ -3666,12 +3752,10 @@ def test_v3_checkpoint_conserves_one_member_and_every_exclusion_reason(
         assert chunk.component == "stale"
         assert terminal_reason == "drift-unclassified"
         status = store.structure_generation_drift_status()
-        assert status["authorized"] is False
-        assert status["reason"] == "drift-unclassified"
-        assert status["projection_candidate_count"] == 8
-        assert status["projection_exclusion_count"] == 7
-        assert status["projection_diagnostic_count"] == 0
-        assert status["projection_exclusion_counts"] == expected_counts
+        _assert_stale_terminal_public_evidence_suppressed(
+            status,
+            expected_reason="drift-unclassified",
+        )
         with sqlite3.connect(store.db_path) as con:
             progress = con.execute(
                 "SELECT projection_candidate_count,projection_exclusion_count,"
@@ -3690,12 +3774,7 @@ def test_v3_checkpoint_conserves_one_member_and_every_exclusion_reason(
         assert receipt is not None
         assert tuple(progress) == tuple(receipt)
         assert int(progress[0]) - int(progress[1]) == 1
-        observed.append(
-            (
-                *tuple(progress),
-                status["projection_diagnostic_count"],
-            )
-        )
+        observed.append(tuple(progress))
 
     assert set(fetch_limits) == {1, 17, 500}
     assert observed[0] == observed[1] == observed[2]

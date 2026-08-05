@@ -1732,19 +1732,10 @@ _STRUCTURE_DRIFT_REMOVAL_CLASS_TAGS = (
 )
 
 
-def _validated_structure_drift_class_evidence(
+def _validated_structure_drift_class_shape(
     class_counts_json: object,
     class_digests_json: object,
-    *,
-    expected_legacy_count: int,
-    expected_generation_count: int,
-    enforce_count_conservation: bool = True,
 ) -> tuple[dict[str, int], dict[str, str]]:
-    """Validate one complete domain-separated class partition."""
-    from polyarb.perception.structure_drift import (
-        reconstruction_root_from_class_commitments,
-    )
-
     try:
         class_counts = json.loads(str(class_counts_json))
         class_digests = json.loads(str(class_digests_json))
@@ -1769,11 +1760,33 @@ def _validated_structure_drift_class_evidence(
             and re.fullmatch(r"[0-9a-f]{64}", root) is not None
             for root in class_digests.values()
         )
-        and type(expected_legacy_count) is int
+    )
+    if not valid:
+        raise ValueError("structure-drift-class-evidence-invalid")
+    return class_counts, class_digests
+
+
+def _validated_structure_drift_class_evidence(
+    class_counts_json: object,
+    class_digests_json: object,
+    *,
+    expected_legacy_count: int,
+    expected_generation_count: int,
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Authenticate a sealed class partition against retained commitments."""
+    from polyarb.perception.structure_drift import (
+        reconstruction_root_from_class_commitments,
+    )
+
+    class_counts, class_digests = _validated_structure_drift_class_shape(
+        class_counts_json,
+        class_digests_json,
+    )
+    valid = (
+        type(expected_legacy_count) is int
         and expected_legacy_count >= 0
         and type(expected_generation_count) is int
         and expected_generation_count >= 0
-        and type(enforce_count_conservation) is bool
     )
     if not valid:
         raise ValueError("structure-drift-class-evidence-invalid")
@@ -1799,7 +1812,7 @@ def _validated_structure_drift_class_evidence(
         ),
         domain="generation-reconstruction",
     )
-    if enforce_count_conservation and class_counts["unclassified"] == 0:
+    if class_counts["unclassified"] == 0:
         legacy_count = (
             class_counts["shared"]
             + sum(class_counts[tag] for tag in _STRUCTURE_DRIFT_REMOVAL_CLASS_TAGS)
@@ -9825,15 +9838,9 @@ class SQLiteStore:
                         (
                             terminal_class_counts,
                             terminal_class_digests,
-                        ) = _validated_structure_drift_class_evidence(
+                        ) = _validated_structure_drift_class_shape(
                             terminal_payload["class_counts_json"],
                             terminal_payload["class_digests_json"],
-                            expected_legacy_count=int(legacy[3]),
-                            expected_generation_count=int(projection_member_count),
-                            enforce_count_conservation=(
-                                terminal_payload["terminal_reason"]
-                                == "drift-overlap-conflict"
-                            ),
                         )
                         terminal_shape_valid = diagnostic_evidence_valid and (
                             (
@@ -9914,14 +9921,11 @@ class SQLiteStore:
                     }
                 return {
                     **base,
-                    **projection_status,
                     "authorization_mode": "none",
                     "authorized": False,
                     "progress_id": str(progress[0]),
                     "hash_algorithm": str(progress[5]),
                     "classifier_contract_version": str(progress[11]),
-                    "class_counts": terminal_class_counts,
-                    "class_digests": terminal_class_digests,
                     "diagnostic_counts": diagnostic_counts,
                     "diagnostic_root": str(terminal_payload["diagnostic_root"]),
                     "diagnostic_samples": diagnostic_samples,
