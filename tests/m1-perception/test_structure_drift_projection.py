@@ -219,6 +219,8 @@ def _published_source_store(
     orphan_market: bool = False,
     tamper_market_issue: bool = False,
     tamper_event_issue: bool = False,
+    duplicate_exact_event_issue_count: int = 0,
+    irrelevant_issue_count: int = 0,
 ) -> SQLiteStore:
     store = SQLiteStore(tmp_path / "drift-source.db")
     store.init_schema()
@@ -419,6 +421,36 @@ def _published_source_store(
                     raw_payload,
                 ),
             )
+            con.executemany(
+                "INSERT INTO structure_generation_issues(snapshot_id,issue_index,"
+                "layer,category,market_id,detail,raw_payload) VALUES (1,?,?,?,?,?,?)",
+                (
+                    (
+                        10_000 + duplicate_index,
+                        issue["layer"],
+                        issue["category"],
+                        market_id,
+                        issue["detail"],
+                        raw_payload,
+                    )
+                    for duplicate_index in range(duplicate_exact_event_issue_count)
+                ),
+            )
+        con.executemany(
+            "INSERT INTO structure_generation_issues(snapshot_id,issue_index,"
+            "layer,category,market_id,detail,raw_payload) VALUES (1,?,?,?,?,?,?)",
+            (
+                (
+                    20_000 + issue_index,
+                    99,
+                    "irrelevant",
+                    "event-only",
+                    f"irrelevant-{issue_index}",
+                    f"irrelevant-{issue_index}",
+                )
+                for issue_index in range(irrelevant_issue_count)
+            ),
+        )
         con.execute(
             "INSERT INTO structure_publications("
             "publication_id,window_id,snapshot_id,status,normalization_contract_version,"
@@ -674,6 +706,99 @@ def test_v3_event_only_candidate_defect_is_not_expected_exclusion(
     assert chunk.exclusions == ()
     assert matching
     assert {row.code for row in matching} == {code}
+
+
+@pytest.mark.parametrize(
+    ("store_kwargs", "code"),
+    [
+        ({"raw_member_overrides": {"active": None}}, "evidence-missing"),
+        ({"raw_member_overrides": {"closed": None}}, "evidence-missing"),
+        ({"duplicate_event_only_identity": True}, "duplicate-market-identity"),
+        (
+            {
+                "event_count": 2,
+                "certified_event_only_conflict": True,
+                "event_only_members": (("event-only-certified", False),),
+            },
+            "conflicting-event-membership",
+        ),
+    ],
+)
+def test_v3_ordinary_event_only_structural_defect_precedes_event_exclusion(
+    tmp_path: Path,
+    store_kwargs: dict[str, object],
+    code: str,
+) -> None:
+    event_count = int(store_kwargs.pop("event_count", 1))
+    event_only_members = store_kwargs.pop(
+        "event_only_members", (("event-only", False),)
+    )
+    store = _published_source_store(
+        tmp_path,
+        event_count=event_count,
+        raw_event_overrides={
+            "negRisk": False,
+            "enableNegRisk": False,
+            "negRiskMarketID": None,
+        },
+        event_only_members=event_only_members,
+        **store_kwargs,
+    )
+
+    chunk = _all_v3_chunks(store)
+    matching = [
+        row
+        for row in chunk.diagnostics
+        if row.envelope.market_id == event_only_members[0][0]
+    ]
+    assert [row.reason for row in chunk.exclusions if row.stream == "event-only"] == []
+    assert matching
+    assert {row.code for row in matching} == {code}
+
+
+def test_v3_exact_issue_witnesses_are_bounded_under_duplicate_and_irrelevant_flood(
+    tmp_path: Path,
+) -> None:
+    store = _published_source_store(
+        tmp_path,
+        event_count=1,
+        event_only_members=(("event-only", True),),
+        duplicate_exact_event_issue_count=1_000,
+        irrelevant_issue_count=1_000,
+    )
+    inspected: list[tuple[str, int]] = []
+    statements: list[str] = []
+
+    chunk = store.fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-1",
+        generation_snapshot_id=1,
+        cursor=None,
+        limit=500,
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
+        trace_callback=statements.append,
+        inspection_callback=lambda name, rows: inspected.append((name, rows)),
+    )
+
+    assert [row.reason for row in chunk.exclusions if row.stream == "event-only"] == [
+        "event-only-quarantine"
+    ]
+    assert dict(inspected)["certified-issues"] == 1
+    issue_queries = [
+        sql
+        for sql in statements
+        if "structure_generation_issues issue" in sql.lower()
+    ]
+    assert len(issue_queries) == 1
+    assert all(
+        f"issue.{column}=candidate.{column}" in issue_queries[0]
+        for column in ("market_id", "layer", "category", "raw_payload", "detail")
+    )
+    with sqlite3.connect(store.db_path) as con:
+        plan = "\n".join(
+            str(row[3])
+            for row in con.execute("EXPLAIN QUERY PLAN " + issue_queries[0])
+        )
+    assert "idx_structure_generation_issues_exact_evidence" in plan
 
 
 def test_projection_union_excludes_only_certified_event_only_member(

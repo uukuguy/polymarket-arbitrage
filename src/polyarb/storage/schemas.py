@@ -3529,6 +3529,10 @@ CREATE TABLE IF NOT EXISTS structure_generation_issues (
     raw_payload TEXT,
     PRIMARY KEY(snapshot_id,issue_index)
 );
+CREATE INDEX IF NOT EXISTS idx_structure_generation_issues_exact_evidence
+ON structure_generation_issues(
+    snapshot_id,market_id,layer,category,raw_payload,detail
+);
 CREATE TABLE IF NOT EXISTS current_structure_generation (
     id INTEGER PRIMARY KEY CHECK(id=1),
     snapshot_id INTEGER NOT NULL UNIQUE REFERENCES snapshots(id),

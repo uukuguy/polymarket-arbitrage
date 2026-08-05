@@ -689,6 +689,26 @@ def test_event_tags_indexes_exist(tmp_path: Path) -> None:
     assert "idx_event_tags_snapshot" in idx_names
 
 
+def test_structure_generation_issue_exact_evidence_index_supports_lookup(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "structure-issue-index.db")
+    store.init_schema()
+    with sqlite3.connect(store.db_path) as con:
+        plan = "\n".join(
+            str(row[3])
+            for row in con.execute(
+                "EXPLAIN QUERY PLAN SELECT 1 FROM structure_generation_issues issue "
+                "WHERE issue.snapshot_id=1 AND issue.market_id='market-1' "
+                "AND issue.layer=3 AND issue.category='category' "
+                "AND issue.raw_payload='payload' AND issue.detail='detail' LIMIT 1"
+            )
+        )
+
+    assert "idx_structure_generation_issues_exact_evidence" in plan
+    assert "COVERING INDEX" in plan
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. Phase 1.1 Amendment 01 baseline — exact column count
 # ─────────────────────────────────────────────────────────────────────────────

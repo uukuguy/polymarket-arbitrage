@@ -6228,24 +6228,13 @@ class SQLiteStore:
             group_truth_by_key: dict[tuple[str, str], tuple[object, ...]] = {}
             conflict_events: set[str] = set()
             certified_event_keys: set[tuple[str, int, int]] = set()
-            generation_issues_by_market: dict[
-                str, set[tuple[object, ...]]
-            ] = {}
+            certified_issue_candidate_indexes: set[int] = set()
             raw_events_by_id: dict[str, dict[str, object]] = {}
             generated_market_ids: set[str] = set()
             generated_membership_ids: set[str] = set()
             if market_ids:
                 placeholders = ",".join("?" for _ in market_ids)
                 if classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
-                    for issue_row in con.execute(
-                        "SELECT layer,category,market_id,detail,raw_payload FROM "
-                        "structure_generation_issues WHERE snapshot_id=? AND "
-                        f"market_id IN ({placeholders})",
-                        (generation_snapshot_id, *market_ids),
-                    ):
-                        generation_issues_by_market.setdefault(
-                            str(issue_row[2]), set()
-                        ).add(tuple(issue_row))
                     generated_market_ids.update(
                         str(row[0])
                         for row in con.execute(
@@ -6457,44 +6446,101 @@ class SQLiteStore:
                         in conflict_rows
                         if bool(global_conflict)
                     )
-                issue_keys = []
-                for item in candidates:
-                    if item["kind"] != "event-only":
-                        continue
-                    envelope = {
-                        "event_id": item["event_id"],
-                        "event_payload_sha256": item["raw_event_hash"],
-                        "event_source_ordinal": item["source_ordinal"],
-                        "group_id": item["group_id"],
-                        "market_id": item["market_id"],
-                        "member_ordinal": item["member_ordinal"],
-                        "member_payload_sha256": item["raw_market_hash"],
-                    }
-                    issue_keys.append((
-                        str(item["event_id"]), int(item["source_ordinal"]),
-                        int(item["member_ordinal"]), str(item["market_id"]),
-                        f"{EVENT_ONLY_NEG_RISK_QUARANTINE_REASON}:"
-                        f"{structure_market_source_hash(envelope)}",
-                    ))
-                if issue_keys:
-                    issue_values = ",".join("(?,?,?,?,?)" for _ in issue_keys)
-                    issue_params = tuple(value for key in issue_keys for value in key)
-                    issue_rows = con.execute(
-                        "WITH candidate(event_id,event_ordinal,member_ordinal,market_id,"
-                        "raw_payload) AS (VALUES " + issue_values + ") SELECT "
-                        "candidate.event_id,candidate.event_ordinal,candidate.member_ordinal "
-                        "FROM candidate WHERE EXISTS (SELECT 1 FROM "
-                        "structure_generation_issues issue WHERE issue.snapshot_id=? AND "
-                        "issue.market_id=candidate.market_id AND "
-                        "issue.raw_payload=candidate.raw_payload LIMIT 1)",
-                        (*issue_params, generation_snapshot_id),
-                    ).fetchall()
-                    if inspection_callback is not None:
-                        inspection_callback("certified-issues", len(issue_rows))
-                    for event_id, event_ordinal, member_ordinal in issue_rows:
-                        certified_event_keys.add((
-                            str(event_id), int(event_ordinal), int(member_ordinal)
+                if classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V2:
+                    issue_keys = []
+                    for item in candidates:
+                        if item["kind"] != "event-only":
+                            continue
+                        envelope = {
+                            "event_id": item["event_id"],
+                            "event_payload_sha256": item["raw_event_hash"],
+                            "event_source_ordinal": item["source_ordinal"],
+                            "group_id": item["group_id"],
+                            "market_id": item["market_id"],
+                            "member_ordinal": item["member_ordinal"],
+                            "member_payload_sha256": item["raw_market_hash"],
+                        }
+                        issue_keys.append((
+                            str(item["event_id"]), int(item["source_ordinal"]),
+                            int(item["member_ordinal"]), str(item["market_id"]),
+                            f"{EVENT_ONLY_NEG_RISK_QUARANTINE_REASON}:"
+                            f"{structure_market_source_hash(envelope)}",
                         ))
+                    if issue_keys:
+                        issue_values = ",".join("(?,?,?,?,?)" for _ in issue_keys)
+                        issue_params = tuple(value for key in issue_keys for value in key)
+                        issue_rows = con.execute(
+                            "WITH candidate(event_id,event_ordinal,member_ordinal,market_id,"
+                            "raw_payload) AS (VALUES " + issue_values + ") SELECT "
+                            "candidate.event_id,candidate.event_ordinal,candidate.member_ordinal "
+                            "FROM candidate WHERE EXISTS (SELECT 1 FROM "
+                            "structure_generation_issues issue WHERE issue.snapshot_id=? AND "
+                            "issue.market_id=candidate.market_id AND "
+                            "issue.raw_payload=candidate.raw_payload LIMIT 1)",
+                            (*issue_params, generation_snapshot_id),
+                        ).fetchall()
+                        if inspection_callback is not None:
+                            inspection_callback("certified-issues", len(issue_rows))
+                        for event_id, event_ordinal, member_ordinal in issue_rows:
+                            certified_event_keys.add((
+                                str(event_id), int(event_ordinal), int(member_ordinal)
+                            ))
+                else:
+                    expected_issues: list[tuple[object, ...]] = []
+                    for candidate_index, item in enumerate(candidates):
+                        market_id = str(item["market_id"])
+                        if item["kind"] == "event-only":
+                            raw_event = raw_events_by_id.get(str(item["event_id"]))
+                            expected_issue = (
+                                None
+                                if raw_event is None
+                                else event_only_member_quarantine_issue(
+                                    raw_event,
+                                    event_source_ordinal=int(item["source_ordinal"]),
+                                    market_id=market_id,
+                                )
+                            )
+                        else:
+                            raw_market = item["raw_market"]
+                            assert isinstance(raw_market, dict)
+                            expected_issue = market_quarantine_issue(
+                                market_id,
+                                raw_market,
+                                tuple(relations.get(market_id, ())),
+                            )
+                        if expected_issue is not None:
+                            expected_issues.append((
+                                candidate_index,
+                                expected_issue["market_id"],
+                                expected_issue["layer"],
+                                expected_issue["category"],
+                                expected_issue["raw_payload"],
+                                expected_issue["detail"],
+                            ))
+                    if expected_issues:
+                        issue_values = ",".join("(?,?,?,?,?,?)" for _ in expected_issues)
+                        issue_params = tuple(
+                            value for expected_issue in expected_issues
+                            for value in expected_issue
+                        )
+                        issue_rows = con.execute(
+                            "WITH candidate(candidate_index,market_id,layer,category,"
+                            "raw_payload,detail) AS (VALUES " + issue_values + ") SELECT "
+                            "candidate.candidate_index FROM candidate WHERE EXISTS "
+                            "(SELECT 1 FROM structure_generation_issues issue WHERE "
+                            "issue.snapshot_id=? AND "
+                            "issue.market_id=candidate.market_id AND "
+                            "issue.layer=candidate.layer AND "
+                            "issue.category=candidate.category AND "
+                            "issue.raw_payload=candidate.raw_payload AND "
+                            "issue.detail=candidate.detail LIMIT 1)",
+                            (*issue_params, generation_snapshot_id),
+                        ).fetchall()
+                        certified_issue_candidate_indexes.update(
+                            int(row[0]) for row in issue_rows
+                        )
+                        if inspection_callback is not None:
+                            inspection_callback("certified-issues", len(issue_rows))
 
             members: list[StructuralMemberIdentity] = []
             diagnostics = []
@@ -6511,7 +6557,7 @@ class SQLiteStore:
                     FreshProjectionExclusion(reason, stream, envelope, truth)
                 )
 
-            for candidate in candidates:
+            for candidate_index, candidate in enumerate(candidates):
                 market_id = str(candidate["market_id"])
                 if candidate["kind"] == "event-only":
                     envelope = StructureDriftCandidateEnvelope(
@@ -6550,7 +6596,11 @@ class SQLiteStore:
                     group_evidence = (
                         FreshGroupEvidence(
                             event_id=str(candidate["event_id"]),
-                            group_id=str(candidate["group_id"]),
+                            group_id=(
+                                str(candidate["group_id"])
+                                if isinstance(candidate["group_id"], str)
+                                else ""
+                            ),
                             neg_risk_type="standard",
                             quality="incomplete-source",
                             reason="conflicting-event-membership",
@@ -6558,7 +6608,6 @@ class SQLiteStore:
                             global_relation_conflict=True,
                         )
                         if global_conflict
-                        and isinstance(candidate["group_id"], str)
                         else None
                     )
                     if (
@@ -6591,10 +6640,15 @@ class SQLiteStore:
                         and isinstance(candidate["raw_member"], dict)
                         and type(candidate["raw_member"].get("negRiskOther")) is bool
                         and (
-                            str(candidate["event_id"]),
-                            int(candidate["source_ordinal"]),
-                            int(candidate["member_ordinal"]),
-                        ) in certified_event_keys
+                            candidate_index in certified_issue_candidate_indexes
+                            if classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3
+                            else (
+                                str(candidate["event_id"]),
+                                int(candidate["source_ordinal"]),
+                                int(candidate["member_ordinal"]),
+                            )
+                            in certified_event_keys
+                        )
                     )
                     sidecar_identity_valid = (
                         bool(market_id)
@@ -6626,6 +6680,23 @@ class SQLiteStore:
                             and raw_event.get("negRiskMarketID")
                             == candidate["group_id"]
                         )
+                        ordinary_compatible_identity_valid = (
+                            bool(market_id)
+                            and market_id.strip() == market_id
+                            and candidate["member_kind"]
+                            in {"named", "other", "inactive-reserved"}
+                            and type(candidate["active"]) is bool
+                            and type(candidate["closed"]) is bool
+                            and (
+                                ordinary_event
+                                or (
+                                    isinstance(candidate["group_id"], str)
+                                    and bool(candidate["group_id"])
+                                    and str(candidate["group_id"]).strip()
+                                    == candidate["group_id"]
+                                )
+                            )
+                        )
                         expected_issue = (
                             None
                             if raw_event is None
@@ -6637,14 +6708,7 @@ class SQLiteStore:
                         )
                         exact_quarantine = (
                             expected_issue is not None
-                            and (
-                                expected_issue["layer"],
-                                expected_issue["category"],
-                                expected_issue["market_id"],
-                                expected_issue["detail"],
-                                expected_issue["raw_payload"],
-                            )
-                            in generation_issues_by_market.get(market_id, set())
+                            and candidate_index in certified_issue_candidate_indexes
                             and market_id not in generated_market_ids
                             and market_id not in generated_membership_ids
                         )
@@ -6662,19 +6726,20 @@ class SQLiteStore:
                             market_side_quarantine=False,
                             absent_from_event_catalog=False,
                             absent_from_market_catalog=True,
-                            identity_revalidated=sidecar_identity_valid,
+                            identity_revalidated=ordinary_compatible_identity_valid,
                             invalid_neg_risk_classification=not (
                                 ordinary_event or standard_event
                             ),
                             invalid_event_membership=(
-                                not sidecar_identity_valid and not global_conflict
+                                not ordinary_compatible_identity_valid
+                                and not global_conflict
                             ),
                             duplicate_market_identity=(
                                 duplicate_identity and not global_conflict
                             ),
                             uncertified_event_only_member=(
                                 standard_event
-                                and sidecar_identity_valid
+                                and ordinary_compatible_identity_valid
                                 and not global_conflict
                                 and not duplicate_identity
                                 and approved_group
@@ -6701,6 +6766,12 @@ class SQLiteStore:
 
                         if not (ordinary_event or standard_event):
                             diagnose_event_only()
+                        elif (
+                            not ordinary_compatible_identity_valid
+                            or global_conflict
+                            or duplicate_identity
+                        ):
+                            diagnose_event_only()
                         elif ordinary_event:
                             add_exclusion(
                                 reason="non-neg-risk-event-member",
@@ -6708,8 +6779,6 @@ class SQLiteStore:
                                 envelope=envelope,
                                 truth=None,
                             )
-                        elif not sidecar_identity_valid or global_conflict or duplicate_identity:
-                            diagnose_event_only()
                         elif envelope.active is not True or envelope.closed is not False:
                             add_exclusion(
                                 reason="current-nontradable-event-member",
@@ -6991,14 +7060,7 @@ class SQLiteStore:
                 )
                 exact_market_quarantine = (
                     expected_market_issue is not None
-                    and (
-                        expected_market_issue["layer"],
-                        expected_market_issue["category"],
-                        expected_market_issue["market_id"],
-                        expected_market_issue["detail"],
-                        expected_market_issue["raw_payload"],
-                    )
-                    in generation_issues_by_market.get(market_id, set())
+                    and candidate_index in certified_issue_candidate_indexes
                 )
                 evidence = FreshMemberEvidence(
                     source_present=True,
