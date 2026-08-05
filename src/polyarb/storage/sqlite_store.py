@@ -1712,6 +1712,110 @@ _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS_V3 = (
 _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS = (
     _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS_V2
 )
+_STRUCTURE_DRIFT_CLASS_TAGS = (
+    "shared",
+    "fresh-addition",
+    "current-nontradable",
+    "event-only-quarantine",
+    "market-side-quarantine",
+    "fresh-source-absent",
+    "fresh-group-ineligible",
+    "overlap-conflict",
+    "unclassified",
+)
+_STRUCTURE_DRIFT_REMOVAL_CLASS_TAGS = (
+    "current-nontradable",
+    "event-only-quarantine",
+    "market-side-quarantine",
+    "fresh-source-absent",
+    "fresh-group-ineligible",
+)
+
+
+def _validated_structure_drift_class_evidence(
+    class_counts_json: object,
+    class_digests_json: object,
+    *,
+    expected_legacy_count: int,
+    expected_generation_count: int,
+    enforce_count_conservation: bool = True,
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Validate one complete domain-separated class partition."""
+    from polyarb.perception.structure_drift import (
+        reconstruction_root_from_class_commitments,
+    )
+
+    try:
+        class_counts = json.loads(str(class_counts_json))
+        class_digests = json.loads(str(class_digests_json))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("structure-drift-class-evidence-invalid") from error
+    valid = (
+        isinstance(class_counts, dict)
+        and set(class_counts) == set(_STRUCTURE_DRIFT_CLASS_TAGS)
+        and all(
+            type(class_counts[tag]) is int and class_counts[tag] >= 0
+            for tag in _STRUCTURE_DRIFT_CLASS_TAGS
+        )
+        and isinstance(class_digests, dict)
+        and set(class_digests)
+        == {
+            tag
+            for tag in _STRUCTURE_DRIFT_CLASS_TAGS
+            if class_counts[tag] > 0
+        }
+        and all(
+            isinstance(root, str)
+            and re.fullmatch(r"[0-9a-f]{64}", root) is not None
+            for root in class_digests.values()
+        )
+        and type(expected_legacy_count) is int
+        and expected_legacy_count >= 0
+        and type(expected_generation_count) is int
+        and expected_generation_count >= 0
+        and type(enforce_count_conservation) is bool
+    )
+    if not valid:
+        raise ValueError("structure-drift-class-evidence-invalid")
+    reconstruction_root_from_class_commitments(
+        class_counts=class_counts,
+        class_digests=class_digests,
+        tags=(
+            "shared",
+            *_STRUCTURE_DRIFT_REMOVAL_CLASS_TAGS,
+            "overlap-conflict",
+            "unclassified",
+        ),
+        domain="legacy-reconstruction",
+    )
+    reconstruction_root_from_class_commitments(
+        class_counts=class_counts,
+        class_digests=class_digests,
+        tags=(
+            "shared",
+            "fresh-addition",
+            "overlap-conflict",
+            "unclassified",
+        ),
+        domain="generation-reconstruction",
+    )
+    if enforce_count_conservation and class_counts["unclassified"] == 0:
+        legacy_count = (
+            class_counts["shared"]
+            + sum(class_counts[tag] for tag in _STRUCTURE_DRIFT_REMOVAL_CLASS_TAGS)
+            + class_counts["overlap-conflict"]
+        )
+        generation_count = (
+            class_counts["shared"]
+            + class_counts["fresh-addition"]
+            + class_counts["overlap-conflict"]
+        )
+        if (
+            legacy_count != expected_legacy_count
+            or generation_count != expected_generation_count
+        ):
+            raise ValueError("structure-drift-class-evidence-invalid")
+    return class_counts, class_digests
 
 
 def _structure_drift_terminal_receipt_fields(contract: str) -> tuple[str, ...]:
@@ -9658,17 +9762,7 @@ class SQLiteStore:
                 "WHERE comparison_id=?",
                 (str(progress[0]),),
             ).fetchone()
-            class_tags = (
-                "shared",
-                "fresh-addition",
-                "current-nontradable",
-                "event-only-quarantine",
-                "market-side-quarantine",
-                "fresh-source-absent",
-                "fresh-group-ineligible",
-                "overlap-conflict",
-                "unclassified",
-            )
+            class_tags = _STRUCTURE_DRIFT_CLASS_TAGS
             progress_class_items = {
                 key: value
                 for key, value in progress_counts.items()
@@ -9714,25 +9808,43 @@ class SQLiteStore:
                         )
                     )
                     try:
-                        terminal_class_counts = json.loads(
-                            str(terminal_payload["class_counts_json"])
-                        )
-                        terminal_class_digests = json.loads(
-                            str(terminal_payload["class_digests_json"])
-                        )
                         diagnostic_counts = json.loads(
                             str(terminal_payload["diagnostic_counts_json"])
                         )
                         diagnostic_samples = json.loads(
                             str(terminal_payload["diagnostic_samples_json"])
                         )
-                        terminal_shape_valid = all(
-                            isinstance(value, dict)
-                            for value in (
-                                terminal_class_counts,
-                                terminal_class_digests,
-                                diagnostic_counts,
-                                diagnostic_samples,
+                        diagnostic_evidence_valid = (
+                            isinstance(diagnostic_counts, dict)
+                            and all(
+                                type(value) is int and value >= 0
+                                for value in diagnostic_counts.values()
+                            )
+                            and isinstance(diagnostic_samples, dict)
+                        )
+                        (
+                            terminal_class_counts,
+                            terminal_class_digests,
+                        ) = _validated_structure_drift_class_evidence(
+                            terminal_payload["class_counts_json"],
+                            terminal_payload["class_digests_json"],
+                            expected_legacy_count=int(legacy[3]),
+                            expected_generation_count=int(projection_member_count),
+                            enforce_count_conservation=(
+                                terminal_payload["terminal_reason"]
+                                == "drift-overlap-conflict"
+                            ),
+                        )
+                        terminal_shape_valid = diagnostic_evidence_valid and (
+                            (
+                                terminal_class_counts["overlap-conflict"] > 0
+                                and terminal_payload["terminal_reason"]
+                                == "drift-overlap-conflict"
+                            )
+                            or (
+                                terminal_class_counts["overlap-conflict"] == 0
+                                and terminal_payload["terminal_reason"]
+                                != "drift-overlap-conflict"
                             )
                         )
                     except (TypeError, ValueError, json.JSONDecodeError):
@@ -9851,38 +9963,27 @@ class SQLiteStore:
             except ValueError:
                 expected_receipt_digest = None
             try:
-                receipt_class_counts = json.loads(
-                    str(receipt_payload["class_counts_json"])
-                )
-                receipt_class_digests = json.loads(
-                    str(receipt_payload["class_digests_json"])
+                (
+                    receipt_class_counts,
+                    receipt_class_digests,
+                ) = _validated_structure_drift_class_evidence(
+                    receipt_payload["class_counts_json"],
+                    receipt_payload["class_digests_json"],
+                    expected_legacy_count=int(
+                        progress_counts.get("legacy_member_scan_count", -1)
+                    ),
+                    expected_generation_count=int(
+                        progress_counts.get("generation_member_scan_count", -1)
+                    ),
                 )
                 sealed_class_digests = progress_digests.get(
                     "sealed_class_digests"
                 )
                 class_evidence_valid = (
                     progress_class_shape_valid
-                    and isinstance(receipt_class_counts, dict)
-                    and set(receipt_class_counts) == set(class_tags)
-                    and all(
-                        type(receipt_class_counts[tag]) is int
-                        and receipt_class_counts[tag] >= 0
-                        for tag in class_tags
-                    )
-                    and isinstance(receipt_class_digests, dict)
                     and isinstance(sealed_class_digests, dict)
                     and receipt_class_digests == sealed_class_digests
                     and receipt_class_counts == class_counts
-                    and set(receipt_class_digests)
-                    == {
-                        tag
-                        for tag in class_tags
-                        if receipt_class_counts[tag] > 0
-                    }
-                    and all(
-                        isinstance(value, str) and len(value) == 64
-                        for value in receipt_class_digests.values()
-                    )
                 )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 receipt_class_counts = {}

@@ -280,17 +280,26 @@ def _terminal_receipt_payload(
         "structure_generation_drift_progress WHERE comparison_id=?",
         (comparison_id,),
     ).fetchone()
-    diagnostic_samples_json = (
-        '{"other-zero-removal-reason":[{"market_id":"m1"}]}'
-    )
+    diagnostic_samples_json = '{"other-zero-removal-reason":[{"market_id":"m1"}]}'
+    class_counts = {
+        "shared": 0,
+        "fresh-addition": 0,
+        "current-nontradable": 0,
+        "event-only-quarantine": 0,
+        "market-side-quarantine": 0,
+        "fresh-source-absent": 0,
+        "fresh-group-ineligible": 0,
+        "overlap-conflict": 0,
+        "unclassified": 1,
+    }
     values: tuple[object, ...] = (
         comparison_id,
         *row[:10],
         "a" * 64,
         row[10],
         "drift-unclassified",
-        '{"unclassified":1}',
-        '{"unclassified":"' + "c" * 64 + '"}',
+        json.dumps(class_counts, sort_keys=True, separators=(",", ":")),
+        json.dumps({"unclassified": "c" * 64}, separators=(",", ":")),
         '{"other-zero-removal-reason":1}',
         "b" * 64,
         diagnostic_samples_json,
@@ -330,6 +339,130 @@ def _insert_terminal_receipt(
         (*(payload[field] for field in fields), receipt_digest),
     )
     return receipt_digest
+
+
+def _stale_overlap_v3_store(tmp_path: Path) -> tuple[SQLiteStore, str]:
+    store = _drift_store(tmp_path)
+    with sqlite3.connect(store.db_path) as con:
+        con.execute("DROP TRIGGER trg_structure_generation_markets_frozen_update_v2")
+        con.execute(
+            "UPDATE structure_generation_markets SET yes_token_id='divergent' "
+            "WHERE snapshot_id=2 AND market_id='shared'"
+        )
+    comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
+    assert _run_drift_to_terminal(store, comparison_id) == "stale"
+    return store, comparison_id
+
+
+def _rewrite_stale_terminal_class_evidence(
+    store: SQLiteStore,
+    comparison_id: str,
+    *,
+    class_counts: dict[str, object],
+    class_digests: dict[str, object],
+) -> None:
+    fields = sqlite_store_module._structure_drift_terminal_receipt_fields(
+        STRUCTURE_DRIFT_CLASSIFIER_V3
+    )
+    counts_json = json.dumps(class_counts, sort_keys=True, separators=(",", ":"))
+    digests_json = json.dumps(class_digests, sort_keys=True, separators=(",", ":"))
+    with sqlite3.connect(store.db_path) as con:
+        row = con.execute(
+            "SELECT " + ",".join(fields) + " FROM "
+            "structure_generation_drift_terminal_receipts WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        assert row is not None
+        payload = dict(zip(fields, row, strict=True))
+        payload["class_counts_json"] = counts_json
+        payload["class_digests_json"] = digests_json
+        digest = sqlite_store_module._structure_drift_terminal_receipt_digest(payload)
+        con.execute("DROP TRIGGER trg_structure_drift_terminal_receipt_update")
+        con.execute(
+            "UPDATE structure_generation_drift_terminal_receipts SET "
+            "class_counts_json=?,class_digests_json=?,receipt_digest=? "
+            "WHERE comparison_id=?",
+            (counts_json, digests_json, digest, comparison_id),
+        )
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET "
+            "class_counts_json=?,class_digests_json=? WHERE comparison_id=?",
+            (counts_json, digests_json, comparison_id),
+        )
+
+
+def _assert_stale_terminal_evidence_unavailable(status: dict[str, object]) -> None:
+    assert status["authorized"] is False
+    assert status["reason"] == "structure-drift-terminal-receipt-invalid"
+    for field in (
+        "class_counts",
+        "class_digests",
+        "projection_candidate_count",
+        "projection_exclusion_count",
+        "projection_exclusion_counts",
+        "projection_exclusion_roots",
+    ):
+        assert field not in status
+
+
+def test_stale_terminal_rejects_joint_invented_class_count_forgery(
+    tmp_path: Path,
+) -> None:
+    store, comparison_id = _stale_overlap_v3_store(tmp_path)
+    _rewrite_stale_terminal_class_evidence(
+        store,
+        comparison_id,
+        class_counts={"invented-class": 999_999},
+        class_digests={"invented-class": "a" * 64},
+    )
+
+    _assert_stale_terminal_evidence_unavailable(
+        store.structure_generation_drift_status()
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "negative-count",
+        "bool-count",
+        "missing-digest",
+        "extra-zero-digest",
+        "malformed-root",
+        "reconstruction-count",
+    ),
+)
+def test_stale_terminal_rejects_invalid_class_commitment(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    store, comparison_id = _stale_overlap_v3_store(tmp_path)
+    status = store.structure_generation_drift_status()
+    counts = dict(status["class_counts"])
+    digests = dict(status["class_digests"])
+    if tamper == "negative-count":
+        counts["overlap-conflict"] = -1
+    elif tamper == "bool-count":
+        counts["overlap-conflict"] = True
+    elif tamper == "missing-digest":
+        digests.pop("overlap-conflict")
+    elif tamper == "extra-zero-digest":
+        digests["shared"] = "a" * 64
+    elif tamper == "malformed-root":
+        digests["overlap-conflict"] = "not-a-root"
+    else:
+        counts["fresh-addition"] += 100
+        digests["fresh-addition"] = "b" * 64
+    _rewrite_stale_terminal_class_evidence(
+        store,
+        comparison_id,
+        class_counts=counts,
+        class_digests=digests,
+    )
+
+    _assert_stale_terminal_evidence_unavailable(
+        store.structure_generation_drift_status()
+    )
 
 
 @pytest.mark.parametrize(
