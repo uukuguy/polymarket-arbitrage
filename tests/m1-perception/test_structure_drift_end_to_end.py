@@ -4097,6 +4097,133 @@ def test_v3_sealed_status_exposes_authenticated_expected_exclusions(
     assert all(value > 0 for value in status["projection_exclusion_counts"].values())
 
 
+def _forge_v3_terminal_candidate_and_exclusion_count(
+    store: SQLiteStore,
+    comparison_id: str,
+    *,
+    terminal: str,
+) -> None:
+    receipt_table = (
+        "structure_generation_drift_receipts"
+        if terminal == "sealed"
+        else "structure_generation_drift_terminal_receipts"
+    )
+    receipt_fields = (
+        sqlite_store_module._structure_drift_receipt_fields(
+            STRUCTURE_DRIFT_CLASSIFIER_V3
+        )
+        if terminal == "sealed"
+        else sqlite_store_module._structure_drift_terminal_receipt_fields(
+            STRUCTURE_DRIFT_CLASSIFIER_V3
+        )
+    )
+    digest_helper = (
+        sqlite_store_module._structure_drift_receipt_digest
+        if terminal == "sealed"
+        else sqlite_store_module._structure_drift_terminal_receipt_digest
+    )
+    reason = "non-neg-risk-market"
+    with sqlite3.connect(store.db_path) as con:
+        progress = con.execute(
+            "SELECT projection_exclusion_counts_json,"
+            "projection_exclusion_digest_states_json FROM "
+            "structure_generation_drift_progress WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        receipt = con.execute(
+            "SELECT " + ",".join(receipt_fields) + " FROM " + receipt_table
+            + " WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        assert progress is not None
+        assert receipt is not None
+        counts = json.loads(str(progress[0]))
+        states = json.loads(str(progress[1]))
+        chain = RowChainSHA256.from_json(
+            states[reason], expected_domain=f"projection-exclusion/{reason}"
+        )
+        chain.update(("forged-source-candidate", comparison_id))
+        counts[reason] += 1
+        states[reason] = chain.to_json()
+        roots = {
+            key: RowChainSHA256.from_json(
+                state, expected_domain=f"projection-exclusion/{key}"
+            ).hexdigest()
+            for key, state in states.items()
+        }
+        counts_json = json.dumps(counts, sort_keys=True, separators=(",", ":"))
+        states_json = json.dumps(states, sort_keys=True, separators=(",", ":"))
+        roots_json = json.dumps(roots, sort_keys=True, separators=(",", ":"))
+        payload = dict(zip(receipt_fields, receipt, strict=True))
+        payload["projection_candidate_count"] = (
+            int(payload["projection_candidate_count"]) + 1
+        )
+        payload["projection_exclusion_count"] = (
+            int(payload["projection_exclusion_count"]) + 1
+        )
+        payload["projection_exclusion_counts_json"] = counts_json
+        payload["projection_exclusion_roots_json"] = roots_json
+        receipt_digest = digest_helper(payload)
+        trigger = (
+            "trg_structure_drift_receipt_update"
+            if terminal == "sealed"
+            else "trg_structure_drift_terminal_receipt_update"
+        )
+        con.execute(f"DROP TRIGGER {trigger}")
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET "
+            "projection_candidate_count=projection_candidate_count+1,"
+            "projection_exclusion_count=projection_exclusion_count+1,"
+            "projection_exclusion_counts_json=?,projection_exclusion_roots_json=?,"
+            "projection_exclusion_digest_states_json=? WHERE comparison_id=?",
+            (counts_json, roots_json, states_json, comparison_id),
+        )
+        con.execute(
+            "UPDATE " + receipt_table + " SET "
+            "projection_candidate_count=projection_candidate_count+1,"
+            "projection_exclusion_count=projection_exclusion_count+1,"
+            "projection_exclusion_counts_json=?,projection_exclusion_roots_json=?,"
+            "receipt_digest=? WHERE comparison_id=?",
+            (counts_json, roots_json, receipt_digest, comparison_id),
+        )
+        if terminal == "sealed":
+            con.execute(
+                "UPDATE structure_generation_drift_progress SET "
+                "class_digests_json=json_set(class_digests_json,'$.receipt_digest',?) "
+                "WHERE comparison_id=?",
+                (receipt_digest, comparison_id),
+            )
+
+
+@pytest.mark.parametrize("terminal", ("sealed", "stale"))
+def test_v3_terminal_status_recomputes_pinned_candidate_count_before_exposure(
+    tmp_path: Path,
+    terminal: str,
+) -> None:
+    if terminal == "sealed":
+        store, comparison_id = _sealed_v3_store(tmp_path)
+        assert store.structure_generation_drift_status()["authorized"] is True
+    else:
+        store, comparison_id = _stale_unclassified_v3_store(tmp_path)
+        _assert_stale_terminal_public_evidence_suppressed(
+            store.structure_generation_drift_status()
+        )
+
+    _forge_v3_terminal_candidate_and_exclusion_count(
+        store, comparison_id, terminal=terminal
+    )
+
+    status = store.structure_generation_drift_status()
+    assert status["authorized"] is False
+    assert status["reason"] == (
+        "structure-drift-receipt-invalid"
+        if terminal == "sealed"
+        else "structure-drift-terminal-receipt-invalid"
+    )
+    assert "projection_candidate_count" not in status
+    assert "projection_exclusion_counts" not in status
+
+
 @pytest.mark.parametrize("tamper", ("unknown-reason", "missing-reason", "count-sum", "one-root"))
 def test_v3_sealed_status_rejects_semantic_exclusion_tamper(
     tmp_path: Path,

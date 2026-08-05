@@ -9695,8 +9695,19 @@ class SQLiteStore:
                     else None
                 ),
             )
+            terminal_source_count_valid = (
+                progress[1] not in {"sealed", "stale"}
+                or (
+                    type(projection_candidate_count) is int
+                    and projection_candidate_count
+                    == _fresh_projection_expected_candidate_count(
+                        con, window_id=str(current[4])
+                    )
+                )
+            )
             progress_exclusion_evidence_valid = (
-                type(projection_candidate_count) is int
+                terminal_source_count_valid
+                and type(projection_candidate_count) is int
                 and projection_candidate_count >= 0
                 and type(projection_member_count) is int
                 and projection_member_count >= 0
