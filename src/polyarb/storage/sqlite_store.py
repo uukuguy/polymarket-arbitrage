@@ -9596,7 +9596,8 @@ class SQLiteStore:
                 "diagnostic_samples_digest,projection_member_receipt_digest,"
                 "projection_candidate_count,projection_exclusion_count,"
                 "projection_exclusion_counts_json,projection_exclusion_roots_json,"
-                "projection_exclusion_digest_states_json "
+                "projection_exclusion_digest_states_json,"
+                "diagnostic_digest_state_json "
                 "FROM structure_generation_drift_progress WHERE "
                 "legacy_snapshot_id=? AND generation_snapshot_id=? AND "
                 "publication_id=? AND window_id=? AND "
@@ -9834,6 +9835,25 @@ class SQLiteStore:
                                 for value in diagnostic_counts.values()
                             )
                             and isinstance(diagnostic_samples, dict)
+                            and set(diagnostic_samples) <= set(diagnostic_counts)
+                            and all(
+                                isinstance(samples, list)
+                                and len(samples) <= 3
+                                and len(samples) <= diagnostic_counts[reason]
+                                and all(isinstance(sample, dict) for sample in samples)
+                                for reason, samples in diagnostic_samples.items()
+                            )
+                        )
+                        diagnostic_digest = RowChainSHA256.from_json(
+                            str(progress[23]),
+                            expected_domain="diagnostic/unclassified",
+                        )
+                        diagnostic_evidence_valid = (
+                            diagnostic_evidence_valid
+                            and diagnostic_digest.count
+                            == sum(diagnostic_counts.values())
+                            and diagnostic_digest.hexdigest()
+                            == terminal_payload["diagnostic_root"]
                         )
                         (
                             terminal_class_counts,
@@ -9842,17 +9862,15 @@ class SQLiteStore:
                             terminal_payload["class_counts_json"],
                             terminal_payload["class_digests_json"],
                         )
-                        terminal_shape_valid = diagnostic_evidence_valid and (
-                            (
-                                terminal_class_counts["overlap-conflict"] > 0
-                                and terminal_payload["terminal_reason"]
-                                == "drift-overlap-conflict"
-                            )
-                            or (
-                                terminal_class_counts["overlap-conflict"] == 0
-                                and terminal_payload["terminal_reason"]
-                                != "drift-overlap-conflict"
-                            )
+                        expected_terminal_reason = (
+                            "drift-overlap-conflict"
+                            if terminal_class_counts["overlap-conflict"] > 0
+                            else "drift-unclassified"
+                        )
+                        terminal_shape_valid = (
+                            diagnostic_evidence_valid
+                            and terminal_payload["terminal_reason"]
+                            == expected_terminal_reason
                         )
                     except (TypeError, ValueError, json.JSONDecodeError):
                         terminal_shape_valid = False

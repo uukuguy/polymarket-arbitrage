@@ -257,14 +257,18 @@ def _terminal_receipt_payload(
         ).hexdigest()
         for reason in STRUCTURE_PROJECTION_EXCLUSION_REASONS
     }
+    diagnostic_state = RowChainSHA256.new("diagnostic/unclassified")
+    diagnostic_state.update(("other-zero-removal-reason", "m1"))
     con.execute(
         "UPDATE structure_generation_drift_progress SET "
         "projection_exclusion_counts_json=?,projection_exclusion_roots_json=?,"
-        "projection_exclusion_digest_states_json=? WHERE comparison_id=?",
+        "projection_exclusion_digest_states_json=?,"
+        "diagnostic_digest_state_json=? WHERE comparison_id=?",
         (
             json.dumps(exclusion_counts, sort_keys=True, separators=(",", ":")),
             json.dumps(exclusion_roots, sort_keys=True, separators=(",", ":")),
             json.dumps(exclusion_states, sort_keys=True, separators=(",", ":")),
+            diagnostic_state.to_json(),
             comparison_id,
         ),
     )
@@ -301,7 +305,7 @@ def _terminal_receipt_payload(
         json.dumps(class_counts, sort_keys=True, separators=(",", ":")),
         json.dumps({"unclassified": "c" * 64}, separators=(",", ":")),
         '{"other-zero-removal-reason":1}',
-        "b" * 64,
+        diagnostic_state.hexdigest(),
         diagnostic_samples_json,
         hashlib.sha256(diagnostic_samples_json.encode()).hexdigest(),
         3_001,
@@ -398,6 +402,77 @@ def _rewrite_stale_terminal_class_evidence(
         )
 
 
+def _rewrite_stale_terminal_diagnostic_evidence(
+    store: SQLiteStore,
+    comparison_id: str,
+    *,
+    terminal_reason: str | None = None,
+    diagnostic_counts: dict[str, object] | None = None,
+    diagnostic_root: str | None = None,
+    diagnostic_samples: dict[str, object] | None = None,
+) -> None:
+    fields = sqlite_store_module._structure_drift_terminal_receipt_fields(
+        STRUCTURE_DRIFT_CLASSIFIER_V3
+    )
+    with sqlite3.connect(store.db_path) as con:
+        row = con.execute(
+            "SELECT " + ",".join(fields) + " FROM "
+            "structure_generation_drift_terminal_receipts WHERE comparison_id=?",
+            (comparison_id,),
+        ).fetchone()
+        assert row is not None
+        payload = dict(zip(fields, row, strict=True))
+        if terminal_reason is not None:
+            payload["terminal_reason"] = terminal_reason
+        if diagnostic_counts is not None:
+            payload["diagnostic_counts_json"] = json.dumps(
+                diagnostic_counts, sort_keys=True, separators=(",", ":")
+            )
+        if diagnostic_root is not None:
+            payload["diagnostic_root"] = diagnostic_root
+        if diagnostic_samples is not None:
+            samples_json = json.dumps(
+                diagnostic_samples,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            payload["diagnostic_samples_json"] = samples_json
+            payload["diagnostic_samples_digest"] = hashlib.sha256(
+                samples_json.encode()
+            ).hexdigest()
+        digest = sqlite_store_module._structure_drift_terminal_receipt_digest(payload)
+        con.execute("DROP TRIGGER trg_structure_drift_terminal_receipt_update")
+        con.execute(
+            "UPDATE structure_generation_drift_terminal_receipts SET "
+            "terminal_reason=?,diagnostic_counts_json=?,diagnostic_root=?,"
+            "diagnostic_samples_json=?,diagnostic_samples_digest=?,receipt_digest=? "
+            "WHERE comparison_id=?",
+            (
+                payload["terminal_reason"],
+                payload["diagnostic_counts_json"],
+                payload["diagnostic_root"],
+                payload["diagnostic_samples_json"],
+                payload["diagnostic_samples_digest"],
+                digest,
+                comparison_id,
+            ),
+        )
+        con.execute(
+            "UPDATE structure_generation_drift_progress SET "
+            "terminal_reason=?,diagnostic_counts_json=?,diagnostic_root=?,"
+            "diagnostic_samples_json=?,diagnostic_samples_digest=? "
+            "WHERE comparison_id=?",
+            (
+                payload["terminal_reason"],
+                payload["diagnostic_counts_json"],
+                payload["diagnostic_root"],
+                payload["diagnostic_samples_json"],
+                payload["diagnostic_samples_digest"],
+                comparison_id,
+            ),
+        )
+
+
 def _stale_terminal_class_evidence(
     store: SQLiteStore,
     comparison_id: str,
@@ -424,6 +499,10 @@ def _assert_stale_terminal_evidence_unavailable(status: dict[str, object]) -> No
         "projection_diagnostic_count",
         "projection_exclusion_counts",
         "projection_exclusion_roots",
+        "diagnostic_counts",
+        "diagnostic_root",
+        "diagnostic_samples",
+        "diagnostic_samples_digest",
     ):
         assert field not in status
 
@@ -482,6 +561,38 @@ def test_stale_unclassified_suppresses_well_formed_count_and_root_injection(
     _assert_stale_terminal_public_evidence_suppressed(
         store.structure_generation_drift_status(),
         expected_reason="drift-unclassified",
+    )
+
+
+def test_stale_terminal_rejects_joint_diagnostic_evidence_forgery(
+    tmp_path: Path,
+) -> None:
+    store, comparison_id = _stale_unclassified_v3_store(tmp_path)
+    _rewrite_stale_terminal_diagnostic_evidence(
+        store,
+        comparison_id,
+        diagnostic_counts={"forged-diagnostic": 999},
+        diagnostic_root="d" * 64,
+        diagnostic_samples={"forged-diagnostic": [{"market_id": "forged"}]},
+    )
+
+    _assert_stale_terminal_evidence_unavailable(
+        store.structure_generation_drift_status()
+    )
+
+
+def test_stale_terminal_rejects_joint_terminal_reason_forgery(
+    tmp_path: Path,
+) -> None:
+    store, comparison_id = _stale_unclassified_v3_store(tmp_path)
+    _rewrite_stale_terminal_diagnostic_evidence(
+        store,
+        comparison_id,
+        terminal_reason="drift-forged-reason",
+    )
+
+    _assert_stale_terminal_evidence_unavailable(
+        store.structure_generation_drift_status()
     )
 
 
