@@ -78,4 +78,9 @@
 
 - [ ] **Step 1: Run focused publication and scheduler suites, changed-file Ruff, and `make planning-status`.
 - [ ] **Step 2: Record that source conflict is terminal for its immutable window but recoverable at the scheduler level only through a fresh window.
-- [ ] **Step 3: Create the plan SUMMARY, commit only task files, and request a new `DEPLOY_SHA_APPROVE`.
+- [ ] **Step 3: Create the plan SUMMARY, commit only task files, then deploy
+  directly in R&D mode while recording the exact SHA and local/Fly verification
+  evidence. Do not create a `DEPLOY_SHA_APPROVE` blocking step. Escalate only
+  if a change crosses a risk boundary (funds, secrets, read mode, Quote,
+  orders, pointer override, cleanup disablement, or irreversible production
+  data mutation).

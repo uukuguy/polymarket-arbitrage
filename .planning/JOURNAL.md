@@ -6358,7 +6358,13 @@ pointer, cleanup, or opportunity-feed change.
 
 ### [NEXT — CURRENT]
 
-Commit this membership-conflict recovery, obtain `DEPLOY_SHA_APPROVE <exact
-final 40-char HEAD>`, deploy only with drift enabled / legacy reads / Quote off
-/ cleanup on, and observe immutable retirement of 880 followed by a natural
-successor publication and health recovery.
+Deploy the verified membership-conflict recovery directly in R&D mode, record
+the exact deployed SHA plus local/Fly verification evidence, and keep drift
+enabled / legacy reads / Quote off / cleanup on. Observe immutable retirement
+of 880 followed by a natural successor publication and health recovery.
+
+`DEPLOY_SHA_APPROVE` is not an R&D deployment gate: it is prohibited as a
+blocking ritual when the agent itself produced the SHA. Human approval remains
+required only for risk-boundary changes: funds, secrets, read-mode changes,
+Quote enablement, order placement, pointer override, cleanup disablement, or
+other irreversible production-data mutations.
