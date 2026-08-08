@@ -27,6 +27,7 @@ os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 
 import pytest
 
+from polyarb.storage import sqlite_store as sqlite_store_module
 from polyarb.storage.schemas import (
     DDL,
     EVENT_TAGS_COLUMN_ORDER,
@@ -125,6 +126,50 @@ def test_market_truth_tables_are_created_by_init_schema(tmp_path: Path) -> None:
         }
 
     assert set(MARKET_TRUTH_COLUMNS) <= tables
+
+
+def test_init_schema_does_not_reanalyze_drift_indexes_with_existing_statistics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large production databases must not rescan drift indexes at each boot."""
+    statements: list[str] = []
+    original_connect = sqlite_store_module.sqlite3.connect
+
+    def traced_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        con = original_connect(*args, **kwargs)
+        con.set_trace_callback(statements.append)
+        return con
+
+    monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", traced_connect)
+    store = SQLiteStore(tmp_path / "drift-stats.db")
+
+    store.init_schema()
+    first_analyzes = [statement for statement in statements if statement.startswith("ANALYZE ")]
+    assert first_analyzes == [
+        "ANALYZE idx_structure_generation_memberships_drift_scan",
+        "ANALYZE idx_event_market_memberships_drift_scan",
+    ]
+
+    # Empty indexes have no sqlite_stat1 rows. Production has populated indexes,
+    # so seed the persisted planner statistics that a prior ANALYZE would write.
+    with original_connect(store.db_path) as con:
+        con.executemany(
+            "INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES (?, ?, ?)",
+            [
+                (
+                    "structure_generation_memberships",
+                    "idx_structure_generation_memberships_drift_scan",
+                    "1 1",
+                ),
+                ("event_market_memberships", "idx_event_market_memberships_drift_scan", "1 1"),
+            ],
+        )
+
+    statements.clear()
+    SQLiteStore(store.db_path).init_schema()
+
+    assert not [statement for statement in statements if statement.startswith("ANALYZE ")]
 
 
 def test_structure_generation_tables_are_declared_and_created(tmp_path: Path) -> None:

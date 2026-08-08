@@ -3244,8 +3244,27 @@ class SQLiteStore:
             _migrate_structure_drift_member_receipt_binding(con)
             con.executescript(STRUCTURE_GENERATIONS_DDL)
             _migrate_structure_drift_classifier_v3_exclusions(con)
-            con.execute("ANALYZE idx_structure_generation_memberships_drift_scan")
-            con.execute("ANALYZE idx_event_market_memberships_drift_scan")
+            # ANALYZE scans the entire index and held the production daemon in
+            # disk sleep for minutes on every restart.  Newly created/rebuilt
+            # indexes still need planner statistics, but an existing stat row
+            # proves that startup has already paid that one-time cost.
+            for index_name in (
+                "idx_structure_generation_memberships_drift_scan",
+                "idx_event_market_memberships_drift_scan",
+            ):
+                stat_table_exists = con.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='sqlite_stat1'"
+                ).fetchone()
+                stat_exists = (
+                    stat_table_exists is not None
+                    and con.execute(
+                        "SELECT 1 FROM sqlite_stat1 WHERE idx=?", (index_name,)
+                    ).fetchone()
+                    is not None
+                )
+                if not stat_exists:
+                    con.execute(f"ANALYZE {index_name}")
             con.execute(
                 "CREATE VIEW IF NOT EXISTS current_structure_markets AS "
                 "SELECT markets.* FROM structure_generation_markets markets "

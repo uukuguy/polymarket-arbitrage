@@ -6368,3 +6368,20 @@ blocking ritual when the agent itself produced the SHA. Human approval remains
 required only for risk-boundary changes: funds, secrets, read-mode changes,
 Quote enablement, order placement, pointer override, cleanup disablement, or
 other irreversible production-data mutations.
+
+## SESSION 138 — 2026-08-08 (startup availability repair)
+
+- [PRODUCTION EVIDENCE] Release 243 started the intended membership recovery
+  SHA with all safety settings unchanged, but the daemon remained in disk sleep
+  before scheduler startup. The startup path unconditionally ran `ANALYZE` on
+  two large drift indexes; observed process I/O exceeded 7 GB reads and 2.5 GB
+  writes. Both indexes already have durable `sqlite_stat1` entries.
+- [FIXED LOCAL] Schema startup now runs that expensive analysis only when the
+  index has no planner-statistics row, preserving the one-time build while
+  making normal restarts bounded.
+
+### [NEXT — CURRENT]
+
+Deploy the verified startup-statistics repair directly in R&D mode, preserving
+drift enabled / legacy reads / Quote off / cleanup on. Verify bounded boot,
+then observe retirement of publication 880 and a natural successor window.
