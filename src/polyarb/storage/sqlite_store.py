@@ -40,6 +40,8 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V1,
     STRUCTURE_DRIFT_CLASSIFIER_V2,
     STRUCTURE_DRIFT_CLASSIFIER_V3,
+    STRUCTURE_DRIFT_CLASSIFIER_V4,
+    STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_MEMBER_WORK,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_PAYLOAD_BYTES,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
@@ -1661,7 +1663,7 @@ def _canonical_tuple_sha256(values: tuple[object, ...]) -> str:
 def _structure_drift_receipt_fields(contract: str) -> tuple[str, ...]:
     if contract in {STRUCTURE_DRIFT_CLASSIFIER_V1, STRUCTURE_DRIFT_CLASSIFIER_V2}:
         return _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS_V2
-    if contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
+    if contract in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE:
         return _STRUCTURE_DRIFT_RECEIPT_DIGEST_FIELDS_V3
     raise ValueError("invalid-structure-drift-classifier-contract")
 
@@ -1834,7 +1836,7 @@ def _validated_structure_drift_class_evidence(
 def _structure_drift_terminal_receipt_fields(contract: str) -> tuple[str, ...]:
     if contract in {STRUCTURE_DRIFT_CLASSIFIER_V1, STRUCTURE_DRIFT_CLASSIFIER_V2}:
         return _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS_V2
-    if contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
+    if contract in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE:
         return _STRUCTURE_DRIFT_TERMINAL_RECEIPT_DIGEST_FIELDS_V3
     raise ValueError("invalid-structure-drift-classifier-contract")
 
@@ -1856,6 +1858,7 @@ def _structure_drift_comparison_id(
         STRUCTURE_DRIFT_CLASSIFIER_V1,
         STRUCTURE_DRIFT_CLASSIFIER_V2,
         STRUCTURE_DRIFT_CLASSIFIER_V3,
+        STRUCTURE_DRIFT_CLASSIFIER_V4,
     }:
         raise ValueError("invalid-structure-drift-classifier-contract")
     return hashlib.sha256(
@@ -6262,6 +6265,7 @@ class SQLiteStore:
         if classifier_contract not in {
             STRUCTURE_DRIFT_CLASSIFIER_V2,
             STRUCTURE_DRIFT_CLASSIFIER_V3,
+            STRUCTURE_DRIFT_CLASSIFIER_V4,
         }:
             raise ValueError("invalid-structure-drift-classifier-contract")
         self._validated_fresh_projection_member_authority(
@@ -6314,6 +6318,7 @@ class SQLiteStore:
         if classifier_contract not in {
             STRUCTURE_DRIFT_CLASSIFIER_V2,
             STRUCTURE_DRIFT_CLASSIFIER_V3,
+            STRUCTURE_DRIFT_CLASSIFIER_V4,
         }:
             raise ValueError("invalid-structure-drift-classifier-contract")
         if (
@@ -6527,7 +6532,7 @@ class SQLiteStore:
             generated_membership_ids: set[str] = set()
             if market_ids:
                 placeholders = ",".join("?" for _ in market_ids)
-                if classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
+                if classifier_contract in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE:
                     generated_market_ids.update(
                         str(row[0])
                         for row in con.execute(
@@ -6904,7 +6909,7 @@ class SQLiteStore:
                         else None
                     )
                     if (
-                        classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3
+                        classifier_contract in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE
                         and group_evidence is None
                         and isinstance(candidate["group_id"], str)
                     ):
@@ -6934,7 +6939,7 @@ class SQLiteStore:
                         and type(candidate["raw_member"].get("negRiskOther")) is bool
                         and (
                             candidate_index in certified_issue_candidate_indexes
-                            if classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3
+                            if classifier_contract in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE
                             else (
                                 str(candidate["event_id"]),
                                 int(candidate["source_ordinal"]),
@@ -6955,13 +6960,24 @@ class SQLiteStore:
                         and type(candidate["active"]) is bool
                         and type(candidate["closed"]) is bool
                     )
-                    if classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
-                        ordinary_event = (
+                    if classifier_contract in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE:
+                        strict_ordinary_event = (
                             raw_event is not None
                             and raw_event.get("negRisk") is False
                             and raw_event.get("enableNegRisk") is False
                             and raw_event.get("negRiskMarketID") is None
                         )
+                        nullable_ordinary_event = (
+                            classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V4
+                            and raw_event is not None
+                            and raw_event.get("negRisk") is None
+                            and raw_event.get("enableNegRisk") is False
+                            and raw_event.get("negRiskMarketID") is None
+                            and candidate["group_id"] is None
+                            and isinstance(candidate["raw_member"], dict)
+                            and candidate["raw_member"].get("negRiskOther") is False
+                        )
+                        ordinary_event = strict_ordinary_event or nullable_ordinary_event
                         standard_event = (
                             raw_event is not None
                             and raw_event.get("negRisk") is True
@@ -7364,7 +7380,7 @@ class SQLiteStore:
                     event_only_quarantine=False,
                     market_side_quarantine=(
                         exact_market_quarantine
-                        if classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3
+                        if classifier_contract in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE
                         else expected_market_issue is not None
                     ),
                     absent_from_event_catalog=not event_ids,
@@ -7385,11 +7401,11 @@ class SQLiteStore:
                         not source_identity_valid and not conflict
                     ),
                     invalid_neg_risk_classification=(
-                        classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3
+                        classifier_contract in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE
                         and type(raw_market.get("negRisk")) is not bool
                     ),
                 )
-                if classifier_contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
+                if classifier_contract in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE:
                     if type(raw_market.get("negRisk")) is not bool:
                         diagnostics.append(
                             diagnose_unresolved_member(
@@ -7787,7 +7803,7 @@ class SQLiteStore:
         if (
             progress is None
             or progress[2] != "fresh-projection-members"
-            or progress[11] != STRUCTURE_DRIFT_CLASSIFIER_V3
+            or progress[11] != STRUCTURE_DRIFT_CLASSIFIER_V4
         ):
             raise ValueError("structure-drift-fresh-projection-phase-invalid")
         counts = json.loads(str(progress[4]))
@@ -7831,7 +7847,7 @@ class SQLiteStore:
             publication_id=str(progress[1]),
             generation_snapshot_id=int(progress[0]),
             member_receipt_digest=member_receipt_digest,
-            classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V3,
+            classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V4,
             cursor=cursor,
             candidates_processed=int(progress[12]),
             member_count=int(counts.get("projection_member_count", 0)),
@@ -7848,7 +7864,7 @@ class SQLiteStore:
             generation_snapshot_id=int(progress[0]),
             cursor=cursor,
             limit=max_rows,
-            classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
+            classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V4,
         )
         unresolved_diagnostics = tuple(chunk.diagnostics)
         projected_ids = [item.market_id for item in chunk.members]
@@ -8081,7 +8097,7 @@ class SQLiteStore:
             )
             comparison_id = _structure_drift_comparison_id(
                 identity,
-                classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V3,
+                classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V4,
             )
             active = con.execute(
                 "SELECT comparison_id,hash_algorithm,classifier_contract_version FROM "
@@ -8090,7 +8106,7 @@ class SQLiteStore:
             ).fetchone()
             if active is not None and (
                 active[1] == "serializable-sha256-v1"
-                or active[2] != STRUCTURE_DRIFT_CLASSIFIER_V3
+                or active[2] != STRUCTURE_DRIFT_CLASSIFIER_V4
             ):
                 superseded_reason = (
                     "drift-hash-algorithm-superseded"
@@ -8149,7 +8165,7 @@ class SQLiteStore:
                 (
                     comparison_id,
                     ROW_CHAIN_SHA256_V2,
-                    STRUCTURE_DRIFT_CLASSIFIER_V3,
+                    STRUCTURE_DRIFT_CLASSIFIER_V4,
                     int(row[12]),
                     int(row[0]),
                     str(row[1]),
@@ -8836,7 +8852,7 @@ class SQLiteStore:
                     receipt_payload: dict[str, object] = {
                         "comparison_id": comparison_id,
                         "hash_algorithm": ROW_CHAIN_SHA256_V2,
-                        "classifier_contract_version": STRUCTURE_DRIFT_CLASSIFIER_V3,
+                        "classifier_contract_version": STRUCTURE_DRIFT_CLASSIFIER_V4,
                         "legacy_snapshot_id": int(progress[0]),
                         "legacy_taken_at_ms": int(exact[4]),
                         "legacy_finished_at_ms": int(exact[5]),
@@ -8918,7 +8934,7 @@ class SQLiteStore:
                     )
                     receipt_digest = _structure_drift_receipt_digest(receipt_payload)
                     receipt_columns = _structure_drift_receipt_fields(
-                        STRUCTURE_DRIFT_CLASSIFIER_V3
+                        STRUCTURE_DRIFT_CLASSIFIER_V4
                     )
                     writer.execute(
                         "INSERT INTO structure_generation_drift_receipts("
@@ -8980,7 +8996,7 @@ class SQLiteStore:
                     terminal_payload: dict[str, object] = {
                         "comparison_id": comparison_id,
                         "hash_algorithm": ROW_CHAIN_SHA256_V2,
-                        "classifier_contract_version": STRUCTURE_DRIFT_CLASSIFIER_V3,
+                        "classifier_contract_version": STRUCTURE_DRIFT_CLASSIFIER_V4,
                         "legacy_snapshot_id": int(progress[0]),
                         "generation_snapshot_id": int(progress[1]),
                         "publication_id": str(progress[2]),
@@ -9011,7 +9027,7 @@ class SQLiteStore:
                         terminal_payload
                     )
                     terminal_columns = _structure_drift_terminal_receipt_fields(
-                        STRUCTURE_DRIFT_CLASSIFIER_V3
+                        STRUCTURE_DRIFT_CLASSIFIER_V4
                     )
                     writer.execute(
                         "INSERT INTO structure_generation_drift_terminal_receipts("
@@ -9134,7 +9150,7 @@ class SQLiteStore:
                 legacy=tuple(counterpart),
                 generation=classified_rows,
                 evidence=evidence,
-                classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
+                classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V4,
             )
             generation_count = counts.get("generation_member_count", 0)
             if type(generation_count) is not int or generation_count < 0:
@@ -9201,7 +9217,7 @@ class SQLiteStore:
                 legacy=classified_rows,
                 generation=(),
                 evidence=evidence,
-                classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
+                classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V4,
             )
 
         for diagnostic in result.diagnostics:
@@ -9613,7 +9629,7 @@ class SQLiteStore:
                     str(current[2]),
                     str(current[6]),
                     ROW_CHAIN_SHA256_V2,
-                    STRUCTURE_DRIFT_CLASSIFIER_V3,
+                    STRUCTURE_DRIFT_CLASSIFIER_V4,
                 ),
             ).fetchone()
             if progress is None:
@@ -9779,7 +9795,7 @@ class SQLiteStore:
             receipt_row = con.execute(
                 "SELECT "
                 + ",".join(
-                    _structure_drift_receipt_fields(STRUCTURE_DRIFT_CLASSIFIER_V3)
+                    _structure_drift_receipt_fields(STRUCTURE_DRIFT_CLASSIFIER_V4)
                 )
                 + ",receipt_digest FROM structure_generation_drift_receipts "
                 "WHERE comparison_id=?",
@@ -9808,7 +9824,7 @@ class SQLiteStore:
                     "SELECT "
                     + ",".join(
                         _structure_drift_terminal_receipt_fields(
-                            STRUCTURE_DRIFT_CLASSIFIER_V3
+                            STRUCTURE_DRIFT_CLASSIFIER_V4
                         )
                     )
                     + ",receipt_digest FROM "
@@ -9824,7 +9840,7 @@ class SQLiteStore:
                     terminal_payload = dict(
                         zip(
                             _structure_drift_terminal_receipt_fields(
-                                STRUCTURE_DRIFT_CLASSIFIER_V3
+                                STRUCTURE_DRIFT_CLASSIFIER_V4
                             ),
                             terminal_row[:-1],
                             strict=True,
@@ -9898,7 +9914,7 @@ class SQLiteStore:
                         and terminal_payload["hash_algorithm"] == progress[5]
                         and terminal_payload["classifier_contract_version"]
                         == progress[11]
-                        == STRUCTURE_DRIFT_CLASSIFIER_V3
+                        == STRUCTURE_DRIFT_CLASSIFIER_V4
                         and terminal_payload["legacy_snapshot_id"] == legacy[0]
                         and terminal_payload["generation_snapshot_id"] == current[0]
                         and terminal_payload["publication_id"] == current[1]
@@ -9979,7 +9995,7 @@ class SQLiteStore:
             receipt_payload = dict(
                 zip(
                     _structure_drift_receipt_fields(
-                        STRUCTURE_DRIFT_CLASSIFIER_V3
+                        STRUCTURE_DRIFT_CLASSIFIER_V4
                     ),
                     receipt_row[:-1],
                     strict=True,
@@ -10068,7 +10084,7 @@ class SQLiteStore:
                 and receipt_payload["hash_algorithm"] == progress[5]
                 and receipt_payload["hash_algorithm"] == ROW_CHAIN_SHA256_V2
                 and receipt_payload["classifier_contract_version"] == progress[11]
-                and progress[11] == STRUCTURE_DRIFT_CLASSIFIER_V3
+                and progress[11] == STRUCTURE_DRIFT_CLASSIFIER_V4
                 and receipt_payload["legacy_snapshot_id"] == legacy[0]
                 and receipt_payload["generation_snapshot_id"] == current[0]
                 and receipt_payload["publication_id"] == current[1]

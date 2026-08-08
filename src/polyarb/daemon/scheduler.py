@@ -44,7 +44,7 @@ from loguru import logger
 
 from polyarb.daemon.structure_schedule import derive_structure_schedule
 from polyarb.perception.structure_contract import (
-    STRUCTURE_DRIFT_CLASSIFIER_V3,
+    STRUCTURE_DRIFT_CLASSIFIER_V4,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
     STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
     valid_structure_publication_checkpoint,
@@ -67,7 +67,7 @@ def _structure_drift_defer_contract(status: dict[str, object]) -> str:
     return (
         contract
         if isinstance(contract, str) and contract
-        else STRUCTURE_DRIFT_CLASSIFIER_V3
+        else STRUCTURE_DRIFT_CLASSIFIER_V4
     )
 
 
@@ -1209,7 +1209,7 @@ class SnapshotScheduler:
             await self._record_structure_defer(
                 reason="structure-drift-status-unavailable",
                 queued_at_ms=queued_at_ms,
-                classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V3,
+                classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V4,
             )
             logger.warning(
                 f"structure drift status unavailable kind={type(error).__name__}"
@@ -1360,7 +1360,7 @@ class SnapshotScheduler:
                     reason="structure-drift-status-unavailable",
                     queued_at_ms=queued_at_ms,
                     initialized_comparison_id=initialized_comparison_id,
-                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V3,
+                    classifier_contract_version=STRUCTURE_DRIFT_CLASSIFIER_V4,
                 )
                 logger.warning(
                     "structure drift current-contract initialization unavailable "
@@ -1466,6 +1466,41 @@ class SnapshotScheduler:
                     reason=reason,
                     queued_at_ms=queued_at_ms,
                 )
+                # A hard timeout is not itself progress, but the child can
+                # commit one or more durable chunks before its parent kills
+                # it. Re-read the same authenticated comparison so that only
+                # demonstrated forward movement selects the 100ms follow-up
+                # cadence. The failed attempt remains immutable evidence.
+                if error_text == "snapshot-subprocess-structure-drift-timeout":
+                    try:
+                        advanced_status = await asyncio.to_thread(
+                            self._sqlite_store.structure_generation_drift_status
+                        )
+                        prior_checkpoint = status.get("checkpoint_at_ms")
+                        advanced_checkpoint = advanced_status.get("checkpoint_at_ms")
+                        advanced = (
+                            advanced_status.get("progress_id")
+                            == initialized_comparison_id
+                            and advanced_status.get("reason")
+                            == "structure-drift-incomplete"
+                            and advanced_status.get("phase")
+                            in {
+                                "source-events",
+                                "source-markets",
+                                "fresh-projection-members",
+                                "generation-members",
+                                "legacy-members",
+                                "fresh-group-truth",
+                            }
+                            and type(prior_checkpoint) is int
+                            and type(advanced_checkpoint) is int
+                            and advanced_checkpoint > prior_checkpoint
+                        )
+                    except (OSError, sqlite3.Error, TypeError, ValueError):
+                        advanced = False
+                    if advanced:
+                        self._record_durable_progress()
+                        self._checkpoint_pending = True
                 logger.warning(
                     f"structure drift child failed kind={error_text} elapsed_ms={error.elapsed_ms}"
                 )

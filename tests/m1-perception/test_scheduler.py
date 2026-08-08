@@ -2854,7 +2854,7 @@ async def test_post_initialize_status_unavailable_defer_binds_current_identity(
 
 
 @pytest.mark.asyncio
-async def test_unavailable_drift_status_defer_uses_expected_v3_contract(
+async def test_unavailable_drift_status_defer_uses_expected_v4_contract(
     daemon_settings_for_test,
 ) -> None:
     from polyarb.daemon.scheduler import SnapshotScheduler
@@ -2881,7 +2881,7 @@ async def test_unavailable_drift_status_defer_uses_expected_v3_contract(
     assert defer is not None
     assert defer["reason"] == "structure-drift-status-unavailable"
     assert defer["classifier_contract_version"] == (
-        "structure-drift-classifier-v3"
+        "structure-drift-classifier-v4"
     )
 
 
@@ -3026,6 +3026,128 @@ async def test_structure_drift_parent_terminalizes_child_failures(
     else:
         assert attempt["stderr_safe_marker"] is None
     assert scheduler._failure_counter == 0
+
+
+@pytest.mark.asyncio
+async def test_drift_timeout_with_durable_same_identity_progress_requests_immediate_retry(
+    daemon_settings_for_test,
+    monkeypatch,
+) -> None:
+    """A killed child may still have committed a checkpoint before termination."""
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import SnapshotSubprocessError
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    initial = {
+        "authorized": False,
+        "phase": "fresh-projection-members",
+        "reason": "structure-drift-incomplete",
+        "progress_id": "comparison-v3",
+        "checkpoint_at_ms": 1_000,
+    }
+    advanced = {**initial, "checkpoint_at_ms": 1_001}
+    store.structure_generation_drift_status = MagicMock(
+        side_effect=(initial, initial, initial, advanced)
+    )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v3"
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "run_structure_drift_in_subprocess",
+        AsyncMock(
+            side_effect=SnapshotSubprocessError(
+                "structure-drift-timeout",
+                last_stage="fresh-projection-members",
+                elapsed_ms=75_000,
+                chunks_processed=1,
+                rows_processed=500,
+            )
+        ),
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is True
+
+    attempt = store.get_latest_structure_drift_attempt()
+    assert attempt is not None
+    assert attempt["outcome"] == "failed"
+    assert attempt["failure_kind"] == "structure-drift-timeout"
+    assert scheduler._checkpoint_pending is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "advanced_status",
+    (
+        {"checkpoint_at_ms": 1_000},
+        {"progress_id": "comparison-replaced", "checkpoint_at_ms": 1_001},
+        {
+            "phase": "stale",
+            "reason": "drift-unclassified",
+            "checkpoint_at_ms": 1_001,
+        },
+    ),
+    ids=("same-checkpoint", "identity-replaced", "terminal-status"),
+)
+async def test_drift_timeout_without_same_identity_durable_progress_does_not_retry_immediately(
+    daemon_settings_for_test,
+    monkeypatch,
+    advanced_status,
+) -> None:
+    """Timeout recovery never bypasses ordinary cadence without proven progress."""
+    from polyarb.daemon import scheduler as scheduler_module
+    from polyarb.daemon.scheduler import SnapshotSubprocessError
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    settings = daemon_settings_for_test.model_copy(
+        update={"structure_generation_drift_compare_enabled": True}
+    )
+    store = SQLiteStore(settings.db_path)
+    store.init_schema()
+    initial = {
+        "authorized": False,
+        "phase": "fresh-projection-members",
+        "reason": "structure-drift-incomplete",
+        "progress_id": "comparison-v3",
+        "checkpoint_at_ms": 1_000,
+    }
+    store.structure_generation_drift_status = MagicMock(
+        side_effect=(initial, initial, initial, {**initial, **advanced_status})
+    )
+    store.initialize_structure_drift_comparison = MagicMock(
+        return_value="comparison-v3"
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "run_structure_drift_in_subprocess",
+        AsyncMock(
+            side_effect=SnapshotSubprocessError(
+                "structure-drift-timeout",
+                last_stage="fresh-projection-members",
+                elapsed_ms=75_000,
+                chunks_processed=1,
+                rows_processed=500,
+            )
+        ),
+    )
+    scheduler = SnapshotScheduler(
+        settings=settings,
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
+    )
+
+    assert await scheduler._tick_once(queued_at_ms=1_000) is True
+    assert scheduler._checkpoint_pending is False
 
 
 @pytest.mark.asyncio

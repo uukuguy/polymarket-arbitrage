@@ -41,6 +41,13 @@ STRUCTURE_NORMALIZATION_CONTRACT_VERSION = "2026-08-02-event-only-quarantine-v2"
 STRUCTURE_DRIFT_CLASSIFIER_V1 = "structure-drift-classifier-v1"
 STRUCTURE_DRIFT_CLASSIFIER_V2 = "structure-drift-classifier-v2"
 STRUCTURE_DRIFT_CLASSIFIER_V3 = "structure-drift-classifier-v3"
+# v4 preserves v3 receipt/digest semantics while narrowing one explicitly
+# observed, safe ordinary-event shape: negRisk may be null when every other
+# ordinary marker is present and the event member has no group.
+STRUCTURE_DRIFT_CLASSIFIER_V4 = "structure-drift-classifier-v4"
+STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE = frozenset(
+    (STRUCTURE_DRIFT_CLASSIFIER_V3, STRUCTURE_DRIFT_CLASSIFIER_V4)
+)
 STRUCTURE_PROJECTION_EXCLUSION_REASONS = (
     "non-neg-risk-market",
     "market-side-quarantine",

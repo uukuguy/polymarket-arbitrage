@@ -1577,3 +1577,16 @@ success is not user receipt/read evidence.
   before and after acquiring it. `stale`, `not-pending`, zero-progress,
   deferred, and failed paths keep their existing scheduling and incident
   semantics.
+
+### §2.25 Timeout recovery and nullable ordinary events require immutable evidence (2026-08-08)
+
+- A process timeout is not evidence of progress. A child can commit before the
+  parent kills it, so recovery may use the 100 ms continuation only after a
+  fresh status read proves that the same comparison ID advanced its durable
+  `checkpoint_at_ms`. The terminal failed attempt remains the audit record;
+  unchanged, replaced, terminal, or unavailable status stays on normal cadence.
+- Production exposed 11 event-only members with `negRisk=null`,
+  `enableNegRisk=false`, `negRiskMarketID=null`, null member group, and
+  `negRiskOther=false`. This is safe ordinary-event evidence, but changing v3
+  would rewrite its terminal receipt semantics. v4 binds the exact predicate to
+  a new comparison identity and leaves every v3 receipt immutable.

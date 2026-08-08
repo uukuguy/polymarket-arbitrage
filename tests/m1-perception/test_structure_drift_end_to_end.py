@@ -18,6 +18,7 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V1,
     STRUCTURE_DRIFT_CLASSIFIER_V2,
     STRUCTURE_DRIFT_CLASSIFIER_V3,
+    STRUCTURE_DRIFT_CLASSIFIER_V4,
     STRUCTURE_EVENT_SOURCE_CONTRACT,
     STRUCTURE_PROJECTION_EXCLUSION_REASONS,
 )
@@ -176,7 +177,7 @@ def test_terminal_receipt_schema_rejects_update_and_delete(tmp_path: Path) -> No
     with sqlite3.connect(store.db_path) as con:
         payload = _terminal_receipt_payload(con, comparison_id)
         terminal_fields = sqlite_store_module._structure_drift_terminal_receipt_fields(
-            STRUCTURE_DRIFT_CLASSIFIER_V3
+            str(payload["classifier_contract_version"])
         )
         receipt_digest = sqlite_store_module._structure_drift_terminal_receipt_digest(
             payload
@@ -334,7 +335,7 @@ def _terminal_receipt_payload(
         3_002,
     )
     payload = dict(zip(_TERMINAL_RECEIPT_FIELDS, values, strict=True))
-    if row[1] == STRUCTURE_DRIFT_CLASSIFIER_V3:
+    if row[1] in {STRUCTURE_DRIFT_CLASSIFIER_V3, STRUCTURE_DRIFT_CLASSIFIER_V4}:
         payload.update(
             {
                 "projection_candidate_count": row[11],
@@ -1500,6 +1501,62 @@ def test_complete_projection_detects_generation_omission(tmp_path: Path) -> None
     ) is False
 
 
+def test_v4_nullable_ordinary_event_member_is_excluded_not_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """The observed nullable ordinary-event shape is explicit v4 evidence."""
+    store = _drift_store(tmp_path)
+    nullable_event = {
+        "id": "event-event-only",
+        "slug": "event-event-only",
+        "active": True,
+        "closed": True,
+        "negRisk": None,
+        "enableNegRisk": False,
+        "negRiskMarketID": None,
+        "markets": [
+            {
+                "id": "event-only",
+                "active": True,
+                "closed": True,
+                "negRiskOther": False,
+            }
+        ],
+    }
+    with sqlite3.connect(store.db_path) as con:
+        for (trigger_name,) in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND "
+            "tbl_name IN ('structure_sync_event_staging',"
+            "'structure_sync_event_member_staging')"
+        ):
+            con.execute(f'DROP TRIGGER "{trigger_name}"')
+        con.execute(
+            "UPDATE structure_sync_event_staging SET payload_json=? "
+            "WHERE window_id='window-2' AND event_id='event-event-only'",
+            (json.dumps(nullable_event),),
+        )
+        con.execute(
+            "UPDATE structure_sync_event_member_staging SET group_id=NULL,"
+            "active=1,closed=1 WHERE window_id='window-2' AND "
+            "event_id='event-event-only' AND market_id='event-only'"
+        )
+
+    chunk = store._fetch_structure_drift_fresh_projection_chunk(
+        publication_id="publication-2",
+        generation_snapshot_id=2,
+        cursor=None,
+        limit=500,
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V4,
+    )
+
+    assert not [item for item in chunk.diagnostics if item.market_id == "event-only"]
+    assert [
+        item.reason
+        for item in chunk.exclusions
+        if item.envelope.market_id == "event-only"
+    ] == ["non-neg-risk-event-member"]
+
+
 def _reshape_as_production_845_848(store: SQLiteStore) -> None:
     """Retain fixture semantics while matching the production identity topology."""
     with sqlite3.connect(store.db_path) as con:
@@ -2216,24 +2273,24 @@ def test_v3_migration_preserves_v2_receipt_bytes_and_adds_nullable_fields(
                 con.execute(statement, (comparison_id,))
 
 
-def test_terminal_v2_identity_starts_v3_without_mutating_v2(
+def test_terminal_v2_identity_starts_v4_without_mutating_v2(
     tmp_path: Path,
 ) -> None:
     store, _, terminal_before = _pre_v3_receipt_store(tmp_path)
     v2_id = str(terminal_before[0])
     store.init_schema()
 
-    v3_id = store.initialize_structure_drift_comparison(now_ms=4_000)
+    v4_id = store.initialize_structure_drift_comparison(now_ms=4_000)
 
-    assert v3_id != v2_id
+    assert v4_id != v2_id
     with sqlite3.connect(store.db_path) as con:
         assert con.execute(
             "SELECT classifier_contract_version FROM "
             "structure_generation_drift_progress WHERE comparison_id=?",
-            (v3_id,),
-        ).fetchone() == (STRUCTURE_DRIFT_CLASSIFIER_V3,)
+            (v4_id,),
+        ).fetchone() == (STRUCTURE_DRIFT_CLASSIFIER_V4,)
         assert _terminal_bytes(con, v2_id) == terminal_before
-    assert store.initialize_structure_drift_comparison(now_ms=4_001) == v3_id
+    assert store.initialize_structure_drift_comparison(now_ms=4_001) == v4_id
 
 
 def test_v3_migration_lightweight_structure_sync_schema_converges(
@@ -2493,7 +2550,7 @@ def test_classifier_migration_rollback_restores_authority_and_business_rows(
     store.init_schema()
 
 
-def test_migrated_active_classifier_v1_is_superseded_before_v3_initialization(
+def test_migrated_active_classifier_v1_is_superseded_before_v4_initialization(
     tmp_path: Path,
 ) -> None:
     store = _drift_store(tmp_path)
@@ -2509,9 +2566,9 @@ def test_migrated_active_classifier_v1_is_superseded_before_v3_initialization(
             (legacy_comparison_id, STRUCTURE_DRIFT_CLASSIFIER_V1),
         )
 
-    v3_comparison_id = store.initialize_structure_drift_comparison(now_ms=3_001)
+    v4_comparison_id = store.initialize_structure_drift_comparison(now_ms=3_001)
 
-    assert v3_comparison_id != legacy_comparison_id
+    assert v4_comparison_id != legacy_comparison_id
     with sqlite3.connect(store.db_path) as con:
         rows = con.execute(
             "SELECT comparison_id,classifier_contract_version,phase,terminal_reason "
@@ -2526,8 +2583,8 @@ def test_migrated_active_classifier_v1_is_superseded_before_v3_initialization(
             "drift-classifier-contract-superseded",
         ),
         (
-            v3_comparison_id,
-            STRUCTURE_DRIFT_CLASSIFIER_V3,
+                v4_comparison_id,
+                STRUCTURE_DRIFT_CLASSIFIER_V4,
             "source-events",
             None,
         ),
@@ -2751,7 +2808,7 @@ def test_v2_insert_failure_rolls_back_v1_supersession(tmp_path: Path) -> None:
         ]
 
 
-def test_current_stale_v1_initializes_and_advances_v3_without_mutating_v1(
+def test_current_stale_v1_initializes_and_advances_v4_without_mutating_v1(
     tmp_path: Path,
 ) -> None:
     store = _drift_store(tmp_path)
@@ -2778,18 +2835,18 @@ def test_current_stale_v1_initializes_and_advances_v3_without_mutating_v1(
             "SELECT * FROM structure_generation_drift_progress WHERE comparison_id=?",
             (v1_comparison_id,),
         ).fetchone()
-        v3_rows = con.execute(
+        v4_rows = con.execute(
             "SELECT comparison_id,phase FROM structure_generation_drift_progress "
             "WHERE classifier_contract_version=?",
-            (STRUCTURE_DRIFT_CLASSIFIER_V3,),
+            (STRUCTURE_DRIFT_CLASSIFIER_V4,),
         ).fetchall()
     assert v1_after == v1_before
-    assert len(v3_rows) == 1
-    assert v3_rows[0][1] in {"source-events", "source-markets"}
+    assert len(v4_rows) == 1
+    assert v4_rows[0][1] in {"source-events", "source-markets"}
 
 
 @pytest.mark.asyncio
-async def test_concurrent_scheduler_ticks_start_one_real_v3_child(
+async def test_concurrent_scheduler_ticks_start_one_real_v4_child(
     tmp_path: Path,
 ) -> None:
     from polyarb.daemon.scheduler import SnapshotScheduler
@@ -2821,7 +2878,7 @@ async def test_concurrent_scheduler_ticks_start_one_real_v3_child(
         progress = con.execute(
             "SELECT comparison_id FROM structure_generation_drift_progress WHERE "
             "classifier_contract_version=?",
-            (STRUCTURE_DRIFT_CLASSIFIER_V3,),
+            (STRUCTURE_DRIFT_CLASSIFIER_V4,),
         ).fetchall()
         assert len(progress) == 1
         assert con.execute(
@@ -2865,7 +2922,7 @@ async def test_same_contract_stale_does_not_spawn_real_scheduler_retry(
         assert con.execute(
             "SELECT COUNT(*) FROM structure_generation_drift_progress WHERE "
             "classifier_contract_version=?",
-            (STRUCTURE_DRIFT_CLASSIFIER_V3,),
+            (STRUCTURE_DRIFT_CLASSIFIER_V4,),
         ).fetchone() == (1,)
         assert con.execute(
             "SELECT COUNT(*) FROM structure_drift_attempts"
@@ -2873,7 +2930,7 @@ async def test_same_contract_stale_does_not_spawn_real_scheduler_retry(
 
 
 @pytest.mark.asyncio
-async def test_scheduler_v3_initialization_fault_rolls_back_before_child_attempt(
+async def test_scheduler_v4_initialization_fault_rolls_back_before_child_attempt(
     tmp_path: Path,
 ) -> None:
     from polyarb.daemon.scheduler import SnapshotScheduler
@@ -2888,10 +2945,10 @@ async def test_scheduler_v3_initialization_fault_rolls_back_before_child_attempt
             (v1_comparison_id, STRUCTURE_DRIFT_CLASSIFIER_V1, original_id),
         )
         con.execute(
-            "CREATE TRIGGER reject_scheduler_v3_progress BEFORE INSERT ON "
+            "CREATE TRIGGER reject_scheduler_v4_progress BEFORE INSERT ON "
             "structure_generation_drift_progress WHEN "
-            "NEW.classifier_contract_version='structure-drift-classifier-v3' "
-            "BEGIN SELECT RAISE(ABORT,'injected-scheduler-v3-failure'); END"
+            "NEW.classifier_contract_version='structure-drift-classifier-v4' "
+            "BEGIN SELECT RAISE(ABORT,'injected-scheduler-v4-failure'); END"
         )
         v1_before = con.execute(
             "SELECT * FROM structure_generation_drift_progress WHERE comparison_id=?",
@@ -2920,7 +2977,7 @@ async def test_scheduler_v3_initialization_fault_rolls_back_before_child_attempt
         assert con.execute(
             "SELECT COUNT(*) FROM structure_generation_drift_progress WHERE "
             "classifier_contract_version=?",
-            (STRUCTURE_DRIFT_CLASSIFIER_V3,),
+            (STRUCTURE_DRIFT_CLASSIFIER_V4,),
         ).fetchone() == (0,)
         assert con.execute(
             "SELECT COUNT(*) FROM structure_drift_attempts"

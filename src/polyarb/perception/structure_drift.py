@@ -14,6 +14,8 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V1,
     STRUCTURE_DRIFT_CLASSIFIER_V2,
     STRUCTURE_DRIFT_CLASSIFIER_V3,
+    STRUCTURE_DRIFT_CLASSIFIER_V4,
+    STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE,
     STRUCTURE_DRIFT_DIAGNOSTIC_CODES,
     STRUCTURE_PROJECTION_EXCLUSION_REASONS,
 )
@@ -127,6 +129,7 @@ class FreshProjectionCommitment:
             or classifier_contract_version not in {
                 STRUCTURE_DRIFT_CLASSIFIER_V2,
                 STRUCTURE_DRIFT_CLASSIFIER_V3,
+                STRUCTURE_DRIFT_CLASSIFIER_V4,
             }
         ):
             raise ValueError("invalid-fresh-projection-commitment-identity")
@@ -226,17 +229,18 @@ def advance_fresh_projection_commitment(
     if commitment.classifier_contract_version not in {
         STRUCTURE_DRIFT_CLASSIFIER_V2,
         STRUCTURE_DRIFT_CLASSIFIER_V3,
+        STRUCTURE_DRIFT_CLASSIFIER_V4,
     }:
         raise ValueError("invalid-structure-drift-classifier-contract")
     if (
-        commitment.classifier_contract_version == STRUCTURE_DRIFT_CLASSIFIER_V3
+        commitment.classifier_contract_version in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE
         and commitment.candidates_processed
         != commitment.member_count
         + commitment.exclusion_count
         + commitment.diagnostic_count
     ):
         raise ValueError("fresh-projection-candidate-conservation")
-    if commitment.classifier_contract_version == STRUCTURE_DRIFT_CLASSIFIER_V3:
+    if commitment.classifier_contract_version in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE:
         candidate_keys = _fresh_projection_chunk_candidate_keys(chunk)
         if len(candidate_keys) != len(set(candidate_keys)):
             raise ValueError("fresh-projection-candidate-duplicate")
@@ -306,7 +310,7 @@ def advance_fresh_projection_commitment(
     advanced_exclusion_count = commitment.exclusion_count + len(chunk.exclusions)
     advanced_diagnostic_count = commitment.diagnostic_count + len(chunk.diagnostics)
     if (
-        commitment.classifier_contract_version == STRUCTURE_DRIFT_CLASSIFIER_V3
+        commitment.classifier_contract_version in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE
         and advanced_candidates_processed
         != advanced_member_count
         + advanced_exclusion_count
@@ -1180,11 +1184,13 @@ def classify_structure_member_drift(
         STRUCTURE_DRIFT_CLASSIFIER_V1,
         STRUCTURE_DRIFT_CLASSIFIER_V2,
         STRUCTURE_DRIFT_CLASSIFIER_V3,
+        STRUCTURE_DRIFT_CLASSIFIER_V4,
     }:
         raise ValueError("invalid-structure-drift-classifier-contract")
     strict_classifier = classifier_contract in {
         STRUCTURE_DRIFT_CLASSIFIER_V2,
         STRUCTURE_DRIFT_CLASSIFIER_V3,
+        STRUCTURE_DRIFT_CLASSIFIER_V4,
     }
     duplicate_ids = {
         market_id

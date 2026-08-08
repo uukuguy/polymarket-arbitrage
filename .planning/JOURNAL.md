@@ -6307,3 +6307,30 @@ SHA with drift enabled, Structure reads on legacy, Quote disabled, and existing
 cleanup protections. Prove natural v3 seal, authenticated health, immediate
 checkpoint continuation, and terminal no-busy-loop before any separate
 generation-read or Quote cutover.
+
+## SESSION 136 — 2026-08-08 (v4 immutable classifier repair locally qualified)
+
+- [PRODUCTION ROOT CAUSE] Terminal v3 comparison
+  `cf21a3ad4b4badf8aa8bbee5ca639af569a6bed8ab7e105bb859f50640905a34`
+  recorded 11 `evidence-missing` diagnostics. Read-only evidence showed
+  `negRisk=null`, `enableNegRisk=false`, `negRiskMarketID=null`, member
+  `group_id=NULL`, and `negRiskOther=false`; all were closed event-only members.
+  v3 remains immutable and stale.
+- [FIXED LOCAL] A drift timeout re-reads status after recording its failed
+  attempt and uses 100 ms only when the same comparison checkpoint advanced.
+  Negative coverage includes unchanged checkpoint, replacement ID, terminal,
+  and unavailable status.
+- [FIXED LOCAL] Classifier v4 creates a new comparison identity and recognizes
+  the exact nullable ordinary-event predicate as `non-neg-risk-event-member`,
+  not a diagnostic. v1-v3 receipts and terminal evidence remain untouched.
+- [VERIFIED] Drift end-to-end and scheduler suites, changed-file Ruff, diff
+  check, and `make planning-status` passed. User-owned `.superpowers/sdd/*`
+  changes and the pre-existing HANDOFF deletion are excluded.
+
+### [NEXT — CURRENT]
+
+Commit only this v4 repair, then obtain `DEPLOY_SHA_APPROVE <exact final
+40-char HEAD>`. Deploy only that SHA with classifier enabled, legacy Structure
+reads, Quote disabled, and cleanup protections unchanged. Verify a new v4
+comparison reaches authenticated sealed health before any read-mode, Quote,
+pointer, cleanup, or opportunity-feed change.

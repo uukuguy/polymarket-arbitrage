@@ -63,6 +63,8 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V1,
     STRUCTURE_DRIFT_CLASSIFIER_V2,
     STRUCTURE_DRIFT_CLASSIFIER_V3,
+    STRUCTURE_DRIFT_CLASSIFIER_V4,
+    STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE,
     STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
     STRUCTURE_POINTER_SWITCH_TRANSACTION_DEADLINE_S,
     STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S,
@@ -790,7 +792,7 @@ def _structure_drift_health_check(
                 and len(diagnostic_root) == 64
                 and all(character in "0123456789abcdef" for character in diagnostic_root)
             )
-            if contract == STRUCTURE_DRIFT_CLASSIFIER_V3 and v3_aggregate_valid:
+            if contract in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE and v3_aggregate_valid:
                 output = (
                     f"contract={contract} comparison={comparison_id} "
                     f"reason={v3_public_reason} "
@@ -830,7 +832,7 @@ def _structure_drift_health_check(
                     "diagnosticSamples": diagnostic_samples,
                     "checkpointAtMs": checkpoint,
                 }
-            elif contract == STRUCTURE_DRIFT_CLASSIFIER_V3:
+            elif contract in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE:
                 output = (
                     f"contract={contract} comparison={comparison_id} "
                     f"reason={v3_public_reason} "
@@ -876,7 +878,7 @@ def _structure_drift_health_check(
             if (
                 authorized
                 and phase == "sealed"
-                and contract == STRUCTURE_DRIFT_CLASSIFIER_V3
+                and contract in STRUCTURE_DRIFT_CLASSIFIERS_V3_COMPATIBLE
             ):
                 extra.update(
                     {
@@ -1438,7 +1440,11 @@ def _build_health_checks(
         and latest_defer.get("classifier_contract_version")
         == drift_status.get("classifier_contract_version")
         and drift_status.get("classifier_contract_version")
-        in {STRUCTURE_DRIFT_CLASSIFIER_V2, STRUCTURE_DRIFT_CLASSIFIER_V3}
+        in {
+            STRUCTURE_DRIFT_CLASSIFIER_V2,
+            STRUCTURE_DRIFT_CLASSIFIER_V3,
+            STRUCTURE_DRIFT_CLASSIFIER_V4,
+        }
         and latest_defer.get("current_comparison_id")
         == drift_status.get("progress_id")
     )
