@@ -11506,11 +11506,23 @@ class SQLiteStore:
         window_id: str,
         current_version: str,
         now_ms: int,
+        *,
+        failure_reason: str = "publication-contract-superseded",
+        force_retire: bool = False,
     ) -> StructurePublicationContractReconciliation:
         """Fail one incompatible unpublished generation and its source atomically."""
-        if not window_id or not current_version or now_ms < 0:
+        if (
+            not window_id
+            or not current_version
+            or now_ms < 0
+            or failure_reason
+            not in {
+                "publication-contract-superseded",
+                "publication-membership-invalid",
+            }
+        ):
             raise ValueError("invalid-structure-publication-contract")
-        reason = "publication-contract-superseded"
+        reason = failure_reason
         con = self._connect_writer()
         try:
             con.execute("BEGIN IMMEDIATE")
@@ -11544,7 +11556,7 @@ class SQLiteStore:
                     is not None
                 )
                 if (
-                    stored_version == current_version
+                    (not force_retire and stored_version == current_version)
                     or row[5] != "structure"
                     or row[6] != "failed"
                     or int(row[7]) != 0
@@ -11574,7 +11586,7 @@ class SQLiteStore:
                 or row[9] != "complete"
                 or pointer_is_candidate
             )
-            if stored_version == current_version:
+            if stored_version == current_version and not force_retire:
                 if common_unsafe or row[6] != "building":
                     raise ValueError("structure-publication-supersession-unsafe")
                 con.execute("COMMIT")
@@ -11620,6 +11632,21 @@ class SQLiteStore:
             raise
         finally:
             con.close()
+
+    def retire_membership_invalid_structure_publication(
+        self,
+        window_id: str,
+        *,
+        now_ms: int,
+    ) -> StructurePublicationContractReconciliation:
+        """Retire one frozen source conflict without altering its evidence."""
+        return self.reconcile_structure_publication_contract(
+            window_id,
+            STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+            now_ms,
+            failure_reason="publication-membership-invalid",
+            force_retire=True,
+        )
 
     @staticmethod
     def _component_values(

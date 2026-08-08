@@ -6334,3 +6334,31 @@ Commit only this v4 repair, then obtain `DEPLOY_SHA_APPROVE <exact final
 reads, Quote disabled, and cleanup protections unchanged. Verify a new v4
 comparison reaches authenticated sealed health before any read-mode, Quote,
 pointer, cleanup, or opportunity-feed change.
+
+## SESSION 137 — 2026-08-08 (membership-conflict loop root cause and recovery)
+
+- [PRODUCTION EVIDENCE] v4 comparison `1cc5f52d...` sealed with
+  `unclassified=0`; 11 nullable ordinary event members moved into the
+  `non-neg-risk-event-member` exclusion chain (14,329 -> 14,340). Real timeout
+  attempts 444-446 were followed by checkpointed/succeeded attempts 447-448,
+  proving no 300-second continuation stall.
+- [ROOT CAUSE] Remaining `/health` failure is not classifier drift. Publication
+  880/window `320fe...` has a frozen event-member/market identity conflict for
+  market `3340236`: event authority is inactive-reserved (`active=false`),
+  while market authority is active. The strict certification correctly fails
+  `membership-invalid`, but the old producer retried that immutable writing
+  publication every ~63 seconds indefinitely.
+- [FIXED LOCAL] An authenticated membership conflict now atomically retires
+  only the unpublished publication/window/building snapshot with
+  `publication-membership-invalid`; frozen source staging, serving pointer and
+  strict validation stay intact. The producer returns a superseded checkpoint,
+  releasing the next tick to create a fresh natural window.
+- [VERIFIED] Publication suite, scheduler/CLI regression suites, changed-file
+  Ruff, diff check, and planning audit passed. No production data was mutated.
+
+### [NEXT — CURRENT]
+
+Commit this membership-conflict recovery, obtain `DEPLOY_SHA_APPROVE <exact
+final 40-char HEAD>`, deploy only with drift enabled / legacy reads / Quote off
+/ cleanup on, and observe immutable retirement of 880 followed by a natural
+successor publication and health recovery.

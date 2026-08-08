@@ -23,7 +23,7 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_PUBLICATION_MAX_ROWS,
     STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S,
 )
-from polyarb.storage.sqlite_store import SQLiteStore
+from polyarb.storage.sqlite_store import SQLiteStore, StructureMembershipInvalidError
 
 _monotonic = time.monotonic
 
@@ -341,6 +341,7 @@ async def run_structure_sync_until_published(
         and (max_pages is not None or max_elapsed_s is not None)
     ):
         from polyarb.perception.structure_publication import (
+            StructurePublicationCheckpoint,
             run_structure_publication_slice,
         )
 
@@ -358,15 +359,29 @@ async def run_structure_sync_until_published(
                 stage="bootstrap",
                 pages_processed=max(1, bootstrap_chunks),
             )
-        return await asyncio.to_thread(
-            run_structure_publication_slice,
-            settings,
-            str(latest["id"]),
-            max_rows=max_publication_rows,
-            max_elapsed_s=max(0.001, remaining_s),
-            max_chunks=100 - bootstrap_chunks,
-            store=store,
-        )
+        try:
+            return await asyncio.to_thread(
+                run_structure_publication_slice,
+                settings,
+                str(latest["id"]),
+                max_rows=max_publication_rows,
+                max_elapsed_s=max(0.001, remaining_s),
+                max_chunks=100 - bootstrap_chunks,
+                store=store,
+            )
+        except StructureMembershipInvalidError:
+            retired = await asyncio.to_thread(
+                store.retire_membership_invalid_structure_publication,
+                str(latest["id"]),
+                now_ms=int(time.time() * 1_000),
+            )
+            return StructurePublicationCheckpoint(
+                stage="superseded",
+                component=None,
+                rows_processed=0,
+                cursor=None,
+                publication_id=retired.publication_id,
+            )
     async with GammaClient(settings) as gamma:
         if latest is not None and latest["status"] == "complete":
             return await finalize_structure_window(

@@ -1034,6 +1034,115 @@ def test_both_present_status_mismatch_remains_membership_invalid(
             )
 
 
+def test_membership_invalid_publication_is_retired_for_fresh_window(
+    settings_for_test,
+) -> None:
+    """A contradictory frozen window must fail once, not block its successor."""
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    _publish_generation(
+        store,
+        snapshot_id=845,
+        market_id="serving-market",
+        now_ms=1_000,
+    )
+    publication = _begin_generation(
+        store,
+        snapshot_id=846,
+        market_id="conflicting-market",
+        now_ms=2_000,
+    )
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "UPDATE structure_generation_memberships SET member_kind='inactive-reserved',"
+            "active=0 WHERE snapshot_id=846 AND market_id='conflicting-market'"
+        )
+
+    result = store.retire_membership_invalid_structure_publication(
+        publication.window_id,
+        now_ms=3_000,
+    )
+
+    assert result.publication_id == publication.publication_id
+    assert result.superseded is True
+    assert store.retire_membership_invalid_structure_publication(
+        publication.window_id,
+        now_ms=3_001,
+    ) == result
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT status,failure_reason FROM structure_publications "
+            "WHERE publication_id=?",
+            (publication.publication_id,),
+        ).fetchone() == ("failed", "publication-membership-invalid")
+        assert con.execute(
+            "SELECT snapshot_status,is_valid,market_view_published FROM snapshots "
+            "WHERE id=846"
+        ).fetchone() == ("failed", 0, 0)
+        assert con.execute(
+            "SELECT status,failure_reason FROM structure_sync_windows WHERE id=?",
+            (publication.window_id,),
+        ).fetchone() == ("failed", "publication-membership-invalid")
+        assert con.execute(
+            "SELECT snapshot_id FROM current_structure_generation WHERE id=1"
+        ).fetchone() == (845,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM structure_sync_event_staging WHERE window_id=?",
+            (publication.window_id,),
+        ).fetchone() == (1,)
+
+    successor = store.begin_or_resume_structure_sync(started_at_ms=3_002)
+    assert successor["id"] != publication.window_id
+    assert successor["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_membership_invalid_publication_yields_natural_successor(
+    settings_for_test,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The producer converts only authenticated membership conflict to retirement."""
+    from polyarb.perception import structure_publication as publication_module
+    from polyarb.perception.structure_publication import StructurePublicationCheckpoint
+    from polyarb.perception.structure_sync import run_structure_sync_until_published
+    from polyarb.storage.sqlite_store import StructureMembershipInvalidError
+
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    publication = _begin_generation(
+        store,
+        snapshot_id=846,
+        market_id="conflicting-market",
+        now_ms=2_000,
+    )
+
+    def raise_membership_invalid(*_args, **_kwargs):
+        raise StructureMembershipInvalidError(
+            "market-identity", ("event-1", "group-1", "conflicting-market")
+        )
+
+    monkeypatch.setattr(
+        publication_module,
+        "run_structure_publication_slice",
+        raise_membership_invalid,
+    )
+
+    result = await run_structure_sync_until_published(
+        settings_for_test,
+        max_elapsed_s=60,
+    )
+
+    assert result == StructurePublicationCheckpoint(
+        stage="superseded",
+        component=None,
+        rows_processed=0,
+        cursor=None,
+        publication_id=publication.publication_id,
+    )
+    successor = store.begin_or_resume_structure_sync(started_at_ms=3_000)
+    assert successor["id"] != publication.window_id
+
+
 def test_event_only_issue_source_keyset_is_bounded_at_500(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()
