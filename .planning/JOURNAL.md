@@ -6880,3 +6880,39 @@ volume, or changing Fly routing. Continue natural Quote monitoring on v300;
 any recurrent P1 timeout is a dedicated production investigation. M1 remains
 unaccepted while archive/mirror/structure and continuous-runtime evidence are
 still incomplete.
+
+## SESSION 159 — 2026-08-10 (P1 Quote timeout containment and recovery)
+
+- [P1 DETECTED] Fly v300 repeatedly hit the 120-second isolated Quote-child
+  deadline: six consecutive `QuoteCollectionSubprocessError` timeouts left the
+  certified feed stale for more than 18 minutes. `/healthz` correctly became
+  `fail`; the direct console intermittently exceeded 25 seconds. This was
+  handled as a production fault, not a routine degradation.
+- [FORENSICS] The first process inspection found a stale operator-created
+  `dbstat` SQLite full-scan diagnostic (PID 739) on `/data/state.db`, concurrent
+  with Quote. It was terminated by its exact PID only; no volume/data action
+  was taken. Memory remained available and direct CLOB reachability returned
+  promptly, but a clean-machine retry still timed out. Therefore the scan was
+  an aggravating contention source, not claimed as the sole cause.
+- [CONTAINMENT / RECOVERY] One requested-stop Fly restart (exit 143,
+  `oom_killed=false`) did not cure the first post-boot Quote retry. The
+  reversible runtime setting `POLYARB_CLOB_BATCH_MAX_CONCURRENCY=6` was then
+  applied (previous default 12), triggering a single rolling restart. New boot
+  `d4100be1-64bb-49c4-8779-c75610357a5c` produced certified Quote run 2179 in
+  about 21 seconds. `/healthz` returned `warn` (not fail), direct console was
+  HTTP 200 in 0.76s, incidents endpoint was HTTP 200 with `open_count=0`, and
+  `/arbitrage/opportunities` returned current gross-before-fees candidates.
+- [HARD RULE] Never run `dbstat`, `VACUUM`, broad table scans, or any other
+  unbounded SQLite diagnostic against `/data/state.db` on the live producer.
+  Use bounded metadata probes or the isolated backup/replacement workflow.
+  Treat the lowered CLOB concurrency as a live mitigation pending a dedicated
+  root-cause/performance diagnosis; it is not proof the upstream pathology is
+  permanently fixed.
+
+### [NEXT — CURRENT]
+
+Observe multiple natural Quote cycles at concurrency 6 and verify stable
+health/console/opportunity responses. Open a focused incident remediation for
+the fetch-stage timeout pathology and ensure repeated Quote failures stay
+visible in both the direct console and Polywatch. Resume R2 backup/restore work
+only after this P1 has accumulated recovery evidence; M1 remains unaccepted.
