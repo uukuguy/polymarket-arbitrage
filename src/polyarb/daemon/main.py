@@ -58,6 +58,7 @@ from polyarb.perception.capacity_controller import (
     CapacityMaintenanceWorker,
     CapacityPolicy,
 )
+from polyarb.perception.capacity_incidents import CapacityIncidentLifecycle
 from polyarb.perception.discovery import (
     CandidateFreshness,
     DiscoveryRunner,
@@ -585,6 +586,7 @@ def _build_generation_cleanup_worker(
 def _build_capacity_worker(
     settings,
     sqlite_store: SQLiteStore,
+    perception_store: OpportunityPerceptionStore,
     producer_lock: asyncio.Lock,
     *,
     quote_worker_runtime: QuoteWorkerRuntime | None,
@@ -608,6 +610,7 @@ def _build_capacity_worker(
         quote_worker_runtime=quote_worker_runtime,
         quote_interval_s=float(settings.neg_risk_quote_interval_s),
         interval_s=float(settings.capacity_interval_s),
+        incident_lifecycle=CapacityIncidentLifecycle(IncidentManager(perception_store)),
     )
 
 
@@ -677,6 +680,7 @@ async def main() -> int:
     capacity_worker = _build_capacity_worker(
         settings,
         sqlite_store,
+        perception_store,
         producer_lock,
         quote_worker_runtime=quote_worker.runtime if quote_worker is not None else None,
     )

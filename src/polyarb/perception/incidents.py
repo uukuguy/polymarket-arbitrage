@@ -2209,6 +2209,27 @@ class IncidentManager:
                     )
                 )
             )
+        if scope == "capacity":
+            receipt_at_ms = verification_evidence.get("last_recovery_receipt_at_ms")
+            if type(receipt_at_ms) is not int or receipt_at_ms < recovery_started_at_ms:
+                return False
+            receipt = con.execute(
+                "SELECT completed_at_ms,deleted_count FROM capacity_reclaim_receipts "
+                "WHERE completed_at_ms=? ORDER BY id DESC LIMIT 1",
+                (receipt_at_ms,),
+            ).fetchone()
+            runtime = con.execute(
+                "SELECT state,last_recovery_receipt_at_ms FROM "
+                "capacity_controller_runtime WHERE id=1"
+            ).fetchone()
+            return bool(
+                receipt
+                and receipt["deleted_count"] > 0
+                and recovery_started_at_ms <= receipt["completed_at_ms"] <= verification_at_ms
+                and runtime
+                and runtime["state"] == "normal"
+                and runtime["last_recovery_receipt_at_ms"] == receipt_at_ms
+            )
         if scope == "quote-collection":
             run_id = verification_evidence.get("run_id")
             if type(run_id) is not int or run_id < 1:

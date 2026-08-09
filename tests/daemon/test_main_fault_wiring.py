@@ -12,6 +12,7 @@ def test_nonisolated_daemon_builders_receive_distinct_exact_fault_runtimes(
     monkeypatch,
 ) -> None:
     import polyarb.daemon.main as daemon_main
+    from polyarb.perception.store import OpportunityPerceptionStore
 
     assert hasattr(daemon_main, "_build_daemon_perception_workers")
     path = tmp_path / "daemon.db"
@@ -99,6 +100,8 @@ def test_capacity_worker_builds_without_opportunity_supervisor(tmp_path) -> None
 
     store = SQLiteStore(tmp_path / "daemon.db")
     store.init_schema()
+    perception_store = OpportunityPerceptionStore(tmp_path / "daemon.db")
+    perception_store.init_schema()
     settings = SimpleNamespace(
         capacity_controller_enabled=True,
         capacity_pressure_free_percent=20.0,
@@ -114,6 +117,7 @@ def test_capacity_worker_builds_without_opportunity_supervisor(tmp_path) -> None
     worker = daemon_main._build_capacity_worker(
         settings,
         store,
+        perception_store,
         asyncio.Lock(),
         quote_worker_runtime=None,
     )

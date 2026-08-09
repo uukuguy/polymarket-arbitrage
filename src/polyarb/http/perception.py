@@ -1093,11 +1093,53 @@ def _quote_incident_diagnosis(evidence: dict[str, object]) -> dict[str, object] 
         "deadline_s": deadline_s,
         "consecutive_failures": failures,
         "last_success_age_s": float(age),
+        "free_percent": None,
         "failure_reason": (
             evidence["failure_reason"]
             if isinstance(evidence.get("failure_reason"), str)
             else None
         ),
+    }
+
+
+def _capacity_incident_diagnosis(evidence: dict[str, object]) -> dict[str, object] | None:
+    """Expose a complete, credential-free disposition for storage pressure."""
+    if (
+        evidence.get("severity") not in {"p1", "p2"}
+        or evidence.get("impact") != "storage-exhaustion-risk"
+        or evidence.get("automatic_action") != "reclaim-bounded-history"
+        or evidence.get("next_action") != "inspect-capacity-receipts"
+    ):
+        return None
+    reminder = evidence.get("reminder_interval_s")
+    free_percent = evidence.get("free_percent")
+    failures = evidence.get("consecutive_failures")
+    if (
+        isinstance(reminder, bool)
+        or not isinstance(reminder, int)
+        or reminder <= 0
+        or isinstance(free_percent, bool)
+        or not isinstance(free_percent, (int, float))
+        or not 0.0 <= float(free_percent) <= 100.0
+        or isinstance(failures, bool)
+        or not isinstance(failures, int)
+        or failures < 0
+    ):
+        return None
+    failure_reason = evidence.get("failure_reason")
+    if failure_reason is not None and not isinstance(failure_reason, str):
+        return None
+    return {
+        "severity": evidence["severity"],
+        "reminder_interval_s": reminder,
+        "impact": evidence["impact"],
+        "automatic_action": evidence["automatic_action"],
+        "next_action": evidence["next_action"],
+        "deadline_s": None,
+        "free_percent": float(free_percent),
+        "consecutive_failures": failures,
+        "last_success_age_s": None,
+        "failure_reason": failure_reason,
     }
 
 
@@ -1176,6 +1218,8 @@ def _incidents(
                     "diagnosis": (
                         _quote_incident_diagnosis(item.incident.evidence)
                         if item.incident.scope == "quote-collection"
+                        else _capacity_incident_diagnosis(item.incident.evidence)
+                        if item.incident.scope == "capacity"
                         else None
                     ),
                     "evidence": _safe_evidence(item.incident.evidence),

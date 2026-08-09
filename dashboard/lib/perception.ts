@@ -601,6 +601,21 @@ function isIncident(value: unknown): boolean {
         isPositiveInteger(value.diagnosis.consecutive_failures) &&
         typeof value.diagnosis.last_success_age_s === "number" &&
         value.diagnosis.last_success_age_s >= 0 &&
+        value.diagnosis.free_percent === null &&
+        (value.diagnosis.failure_reason === null ||
+          typeof value.diagnosis.failure_reason === "string")) ||
+      (isRecord(value.diagnosis) &&
+        (value.diagnosis.severity === "p1" || value.diagnosis.severity === "p2") &&
+        isPositiveInteger(value.diagnosis.reminder_interval_s) &&
+        value.diagnosis.impact === "storage-exhaustion-risk" &&
+        value.diagnosis.automatic_action === "reclaim-bounded-history" &&
+        value.diagnosis.next_action === "inspect-capacity-receipts" &&
+        value.diagnosis.deadline_s === null &&
+        isNonNegativeInteger(value.diagnosis.consecutive_failures) &&
+        value.diagnosis.last_success_age_s === null &&
+        typeof value.diagnosis.free_percent === "number" &&
+        value.diagnosis.free_percent >= 0 &&
+        value.diagnosis.free_percent <= 100 &&
         (value.diagnosis.failure_reason === null ||
           typeof value.diagnosis.failure_reason === "string"))) &&
     isRecord(value.evidence)

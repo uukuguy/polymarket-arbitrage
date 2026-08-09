@@ -630,8 +630,41 @@ def test_quote_timeout_incident_exposes_operator_diagnosis(http_test_client) -> 
             "deadline_s": 120,
             "consecutive_failures": 3,
             "last_success_age_s": 3057.8,
+            "free_percent": None,
             "failure_reason": "quote-collection-subprocess-timeout",
         }
+
+
+def test_capacity_incident_exposes_operator_diagnosis(http_test_client) -> None:
+    from polyarb.perception.capacity_incidents import CapacityIncidentLifecycle
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    db_path = http_test_client.app.state.sqlite_store.db_path
+    runtime = SQLiteStore(db_path).record_capacity_controller_measurement(
+        state="critical",
+        free_bytes=11,
+        free_percent=11.0,
+        observed_at_ms=1_000,
+    )
+    CapacityIncidentLifecycle(
+        IncidentManager(OpportunityPerceptionStore(db_path), clock_ms=lambda: 1_000)
+    ).observe(runtime)
+
+    item = http_test_client.get("/perception/incidents?limit=10").json()["items"][0]
+
+    assert item["scope"] == "capacity"
+    assert item["diagnosis"] == {
+        "severity": "p1",
+        "impact": "storage-exhaustion-risk",
+        "automatic_action": "reclaim-bounded-history",
+        "next_action": "inspect-capacity-receipts",
+        "deadline_s": None,
+        "free_percent": 11.0,
+        "consecutive_failures": 0,
+        "last_success_age_s": None,
+        "failure_reason": None,
+        "reminder_interval_s": 300,
+    }
 
 
 def test_incident_history_endpoint_exposes_exact_bounded_lifecycle(

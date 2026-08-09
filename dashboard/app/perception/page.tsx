@@ -96,6 +96,10 @@ export default async function PerceptionOverviewPage() {
       incident.scope === "quote-collection" &&
       incident.diagnosis?.severity === "p1",
   );
+  const p1CapacityIncidents = openIncidents.filter(
+    (incident) =>
+      incident.scope === "capacity" && incident.diagnosis?.severity === "p1",
+  );
   const currentResourceSample =
     resources.current === null
       ? null
@@ -494,6 +498,30 @@ export default async function PerceptionOverviewPage() {
         </section>
       )}
 
+      {p1CapacityIncidents.length > 0 && (
+        <section
+          style={{
+            ...panel,
+            border: "2px solid #f97316",
+            background: "#2a1812",
+          }}
+        >
+          <h2 style={{ marginTop: 0, color: "#fed7aa" }}>
+            P1 storage capacity incident ({p1CapacityIncidents.length})
+          </h2>
+          {p1CapacityIncidents.map((incident) => (
+            <div key={incident.incident_id}>
+              <strong>Impact:</strong> {incident.diagnosis?.impact.replaceAll("-", " ")}
+              <div><strong>Automatic action:</strong> {incident.diagnosis?.automatic_action.replaceAll("-", " ")}</div>
+              <div><strong>Next action:</strong> {incident.diagnosis?.next_action.replaceAll("-", " ")}</div>
+              <div style={muted}>
+                free space {incident.diagnosis?.free_percent}% · reminder every {incident.diagnosis?.reminder_interval_s}s
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
+
       <section style={panel}>
         <h2 style={{ marginTop: 0 }}>
           Open incidents ({incidents.open_count})
@@ -551,9 +579,15 @@ export default async function PerceptionOverviewPage() {
                   <div><strong>Impact:</strong> {incident.diagnosis.impact.replace("-", " ")}</div>
                   <div><strong>Automatic action:</strong> {incident.diagnosis.automatic_action.replace("-", " ")}</div>
                   <div><strong>Next action:</strong> {incident.diagnosis.next_action.replaceAll("-", " ")}</div>
-                  <div style={muted}>
-                    Evidence: deadline {incident.diagnosis.deadline_s}s · consecutive failures {incident.diagnosis.consecutive_failures} · last certified success age {fmtDurationMs(incident.diagnosis.last_success_age_s * 1000)}
-                  </div>
+                  {incident.diagnosis.deadline_s !== null && incident.diagnosis.last_success_age_s !== null ? (
+                    <div style={muted}>
+                      Evidence: deadline {incident.diagnosis.deadline_s}s · consecutive failures {incident.diagnosis.consecutive_failures} · last certified success age {fmtDurationMs(incident.diagnosis.last_success_age_s * 1000)}
+                    </div>
+                  ) : (
+                    <div style={muted}>
+                      Evidence: free space {incident.diagnosis.free_percent}% · consecutive failures {incident.diagnosis.consecutive_failures}
+                    </div>
+                  )}
                   {incident.diagnosis.failure_reason !== null && (
                     <div style={muted}>Failure: {incident.diagnosis.failure_reason}</div>
                   )}

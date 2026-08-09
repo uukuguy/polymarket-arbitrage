@@ -154,6 +154,7 @@ class CapacityMaintenanceWorker:
         quote_worker_runtime: object | None,
         quote_interval_s: float,
         interval_s: float,
+        incident_lifecycle: object | None = None,
     ) -> None:
         if quote_interval_s <= 0 or interval_s <= 0:
             raise ValueError("invalid-capacity-maintenance-interval")
@@ -162,6 +163,7 @@ class CapacityMaintenanceWorker:
         self._quote_runtime = quote_worker_runtime
         self._quote_interval_s = quote_interval_s
         self._interval_s = interval_s
+        self._incident_lifecycle = incident_lifecycle
 
     def _quote_priority(self) -> bool:
         runtime = self._quote_runtime
@@ -172,13 +174,17 @@ class CapacityMaintenanceWorker:
 
     async def _tick(self) -> None:
         if self._quote_priority():
-            await asyncio.to_thread(self._controller.run_once, quote_priority=True)
-            return
-        async with self._producer_lock:
-            await asyncio.to_thread(
-                self._controller.run_once,
-                quote_priority=self._quote_priority(),
+            runtime = await asyncio.to_thread(
+                self._controller.run_once, quote_priority=True
             )
+        else:
+            async with self._producer_lock:
+                runtime = await asyncio.to_thread(
+                    self._controller.run_once,
+                    quote_priority=self._quote_priority(),
+                )
+        if self._incident_lifecycle is not None:
+            await asyncio.to_thread(self._incident_lifecycle.observe, runtime)
 
     async def run(self, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():

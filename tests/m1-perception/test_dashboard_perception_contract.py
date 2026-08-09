@@ -302,6 +302,17 @@ def test_overview_has_prominent_p1_quote_incident_panel() -> None:
     assert "Next action:" in overview
 
 
+def test_overview_has_prominent_p1_capacity_incident_panel() -> None:
+    overview = _source("dashboard/app/perception/page.tsx")
+    reader = _source("dashboard/lib/perception.ts")
+
+    assert "P1 storage capacity incident" in overview
+    assert "p1CapacityIncidents" in overview
+    assert "free space" in overview
+    assert "storage-exhaustion-risk" in reader
+    assert "inspect-capacity-receipts" in reader
+
+
 def test_overview_binds_candidate_envelopes_before_rendering() -> None:
     reader = _source("dashboard/lib/perception.ts")
     types = _source("dashboard/lib/types.ts")
