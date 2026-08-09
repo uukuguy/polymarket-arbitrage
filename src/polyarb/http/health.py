@@ -487,11 +487,14 @@ def _structure_generation_health_checks(
         publication_output = "stage=idle"
     else:
         stage = str(publication.get("status") or "unknown")
+        certification_component = publication.get("certification_component")
+        if stage == "writing" and certification_component is not None:
+            stage = "certifying"
         quarantine_count = int(publication.get("quarantine_count") or 0)
         checkpoint = publication.get("checkpoint_at_ms")
         if isinstance(checkpoint, int):
             checkpoint_age_s = max(0.0, (now_ms - checkpoint) / 1_000)
-        active = stage in {"normalizing", "writing", "ready"}
+        active = stage in {"normalizing", "writing", "certifying", "ready"}
         publication_status = (
             "fail"
             if active
@@ -509,6 +512,8 @@ def _structure_generation_health_checks(
             f"normalization_cursor={publication.get('normalization_cursor')} "
             f"write_component={publication.get('write_component')} "
             f"write_cursor={publication.get('write_cursor')} "
+            f"certification_component={certification_component} "
+            f"certification_cursor={publication.get('certification_cursor')} "
             f"quarantine_count={quarantine_count} "
             f"checkpoint_age_seconds={checkpoint_age_s}"
         )

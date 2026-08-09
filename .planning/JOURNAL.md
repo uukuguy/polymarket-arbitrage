@@ -6554,3 +6554,26 @@ fresh market truth, strict logical health, and the protected Quote-disabled
 opportunity surface. Then deploy the keyset repair through `make deploy` to
 bind a non-`dev` release identity, and prove a post-deploy restart/recovery
 without reintroducing startup or tail-scan stalls.
+
+## SESSION 148 — 2026-08-09 (certification health chain truth)
+
+- [PRODUCTION EVIDENCE] After `issues|done`, scheduler logs advanced into
+  `certifying/event_tags` and then `certifying/memberships`; `/health` still
+  reported `writing/issues|done`. One hard-limited child timeout incremented
+  the failure counter to one; the following successful checkpoint reset it to
+  zero without restart, confirming automatic recovery.
+- [ROOT CAUSE] `structure_generation_status()` selected normalization and
+  writing progress but omitted the already durable certification component and
+  cursor. The health projection therefore described a completed prior stage.
+- [FIXED LOCAL] Read-only status and health now carry certification progress
+  and report an active writing publication with a certification component as
+  `stage=certifying`; the existing checkpoint SLA remains the health gate.
+- [VERIFIED LOCAL] Red/green health contract, complete health endpoint tests,
+  and changed-file Ruff pass.
+
+### [NEXT — CURRENT]
+
+Observe publication `463055...` through certification and atomic publication.
+Verify fresh market truth and the Quote-disabled opportunity surface. Then
+deploy `117e7fc` plus certification-health truth through `make deploy` for a
+non-`dev` release identity and prove post-deploy restart/recovery.

@@ -201,6 +201,8 @@ def test_structure_generation_health_exposes_stalled_publication_and_cleanup_pre
                 "status": "writing",
                 "write_component": "markets",
                 "write_cursor": "market-42",
+                "certification_component": "memberships",
+                "certification_cursor": '["event-4","market-2"]',
                 "checkpoint_at_ms": 1_000,
             },
             "comparison": {
@@ -228,7 +230,11 @@ def test_structure_generation_health_exposes_stalled_publication_and_cleanup_pre
         pressure_fail_count=8,
     )
     assert checks["snapshot:structure_generation"][0]["status"] == "fail"
-    assert "stage=writing" in checks["snapshot:structure_generation"][0]["output"]
+    assert "stage=certifying" in checks["snapshot:structure_generation"][0]["output"]
+    assert (
+        "certification_component=memberships"
+        in checks["snapshot:structure_generation"][0]["output"]
+    )
     assert checks["snapshot:structure_generation_comparison"][0]["status"] == "fail"
     assert checks["snapshot:structure_generation_evidence"][0]["status"] == "fail"
     assert (

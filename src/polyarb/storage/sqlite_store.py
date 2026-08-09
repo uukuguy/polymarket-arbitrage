@@ -12278,7 +12278,8 @@ class SQLiteStore:
             publication = con.execute(
                 "SELECT publication_id,snapshot_id,status,normalization_component,"
                 "normalization_source_cursor,write_component,write_row_cursor,"
-                "checkpoint_at_ms,committed_counts_json FROM structure_publications p "
+                "certification_component,certification_row_cursor,checkpoint_at_ms,"
+                "committed_counts_json FROM structure_publications p "
                 "WHERE status IN ('normalizing','writing','ready') "
                 "ORDER BY checkpoint_at_ms DESC,publication_id DESC LIMIT 1"
             ).fetchone()
@@ -12286,8 +12287,9 @@ class SQLiteStore:
                 publication = con.execute(
                     "SELECT p.publication_id,p.snapshot_id,p.status,"
                     "p.normalization_component,p.normalization_source_cursor,"
-                    "p.write_component,p.write_row_cursor,p.checkpoint_at_ms,"
-                    "p.committed_counts_json FROM "
+                    "p.write_component,p.write_row_cursor,p.certification_component,"
+                    "p.certification_row_cursor,p.checkpoint_at_ms,p.committed_counts_json "
+                    "FROM "
                     "current_structure_generation g JOIN structure_publications p "
                     "ON p.snapshot_id=g.snapshot_id AND "
                     "p.publication_id=g.publication_id WHERE g.id=1"
@@ -12587,9 +12589,11 @@ class SQLiteStore:
                 "normalization_cursor": publication[4],
                 "write_component": publication[5],
                 "write_cursor": publication[6],
-                "checkpoint_at_ms": int(publication[7]),
+                "certification_component": publication[7],
+                "certification_cursor": publication[8],
+                "checkpoint_at_ms": int(publication[9]),
                 "quarantine_count": (
-                    int(json.loads(str(publication[8])).get("issues", 0))
+                    int(json.loads(str(publication[10])).get("issues", 0))
                     if str(publication[2]) in {"ready", "published"}
                     else 0
                 ),
