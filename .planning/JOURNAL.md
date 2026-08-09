@@ -7303,3 +7303,23 @@ attempt/run replacements with health, opportunities, incident console and
 Polywatch remaining healthy. If a hard timeout recurs, use its console stage
 timings to decide whether the remaining bottleneck is fetch, persistence or
 certification; do not resume generic retry loops.
+
+## SESSION 175 — 2026-08-10 (v311 natural-cycle continuation)
+
+- [CONTINUOUS EVIDENCE] The post-recovery producer advanced from attempt 493 /
+  run 2282 to attempt 495 / run 2284 and then attempt 497 / run 2286, each
+  complete for 40,495 tokens. The latter external sample saw Quote age 33.9s,
+  collector `pass`, `/healthz` 200, opportunities 200 with nine certified
+  candidates, and the incident API at `open_count=0`.
+- [MONITORING] Resident Polywatch completed its 22:42 and 22:44 UTC cycles
+  with L1, opportunities, L2 and operator surface all healthy, an empty
+  durable alert state, and no new notification. L2's sole top-level warning
+  remains the explicitly documented `WAITING_FOR_EVENT` quiet state; its L3
+  evidence remains 10/10.
+
+### [NEXT — CURRENT]
+
+Continue v311 natural-cycle observation across a longer window while retaining
+the same fail-closed feed and direct incident visibility. Investigate only a
+new evidence-bearing fault; do not churn documented non-gating quiet/archive
+warnings into unnecessary deployments.
