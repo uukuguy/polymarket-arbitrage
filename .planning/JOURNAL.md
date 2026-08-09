@@ -7177,3 +7177,34 @@ sources separately: Polywatch currently observes L2 `active_count=0`, while
 archive/mirror warnings remain non-gating but must have an explicit owner and
 operator explanation. Keep direct incident-console/Telegram evidence required
 for every recurrence.
+
+## SESSION 171 — 2026-08-10 (L2 P1 recovery and direct operator detail)
+
+- [P1 DETECTED] L2 was not merely slow: its old release
+  `a9a282586c3f1e1a452aa96dee99fc9af1f47be0` had six-day stale event/mirror
+  evidence, repeated `evidence_timeout`, and runtime-event queue overflow.
+  `/healthz` staying 200 did not hide it: strict `/health` was 503 and the
+  resident Polywatch emitted/retained L1, opportunity and L2 incident state.
+- [OPERATOR SURFACE] `301ce714ff8504622183f48b69a28dbb59e0db0c` adds the
+  read-only `https://polyarb-l2.fly.dev/console`, linked from L1
+  `/perception/console`. Every L2 warn/fail now has impact, raw evidence,
+  automatic-recovery posture and a specific operator action; unavailable
+  health reads are explicitly visibility faults. There are no control buttons.
+- [RECOVERY] The single L2 machine was updated to immutable image
+  `registry.fly.io/polyarb-l2@sha256:7b63536ad07259f9a1c564634ddc91c4a819a8aa050f5d4d2b3b5e9445f18a07`.
+  It restored WS event age 0, LISTEN, candidate fetch and TOB mirror writes.
+  The first promoter cycle committed 10/10 and its following quiet refresh
+  evidenced all assets: strict health is HTTP 200 with 5/5 membership and
+  persisted evidence/freshness passing.
+- [L1 HANDOFF] L1 was updated to the matching immutable image/release. Its
+  replacement window correctly went fail-closed when the old Quote run was
+  stale, Polywatch reported it, then certified Quote run 2265 restored the
+  opportunity endpoint to HTTP 200 with nine live source-truth candidates.
+
+### [NEXT — CURRENT]
+
+Continue natural-cycle soak on release `301ce714`: retain direct-console,
+Polywatch and strict-health evidence through additional L1 Quote generation
+replacements and L2 promoter/quiet-refresh cycles. Treat any repeated timeout,
+stale evidence or console-read failure as a visible P1 with diagnosis and a
+recovery trail, never as silent degradation.
