@@ -161,3 +161,23 @@ Before production rollout, prove:
    eligible payload families.
 3. Add rolling compaction only after measured freelist/latency evidence shows
    that ordinary reuse and archival cannot maintain the high watermark.
+
+## 7. Physical recovery escalation (observed 2026-08-10)
+
+**Evidence:** the production volume reached `state.db` 41GB with about 13%
+headroom. `neg_risk_quote_run_legs` had 41.2M rows and `neg_risk_quotes` 33.9M
+rows; snapshot cleanup therefore could not recover capacity. Quote-history
+retention reduced retained runs, but `auto_vacuum=0` and a zero freelist showed
+that this stops further growth rather than shrinking the allocated file.
+
+**Required replacement protocol:** do not compact the mounted production file.
+Export an online SQLite backup to private R2 under a content-addressed digest,
+verify its digest and `PRAGMA integrity_check`, restore it on an unattached
+100GB replacement Fly volume, and boot an isolated Machine from the exact
+release. It must produce a new complete Quote and pass health/incident/Dashboard
+probes before routing switches. Retain the original Machine and volume as the
+rollback target throughout the explicit observation window.
+
+Fly permits one volume per Machine, so a second volume cannot be attached to
+the live app for in-place copying. This is why R2 is the transfer authority and
+why volume creation/cutover is a separately receipted production operation.
