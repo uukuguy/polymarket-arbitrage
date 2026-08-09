@@ -4,6 +4,7 @@ import sqlite3
 
 from polyarb.perception.incidents import IncidentManager
 from polyarb.perception.store import OpportunityPerceptionStore
+from polyarb.perception.supervisor import ProducerSupervisor
 from polyarb.routing.neg_risk_quote_collector import QuoteCollectionResult
 
 
@@ -137,4 +138,63 @@ def test_certified_quote_run_verifies_open_timeout_incident(tmp_path) -> None:
     )
 
     assert verified is not None
+    assert verified.state == "verified"
+
+
+def test_certified_quote_run_closes_escalated_quote_supervisor_incident_after_restart(
+    tmp_path,
+) -> None:
+    """A new supervisor handoff needs a later complete run, not a manual clear."""
+    from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
+
+    now = [1_000]
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    incidents = IncidentManager(store, clock_ms=lambda: now[0])
+    incident = incidents.detect("quote", "child-nonzero", {"attempt": 1})
+    incident = incidents.transition(incident.id, "classified", {"action": "classify"})
+    incident = incidents.transition(incident.id, "contained", {"action": "restart"})
+    incident = incidents.transition(incident.id, "recovering", {"retry": 1})
+    incident = incidents.transition(incident.id, "escalated", {"action": "operator"})
+
+    # The restarted supervisor records a new recovery boundary before the
+    # collection succeeds.  An old successful run is therefore insufficient.
+    ProducerSupervisor(
+        store=store,
+        incidents=incidents,
+        clock_ms=lambda: now[0],
+    )._resume_open_incidents("quote")
+
+    with sqlite3.connect(store.db_path) as con:
+        con.execute(
+            "INSERT INTO snapshots("
+            "taken_at_ms,finished_at_ms,mode,market_count,market_view_published,"
+            "data_product,is_valid,parquet_path) VALUES(?,?,?,?,?,?,?,?)",
+            (900, 901, "subset", 2, 1, "structure", 1, "fixture.parquet"),
+        )
+        snapshot_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
+        con.execute(
+            "INSERT INTO neg_risk_quote_runs("
+            "universe_snapshot_id,universe_taken_at_ms,quoted_at_ms,"
+            "requested_token_count,successful_response_count,lease_expires_at_ms,"
+            "status,completed_at_ms) VALUES(?,?,?,?,?,?,?,?)",
+            (snapshot_id, 900, 1_001, 2, 2, 0, "complete", 1_001),
+        )
+        run_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+    now[0] = 1_002
+    verified = QuoteIncidentLifecycle(incidents).record_certified_success(
+        QuoteCollectionResult(
+            run_id=run_id,
+            status="complete",
+            universe_snapshot_id=snapshot_id,
+            requested_token_count=2,
+            successful_response_count=2,
+            quote_taken_at_ms=1_001,
+            elapsed_ms=1,
+        )
+    )
+
+    assert verified is not None
+    assert verified.id == incident.id
     assert verified.state == "verified"

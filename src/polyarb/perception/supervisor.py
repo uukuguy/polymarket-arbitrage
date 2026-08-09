@@ -125,6 +125,7 @@ class ProducerSupervisor:
             )
         if incident is not None:
             self._begin_recovery(incident, retries=0)
+        self._resume_open_incidents(spec.component)
         while not stop_event.is_set():
             started_at_ms = self._clock_ms()
             attempt = self._store.reserve_producer_attempt(
@@ -558,6 +559,30 @@ class ProducerSupervisor:
             self._incidents.transition(latest.id, "verified", pointer)
         except (RecoveryEvidenceRequiredError, ValueError):
             return
+
+    def _resume_open_incidents(self, component: str) -> None:
+        """Give an exhausted prior supervisor a new, durable recovery boundary.
+
+        A process restart alone is not recovery.  It merely makes a later
+        child-authenticated success eligible to verify the earlier P1 event.
+        """
+        for incident in self._incidents.open_incidents():
+            if incident.scope != component or incident.state != "escalated":
+                continue
+            try:
+                self._incidents.transition(
+                    incident.id,
+                    "recovering",
+                    {
+                        **self._recovery_anchor(component, retries=0),
+                        "action": "restart-supervisor",
+                        "retry_count": 0,
+                    },
+                )
+            except ValueError:
+                # A concurrent detector may have advanced this incident. The
+                # next polling/certified-success cycle will re-read it.
+                continue
 
     def _recovery_anchor(self, scope: str, retries: int) -> dict:
         if scope == "reconciliation":
