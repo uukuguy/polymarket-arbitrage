@@ -143,7 +143,7 @@ async def test_generation_cleanup_start_helper_is_optional_and_cancellable() -> 
     worker.run.assert_awaited_once_with(stop_event)
 
 
-def test_generation_cleanup_owner_is_disabled_for_isolated_or_legacy_topology() -> None:
+def test_generation_cleanup_owner_runs_in_isolated_topology_but_not_without_sync() -> None:
     from polyarb.daemon.main import _build_generation_cleanup_worker
 
     settings = Settings()
@@ -151,17 +151,17 @@ def test_generation_cleanup_owner_is_disabled_for_isolated_or_legacy_topology() 
     lock = asyncio.Lock()
     runtime = MagicMock()
 
-    assert (
-        _build_generation_cleanup_worker(
-            settings,
-            store,
-            lock,
-            runtime,
-            isolated_producers=True,
-            structure_sync_enabled=True,
-        )
-        is None
-    )
+    # Isolated snapshot producers do not own this resident cleanup loop. The
+    # parent daemon must still own it, otherwise enabled cleanup has no
+    # heartbeat or executor in production.
+    assert _build_generation_cleanup_worker(
+        settings,
+        store,
+        lock,
+        runtime,
+        isolated_producers=True,
+        structure_sync_enabled=True,
+    ) is not None
     assert (
         _build_generation_cleanup_worker(
             settings,

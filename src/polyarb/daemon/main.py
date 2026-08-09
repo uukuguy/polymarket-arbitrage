@@ -505,11 +505,11 @@ def _build_generation_cleanup_worker(
     structure_sync_enabled: bool,
 ) -> StructureGenerationCleanupWorker | None:
     """Create the single cleanup owner only beside generation publication."""
-    if (
-        isolated_producers
-        or not structure_sync_enabled
-        or not settings.structure_generation_cleanup_enabled
-    ):
+    # In isolated topology the scheduler lives in a supervised child, but the
+    # parent remains the only resident owner able to drive durable cleanup.
+    # Suppressing this worker there leaves an enabled cleanup runtime stale
+    # forever while reclaimable generations accumulate.
+    if not structure_sync_enabled or not settings.structure_generation_cleanup_enabled:
         return None
     return StructureGenerationCleanupWorker(
         settings=settings,

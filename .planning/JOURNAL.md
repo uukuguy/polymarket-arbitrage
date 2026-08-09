@@ -6385,3 +6385,22 @@ other irreversible production-data mutations.
 Deploy the verified startup-statistics repair directly in R&D mode, preserving
 drift enabled / legacy reads / Quote off / cleanup on. Verify bounded boot,
 then observe retirement of publication 880 and a natural successor window.
+
+## SESSION 139 — 2026-08-09 (isolated cleanup ownership)
+
+- [PRODUCTION EVIDENCE] Membership recovery succeeded naturally: publication
+  880 retired with `publication-membership-invalid`, then 881, 882 and 883
+  published. Health nevertheless showed a stale enabled cleanup runtime with
+  reclaimable generations.
+- [ROOT CAUSE] The only cleanup worker was suppressed by
+  `isolated_producers=true`; the supervised snapshot child does not own a
+  replacement. The health check read the correctly stale durable runtime.
+- [FIXED LOCAL] The parent now owns bounded cleanup whenever Structure sync and
+  cleanup are enabled, including isolated topology. Focused worker/wiring and
+  health tests plus Ruff pass.
+
+### [NEXT — CURRENT]
+
+Deploy the isolated-cleanup-owner repair directly in R&D mode. Verify its
+runtime checkpoint advances and health no longer reports it stale; continue
+natural Structure publication until market-truth and snapshot health recover.
