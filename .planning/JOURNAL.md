@@ -6793,3 +6793,35 @@ verified transition if one occurs, and keep the direct console readable while
 the Quote worker runs. In parallel, prioritize the outstanding Archive/R2/
 mirror and historical SQLite capacity migration work; M1 remains not accepted
 until continuous production evidence covers those independent fault domains.
+
+## SESSION 156 — 2026-08-10 (P1 timeout attribution and direct handling)
+
+- [FIXED / DEPLOYED] Exact SHA
+  `94ab3b98967f4dc7e093cf088e14356903a8cbd6` runs as Fly v299. A Quote
+  timeout now carries its already-durable failed `attempt_id` through the
+  isolated child boundary and into incident evidence. The console makes this a
+  first-class **Failed attempt** field on both open and recovered cards. It
+  never reports the prior successful Quote run as the faulting run; absent a
+  safe run projection remains explicitly empty. The hard-timeout reaper adds
+  no SQLite read.
+- [PRODUCTION EVIDENCE] The live incident `58e36a06c71640b99d3b55e0d4f89d05`
+  reached P1 after five consecutive 120-second child timeouts. It stayed open
+  and actionable with `retry-immediately` and
+  `inspect-clob-and-child-io`, then closed only after certified run 2161
+  (38,965/40,495 responses). `/perception/incidents` now returns
+  `open_count=0`; the bounded recent endpoint retains its verified lifecycle.
+- [RUNTIME FOLLOW-UP] v299 subsequently completed a fresh Quote cycle in
+  roughly 12.1 seconds and projected 11 gross-before-fees candidates. The
+  immediate P1 cleared automatically, but the earlier timeout burst remains a
+  production incident to watch and diagnose if it recurs; it is not classified
+  as a harmless degradation. Capacity is normal at about 53.96% free. Overall
+  health remains `warn` because independent Archive/R2/Structure domains are
+  unresolved.
+
+### [NEXT — CURRENT]
+
+Continue natural Quote monitoring on v299. Verify the new exact failed-attempt
+identity on any future timeout without fault injection, and treat any repeated
+P1 burst as a dedicated CLOB/child-I/O throughput investigation. Continue the
+no-downtime historical SQLite capacity migration and independent Archive/R2/
+mirror remediation; M1 is not yet production-accepted.
