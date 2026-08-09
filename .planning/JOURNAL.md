@@ -7082,3 +7082,21 @@ Continue natural-cycle soak on release `fc99a6e`: record fresh Quote,
 opportunity, direct console and Polywatch evidence across multiple cycles.
 Treat any new timeout, health latency or P1 card as a visible incident with
 exact release/boot correlation; do not silence or force-close it.
+
+## SESSION 167 — 2026-08-10 (post-recovery natural-cycle evidence)
+
+- [SOAK] Release `fc99a6e`, boot `26f674a3-0ac5-4699-9067-d20df0f0b792`,
+  completed consecutive natural Quote runs 2232 and 2233 (attempts 437/438),
+  each covering 40,495 targets. Quote collector remained `pass`; Quote age
+  remained below 92 seconds.
+- [OPERATOR SURFACES] Each sampled `/healthz`, `/perception/opportunities`
+  and `/perception/console` returned HTTP 200 in approximately 0.7–1.2s.
+  The opportunity endpoint returned `status=available`,
+  `current_opportunity_count=0`; that is an authenticated valid zero, not an
+  availability/degradation claim. Market truth remained `complete`
+  (133,965 markets / 17,917 events), and open incidents remained zero.
+- [ALERT FORENSICS] Earlier 10-second Polywatch timeouts occurred during the
+  old release failure and the later image-replacement window, and were sent to
+  Telegram with recovery messages. They are not attributed to a natural Quote
+  cycle on `fc99a6e`; future samples must continue to preserve that exact
+  release/boot distinction.
