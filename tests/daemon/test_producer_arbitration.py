@@ -41,3 +41,17 @@ def test_only_lease_owner_can_release_slot(tmp_path) -> None:
     assert arbitrator.current() == lease
     assert arbitrator.release(lease) is True
     assert arbitrator.current() is None
+
+
+def test_structure_yields_a_released_checkpoint_to_quote(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    now = [1_000]
+    arbitrator = ProducerArbitrator(db_path, now_ms=lambda: now[0])
+    structure = arbitrator.acquire(owner="structure", lease_s=45)
+    assert structure is not None
+    now[0] = 2_000
+    assert arbitrator.release(structure) is True
+
+    assert arbitrator.acquire(owner="structure", lease_s=45) is None
+    assert arbitrator.acquire(owner="quote", lease_s=60) is not None

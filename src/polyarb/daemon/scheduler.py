@@ -1188,6 +1188,10 @@ class SnapshotScheduler:
                     reason="producer-lease-held",
                     queued_at_ms=queued_at_ms,
                 )
+                # The durable arbitrator also yields a just-released
+                # Structure checkpoint to Quote. Retry at a bounded cadence
+                # rather than sleeping the full Structure interval.
+                self._checkpoint_pending = True
                 return None
             self._producer_lease = lease
         if self._producer_lock is not None:
@@ -2136,7 +2140,7 @@ class SnapshotScheduler:
                 if await self._wait_for_next_tick(
                     stop_event,
                     (
-                        0.1
+                        (2.0 if self._producer_arbitrator is not None else 0.1)
                         if self._checkpoint_pending
                         else recovery_retry_delay_s(self._failure_counter)
                         if self._failure_counter > 0

@@ -18,6 +18,7 @@ from typing import Literal
 
 ProducerOwner = Literal["quote", "structure"]
 _RESOURCE = "market-write-producer"
+_STRUCTURE_YIELD_TO_QUOTE_MS = 5_000
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,22 @@ class ProducerArbitrator:
                     "DELETE FROM producer_arbitration_leases WHERE resource=?",
                     (_RESOURCE,),
                 )
+            if owner == "structure":
+                # A checkpointed Structure child can finish in milliseconds.
+                # Give a pending supervised Quote two bounded retry turns
+                # before Structure tries to monopolize the newly-free slot.
+                last_structure_release = con.execute(
+                    "SELECT observed_at_ms FROM producer_arbitration_receipts "
+                    "WHERE owner='structure' AND action='released' "
+                    "ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if (
+                    last_structure_release is not None
+                    and now_ms - int(last_structure_release[0])
+                    < _STRUCTURE_YIELD_TO_QUOTE_MS
+                ):
+                    con.execute("ROLLBACK")
+                    return None
             con.execute(
                 "INSERT INTO producer_arbitration_leases("
                 "resource,owner,lease_id,acquired_at_ms,expires_at_ms,updated_at_ms) "

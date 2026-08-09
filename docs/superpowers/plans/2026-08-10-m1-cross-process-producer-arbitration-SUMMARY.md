@@ -12,6 +12,9 @@ Implemented the first production slice of the approved arbitration design.
   certification boundary.  Wired supervised Structure to acquire at most a
   45-second window and stopped using the parent-only Quote runtime as an
   authority in that mode.
+- Added a five-second post-Structure yield and a two-second bounded retry in
+  the scheduler, so a checkpointing Structure child cannot repeatedly reclaim
+  the just-freed slot ahead of a waiting Quote cycle.
 - Added `/perception/producer-arbitration` and a **Producer handoff** card on
   `/perception/console`: current owner/expiry, recent handoff evidence,
   automatic recovery, and operator action are directly inspectable.
