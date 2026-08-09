@@ -6608,6 +6608,23 @@ non-`dev` release identity and prove post-deploy restart/recovery.
 - [VERIFIED LOCAL] Red/green pointer-health contract, market-truth health
   tests, complete health endpoint suite, and changed-file Ruff passed.
 
+## SESSION 150 — 2026-08-09 (generation health recovery deployed)
+
+- [DEPLOYED] Commit `296a846073a1e7c7b3cc6325115e8e9523568b63` now runs as
+  Fly release v258. The app machine passed its 1/1 platform check on the
+  persisted volume; the resident Polywatch cron is running.
+- [PRODUCTION EVIDENCE] `/health` is HTTP 200 with no failed checks. Market
+  truth is anchored to generation snapshot 884 (`130,184` markets / `17,678`
+  events); active snapshot 885 is correctly `BUILDING`; scheduler failures are
+  zero; and the authenticated v4 drift seal passes while explicitly recording
+  that failed attempt 554 is superseded by its matching durable comparison.
+- [CONFIG] The deployed app explicitly exposes `generation` read mode,
+  cleanup enabled, and Quote worker disabled. Quote activation remains a
+  separate authorization boundary.
+- [OBSERVATION] Rolling releases retain stopped/created cron machine records.
+  One cron instance is active; defer destructive cleanup of inactive records
+  until it is needed, rather than changing healthy monitoring during closure.
+
 ### [NEXT — CURRENT]
 
 Commit and deploy generation-mode health truth, then verify `/health` anchors
