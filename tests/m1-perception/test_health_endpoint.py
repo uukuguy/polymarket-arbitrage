@@ -1291,6 +1291,43 @@ def test_market_truth_health_does_not_certify_unpublished_complete_attempt(
     assert result.last_complete_age_seconds is None
 
 
+def test_market_truth_health_uses_authenticated_generation_pointer_in_generation_mode(
+    tmp_path: Path,
+) -> None:
+    """Generation mode trusts its atomically switched certified pointer."""
+    path = tmp_path / "state.db"
+    snapshot_id = _insert_snapshot(
+        path,
+        taken_at_ms=2_000,
+        market_count=130,
+        event_count=17,
+        coverage_completed=False,
+    )
+    with sqlite3.connect(path) as con:
+        con.execute(
+            "INSERT INTO current_structure_generation("
+            "id,snapshot_id,publication_id,validation_hash,counts_json,"
+            "certification_component,comparison_receipt_digest,switched_at_ms"
+            ") VALUES (1,?,'publication-1',?,'{\"markets\":130,\"events\":17}',"
+            "'bounded-complete',?,2001)",
+            (snapshot_id, "a" * 64, "b" * 64),
+        )
+
+    result = health_module.read_market_truth_health(
+        path,
+        now_s=3.0,
+        structure_generation_read_mode="generation",
+    )
+
+    assert result.coverage_status == "pass"
+    assert result.coverage_value == "complete"
+    assert result.latest_attempt_snapshot_id == snapshot_id
+    assert result.latest_attempt_market_items == 130
+    assert result.latest_attempt_event_items == 17
+    assert result.last_complete_snapshot_id == snapshot_id
+    assert result.last_complete_age_seconds == pytest.approx(1.0)
+
+
 def test_market_truth_health_rejects_legacy_combined_snapshot(tmp_path: Path) -> None:
     path = tmp_path / "state.db"
     _insert_snapshot(path, taken_at_ms=1_000, data_product="legacy_combined")

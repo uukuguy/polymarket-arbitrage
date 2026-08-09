@@ -6577,3 +6577,30 @@ Observe publication `463055...` through certification and atomic publication.
 Verify fresh market truth and the Quote-disabled opportunity surface. Then
 deploy `117e7fc` plus certification-health truth through `make deploy` for a
 non-`dev` release identity and prove post-deploy restart/recovery.
+
+## SESSION 149 — 2026-08-09 (generation truth activation)
+
+- [PRODUCTION EVIDENCE] Publication `463055...` completed all certification
+  and comparison phases, atomically published snapshot 884, and sealed drift
+  classifier v4 with `authorized=true`, `unclassified=0`, and
+  `overlap-conflict=0`.
+- [DEPLOYED] `make deploy` released `3c144d0...` as Fly v254; app health check
+  returned 1/1. The user then explicitly authorized
+  `POLYARB_STRUCTURE_GENERATION_READ_MODE=generation`; app and stopped cron
+  machine configuration were updated without enabling Quote.
+- [ROOT CAUSE] Strict health still read legacy `snapshot_source_coverage` and
+  therefore described stale snapshot 845 even though generation 884 was the
+  authenticated active read pointer.
+- [FIXED LOCAL] Generation-mode health now accepts only the atomically switched
+  `bounded-complete` pointer with a comparison receipt, published valid
+  snapshot, and authenticated committed counts. It fails closed otherwise.
+- [VERIFIED LOCAL] Red/green pointer-health contract, market-truth health
+  tests, complete health endpoint suite, and changed-file Ruff passed.
+
+### [NEXT — CURRENT]
+
+Commit and deploy generation-mode health truth, then verify `/health` anchors
+to 884. Quote stays disabled until its explicit activation; after activation,
+verify real candidate discovery, persistence, notification delivery, and M2
+readiness. Design the required incremental publication SLO only after its
+acceptance criteria are explicitly confirmed.

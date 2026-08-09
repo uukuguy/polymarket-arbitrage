@@ -322,7 +322,12 @@ def read_reconciliation_health(path: Path, now_ms: int) -> ReconciliationHealth:
     )
 
 
-def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
+def read_market_truth_health(
+    path: Path,
+    now_s: float,
+    *,
+    structure_generation_read_mode: str = "legacy",
+) -> MarketTruthHealth:
     """Read durable market-truth health without certifying diagnostic rows."""
     empty = MarketTruthHealth(
         coverage_status="fail",
@@ -344,6 +349,44 @@ def read_market_truth_health(path: Path, now_s: float) -> MarketTruthHealth:
         return empty
     try:
         con.execute("BEGIN")
+        if structure_generation_read_mode == "generation":
+            generation = con.execute(
+                "SELECT s.id,s.taken_at_ms,s.finished_at_ms,g.counts_json "
+                "FROM current_structure_generation g "
+                "JOIN snapshots s ON s.id=g.snapshot_id "
+                "WHERE g.id=1 AND g.certification_component='bounded-complete' "
+                "AND length(g.comparison_receipt_digest)=64 "
+                "AND s.data_product='structure' AND s.market_view_published=1 "
+                "AND s.is_valid=1"
+            ).fetchone()
+            if generation is None:
+                return empty
+            try:
+                counts = json.loads(str(generation[3]))
+                market_items = counts["markets"]
+                event_items = counts["events"]
+                if (
+                    type(market_items) is not int
+                    or type(event_items) is not int
+                    or market_items < 0
+                    or event_items < 0
+                ):
+                    return empty
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                return empty
+            snapshot_id, taken_at_ms, finished_at_ms = generation[:3]
+            return MarketTruthHealth(
+                coverage_status="pass",
+                coverage_value="complete",
+                latest_attempt_snapshot_id=int(snapshot_id),
+                latest_attempt_market_items=market_items,
+                latest_attempt_event_items=event_items,
+                last_complete_snapshot_id=int(snapshot_id),
+                last_complete_age_seconds=max(0.0, now_s - taken_at_ms / 1000.0),
+                last_complete_finished_age_seconds=max(
+                    0.0, now_s - finished_at_ms / 1000.0
+                ),
+            )
         latest = con.execute(
             "SELECT s.id,s.market_view_published,c.completed,"
             "c.market_items,c.event_items "
@@ -1226,7 +1269,13 @@ def _build_health_checks(
     ]
 
     # ── Check 0: authoritative market-truth coverage ──────────────────────
-    market_truth = read_market_truth_health(store.db_path, now_s)
+    market_truth = read_market_truth_health(
+        store.db_path,
+        now_s,
+        structure_generation_read_mode=str(
+            getattr(settings, "structure_generation_read_mode", "legacy")
+        ),
+    )
     overall = _severity(overall, market_truth.coverage_status)
     checks["market_truth:coverage"] = [
         {
