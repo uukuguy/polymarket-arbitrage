@@ -30,6 +30,7 @@ from polyarb.routing.neg_risk_quote_store import (
 )
 from polyarb.routing.opportunity_scanner import (
     OpportunityScanResult,
+    StaleQuoteRunError,
     scan_certified_neg_risk_quote_projection,
 )
 from polyarb.storage.sqlite_store import SQLiteStore
@@ -1079,7 +1080,12 @@ class QuoteWorker:
             self.runtime.mark_stopped()
 
 
-def load_certified_quote_feed(settings: Settings) -> CertifiedQuoteFeed | None:
+def load_certified_quote_feed(
+    settings: Settings,
+    *,
+    now_s: Callable[[], float] = time.time,
+    max_quote_age_s: float = 300,
+) -> CertifiedQuoteFeed | None:
     """Rebuild a compact public feed from one durably certified Quote run.
 
     This is intentionally read-only so the HTTP parent can hydrate its cache
@@ -1089,6 +1095,13 @@ def load_certified_quote_feed(settings: Settings) -> CertifiedQuoteFeed | None:
         settings.db_path,
         structure_generation_read_mode=settings.structure_generation_read_mode,
     )
+    metadata = quote_store.latest_complete_projection_metadata()
+    if metadata is not None:
+        quote_age_s = max(0.0, now_s() - metadata.quoted_at_ms / 1_000)
+        if quote_age_s > max_quote_age_s:
+            raise StaleQuoteRunError(
+                f"quote age {quote_age_s:.1f}s exceeds {max_quote_age_s:.1f}s"
+            )
     projection = quote_store.latest_complete_projection()
     if projection is None:
         return None

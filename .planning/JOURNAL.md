@@ -6957,3 +6957,30 @@ verify parent receipt/incident evidence, restart budget behavior, console 200,
 and Polywatch alert/recovery. In parallel, continue the separately safe R2
 backup/restore and source-truth/Structure remediation. Never run broad SQLite
 diagnostics on the live producer.
+
+## SESSION 161 — 2026-08-10 (P1 local load-amplification root cause)
+
+- [FORENSICS] During the v304 P1, bounded `/proc` inspection found main PID 662
+  issuing small CLOB `chunk 1/1` fetches while the isolated Quote worker was
+  collecting the 40,495-token universe. The active Quote collector reached its
+  hard-failure terminal state after about 133 seconds; it did not remain an
+  untracked process. `/healthz` recovered to HTTP 200 afterwards, proving this
+  is a contention/throughput fault rather than a permanently dead listener.
+- [ROOT CAUSE] `opportunity_first_watcher_enabled=false` did suppress the
+  Candidate watcher, but not the legacy focused active-master CLOB loop. That
+  loop ran in the HTTP parent and competed with full Quote collection. Also,
+  the supervised parent reloaded/rescanned the entire durable Quote projection
+  every 15 seconds before it could report an already-stale run.
+- [CONTAINMENT READY] Task 6 gates the focused loop behind the same explicit
+  opportunity-first flag and rejects a stale Quote from compact run metadata
+  before full projection loading. Tests were red-first then green (179 focused
+  tests passed). Deployment is the next action; no broad live SQLite diagnostic
+  was run.
+
+### [NEXT — CURRENT]
+
+Commit and deploy Task 6 containment. Verify post-boot that no parent-process
+micro CLOB polling runs while opportunity-first remains disabled, then observe
+multiple natural Quote cycles with health, console, opportunity and Polywatch
+evidence. Continue treating an upstream CLOB timeout as P1 rather than normal
+degradation.

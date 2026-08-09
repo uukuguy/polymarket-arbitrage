@@ -1279,6 +1279,40 @@ class NegRiskQuoteStore:
         finally:
             con.close()
 
+    def latest_complete_projection_metadata(self) -> QuoteRun | None:
+        """Read only the current complete run identity before a large projection load."""
+        con = sqlite3.connect(
+            f"file:{self._db_path}?mode=ro",
+            uri=True,
+            isolation_level=None,
+        )
+        try:
+            con.execute("BEGIN")
+            pointer = con.execute(
+                "SELECT quote_run_id FROM neg_risk_quote_current_generation "
+                "WHERE singleton=1"
+            ).fetchone()
+            if pointer is None:
+                row = con.execute(
+                    "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
+                    "requested_token_count, successful_response_count, status, failure_reason, "
+                    "completed_at_ms, universe_hash, source_truth_hash "
+                    "FROM neg_risk_quote_runs WHERE status='complete' "
+                    "ORDER BY quoted_at_ms DESC,id DESC LIMIT 1"
+                ).fetchone()
+            else:
+                row = con.execute(
+                    "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
+                    "requested_token_count, successful_response_count, status, failure_reason, "
+                    "completed_at_ms, universe_hash, source_truth_hash "
+                    "FROM neg_risk_quote_runs WHERE id=? AND status='complete'",
+                    (int(pointer[0]),),
+                ).fetchone()
+            con.execute("COMMIT")
+            return None if row is None else _quote_run_from_row(row)
+        finally:
+            con.close()
+
 
 def _blank_provenance_state(
     leg_rows: list[tuple[object, ...]],

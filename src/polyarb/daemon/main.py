@@ -770,7 +770,11 @@ async def main() -> int:
         else None
     )
     focused_watcher_task = _start_opportunity_watcher(
-        None if isolated_producers else focused_watcher,
+        (
+            None
+            if isolated_producers or not settings.opportunity_first_watcher_enabled
+            else focused_watcher
+        ),
         stop_event,
     )
     candidate_watcher_task = _start_candidate_watcher(candidate_watcher, stop_event)

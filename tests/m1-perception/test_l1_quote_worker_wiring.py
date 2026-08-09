@@ -209,6 +209,16 @@ def test_l1_main_owns_quote_worker_shutdown() -> None:
     assert "quote_worker_task" in source.partition("asyncio.gather(")[2]
 
 
+def test_disabled_opportunity_first_watcher_does_not_compete_with_global_quote() -> None:
+    """The default-off candidate loop must not issue CLOB micro-fetches in production."""
+    from polyarb.daemon import main
+
+    source = inspect.getsource(main.main)
+
+    assert "if isolated_producers or not settings.opportunity_first_watcher_enabled" in source
+    assert "else focused_watcher" in source
+
+
 def test_l1_main_owns_generation_cleanup_worker_shutdown() -> None:
     from polyarb.daemon import main
 

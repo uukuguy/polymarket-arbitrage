@@ -37,6 +37,32 @@ def test_quote_worker_module_exists() -> None:
     assert importlib.util.find_spec("polyarb.daemon.quote_worker") is not None
 
 
+def test_durable_feed_loader_rejects_stale_run_before_large_projection_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stuck Quote child must not make the HTTP parent rescan 40k quotes forever."""
+    from polyarb.daemon import quote_worker
+    from polyarb.routing.opportunity_scanner import StaleQuoteRunError
+
+    class _QuoteStore:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def latest_complete_projection_metadata(self):
+            return SimpleNamespace(quoted_at_ms=1_000)
+
+        def latest_complete_projection(self):
+            raise AssertionError("stale feed must not load the full projection")
+
+    monkeypatch.setattr(quote_worker, "NegRiskQuoteStore", _QuoteStore)
+
+    with pytest.raises(StaleQuoteRunError, match="quote age"):
+        quote_worker.load_certified_quote_feed(
+            Settings(),
+            now_s=lambda: 302.0,
+        )
+
+
 def _result(run_id: int) -> QuoteCollectionResult:
     return QuoteCollectionResult(
         run_id=run_id,
