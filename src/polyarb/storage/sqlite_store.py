@@ -12772,6 +12772,121 @@ class SQLiteStore:
             con.close()
         return self.capacity_controller_runtime_status()
 
+    def defer_capacity_controller_attempt(
+        self,
+        *,
+        action: str,
+        now_ms: int,
+        next_attempt_at_ms: int,
+    ) -> dict[str, object]:
+        """Persist a benign, retryable deferral such as Quote priority."""
+        if not 1 <= len(action) <= 64:
+            raise ValueError("invalid-capacity-controller-action")
+        if (
+            type(now_ms) is not int
+            or now_ms < 0
+            or type(next_attempt_at_ms) is not int
+            or next_attempt_at_ms < now_ms
+        ):
+            raise ValueError("invalid-capacity-controller-attempt-time")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute(
+                "UPDATE capacity_controller_runtime SET last_action=?,"
+                "next_attempt_at_ms=?,last_error_kind=NULL WHERE id=1",
+                (action, next_attempt_at_ms),
+            )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+        return self.capacity_controller_runtime_status()
+
+    def record_capacity_controller_reclaim(
+        self,
+        *,
+        action: str,
+        deleted_count: int,
+        deleted_ids: list[int],
+        completed_at_ms: int,
+    ) -> dict[str, object]:
+        """Append a successful bounded reclaim receipt and retain its recovery fact."""
+        if not 1 <= len(action) <= 64:
+            raise ValueError("invalid-capacity-controller-action")
+        if type(deleted_count) is not int or deleted_count < 0:
+            raise ValueError("invalid-capacity-controller-deleted-count")
+        if (
+            len(deleted_ids) != deleted_count
+            or any(type(item) is not int or item <= 0 for item in deleted_ids)
+            or len(set(deleted_ids)) != len(deleted_ids)
+        ):
+            raise ValueError("invalid-capacity-controller-deleted-ids")
+        if type(completed_at_ms) is not int or completed_at_ms < 0:
+            raise ValueError("invalid-capacity-controller-completed-at")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute(
+                "INSERT INTO capacity_reclaim_receipts("
+                "action,deleted_count,deleted_ids_json,completed_at_ms"
+                ") VALUES (?,?,?,?)",
+                (action, deleted_count, json.dumps(deleted_ids), completed_at_ms),
+            )
+            con.execute(
+                "UPDATE capacity_controller_runtime SET last_action=?,"
+                "consecutive_failures=0,next_attempt_at_ms=0,last_error_kind=NULL,"
+                "last_recovery_receipt_at_ms=CASE WHEN ?>0 THEN ? "
+                "ELSE last_recovery_receipt_at_ms END WHERE id=1",
+                (action, deleted_count, completed_at_ms),
+            )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+        return self.capacity_controller_runtime_status()
+
+    def record_capacity_controller_failure(
+        self,
+        *,
+        error_kind: str,
+        now_ms: int,
+        next_attempt_at_ms: int,
+    ) -> dict[str, object]:
+        """Keep a failed reclaim diagnosable and due for bounded retry."""
+        if not 1 <= len(error_kind) <= 64:
+            raise ValueError("invalid-capacity-controller-error-kind")
+        if (
+            type(now_ms) is not int
+            or now_ms < 0
+            or type(next_attempt_at_ms) is not int
+            or next_attempt_at_ms < now_ms
+        ):
+            raise ValueError("invalid-capacity-controller-attempt-time")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute(
+                "UPDATE capacity_controller_runtime SET last_action='reclaim-failed',"
+                "consecutive_failures=consecutive_failures+1,next_attempt_at_ms=?,"
+                "last_error_kind=? WHERE id=1",
+                (next_attempt_at_ms, error_kind),
+            )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+        return self.capacity_controller_runtime_status()
+
     def recover_structure_generation_cleanup_runtime(
         self,
         *,

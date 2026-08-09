@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 
 def test_policy_enters_each_capacity_watermark() -> None:
@@ -91,3 +95,104 @@ def test_sqlite_runtime_persists_watermark_across_restart(tmp_path: Path) -> Non
     restarted = SQLiteStore(db_path)
     restarted.init_schema()
     assert restarted.capacity_controller_runtime_status() == recorded
+
+
+def test_quote_priority_defers_capacity_reclaim_without_mutating_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.perception.capacity_controller import CapacityController, CapacityPolicy
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    monkeypatch.setattr(
+        "polyarb.perception.capacity_controller.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=15, total=100),
+    )
+    monkeypatch.setattr(
+        store,
+        "purge_old_snapshots",
+        lambda **_kwargs: pytest.fail("Quote priority must skip reclamation"),
+    )
+
+    runtime = CapacityController(
+        store=store,
+        policy=CapacityPolicy(20.0, 12.0, 6.0, 30_000),
+        clock_ms=lambda: 1_000,
+        retry_delay_ms=5_000,
+    ).run_once(quote_priority=True)
+
+    assert runtime["state"] == "pressure"
+    assert runtime["last_action"] == "quote-priority"
+    assert runtime["next_attempt_at_ms"] == 6_000
+
+
+def test_pressure_reclaims_one_bounded_history_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.perception.capacity_controller import CapacityController, CapacityPolicy
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    monkeypatch.setattr(
+        "polyarb.perception.capacity_controller.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=15, total=100),
+    )
+    calls: list[dict[str, object]] = []
+
+    def reclaim(**kwargs: object) -> tuple[int, list[int]]:
+        calls.append(kwargs)
+        return (2, [41, 42])
+
+    monkeypatch.setattr(store, "purge_old_snapshots", reclaim)
+
+    runtime = CapacityController(
+        store=store,
+        policy=CapacityPolicy(20.0, 12.0, 6.0, 30_000),
+        clock_ms=lambda: 1_000,
+        retry_delay_ms=5_000,
+    ).run_once(quote_priority=False)
+
+    assert calls == [
+        {
+            "older_than_days": 7,
+            "keep_last": 5,
+            "max_snapshots_per_run": 10,
+        }
+    ]
+    assert runtime["last_action"] == "reclaimed-snapshots"
+    assert runtime["last_recovery_receipt_at_ms"] == 1_000
+
+
+def test_reclaim_failure_becomes_persisted_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.perception.capacity_controller import CapacityController, CapacityPolicy
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    monkeypatch.setattr(
+        "polyarb.perception.capacity_controller.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=15, total=100),
+    )
+
+    def fail_reclaim(**_kwargs: object) -> tuple[int, list[int]]:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "purge_old_snapshots", fail_reclaim)
+    runtime = CapacityController(
+        store=store,
+        policy=CapacityPolicy(20.0, 12.0, 6.0, 30_000),
+        clock_ms=lambda: 1_000,
+        retry_delay_ms=5_000,
+    ).run_once(quote_priority=False)
+
+    assert runtime["last_action"] == "reclaim-failed"
+    assert runtime["consecutive_failures"] == 1
+    assert runtime["next_attempt_at_ms"] == 6_000
+    assert runtime["last_error_kind"] == "writer-busy"

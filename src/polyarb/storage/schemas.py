@@ -3856,6 +3856,13 @@ INSERT OR IGNORE INTO capacity_controller_runtime(
     id,state,state_started_at_ms,last_measurement_at_ms,last_action,
     consecutive_failures,next_attempt_at_ms
 ) VALUES (1,'normal',0,0,'measured',0,0);
+CREATE TABLE IF NOT EXISTS capacity_reclaim_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL CHECK(length(action) BETWEEN 1 AND 64),
+    deleted_count INTEGER NOT NULL CHECK(deleted_count>=0),
+    deleted_ids_json TEXT NOT NULL,
+    completed_at_ms INTEGER NOT NULL CHECK(completed_at_ms>=0)
+);
 
 """
 
