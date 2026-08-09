@@ -12,7 +12,7 @@
 # `source .venv/bin/activate` needed. To bootstrap: `uv sync --extra dev`.
 
 .DEFAULT_GOAL := help
-.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-opportunities perception-groups perception-incidents perception-resources queue-discovery queue-reconciliation sqlite-volume-backup sqlite-volume-restore-verify
+.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-opportunities perception-groups perception-incidents perception-resources queue-discovery queue-reconciliation sqlite-volume-backup sqlite-volume-restore-verify qualify-replacement-volume
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -35,6 +35,11 @@ sqlite-volume-backup:
 sqlite-volume-restore-verify:
 	@test -n "$(object_key)" && test -n "$(manifest)" && test -n "$(destination)" || (echo "usage: make sqlite-volume-restore-verify object_key=<r2-key> manifest=/path/manifest.json destination=/new/path/state.db" >&2; exit 2)
 	@uv run python -m polyarb.cli_volume_recovery restore-verify --object-key "$(object_key)" --manifest "$(manifest)" --destination "$(destination)"
+
+## qualify-replacement-volume: Read-only replacement verifier; manifest= health_url= console_url= expected_release= output= must be explicit.
+qualify-replacement-volume:
+	@test -n "$(manifest)" && test -n "$(health_url)" && test -n "$(console_url)" && test -n "$(expected_release)" && test -n "$(output)" || (echo "usage: make qualify-replacement-volume manifest=/path/manifest.json health_url=https://host/healthz console_url=https://host/perception/console expected_release=<sha> output=/new/path/verdict.json" >&2; exit 2)
+	@uv run python scripts/qualify_replacement_volume.py --manifest "$(manifest)" --health-url "$(health_url)" --console-url "$(console_url)" --expected-release "$(expected_release)" --output "$(output)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # M1 opportunity watcher cloud controls — no local SQLite, wallet, or orders.

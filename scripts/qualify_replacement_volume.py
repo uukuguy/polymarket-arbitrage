@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 from urllib.request import urlopen
@@ -57,3 +58,30 @@ def qualify(
     }
     output_path.write_text(json.dumps(verdict, sort_keys=True) + "\n")
     return verdict
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--health-url", required=True)
+    parser.add_argument("--console-url", required=True)
+    parser.add_argument("--expected-release", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args(argv)
+    print(
+        json.dumps(
+            qualify(
+                manifest_path=args.manifest,
+                health_url=args.health_url,
+                console_url=args.console_url,
+                expected_release_id=args.expected_release,
+                output_path=args.output,
+            ),
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
