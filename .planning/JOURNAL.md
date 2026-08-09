@@ -6853,3 +6853,30 @@ timeout burst recurs and verify the newly recorded failed-attempt identity.
 Then proceed with the no-downtime SQLite history migration and the independent
 Archive/R2/mirror remediation. M1 remains unaccepted until continuous evidence
 and those independent domains are closed or explicitly remediated.
+
+## SESSION 158 — 2026-08-10 (offline SQLite recovery primitive)
+
+- [DELIVERED / NOT DEPLOYED] Commit `c57529c` adds the first isolated SQLite
+  recovery primitive. It reads a source database with `mode=ro`, uses SQLite's
+  online backup API into an exclusive sibling partial artifact, verifies
+  `integrity_check=ok`, records immutable SHA-256/page facts, then atomically
+  publishes only a new caller-selected destination. It contains no Fly, R2,
+  traffic, volume, checkpoint, or `VACUUM` operation.
+- [SAFETY EVIDENCE] Focused tests pass for independent readability, a WAL
+  writer operating during a one-page-at-a-time backup, existing-destination
+  refusal, and missing-source refusal. The source's mutable digest is not made
+  an invariant: only the completed immutable artifact digest is authoritative.
+- [OPERATOR VISIBILITY] v300 remains the deployed direct-console/alert-routing
+  release. Serious Quote/capacity incidents are directly inspectable at the
+  Fly console with failure reason, lifecycle, automatic handling, retry state,
+  operator action and recovery evidence. The protected Vercel page is not a
+  substitute for that surface.
+
+### [NEXT — CURRENT]
+
+Implement the separately tested R2 upload/restore receipt chain on top of the
+offline primitive, without scheduling archive work, invoking it on the live
+volume, or changing Fly routing. Continue natural Quote monitoring on v300;
+any recurrent P1 timeout is a dedicated production investigation. M1 remains
+unaccepted while archive/mirror/structure and continuous-runtime evidence are
+still incomplete.
