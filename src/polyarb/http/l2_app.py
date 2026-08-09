@@ -24,6 +24,7 @@ from starlette.middleware import Middleware
 from starlette.routing import Route
 
 from polyarb.http.control import ControlAuthMiddleware
+from polyarb.http.l2_console import l2_console
 from polyarb.http.l2_control import ws_test_kill_handler
 from polyarb.http.l2_health import health, healthz
 
@@ -63,6 +64,7 @@ def create_l2_app(
     routes = [
         Route("/health", health, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
+        Route("/console", l2_console, methods=["GET"]),
         # Phase 04.1 G-03: in-band chaos endpoint — HMAC-gated by middleware below.
         # Route lives under /control/ so ControlAuthMiddleware's path-guard covers it.
         Route(

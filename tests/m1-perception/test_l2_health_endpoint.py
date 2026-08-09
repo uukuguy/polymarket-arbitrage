@@ -141,3 +141,14 @@ def test_health_when_ws_consumer_none(daemon_settings_for_test):
     assert "not_configured" in body_lower or "not configured" in body_lower, (
         f"expected 'not configured' marker in body, got: {resp.text[:300]}"
     )
+
+
+def test_console_exposes_read_only_failure_diagnosis(l2_http_test_client):
+    """Operators can inspect failed L2 health checks without log access."""
+    resp = l2_http_test_client.get("/console")
+
+    assert resp.status_code == 200
+    assert "L2 operations console" in resp.text
+    assert 'fetch("/health"' in resp.text
+    assert "Next operator action" in resp.text
+    assert "evidence_timeout" in resp.text
