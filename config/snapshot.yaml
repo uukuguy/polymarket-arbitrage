@@ -9,6 +9,7 @@ clob_url: https://clob.polymarket.com
 gamma_rate_per_10s: 280       # Polymarket Gamma /markets is 300/10s on Cloudflare throttle.
 clob_batch_rate_per_10s: 450  # CLOB batch /books is 500/10s.
 clob_batch_size: 500          # Max token IDs per get_order_books call.
+clob_batch_max_concurrency: 12 # Bounded in-flight CLOB batches; rate cap remains above.
 
 # Subset mode threshold (markets with liquidity_usd > this are queried for top-of-book).
 liquidity_threshold_usd: 1000.0

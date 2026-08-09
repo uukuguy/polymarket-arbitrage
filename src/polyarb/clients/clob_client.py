@@ -118,6 +118,7 @@ class ClobReaderClient:
         # L0 read-only: only host needed. NO key/creds/chain_id (tested in T5).
         self._client = ClobClient(settings.clob_url)
         self._limiter = AsyncLimiter(settings.clob_batch_rate_per_10s, 10)
+        self._batch_semaphore = asyncio.Semaphore(settings.clob_batch_max_concurrency)
         self._executor = executor
 
     async def _run_sync(self, function: Any, *args: Any) -> Any:
@@ -160,18 +161,18 @@ class ClobReaderClient:
 
         chunks = _chunked(token_ids, self._settings.clob_batch_size)
         n_chunks = len(chunks)
-        for i, chunk in enumerate(chunks, start=1):
+        async def fetch_chunk(i: int, chunk: list[str]) -> list[Any]:
             if cache is not None and cache.has_books_chunk(i):
                 cached = cache.load_books_chunk(i)
                 if projection == "top":
-                    out.extend(_compact_book_top(book) for book in cached)
+                    result = [_compact_book_top(book) for book in cached]
                 else:
-                    out.extend(cached)
+                    result = cached
                 logger.info(f"CLOB books chunk {i}/{n_chunks}: cached ({len(cached)} books)")
-                continue
+                return result
             params = [BookParams(token_id=t) for t in chunk]
 
-            def fetch_chunk() -> tuple[list[Any] | None, list[Any]]:
+            def fetch_sync() -> tuple[list[Any] | None, list[Any]]:
                 raw_books = self._client.get_order_books(params)
                 projected = (
                     [_compact_book_top(book) for book in raw_books]
@@ -180,12 +181,21 @@ class ClobReaderClient:
                 )
                 return (raw_books if cache is not None else None), projected
 
-            async with self._limiter:
-                raw_books, books = await self._run_sync(fetch_chunk)
+            async with self._batch_semaphore:
+                async with self._limiter:
+                    raw_books, books = await self._run_sync(fetch_sync)
             if cache is not None and raw_books is not None:
                 cache.save_books_chunk(i, raw_books)
-            out.extend(books)
             logger.info(f"CLOB books chunk {i}/{n_chunks}: fetched ({len(chunk)} tokens)")
+            return books
+
+        # gather preserves chunk order, so downstream identity validation sees
+        # the same deterministic sequence as the previous serial collector.
+        chunk_results = await asyncio.gather(
+            *(fetch_chunk(i, chunk) for i, chunk in enumerate(chunks, start=1))
+        )
+        for books in chunk_results:
+            out.extend(books)
         return out
 
     async def get_prices_buy_sell(

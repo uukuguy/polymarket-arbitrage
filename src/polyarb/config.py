@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     gamma_rate_per_10s: int = 280
     clob_batch_rate_per_10s: int = 450
     clob_batch_size: int = 500
+    # A full M1 quote universe has tens of thousands of tokens.  CLOB accepts
+    # 500 per request, so serial batches exhaust the collection deadline long
+    # before the feed can be certified.  This is a concurrency cap, separate
+    # from the global request-rate limiter above.
+    clob_batch_max_concurrency: int = Field(default=12, ge=1, le=32)
 
     # 2026-05-20 (Inj 2 P0 fix): scheduler tick interval, was hardcoded 3600
     # via getattr fallback. Now explicit + env-var configurable so chaos

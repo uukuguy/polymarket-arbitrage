@@ -89,6 +89,49 @@ async def test_get_books_multiple_chunks() -> None:
     assert len(out) == 3
 
 
+async def test_get_books_fetches_chunks_with_bounded_concurrency() -> None:
+    """A full Quote run must not spend its entire deadline on serial batches."""
+    client = ClobReaderClient(
+        Settings(clob_batch_size=2, clob_batch_max_concurrency=2)
+    )
+    active = 0
+    peak_active = 0
+    lock = threading.Lock()
+
+    def slow_fetch(params):
+        nonlocal active, peak_active
+        with lock:
+            active += 1
+            peak_active = max(peak_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return [{"asset_id": param.token_id, "asks": [], "bids": []} for param in params]
+
+    token_ids = [f"tok_{i}" for i in range(8)]
+    with patch.object(client._client, "get_order_books", side_effect=slow_fetch) as mocked:
+        books = await client.get_books(token_ids, projection="top")
+
+    assert peak_active == 2
+    assert mocked.call_count == 4
+    assert [book["asset_id"] for book in books] == token_ids
+
+
+async def test_get_books_does_not_return_partial_books_when_one_chunk_fails() -> None:
+    client = ClobReaderClient(
+        Settings(clob_batch_size=2, clob_batch_max_concurrency=2)
+    )
+
+    def fetch(params):
+        if params[0].token_id == "tok_2":
+            raise RuntimeError("upstream-failed")
+        return [{"asset_id": param.token_id, "asks": [], "bids": []} for param in params]
+
+    with patch.object(client._client, "get_order_books", side_effect=fetch):
+        with pytest.raises(RuntimeError, match="upstream-failed"):
+            await client.get_books(["tok_0", "tok_1", "tok_2", "tok_3"], projection="top")
+
+
 # ---------------------------------------------------------------------------
 # Test 3: empty token_ids → no SDK call, returns []
 # ---------------------------------------------------------------------------
