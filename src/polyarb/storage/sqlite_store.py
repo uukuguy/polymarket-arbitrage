@@ -3218,7 +3218,18 @@ class SQLiteStore:
         """
         con = self._connect_writer()
         try:
-            con.executescript(DDL)
+            # `PRAGMA journal_mode=WAL` can coordinate/checkpoint a large WAL.
+            # Do it only for a fresh/non-WAL database; never embed it in the
+            # ordinary startup DDL replay against the production volume.
+            journal_mode = str(con.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            if journal_mode != "wal":
+                con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA synchronous=NORMAL")
+            con.executescript(
+                DDL.removeprefix(
+                    "\nPRAGMA journal_mode = WAL;\nPRAGMA synchronous = NORMAL;\n"
+                )
+            )
             # This pre-hotfix trigger was too broad: generation publication
             # could clear an unrelated dirty legacy mutation. Legacy writers
             # now clear only at their explicit atomic COMMIT boundary.

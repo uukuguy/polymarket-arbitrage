@@ -6419,3 +6419,19 @@ natural Structure publication until market-truth and snapshot health recover.
 
 Deploy the bounded status-backfill repair directly in R&D mode. Verify prompt
 HTTP startup, cleanup runtime ownership, and continued natural publication.
+
+## SESSION 141 — 2026-08-09 (startup WAL idempotence)
+
+- [ROOT CAUSE] Release 246 still entered disk sleep during initialization after
+  status backfill was bounded. Shared DDL replayed persistent
+  `PRAGMA journal_mode=WAL` on every startup, an unsafe coordination point on
+  the large active production volume.
+- [FIXED LOCAL] WAL is now enabled only if the current database mode is not
+  already WAL; the normal DDL replay omits repeated journal-mode/synchronous
+  pragmas. WAL and migration regressions pass.
+
+### [NEXT — CURRENT]
+
+Deploy the WAL-idempotence repair directly in R&D mode and verify the daemon
+crosses startup into HTTP/scheduler operation, then confirm cleanup heartbeat
+and opportunity pipeline health.
