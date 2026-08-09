@@ -295,6 +295,22 @@ def test_opportunity_endpoint_hydrates_certified_feed_from_isolated_producer(
     assert resident_runtime.certified_feed() is producer_runtime.certified_feed()
 
 
+def test_opportunity_endpoint_turns_stale_loader_feed_into_structured_503(
+    http_test_client,
+) -> None:
+    http_test_client.app.state.quote_worker_runtime = QuoteWorkerRuntime()
+
+    def stale_loader():
+        raise StaleQuoteRunError("quote age 2662.0s exceeds 300.0s")
+
+    http_test_client.app.state.quote_feed_loader = stale_loader
+
+    response = http_test_client.get("/arbitrage/opportunities")
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "quote age 2662.0s exceeds 300.0s"}
+
+
 def test_opportunity_endpoint_uses_authenticated_fallback_for_incomplete_source_truth(
     http_test_client, monkeypatch
 ) -> None:

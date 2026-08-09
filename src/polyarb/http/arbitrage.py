@@ -165,6 +165,11 @@ async def _opportunities(request: Request) -> JSONResponse:
                     asyncio.to_thread(loader),
                     timeout=_FEED_HYDRATION_TIMEOUT_S,
                 )
+            except (StaleQuoteRunError, StaleUniverseError) as error:
+                # A cold HTTP parent must surface the already-classified feed
+                # staleness as an availability response, never leak it through
+                # Starlette as an ASGI 500 traceback.
+                return JSONResponse({"error": str(error)}, status_code=503)
             except (TimeoutError, sqlite3.Error, ValueError):
                 feed = None
             if feed is not None and runtime is not None:
