@@ -6707,3 +6707,28 @@ prove a longer multi-cycle recovery window, query operator feed live-read
 health without masking fallback warnings, and design/verify a no-downtime
 SQLite history migration that restores durable volume headroom before any
 re-enable decision for drift maintenance.
+
+## SESSION 153 — 2026-08-09 (certified fallback serving semantics)
+
+- [FIXED / DEPLOYED] Exact release
+  `75ba5280a3b34eadc8403c2920253db6551be389` runs as Fly v273. A repeated
+  live source-truth diagnostic timeout used the already fresh, identity-bound
+  Quote fallback correctly at the API layer, but previously made strict health
+  503 after three attempts. This is now `warn` at any count while authenticated;
+  binding invalidity and the independent Quote/universe SLA gates remain strict
+  fail-closed.
+- [PRODUCTION EVIDENCE] Quote run 1999 completed for 39,748 tokens and
+  `/arbitrage/opportunities` returned HTTP 200,
+  `coverage=verified-standard-neg-risk`, 16 gross-before-fees candidates and
+  `source_truth_status=last-known-authenticated`. After a third fallback,
+  `/health` remained HTTP 200 with the explicit `source_truth_read=warn` and
+  failure count. Candidate execution remains `not-verified`; this is M2 input,
+  never an execution/profit assertion.
+
+### [NEXT — CURRENT]
+
+Continue the v273 natural Quote window with drift maintenance disabled. Treat
+the 40.9GB SQLite / 17.8% volume headroom as an active production risk: map
+retained history ownership without load-amplifying live diagnostics, then plan
+a tested no-downtime historical data migration/compaction. Do not re-enable
+unauthorized drift maintenance or run online VACUUM.
