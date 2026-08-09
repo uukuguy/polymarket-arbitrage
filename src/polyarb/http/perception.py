@@ -32,6 +32,8 @@ _LEGS_JSON_MAX_BYTES = 65_536
 _TIMEOUT_S = 1.0
 _BUSY_TIMEOUT_MS = 250
 _READ_SQL_DEADLINE_S = 0.8
+_INCIDENT_READ_TIMEOUT_S = 3.0
+_INCIDENT_READ_SQL_DEADLINE_S = 2.5
 _INCIDENT_EDGES = {
     "detected": {"classified"},
     "classified": {"contained", "escalated"},
@@ -1479,14 +1481,21 @@ def _resources(
         con.close()
 
 
-async def _serve(request: Request, reader: Callable[[], dict[str, Any]]) -> JSONResponse:
-    execution = _ReadExecution(time.monotonic() + _READ_SQL_DEADLINE_S)
+async def _serve(
+    request: Request,
+    reader: Callable[[], dict[str, Any]],
+    *,
+    lane_name: str = "perception_read_lane",
+    timeout_s: float = _TIMEOUT_S,
+    sql_deadline_s: float = _READ_SQL_DEADLINE_S,
+) -> JSONResponse:
+    execution = _ReadExecution(time.monotonic() + sql_deadline_s)
     token = _READ_EXECUTION.set(execution)
     try:
         task = asyncio.create_task(
-            request.app.state.perception_read_lane.run(
+            getattr(request.app.state, lane_name).run(
                 reader,
-                timeout_s=_TIMEOUT_S,
+                timeout_s=timeout_s,
             )
         )
     finally:
@@ -1678,7 +1687,13 @@ async def perception_incidents(request: Request) -> JSONResponse:
     except ValueError as error:
         return JSONResponse({"status": "invalid-request", "reason": str(error)}, status_code=400)
     db_path = Path(request.app.state.sqlite_store.db_path)
-    return await _serve(request, lambda: _incidents(db_path, limit, before))
+    return await _serve(
+        request,
+        lambda: _incidents(db_path, limit, before),
+        lane_name="incident_read_lane",
+        timeout_s=_INCIDENT_READ_TIMEOUT_S,
+        sql_deadline_s=_INCIDENT_READ_SQL_DEADLINE_S,
+    )
 
 
 async def perception_incident_history(request: Request) -> JSONResponse:
@@ -1695,6 +1710,9 @@ async def perception_incident_history(request: Request) -> JSONResponse:
     return await _serve(
         request,
         lambda: _incident_history(db_path, incident_id),
+        lane_name="incident_read_lane",
+        timeout_s=_INCIDENT_READ_TIMEOUT_S,
+        sql_deadline_s=_INCIDENT_READ_SQL_DEADLINE_S,
     )
 
 
@@ -1734,6 +1752,9 @@ async def perception_recent_incidents(request: Request) -> JSONResponse:
             after_ms=after_ms,
             limit=limit,
         ),
+        lane_name="incident_read_lane",
+        timeout_s=_INCIDENT_READ_TIMEOUT_S,
+        sql_deadline_s=_INCIDENT_READ_SQL_DEADLINE_S,
     )
 
 

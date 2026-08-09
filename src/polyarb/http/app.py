@@ -207,6 +207,9 @@ def create_app(
     source_truth_lane = BoundedReadLane("opportunity-source-truth")
     lifecycle_lane = BoundedReadLane("opportunity-lifecycle")
     perception_read_lane = BoundedReadLane("perception-read")
+    # Incident history is the production recovery record.  It must not be
+    # starved by broad market-map reads while Quote is writing SQLite.
+    incident_read_lane = BoundedReadLane("incident-read")
 
     @asynccontextmanager
     async def opportunity_read_lifespan(_app: Starlette):
@@ -216,6 +219,7 @@ def create_app(
             source_truth_lane.shutdown()
             lifecycle_lane.shutdown()
             perception_read_lane.shutdown()
+            incident_read_lane.shutdown()
 
     app = Starlette(
         routes=routes,
@@ -236,6 +240,7 @@ def create_app(
     app.state.opportunity_source_truth_lane = source_truth_lane
     app.state.opportunity_lifecycle_lane = lifecycle_lane
     app.state.perception_read_lane = perception_read_lane
+    app.state.incident_read_lane = incident_read_lane
     # Slice B stores the exact runtime object mutated by Candidate Watcher.
     # Public HTTP exposure belongs to Task 6; keeping it on app.state now
     # preserves chain-truth without adding a premature route.

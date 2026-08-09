@@ -882,6 +882,33 @@ def test_recent_incident_endpoint_discovers_latest_state_after_open_removal(
     }
 
 
+def test_recent_incident_endpoint_uses_dedicated_operator_lane_and_budget(
+    http_test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Historical incident evidence cannot be starved by broad perception reads."""
+    observed: dict[str, object] = {}
+
+    async def capture_serve(_request, _reader, **kwargs):
+        observed.update(kwargs)
+        return perception.JSONResponse({"status": "available", "items": []})
+
+    monkeypatch.setattr(perception, "_serve", capture_serve)
+
+    request = SimpleNamespace(
+        query_params={"scope": "quote-collection", "after_ms": "0", "limit": "5"},
+        app=http_test_client.app,
+    )
+    response = asyncio.run(perception.perception_recent_incidents(request))
+
+    assert response.status_code == 200
+    assert observed == {
+        "lane_name": "incident_read_lane",
+        "timeout_s": 3.0,
+        "sql_deadline_s": 2.5,
+    }
+
+
 @pytest.mark.parametrize(
     ("params", "reason"),
     [
