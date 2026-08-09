@@ -142,12 +142,17 @@ def test_pressure_reclaims_one_bounded_history_batch(
         lambda _path: SimpleNamespace(free=15, total=100),
     )
     calls: list[dict[str, object]] = []
+    quote_calls: list[dict[str, object]] = []
 
     def reclaim(**kwargs: object) -> tuple[int, list[int]]:
         calls.append(kwargs)
         return (2, [41, 42])
 
     monkeypatch.setattr(store, "purge_old_snapshots", reclaim)
+    monkeypatch.setattr(
+        "polyarb.perception.capacity_controller.NegRiskQuoteStore.purge_old_runs",
+        lambda _self, **kwargs: quote_calls.append(kwargs) or 1,
+    )
 
     runtime = CapacityController(
         store=store,
@@ -163,7 +168,8 @@ def test_pressure_reclaims_one_bounded_history_batch(
             "max_snapshots_per_run": 10,
         }
     ]
-    assert runtime["last_action"] == "reclaimed-snapshots"
+    assert quote_calls == [{"keep_last_per_status": 10, "max_runs": 1}]
+    assert runtime["last_action"] == "reclaimed-quote-history"
     assert runtime["last_recovery_receipt_at_ms"] == 1_000
 
 

@@ -12,6 +12,8 @@ from typing import Literal
 
 from loguru import logger
 
+from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore
+
 CapacityState = Literal["normal", "pressure", "critical", "exhaustion-imminent"]
 
 
@@ -118,11 +120,14 @@ class CapacityController:
                 next_attempt_at_ms=now_ms + self._retry_delay_ms,
             )
         try:
-            deleted_count, deleted_ids = self._store.purge_old_snapshots(
+            snapshot_deleted_count, deleted_ids = self._store.purge_old_snapshots(
                 older_than_days=7,
                 keep_last=5,
                 max_snapshots_per_run=10,
             )
+            quote_deleted_count = NegRiskQuoteStore(
+                self._store.db_path
+            ).purge_old_runs(keep_last_per_status=10, max_runs=1)
         except (OSError, sqlite3.Error) as error:
             error_kind = (
                 "writer-busy"
@@ -136,8 +141,15 @@ class CapacityController:
                 next_attempt_at_ms=now_ms + self._retry_delay_ms,
             )
         return self._store.record_capacity_controller_reclaim(
-            action="reclaimed-snapshots",
-            deleted_count=deleted_count,
+            action=(
+                "reclaimed-quote-history"
+                if quote_deleted_count
+                else "reclaimed-snapshots"
+            ),
+            # Existing capacity receipts identify snapshot IDs.  Quote purge
+            # returns only a count, so retain the verifiable snapshot receipt
+            # shape while its action records the independent quote reclaim.
+            deleted_count=snapshot_deleted_count,
             deleted_ids=deleted_ids,
             completed_at_ms=now_ms,
         )
