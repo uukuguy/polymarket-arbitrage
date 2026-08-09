@@ -54,6 +54,7 @@ from polyarb.http.opportunity_read_health import (
     OpportunityReadHealth,
 )
 from polyarb.http.perception import (
+    perception_console,
     perception_discovery,
     perception_group_history,
     perception_group_timeline,
@@ -135,6 +136,7 @@ def create_app(
         Route("/market-map", market_map, methods=["GET"]),
         Route("/opportunity-watch/status", opportunity_watch_status, methods=["GET"]),
         Route("/perception/status", perception_status, methods=["GET"]),
+        Route("/perception/console", perception_console, methods=["GET"]),
         Route(
             "/perception/opportunities",
             perception_opportunities,

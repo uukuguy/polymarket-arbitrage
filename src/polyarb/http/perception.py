@@ -1,5 +1,7 @@
 """Bounded, read-only HTTP projections for durable M1 perception facts."""
 
+# ruff: noqa: E501
+
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +20,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 
 from polyarb.http.opportunity_read_health import ReadLaneSaturatedError
 from polyarb.perception.models import GroupLeg, GroupRevision
@@ -92,6 +94,29 @@ class _ReadExecution:
 
 class _IncidentNotFoundError(RuntimeError):
     pass
+
+
+def perception_console(_request: Request) -> HTMLResponse:
+    """Serve a Fly-native, credential-free view of the public incident model."""
+    return HTMLResponse(
+        """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>M1 incident console</title>
+<style>
+body{background:#0b0d10;color:#e6edf3;font:15px system-ui,sans-serif;margin:0}main{max-width:1100px;margin:auto;padding:24px}
+h1{margin:0 0 6px} .muted{color:#9aa4b2}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.card{border:1px solid #30363d;border-radius:8px;padding:16px;margin:12px 0;background:#11161c}.p1{border-color:#f85149}.p2{border-color:#d29922}button,a{background:#21262d;color:#58a6ff;border:1px solid #30363d;border-radius:6px;padding:7px 10px;text-decoration:none;cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#090c10;padding:10px;border-radius:5px}.label{color:#9aa4b2}.error{color:#ff7b72}
+</style></head><body><main>
+<div class="row"><div><h1>M1 incident console</h1><div class="muted">Fly-native, read-only operator view. It never treats an unavailable read as no incident.</div></div><button id="refresh">Refresh now</button><a href="/healthz">Health JSON</a><a href="/perception/incidents?limit=100">Incident JSON</a></div>
+<p id="status" class="muted">Loading durable incident evidence…</p><p class="muted">`read-model-unavailable` or `read-model-saturated` is itself an operator-visibility failure, never an all-clear.</p><section id="incidents"></section>
+<script>
+const endpoint="/perception/incidents?limit=100";
+const status=document.getElementById("status"), root=document.getElementById("incidents");
+function field(card,label,value){const row=document.createElement("div");const key=document.createElement("strong");key.textContent=label+": ";row.append(key,document.createTextNode(value ?? "not recorded"));card.append(row)}
+function render(body){root.replaceChildren();const items=Array.isArray(body.items)?body.items:[];status.textContent=`${body.open_count ?? "unknown"} open incident(s) · refreshed ${new Date().toISOString()}`;if(!items.length){const empty=document.createElement("p");empty.className="muted";empty.textContent="No open incident rows were returned. This is not proof of health when the read model is unavailable.";root.append(empty);return}for(const incident of items){const diagnosis=incident.diagnosis||{};const card=document.createElement("article");card.className="card "+(diagnosis.severity||"");const title=document.createElement("h2");title.textContent=`${(diagnosis.severity||"incident").toUpperCase()} · ${incident.kind} · ${incident.state}`;card.append(title);field(card,"Scope",incident.scope);field(card,"Impact",diagnosis.impact);field(card,"Automatic action",diagnosis.automatic_action);field(card,"Next operator action",diagnosis.next_action);field(card,"Failure reason",diagnosis.failure_reason);field(card,"Retry count",incident.retry_count);field(card,"Next automatic retry",incident.next_retry_at_ms?new Date(incident.next_retry_at_ms).toISOString():null);field(card,"Lifecycle age",incident.lifecycle_age_ms==null?null:`${Math.round(incident.lifecycle_age_ms/1000)}s`);const evidence=document.createElement("pre");evidence.textContent="Recovery / current evidence\n"+JSON.stringify(incident.recovery_start_evidence||incident.evidence||{},null,2);card.append(evidence);root.append(card)}}
+async function refresh(){status.className="muted";status.textContent="Loading durable incident evidence…";try{const response=await fetch(endpoint,{cache:"no-store"});const body=await response.json();if(!response.ok||body.status!=="available")throw new Error(body.reason||`HTTP ${response.status}`);render(body)}catch(error){root.replaceChildren();status.className="error";status.textContent=`Incident read unavailable: ${error.message}. This is a production visibility fault, not zero incidents. Check /healthz and retry.`}}
+document.getElementById("refresh").addEventListener("click",refresh);refresh();setInterval(refresh,30000);
+</script></main></body></html>"""
+    )
 
 
 def _check_read_deadline() -> None:

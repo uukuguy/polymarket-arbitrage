@@ -187,6 +187,18 @@ def test_perception_routes_exist_and_limits_are_validated(http_test_client) -> N
         }
 
 
+def test_perception_console_is_a_direct_operator_view(http_test_client) -> None:
+    response = http_test_client.get("/perception/console")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "M1 incident console" in response.text
+    assert "/perception/incidents?limit=100" in response.text
+    assert "Automatic action" in response.text
+    assert "Next operator action" in response.text
+    assert "read-model-unavailable" in response.text
+
+
 @pytest.mark.asyncio
 async def test_perception_read_uses_dedicated_lane_when_default_executor_is_blocked(
     monkeypatch: pytest.MonkeyPatch,
