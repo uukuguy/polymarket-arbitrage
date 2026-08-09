@@ -7027,3 +7027,25 @@ supervisor recoveries remain visible.
 Commit/deploy the console-scope correction after recording another v306 natural
 Quote cycle. Continue requiring real continuous-cycle evidence before M1
 acceptance.
+
+## SESSION 164 — 2026-08-10 (console scope deployed)
+
+- [DEPLOYED] v307 runs exact SHA
+  `23618604e462079a2d5d82a761166cb214a23e2b`, boot
+  `495624d9-fa49-4aa9-9693-c880da04d01d`. Fly app and cron machines are
+  started and the service check passes; `/healthz` and the direct console are
+  both HTTP 200.
+- [DEPLOYMENT FORENSICS] The v307 release began during a v306 service-check
+  failure and sent expected SIGINT/SIGTERM to v306. That deploy window cannot
+  be attributed to Quote load; prior notes treating it as a new Quote-induced
+  HTTP failure were corrected. Future P1 diagnosis must correlate a timeout
+  with release/boot identity before assigning cause.
+- [VISIBILITY] The console now queries recovered supervisor events as
+  `scope=quote`; v307 is the first runtime carrying that correction.
+
+### [NEXT — CURRENT]
+
+Observe several natural v307 Quote cycles and correlate every health timeout
+with the active release/boot before diagnosis. Require fresh Quote plus
+responsive health/opportunity/console and clean Polywatch L1/opportunity/
+operator-surface checks before M1 acceptance.
