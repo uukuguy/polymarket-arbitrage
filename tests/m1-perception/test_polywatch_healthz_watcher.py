@@ -1297,7 +1297,7 @@ def test_cron_machine_runs_only_polywatch_every_two_minutes() -> None:
     crontab = (PROJECT_ROOT / "crontab").read_text()
 
     assert "*/2 * * * *" in crontab
-    assert "POLYWATCH_STATE_FILE=/tmp/polywatch-healthz-state.json" in crontab
+    assert "POLYWATCH_STATE_FILE=/app/logs/polywatch-healthz-state.json" in crontab
     assert "python /app/scripts/polywatch/healthz_watcher.py" in crontab
     assert "polyarb.snapshot" not in crontab
     assert "snapshots-purge" not in crontab
@@ -1320,7 +1320,7 @@ def test_makefile_exposes_resident_polywatch_status() -> None:
     assert "flyctl logs -a polyarb-l1 --machine" in makefile
     assert "--no-tail --json" in makefile
     assert 'contains("polywatch")' in makefile
-    assert "/tmp/polywatch-healthz-state.json" in makefile
+    assert "/app/logs/polywatch-healthz-state.json" in makefile
 
 
 def test_external_watchdog_is_five_minute_repairing_fallback() -> None:

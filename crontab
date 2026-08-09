@@ -3,4 +3,4 @@
 # Direct snapshot/purge jobs here created false operational evidence and are
 # intentionally removed; the mounted app scheduler owns Structure collection.
 # Format: minute hour day-of-month month day-of-week command
-*/2 * * * *  POLYWATCH_STATE_FILE=/tmp/polywatch-healthz-state.json POLYWATCH_REMINDER_S=1800 python /app/scripts/polywatch/healthz_watcher.py
+*/2 * * * *  POLYWATCH_STATE_FILE=/app/logs/polywatch-healthz-state.json POLYWATCH_REMINDER_S=1800 python /app/scripts/polywatch/healthz_watcher.py

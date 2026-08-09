@@ -773,7 +773,7 @@ polywatch-resident-status:
 	  jq -r 'select(.message | contains("polywatch") or contains("POLYWATCH_STATE_FILE")) | [.timestamp, .message] | @tsv' | tail -80; \
 	echo ">> resident alert state"; \
 	FLY_API_TOKEN= flyctl ssh console -a polyarb-l1 --machine "$$CRON_ID" \
-	  -C "python -c 'from pathlib import Path; p=Path(\"/tmp/polywatch-healthz-state.json\"); print(p.read_text() if p.exists() else \"state file not created yet\")'"
+	  -C "python -c 'from pathlib import Path; p=Path(\"/app/logs/polywatch-healthz-state.json\"); print(p.read_text() if p.exists() else \"state file not created yet\")'"
 
 ## polywatch-resident-repair: External control-plane probe; starts a stopped resident Polywatch machine and requires Telegram delivery.
 ## Usage: make polywatch-resident-repair (requires Fly auth and POLYARB_TELEGRAM_* env)
