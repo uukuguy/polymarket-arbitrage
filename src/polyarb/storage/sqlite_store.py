@@ -69,6 +69,7 @@ from polyarb.storage.schemas import (
     L2_MIRROR_STATE_DDL,
     MARKETS_COLUMN_ORDER,
     MARKETS_INSERT_SQL,
+    PRODUCER_ARBITRATION_DDL,
     SCHEDULER_STATE_DDL,
     SNAPSHOT_ATTEMPTS_DDL,
     STRUCTURE_DEFER_RECEIPTS_DDL,
@@ -3246,6 +3247,7 @@ class SQLiteStore:
             con.executescript(SCHEDULER_STATE_DDL)
             # Parent-observed outcomes for isolated scheduler snapshot children.
             con.executescript(SNAPSHOT_ATTEMPTS_DDL)
+            con.executescript(PRODUCER_ARBITRATION_DDL)
             con.executescript(STRUCTURE_DEFER_RECEIPTS_DDL)
             con.executescript(STRUCTURE_DRIFT_ATTEMPTS_DDL)
             con.executescript(STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL)

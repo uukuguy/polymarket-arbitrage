@@ -42,6 +42,7 @@ from enum import StrEnum
 
 from loguru import logger
 
+from polyarb.daemon.producer_arbitration import ProducerArbitrator, ProducerLease
 from polyarb.daemon.structure_schedule import derive_structure_schedule
 from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V4,
@@ -884,12 +885,15 @@ class SnapshotScheduler:
         producer_lock: asyncio.Lock | None = None,
         on_snapshot_published: Callable[[], object] | None = None,
         quote_worker_runtime: object | None = None,
+        producer_arbitrator: ProducerArbitrator | None = None,
     ) -> None:
         self._settings = settings
         self._sqlite_store = sqlite_store
         self._producer_lock = producer_lock
         self._on_snapshot_published = on_snapshot_published
         self._quote_worker_runtime = quote_worker_runtime
+        self._producer_arbitrator = producer_arbitrator
+        self._producer_lease: ProducerLease | None = None
         self._checkpoint_pending = False
         self._producer_slot_owned = False
         self._admitted_timeout_s: float | None = None
@@ -1112,6 +1116,10 @@ class SnapshotScheduler:
             return await run_in_slot()
 
     def _quote_priority_reason(self) -> str | None:
+        # The in-parent Quote runtime is not authoritative when Quote is
+        # supervised in another process; arbitration then happens in SQLite.
+        if self._producer_arbitrator is not None:
+            return None
         runtime = self._quote_worker_runtime
         if runtime is None:
             return None
@@ -1148,11 +1156,16 @@ class SnapshotScheduler:
             )
 
     def _release_producer_slot(self) -> None:
-        if not self._producer_slot_owned:
+        if not self._producer_slot_owned and self._producer_lease is None:
             return
         self._producer_slot_owned = False
         if self._producer_lock is not None:
             self._producer_lock.release()
+        if self._producer_lease is not None:
+            try:
+                self._producer_arbitrator.release(self._producer_lease)
+            finally:
+                self._producer_lease = None
 
     async def _admit_snapshot(self, *, queued_at_ms: int) -> int | None:
         """Return one attempt id while retaining ownership of its producer slot."""
@@ -1164,6 +1177,19 @@ class SnapshotScheduler:
             )
             return None
 
+        if self._producer_arbitrator is not None:
+            lease = await asyncio.to_thread(
+                self._producer_arbitrator.acquire,
+                owner="structure",
+                lease_s=45.0,
+            )
+            if lease is None:
+                await self._record_structure_defer(
+                    reason="producer-lease-held",
+                    queued_at_ms=queued_at_ms,
+                )
+                return None
+            self._producer_lease = lease
         if self._producer_lock is not None:
             await self._producer_lock.acquire()
             self._producer_slot_owned = True
@@ -1178,7 +1204,11 @@ class SnapshotScheduler:
                 # the already-budgeted child itself.
                 reason = self._quote_priority_reason()
             if reason is None:
-                self._admitted_timeout_s = timeout_s
+                self._admitted_timeout_s = (
+                    min(timeout_s, 45.0)
+                    if self._producer_arbitrator is not None
+                    else timeout_s
+                )
                 attempt_id = self._sqlite_store.begin_snapshot_attempt(
                     started_at_ms=int(time.time() * 1_000),
                 )

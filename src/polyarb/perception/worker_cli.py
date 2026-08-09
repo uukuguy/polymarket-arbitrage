@@ -12,6 +12,7 @@ from uuid import UUID
 
 from polyarb.config import load_settings
 from polyarb.daemon.opportunity_watcher import build_focused_opportunity_watcher
+from polyarb.daemon.producer_arbitration import ProducerArbitrator
 from polyarb.daemon.quote_worker import build_production_quote_worker
 from polyarb.perception.candidate_watcher import build_production_candidate_watcher
 from polyarb.perception.discovery import (
@@ -97,6 +98,7 @@ async def run_component(component: str, settings) -> int:
             perception_store=store,
             stop_after_consecutive_timeouts=_QUOTE_SUPERVISED_TIMEOUT_LIMIT,
             on_cycle_started=publish_progress,
+            producer_arbitrator=ProducerArbitrator(settings.db_path),
         )
         if worker is None:
             raise RuntimeError("quote-producer-disabled")

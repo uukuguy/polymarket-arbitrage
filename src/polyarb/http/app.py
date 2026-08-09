@@ -67,6 +67,7 @@ from polyarb.http.perception import (
     perception_reconciliation,
     perception_resources,
     perception_status,
+    producer_arbitration_status,
 )
 from polyarb.http.perception_faults import (
     arm_fault,
@@ -137,6 +138,7 @@ def create_app(
         Route("/opportunity-watch/status", opportunity_watch_status, methods=["GET"]),
         Route("/perception/status", perception_status, methods=["GET"]),
         Route("/perception/console", perception_console, methods=["GET"]),
+        Route("/perception/producer-arbitration", producer_arbitration_status, methods=["GET"]),
         Route(
             "/perception/opportunities",
             perception_opportunities,

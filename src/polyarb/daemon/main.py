@@ -39,6 +39,7 @@ from polyarb.daemon.opportunity_watcher import (
     OpportunityWatcher,
     build_focused_opportunity_watcher,
 )
+from polyarb.daemon.producer_arbitration import ProducerArbitrator
 from polyarb.daemon.quote_worker import (
     QuoteWorker,
     QuoteWorkerRuntime,
@@ -683,6 +684,7 @@ async def main() -> int:
 
     sqlite_store = SQLiteStore(settings.db_path)
     sqlite_store.init_schema()
+    producer_arbitrator = ProducerArbitrator(settings.db_path)
 
     producer_lock = asyncio.Lock()
     perception_store = OpportunityPerceptionStore(settings.db_path)
@@ -716,6 +718,7 @@ async def main() -> int:
         quote_worker_runtime=(
             quote_worker.runtime if quote_worker is not None else None
         ),
+        producer_arbitrator=(producer_arbitrator if quote_supervised else None),
     )
     cleanup_worker = _build_generation_cleanup_worker(
         settings,

@@ -22,6 +22,7 @@ from urllib.parse import unquote
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 
+from polyarb.daemon.producer_arbitration import ProducerArbitrator
 from polyarb.http.opportunity_read_health import ReadLaneSaturatedError
 from polyarb.perception.models import GroupLeg, GroupRevision
 from polyarb.perception.store import OpportunityPerceptionStore
@@ -98,6 +99,44 @@ class _IncidentNotFoundError(RuntimeError):
     pass
 
 
+async def producer_arbitration_status(request: Request) -> JSONResponse:
+    """Expose the cross-process producer handoff with an operator action."""
+    try:
+        arbitrator = ProducerArbitrator(request.app.state.settings.db_path)
+        current, receipts = await asyncio.to_thread(
+            lambda: (arbitrator.current(), arbitrator.receipts(limit=10))
+        )
+    except (OSError, sqlite3.Error, ValueError) as error:
+        return JSONResponse(
+            {
+                "status": "unavailable",
+                "reason": type(error).__name__,
+                "operator_action": "Inspect /healthz and Fly volume/SQLite availability; retry this view.",
+            },
+            status_code=503,
+        )
+    now_ms = int(time.time() * 1_000)
+    lease = None if current is None else asdict(current)
+    if current is None:
+        action = "No producer owns the slot; the next scheduled Quote or Structure cycle may acquire it."
+    elif current.expires_at_ms <= now_ms:
+        action = "Lease is expired and will be atomically reclaimed by the next producer; inspect recent receipts if it does not clear."
+    elif current.owner == "structure":
+        action = "Structure has a bounded 45-second window; Quote retries automatically after release."
+    else:
+        action = "Quote owns its bounded collection window; Structure records a defer and retries on its next tick."
+    return JSONResponse(
+        {
+            "status": "available",
+            "now_ms": now_ms,
+            "current_lease": lease,
+            "recent_receipts": [asdict(item) for item in receipts],
+            "automatic_action": "SQLite BEGIN IMMEDIATE enforces one owner; expiry reclaims a crashed owner without manual intervention.",
+            "operator_action": action,
+        }
+    )
+
+
 def perception_console(_request: Request) -> HTMLResponse:
     """Serve a Fly-native, credential-free view of the public incident model."""
     return HTMLResponse(
@@ -109,18 +148,20 @@ body{background:#0b0d10;color:#e6edf3;font:15px system-ui,sans-serif;margin:0}ma
 h1{margin:0 0 6px} .muted{color:#9aa4b2}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.card{border:1px solid #30363d;border-radius:8px;padding:16px;margin:12px 0;background:#11161c}.p1{border-color:#f85149}.p2{border-color:#d29922}button,a{background:#21262d;color:#58a6ff;border:1px solid #30363d;border-radius:6px;padding:7px 10px;text-decoration:none;cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#090c10;padding:10px;border-radius:5px}.label{color:#9aa4b2}.error{color:#ff7b72}
 </style></head><body><main>
 <div class="row"><div><h1>M1 incident console</h1><div class="muted">Fly-native, read-only operator view. It never treats an unavailable read as no incident.</div></div><button id="refresh">Refresh now</button><a href="/healthz">Health JSON</a><a href="/perception/incidents?limit=100">Incident JSON</a><a href="https://polyarb-l2.fly.dev/console">L2 operations console</a></div>
-<p id="status" class="muted">Loading durable incident evidence…</p><p class="muted">`read-model-unavailable` or `read-model-saturated` is itself an operator-visibility failure, never an all-clear.</p><section id="incidents"></section><section><h2>Recent recovered severe incidents</h2><p class="muted">Last 24 hours. Recovery remains inspectable; it is not erased from the operator record.</p><div id="recent"></div></section>
+<p id="status" class="muted">Loading durable incident evidence…</p><p class="muted">`read-model-unavailable` or `read-model-saturated` is itself an operator-visibility failure, never an all-clear.</p><section><h2>Producer handoff</h2><p class="muted">The live cross-process ownership proof for Quote and Structure. A stale owner is automatically reclaimed.</p><div id="handoff"></div></section><section id="incidents"></section><section><h2>Recent recovered severe incidents</h2><p class="muted">Last 24 hours. Recovery remains inspectable; it is not erased from the operator record.</p><div id="recent"></div></section>
 <script>
 const endpoint="/perception/incidents?limit=100";
 const recentQuoteEndpoint="/perception/incidents/recent?scope=quote-collection";
 const recentQuoteSupervisorEndpoint="/perception/incidents/recent?scope=quote";
 const recentCapacityEndpoint="/perception/incidents/recent?scope=capacity";
-const status=document.getElementById("status"), root=document.getElementById("incidents"), recent=document.getElementById("recent");
+const handoffEndpoint="/perception/producer-arbitration";
+const status=document.getElementById("status"), root=document.getElementById("incidents"), recent=document.getElementById("recent"), handoff=document.getElementById("handoff");
 function field(card,label,value){const row=document.createElement("div");const key=document.createElement("strong");key.textContent=label+": ";row.append(key,document.createTextNode(value ?? "not recorded"));card.append(row)}
+function renderHandoff(body){handoff.replaceChildren();const card=document.createElement("article");card.className="card "+(body.status==="available"?"":"p1");const lease=body.current_lease||{};const title=document.createElement("h3");title.textContent=body.status==="available"?`Current owner: ${lease.owner||"none"}`:"Producer handoff read unavailable";card.append(title);field(card,"Lease expiry",lease.expires_at_ms?new Date(lease.expires_at_ms).toISOString():null);field(card,"Automatic action",body.automatic_action);field(card,"Operator action",body.operator_action);const detail=document.createElement("pre");detail.textContent="Durable handoff evidence\n"+JSON.stringify(body.recent_receipts||[],null,2);card.append(detail);handoff.append(card)}
 function render(body){root.replaceChildren();const items=Array.isArray(body.items)?body.items:[];status.textContent=`${body.open_count ?? "unknown"} open incident(s) · refreshed ${new Date().toISOString()}`;if(!items.length){const empty=document.createElement("p");empty.className="muted";empty.textContent="No open incident rows were returned. This is not proof of health when the read model is unavailable.";root.append(empty);return}for(const incident of items){const diagnosis=incident.diagnosis||{};const evidence=incident.recovery_start_evidence||incident.evidence||{};const card=document.createElement("article");card.className="card "+(diagnosis.severity||"");const title=document.createElement("h2");title.textContent=`${(diagnosis.severity||"incident").toUpperCase()} · ${incident.kind} · ${incident.state}`;card.append(title);field(card,"Scope",incident.scope);field(card,"Impact",diagnosis.impact);field(card,"Automatic action",diagnosis.automatic_action);field(card,"Next operator action",diagnosis.next_action);field(card,"Failure reason",diagnosis.failure_reason);field(card,"Failed attempt",evidence.attempt_id);field(card,"Retry count",incident.retry_count);field(card,"Next automatic retry",incident.next_retry_at_ms?new Date(incident.next_retry_at_ms).toISOString():null);field(card,"Lifecycle age",incident.lifecycle_age_ms==null?null:`${Math.round(incident.lifecycle_age_ms/1000)}s`);const detail=document.createElement("pre");detail.textContent="Recovery / current evidence\n"+JSON.stringify(evidence,null,2);card.append(detail);root.append(card)}}
 function renderRecent(histories){recent.replaceChildren();if(!histories.length){const empty=document.createElement("p");empty.className="muted";empty.textContent="No recovered Quote or capacity incidents in this 24-hour window.";recent.append(empty);return}for(const history of histories){const events=Array.isArray(history.items)?history.items:[];const first=events[0]||{}, last=events.at(-1)||{}, evidence=first.evidence||{}, recovered=last.evidence||{};const card=document.createElement("article");card.className="card "+(evidence.severity||"");const title=document.createElement("h3");title.textContent=`${(evidence.severity||"incident").toUpperCase()} · ${history.kind} · recovered as ${last.state||"unknown"}`;card.append(title);field(card,"Scope",history.scope);field(card,"Automatic action",evidence.automatic_action);field(card,"Next operator action",evidence.next_action);field(card,"Failure reason",evidence.failure_reason);field(card,"Failed attempt",evidence.attempt_id);field(card,"Recovery time",last.occurred_at_ms?new Date(last.occurred_at_ms).toISOString():null);const link=document.createElement("a");link.href=`/perception/incidents/${history.incident_id}/history`;link.textContent="Open complete lifecycle JSON";card.append(link);const proof=document.createElement("pre");proof.textContent="Recovery evidence\n"+JSON.stringify(recovered,null,2);card.append(proof);recent.append(card)}}
 async function loadRecent(){const after=Date.now()-24*60*60*1000;const responses=await Promise.all([fetch(`${recentQuoteEndpoint}&after_ms=${after}&limit=5`,{cache:"no-store"}),fetch(`${recentQuoteSupervisorEndpoint}&after_ms=${after}&limit=5`,{cache:"no-store"}),fetch(`${recentCapacityEndpoint}&after_ms=${after}&limit=5`,{cache:"no-store"})]);const bodies=await Promise.all(responses.map(async response=>{const body=await response.json();if(!response.ok||body.status!=="available")throw new Error(body.reason||`HTTP ${response.status}`);return body}));const ids=[...new Set(bodies.flatMap(body=>Array.isArray(body.items)?body.items.map(item=>item.incident_id):[]))].slice(0,10);const histories=await Promise.all(ids.map(async id=>{const response=await fetch(`/perception/incidents/${id}/history`,{cache:"no-store"});const body=await response.json();if(!response.ok||body.status!=="available")throw new Error(body.reason||`HTTP ${response.status}`);return body}));renderRecent(histories)}
-async function refresh(){status.className="muted";status.textContent="Loading durable incident evidence…";try{const response=await fetch(endpoint,{cache:"no-store"});const body=await response.json();if(!response.ok||body.status!=="available")throw new Error(body.reason||`HTTP ${response.status}`);render(body);await loadRecent()}catch(error){root.replaceChildren();recent.replaceChildren();status.className="error";status.textContent=`Incident read unavailable: ${error.message}. This is a production visibility fault, not zero incidents. Check /healthz and retry.`}}
+async function refresh(){status.className="muted";status.textContent="Loading durable incident evidence…";try{const [response,handoffResponse]=await Promise.all([fetch(endpoint,{cache:"no-store"}),fetch(handoffEndpoint,{cache:"no-store"})]);const body=await response.json(),handoffBody=await handoffResponse.json();if(!response.ok||body.status!=="available")throw new Error(body.reason||`HTTP ${response.status}`);render(body);renderHandoff(handoffBody);await loadRecent()}catch(error){root.replaceChildren();recent.replaceChildren();handoff.replaceChildren();status.className="error";status.textContent=`Incident read unavailable: ${error.message}. This is a production visibility fault, not zero incidents. Check /healthz and retry.`}}
 document.getElementById("refresh").addEventListener("click",refresh);refresh();setInterval(refresh,30000);
 </script></main></body></html>"""
     )

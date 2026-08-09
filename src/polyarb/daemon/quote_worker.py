@@ -16,6 +16,7 @@ from loguru import logger
 
 from polyarb.config import Settings
 from polyarb.daemon.opportunity_watcher import OpportunityWatcher
+from polyarb.daemon.producer_arbitration import ProducerArbitrator, ProducerLease
 from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
 from polyarb.perception.incidents import IncidentManager
 from polyarb.perception.store import OpportunityPerceptionStore
@@ -714,6 +715,8 @@ class QuoteWorker:
         record_failure_incident: RecordFailureIncident | None = None,
         record_certified_success_incident: RecordCertifiedSuccessIncident | None = None,
         on_cycle_started: OnCycleStarted | None = None,
+        producer_arbitrator: ProducerArbitrator | None = None,
+        producer_lease_s: float = 180.0,
         producer_lock: asyncio.Lock | None = None,
         interval_s: float,
         stop_after_consecutive_timeouts: int | None = None,
@@ -749,6 +752,8 @@ class QuoteWorker:
         self._record_failure_incident = record_failure_incident
         self._record_certified_success_incident = record_certified_success_incident
         self._on_cycle_started = on_cycle_started
+        self._producer_arbitrator = producer_arbitrator
+        self._producer_lease_s = producer_lease_s
         self._producer_lock = producer_lock
         self._interval_s = interval_s
         self._stop_after_consecutive_timeouts = stop_after_consecutive_timeouts
@@ -849,7 +854,23 @@ class QuoteWorker:
                 exit_for_supervisor = False
                 result = None
                 producer_slot_acquired = False
+                producer_lease: ProducerLease | None = None
+                pipeline_started = False
+                if self._producer_arbitrator is not None:
+                    producer_lease = await asyncio.to_thread(
+                        self._producer_arbitrator.acquire,
+                        owner="quote",
+                        lease_s=self._producer_lease_s,
+                    )
+                    if producer_lease is None:
+                        # Structure owns at most a 45-second bounded slice.
+                        # A short, interruptible retry avoids busy-spinning and
+                        # lets Quote take the slot immediately after release.
+                        if await self._wait_for_next_attempt(stop_event, 2.0):
+                            break
+                        continue
                 self.runtime.mark_pipeline_started()
+                pipeline_started = True
                 try:
                     self.runtime.mark_started()
                     if self._on_cycle_started is not None:
@@ -931,6 +952,11 @@ class QuoteWorker:
                         if producer_slot_acquired:
                             self._producer_lock.release()
                             producer_slot_acquired = False
+                        if producer_lease is not None:
+                            await asyncio.to_thread(
+                                self._producer_arbitrator.release, producer_lease
+                            )
+                            producer_lease = None
                         if self._cleanup_old_runs is not None:
                             try:
                                 deleted_runs = await self._cleanup_old_runs()
@@ -1044,6 +1070,10 @@ class QuoteWorker:
                 finally:
                     if producer_slot_acquired:
                         self._producer_lock.release()
+                    if producer_lease is not None:
+                        await asyncio.to_thread(
+                            self._producer_arbitrator.release, producer_lease
+                        )
                     # Certification needs the full run legs, quotes, and source
                     # universe, but steady-state health/opportunity reads do not.
                     # Drop the local owner before the interval wait so the next
@@ -1052,7 +1082,8 @@ class QuoteWorker:
                         certified_projection = None
                         self._release_projection_memory()
                     finally:
-                        self.runtime.mark_pipeline_finished()
+                        if pipeline_started:
+                            self.runtime.mark_pipeline_finished()
                 elapsed_s = max(0.0, self._monotonic() - attempt_started)
                 if exit_for_supervisor:
                     break
@@ -1136,6 +1167,7 @@ def build_production_quote_worker(
     perception_store: OpportunityPerceptionStore | None = None,
     stop_after_consecutive_timeouts: int | None = None,
     on_cycle_started: OnCycleStarted | None = None,
+    producer_arbitrator: ProducerArbitrator | None = None,
 ) -> QuoteWorker | None:
     """Build the public-read-only production worker when explicitly enabled."""
     if not settings.neg_risk_quote_worker_enabled:
@@ -1342,6 +1374,8 @@ def build_production_quote_worker(
         record_failure_incident=record_failure_incident,
         record_certified_success_incident=record_certified_success_incident,
         on_cycle_started=on_cycle_started,
+        producer_arbitrator=producer_arbitrator,
+        producer_lease_s=settings.neg_risk_quote_child_hard_limit_s,
         producer_lock=producer_lock,
         interval_s=settings.neg_risk_quote_interval_s,
         stop_after_consecutive_timeouts=stop_after_consecutive_timeouts,

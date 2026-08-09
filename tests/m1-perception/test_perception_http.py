@@ -199,11 +199,23 @@ def test_perception_console_is_a_direct_operator_view(http_test_client) -> None:
     assert "Failed attempt" in response.text
     assert "read-model-unavailable" in response.text
     assert "Recent recovered severe incidents" in response.text
+    assert "/perception/producer-arbitration" in response.text
     assert "/perception/incidents/recent?scope=quote-collection" in response.text
     assert (
         'const recentQuoteSupervisorEndpoint="/perception/incidents/recent?scope=quote";'
         in response.text
     )
+
+
+def test_producer_arbitration_status_is_a_direct_operator_view(http_test_client) -> None:
+    response = http_test_client.get("/perception/producer-arbitration")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "available"
+    assert body["current_lease"] is None
+    assert "SQLite BEGIN IMMEDIATE" in body["automatic_action"]
+    assert "next scheduled" in body["operator_action"]
 
 
 @pytest.mark.asyncio

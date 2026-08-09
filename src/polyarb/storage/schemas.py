@@ -2669,6 +2669,30 @@ CREATE INDEX IF NOT EXISTS idx_structure_defer_receipts_observed_at
 ON structure_defer_receipts(observed_at_ms DESC);
 """
 
+# A single durable writer slot shared by the HTTP-parent Structure scheduler
+# and the supervised Quote child.  An in-memory asyncio lock cannot cross the
+# process boundary, so a crashed owner must be made reclaimable by expiry.
+PRODUCER_ARBITRATION_DDL = """
+CREATE TABLE IF NOT EXISTS producer_arbitration_leases (
+  resource TEXT PRIMARY KEY NOT NULL CHECK(resource = 'market-write-producer'),
+  owner TEXT NOT NULL CHECK(owner IN ('quote', 'structure')),
+  lease_id TEXT NOT NULL,
+  acquired_at_ms INTEGER NOT NULL CHECK(acquired_at_ms >= 0),
+  expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms > acquired_at_ms),
+  updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= acquired_at_ms)
+);
+CREATE TABLE IF NOT EXISTS producer_arbitration_receipts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner TEXT NOT NULL CHECK(owner IN ('quote', 'structure')),
+  lease_id TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('acquired', 'released', 'expired')),
+  observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+  expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_producer_arbitration_receipts_latest
+  ON producer_arbitration_receipts(id DESC);
+"""
+
 # Parent-owned evidence for the separate drift-maintenance child.  It is
 # deliberately independent of snapshot_attempts so maintenance outcomes never
 # feed the adaptive Structure publication schedule.
