@@ -7100,3 +7100,24 @@ exact release/boot correlation; do not silence or force-close it.
   Telegram with recovery messages. They are not attributed to a natural Quote
   cycle on `fc99a6e`; future samples must continue to preserve that exact
   release/boot distinction.
+
+## SESSION 168 — 2026-08-10 (active P1: parent feed hydration starvation)
+
+- [P1 OPEN] Subsequent production probes repeatedly exceeded Fly's 10-second
+  response budget; a later response took 9.29 seconds and reported Quote feed
+  age 323.5 seconds (`fail`) while child attempt 440 was still collecting.
+  The machine stayed started, but its service check entered critical during
+  the outage. Incident API/console did not fabricate an all-clear.
+- [LEADING CAUSE] The isolated child is correct for CLOB collection, but the
+  HTTP parent still rebuilds and re-scans the ~40,495-row complete Quote
+  projection every 15 seconds to hydrate its in-memory M2 feed. The scan
+  runs in a thread but executes Python work that can starve the parent/GIL.
+  Do not mitigate by merely increasing cadence; persist a compact certified
+  opportunity feed from the child and hydrate only that bounded artifact.
+
+### [NEXT — CURRENT]
+
+Implement the compact child-produced Quote feed handoff and remove full
+projection scanning from the HTTP-parent hydration path. Verify under natural
+Quote cycles that `/healthz`, console and opportunity routes stay below the
+Fly deadline while feed age remains under 300 seconds.
