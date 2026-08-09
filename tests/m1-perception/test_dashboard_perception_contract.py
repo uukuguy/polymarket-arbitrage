@@ -133,6 +133,14 @@ def test_overview_contains_operator_perception_and_incident_vocabulary() -> None
         assert phrase in overview
 
 
+def test_dashboard_promotes_supervisor_p1_with_actionable_evidence() -> None:
+    overview = _source("dashboard/app/perception/page.tsx")
+
+    assert 'incident.scope === "quote"' in overview
+    assert "P1 quote feed incident" in overview
+    assert "Recovery evidence" in overview
+
+
 def test_dashboard_validates_and_renders_bounded_resource_history() -> None:
     reader = _source("dashboard/lib/perception.ts")
     types = _source("dashboard/lib/types.ts")

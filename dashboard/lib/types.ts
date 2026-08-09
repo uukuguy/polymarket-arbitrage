@@ -374,11 +374,14 @@ export interface PerceptionIncident {
     automatic_action:
       | "retry-immediately"
       | "retry-at-next-cadence"
-      | "reclaim-bounded-history";
+      | "reclaim-bounded-history"
+      | "retry-supervised-producer"
+      | "automatic-retries-exhausted";
     next_action:
       | "inspect-clob-and-child-io"
       | "inspect-child-stderr"
-      | "inspect-capacity-receipts";
+      | "inspect-capacity-receipts"
+      | "inspect-producer-receipt-and-restart";
     deadline_s: number | null;
     consecutive_failures: number;
     last_success_age_s: number | null;

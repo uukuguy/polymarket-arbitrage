@@ -93,7 +93,7 @@ export default async function PerceptionOverviewPage() {
   );
   const p1QuoteIncidents = openIncidents.filter(
     (incident) =>
-      incident.scope === "quote-collection" &&
+      (incident.scope === "quote-collection" || incident.scope === "quote") &&
       incident.diagnosis?.severity === "p1",
   );
   const p1CapacityIncidents = openIncidents.filter(
@@ -499,6 +499,18 @@ export default async function PerceptionOverviewPage() {
               <div style={muted}>
                 retries {incident.retry_count ?? "not recorded"} · next automatic retry {fmtTime(incident.next_retry_at_ms)}
               </div>
+              {incident.recovery_start_evidence !== null && (
+                <pre
+                  style={{
+                    ...muted,
+                    margin: "6px 0 0",
+                    overflowWrap: "anywhere",
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  Recovery evidence {JSON.stringify(incident.recovery_start_evidence, null, 2)}
+                </pre>
+              )}
             </div>
           ))}
         </section>

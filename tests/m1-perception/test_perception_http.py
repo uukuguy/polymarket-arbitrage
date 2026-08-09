@@ -712,6 +712,53 @@ def test_quote_child_failure_exposes_diagnosis_without_prior_success(
     assert item["diagnosis"]["next_action"] == "inspect-child-stderr"
 
 
+def test_quote_supervisor_escalation_exposes_p1_operator_disposition(
+    http_test_client,
+) -> None:
+    """A dead supervised Quote child is P1, not opaque raw evidence."""
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
+    manager = IncidentManager(store, clock_ms=lambda: 1_000)
+    incident = manager.detect(
+        "quote",
+        "child-nonzero",
+        {"action": "restart-producer", "retry_count": 3},
+    )
+    manager.transition(
+        incident.id,
+        "classified",
+        {"action": "classify-producer-failure", "retry_count": 3},
+    )
+    manager.transition(
+        incident.id,
+        "contained",
+        {"action": "restart-producer", "retry_count": 3},
+    )
+    manager.transition(
+        incident.id,
+        "escalated",
+        {
+            "action": "operator-intervention",
+            "retry_count": 3,
+            "retry_limit": 3,
+        },
+    )
+
+    item = http_test_client.get("/perception/incidents?limit=10").json()["items"][0]
+
+    assert item["diagnosis"] == {
+        "severity": "p1",
+        "reminder_interval_s": 300,
+        "impact": "feed-unavailable",
+        "automatic_action": "automatic-retries-exhausted",
+        "next_action": "inspect-producer-receipt-and-restart",
+        "deadline_s": None,
+        "consecutive_failures": 4,
+        "last_success_age_s": None,
+        "free_percent": None,
+        "failure_reason": "child-nonzero",
+    }
+
+
 def test_capacity_incident_exposes_operator_diagnosis(http_test_client) -> None:
     from polyarb.perception.capacity_incidents import CapacityIncidentLifecycle
     from polyarb.storage.sqlite_store import SQLiteStore

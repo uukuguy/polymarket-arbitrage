@@ -594,10 +594,14 @@ function isIncident(value: unknown): boolean {
         (value.diagnosis.impact === "feed-at-risk" ||
           value.diagnosis.impact === "feed-unavailable") &&
         (value.diagnosis.automatic_action === "retry-immediately" ||
-          value.diagnosis.automatic_action === "retry-at-next-cadence") &&
+          value.diagnosis.automatic_action === "retry-at-next-cadence" ||
+          value.diagnosis.automatic_action === "retry-supervised-producer" ||
+          value.diagnosis.automatic_action === "automatic-retries-exhausted") &&
         (value.diagnosis.next_action === "inspect-clob-and-child-io" ||
-          value.diagnosis.next_action === "inspect-child-stderr") &&
-        isPositiveInteger(value.diagnosis.deadline_s) &&
+          value.diagnosis.next_action === "inspect-child-stderr" ||
+          value.diagnosis.next_action === "inspect-producer-receipt-and-restart") &&
+        (isPositiveInteger(value.diagnosis.deadline_s) ||
+          value.diagnosis.deadline_s === null) &&
         isPositiveInteger(value.diagnosis.consecutive_failures) &&
         typeof value.diagnosis.last_success_age_s === "number" &&
         value.diagnosis.last_success_age_s >= 0 &&

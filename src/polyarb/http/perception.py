@@ -1181,6 +1181,35 @@ def _capacity_incident_diagnosis(evidence: dict[str, object]) -> dict[str, objec
     }
 
 
+def _quote_supervisor_incident_diagnosis(
+    *,
+    kind: str,
+    state: str,
+    evidence: dict[str, object],
+) -> dict[str, object] | None:
+    """Make failed Quote supervision an actionable P1, not opaque evidence."""
+    if not kind.startswith("child-"):
+        return None
+    retries = evidence.get("retry_count")
+    if type(retries) is not int or retries < 0:
+        return None
+    exhausted = state == "escalated"
+    return {
+        "severity": "p1",
+        "reminder_interval_s": 300,
+        "impact": "feed-unavailable",
+        "automatic_action": (
+            "automatic-retries-exhausted" if exhausted else "retry-supervised-producer"
+        ),
+        "next_action": "inspect-producer-receipt-and-restart",
+        "deadline_s": None,
+        "consecutive_failures": retries + 1,
+        "last_success_age_s": None,
+        "free_percent": None,
+        "failure_reason": kind,
+    }
+
+
 def _incidents(
     db_path: Path,
     limit: int,
@@ -1256,6 +1285,12 @@ def _incidents(
                     "diagnosis": (
                         _quote_incident_diagnosis(item.incident.evidence)
                         if item.incident.scope == "quote-collection"
+                        else _quote_supervisor_incident_diagnosis(
+                            kind=item.incident.kind,
+                            state=item.incident.state,
+                            evidence=item.incident.evidence,
+                        )
+                        if item.incident.scope == "quote"
                         else _capacity_incident_diagnosis(item.incident.evidence)
                         if item.incident.scope == "capacity"
                         else None
