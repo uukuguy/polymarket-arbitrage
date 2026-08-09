@@ -6477,3 +6477,27 @@ pipeline rather than declaring recovery from release metadata alone.
 - [FIXED LOCAL] The next restart logs start/complete around every Structure
   migration function, making the remaining startup cost attributable rather
   than inferred.
+
+## SESSION 145 — 2026-08-09 (startup index-rebuild root cause)
+
+- [PRODUCTION EVIDENCE] v251 / `a12c505` crossed recovery-authority and
+  event-market-progress in under 2ms, then blocked at event-member-schema.
+  The process is in `D (disk sleep)` on `pread64`, after 1.9GB physical reads
+  and 413MB writes. The affected staging table has 2,544,982 rows.
+- [ROOT CAUSE] The canonical migration unconditionally dropped and recreated
+  three event-member staging indexes on every daemon startup. This was a
+  one-time schema operation accidentally retained in the ordinary restart
+  path.
+- [FIXED LOCAL] Existing indexes are preserved with `CREATE INDEX IF NOT
+  EXISTS`; missing indexes are still installed on a genuine upgrade. A
+  red/green trace regression rejects repeated `DROP INDEX` calls.
+- [VERIFIED LOCAL] Targeted event-member migration tests and changed-file Ruff
+  pass. The full migration suite is running; production evidence is still
+  pending.
+
+### [NEXT — CURRENT]
+
+Deploy the event-member-index startup repair directly in R&D mode, preserving
+drift enabled / legacy reads / Quote off / cleanup on. Verify that v251's
+event-member-schema block disappears, `/health` binds, then inspect cleanup
+and opportunity-pipeline recovery before claiming production recovery.

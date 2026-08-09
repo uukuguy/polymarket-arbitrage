@@ -666,6 +666,22 @@ def test_event_member_migration_is_idempotent_and_schema_locked(tmp_path) -> Non
         assert _event_member_migration_business_rows(rhs) == business_before
 
 
+def test_event_member_migration_keeps_existing_large_staging_indexes(tmp_path) -> None:
+    """Startup must not rebuild populated event-member staging indexes."""
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    statements: list[str] = []
+    with sqlite3.connect(store.db_path) as con:
+        con.set_trace_callback(statements.append)
+        sqlite_store_module._migrate_structure_event_member_schema(con)
+
+    assert not any(
+        statement.startswith("DROP INDEX")
+        and "idx_structure_event_member_" in statement
+        for statement in statements
+    )
+
+
 def test_event_conflict_merkle_receipt_migration_fault_rolls_back(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "previous-amendment.db")
     store.init_schema()

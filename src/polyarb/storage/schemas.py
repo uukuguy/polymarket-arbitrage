@@ -3265,34 +3265,24 @@ STRUCTURE_EVENT_MEMBER_SCHEMA_STATEMENTS = (
         "SELECT RAISE(ABORT,'structure-event-group-truth-progress-frozen'); END",
     ),
     (
-        "after-projection-index-drop",
-        "DROP INDEX IF EXISTS idx_structure_event_member_projection",
-    ),
-    (
         "after-projection-index-create",
-        "CREATE INDEX idx_structure_event_member_projection ON "
+        "CREATE INDEX IF NOT EXISTS idx_structure_event_member_projection ON "
         "structure_sync_event_member_staging(window_id,market_sort_key,event_id,"
         "event_ordinal,member_ordinal)",
     ),
-    ("after-resume-index-drop", "DROP INDEX IF EXISTS idx_structure_event_member_resume"),
     (
         "after-resume-index-create",
-        "CREATE INDEX idx_structure_event_member_resume ON "
+        "CREATE INDEX IF NOT EXISTS idx_structure_event_member_resume ON "
         "structure_sync_event_member_staging(window_id,event_id,member_ordinal)",
     ),
-    ("after-market-index-drop", "DROP INDEX IF EXISTS idx_structure_event_member_market"),
     (
         "after-market-index-create",
-        "CREATE INDEX idx_structure_event_member_market ON "
+        "CREATE INDEX IF NOT EXISTS idx_structure_event_member_market ON "
         "structure_sync_event_member_staging(window_id,market_id,event_id,member_ordinal)",
     ),
     (
-        "after-progress-index-drop",
-        "DROP INDEX IF EXISTS idx_structure_event_member_progress_active",
-    ),
-    (
         "after-progress-index-create",
-        "CREATE INDEX idx_structure_event_member_progress_active ON "
+        "CREATE INDEX IF NOT EXISTS idx_structure_event_member_progress_active ON "
         "structure_sync_event_member_progress(checkpoint_at_ms DESC,window_id DESC) "
         "WHERE completed_at_ms IS NULL",
     ),
