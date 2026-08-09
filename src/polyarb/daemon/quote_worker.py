@@ -150,8 +150,9 @@ CleanupCollectingRuns = Callable[[], Awaitable[int]]
 class QuoteCollectionSubprocessError(RuntimeError):
     """The isolated quote collector did not return one valid complete result."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, diagnostic: str | None = None) -> None:
         self.reason = reason
+        self.diagnostic = diagnostic
         super().__init__(f"quote-collection-subprocess-{reason}")
 
 
@@ -160,6 +161,16 @@ class QuoteCollectionSourceSupersededError(QuoteCollectionSubprocessError):
 
     def __init__(self) -> None:
         super().__init__("source-superseded")
+
+
+def _child_stderr_tail(stderr: bytes, *, limit: int = 1_024) -> str | None:
+    """Return bounded operator evidence without treating child stdout as logs."""
+    text = stderr.decode("utf-8", errors="replace").strip()
+    if not text:
+        return None
+    # Tracebacks put the actionable exception at the tail.  Bound it before
+    # logging so a pathological upstream response cannot create log pressure.
+    return text[-limit:]
 
 
 class QuoteWorkerRuntime:
@@ -561,8 +572,10 @@ async def collect_quotes_in_subprocess(
                 )
                 raise QuoteCollectionSubprocessError("timeout")
         await _terminalize_quote_attempt(attempt_store, attempt_id, "child-failed")
-        diagnostic = stderr.decode("utf-8", errors="replace")
-        if "verified universe snapshot is no longer the latest published truth" in diagnostic:
+        diagnostic = _child_stderr_tail(stderr)
+        if "verified universe snapshot is no longer the latest published truth" in (
+            diagnostic or ""
+        ):
             logger.info(
                 "isolated quote collection superseded by a newer Structure revision "
                 f"pid={getattr(process, 'pid', None)}"
@@ -571,9 +584,10 @@ async def collect_quotes_in_subprocess(
         logger.warning(
             "isolated quote collection failed "
             f"returncode={process.returncode} "
-            f"stderr_bytes={len(stderr)}"
+            f"stderr_bytes={len(stderr)} "
+            f"stderr_tail={diagnostic!r}"
         )
-        raise QuoteCollectionSubprocessError("failed")
+        raise QuoteCollectionSubprocessError("failed", diagnostic=diagnostic)
     try:
         payload = json.loads(stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:

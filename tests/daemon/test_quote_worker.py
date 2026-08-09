@@ -835,6 +835,24 @@ async def test_isolated_collection_fails_closed_on_invalid_child_result(
     assert attempt["outcome"] == "failed"
 
 
+async def test_failed_child_retains_bounded_stderr_diagnostic(tmp_path) -> None:
+    from polyarb.daemon.quote_worker import (
+        QuoteCollectionSubprocessError,
+        collect_quotes_in_subprocess,
+    )
+
+    async def spawn(*_args, **_kwargs):
+        return _FakeProcess(returncode=2, stderr=b"Traceback\\nQuoteUniverseUnavailableError")
+
+    with pytest.raises(QuoteCollectionSubprocessError) as captured:
+        await collect_quotes_in_subprocess(
+            Settings(db_path=tmp_path / "state.db"), spawn=spawn
+        )
+
+    assert captured.value.reason == "failed"
+    assert captured.value.diagnostic == "Traceback\\nQuoteUniverseUnavailableError"
+
+
 async def test_isolated_collection_hard_timeout_kills_child_and_releases_run(tmp_path) -> None:
     from polyarb.daemon.quote_worker import (
         QuoteCollectionSubprocessError,
