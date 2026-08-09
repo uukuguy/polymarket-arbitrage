@@ -6668,3 +6668,42 @@ state persistence, external watchdog and Telegram delivery. Then diagnose the
 Quote subprocess 120-second stall (including child stdout/stderr pipe
 backpressure and upstream request deadlines) with a red/green reproduction;
 do not classify M1 as production-ready while its Quote freshness gate fails.
+
+## SESSION 152 — 2026-08-09 (Quote-priority containment and recovery)
+
+- [DEPLOYED] Commit `14dc336fac7bc06d45755e8a280413273b01b8d6` runs as Fly
+  release v271. It holds the shared producer slot from Quote collection through
+  certified feed publication, so Structure cannot interleave at the critical
+  SQLite certification boundary.
+- [INCIDENT] Quote attempts 176–180 still failed or were cancelled under the
+  120-second child wall. Durable attempt receipts exposed slow
+  source/admission/fetch/persist stages; `/perception/incidents` recorded one
+  `quote-collection-timeout` with `retry-immediately`, deadline and last-good
+  age rather than silently degrading.
+- [ROOT CAUSE / CONTAINMENT] The production-only
+  `POLYARB_STRUCTURE_GENERATION_DRIFT_COMPARE_ENABLED=true` setting admitted
+  repeated 45-second drift children even though their health was
+  `authorized=false`: no serving-plane output, but substantial CPU/SQLite I/O.
+  It was changed to `false` via Fly secrets (release v272); all receipts remain
+  preserved and health now explicitly reports `structure_generation_drift`
+  `disabled/pass`.
+- [RECOVERY EVIDENCE] After containment, natural Quote attempts 181, 182 and
+  183 all completed 39,748-token certified runs. Timings were respectively:
+  source/admission/fetch/persist/certify =
+  `3.08/2.40/4.49/5.68/1.83s`, `0.90/2.35/4.67/5.15/1.80s`, and
+  `0.97/1.44/4.67/4.78/14.82s`. Strict `/health` returned HTTP 200 and the
+  operator feed recovered. This is containment evidence, not final soak PASS.
+- [CAPACITY RISK] `/data/state.db` is 40.9GB on a 50GB Fly volume (about 18%
+  free). `freelist_count` is only 21,365 pages (~87MB), so this is retained
+  live history rather than simple reclaimable space. `storage:volume_free_percent`
+  warns below 20% and strict health fails below 10%; a controlled data-retention
+  and physical-compaction/migration plan remains mandatory before final M1
+  production acceptance. Do not run online VACUUM.
+
+### [NEXT — CURRENT]
+
+Continue natural Quote monitoring under v272 with drift maintenance disabled;
+prove a longer multi-cycle recovery window, query operator feed live-read
+health without masking fallback warnings, and design/verify a no-downtime
+SQLite history migration that restores durable volume headroom before any
+re-enable decision for drift maintenance.
