@@ -205,7 +205,10 @@ async def _opportunities(request: Request) -> JSONResponse:
                 now_s,
                 timeout_s=_SOURCE_TRUTH_READ_TIMEOUT_S,
             )
-            if market_truth.last_complete_snapshot_id is None:
+            if (
+                market_truth.last_complete_snapshot_id is None
+                or getattr(market_truth, "coverage_status", "pass") == "fail"
+            ):
                 raise QuoteUniverseUnavailableError("source-truth-unavailable")
             health.mark_source_live(source_token, time.time())
         except Exception as error:  # noqa: BLE001 - certified fallback is fail-soft

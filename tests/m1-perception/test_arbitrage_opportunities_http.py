@@ -295,6 +295,29 @@ def test_opportunity_endpoint_hydrates_certified_feed_from_isolated_producer(
     assert resident_runtime.certified_feed() is producer_runtime.certified_feed()
 
 
+def test_opportunity_endpoint_uses_authenticated_fallback_for_incomplete_source_truth(
+    http_test_client, monkeypatch
+) -> None:
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(runtime)
+    http_test_client.app.state.quote_worker_runtime = runtime
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: SimpleNamespace(
+            coverage_status="fail",
+            last_complete_snapshot_id=845,
+            last_complete_finished_age_seconds=999_999.0,
+        ),
+    )
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+
+    response = http_test_client.get("/arbitrage/opportunities")
+
+    assert response.status_code == 200
+    assert response.json()["source_truth_status"] == "last-known-authenticated"
+    assert response.json()["source_snapshot_id"] == 10
+
+
 def test_opportunity_endpoint_serves_previous_feed_when_market_truth_advances(
     http_test_client, monkeypatch
 ) -> None:
