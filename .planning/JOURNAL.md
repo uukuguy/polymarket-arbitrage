@@ -7148,3 +7148,32 @@ Fly deadline while feed age remains under 300 seconds.
 Continue natural-cycle soak on `93362a5`: require multiple subsequent Quote
 generation replacements (the exact path that failed), responsive health/
 console/opportunity routes, and no new P1/P2 lifecycle before accepting M1.
+
+## SESSION 170 — 2026-08-10 (generation source-truth diagnostic repair)
+
+- [ROOT CAUSE] Production has `POLYARB_STRUCTURE_GENERATION_READ_MODE=generation`,
+  and the main health path honored it. The opportunity endpoint's secondary
+  source-truth diagnostic did not: it called `read_market_truth_health` with
+  its legacy default, then repeatedly reported
+  `last-known-authenticated/source-truth-unavailable` despite an authenticated,
+  in-SLA Quote feed.
+- [FIX/DEPLOYED] `e904ce5d83ec7451dbc1e8f1ebe8701454c8ead4` propagates the
+  configured mode through the bounded source-truth lane via copied request
+  context. A RED/GREEN regression proves the lane observes `generation`; the
+  existing timeout/fallback contract stays intact.
+- [LIVE PROOF] Original-volume machine `8906d6c644de18`, boot
+  `2c967122-6888-43d4-87ba-7f62a48509f9`, completed Quote runs 2255 and 2256.
+  The second post-deploy probe saw 2257 collecting while the current run 2256
+  still served 10 candidates. `/healthz`, `/arbitrage/opportunities`, and
+  `/perception/incidents` were HTTP 200 in 0.8–1.1s; source truth is
+  `live`/pass with zero failures, and open incidents are zero. The initial
+  single-machine replacement P1 was visible, alerted, and automatically
+  verified only after a complete run; it was not silently discarded.
+
+### [NEXT — CURRENT]
+
+Continue release `e904ce5` natural-cycle soak and investigate non-Quote warn
+sources separately: Polywatch currently observes L2 `active_count=0`, while
+archive/mirror warnings remain non-gating but must have an explicit owner and
+operator explanation. Keep direct incident-console/Telegram evidence required
+for every recurrence.
