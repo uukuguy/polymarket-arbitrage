@@ -3251,13 +3251,18 @@ class SQLiteStore:
             con.executescript(STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL)
             con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
             logger.info("sqlite-schema-stage stage=structure-sync-ddl-complete")
-            _migrate_structure_recovery_authority(con)
-            _migrate_structure_event_market_progress(con)
-            _migrate_structure_event_member_schema(con)
-            _migrate_structure_drift_hash_v2(con)
-            _migrate_structure_drift_classifier_v2(con)
-            _migrate_structure_drift_fresh_projection_phase(con)
-            _migrate_structure_drift_member_receipt_binding(con)
+            for stage, migration in (
+                ("recovery-authority", _migrate_structure_recovery_authority),
+                ("event-market-progress", _migrate_structure_event_market_progress),
+                ("event-member-schema", _migrate_structure_event_member_schema),
+                ("drift-hash-v2", _migrate_structure_drift_hash_v2),
+                ("drift-classifier-v2", _migrate_structure_drift_classifier_v2),
+                ("drift-fresh-projection", _migrate_structure_drift_fresh_projection_phase),
+                ("drift-member-receipt", _migrate_structure_drift_member_receipt_binding),
+            ):
+                logger.info(f"sqlite-schema-stage stage={stage}-start")
+                migration(con)
+                logger.info(f"sqlite-schema-stage stage={stage}-complete")
             con.executescript(STRUCTURE_GENERATIONS_DDL)
             _migrate_structure_drift_classifier_v3_exclusions(con)
             logger.info("sqlite-schema-stage stage=structure-migrations-complete")
