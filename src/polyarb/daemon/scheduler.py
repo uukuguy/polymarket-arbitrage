@@ -1901,49 +1901,60 @@ class SnapshotScheduler:
                     await _alerts.send_heartbeat_ok(self._settings)
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"send_heartbeat_ok failed: {e!r}")
-                try:
-                    deleted, _ = await asyncio.to_thread(
-                        self._sqlite_store.purge_old_snapshots,
-                        older_than_days=7,
-                        keep_last=5,
-                        max_snapshots_per_run=10,
-                        parquet_root=self._settings.parquet_root,
+                retention_defer_reason = self._quote_priority_reason()
+                if retention_defer_reason is not None:
+                    # Retention uses large SQLite write transactions.  It is
+                    # lower priority than the newly woken Quote producer and
+                    # must never turn a fresh Structure publication into a
+                    # 120-second Quote persist timeout.
+                    logger.info(
+                        "snapshot retention deferred "
+                        f"reason={retention_defer_reason}"
                     )
-                    if deleted:
-                        logger.info(
-                            f"snapshot retention deleted {deleted} expired snapshots"
+                else:
+                    try:
+                        deleted, _ = await asyncio.to_thread(
+                            self._sqlite_store.purge_old_snapshots,
+                            older_than_days=7,
+                            keep_last=5,
+                            max_snapshots_per_run=10,
+                            parquet_root=self._settings.parquet_root,
                         )
-                except Exception as e:  # noqa: BLE001
-                    # Retention is fail-soft relative to a valid fresh snapshot,
-                    # but its failure remains visible in production logs.
-                    logger.warning(f"snapshot retention failed: {e!r}")
-                try:
-                    reclaimed_failed, _ = await asyncio.to_thread(
-                        self._sqlite_store.purge_failed_structure_sync_windows,
-                        max_windows_per_run=1,
-                    )
-                    if reclaimed_failed:
-                        logger.info(
-                            "structure staging retention reclaimed payload for "
-                            f"{reclaimed_failed} failed window"
+                        if deleted:
+                            logger.info(
+                                f"snapshot retention deleted {deleted} expired snapshots"
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        # Retention is fail-soft relative to a valid fresh snapshot,
+                        # but its failure remains visible in production logs.
+                        logger.warning(f"snapshot retention failed: {e!r}")
+                    try:
+                        reclaimed_failed, _ = await asyncio.to_thread(
+                            self._sqlite_store.purge_failed_structure_sync_windows,
+                            max_windows_per_run=1,
                         )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"failed structure staging retention failed: {e!r}")
-                try:
-                    reclaimed_windows, _ = await asyncio.to_thread(
-                        self._sqlite_store.purge_published_structure_sync_windows,
-                        keep_last=1,
-                        max_windows_per_run=1,
-                    )
-                    if reclaimed_windows:
-                        logger.info(
-                            "structure staging retention reclaimed payload for "
-                            f"{reclaimed_windows} expired published window"
+                        if reclaimed_failed:
+                            logger.info(
+                                "structure staging retention reclaimed payload for "
+                                f"{reclaimed_failed} failed window"
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"failed structure staging retention failed: {e!r}")
+                    try:
+                        reclaimed_windows, _ = await asyncio.to_thread(
+                            self._sqlite_store.purge_published_structure_sync_windows,
+                            keep_last=1,
+                            max_windows_per_run=1,
                         )
-                except Exception as e:  # noqa: BLE001
-                    # The certified snapshot remains valid; the next successful
-                    # cycle retries this bounded disk-reclamation transaction.
-                    logger.warning(f"structure staging retention failed: {e!r}")
+                        if reclaimed_windows:
+                            logger.info(
+                                "structure staging retention reclaimed payload for "
+                                f"{reclaimed_windows} expired published window"
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        # The certified snapshot remains valid; the next successful
+                        # cycle retries this bounded disk-reclamation transaction.
+                        logger.warning(f"structure staging retention failed: {e!r}")
             else:
                 snapshot_id = getattr(result, "snapshot_id", None)
                 await self._finish_attempt(

@@ -4071,6 +4071,33 @@ async def test_successful_tick_purges_expired_snapshots_on_attached_store(
 
 
 @pytest.mark.asyncio
+async def test_successful_tick_defers_retention_while_quote_pipeline_active(
+    daemon_settings_for_test: Any,
+) -> None:
+    """Post-publish retention must not contend with the priority Quote writer."""
+    from polyarb.daemon.quote_worker import QuoteWorkerRuntime
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    purge = MagicMock(return_value=(0, []))
+    store.purge_old_snapshots = purge  # type: ignore[method-assign]
+    runtime = QuoteWorkerRuntime()
+    runtime.mark_pipeline_started()
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+        quote_worker_runtime=runtime,
+    )
+    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.OK))
+
+    with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()):
+        await scheduler._tick()
+
+    purge.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_success_persists_recovery_before_slow_retention(
     daemon_settings_for_test: Any,
 ) -> None:
