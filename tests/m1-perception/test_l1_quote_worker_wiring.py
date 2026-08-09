@@ -353,6 +353,7 @@ def test_fly_readonly_quote_release_enables_quote_and_keeps_cleanup_bounded() ->
     assert env["POLYARB_STRUCTURE_GENERATION_CLEANUP_ACTIVE_INTERVAL_S"] == "0.05"
     assert env["POLYARB_STRUCTURE_GENERATION_CLEANUP_IDLE_INTERVAL_S"] == "30"
     assert env["POLYARB_STRUCTURE_GENERATION_CLEANUP_WRITER_BUSY_INTERVAL_S"] == "5"
+    assert env["POLYARB_CAPACITY_CONTROLLER_ENABLED"] == "true"
 
 
 def test_fly_refreshes_structure_within_the_quote_freshness_window() -> None:
