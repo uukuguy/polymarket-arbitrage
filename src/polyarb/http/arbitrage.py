@@ -33,7 +33,10 @@ from polyarb.routing.opportunity_scanner import (
 _SOURCE_TRUTH_READ_TIMEOUT_S = 1.0
 _LIFECYCLE_READ_TIMEOUT_S = 1.0
 _ENDPOINT_TIMEOUT_S = 3.0
-_FEED_HYDRATION_TIMEOUT_S = 1.0
+# The live 39k-token certified projection takes about 2.2s to reconstruct on
+# Fly's attached volume. Keep its cold-cache read bounded below the endpoint's
+# three-second absolute budget without rejecting every healthy restart.
+_FEED_HYDRATION_TIMEOUT_S = 2.5
 
 
 def _is_sha256(value: object) -> bool:
