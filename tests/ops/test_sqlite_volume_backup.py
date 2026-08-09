@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -83,3 +84,49 @@ def test_backup_refuses_missing_source(tmp_path: Path) -> None:
 
     with pytest.raises(SQLiteBackupRefusal, match="source-not-a-file"):
         backup_sqlite(tmp_path / "missing.db", tmp_path / "backup.db")
+
+
+def test_upload_backup_verifies_object_digest_before_writing_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.ops import sqlite_volume_backup as recovery
+
+    source = tmp_path / "source.db"
+    backup = tmp_path / "backup.db"
+    _source_db(source)
+    manifest = recovery.backup_sqlite(source, backup)
+    calls: list[tuple[str, dict]] = []
+
+    class Client:
+        def upload_file(self, filename, bucket, key, ExtraArgs):
+            calls.append(
+                (
+                    "upload",
+                    {
+                        "filename": filename,
+                        "bucket": bucket,
+                        "key": key,
+                        "extra": ExtraArgs,
+                    },
+                )
+            )
+
+        def head_object(self, **kwargs):
+            calls.append(("head", kwargs))
+            return {
+                "ContentLength": manifest.backup_size_bytes,
+                "Metadata": {"sha256": manifest.backup_sha256},
+            }
+
+        def put_object(self, **kwargs):
+            calls.append(("manifest", kwargs))
+
+    monkeypatch.setattr(recovery, "_r2_client", lambda _settings: Client())
+    settings = SimpleNamespace(r2_bucket="bucket", r2_endpoint="https://r2.example")
+
+    object_key = recovery.upload_backup(manifest=manifest, backup=backup, settings=settings)
+
+    assert object_key == f"volume-backups/{manifest.backup_sha256}/state.db"
+    assert [kind for kind, _ in calls] == ["upload", "head", "manifest"]
+    assert calls[0][1]["extra"]["Metadata"]["sha256"] == manifest.backup_sha256

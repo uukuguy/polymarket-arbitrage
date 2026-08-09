@@ -7,11 +7,14 @@ artifact and deliberately has no Fly, R2, or traffic-switching integration.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+from polyarb.storage.r2_sync import _build_client
 
 
 class SQLiteBackupError(RuntimeError):
@@ -108,6 +111,58 @@ def verify_sqlite(path: Path, *, source_path: Path | None = None) -> SQLiteBacku
         page_size=page_size,
         freelist_count=freelist_count,
         integrity_check=integrity_check,
+    )
+
+
+def upload_backup(*, manifest: SQLiteBackupManifest, backup: Path, settings) -> str:
+    """Upload one verified artifact then publish its receipt only after HEAD.
+
+    This has no Fly/volume action.  Reusing an immutable content-addressed
+    object is safe only when its size and digest metadata match exactly.
+    """
+    artifact = Path(backup)
+    if artifact != manifest.backup_path or _sha256(artifact) != manifest.backup_sha256:
+        raise SQLiteBackupRefusal("backup-manifest-mismatch")
+    key = f"volume-backups/{manifest.backup_sha256}/state.db"
+    client = _r2_client(settings)
+    client.upload_file(
+        str(artifact),
+        settings.r2_bucket,
+        key,
+        ExtraArgs={"Metadata": {"sha256": manifest.backup_sha256}},
+    )
+    head = client.head_object(Bucket=settings.r2_bucket, Key=key)
+    remote_digest = str(head.get("Metadata", {}).get("sha256", ""))
+    if (
+        int(head.get("ContentLength", -1)) != manifest.backup_size_bytes
+        or remote_digest != manifest.backup_sha256
+    ):
+        raise SQLiteBackupError("r2-object-verification-failed")
+    client.put_object(
+        Bucket=settings.r2_bucket,
+        Key=f"volume-backups/{manifest.backup_sha256}/manifest.json",
+        Body=json.dumps(
+            {
+                "backup_sha256": manifest.backup_sha256,
+                "backup_size_bytes": manifest.backup_size_bytes,
+                "page_count": manifest.page_count,
+                "page_size": manifest.page_size,
+                "freelist_count": manifest.freelist_count,
+                "integrity_check": manifest.integrity_check,
+                "object_key": key,
+            },
+            sort_keys=True,
+        ).encode(),
+        ContentType="application/json",
+    )
+    return key
+
+
+def _r2_client(settings):
+    return _build_client(
+        settings.r2_endpoint,
+        settings.r2_access_key_id.get_secret_value(),
+        settings.r2_secret_access_key.get_secret_value(),
     )
 
 
