@@ -326,13 +326,13 @@ def test_candidate_controller_accepts_strictly_sub_boundary_high_burst() -> None
     )
 
 
-def test_fly_maintenance_release_keeps_quote_off_and_cleanup_bounded() -> None:
+def test_fly_readonly_quote_release_enables_quote_and_keeps_cleanup_bounded() -> None:
     config = tomllib.loads(Path("fly.toml").read_text())
     env = config["env"]
 
-    assert env["POLYARB_NEG_RISK_QUOTE_WORKER_ENABLED"] == "false"
+    assert env["POLYARB_NEG_RISK_QUOTE_WORKER_ENABLED"] == "true"
     assert env["POLYARB_NEG_RISK_QUOTE_INTERVAL_S"] == "60"
-    assert env["POLYARB_STRUCTURE_GENERATION_READ_MODE"] == "legacy"
+    assert env["POLYARB_STRUCTURE_GENERATION_READ_MODE"] == "generation"
     assert env["POLYARB_STRUCTURE_GENERATION_CLEANUP_ENABLED"] == "true"
     assert env["POLYARB_STRUCTURE_GENERATION_CLEANUP_MAX_ROWS"] == "500"
     assert env["POLYARB_STRUCTURE_GENERATION_CLEANUP_ACTIVE_INTERVAL_S"] == "0.05"

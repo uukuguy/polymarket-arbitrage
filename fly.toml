@@ -22,7 +22,9 @@ primary_region = "ams"
   # Protected maintenance release: cleanup must converge before the separate
   # generation-read and Quote cutovers are authorized.
   POLYARB_STRUCTURE_GENERATION_READ_MODE = "generation"
-  POLYARB_NEG_RISK_QUOTE_WORKER_ENABLED = "false"
+  # User-authorized public-read-only quote production for the certified M1→M2 feed.
+  # This enables no wallet, signer, order, or execution capability.
+  POLYARB_NEG_RISK_QUOTE_WORKER_ENABLED = "true"
   POLYARB_NEG_RISK_QUOTE_INTERVAL_S = "60"
   POLYARB_STRUCTURE_GENERATION_CLEANUP_ENABLED = "true"
   POLYARB_STRUCTURE_GENERATION_CLEANUP_MAX_ROWS = "500"
