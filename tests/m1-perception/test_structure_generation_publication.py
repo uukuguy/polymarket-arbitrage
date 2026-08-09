@@ -1182,6 +1182,66 @@ def test_event_only_issue_source_keyset_is_bounded_at_500(tmp_path: Path) -> Non
     assert {row[1]["source_kind"] for row in [*first, *second]} == {"event_only"}
 
 
+def test_issue_source_keyset_tail_does_not_rescan_prior_event_only_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed issue cursor must use the event-market keyset index, not rescan it."""
+    store = SQLiteStore(tmp_path / "issue-keyset-tail.db")
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    with sqlite3.connect(store.db_path) as con:
+        con.executemany(
+            "INSERT INTO structure_sync_event_staging("
+            "window_id,event_id,payload_json,source_ordinal) VALUES (?,?,?,?)",
+            [
+                (
+                    window["id"],
+                    f"event-{index:05d}",
+                    '{"id":"event"}',
+                    index,
+                )
+                for index in range(2_000)
+            ],
+        )
+        con.executemany(
+            "INSERT INTO structure_sync_event_market_staging("
+            "window_id,market_id,event_id,source_ordinal) VALUES (?,?,?,?)",
+            [
+                (
+                    window["id"],
+                    f"event-only-{index:05d}",
+                    f"event-{index:05d}",
+                    index,
+                )
+                for index in range(2_000)
+            ],
+        )
+
+    opcodes = 0
+    real_connect = sqlite3.connect
+
+    def counted_connect(*args, **kwargs):
+        con = real_connect(*args, **kwargs)
+
+        def count() -> int:
+            nonlocal opcodes
+            opcodes += 100
+            return 0
+
+        con.set_progress_handler(count, 100)
+        return con
+
+    monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", counted_connect)
+    rows = store.fetch_structure_issue_source_chunk(
+        window_id=window["id"], after_market_id="event-only-01949", limit=500
+    )
+
+    assert [row[0] for row in rows] == [
+        f"event-only-{index:05d}" for index in range(1_950, 2_000)
+    ]
+    assert opcodes < 10_000
+
+
 def test_production_shaped_62_event_only_members_across_14_groups_certify(
     tmp_path: Path,
 ) -> None:

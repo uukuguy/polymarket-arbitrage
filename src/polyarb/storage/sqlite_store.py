@@ -10290,17 +10290,30 @@ class SQLiteStore:
         if not window_id or not 1 <= limit <= 500:
             raise ValueError("invalid-structure-issue-source-chunk")
         with sqlite3.connect(self._db_path) as con:
+            market_cursor_clause = ""
+            event_cursor_clause = ""
+            market_parameters: list[object] = [window_id]
+            event_parameters: list[object] = [window_id]
+            if after_market_id is not None:
+                market_cursor_clause = " AND market_id>?"
+                event_cursor_clause = " AND relation.market_id>?"
+                market_parameters.append(after_market_id)
+                event_parameters.append(after_market_id)
             keys = con.execute(
-                "WITH candidates AS (SELECT market_id,'market' source_kind FROM "
-                "structure_sync_market_staging WHERE window_id=? UNION ALL SELECT "
-                "relation.market_id,'event_only' FROM "
+                "WITH market_candidates AS (SELECT market_id,'market' source_kind "
+                "FROM structure_sync_market_staging WHERE window_id=?"
+                f"{market_cursor_clause} ORDER BY market_id LIMIT ?),"
+                "event_only_candidates AS (SELECT relation.market_id,"
+                "'event_only' source_kind FROM "
                 "structure_sync_event_market_staging relation LEFT JOIN "
                 "structure_sync_market_staging market ON market.window_id=relation.window_id "
                 "AND market.market_id=relation.market_id WHERE relation.window_id=? "
-                "AND market.market_id IS NULL GROUP BY relation.market_id HAVING "
-                "COUNT(DISTINCT relation.event_id)=1) SELECT market_id,source_kind FROM "
-                "candidates WHERE (? IS NULL OR market_id>?) ORDER BY market_id LIMIT ?",
-                (window_id, window_id, after_market_id, after_market_id, limit),
+                f"{event_cursor_clause} AND market.market_id IS NULL GROUP BY "
+                "relation.market_id HAVING COUNT(*)=1 ORDER BY relation.market_id "
+                "LIMIT ?) SELECT market_id,source_kind FROM market_candidates UNION ALL "
+                "SELECT market_id,source_kind FROM event_only_candidates ORDER BY "
+                "market_id LIMIT ?",
+                (*market_parameters, limit, *event_parameters, limit, limit),
             ).fetchall()
             result: list[tuple[str, dict[str, object]]] = []
             for market_id, source_kind in keys:

@@ -6528,3 +6528,29 @@ Observe publication `463055...` through certified completion and the first
 fresh market-truth snapshot. Verify logical health and the opportunity endpoint
 recover without manual database mutation. Quote remains disabled and read mode
 remains legacy until an explicit protected-boundary decision.
+
+## SESSION 147 — 2026-08-09 (issue-source keyset tail recovery)
+
+- [PRODUCTION EVIDENCE] The restored daemon continues publication `463055...`
+  with zero scheduler failures, but `EXPLAIN QUERY PLAN` showed the resumed
+  issue-source query materialized the full candidate union before applying its
+  cursor. It scanned candidates and created temporary B-trees for both
+  `COUNT(DISTINCT)` and ordering on each 500-row checkpoint.
+- [ROOT CAUSE] The cursor was outside the source union. The active source
+  window has 130,555 market rows and 165,347 event-market rows, so bounded
+  producer slices still repeated a large read path.
+- [FIXED LOCAL] The cursor is now pushed into both indexed source streams;
+  each is bounded before their ordered union. The event-only singleton test
+  now uses `COUNT(*)=1`, which is exact under the staging primary key.
+- [VERIFIED LOCAL] The new 2,000-row tail regression failed on the old query
+  at 17,700 SQLite instructions and passes on the repair at about 7,800;
+  existing keyset and complete Structure-publication tests plus changed-file
+  Ruff pass.
+
+### [NEXT — CURRENT]
+
+Let publication `463055...` complete without manual database mutation. Verify
+fresh market truth, strict logical health, and the protected Quote-disabled
+opportunity surface. Then deploy the keyset repair through `make deploy` to
+bind a non-`dev` release identity, and prove a post-deploy restart/recovery
+without reintroducing startup or tail-scan stalls.
