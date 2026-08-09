@@ -3218,6 +3218,7 @@ class SQLiteStore:
         """
         con = self._connect_writer()
         try:
+            logger.info("sqlite-schema-stage stage=connected")
             # `PRAGMA journal_mode=WAL` can coordinate/checkpoint a large WAL.
             # Do it only for a fresh/non-WAL database; never embed it in the
             # ordinary startup DDL replay against the production volume.
@@ -3230,6 +3231,7 @@ class SQLiteStore:
                     "\nPRAGMA journal_mode = WAL;\nPRAGMA synchronous = NORMAL;\n"
                 )
             )
+            logger.info("sqlite-schema-stage stage=base-ddl-complete")
             # This pre-hotfix trigger was too broad: generation publication
             # could clear an unrelated dirty legacy mutation. Legacy writers
             # now clear only at their explicit atomic COMMIT boundary.
@@ -3248,6 +3250,7 @@ class SQLiteStore:
             con.executescript(STRUCTURE_DRIFT_ATTEMPTS_DDL)
             con.executescript(STRUCTURE_SCHEDULE_ADJUSTMENTS_DDL)
             con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
+            logger.info("sqlite-schema-stage stage=structure-sync-ddl-complete")
             _migrate_structure_recovery_authority(con)
             _migrate_structure_event_market_progress(con)
             _migrate_structure_event_member_schema(con)
@@ -3257,6 +3260,7 @@ class SQLiteStore:
             _migrate_structure_drift_member_receipt_binding(con)
             con.executescript(STRUCTURE_GENERATIONS_DDL)
             _migrate_structure_drift_classifier_v3_exclusions(con)
+            logger.info("sqlite-schema-stage stage=structure-migrations-complete")
             # ANALYZE scans the entire index and held the production daemon in
             # disk sleep for minutes on every restart.  Newly created/rebuilt
             # indexes still need planner statistics, but an existing stat row
@@ -3432,6 +3436,7 @@ class SQLiteStore:
             _repair_current_structure_generation_authentication(con)
             _migrate_structure_cleanup_progress_binding(con)
             con.commit()
+            logger.info("sqlite-schema-stage stage=additive-migrations-complete")
             _install_structure_generation_freeze_triggers(con)
             _install_structure_comparison_receipt_triggers(con)
             # This projects pre-column history only during the schema upgrade
@@ -3468,7 +3473,9 @@ class SQLiteStore:
         # migration path used by opportunity-first producers.
         from polyarb.perception.store import OpportunityPerceptionStore
 
+        logger.info("sqlite-schema-stage stage=opportunity-schema-start")
         OpportunityPerceptionStore(self._db_path).init_schema()
+        logger.info("sqlite-schema-stage stage=complete")
 
     def init_structure_sync_schema(self) -> None:
         """Prepare only the resumable Structure staging tables.

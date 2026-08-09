@@ -6457,3 +6457,13 @@ Deploy the one-time status-backfill repair directly in R&D mode, preserving
 drift enabled / legacy reads / Quote off / cleanup on. Verify the daemon
 crosses startup promptly, then observe cleanup heartbeat and the opportunity
 pipeline rather than declaring recovery from release metadata alone.
+
+## SESSION 143 — 2026-08-09 (startup stage telemetry)
+
+- [PRODUCTION EVIDENCE] `c121f2b` removed the immediate legacy-status scan but
+  later remained in disk I/O before HTTP bind (2.6 GB read / 459 MB written).
+  Discovery batch tables are empty, ruling out discovery-authority compaction.
+- [FIXED LOCAL] Added concise schema stage markers for base DDL, Structure
+  migrations, additive migrations, and opportunity schema initialization.
+  The next R&D restart will identify the remaining exact path from logs.
+- [VERIFIED] SQLite migration suite and Ruff pass.
