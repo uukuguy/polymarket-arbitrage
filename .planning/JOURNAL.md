@@ -6501,3 +6501,30 @@ Deploy the event-member-index startup repair directly in R&D mode, preserving
 drift enabled / legacy reads / Quote off / cleanup on. Verify that v251's
 event-member-schema block disappears, `/health` binds, then inspect cleanup
 and opportunity-pipeline recovery before claiming production recovery.
+
+## SESSION 146 — 2026-08-09 (startup restored and durable recovery proven)
+
+- [PRODUCTION EVIDENCE] v252 deployed `117dbb7` and crossed
+  `event-member-schema` in 6ms; the complete SQLite schema initialization
+  reached `stage=complete` in about 0.5 seconds. Uvicorn and the scheduler
+  then started normally, eliminating the multi-GB startup I/O block.
+- [PRODUCTION EVIDENCE] A controlled v253 restart proved recovery rather than
+  a one-shot start: the event-member sidecar resumed its durable checkpoint,
+  sealed at 165,347 rows, and the Structure producer automatically continued
+  the same publication in bounded 49k–50k row slices with failure counter 0.
+- [CONFIG RECONCILIATION] The deployed process exposed a missing
+  `POLYARB_STRUCTURE_GENERATION_DRIFT_COMPARE_ENABLED` despite the protected
+  intended state. Restored it to `true`; process verification is now exactly
+  `drift=true`, `read_mode=legacy`, `Quote=false`, `cleanup=true`. Drift health
+  is authenticated `drift-safe-sealed` with zero unclassified candidates.
+- [OPEN] Logical `/health` remains 503 solely because the last complete market
+  truth is stale while publication `463055...` continues bounded normalization.
+  Transport health is passing; this is an active durable recovery, not a
+  stopped/degraded daemon.
+
+### [NEXT — CURRENT]
+
+Observe publication `463055...` through certified completion and the first
+fresh market-truth snapshot. Verify logical health and the opportunity endpoint
+recover without manual database mutation. Quote remains disabled and read mode
+remains legacy until an explicit protected-boundary decision.
