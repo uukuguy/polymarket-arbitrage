@@ -6916,3 +6916,44 @@ health/console/opportunity responses. Open a focused incident remediation for
 the fetch-stage timeout pathology and ensure repeated Quote failures stay
 visible in both the direct console and Polywatch. Resume R2 backup/restore work
 only after this P1 has accumulated recovery evidence; M1 remains unaccepted.
+
+## SESSION 160 — 2026-08-10 (Quote supervised recovery deployed)
+
+- [P1 REMEDIATION / DEPLOYED] v303 runs exact SHA
+  `cf84512ea4b0898bdb9bca752f103b71e6f8669d`.  Quote now has a dedicated
+  outer producer-supervisor path: a hard 120-second child timeout terminalizes
+  the inner worker, exits the Quote child with a controlled nonzero code, and
+  enters the supervisor's durable receipt/restart/escalation budget.  It no
+  longer retries forever in the parent process.
+- [SCHEMA SAFETY] Existing SQLite producer authority tables are migrated
+  atomically before Quote uses them. The migration preserves old receipts,
+  child starts and heartbeats, recreates the index, and never exposes a partial
+  authority set. Focused migration and heartbeat tests passed.
+- [TOPOLOGY SAFETY] The legacy global supervisor flag would disable the parent
+  Structure scheduler. It was not enabled. A Quote-only production flag
+  (`POLYARB_NEG_RISK_QUOTE_SUPERVISOR_ENABLED=true`) keeps Structure/Snapshot
+  running and makes the supervised Quote child the sole collector while the
+  parent hydrates certified feed state.
+- [RECOVERY EVIDENCE] The v302 P1 incident reached seven hard timeouts and was
+  alertable through Polywatch/Telegram. After v303 boot
+  `2cacd8e2-6c3b-4b7f-a2ea-4dfa8b50d6ed`, certified run 2200 completed
+  38,259/40,495 responses; its incident history reached `verified` with
+  `automatic_action=certified-recovery`. The opportunity feed again returned
+  gross-before-fees candidates; they remain `execution_status=not-verified`.
+- [OPERATOR VISIBILITY / DEPLOYED] v304 runs exact SHA
+  `917eae5bb4ed336e1d9b5642e8c8d4272ce38d3e`, boot
+  `9a1a5d6a-5930-4aee-9d31-1ddd697fa624`. The direct Fly console is HTTP 200
+  and now includes recovered `producer:quote` histories alongside Quote
+  collection and capacity, so supervisor recovery/escalation remains visible
+  after a live card closes.
+- [UNRESOLVED] This proves the containment/recovery chain, not the fetch-stage
+  root cause. Archive/R2/Supabase/Structure and source-truth warning domains
+  remain independent; M1 is still not production accepted.
+
+### [NEXT — CURRENT]
+
+Observe several natural v304 Quote cycles and any hard-timeout transition:
+verify parent receipt/incident evidence, restart budget behavior, console 200,
+and Polywatch alert/recovery. In parallel, continue the separately safe R2
+backup/restore and source-truth/Structure remediation. Never run broad SQLite
+diagnostics on the live producer.
