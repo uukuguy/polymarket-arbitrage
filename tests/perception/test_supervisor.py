@@ -168,8 +168,9 @@ async def test_isolated_topology_supervises_quote_as_its_only_collector(
         def __init__(self, **_kwargs) -> None:
             pass
 
-        async def run(self, spec, _stop_event) -> None:
+        async def run(self, spec, stop_event) -> None:
             specs.append(spec)
+            stop_event.set()
 
     monkeypatch.setattr(daemon_main, "ProducerSupervisor", Supervisor)
     store = OpportunityPerceptionStore(tmp_path / "state.db")
@@ -180,6 +181,46 @@ async def test_isolated_topology_supervises_quote_as_its_only_collector(
 
     assert [spec.component for spec in specs] == ["quote"]
     assert specs[0].stall_detection_s is None
+
+
+@pytest.mark.asyncio
+async def test_daemon_restarts_a_supervisor_that_returns_while_service_is_live(
+    tmp_path, monkeypatch
+) -> None:
+    """A returned Quote supervisor cannot silently leave the daemon producerless."""
+    class Settings:
+        opportunity_producer_supervisor_enabled = False
+        opportunity_first_watcher_enabled = False
+        opportunity_discovery_enabled = False
+        opportunity_reconciliation_enabled = False
+        neg_risk_quote_worker_enabled = True
+        neg_risk_quote_supervisor_enabled = True
+        producer_stall_timeout_s = 1.0
+        producer_stall_detection_s = 0.1
+        producer_terminate_grace_s = 0.1
+        producer_max_restarts = 0
+        producer_backoff_initial_s = 0.0
+        producer_backoff_max_s = 0.0
+
+    calls: list[str] = []
+
+    class Supervisor:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def run(self, spec, stop_event) -> None:
+            calls.append(spec.component)
+            if len(calls) == 2:
+                stop_event.set()
+
+    monkeypatch.setattr(daemon_main, "ProducerSupervisor", Supervisor)
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    stop = asyncio.Event()
+
+    await asyncio.gather(*daemon_main._start_supervised_producers(Settings, store, stop))
+
+    assert calls == ["quote", "quote"]
 
 
 @pytest.mark.asyncio

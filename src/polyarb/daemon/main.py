@@ -363,29 +363,65 @@ def _start_supervised_producers(
         ),
         "quote": quote_supervised and settings.neg_risk_quote_worker_enabled,
     }
-    supervisor = ProducerSupervisor(
-        store=store,
-        incidents=IncidentManager(store),
-    )
-    return [
-        asyncio.create_task(
-            supervisor.run(
-                ProducerSpec(
-                    component=component,
-                    timeout_s=settings.producer_stall_timeout_s,
-                    stall_detection_s=(
-                        settings.producer_stall_detection_s
-                        if component == "reconciliation"
-                        else None
-                    ),
-                    terminate_grace_s=settings.producer_terminate_grace_s,
-                    max_restarts=settings.producer_max_restarts,
-                    backoff_initial_s=settings.producer_backoff_initial_s,
-                    backoff_max_s=settings.producer_backoff_max_s,
-                ),
-                stop_event,
+    async def run_supervisor_forever(component: str) -> None:
+        """Keep the daemon's supervision plane alive after its own failure.
+
+        ``ProducerSupervisor.run`` deliberately returns after bounded child
+        retries are exhausted.  Leaving that returned task unobserved made the
+        HTTP parent look healthy while its only Quote producer no longer
+        existed.  A supervisor exit is therefore a recoverable control-plane
+        failure: persist its normal child evidence first, then construct a new
+        supervisor after the same bounded backoff discipline.  Only daemon
+        shutdown may end this coroutine.
+        """
+        restarts = 0
+        while not stop_event.is_set():
+            supervisor = ProducerSupervisor(
+                store=store,
+                incidents=IncidentManager(store),
             )
-        )
+            try:
+                await supervisor.run(
+                    ProducerSpec(
+                        component=component,
+                        timeout_s=settings.producer_stall_timeout_s,
+                        stall_detection_s=(
+                            settings.producer_stall_detection_s
+                            if component == "reconciliation"
+                            else None
+                        ),
+                        terminate_grace_s=settings.producer_terminate_grace_s,
+                        max_restarts=settings.producer_max_restarts,
+                        backoff_initial_s=settings.producer_backoff_initial_s,
+                        backoff_max_s=settings.producer_backoff_max_s,
+                    ),
+                    stop_event,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "producer supervisor crashed "
+                    f"component={component}; scheduling control-plane recovery"
+                )
+            if stop_event.is_set():
+                return
+            restarts += 1
+            delay_s = min(
+                settings.producer_backoff_max_s,
+                settings.producer_backoff_initial_s * (2 ** (restarts - 1)),
+            )
+            logger.error(
+                "producer supervisor exited while daemon remains live; "
+                f"component={component} restart={restarts} retry_in_s={delay_s}"
+            )
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=delay_s)
+            except TimeoutError:
+                continue
+
+    return [
+        asyncio.create_task(run_supervisor_forever(component))
         for component, enabled in flags.items()
         if enabled
     ]
