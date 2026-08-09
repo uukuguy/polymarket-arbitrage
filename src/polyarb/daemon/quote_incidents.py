@@ -40,6 +40,11 @@ class QuoteIncidentLifecycle:
             if last_success_age_s is None or last_success_age_s > 300
             else "feed-at-risk"
         )
+        severity = (
+            "p1"
+            if impact == "feed-unavailable" or consecutive_failures >= 3
+            else "p2"
+        )
         evidence: dict[str, Any] = {
             "run_id": run_id,
             "requested_token_count": requested_token_count,
@@ -50,6 +55,8 @@ class QuoteIncidentLifecycle:
             "automatic_action": "retry-immediately",
             "next_action": "inspect-clob-and-child-io",
             "failure_reason": "quote-collection-subprocess-timeout",
+            "severity": severity,
+            "reminder_interval_s": 300 if severity == "p1" else 1800,
         }
         incident = self._incidents.detect(self._SCOPE, self._KIND, evidence)
         if incident.state == "detected":
@@ -75,6 +82,11 @@ class QuoteIncidentLifecycle:
             else max(0.0, time.time() - snapshot.last_success_at_s)
         )
         impact = "feed-unavailable" if age is None or age > 300 else "feed-at-risk"
+        severity = (
+            "p1"
+            if impact == "feed-unavailable" or snapshot.consecutive_failures >= 3
+            else "p2"
+        )
         evidence: dict[str, Any] = {
             "failure_reason": f"quote-collection-subprocess-{error.reason}",
             "deadline_s": 120,
@@ -83,6 +95,8 @@ class QuoteIncidentLifecycle:
             "impact": impact,
             "automatic_action": "retry-at-next-cadence",
             "next_action": "inspect-child-stderr",
+            "severity": severity,
+            "reminder_interval_s": 300 if severity == "p1" else 1800,
         }
         if error.diagnostic:
             evidence["diagnostic"] = error.diagnostic

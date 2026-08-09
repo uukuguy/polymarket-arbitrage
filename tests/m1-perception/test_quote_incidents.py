@@ -51,6 +51,21 @@ def test_repeated_timeout_reuses_the_open_incident(tmp_path) -> None:
     assert second.sequence > first.sequence
 
 
+def test_unavailable_quote_timeout_is_a_p1_incident(tmp_path) -> None:
+    from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
+
+    incident = QuoteIncidentLifecycle(_manager(tmp_path)).record_timeout(
+        run_id=1908,
+        requested_token_count=38_972,
+        deadline_s=120,
+        consecutive_failures=3,
+        last_success_age_s=301.0,
+    )
+
+    assert incident.evidence["severity"] == "p1"
+    assert incident.evidence["reminder_interval_s"] == 300
+
+
 def test_non_timeout_child_failure_creates_operator_incident(tmp_path) -> None:
     from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
     from polyarb.daemon.quote_worker import (

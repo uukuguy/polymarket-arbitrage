@@ -91,6 +91,11 @@ export default async function PerceptionOverviewPage() {
   const openIncidents = incidents.items.filter(
     (incident) => incident.state !== "verified",
   );
+  const p1QuoteIncidents = openIncidents.filter(
+    (incident) =>
+      incident.scope === "quote-collection" &&
+      incident.diagnosis?.severity === "p1",
+  );
   const currentResourceSample =
     resources.current === null
       ? null
@@ -465,6 +470,30 @@ export default async function PerceptionOverviewPage() {
         )}
       </section>
 
+      {p1QuoteIncidents.length > 0 && (
+        <section
+          style={{
+            ...panel,
+            border: "2px solid #ef4444",
+            background: "#2a1212",
+          }}
+        >
+          <h2 style={{ marginTop: 0, color: "#fecaca" }}>
+            P1 quote feed incident ({p1QuoteIncidents.length})
+          </h2>
+          {p1QuoteIncidents.map((incident) => (
+            <div key={incident.incident_id}>
+              <strong>Impact:</strong> {incident.diagnosis?.impact.replace("-", " ")}
+              <div><strong>Automatic action:</strong> {incident.diagnosis?.automatic_action.replaceAll("-", " ")}</div>
+              <div><strong>Next action:</strong> {incident.diagnosis?.next_action.replaceAll("-", " ")}</div>
+              <div style={muted}>
+                consecutive failures {incident.diagnosis?.consecutive_failures} · reminder every {incident.diagnosis?.reminder_interval_s}s
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
+
       <section style={panel}>
         <h2 style={{ marginTop: 0 }}>
           Open incidents ({incidents.open_count})
@@ -518,6 +547,7 @@ export default async function PerceptionOverviewPage() {
                     background: "#2d1717",
                   }}
                 >
+                  <div><strong>Severity:</strong> {incident.diagnosis.severity.toUpperCase()} · reminder every {incident.diagnosis.reminder_interval_s}s</div>
                   <div><strong>Impact:</strong> {incident.diagnosis.impact.replace("-", " ")}</div>
                   <div><strong>Automatic action:</strong> {incident.diagnosis.automatic_action.replace("-", " ")}</div>
                   <div><strong>Next action:</strong> {incident.diagnosis.next_action.replaceAll("-", " ")}</div>

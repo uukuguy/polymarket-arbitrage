@@ -622,6 +622,8 @@ def test_quote_timeout_incident_exposes_operator_diagnosis(http_test_client) -> 
 
     assert response.status_code == 200
     assert response.json()["items"][0]["diagnosis"] == {
+        "severity": "p1",
+        "reminder_interval_s": 300,
         "impact": "feed-unavailable",
         "automatic_action": "retry-immediately",
         "next_action": "inspect-clob-and-child-io",

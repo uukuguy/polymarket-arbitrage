@@ -1075,7 +1075,18 @@ def _quote_incident_diagnosis(evidence: dict[str, object]) -> dict[str, object] 
         or age < 0
     ):
         return None
+    severity = evidence.get("severity")
+    reminder_interval_s = evidence.get("reminder_interval_s")
+    if (
+        severity not in {"p1", "p2"}
+        or isinstance(reminder_interval_s, bool)
+        or not isinstance(reminder_interval_s, int)
+        or reminder_interval_s <= 0
+    ):
+        return None
     return {
+        "severity": severity,
+        "reminder_interval_s": reminder_interval_s,
         "impact": evidence["impact"],
         "automatic_action": evidence["automatic_action"],
         "next_action": evidence["next_action"],

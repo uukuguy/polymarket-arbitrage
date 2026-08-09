@@ -589,6 +589,8 @@ function isIncident(value: unknown): boolean {
     value.notification_delivery_tracked === false &&
     (value.diagnosis === null ||
       (isRecord(value.diagnosis) &&
+        (value.diagnosis.severity === "p1" || value.diagnosis.severity === "p2") &&
+        isPositiveInteger(value.diagnosis.reminder_interval_s) &&
         (value.diagnosis.impact === "feed-at-risk" ||
           value.diagnosis.impact === "feed-unavailable") &&
         (value.diagnosis.automatic_action === "retry-immediately" ||

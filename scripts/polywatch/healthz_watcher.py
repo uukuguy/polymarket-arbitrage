@@ -74,6 +74,7 @@ L2_WS_SILENCE_S = int(os.environ.get("POLYWATCH_L2_WS_SILENCE_S", "600"))       
 DRY_RUN = os.environ.get("POLYWATCH_DRY_RUN", "0") == "1"
 STATE_FILE = os.environ.get("POLYWATCH_STATE_FILE", "")
 REMINDER_S = int(os.environ.get("POLYWATCH_REMINDER_S", "1800"))
+P1_QUOTE_REMINDER_S = int(os.environ.get("POLYWATCH_P1_QUOTE_REMINDER_S", "300"))
 COMPONENTS = ("l1", "l2", "opportunity", "dashboard")
 CURRENT_DRIFT_CLASSIFIER_CONTRACT = "structure-drift-classifier-v2"
 _INCIDENT_IDENTITY_FIELDS = (
@@ -139,6 +140,14 @@ def _extract_check(healthz: dict, check_key: str, default=None):
     if not entries:
         return default
     return entries[0]
+
+
+def l1_reminder_interval_s(healthz: dict) -> int:
+    """Use a short reminder cycle only when certified Quote input is unavailable."""
+    quote_age = _extract_check(healthz, "quote_feed:last_complete_age_seconds", {})
+    if quote_age and quote_age.get("status") == "fail":
+        return P1_QUOTE_REMINDER_S
+    return REMINDER_S
 
 
 def _post_unpause() -> tuple[bool, str]:
@@ -991,7 +1000,7 @@ def main() -> int:
             active_by_component,
             state,
             now_s=now_s,
-            reminder_s=REMINDER_S,
+            reminder_s=l1_reminder_interval_s(l1),
             incident_by_component=incident_by_component,
             recovery_by_component=recovery_by_component,
         )

@@ -368,6 +368,8 @@ export interface PerceptionIncident {
   } | null;
   notification_delivery_tracked: false;
   diagnosis: {
+    severity: "p1" | "p2";
+    reminder_interval_s: number;
     impact: "feed-at-risk" | "feed-unavailable";
     automatic_action: "retry-immediately" | "retry-at-next-cadence";
     next_action: "inspect-clob-and-child-io" | "inspect-child-stderr";

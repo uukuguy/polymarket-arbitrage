@@ -85,6 +85,16 @@ def test_l1_quote_age_failure_pushes() -> None:
     assert "quote" in reason.lower()
 
 
+def test_quote_feed_unavailable_uses_p1_reminder_interval() -> None:
+    health = _health(
+        checks={
+            "quote_feed:last_complete_age_seconds": _check(301.0, status="fail"),
+        }
+    )
+
+    assert WATCHER.l1_reminder_interval_s(health) == 300
+
+
 @pytest.mark.parametrize("reason", [
     "structure-event-member-checkpoint-invalid",
     "structure-event-source-receipt-invalid",
