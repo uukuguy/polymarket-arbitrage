@@ -94,7 +94,10 @@ def _setup_logger(verbose: bool) -> None:
     logger.remove()
     logger.add(
         sys.stderr,
-        level="DEBUG" if verbose else "INFO",
+        # This CLI's stdout is a machine-readable protocol consumed by the
+        # long-lived Quote parent.  Keep routine setup logs off by default so
+        # an embedded runner cannot coalesce them into the JSON envelope.
+        level="DEBUG" if verbose else "WARNING",
         format="<green>{time:HH:mm:ss}</green> | <level>{level:<7}</level> | {message}",
     )
 
