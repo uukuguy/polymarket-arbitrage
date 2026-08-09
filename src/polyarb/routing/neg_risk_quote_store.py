@@ -856,6 +856,65 @@ class NegRiskQuoteStore:
         finally:
             con.close()
 
+    def reclaim_terminal_failed_payloads(self, *, max_runs: int = 1) -> int:
+        """Release unpublishable failed-run payloads while retaining diagnosis.
+
+        A failed full-universe run can contain tens of thousands of legs and
+        terminal quotes.  Those rows are never eligible for a certified feed;
+        retaining them across a retry storm turns transient CLOB failures into
+        persistent SQLite write amplification.  The run metadata and its
+        attempt's stable ``quote_run_identity`` remain durable evidence.
+        """
+        if isinstance(max_runs, bool) or not isinstance(max_runs, int) or max_runs < 1:
+            raise ValueError("max_runs must be positive")
+        con = self._connect()
+        try:
+            con.execute("PRAGMA secure_delete=OFF")
+            self._begin_immediate(con)
+            try:
+                rows = con.execute(
+                    "SELECT r.id FROM neg_risk_quote_runs r "
+                    "WHERE r.status='failed' AND ("
+                    "EXISTS (SELECT 1 FROM neg_risk_quote_run_legs l WHERE l.quote_run_id=r.id) "
+                    "OR EXISTS (SELECT 1 FROM neg_risk_quotes q WHERE q.quote_run_id=r.id) "
+                    "OR EXISTS (SELECT 1 FROM neg_risk_quote_source_receipts s "
+                    "WHERE s.quote_run_id=r.id)"
+                    ") ORDER BY r.quoted_at_ms,r.id LIMIT ?",
+                    (max_runs,),
+                ).fetchall()
+                run_ids = tuple(int(row[0]) for row in rows)
+                if not run_ids:
+                    con.execute("COMMIT")
+                    return 0
+                placeholders = ",".join("?" for _ in run_ids)
+                con.execute(
+                    "UPDATE neg_risk_quote_attempts SET "
+                    "quote_run_identity=COALESCE(quote_run_identity,quote_run_id),"
+                    "quote_run_id=NULL WHERE quote_run_id IN ("
+                    f"{placeholders})",
+                    run_ids,
+                )
+                con.execute(
+                    "DELETE FROM neg_risk_quote_source_receipts "
+                    f"WHERE quote_run_id IN ({placeholders})",
+                    run_ids,
+                )
+                con.execute(
+                    f"DELETE FROM neg_risk_quotes WHERE quote_run_id IN ({placeholders})",
+                    run_ids,
+                )
+                con.execute(
+                    f"DELETE FROM neg_risk_quote_run_legs WHERE quote_run_id IN ({placeholders})",
+                    run_ids,
+                )
+                con.execute("COMMIT")
+                return len(run_ids)
+            except Exception:
+                _rollback_without_masking(con)
+                raise
+        finally:
+            con.close()
+
     def purge_old_runs(
         self,
         *,

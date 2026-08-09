@@ -265,6 +265,35 @@ def test_purge_detaches_attempt_fk_but_retains_durable_run_identity(quote_db) ->
         )
 
 
+def test_failed_run_reclaim_keeps_diagnosis_and_attempt_identity(quote_db) -> None:
+    """A retry storm must not retain one full universe payload per failure."""
+    store = NegRiskQuoteStore(quote_db)
+    attempt_id = store.start_collection_attempt(started_at_ms=NOW_MS)
+    run_id = _begin(store)
+    store.checkpoint_collection_attempt(attempt_id, phase="fetch", quote_run_id=run_id)
+    store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b")))
+    store.fail_run(run_id, failure_reason="clob-fetch-timeout")
+
+    assert store.reclaim_terminal_failed_payloads(max_runs=1) == 1
+
+    attempt = store.latest_collection_attempt()
+    assert attempt is not None
+    assert attempt["quote_run_id"] == run_id
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT status,failure_reason FROM neg_risk_quote_runs WHERE id=?", (run_id,)
+        ).fetchone() == ("failed", "clob-fetch-timeout")
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_quote_run_legs WHERE quote_run_id=?", (run_id,)
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_quotes WHERE quote_run_id=?", (run_id,)
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_quote_source_receipts WHERE quote_run_id=?", (run_id,)
+        ).fetchone() == (0,)
+
+
 def test_start_attempt_closes_orphan_and_bounds_terminal_history(quote_db) -> None:
     store = NegRiskQuoteStore(quote_db)
     orphan_id = store.start_collection_attempt(started_at_ms=NOW_MS - 120_001)

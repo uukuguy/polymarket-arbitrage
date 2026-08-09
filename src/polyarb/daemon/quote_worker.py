@@ -45,6 +45,7 @@ PrepareOpportunities = Callable[
 ]
 ReconcileGlobalProjection = Callable[[CompleteQuoteProjection], Awaitable[None]]
 CleanupOldRuns = Callable[[], Awaitable[int]]
+ReclaimFailedPayloads = Callable[[], Awaitable[int]]
 WaitForStop = Callable[[asyncio.Event, float], Awaitable[bool]]
 ReleaseProjectionMemory = Callable[[], None]
 CompleteAttempt = Callable[[QuoteCollectionResult], Awaitable[None]]
@@ -703,6 +704,7 @@ class QuoteWorker:
         restore_feed: RestoreFeed | None = None,
         cleanup_collecting_runs: CleanupCollectingRuns | None = None,
         cleanup_old_runs: CleanupOldRuns | None = None,
+        reclaim_failed_payloads: ReclaimFailedPayloads | None = None,
         complete_attempt: CompleteAttempt | None = None,
         fail_attempt: FailAttempt | None = None,
         record_timeout_incident: RecordTimeoutIncident | None = None,
@@ -726,6 +728,7 @@ class QuoteWorker:
         self._restore_feed = restore_feed
         self._cleanup_collecting_runs = cleanup_collecting_runs
         self._cleanup_old_runs = cleanup_old_runs
+        self._reclaim_failed_payloads = reclaim_failed_payloads
         self._complete_attempt = complete_attempt
         self._fail_attempt = fail_attempt
         self._record_timeout_incident = record_timeout_incident
@@ -942,6 +945,18 @@ class QuoteWorker:
                     if result is not None and self._fail_attempt is not None:
                         await self._fail_attempt(result, type(error).__name__)
                     self.runtime.mark_failure(error)
+                    if self._reclaim_failed_payloads is not None:
+                        try:
+                            reclaimed_runs = await self._reclaim_failed_payloads()
+                            logger.info(
+                                "failed neg-risk quote payloads reclaimed "
+                                f"count={reclaimed_runs}"
+                            )
+                        except Exception as reclaim_error:
+                            logger.warning(
+                                "failed quote payload reclaim failed "
+                                f"kind={type(reclaim_error).__name__}"
+                            )
                     if self._record_timeout_incident is not None and error.reason == "timeout":
                         try:
                             await self._record_timeout_incident(self.runtime)
@@ -1149,6 +1164,12 @@ def build_production_quote_worker(
             max_runs=1,
         )
 
+    async def reclaim_failed_payloads() -> int:
+        return await asyncio.to_thread(
+            quote_store.reclaim_terminal_failed_payloads,
+            max_runs=1,
+        )
+
     async def reconcile_global_projection(
         projection: CompleteQuoteProjection,
     ) -> None:
@@ -1200,6 +1221,7 @@ def build_production_quote_worker(
         restore_feed=restore_feed,
         cleanup_collecting_runs=cleanup_collecting_runs,
         cleanup_old_runs=cleanup_old_runs,
+        reclaim_failed_payloads=reclaim_failed_payloads,
         complete_attempt=complete_attempt,
         fail_attempt=fail_attempt,
         record_timeout_incident=record_timeout_incident,

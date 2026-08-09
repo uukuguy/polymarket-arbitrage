@@ -292,6 +292,40 @@ async def test_subprocess_failure_retries_without_cadence_sleep() -> None:
     assert worker.runtime.snapshot().success_count == 1
 
 
+async def test_failed_quote_payload_is_reclaimed_before_immediate_retry() -> None:
+    from polyarb.daemon.quote_worker import QuoteCollectionSubprocessError, QuoteWorker
+
+    attempts = 0
+    events: list[str] = []
+
+    async def collect_once() -> QuoteCollectionResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise QuoteCollectionSubprocessError("timeout")
+        return _result(9)
+
+    async def reclaim_failed_payloads() -> int:
+        events.append("reclaim")
+        return 1
+
+    async def wait_for_stop(_stop: asyncio.Event, _delay_s: float) -> bool:
+        events.append("wait")
+        return attempts >= 2
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        reclaim_failed_payloads=reclaim_failed_payloads,
+        interval_s=120,
+        wait_for_stop=wait_for_stop,
+    )
+
+    await worker.run(asyncio.Event())
+
+    assert attempts == 2
+    assert events == ["reclaim", "wait", "wait"]
+
+
 async def test_worker_publishes_projection_only_after_certification() -> None:
     from polyarb.daemon.quote_worker import QuoteWorker
 
