@@ -27,6 +27,7 @@ import signal
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from uuid import UUID
 
 import uvicorn
@@ -40,6 +41,7 @@ from polyarb.daemon.opportunity_watcher import (
 )
 from polyarb.daemon.quote_worker import (
     QuoteWorker,
+    QuoteWorkerRuntime,
     build_production_quote_worker,
     load_certified_quote_feed,
 )
@@ -192,6 +194,61 @@ def _start_quote_worker(
     if quote_worker is None:
         return None
     return asyncio.create_task(quote_worker.run(stop_event))
+
+
+async def _hydrate_durable_quote_feed(
+    runtime: QuoteWorkerRuntime,
+    loader: Callable[[], object],
+) -> bool:
+    """Atomically copy an already-certified child feed into HTTP memory."""
+    feed = await asyncio.to_thread(loader)
+    if feed is None:
+        return False
+    runtime.restore_certified_feed(feed)
+    return True
+
+
+async def _run_durable_quote_feed_hydrator(
+    runtime: QuoteWorkerRuntime,
+    loader: Callable[[], object],
+    stop_event: asyncio.Event,
+    *,
+    interval_s: float,
+) -> None:
+    """Keep the HTTP cache current when collection runs in a child process."""
+    while not stop_event.is_set():
+        try:
+            await _hydrate_durable_quote_feed(runtime, loader)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # durable retry; endpoint keeps last valid feed
+            logger.warning(
+                "durable quote feed hydration failed "
+                f"kind={type(error).__name__}"
+            )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+        except TimeoutError:
+            continue
+
+
+def _start_durable_quote_feed_hydrator(
+    runtime: QuoteWorkerRuntime | None,
+    loader: Callable[[], object] | None,
+    stop_event: asyncio.Event,
+    *,
+    interval_s: float,
+) -> asyncio.Task[None] | None:
+    if runtime is None or loader is None:
+        return None
+    return asyncio.create_task(
+        _run_durable_quote_feed_hydrator(
+            runtime,
+            loader,
+            stop_event,
+            interval_s=interval_s,
+        )
+    )
 
 
 def _start_opportunity_watcher(
@@ -558,14 +615,10 @@ async def main() -> int:
         settings,
         perception_store,
     )
-    quote_worker = (
-        None
-        if isolated_producers
-        else build_production_quote_worker(
-            settings,
-            opportunity_watcher=focused_watcher,
-            producer_lock=producer_lock,
-        )
+    quote_worker = build_production_quote_worker(
+        settings,
+        opportunity_watcher=focused_watcher,
+        producer_lock=producer_lock,
     )
     scheduler = SnapshotScheduler(
         settings=settings,
@@ -643,7 +696,16 @@ async def main() -> int:
     scheduler_task = (
         None if isolated_producers else _start_structure_scheduler(scheduler, stop_event)
     )
-    quote_worker_task = _start_quote_worker(quote_worker, stop_event)
+    quote_worker_task = _start_quote_worker(
+        None if isolated_producers else quote_worker,
+        stop_event,
+    )
+    quote_feed_hydrator_task = _start_durable_quote_feed_hydrator(
+        quote_worker.runtime if isolated_producers and quote_worker is not None else None,
+        getattr(app.state, "quote_feed_loader", None),
+        stop_event,
+        interval_s=min(15.0, max(5.0, settings.neg_risk_quote_interval_s / 4)),
+    )
     cleanup_worker_task = _start_generation_cleanup_worker(cleanup_worker, stop_event)
     focused_watcher_task = _start_opportunity_watcher(
         None if isolated_producers else focused_watcher,
@@ -684,6 +746,8 @@ async def main() -> int:
         reconciliation_task.cancel()
     if quote_worker_task is not None:
         quote_worker_task.cancel()
+    if quote_feed_hydrator_task is not None:
+        quote_feed_hydrator_task.cancel()
     if cleanup_worker_task is not None:
         cleanup_worker_task.cancel()
     for task in supervised_tasks:
@@ -702,6 +766,11 @@ async def main() -> int:
                 *([scheduler_task] if scheduler_task is not None else []),
                 *([focused_watcher_task] if focused_watcher_task is not None else []),
                 *([quote_worker_task] if quote_worker_task is not None else []),
+                *(
+                    [quote_feed_hydrator_task]
+                    if quote_feed_hydrator_task is not None
+                    else []
+                ),
                 *([cleanup_worker_task] if cleanup_worker_task is not None else []),
                 *([candidate_watcher_task] if candidate_watcher_task is not None else []),
                 *([discovery_task] if discovery_task is not None else []),

@@ -120,6 +120,20 @@ async def test_l1_start_helper_runs_quote_worker_and_task_is_cancellable() -> No
     worker.run.assert_awaited_once_with(stop_event)
 
 
+async def test_isolated_parent_hydrates_durable_quote_feed_without_collecting() -> None:
+    from polyarb.daemon.main import _hydrate_durable_quote_feed
+
+    runtime = MagicMock()
+    feed = object()
+    loader = MagicMock(return_value=feed)
+
+    hydrated = await _hydrate_durable_quote_feed(runtime, loader)
+
+    assert hydrated is True
+    loader.assert_called_once_with()
+    runtime.restore_certified_feed.assert_called_once_with(feed)
+
+
 async def test_generation_cleanup_start_helper_is_optional_and_cancellable() -> None:
     from polyarb.daemon.main import _start_generation_cleanup_worker
 
@@ -189,7 +203,8 @@ def test_l1_main_owns_quote_worker_shutdown() -> None:
     source = inspect.getsource(main.main)
     assert "build_production_quote_worker(" in source
     assert "opportunity_watcher=focused_watcher" in source
-    assert "_start_quote_worker(quote_worker, stop_event)" in source
+    assert "None if isolated_producers else quote_worker" in source
+    assert "_start_durable_quote_feed_hydrator(" in source
     assert "quote_worker_task.cancel()" in source
     assert "quote_worker_task" in source.partition("asyncio.gather(")[2]
 
