@@ -6732,3 +6732,38 @@ the 40.9GB SQLite / 17.8% volume headroom as an active production risk: map
 retained history ownership without load-amplifying live diagnostics, then plan
 a tested no-downtime historical data migration/compaction. Do not re-enable
 unauthorized drift maintenance or run online VACUUM.
+
+## SESSION 154 — 2026-08-09 (direct incident console and capacity recovery)
+
+- [OPERATOR VISIBILITY] Fly-native read-only console is live at
+  `https://polyarb-l1.fly.dev/perception/console`, independent of the Vercel
+  SSO-gated dashboard. It renders durable incident scope/severity/impact,
+  automatic action, next operator action, failure reason, retry state and
+  recovery evidence. A read failure is displayed as an operator-visibility
+  fault, never as an empty incident list.
+- [INCIDENT EVIDENCE] The console/API showed both a P2
+  `quote-collection-timeout` (automatic `retry-immediately`, operator action
+  `inspect-clob-and-child-io`) and the P2 capacity-pressure recovery. Thus
+  repeated timeout evidence is retained and actionable rather than silently
+  downgraded.
+- [FIXED / DEPLOYED] Exact SHA `923d8e69328c0f31acd4fe9091f55a94243bd363`
+  runs on Fly v297. Capacity recovery now accepts a positive writer receipt
+  from the same incident episode rather than incorrectly requiring it to be
+  newer than every subsequent `recovering` refresh. Post-deploy `/healthz`
+  reports capacity normal/pass at 53.96% free, `perception-recovery=0/pass`,
+  and `/perception/incidents` reports `open_count=0`; console HTTP is 200.
+- [DEPLOYMENT RCA] Terminal detachment left remote `flyctl deploy` children
+  running, which created repeated releases v295-v297. The live target SHA was
+  the same, but this is deployment churn and not acceptable normal operation.
+  Future deployment monitoring must retain/reap the client process and verify
+  the exact health release ID before submitting another deploy; do not infer
+  failure from truncated terminal output.
+
+### [NEXT — CURRENT]
+
+Observe multiple natural Quote cycles on release `923d8e6`; verify that a
+timeout, if it recurs, opens a durable P2 incident, triggers retry and closes
+only with recovery evidence while the direct console remains readable. Then
+continue the no-downtime historical SQLite capacity migration/compaction work;
+do not call M1 production accepted until continuous-runtime evidence and the
+remaining archive/structure warnings are closed or explicitly remediated.
