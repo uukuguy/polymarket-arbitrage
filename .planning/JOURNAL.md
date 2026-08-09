@@ -6594,6 +6594,9 @@ non-`dev` release identity and prove post-deploy restart/recovery.
 - [FIXED LOCAL] Generation-mode health now accepts only the atomically switched
   `bounded-complete` pointer with a comparison receipt, published valid
   snapshot, and authenticated committed counts. It fails closed otherwise.
+- [DEPLOY CORRECTION] A standard deploy re-applied `fly.toml` and overwrote the
+  temporary machine-only generation setting. The user-authorized mode is now
+  persisted in `fly.toml`; Quote remains disabled.
 - [VERIFIED LOCAL] Red/green pointer-health contract, market-truth health
   tests, complete health endpoint suite, and changed-file Ruff passed.
 
