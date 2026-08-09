@@ -6984,3 +6984,29 @@ micro CLOB polling runs while opportunity-first remains disabled, then observe
 multiple natural Quote cycles with health, console, opportunity and Polywatch
 evidence. Continue treating an upstream CLOB timeout as P1 rather than normal
 degradation.
+
+## SESSION 162 — 2026-08-10 (Task 6 deployed and first-cycle proof)
+
+- [DEPLOYED] Exact release `0c9e55cc37eeb5c3f4752742d502e6ea9a0dee69`
+  is Fly v306, boot `f2a630d5-2629-4e31-b3a2-0683e6e06223`. Two overlapping
+  deploy-client sessions caused v305/v306 rolling-control-plane churn, but
+  both converge to the same image; app and cron are now started and the Fly
+  service check passes.
+- [FIRST-CYCLE EVIDENCE] Quote attempt 414 completed 40,495 targets in 13.7s;
+  `/healthz` reported Quote age 33.5s and collector `pass`. The global
+  opportunity endpoint was HTTP 200 with 15 candidates and the direct incident
+  console was HTTP 200. Parent stale-feed hydration returned in about 0.1s,
+  rather than rebuilding the full projection.
+- [NOT ACCEPTED] Overall health remains `warn` because source truth fell back
+  to last-known-authenticated (`consecutive_failures=1`,
+  `source-truth-unavailable`). One success cycle proves the local P1 containment
+  but not continuous production stability; observe multiple cycles and retain
+  Polywatch as the alert authority.
+
+### [NEXT — CURRENT]
+
+Observe several v306 natural Quote cycles. Require fresh Quote, responsive
+health/console/opportunity surfaces and Polywatch success before declaring the
+P1 contained. Separately fix the direct console's recovered supervisor scope
+query (`producer:quote` versus the persisted `quote` scope) so closed
+supervisor recoveries remain visible.
