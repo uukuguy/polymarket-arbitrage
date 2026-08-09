@@ -147,6 +147,12 @@ def l1_reminder_interval_s(healthz: dict) -> int:
     quote_age = _extract_check(healthz, "quote_feed:last_complete_age_seconds", {})
     if quote_age and quote_age.get("status") == "fail":
         return P1_QUOTE_REMINDER_S
+    capacity = _extract_check(healthz, "perception:capacity_controller", {})
+    if capacity and (
+        capacity.get("status") == "fail"
+        or capacity.get("observedValue") in {"critical", "exhaustion-imminent"}
+    ):
+        return P1_QUOTE_REMINDER_S
     return REMINDER_S
 
 
@@ -669,6 +675,16 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
         return "push", "L1 /healthz unreachable (network or daemon down)"
 
     top_status = healthz.get("status", "unknown")
+    capacity = _extract_check(healthz, "perception:capacity_controller", {})
+    capacity_state = capacity.get("observedValue") if capacity else None
+    capacity_status = capacity.get("status") if capacity else None
+    if capacity_state in {"critical", "exhaustion-imminent"} or capacity_status == "fail":
+        return (
+            "push",
+            "L1 capacity controller "
+            f"{capacity_state or 'failed'} "
+            f"({capacity.get('output') or 'inspect Dashboard incident diagnosis'})",
+        )
     members = _extract_check(healthz, "snapshot:structure_event_members", {})
     if members and members.get("status") == "fail":
         output = members.get("output") or "structure-event-member-receipt-invalid"

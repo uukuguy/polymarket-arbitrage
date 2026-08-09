@@ -95,6 +95,30 @@ def test_quote_feed_unavailable_uses_p1_reminder_interval() -> None:
     assert WATCHER.l1_reminder_interval_s(health) == 300
 
 
+def test_critical_capacity_incident_pushes_diagnosis_and_uses_p1_reminders() -> None:
+    health = _health(
+        status="fail",
+        checks={
+            "perception:capacity_controller": _check(
+                "critical",
+                status="fail",
+                output=(
+                    "free_bytes=11 free_percent=11.0 last_action=reclaim-failed "
+                    "consecutive_failures=2 next_action=reclaim-bounded-history"
+                ),
+            ),
+        },
+    )
+
+    action, reason = WATCHER.decide_l1(health)
+
+    assert action == "push"
+    assert "capacity" in reason.lower()
+    assert "critical" in reason
+    assert "reclaim-bounded-history" in reason
+    assert WATCHER.l1_reminder_interval_s(health) == 300
+
+
 @pytest.mark.parametrize("reason", [
     "structure-event-member-checkpoint-invalid",
     "structure-event-source-receipt-invalid",

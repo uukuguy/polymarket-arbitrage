@@ -210,9 +210,14 @@ def read_perception_recovery_health(
         from polyarb.perception.store import OpportunityPerceptionStore
 
         store = OpportunityPerceptionStore(path, read_only=True)
-        open_count, candidate_open, http_open, other_open = IncidentManager(
-            store
-        ).open_incident_status()
+        incident_manager = IncidentManager(store)
+        open_count, candidate_open, http_open, other_open = (
+            incident_manager.open_incident_status()
+        )
+        capacity_open = any(
+            incident.scope == "capacity"
+            for incident in incident_manager.open_incidents()
+        )
         scopes = []
         if candidate_open:
             scopes.append("candidate")
@@ -220,6 +225,8 @@ def read_perception_recovery_health(
             scopes.append("http")
         if other_open:
             scopes.append("other")
+        if capacity_open:
+            scopes.append("capacity")
         mode, reason = "disabled", None
         if include_resource:
             con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.25)
@@ -1210,8 +1217,13 @@ def _build_health_checks(
         include_resource=resource_enabled,
     )
     incident_status = "pass"
-    if recovery_enabled:
+    if recovery_enabled or "capacity" in recovery.scopes:
         if not recovery.evidence_consistent:
+            incident_status = "fail"
+        elif "capacity" in recovery.scopes and capacity_status == "fail":
+            # Capacity P1 must remain a P1 in the common incident surface;
+            # otherwise a disabled candidate supervisor could visually dilute
+            # the emergency to a generic warning.
             incident_status = "fail"
         elif recovery.open_count:
             incident_status = (
@@ -1229,12 +1241,16 @@ def _build_health_checks(
         {
             "componentId": "perception-recovery",
             "componentType": "component",
-            "observedValue": (recovery.open_count if recovery_enabled else 0),
+            "observedValue": (
+                recovery.open_count
+                if recovery_enabled or "capacity" in recovery.scopes
+                else 0
+            ),
             "status": incident_status,
             "output": (
                 f"scopes={','.join(recovery.scopes)} "
                 f"evidence_consistent={recovery.evidence_consistent}"
-                if recovery_enabled
+                if recovery_enabled or "capacity" in recovery.scopes
                 else "disabled"
             ),
             "time": _utc_now_iso(),

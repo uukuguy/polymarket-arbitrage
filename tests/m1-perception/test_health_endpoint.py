@@ -911,6 +911,40 @@ def test_health_exposes_critical_capacity_runtime(
     assert "next_action=reclaim-bounded-history" in check["output"]
 
 
+def test_health_reports_capacity_incident_without_candidate_supervisor(
+    http_test_client: TestClient,
+) -> None:
+    """Capacity is independently operated, so its open incident is never hidden.
+
+    The opportunity candidate supervisor is intentionally disabled in the L1
+    production topology.  A critical capacity incident must still appear in
+    the common incident-health surface that Dashboard and Polywatch consume.
+    """
+    from polyarb.perception.capacity_incidents import CapacityIncidentLifecycle
+    from polyarb.perception.incidents import IncidentManager
+    from polyarb.perception.store import OpportunityPerceptionStore
+
+    store = http_test_client.app.state.sqlite_store
+    http_test_client.app.state.settings.capacity_controller_enabled = True
+    runtime = store.record_capacity_controller_measurement(
+        state="critical",
+        free_bytes=11,
+        free_percent=11.0,
+        observed_at_ms=1_000,
+    )
+    CapacityIncidentLifecycle(
+        IncidentManager(OpportunityPerceptionStore(store.db_path))
+    ).observe(runtime)
+
+    check = http_test_client.get("/healthz").json()["checks"][
+        "perception:open_incidents"
+    ][0]
+
+    assert check["observedValue"] == 1
+    assert check["status"] == "fail"
+    assert "capacity" in check["output"]
+
+
 @pytest.mark.parametrize("handler_name", ["health", "healthz"])
 async def test_health_database_projection_runs_off_event_loop(
     daemon_settings_for_test: Any,
