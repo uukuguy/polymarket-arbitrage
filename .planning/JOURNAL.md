@@ -6632,3 +6632,39 @@ to 884. Quote stays disabled until its explicit activation; after activation,
 verify real candidate discovery, persistence, notification delivery, and M2
 readiness. Design the required incremental publication SLO only after its
 acceptance criteria are explicitly confirmed.
+
+## SESSION 151 — 2026-08-09 (Polywatch monitor-of-monitor incident)
+
+- [INCIDENT] Fly cron machine `48e10e1a9692e8` was observed in `stopped`
+  state. This is L1-critical: the resident Polywatch process cannot report its
+  own absence. It was manually started; the live watcher then sent the real
+  L1/opportunity incident Telegram and wrote incident state.
+- [FIXED LOCAL] Commit `cbf7c4a` adds an independent control-plane watchdog.
+  GitHub Actions runs it every five minutes (best-effort provider cadence) and
+  the L1 deploy workflow runs it before HTTP smoke. It requires exactly one
+  started cron machine, attempts a stopped-machine start, re-reads state, sends
+  a L1-critical Telegram, and fails on any unverified recovery/delivery.
+- [PRODUCTION FAILURE FOUND] Cron logs showed every resident tick failing state
+  persistence with `PermissionError` against the legacy `/tmp` file: a prior
+  root-owned artifact conflicted with the non-root `polyarb` runtime. Commit
+  `aae2338` changes this to the image-owned `/app/logs` state path and locks it
+  by regression test.
+- [DEPLOY STATUS] Direct remote Fly build submission has not yet produced a
+  new machine image; current runtime still uses the old crontab path. Do not
+  treat the persistence repair as deployed until cron logs show the new
+  `/app/logs/polywatch-healthz-state.json` command and one successful state
+  write. The independent watchdog was read-only verified healthy against the
+  currently started cron machine.
+- [OPEN PRODUCTION INCIDENT] Quote collection remains stale and repeatedly
+  hits its 120-second subprocess hard deadline; `/healthz` and opportunity
+  endpoint correctly fail and Polywatch reports the incident. This is not an
+  acceptable continuous-operation state and must be root-caused before M1
+  acceptance.
+
+### [NEXT — CURRENT]
+
+Obtain a completed Fly deployment for `aae2338`, verify new cron command,
+state persistence, external watchdog and Telegram delivery. Then diagnose the
+Quote subprocess 120-second stall (including child stdout/stderr pipe
+backpressure and upstream request deadlines) with a red/green reproduction;
+do not classify M1 as production-ready while its Quote freshness gate fails.
