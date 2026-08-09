@@ -683,7 +683,8 @@ deploy:
 		FLY_API_TOKEN= flyctl deploy $(FLY_BUILD_MODE) --wait-timeout 600 \
 			--env POLYARB_RELEASE_ID="$$RELEASE_ID"
 	@echo ">> ensuring process scale: app=1 cron=1 (W8 Supercronic)"
-	FLY_API_TOKEN= flyctl scale count app=1 cron=1 -a polyarb-l1 --yes || true
+	FLY_API_TOKEN= flyctl scale count app=1 cron=1 -a polyarb-l1 --yes
+	@$(MAKE) polywatch-resident-repair
 	@echo ">> running post-deploy /health smoke probe"
 	bash scripts/deploy_smoke.sh
 
@@ -774,7 +775,12 @@ polywatch-resident-status:
 	FLY_API_TOKEN= flyctl ssh console -a polyarb-l1 --machine "$$CRON_ID" \
 	  -C "python -c 'from pathlib import Path; p=Path(\"/tmp/polywatch-healthz-state.json\"); print(p.read_text() if p.exists() else \"state file not created yet\")'"
 
-.PHONY: polywatch-healthz-dry polywatch-healthz polywatch-resident-status
+## polywatch-resident-repair: External control-plane probe; starts a stopped resident Polywatch machine and requires Telegram delivery.
+## Usage: make polywatch-resident-repair (requires Fly auth and POLYARB_TELEGRAM_* env)
+polywatch-resident-repair:
+	@FLY_API_TOKEN= uv run python scripts/polywatch/resident_watchdog.py --repair
+
+.PHONY: polywatch-healthz-dry polywatch-healthz polywatch-resident-status polywatch-resident-repair
 
 ## logs-tail-axiom: Print the Axiom dataset URL + sample APL query (convenience; opens nothing local)
 logs-tail-axiom:

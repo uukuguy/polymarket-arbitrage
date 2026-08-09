@@ -88,6 +88,7 @@ M1_MAKE_TARGETS = {
     "polywatch-healthz-dry",
     "polywatch-healthz",
     "polywatch-resident-status",
+    "polywatch-resident-repair",
     "fly-l2-status",
     "fly-l2-logs",
     "docs-m1-check",

@@ -22,3 +22,11 @@ def test_deploy_l1_workflow_ignores_documentation_only_pushes() -> None:
     assert "- '.planning/**'" in text
     assert "- 'docs/**'" in text
     assert "- '**/*.md'" in text
+
+
+def test_deploy_l1_workflow_requires_resident_polywatch_before_smoke() -> None:
+    text = DEPLOY_L1_YML.read_text()
+
+    assert "Verify and repair resident Polywatch" in text
+    assert "scripts/polywatch/resident_watchdog.py --repair" in text
+    assert text.index("Verify and repair resident Polywatch") < text.index("Smoke test /health")

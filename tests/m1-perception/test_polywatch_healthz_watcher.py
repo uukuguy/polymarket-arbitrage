@@ -1321,3 +1321,12 @@ def test_makefile_exposes_resident_polywatch_status() -> None:
     assert "--no-tail --json" in makefile
     assert 'contains("polywatch")' in makefile
     assert "/tmp/polywatch-healthz-state.json" in makefile
+
+
+def test_external_watchdog_is_five_minute_repairing_fallback() -> None:
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "polywatch-healthz.yml").read_text()
+
+    assert 'cron: "*/5 * * * *"' in workflow
+    assert "superfly/flyctl-actions/setup-flyctl@1.6" in workflow
+    assert "scripts/polywatch/resident_watchdog.py --repair" in workflow
+    assert "FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}" in workflow

@@ -1,5 +1,7 @@
 name: Polywatch — Healthz Watcher
-# Unified M1 production watcher. Every 15 minutes:
+# Unified M1 production watcher. Every five minutes:
+#   - externally verify the resident Fly cron machine exists and is started;
+#     start it and deliver a critical Telegram incident when it is stopped
 #   - poll L1 /healthz + /arbitrage/opportunities
 #   - poll L2 /healthz with explicit L3 evidence gates
 #   - probe the canonical Vercel Dashboard without following SSO redirects
@@ -21,7 +23,7 @@ name: Polywatch — Healthz Watcher
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -48,6 +50,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install Fly control-plane client
+        uses: superfly/flyctl-actions/setup-flyctl@1.6
+
+      - name: Verify and repair resident Polywatch
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          POLYARB_TELEGRAM_BOT_TOKEN: ${{ secrets.POLYARB_TELEGRAM_BOT_TOKEN }}
+          POLYARB_TELEGRAM_CHAT_ID: ${{ secrets.POLYARB_TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${POLYWATCH_DRY_RUN}" = "1" ]; then
+            python3 scripts/polywatch/resident_watchdog.py
+          else
+            python3 scripts/polywatch/resident_watchdog.py --repair
+          fi
 
       - name: Run healthz watcher
         env:
