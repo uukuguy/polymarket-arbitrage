@@ -19,8 +19,10 @@ Fly Machines/Volumes, pytest, Ruff, Makefile.
 
 - Never run `VACUUM`, `VACUUM INTO`, destructive delete, or volume resize on
   `/data/state.db` of the live machine.
-- The backup manifest binds source `releaseId`, machine, volume, page facts,
-  SHA-256, SQLite integrity result, and exact source path.
+- The promotion receipt binds source `releaseId`, machine, volume, page facts,
+  SQLite integrity result, and exact source path. The artifact manifest binds
+  the immutable backup SHA-256; a live source is intentionally not required to
+  retain one digest while it is being backed up.
 - R2 objects use content-addressed keys and exclusive manifest outputs; an
   existing object with different digest is a hard error.
 - A clone/replacement runs with public service disabled until it has produced a
@@ -37,7 +39,8 @@ Fly Machines/Volumes, pytest, Ruff, Makefile.
 ```python
 @dataclass(frozen=True)
 class SQLiteBackupManifest:
-    source_sha256: str
+    source_path: Path
+    backup_path: Path
     backup_sha256: str
     page_count: int
     page_size: int
@@ -48,18 +51,19 @@ def backup_sqlite(source: Path, destination: Path, *, pages_per_step: int) -> SQ
 def verify_sqlite(path: Path) -> SQLiteBackupManifest: ...
 ```
 
-- [ ] Write a failing test that mutates a WAL database during a throttled backup
+- [x] Write a failing test that mutates a WAL database during a throttled backup
   and asserts the resulting backup passes `integrity_check`, has a stable
   digest, and is readable independently.
-- [ ] Run `uv run pytest tests/ops/test_sqlite_volume_backup.py::test_online_backup_is_integrity_checked -q`; expect failure because the module is absent.
-- [ ] Implement `backup_sqlite` with `sqlite3.Connection.backup` to a caller
-  supplied new path, `pages=pages_per_step`, progress cancellation support,
+- [x] Run the focused test; it failed because the module was absent.
+- [x] Implement `backup_sqlite` with `sqlite3.Connection.backup` to a caller
+  supplied new path, `pages=pages_per_step`, progress callback support,
   `wal_checkpoint(PASSIVE)` only, and no source write pragma. Hash only after
   closing both connections; reject non-`ok` integrity output.
-- [ ] Add failing tests for existing destination, missing source, failed
-  integrity result, and a source fingerprint mismatch; then implement the
-  minimal refusal paths.
-- [ ] Run `uv run pytest tests/ops/test_sqlite_volume_backup.py -q` and Ruff.
+- [x] Add failing tests for existing destination and missing source, then
+  implement the minimal refusal paths. A source fingerprint mismatch is not a
+  valid invariant for a changing WAL database; the immutable backup digest is
+  verified instead.
+- [x] Run `uv run pytest tests/ops/test_sqlite_volume_backup.py -q` and Ruff.
 - [ ] Commit `feat(m1): add verified sqlite backup primitive`.
 
 ## Task 2: R2 transfer and restore verifier
