@@ -51,6 +51,27 @@ def test_repeated_timeout_reuses_the_open_incident(tmp_path) -> None:
     assert second.sequence > first.sequence
 
 
+def test_non_timeout_child_failure_creates_operator_incident(tmp_path) -> None:
+    from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
+    from polyarb.daemon.quote_worker import (
+        QuoteCollectionSubprocessError,
+        QuoteWorkerRuntime,
+    )
+
+    runtime = QuoteWorkerRuntime()
+    runtime.mark_failure(QuoteCollectionSubprocessError("failed"))
+    incident = QuoteIncidentLifecycle(_manager(tmp_path)).record_failure(
+        error=QuoteCollectionSubprocessError(
+            "failed", diagnostic="QuoteUniverseUnavailableError"
+        ),
+        runtime=runtime,
+    )
+
+    assert (incident.kind, incident.state) == ("quote-collection-failure", "recovering")
+    assert incident.evidence["next_action"] == "inspect-child-stderr"
+    assert incident.evidence["failure_reason"] == "quote-collection-subprocess-failed"
+
+
 def test_certified_quote_run_verifies_open_timeout_incident(tmp_path) -> None:
     """A retry is not recovery: only a complete post-incident run closes it."""
     from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle

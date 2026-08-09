@@ -625,10 +625,11 @@ def test_quote_timeout_incident_exposes_operator_diagnosis(http_test_client) -> 
         "impact": "feed-unavailable",
         "automatic_action": "retry-immediately",
         "next_action": "inspect-clob-and-child-io",
-        "deadline_s": 120,
-        "consecutive_failures": 3,
-        "last_success_age_s": 3057.8,
-    }
+            "deadline_s": 120,
+            "consecutive_failures": 3,
+            "last_success_age_s": 3057.8,
+            "failure_reason": "quote-collection-subprocess-timeout",
+        }
 
 
 def test_incident_history_endpoint_exposes_exact_bounded_lifecycle(

@@ -369,11 +369,12 @@ export interface PerceptionIncident {
   notification_delivery_tracked: false;
   diagnosis: {
     impact: "feed-at-risk" | "feed-unavailable";
-    automatic_action: "retry-immediately";
-    next_action: "inspect-clob-and-child-io";
+    automatic_action: "retry-immediately" | "retry-at-next-cadence";
+    next_action: "inspect-clob-and-child-io" | "inspect-child-stderr";
     deadline_s: number;
     consecutive_failures: number;
     last_success_age_s: number;
+    failure_reason: string | null;
   } | null;
   evidence: Record<string, unknown>;
 }

@@ -591,12 +591,16 @@ function isIncident(value: unknown): boolean {
       (isRecord(value.diagnosis) &&
         (value.diagnosis.impact === "feed-at-risk" ||
           value.diagnosis.impact === "feed-unavailable") &&
-        value.diagnosis.automatic_action === "retry-immediately" &&
-        value.diagnosis.next_action === "inspect-clob-and-child-io" &&
+        (value.diagnosis.automatic_action === "retry-immediately" ||
+          value.diagnosis.automatic_action === "retry-at-next-cadence") &&
+        (value.diagnosis.next_action === "inspect-clob-and-child-io" ||
+          value.diagnosis.next_action === "inspect-child-stderr") &&
         isPositiveInteger(value.diagnosis.deadline_s) &&
         isPositiveInteger(value.diagnosis.consecutive_failures) &&
         typeof value.diagnosis.last_success_age_s === "number" &&
-        value.diagnosis.last_success_age_s >= 0)) &&
+        value.diagnosis.last_success_age_s >= 0 &&
+        (value.diagnosis.failure_reason === null ||
+          typeof value.diagnosis.failure_reason === "string"))) &&
     isRecord(value.evidence)
   );
 }

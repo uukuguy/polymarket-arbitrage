@@ -50,6 +50,9 @@ ReleaseProjectionMemory = Callable[[], None]
 CompleteAttempt = Callable[[QuoteCollectionResult], Awaitable[None]]
 FailAttempt = Callable[[QuoteCollectionResult, str], Awaitable[None]]
 RecordTimeoutIncident = Callable[["QuoteWorkerRuntime"], Awaitable[None]]
+RecordFailureIncident = Callable[
+    ["QuoteCollectionSubprocessError", "QuoteWorkerRuntime"], Awaitable[None]
+]
 RecordCertifiedSuccessIncident = Callable[[QuoteCollectionResult], Awaitable[None]]
 _BACKGROUND_REAP_TASKS: set[asyncio.Task[object]] = set()
 
@@ -703,6 +706,7 @@ class QuoteWorker:
         complete_attempt: CompleteAttempt | None = None,
         fail_attempt: FailAttempt | None = None,
         record_timeout_incident: RecordTimeoutIncident | None = None,
+        record_failure_incident: RecordFailureIncident | None = None,
         record_certified_success_incident: RecordCertifiedSuccessIncident | None = None,
         producer_lock: asyncio.Lock | None = None,
         interval_s: float,
@@ -725,6 +729,7 @@ class QuoteWorker:
         self._complete_attempt = complete_attempt
         self._fail_attempt = fail_attempt
         self._record_timeout_incident = record_timeout_incident
+        self._record_failure_incident = record_failure_incident
         self._record_certified_success_incident = record_certified_success_incident
         self._producer_lock = producer_lock
         self._interval_s = interval_s
@@ -928,6 +933,14 @@ class QuoteWorker:
                         except Exception as incident_error:
                             logger.exception(
                                 "quote timeout incident recording failed "
+                                f"kind={type(incident_error).__name__}"
+                            )
+                    if self._record_failure_incident is not None and error.reason != "timeout":
+                        try:
+                            await self._record_failure_incident(error, self.runtime)
+                        except Exception as incident_error:
+                            logger.exception(
+                                "quote failure incident recording failed "
                                 f"kind={type(incident_error).__name__}"
                             )
                     logger.exception(
@@ -1147,6 +1160,17 @@ def build_production_quote_worker(
             ),
         )
 
+    async def record_failure_incident(
+        error: QuoteCollectionSubprocessError,
+        runtime: QuoteWorkerRuntime,
+    ) -> None:
+        if incident_lifecycle is not None:
+            await asyncio.to_thread(
+                incident_lifecycle.record_failure,
+                error=error,
+                runtime=runtime,
+            )
+
     async def record_certified_success_incident(result: QuoteCollectionResult) -> None:
         if incident_lifecycle is not None:
             await asyncio.to_thread(incident_lifecycle.record_certified_success, result)
@@ -1162,6 +1186,7 @@ def build_production_quote_worker(
         complete_attempt=complete_attempt,
         fail_attempt=fail_attempt,
         record_timeout_incident=record_timeout_incident,
+        record_failure_incident=record_failure_incident,
         record_certified_success_incident=record_certified_success_incident,
         producer_lock=producer_lock,
         interval_s=settings.neg_risk_quote_interval_s,

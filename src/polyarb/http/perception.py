@@ -1056,7 +1056,7 @@ def _timeline(
 
 
 def _quote_incident_diagnosis(evidence: dict[str, object]) -> dict[str, object] | None:
-    """Expose only a complete, credential-free Quote timeout disposition."""
+    """Expose only a complete, credential-free Quote failure disposition."""
     required_strings = ("impact", "automatic_action", "next_action")
     if any(not isinstance(evidence.get(key), str) for key in required_strings):
         return None
@@ -1082,6 +1082,11 @@ def _quote_incident_diagnosis(evidence: dict[str, object]) -> dict[str, object] 
         "deadline_s": deadline_s,
         "consecutive_failures": failures,
         "last_success_age_s": float(age),
+        "failure_reason": (
+            evidence["failure_reason"]
+            if isinstance(evidence.get("failure_reason"), str)
+            else None
+        ),
     }
 
 

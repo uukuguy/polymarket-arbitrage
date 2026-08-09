@@ -524,6 +524,9 @@ export default async function PerceptionOverviewPage() {
                   <div style={muted}>
                     Evidence: deadline {incident.diagnosis.deadline_s}s · consecutive failures {incident.diagnosis.consecutive_failures} · last certified success age {fmtDurationMs(incident.diagnosis.last_success_age_s * 1000)}
                   </div>
+                  {incident.diagnosis.failure_reason !== null && (
+                    <div style={muted}>Failure: {incident.diagnosis.failure_reason}</div>
+                  )}
                 </div>
               )}
               {incident.recovery_start_evidence !== null && (
