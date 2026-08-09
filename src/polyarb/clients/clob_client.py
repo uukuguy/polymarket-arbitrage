@@ -36,10 +36,12 @@ import math
 from concurrent.futures import Executor
 from typing import Any, Literal
 
+import httpx
 from aiolimiter import AsyncLimiter
 from loguru import logger
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import BookParams
+from py_clob_client.exceptions import PolyApiException
 
 from polyarb.config import Settings
 
@@ -98,6 +100,24 @@ def _compact_book_top(book: Any) -> dict[str, Any]:
         "asks": _compact_best_level(asks, ask=True),
         "bids": _compact_best_level(bids, ask=False),
     }
+
+
+def _transport_error_kind(error: BaseException) -> str | None:
+    """Return only the wrapped HTTP transport exception class, if present.
+
+    ``py-clob-client`` converts every ``httpx.RequestError`` into the generic
+    ``PolyApiException(error_msg="Request exception!")``.  Exception chaining
+    remains available, but request text may contain token IDs or URLs, so the
+    incident-safe diagnostic deliberately retains only the exception class.
+    """
+    current = error.__cause__ or error.__context__
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, httpx.RequestError):
+            return type(current).__name__
+        current = current.__cause__ or current.__context__
+    return None
 
 
 class ClobReaderClient:
@@ -173,7 +193,16 @@ class ClobReaderClient:
             params = [BookParams(token_id=t) for t in chunk]
 
             def fetch_sync() -> tuple[list[Any] | None, list[Any]]:
-                raw_books = self._client.get_order_books(params)
+                try:
+                    raw_books = self._client.get_order_books(params)
+                except PolyApiException as error:
+                    transport_kind = _transport_error_kind(error)
+                    if transport_kind is not None:
+                        logger.warning(
+                            f"CLOB books chunk {i}/{n_chunks} failed: "
+                            f"transport_kind={transport_kind}"
+                        )
+                    raise
                 projected = (
                     [_compact_book_top(book) for book in raw_books]
                     if projection == "top"

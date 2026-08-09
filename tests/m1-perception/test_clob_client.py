@@ -18,8 +18,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
 from py_clob_client.clob_types import BookParams
+from py_clob_client.exceptions import PolyApiException
 
 from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.config import Settings
@@ -186,6 +188,30 @@ async def test_propagates_sdk_exceptions() -> None:
     with patch.object(client._client, "get_order_books", side_effect=RuntimeError("boom")):
         with pytest.raises(RuntimeError, match="boom"):
             await client.get_books(["t1"])
+
+
+async def test_logs_sdk_transport_cause_without_exposing_request_content() -> None:
+    client = ClobReaderClient(Settings())
+
+    def wrapped_transport_failure(_params):
+        try:
+            raise httpx.ReadTimeout("upstream read timed out")
+        except httpx.RequestError:
+            raise PolyApiException(error_msg="Request exception!")
+
+    with (
+        patch.object(
+            client._client, "get_order_books", side_effect=wrapped_transport_failure
+        ),
+        patch("polyarb.clients.clob_client.logger.warning") as warning,
+        pytest.raises(PolyApiException, match="Request exception"),
+    ):
+        await client.get_books(["secret-token-id"])
+
+    message = warning.call_args.args[0]
+    assert "transport_kind=ReadTimeout" in message
+    assert "secret-token-id" not in message
+    assert "upstream read timed out" not in message
 
 
 async def test_injected_executor_owns_sync_sdk_call() -> None:
