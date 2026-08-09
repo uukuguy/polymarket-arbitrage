@@ -358,7 +358,9 @@ def test_make_smoke_and_living_manual_are_synchronized() -> None:
     assert ".PHONY: smoke-perception-dashboard" in makefile
     assert '"smoke-perception-dashboard"' in checker
     assert "`make smoke-perception-dashboard`" in manual
-    assert "operator visibility FAIL" in makefile
+    assert ".PHONY: smoke-operator-console" in makefile
+    assert "`make smoke-operator-console`" in manual
+    assert "OPERATOR_CONSOLE_URL" in makefile
     assert (
         "<!-- m1-contract: route=/perception "
         "file=dashboard/app/perception/page.tsx -->"

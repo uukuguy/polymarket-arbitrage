@@ -1189,11 +1189,24 @@ def test_dashboard_live_response_is_healthy() -> None:
 
 
 @pytest.mark.parametrize("status", [302, 307])
-def test_dashboard_auth_redirect_is_an_operator_visibility_fault(status: int) -> None:
+def test_dashboard_auth_redirect_is_a_healthy_protected_product_route(status: int) -> None:
     action, reason = _decision("decide_dashboard")(status, {}, None)
+
+    assert action == "noop"
+    assert "protected" in reason.lower()
+
+
+def test_fly_incident_console_is_the_operator_visibility_gate() -> None:
+    action, reason = _decision("decide_operator_console")(503, {}, None)
 
     assert action == "push"
     assert "operator visibility" in reason.lower()
+
+
+def test_fly_incident_console_http_200_is_healthy() -> None:
+    action, _ = _decision("decide_operator_console")(200, {}, None)
+
+    assert action == "noop"
 
 
 def test_dashboard_missing_deployment_pushes() -> None:

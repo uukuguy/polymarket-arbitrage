@@ -25,8 +25,9 @@ Decision rules
 - L1 quote feed fail/error/stopped OR invalid opportunity response → push
 - L2 strict L3 evidence/membership/freshness failure or under-fill → push
 - L2 WAITING_FOR_EVENT with fresh WS and strict L3 pass → no action
-- Dashboard 200 or Vercel SSO 302/307 → no action
-- Dashboard absent, 5xx, other HTTP, or transport failure → push
+- Vercel Dashboard 200 or SSO 302/307 → no action (protected product route)
+- Fly incident console must return 200; any other response or transport failure → push
+- Vercel Dashboard absent, 5xx, or other HTTP → push
 - Otherwise → no action
 
 Safety
@@ -65,6 +66,10 @@ OPPORTUNITY_URL = os.environ.get(
 DASHBOARD_URL = os.environ.get(
     "POLYWATCH_DASHBOARD_URL",
     "https://polymarket-arbitrage-jiangwen-su-s-projects.vercel.app",
+)
+OPERATOR_CONSOLE_URL = os.environ.get(
+    "POLYWATCH_OPERATOR_CONSOLE_URL",
+    "https://polyarb-l1.fly.dev/perception/console",
 )
 
 # Thresholds (seconds)
@@ -929,17 +934,15 @@ def decide_dashboard(
     headers: Mapping[str, str],
     transport_error: str | None,
 ) -> tuple[str, str]:
-    """Interpret a non-following probe of the canonical Vercel deployment."""
+    """Interpret a non-following probe of the protected Vercel product route."""
     if transport_error or status is None:
         return "push", f"Dashboard transport failure: {transport_error or 'unknown'}"
     if status == 200:
         return "noop", "Dashboard deployment and operator surface reachable (HTTP 200)"
     if status in {302, 307}:
         return (
-            "push",
-            "Dashboard operator visibility failure "
-            f"(HTTP {status} auth redirect): authorize the on-call viewer or "
-            "restore the authenticated operator route",
+            "noop",
+            f"Dashboard protected route reachable (HTTP {status} auth redirect)",
         )
 
     vercel_error = next(
@@ -953,6 +956,26 @@ def decide_dashboard(
     if status == 404 and vercel_error == "DEPLOYMENT_NOT_FOUND":
         return "push", "Dashboard HTTP 404 DEPLOYMENT_NOT_FOUND"
     return "push", f"Dashboard unhealthy (HTTP {status}, vercel_error={vercel_error})"
+
+
+def decide_operator_console(
+    status: int | None,
+    headers: Mapping[str, str],
+    transport_error: str | None,
+) -> tuple[str, str]:
+    """The Fly console is the direct, unauthenticated incident-detail gate."""
+    del headers
+    if transport_error or status is None:
+        return "push", (
+            "Operator visibility failure: Fly incident console transport failure "
+            f"({transport_error or 'unknown'})"
+        )
+    if status == 200:
+        return "noop", "Fly incident console reachable (HTTP 200)"
+    return "push", (
+        "Operator visibility failure: Fly incident console unhealthy "
+        f"(HTTP {status})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -970,6 +993,9 @@ def main() -> int:
     dashboard_status, dashboard_headers, dashboard_error = _probe_dashboard(
         DASHBOARD_URL
     )
+    console_status, console_headers, console_error = _probe_dashboard(
+        OPERATOR_CONSOLE_URL
+    )
 
     l1_action, l1_reason = decide_l1(l1)
     opportunity_action, opportunity_reason = decide_opportunity(
@@ -980,6 +1006,12 @@ def main() -> int:
     dashboard_action, dashboard_reason = decide_dashboard(
         dashboard_status, dashboard_headers, dashboard_error
     )
+    console_action, console_reason = decide_operator_console(
+        console_status, console_headers, console_error
+    )
+    if console_action == "push":
+        dashboard_action = "push"
+        dashboard_reason = console_reason
 
     print(f"[polywatch] L1 → {l1_action}: {l1_reason}")
     print(
@@ -988,7 +1020,7 @@ def main() -> int:
     )
     print(f"[polywatch] L2 → {l2_action}: {l2_reason}")
     print(
-        f"[polywatch] Dashboard → {dashboard_action}: {dashboard_reason}"
+        f"[polywatch] Operator surfaces → {dashboard_action}: {dashboard_reason}"
     )
 
     active_by_component = {
@@ -1070,7 +1102,7 @@ def main() -> int:
             )
         if "dashboard" in alert_components:
             push_lines.append(
-                f"⚠️ <b>polyarb Dashboard unhealthy</b>\n{dashboard_reason}"
+                f"⚠️ <b>polyarb operator surface unhealthy</b>\n{dashboard_reason}"
             )
 
         msg = f"🔔 polywatch — {now_iso}\n\n" + "\n\n".join(push_lines)

@@ -793,6 +793,7 @@ logs-tail-axiom:
 
 .PHONY: dashboard-dev dashboard-fixture-api dashboard-build dashboard-typecheck dashboard-deploy smoke-l2-dashboard
 .PHONY: smoke-perception-dashboard qualify-perception-local qualify-perception-prod-readonly
+.PHONY: smoke-operator-console
 
 ## dashboard-dev: 本地起 dashboard (next dev :3000)
 dashboard-dev:
@@ -854,8 +855,8 @@ smoke-l2-dashboard:
 ## smoke-perception-dashboard: Read-only HTTP reachability for the Dashboard /perception route
 ## Usage: make smoke-perception-dashboard
 ##        DASHBOARD_URL=http://localhost:3000 make smoke-perception-dashboard
-## Requires the application page (200). Auth redirects (302/307) are an
-## operator visibility failure: incident detail cannot be opened directly.
+## Requires the protected product page (200) or its Vercel SSO redirect
+## (302/307). Use smoke-operator-console for the direct incident-detail gate.
 ## It does not claim data freshness.
 smoke-perception-dashboard:
 	@DASHBOARD_URL="$${DASHBOARD_URL:-https://polymarket-arbitrage-jiangwen-su-s-projects.vercel.app}"; \
@@ -867,8 +868,26 @@ smoke-perception-dashboard:
 	}; \
 	case "$$code" in \
 	  200) echo "  /perception: 200 reachable" ;; \
-	  302|307) echo "  /perception: $$code operator visibility FAIL (auth redirect)"; exit 1 ;; \
+	  302|307) echo "  /perception: $$code protected route reachable (auth redirect)" ;; \
 	  *) echo "  /perception: $$code FAIL"; exit 1 ;; \
+	esac
+
+## smoke-operator-console: Verify the direct Fly incident-detail console is reachable
+## Usage: make smoke-operator-console
+##        OPERATOR_CONSOLE_URL=http://localhost:8080 make smoke-operator-console
+## Requires a direct HTTP 200. Unlike the protected product Dashboard, this is
+## the production operator-visibility gate and does not claim feed freshness.
+smoke-operator-console:
+	@OPERATOR_CONSOLE_URL="$${OPERATOR_CONSOLE_URL:-https://polyarb-l1.fly.dev}"; \
+	URL="$${OPERATOR_CONSOLE_URL%/}/perception/console"; \
+	echo ">> smoke-operator-console — GET $$URL"; \
+	code=$$(curl --disable --connect-timeout 3 --max-time 10 --retry 0 -sS -o /dev/null -w "%{http_code}" "$$URL") || { \
+	  echo "  /perception/console: transport FAIL"; \
+	  exit 1; \
+	}; \
+	case "$$code" in \
+	  200) echo "  /perception/console: 200 reachable" ;; \
+	  *) echo "  /perception/console: $$code operator visibility FAIL"; exit 1 ;; \
 	esac
 
 ## qualify-perception-local: Deterministic observer-only conformance gate for the M1 qualification evaluator
