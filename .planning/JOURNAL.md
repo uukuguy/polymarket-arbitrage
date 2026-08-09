@@ -7049,3 +7049,36 @@ Observe several natural v307 Quote cycles and correlate every health timeout
 with the active release/boot before diagnosis. Require fresh Quote plus
 responsive health/opportunity/console and clean Polywatch L1/opportunity/
 operator-surface checks before M1 acceptance.
+
+## SESSION 165 — 2026-08-10 (Quote supervisor continuity)
+
+- [ROOT CAUSE] A bounded `ProducerSupervisor` could return after retry
+  exhaustion while the HTTP daemon remained healthy. A Quote run then had no
+  producer, and no durable recovery proof could be written.
+- [DEPLOYED] `05382513e32a681fc7f94c79d2f0a634cc860775` made the daemon own a
+  persistent supervisor runner. It restarted a returned/crashed Quote
+  supervisor with bounded backoff; boot-time attempt 430 completed run 2225,
+  proving the orphaned collecting attempt was recovered on the original
+  volume machine.
+
+## SESSION 166 — 2026-08-10 (P1 closure proof deployed)
+
+- [ROOT CAUSE] Existing Quote `child-*` P1 incidents remained open after the
+  producer recovered because scope `quote` had no authentic Quote-run recovery
+  proof; escalated prior incidents also lacked a new recovery boundary.
+- [DEPLOYED] Exact release `fc99a6ed9f6868a507f7423be9bbd6d80fea7838` runs on
+  the sole original-volume machine `8906d6c644de18`, boot
+  `26f674a3-0ac5-4699-9067-d20df0f0b792`. On startup it moves only escalated
+  Quote supervisor incidents to `recovering`; a later complete Quote run must
+  match durable run ID, timestamps and response counts to verify it.
+- [LIVE PROOF] Attempt 435 completed run 2230 for 40,495 targets. Quote health
+  became `pass`; the two Quote P1 events plus the Quote timeout lifecycle
+  verified and `/perception/incidents` returned `open_count=0`. The direct
+  Fly operator console remains HTTP 200 and retains recovered lifecycle JSON.
+
+### [NEXT — CURRENT]
+
+Continue natural-cycle soak on release `fc99a6e`: record fresh Quote,
+opportunity, direct console and Polywatch evidence across multiple cycles.
+Treat any new timeout, health latency or P1 card as a visible incident with
+exact release/boot correlation; do not silence or force-close it.
