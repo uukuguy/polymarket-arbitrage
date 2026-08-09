@@ -4,15 +4,16 @@
 
 Added the read-only beginning of replacement-volume qualification. It refuses
 an existing verdict path, rejects a non-OK backup manifest or mismatched
-release identity, and verifies the direct console by HTTP status rather than
-mistaking its HTML response for JSON. It has no Fly control, routing, volume,
-or promotion capability.
+release identity, requires a passing Quote under the 300-second SLA, requires
+console HTTP 200 and zero open incidents, and verifies the HTML console by
+HTTP status rather than mistaking it for JSON. It has no Fly control, routing,
+volume, or promotion capability.
 
 ## Verification
 
 `uv run pytest tests/ops/test_qualify_replacement_volume.py -q`
 
-Result: passed with Ruff and diff checks.
+Result: `2 passed` with Ruff and diff checks.
 
 ## Remaining
 

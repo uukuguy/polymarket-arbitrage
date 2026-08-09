@@ -34,8 +34,21 @@ def qualify(
     health = _fetch_json(health_url)
     if health.get("releaseId") != expected_release_id:
         return {"status": "rejected", "reason": "release-id-mismatch"}
+    quote = health.get("checks", {}).get("quote_feed:last_complete_age_seconds", [])
+    if (
+        not isinstance(quote, list)
+        or not quote
+        or quote[0].get("status") != "pass"
+        or not isinstance(quote[0].get("observedValue"), (int, float))
+        or quote[0]["observedValue"] > 300
+    ):
+        return {"status": "rejected", "reason": "fresh-quote-required"}
     if _fetch_status(console_url) != 200:
         return {"status": "rejected", "reason": "console-unavailable"}
+    base_url = console_url.removesuffix("/perception/console")
+    incidents = _fetch_json(f"{base_url}/perception/incidents?limit=1")
+    if incidents.get("open_count") != 0:
+        return {"status": "rejected", "reason": "open-incidents"}
     verdict = {
         "status": "qualified",
         "release_id": expected_release_id,
