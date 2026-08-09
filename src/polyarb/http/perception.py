@@ -1070,9 +1070,14 @@ def _quote_incident_diagnosis(evidence: dict[str, object]) -> dict[str, object] 
         or isinstance(failures, bool)
         or not isinstance(failures, int)
         or failures < 1
-        or isinstance(age, bool)
-        or not isinstance(age, (int, float))
-        or age < 0
+        or (
+            age is not None
+            and (
+                isinstance(age, bool)
+                or not isinstance(age, (int, float))
+                or age < 0
+            )
+        )
     ):
         return None
     severity = evidence.get("severity")
@@ -1092,7 +1097,7 @@ def _quote_incident_diagnosis(evidence: dict[str, object]) -> dict[str, object] 
         "next_action": evidence["next_action"],
         "deadline_s": deadline_s,
         "consecutive_failures": failures,
-        "last_success_age_s": float(age),
+        "last_success_age_s": None if age is None else float(age),
         "free_percent": None,
         "failure_reason": (
             evidence["failure_reason"]

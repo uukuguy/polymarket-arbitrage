@@ -635,6 +635,32 @@ def test_quote_timeout_incident_exposes_operator_diagnosis(http_test_client) -> 
         }
 
 
+def test_quote_child_failure_exposes_diagnosis_without_prior_success(
+    http_test_client,
+) -> None:
+    """The first failure is P1 too; absent age cannot hide its operator plan."""
+    from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
+    from polyarb.daemon.quote_worker import QuoteCollectionSubprocessError, QuoteWorkerRuntime
+
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
+    runtime = QuoteWorkerRuntime()
+    runtime.mark_failure(QuoteCollectionSubprocessError("failed"))
+    QuoteIncidentLifecycle(IncidentManager(store, clock_ms=lambda: 1_000)).record_failure(
+        error=QuoteCollectionSubprocessError(
+            "failed", diagnostic="PolyApiException: Request exception"
+        ),
+        runtime=runtime,
+    )
+
+    item = http_test_client.get("/perception/incidents?limit=10").json()["items"][0]
+
+    assert item["kind"] == "quote-collection-failure"
+    assert item["diagnosis"] is not None
+    assert item["diagnosis"]["severity"] == "p1"
+    assert item["diagnosis"]["last_success_age_s"] is None
+    assert item["diagnosis"]["next_action"] == "inspect-child-stderr"
+
+
 def test_capacity_incident_exposes_operator_diagnosis(http_test_client) -> None:
     from polyarb.perception.capacity_incidents import CapacityIncidentLifecycle
     from polyarb.storage.sqlite_store import SQLiteStore
