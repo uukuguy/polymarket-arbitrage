@@ -7010,3 +7010,20 @@ health/console/opportunity surfaces and Polywatch success before declaring the
 P1 contained. Separately fix the direct console's recovered supervisor scope
 query (`producer:quote` versus the persisted `quote` scope) so closed
 supervisor recoveries remain visible.
+
+## SESSION 163 — 2026-08-10 (closed Quote recovery visibility repair)
+
+- [ROOT CAUSE] The direct console's recovered-supervisor panel queried
+  `producer:quote`, but `ProducerSupervisor` persists its incidents as scope
+  `quote`. Open incidents remained visible through the generic panel, while a
+  verified/recovered supervisor lifecycle silently disappeared from the
+  dedicated recent-history panel.
+- [FIX READY] The console query is now `scope=quote`, guarded by a red-first
+  HTML contract test. This is a visibility-only correction; it does not alter
+  Quote collection, incident authority, or the P1 runtime.
+
+### [NEXT — CURRENT]
+
+Commit/deploy the console-scope correction after recording another v306 natural
+Quote cycle. Continue requiring real continuous-cycle evidence before M1
+acceptance.

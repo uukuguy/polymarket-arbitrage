@@ -113,7 +113,7 @@ h1{margin:0 0 6px} .muted{color:#9aa4b2}.row{display:flex;gap:12px;align-items:c
 <script>
 const endpoint="/perception/incidents?limit=100";
 const recentQuoteEndpoint="/perception/incidents/recent?scope=quote-collection";
-const recentQuoteSupervisorEndpoint="/perception/incidents/recent?scope=producer%3Aquote";
+const recentQuoteSupervisorEndpoint="/perception/incidents/recent?scope=quote";
 const recentCapacityEndpoint="/perception/incidents/recent?scope=capacity";
 const status=document.getElementById("status"), root=document.getElementById("incidents"), recent=document.getElementById("recent");
 function field(card,label,value){const row=document.createElement("div");const key=document.createElement("strong");key.textContent=label+": ";row.append(key,document.createTextNode(value ?? "not recorded"));card.append(row)}

@@ -200,7 +200,10 @@ def test_perception_console_is_a_direct_operator_view(http_test_client) -> None:
     assert "read-model-unavailable" in response.text
     assert "Recent recovered severe incidents" in response.text
     assert "/perception/incidents/recent?scope=quote-collection" in response.text
-    assert "/perception/incidents/recent?scope=producer%3Aquote" in response.text
+    assert (
+        'const recentQuoteSupervisorEndpoint="/perception/incidents/recent?scope=quote";'
+        in response.text
+    )
 
 
 @pytest.mark.asyncio
