@@ -932,6 +932,36 @@ class QuoteWorker:
             self.runtime.mark_stopped()
 
 
+def load_certified_quote_feed(settings: Settings) -> CertifiedQuoteFeed | None:
+    """Rebuild a compact public feed from one durably certified Quote run.
+
+    This is intentionally read-only so the HTTP parent can hydrate its cache
+    when collection is owned by an isolated producer process.
+    """
+    quote_store = NegRiskQuoteStore(
+        settings.db_path,
+        structure_generation_read_mode=settings.structure_generation_read_mode,
+    )
+    projection = quote_store.latest_complete_projection()
+    if projection is None:
+        return None
+    opportunities = scan_certified_neg_risk_quote_projection(
+        projection,
+        min_edge_bps=0,
+        limit=projection.requested_token_count,
+    )
+    if (
+        opportunities.quote_run_id != projection.run_id
+        or opportunities.source_snapshot_id != projection.universe_snapshot_id
+        or opportunities.universe_hash != projection.universe_hash
+    ):
+        raise QuoteProjectionIntegrityError()
+    return CertifiedQuoteFeed(
+        CertifiedQuoteMetadata.from_projection(projection),
+        opportunities,
+    )
+
+
 def build_production_quote_worker(
     settings: Settings,
     *,
@@ -1024,19 +1054,9 @@ def build_production_quote_worker(
 
     async def restore_feed() -> CertifiedQuoteFeed | None:
         """Rebuild the compact M2 feed from a durable, already-certified run."""
-        projection = await asyncio.to_thread(quote_store.latest_complete_projection)
-        if projection is None:
-            return None
-        opportunities = await prepare_opportunities(projection)
-        if (
-            opportunities.quote_run_id != projection.run_id
-            or opportunities.source_snapshot_id != projection.universe_snapshot_id
-            or opportunities.universe_hash != projection.universe_hash
-        ):
-            raise QuoteProjectionIntegrityError()
-        return CertifiedQuoteFeed(
-            CertifiedQuoteMetadata.from_projection(projection),
-            opportunities,
+        return await asyncio.to_thread(
+            load_certified_quote_feed,
+            settings,
         )
 
     async def cleanup_collecting_runs() -> int:

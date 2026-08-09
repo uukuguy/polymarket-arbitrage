@@ -41,6 +41,7 @@ from polyarb.daemon.opportunity_watcher import (
 from polyarb.daemon.quote_worker import (
     QuoteWorker,
     build_production_quote_worker,
+    load_certified_quote_feed,
 )
 from polyarb.daemon.scheduler import SnapshotScheduler
 from polyarb.http.app import create_app
@@ -596,6 +597,11 @@ async def main() -> int:
             candidate_watcher.runtime if candidate_watcher is not None else None
         ),
     )
+    # The producer supervisor intentionally puts Quote collection in another
+    # process. The HTTP parent may therefore hydrate this read-only, already
+    # certified feed on demand without taking over collection work.
+    if settings.neg_risk_quote_worker_enabled:
+        app.state.quote_feed_loader = lambda: load_certified_quote_feed(settings)
 
     config = uvicorn.Config(
         app,

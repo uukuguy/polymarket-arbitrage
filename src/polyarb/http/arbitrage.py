@@ -33,6 +33,7 @@ from polyarb.routing.opportunity_scanner import (
 _SOURCE_TRUTH_READ_TIMEOUT_S = 1.0
 _LIFECYCLE_READ_TIMEOUT_S = 1.0
 _ENDPOINT_TIMEOUT_S = 3.0
+_FEED_HYDRATION_TIMEOUT_S = 1.0
 
 
 def _is_sha256(value: object) -> bool:
@@ -150,6 +151,21 @@ async def _opportunities(request: Request) -> JSONResponse:
         if runtime is not None
         else None
     )
+    # In the supervised topology, the Quote producer is deliberately isolated
+    # from the HTTP parent. Hydrate only its already-certified durable result;
+    # this request never performs CLOB collection or structure mutation.
+    if feed is None:
+        loader = getattr(request.app.state, "quote_feed_loader", None)
+        if loader is not None:
+            try:
+                feed = await asyncio.wait_for(
+                    asyncio.to_thread(loader),
+                    timeout=_FEED_HYDRATION_TIMEOUT_S,
+                )
+            except (TimeoutError, sqlite3.Error, ValueError):
+                feed = None
+            if feed is not None and runtime is not None:
+                runtime.restore_certified_feed(feed)
     if feed is None or feed.opportunity_scan is None:
         return JSONResponse(
             {"error": "verified market universe unavailable"},

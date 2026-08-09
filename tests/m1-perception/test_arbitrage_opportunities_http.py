@@ -273,6 +273,28 @@ def test_opportunity_endpoint_cold_cache_fails_without_database_scan(
     assert response.json() == {"error": "verified market universe unavailable"}
 
 
+def test_opportunity_endpoint_hydrates_certified_feed_from_isolated_producer(
+    http_test_client, monkeypatch
+) -> None:
+    """HTTP owns no producer runtime when the Quote worker is supervised elsewhere."""
+    resident_runtime = QuoteWorkerRuntime()
+    producer_runtime = QuoteWorkerRuntime()
+    _publish_feed(producer_runtime)
+    http_test_client.app.state.quote_worker_runtime = resident_runtime
+    http_test_client.app.state.quote_feed_loader = producer_runtime.certified_feed
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        lambda _path, _now_s: _truth(10),
+    )
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+
+    response = http_test_client.get("/arbitrage/opportunities")
+
+    assert response.status_code == 200
+    assert response.json()["quote_run_id"] == 20
+    assert resident_runtime.certified_feed() is producer_runtime.certified_feed()
+
+
 def test_opportunity_endpoint_serves_previous_feed_when_market_truth_advances(
     http_test_client, monkeypatch
 ) -> None:
