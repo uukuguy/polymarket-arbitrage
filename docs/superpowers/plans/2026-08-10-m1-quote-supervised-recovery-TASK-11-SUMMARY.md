@@ -8,3 +8,9 @@ projection on its 15-second hydration loop.
 
 Verification: Quote worker regression, L1 wiring, arbitrage HTTP and Quote
 health suites passed; Ruff passed.
+
+Production follow-up: the first compact-feed release exposed a foreign-key
+failure on the next current-generation switch.  The complete-run and bounded
+retention transactions now delete a superseded compact artifact before
+deleting its owned Quote run.  A regression test proves an existing compact
+artifact cannot block certification of the next generation.

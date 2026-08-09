@@ -851,6 +851,10 @@ class NegRiskQuoteStore:
             run_ids,
         )
         con.execute(
+            f"DELETE FROM neg_risk_quote_compact_feeds WHERE quote_run_id IN ({placeholders})",
+            run_ids,
+        )
+        con.execute(
             f"DELETE FROM neg_risk_quote_runs WHERE id IN ({placeholders})",
             run_ids,
         )
@@ -1054,6 +1058,10 @@ class NegRiskQuoteStore:
                 )
                 con.execute(
                     f"DELETE FROM neg_risk_quote_run_legs WHERE quote_run_id IN ({placeholders})",
+                    run_ids,
+                )
+                con.execute(
+                    f"DELETE FROM neg_risk_quote_compact_feeds WHERE quote_run_id IN ({placeholders})",
                     run_ids,
                 )
                 con.execute(

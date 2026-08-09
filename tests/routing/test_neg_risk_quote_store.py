@@ -228,6 +228,26 @@ def test_current_generation_hides_staging_and_replaces_previous_payload(quote_db
         ).fetchone() == (0,)
 
 
+def test_current_generation_replacement_removes_superseded_compact_feed(quote_db) -> None:
+    """A compact feed must not block the next certified generation switch."""
+    store = NegRiskQuoteStore(quote_db)
+    previous_run_id = _complete_current(store)
+    store.persist_compact_feed(
+        previous_run_id,
+        {"opportunities": [], "rejections": {}},
+    )
+
+    replacement_run_id = _complete_current(store)
+
+    assert store.latest_complete_projection() is not None
+    assert store.latest_complete_projection().run_id == replacement_run_id
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_quote_compact_feeds WHERE quote_run_id=?",
+            (previous_run_id,),
+        ).fetchone() == (0,)
+
+
 def test_current_generation_cannot_be_removed_by_legacy_retention_purge(quote_db) -> None:
     store = NegRiskQuoteStore(quote_db)
     current_run_id = _complete_current(store)
