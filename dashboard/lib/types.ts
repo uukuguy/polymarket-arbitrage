@@ -367,6 +367,14 @@ export interface PerceptionIncident {
     compacted_event_count: number;
   } | null;
   notification_delivery_tracked: false;
+  diagnosis: {
+    impact: "feed-at-risk" | "feed-unavailable";
+    automatic_action: "retry-immediately";
+    next_action: "inspect-clob-and-child-io";
+    deadline_s: number;
+    consecutive_failures: number;
+    last_success_age_s: number;
+  } | null;
   evidence: Record<string, unknown>;
 }
 

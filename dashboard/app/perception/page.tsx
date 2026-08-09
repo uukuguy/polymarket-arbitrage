@@ -509,6 +509,23 @@ export default async function PerceptionOverviewPage() {
                   ? "not started"
                   : `started ${fmtTime(incident.recovery_occurred_at_ms)}`}
               </div>
+              {incident.diagnosis !== null && (
+                <div
+                  style={{
+                    marginTop: 8,
+                    padding: 10,
+                    borderLeft: "3px solid #d36b6b",
+                    background: "#2d1717",
+                  }}
+                >
+                  <div><strong>Impact:</strong> {incident.diagnosis.impact.replace("-", " ")}</div>
+                  <div><strong>Automatic action:</strong> {incident.diagnosis.automatic_action.replace("-", " ")}</div>
+                  <div><strong>Next action:</strong> {incident.diagnosis.next_action.replaceAll("-", " ")}</div>
+                  <div style={muted}>
+                    Evidence: deadline {incident.diagnosis.deadline_s}s · consecutive failures {incident.diagnosis.consecutive_failures} · last certified success age {fmtDurationMs(incident.diagnosis.last_success_age_s * 1000)}
+                  </div>
+                </div>
+              )}
               {incident.recovery_start_evidence !== null && (
                 <pre
                   style={{

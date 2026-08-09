@@ -606,6 +606,31 @@ def test_discovery_reconciliation_and_incidents_use_stable_envelopes(
     }
 
 
+def test_quote_timeout_incident_exposes_operator_diagnosis(http_test_client) -> None:
+    from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
+
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
+    QuoteIncidentLifecycle(IncidentManager(store, clock_ms=lambda: 1_000)).record_timeout(
+        run_id=1908,
+        requested_token_count=38_972,
+        deadline_s=120,
+        consecutive_failures=3,
+        last_success_age_s=3_057.8,
+    )
+
+    response = http_test_client.get("/perception/incidents?limit=10")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["diagnosis"] == {
+        "impact": "feed-unavailable",
+        "automatic_action": "retry-immediately",
+        "next_action": "inspect-clob-and-child-io",
+        "deadline_s": 120,
+        "consecutive_failures": 3,
+        "last_success_age_s": 3057.8,
+    }
+
+
 def test_incident_history_endpoint_exposes_exact_bounded_lifecycle(
     http_test_client,
 ) -> None:

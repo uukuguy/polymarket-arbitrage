@@ -1055,6 +1055,36 @@ def _timeline(
         con.close()
 
 
+def _quote_incident_diagnosis(evidence: dict[str, object]) -> dict[str, object] | None:
+    """Expose only a complete, credential-free Quote timeout disposition."""
+    required_strings = ("impact", "automatic_action", "next_action")
+    if any(not isinstance(evidence.get(key), str) for key in required_strings):
+        return None
+    deadline_s = evidence.get("deadline_s")
+    failures = evidence.get("consecutive_failures")
+    age = evidence.get("last_success_age_s")
+    if (
+        isinstance(deadline_s, bool)
+        or not isinstance(deadline_s, int)
+        or deadline_s <= 0
+        or isinstance(failures, bool)
+        or not isinstance(failures, int)
+        or failures < 1
+        or isinstance(age, bool)
+        or not isinstance(age, (int, float))
+        or age < 0
+    ):
+        return None
+    return {
+        "impact": evidence["impact"],
+        "automatic_action": evidence["automatic_action"],
+        "next_action": evidence["next_action"],
+        "deadline_s": deadline_s,
+        "consecutive_failures": failures,
+        "last_success_age_s": float(age),
+    }
+
+
 def _incidents(
     db_path: Path,
     limit: int,
@@ -1127,6 +1157,11 @@ def _incidents(
                         }
                     ),
                     "notification_delivery_tracked": False,
+                    "diagnosis": (
+                        _quote_incident_diagnosis(item.incident.evidence)
+                        if item.incident.scope == "quote-collection"
+                        else None
+                    ),
                     "evidence": _safe_evidence(item.incident.evidence),
                 }
                 for item in page.items

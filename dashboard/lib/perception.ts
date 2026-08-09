@@ -587,6 +587,16 @@ function isIncident(value: unknown): boolean {
         isNonNegativeInteger(value.history_floor.through_event_id) &&
         isNonNegativeInteger(value.history_floor.compacted_event_count))) &&
     value.notification_delivery_tracked === false &&
+    (value.diagnosis === null ||
+      (isRecord(value.diagnosis) &&
+        (value.diagnosis.impact === "feed-at-risk" ||
+          value.diagnosis.impact === "feed-unavailable") &&
+        value.diagnosis.automatic_action === "retry-immediately" &&
+        value.diagnosis.next_action === "inspect-clob-and-child-io" &&
+        isPositiveInteger(value.diagnosis.deadline_s) &&
+        isPositiveInteger(value.diagnosis.consecutive_failures) &&
+        typeof value.diagnosis.last_success_age_s === "number" &&
+        value.diagnosis.last_success_age_s >= 0)) &&
     isRecord(value.evidence)
   );
 }
