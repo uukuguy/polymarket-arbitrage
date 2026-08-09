@@ -6767,3 +6767,29 @@ only with recovery evidence while the direct console remains readable. Then
 continue the no-downtime historical SQLite capacity migration/compaction work;
 do not call M1 production accepted until continuous-runtime evidence and the
 remaining archive/structure warnings are closed or explicitly remediated.
+
+## SESSION 155 — 2026-08-09 (recovered severe incident visibility)
+
+- [FIXED / DEPLOYED] Exact SHA `1868243e0f666d992f8b181c3dad9397c5a50308`
+  runs on Fly v298. The direct incident console now combines open incidents
+  with a bounded 24-hour view of recovered Quote and capacity P1/P2 incidents.
+  Every returned incident links to its existing exact-ID immutable lifecycle;
+  no second event store or control action was introduced.
+- [PRODUCTION EVIDENCE] The live recent endpoint returned five verified Quote
+  incidents and one verified capacity incident. For Quote incident
+  `9165da05afb84095942ab68d795ef30e`, the exact history preserves the P2
+  timeout disposition (`retry-immediately`, `inspect-clob-and-child-io`) and
+  the later certified recovery run 2152 with 39,094 successful responses.
+- [HEALTH INTERPRETATION] Current health is `warn`, not all-pass, due to
+  Archive, Supabase/R2, and Structure maintenance warnings. Capacity controller
+  is normal/pass, zero open perception recovery incidents are reported, and
+  the console/history read path is available. Do not collapse these independent
+  warning classes into either an all-clear or a Quote outage.
+
+### [NEXT — CURRENT]
+
+Observe natural Quote cycles under v298, including the newest failure→retry→
+verified transition if one occurs, and keep the direct console readable while
+the Quote worker runs. In parallel, prioritize the outstanding Archive/R2/
+mirror and historical SQLite capacity migration work; M1 remains not accepted
+until continuous production evidence covers those independent fault domains.
