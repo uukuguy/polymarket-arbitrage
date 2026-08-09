@@ -7121,3 +7121,30 @@ Implement the compact child-produced Quote feed handoff and remove full
 projection scanning from the HTTP-parent hydration path. Verify under natural
 Quote cycles that `/healthz`, console and opportunity routes stay below the
 Fly deadline while feed age remains under 300 seconds.
+
+## SESSION 169 — 2026-08-10 (compact-feed foreign-key P1 recovery)
+
+- [ROOT CAUSE] The first compact-feed release `4fb5bf4` added a feed row with
+  a foreign key to its complete Quote run, but did not delete that child row
+  in the existing current-generation replacement transaction. The next Quote
+  generation therefore failed with `FOREIGN KEY constraint failed`; the
+  incident console surfaced the failure, automatic retry, impact and operator
+  action as P2 and then P1 as freshness elapsed.
+- [FIX/DEPLOYED] `93362a51bba32061106d421a307428af18cc8095` deletes only the
+  superseded compact artifact in the same authorized transaction before its
+  Quote run, both for generation replacement and bounded retention. Its
+  regression test was observed RED on the exact SQLite foreign-key exception,
+  then GREEN with the focused Quote store, worker, health and HTTP suites.
+- [RECOVERY PROOF] Image `m1-compact-feed-fk-93362a5` runs on original-volume
+  machine `8906d6c644de18`, boot `796b1d80-da3b-4997-8b7d-81427d9778f7`.
+  A deployment-interrupted collecting run held its bounded 180-second lease;
+  this was correctly recorded as visible P1, automatically expired, and the
+  worker completed attempt 455 / run 2247. Quote age, collector state and
+  attempt phase are `pass`; the opportunity endpoint returned 10 candidates,
+  and `/perception/incidents` returned `open_count=0`.
+
+### [NEXT — CURRENT]
+
+Continue natural-cycle soak on `93362a5`: require multiple subsequent Quote
+generation replacements (the exact path that failed), responsive health/
+console/opportunity routes, and no new P1/P2 lifecycle before accepting M1.
