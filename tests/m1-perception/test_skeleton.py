@@ -57,6 +57,14 @@ def test_env_var_overrides_yaml(tmp_path, monkeypatch):
     [
         (
             {
+                "neg_risk_quote_interval_s": 60,
+                "neg_risk_quote_child_hard_limit_s": 180,
+                "neg_risk_quote_fetch_timeout_s": 150,
+            },
+            True,
+        ),
+        (
+            {
                 "neg_risk_quote_interval_s": 149,
                 "neg_risk_quote_child_hard_limit_s": 120,
             },

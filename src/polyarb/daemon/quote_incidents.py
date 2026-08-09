@@ -30,9 +30,12 @@ class QuoteIncidentLifecycle:
         attempt_id: int | None = None,
         run_id: int | None,
         requested_token_count: int | None,
-        deadline_s: int,
+        deadline_s: float,
         consecutive_failures: int,
         last_success_age_s: float | None,
+        failure_kind: str | None = None,
+        attempt_phase: str | None = None,
+        phase_timings: dict[str, int] | None = None,
     ) -> Incident:
         if deadline_s <= 0 or consecutive_failures < 1:
             raise ValueError("invalid-quote-timeout-evidence")
@@ -46,6 +49,7 @@ class QuoteIncidentLifecycle:
             if impact == "feed-unavailable" or consecutive_failures >= 3
             else "p2"
         )
+        hard_timeout = failure_kind == "child-hard-timeout"
         evidence: dict[str, Any] = {
             "attempt_id": attempt_id,
             "run_id": run_id,
@@ -55,11 +59,21 @@ class QuoteIncidentLifecycle:
             "last_success_age_s": last_success_age_s,
             "impact": impact,
             "automatic_action": "retry-immediately",
-            "next_action": "inspect-clob-and-child-io",
+            "next_action": (
+                "inspect-stage-checkpoint-and-rebalance-child-budget"
+                if hard_timeout
+                else "inspect-clob-and-child-io"
+            ),
             "failure_reason": "quote-collection-subprocess-timeout",
             "severity": severity,
             "reminder_interval_s": 300 if severity == "p1" else 1800,
         }
+        if failure_kind is not None:
+            evidence["failure_kind"] = failure_kind
+        if attempt_phase is not None:
+            evidence["attempt_phase"] = attempt_phase
+        if phase_timings is not None:
+            evidence["phase_timings"] = dict(phase_timings)
         incident = self._incidents.detect(self._SCOPE, self._KIND, evidence)
         if incident.state == "detected":
             incident = self._incidents.transition(incident.id, "classified", evidence)

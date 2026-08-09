@@ -69,12 +69,12 @@ class Settings(BaseSettings):
     # the latter also isolates Structure and is intentionally not required for
     # the Quote timeout containment path.
     neg_risk_quote_supervisor_enabled: bool = False
-    neg_risk_quote_interval_s: int = Field(default=120, gt=0, le=240)
+    neg_risk_quote_interval_s: int = Field(default=60, gt=0, le=240)
     neg_risk_quote_child_hard_limit_s: float = Field(
-        default=120.0, gt=0, le=120, allow_inf_nan=False
+        default=180.0, gt=0, le=180, allow_inf_nan=False
     )
     neg_risk_quote_fetch_timeout_s: float = Field(
-        default=100.0, gt=0, le=100, allow_inf_nan=False
+        default=100.0, gt=0, le=150, allow_inf_nan=False
     )
     neg_risk_quote_shutdown_reserve_s: float = Field(
         default=QUOTE_CHILD_SHUTDOWN_RESERVE_SECONDS,

@@ -26,6 +26,11 @@ primary_region = "ams"
   # This enables no wallet, signer, order, or execution capability.
   POLYARB_NEG_RISK_QUOTE_WORKER_ENABLED = "true"
   POLYARB_NEG_RISK_QUOTE_INTERVAL_S = "60"
+  # A 60s cadence plus a bounded 180s child and 30s publish reserve remains
+  # strictly inside the 300s public freshness SLA. The former 120s limit
+  # cut off observed fetch/persist tail latency and caused restart loops.
+  POLYARB_NEG_RISK_QUOTE_CHILD_HARD_LIMIT_S = "180"
+  POLYARB_NEG_RISK_QUOTE_FETCH_TIMEOUT_S = "150"
   # Quote hard child timeouts must enter the durable, bounded producer
   # supervisor instead of retrying forever in one daemon process.
   POLYARB_NEG_RISK_QUOTE_SUPERVISOR_ENABLED = "true"

@@ -7239,3 +7239,34 @@ Retain direct-console, Polywatch and strict-health evidence across further
 Quote replacements and L2 quiet-refresh cycles; immediately diagnose and
 record any timeout, stale evidence, mirror REST failure, or console-read
 failure rather than accepting a long-lived warning/degraded state.
+
+## SESSION 173 — 2026-08-10 (L1 Quote hard-timeout diagnosis and bounded recovery)
+
+- [P1 ROOT CAUSE] The active L1 configuration ran Quote every 60 seconds with
+  a 120-second hard child deadline and two-second shutdown reserve, leaving
+  only about 118 seconds for child communication. Durable attempts 481–484
+  were terminalized as `child-hard-timeout`; their checkpoints proved the
+  delay was not one opaque CLOB call (some reached transform/persist, one
+  stopped before fetch completed). A successful tail path had accumulated
+  roughly 126 seconds across fetch, persistence and certification, so the
+  existing bound could turn recoverable tail latency into a supervisor restart
+  loop.
+- [REPAIR READY] The production timing contract is now explicit and still
+  bounded: 60-second cadence, 180-second child hard limit, 150-second fetch
+  limit and 30-second publish reserve (`60 + 180 + 30 = 270 < 300` seconds).
+  The worker still terminates a stuck child and routes it through the bounded
+  supervisor; this is not an unbounded wait or permanent degradation.
+- [DASHBOARD EVIDENCE] Every future hard-timeout incident records the durable
+  attempt id, failure kind, final checkpoint phase and stage timing map. The
+  direct incident console already renders this evidence and now gives the
+  precise action `inspect-stage-checkpoint-and-rebalance-child-budget` instead
+  of the generic CLOB instruction. A RED/GREEN lifecycle test and timing-SLA
+  configuration test cover the behavior; focused Quote/HTTP regressions and
+  Ruff pass.
+
+### [NEXT — CURRENT]
+
+Deploy the bounded L1 Quote budget release, then require a new certified Quote
+run plus `/healthz`, opportunity endpoint, incident console and Polywatch
+checks to recover. Observe several natural cycles: any later hard timeout must
+show its phase evidence and automatic action directly in the console.

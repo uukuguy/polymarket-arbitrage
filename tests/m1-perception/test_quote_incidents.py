@@ -35,6 +35,32 @@ def test_timeout_creates_recovering_quote_incident_with_disposition(tmp_path) ->
     assert incident.evidence["impact"] == "feed-unavailable"
 
 
+def test_hard_timeout_incident_exposes_stage_and_bounded_budget_disposition(tmp_path) -> None:
+    from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
+
+    incident = QuoteIncidentLifecycle(_manager(tmp_path)).record_timeout(
+        attempt_id=484,
+        run_id=2275,
+        requested_token_count=38_972,
+        deadline_s=180,
+        consecutive_failures=4,
+        last_success_age_s=735.5,
+        failure_kind="child-hard-timeout",
+        attempt_phase="failed",
+        phase_timings={"admission_ms": 15_597, "universe_ms": 9_921},
+    )
+
+    assert incident.evidence["failure_kind"] == "child-hard-timeout"
+    assert incident.evidence["attempt_phase"] == "failed"
+    assert incident.evidence["phase_timings"] == {
+        "admission_ms": 15_597,
+        "universe_ms": 9_921,
+    }
+    assert incident.evidence["next_action"] == (
+        "inspect-stage-checkpoint-and-rebalance-child-budget"
+    )
+
+
 def test_repeated_timeout_reuses_the_open_incident(tmp_path) -> None:
     from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
 

@@ -1260,6 +1260,12 @@ def build_production_quote_worker(
             return
         snapshot = runtime.snapshot()
         has_attempt_identity = error.attempt_id is not None
+        attempt = await asyncio.to_thread(quote_store.latest_collection_attempt)
+        attempt_evidence = (
+            attempt
+            if attempt is not None and attempt.get("id") == error.attempt_id
+            else {}
+        )
         await asyncio.to_thread(
             incident_lifecycle.record_timeout,
             attempt_id=error.attempt_id,
@@ -1269,13 +1275,16 @@ def build_production_quote_worker(
                 if has_attempt_identity
                 else snapshot.last_requested_token_count
             ),
-            deadline_s=120,
+            deadline_s=settings.neg_risk_quote_child_hard_limit_s,
             consecutive_failures=snapshot.consecutive_failures,
             last_success_age_s=(
                 None
                 if snapshot.last_success_at_s is None
                 else max(0.0, time.time() - snapshot.last_success_at_s)
             ),
+            failure_kind=attempt_evidence.get("failure_kind"),
+            attempt_phase=attempt_evidence.get("phase"),
+            phase_timings=attempt_evidence.get("phase_timings"),
         )
 
     async def record_failure_incident(
