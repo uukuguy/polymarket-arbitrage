@@ -50,7 +50,9 @@ WaitForStop = Callable[[asyncio.Event, float], Awaitable[bool]]
 ReleaseProjectionMemory = Callable[[], None]
 CompleteAttempt = Callable[[QuoteCollectionResult], Awaitable[None]]
 FailAttempt = Callable[[QuoteCollectionResult, str], Awaitable[None]]
-RecordTimeoutIncident = Callable[["QuoteWorkerRuntime"], Awaitable[None]]
+RecordTimeoutIncident = Callable[
+    ["QuoteCollectionSubprocessError", "QuoteWorkerRuntime"], Awaitable[None]
+]
 RecordFailureIncident = Callable[
     ["QuoteCollectionSubprocessError", "QuoteWorkerRuntime"], Awaitable[None]
 ]
@@ -154,9 +156,20 @@ CleanupCollectingRuns = Callable[[], Awaitable[int]]
 class QuoteCollectionSubprocessError(RuntimeError):
     """The isolated quote collector did not return one valid complete result."""
 
-    def __init__(self, reason: str, *, diagnostic: str | None = None) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        diagnostic: str | None = None,
+        attempt_id: int | None = None,
+        run_id: int | None = None,
+        requested_token_count: int | None = None,
+    ) -> None:
         self.reason = reason
         self.diagnostic = diagnostic
+        self.attempt_id = attempt_id
+        self.run_id = run_id
+        self.requested_token_count = requested_token_count
         super().__init__(f"quote-collection-subprocess-{reason}")
 
 
@@ -524,7 +537,7 @@ async def collect_quotes_in_subprocess(
                 else "child-hard-timeout"
             ),
         )
-        raise QuoteCollectionSubprocessError("timeout") from error
+        raise QuoteCollectionSubprocessError("timeout", attempt_id=attempt_id) from error
     except asyncio.CancelledError:
         try:
             await _terminate_quote_child(
@@ -574,7 +587,9 @@ async def collect_quotes_in_subprocess(
                     attempt_id,
                     "child-fetch-timeout",
                 )
-                raise QuoteCollectionSubprocessError("timeout")
+                raise QuoteCollectionSubprocessError(
+                    "timeout", attempt_id=attempt_id
+                )
         await _terminalize_quote_attempt(attempt_store, attempt_id, "child-failed")
         diagnostic = _child_stderr_tail(stderr)
         if "verified universe snapshot is no longer the latest published truth" in (
@@ -959,7 +974,7 @@ class QuoteWorker:
                             )
                     if self._record_timeout_incident is not None and error.reason == "timeout":
                         try:
-                            await self._record_timeout_incident(self.runtime)
+                            await self._record_timeout_incident(error, self.runtime)
                         except Exception as incident_error:
                             logger.exception(
                                 "quote timeout incident recording failed "
@@ -1181,14 +1196,23 @@ def build_production_quote_worker(
         else QuoteIncidentLifecycle(IncidentManager(perception_store))
     )
 
-    async def record_timeout_incident(runtime: QuoteWorkerRuntime) -> None:
+    async def record_timeout_incident(
+        error: QuoteCollectionSubprocessError,
+        runtime: QuoteWorkerRuntime,
+    ) -> None:
         if incident_lifecycle is None:
             return
         snapshot = runtime.snapshot()
+        has_attempt_identity = error.attempt_id is not None
         await asyncio.to_thread(
             incident_lifecycle.record_timeout,
-            run_id=snapshot.last_run_id,
-            requested_token_count=snapshot.last_requested_token_count,
+            attempt_id=error.attempt_id,
+            run_id=error.run_id if has_attempt_identity else snapshot.last_run_id,
+            requested_token_count=(
+                error.requested_token_count
+                if has_attempt_identity
+                else snapshot.last_requested_token_count
+            ),
             deadline_s=120,
             consecutive_failures=snapshot.consecutive_failures,
             last_success_age_s=(

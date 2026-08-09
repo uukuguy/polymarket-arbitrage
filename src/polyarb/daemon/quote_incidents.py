@@ -27,6 +27,7 @@ class QuoteIncidentLifecycle:
     def record_timeout(
         self,
         *,
+        attempt_id: int | None = None,
         run_id: int | None,
         requested_token_count: int | None,
         deadline_s: int,
@@ -46,6 +47,7 @@ class QuoteIncidentLifecycle:
             else "p2"
         )
         evidence: dict[str, Any] = {
+            "attempt_id": attempt_id,
             "run_id": run_id,
             "requested_token_count": requested_token_count,
             "deadline_s": deadline_s,

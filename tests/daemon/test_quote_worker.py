@@ -292,6 +292,50 @@ async def test_subprocess_failure_retries_without_cadence_sleep() -> None:
     assert worker.runtime.snapshot().success_count == 1
 
 
+async def test_timeout_incident_receives_failed_attempt_identity() -> None:
+    """A timeout must identify its failed run, never the prior successful run."""
+    from polyarb.daemon.quote_worker import (
+        QuoteCollectionSubprocessError,
+        QuoteWorker,
+        QuoteWorkerRuntime,
+    )
+
+    attempts = 0
+    recorded: list[tuple[int | None, int | None, int | None]] = []
+
+    async def collect_once() -> QuoteCollectionResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise QuoteCollectionSubprocessError(
+                "timeout",
+                attempt_id=353,
+            )
+        return _result(2156)
+
+    async def record_timeout(error, _runtime) -> None:
+        recorded.append(
+            (error.attempt_id, error.run_id, error.requested_token_count)
+        )
+
+    async def wait_for_stop(_stop: asyncio.Event, _delay_s: float) -> bool:
+        return attempts >= 2
+
+    runtime = QuoteWorkerRuntime()
+    runtime.mark_success(_result(2154))
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        record_timeout_incident=record_timeout,
+        interval_s=120,
+        runtime=runtime,
+        wait_for_stop=wait_for_stop,
+    )
+
+    await worker.run(asyncio.Event())
+
+    assert recorded == [(353, None, None)]
+
+
 async def test_failed_quote_payload_is_reclaimed_before_immediate_retry() -> None:
     from polyarb.daemon.quote_worker import QuoteCollectionSubprocessError, QuoteWorker
 
@@ -948,6 +992,17 @@ async def test_isolated_collection_hard_timeout_kills_child_and_releases_run(tmp
                     "requested_token_count,successful_response_count,lease_expires_at_ms,status"
                     ") VALUES (999,0,0,0,0,9999999999999,'collecting')"
                 )
+                run_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
+                attempt_id = int(
+                    con.execute(
+                        "SELECT MAX(id) FROM neg_risk_quote_attempts"
+                    ).fetchone()[0]
+                )
+                con.execute(
+                    "UPDATE neg_risk_quote_attempts SET quote_run_id=?,"
+                    "quote_run_identity=?,target_count=? WHERE id=?",
+                    (run_id, run_id, 40_495, attempt_id),
+                )
             while not self.killed:
                 with sqlite3.connect(db_path) as con:
                     con.execute(
@@ -971,7 +1026,7 @@ async def test_isolated_collection_hard_timeout_kills_child_and_releases_run(tmp
         return process
 
     started = time.monotonic()
-    with pytest.raises(QuoteCollectionSubprocessError, match="subprocess-timeout"):
+    with pytest.raises(QuoteCollectionSubprocessError, match="subprocess-timeout") as captured:
         await collect_quotes_in_subprocess(
             Settings(
                 db_path=tmp_path / "state.db",
@@ -988,6 +1043,9 @@ async def test_isolated_collection_hard_timeout_kills_child_and_releases_run(tmp
     assert process.killed is True
     assert process.exited is True
     assert process.renewals > 0
+    assert captured.value.attempt_id is not None
+    assert captured.value.run_id is None
+    assert captured.value.requested_token_count is None
     attempt = NegRiskQuoteStore(db_path).latest_collection_attempt()
     assert attempt is not None
     assert (attempt["phase"], attempt["outcome"], attempt["failure_kind"]) == (
