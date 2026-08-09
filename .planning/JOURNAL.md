@@ -6597,6 +6597,14 @@ non-`dev` release identity and prove post-deploy restart/recovery.
 - [DEPLOY CORRECTION] A standard deploy re-applied `fly.toml` and overwrote the
   temporary machine-only generation setting. The user-authorized mode is now
   persisted in `fly.toml`; Quote remains disabled.
+- [HEALTH ROOT CAUSE] The active next snapshot (`building`) was projected as
+  FAILED, and a drift child that wrote the durable same-comparison seal before
+  its hard timeout still overrode that seal as a failure. Both were transient
+  child-state projections, not production truth failure.
+- [FIXED LOCAL] Health now reports active `BUILDING` work separately and gives
+  a terminal seal precedence only over a failed attempt bearing the same,
+  non-empty comparison id. Freshness and durable publication checkpoint gates
+  remain authoritative.
 - [VERIFIED LOCAL] Red/green pointer-health contract, market-truth health
   tests, complete health endpoint suite, and changed-file Ruff passed.
 

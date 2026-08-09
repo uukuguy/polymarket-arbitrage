@@ -477,6 +477,32 @@ def test_structure_drift_health_is_disabled_warn_pending_and_fail_stale() -> Non
     assert "latest_attempt_id=7" in failed_attempt["output"]
 
 
+def test_structure_drift_health_seal_supersedes_same_comparison_timeout() -> None:
+    check = health_module._structure_drift_health_check(
+        {
+            "authorization_mode": "drift-safe-sealed",
+            "authorized": True,
+            "checkpoint_at_ms": 9_000,
+            "phase": "sealed",
+            "progress_id": "comparison-sealed",
+            "reason": None,
+            "latest_attempt": {
+                "id": 8,
+                "progress_id": "comparison-sealed",
+                "outcome": "failed",
+                "failure_kind": "structure-drift-timeout",
+                "started_at_ms": 9_500,
+            },
+        },
+        enabled=True,
+        now_ms=10_000,
+        publication_sla_s=100,
+    )["snapshot:structure_generation_drift"][0]
+
+    assert check["status"] == "pass"
+    assert "latest_attempt_superseded_by_seal=true" in check["output"]
+
+
 def test_structure_drift_health_projects_authenticated_terminal_evidence() -> None:
     check = health_module._structure_drift_health_check(
         {
@@ -1937,6 +1963,27 @@ def test_health_reports_persisted_degraded_structure_status(
     check = response.json()["checks"]["snapshot:last_status"][0]
     assert check["observedValue"] == "DEGRADED"
     assert check["status"] == "warn"
+
+
+def test_health_does_not_mark_active_building_snapshot_as_failed(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    snapshot_id = _insert_snapshot(
+        daemon_settings_for_test.db_path,
+        taken_at_ms=int(time.time() * 1000) - 1_000,
+        snapshot_status="building",
+        coverage_completed=False,
+        market_view_published=False,
+    )
+    with sqlite3.connect(daemon_settings_for_test.db_path) as con:
+        con.execute("UPDATE snapshots SET is_valid=0 WHERE id=?", (snapshot_id,))
+
+    response = http_test_client.get("/health")
+
+    check = response.json()["checks"]["snapshot:last_status"][0]
+    assert check["observedValue"] == "BUILDING"
+    assert check["status"] == "pass"
 
 
 def test_resource_evidence_health_has_no_capability_gate(

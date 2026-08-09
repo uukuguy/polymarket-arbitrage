@@ -811,6 +811,17 @@ def _structure_drift_health_check(
             if isinstance(latest_attempt, dict)
             else None
         )
+        attempt_superseded_by_seal = (
+            authorized
+            and phase == "sealed"
+            and attempt_outcome == "failed"
+            and isinstance(latest_attempt, dict)
+            and isinstance(status.get("progress_id"), str)
+            and bool(status.get("progress_id"))
+            and latest_attempt.get("progress_id") == status.get("progress_id")
+        )
+        if attempt_superseded_by_seal:
+            attempt_failed = False
         severity = (
             "pass"
             if authorized and not attempt_failed
@@ -915,6 +926,8 @@ def _structure_drift_health_check(
                 f"latest_attempt_id={attempt_id} "
                 f"latest_attempt_outcome={attempt_outcome} "
                 f"latest_attempt_failure={attempt_failure} "
+                "latest_attempt_superseded_by_seal="
+                f"{str(attempt_superseded_by_seal).lower()} "
                 "class_counts="
                 f"{json.dumps(status.get('class_counts', {}), sort_keys=True)}"
             )
@@ -1390,7 +1403,10 @@ def _build_health_checks(
         # intentionally only a bounded failure reason and cannot distinguish
         # a valid DEGRADE from a clean OK.
         persisted_status = str(last_snapshot.get("snapshot_status") or "").lower()
-        if persisted_status == "degraded":
+        if persisted_status == "building":
+            last_status_val = "BUILDING"
+            status_check = "pass"
+        elif persisted_status == "degraded":
             last_status_val = "DEGRADED"
             status_check = "warn"
         elif persisted_status == "failed" or not last_snapshot.get("is_valid", True):
