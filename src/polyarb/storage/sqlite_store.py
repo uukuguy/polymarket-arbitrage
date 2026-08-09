@@ -12686,6 +12686,92 @@ class SQLiteStore:
             raise ValueError("structure-generation-cleanup-runtime-missing")
         return self._structure_generation_cleanup_runtime_from_row(tuple(row))
 
+    @staticmethod
+    def _capacity_controller_runtime_from_row(
+        row: tuple[object, ...],
+    ) -> dict[str, object]:
+        return {
+            "state": str(row[0]),
+            "state_started_at_ms": int(row[1]),
+            "free_bytes": None if row[2] is None else int(row[2]),
+            "free_percent": None if row[3] is None else float(row[3]),
+            "last_measurement_at_ms": int(row[4]),
+            "last_action": str(row[5]),
+            "consecutive_failures": int(row[6]),
+            "next_attempt_at_ms": int(row[7]),
+            "last_error_kind": None if row[8] is None else str(row[8]),
+            "last_recovery_receipt_at_ms": (
+                None if row[9] is None else int(row[9])
+            ),
+        }
+
+    def capacity_controller_runtime_status(self) -> dict[str, object]:
+        """Read restart-persistent capacity episode state without mutating it."""
+        with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as con:
+            row = con.execute(
+                "SELECT state,state_started_at_ms,free_bytes,free_percent,"
+                "last_measurement_at_ms,last_action,consecutive_failures,"
+                "next_attempt_at_ms,last_error_kind,last_recovery_receipt_at_ms "
+                "FROM capacity_controller_runtime WHERE id=1"
+            ).fetchone()
+        if row is None:
+            raise ValueError("capacity-controller-runtime-missing")
+        return self._capacity_controller_runtime_from_row(tuple(row))
+
+    def record_capacity_controller_measurement(
+        self,
+        *,
+        state: Literal["normal", "pressure", "critical", "exhaustion-imminent"],
+        free_bytes: int,
+        free_percent: float,
+        observed_at_ms: int,
+    ) -> dict[str, object]:
+        """Persist one measured watermarked state, preserving episode start time."""
+        if state not in {"normal", "pressure", "critical", "exhaustion-imminent"}:
+            raise ValueError("invalid-capacity-controller-state")
+        if type(free_bytes) is not int or free_bytes < 0:
+            raise ValueError("invalid-capacity-controller-free-bytes")
+        if (
+            isinstance(free_percent, bool)
+            or not isinstance(free_percent, (int, float))
+            or not 0.0 <= float(free_percent) <= 100.0
+        ):
+            raise ValueError("invalid-capacity-controller-free-percent")
+        if type(observed_at_ms) is not int or observed_at_ms < 0:
+            raise ValueError("invalid-capacity-controller-observed-at")
+        con = self._connect_writer()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT state,state_started_at_ms FROM "
+                "capacity_controller_runtime WHERE id=1"
+            ).fetchone()
+            if row is None:
+                raise ValueError("capacity-controller-runtime-missing")
+            state_started_at_ms = (
+                observed_at_ms if str(row[0]) != state else int(row[1])
+            )
+            con.execute(
+                "UPDATE capacity_controller_runtime SET state=?,state_started_at_ms=?,"
+                "free_bytes=?,free_percent=?,last_measurement_at_ms=?,"
+                "last_action='measured',last_error_kind=NULL WHERE id=1",
+                (
+                    state,
+                    state_started_at_ms,
+                    free_bytes,
+                    float(free_percent),
+                    observed_at_ms,
+                ),
+            )
+            con.execute("COMMIT")
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+        return self.capacity_controller_runtime_status()
+
     def recover_structure_generation_cleanup_runtime(
         self,
         *,

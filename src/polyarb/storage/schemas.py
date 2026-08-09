@@ -3827,6 +3827,36 @@ INSERT OR IGNORE INTO structure_generation_cleanup_runtime(
     id,state,consecutive_failures,next_attempt_at_ms,rows_deleted,checkpoint_at_ms
 ) VALUES (1,'idle',0,0,0,0);
 
+-- Resident capacity governance has its own restart-persistent operational
+-- truth.  It is deliberately separate from resource-controller decisions:
+-- capacity episodes must remain visible even when optional opportunity
+-- producers are disabled.
+CREATE TABLE IF NOT EXISTS capacity_controller_runtime (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    state TEXT NOT NULL CHECK(state IN (
+        'normal','pressure','critical','exhaustion-imminent'
+    )),
+    state_started_at_ms INTEGER NOT NULL CHECK(state_started_at_ms>=0),
+    free_bytes INTEGER CHECK(free_bytes IS NULL OR free_bytes>=0),
+    free_percent REAL CHECK(
+        free_percent IS NULL OR (free_percent>=0.0 AND free_percent<=100.0)
+    ),
+    last_measurement_at_ms INTEGER NOT NULL CHECK(last_measurement_at_ms>=0),
+    last_action TEXT NOT NULL CHECK(length(last_action) BETWEEN 1 AND 64),
+    consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK(consecutive_failures>=0),
+    next_attempt_at_ms INTEGER NOT NULL DEFAULT 0 CHECK(next_attempt_at_ms>=0),
+    last_error_kind TEXT CHECK(
+        last_error_kind IS NULL OR length(last_error_kind) BETWEEN 1 AND 64
+    ),
+    last_recovery_receipt_at_ms INTEGER CHECK(
+        last_recovery_receipt_at_ms IS NULL OR last_recovery_receipt_at_ms>=0
+    )
+);
+INSERT OR IGNORE INTO capacity_controller_runtime(
+    id,state,state_started_at_ms,last_measurement_at_ms,last_action,
+    consecutive_failures,next_attempt_at_ms
+) VALUES (1,'normal',0,0,'measured',0,0);
+
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
