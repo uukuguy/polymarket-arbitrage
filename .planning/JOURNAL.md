@@ -7270,3 +7270,36 @@ Deploy the bounded L1 Quote budget release, then require a new certified Quote
 run plus `/healthz`, opportunity endpoint, incident console and Polywatch
 checks to recover. Observe several natural cycles: any later hard timeout must
 show its phase evidence and automatic action directly in the console.
+
+## SESSION 174 — 2026-08-10 (L1 startup lease recovery deployed and proven)
+
+- [LIVE DIAGNOSIS] The first bounded-budget boot correctly made the cold feed
+  visible as fail-closed, and the incident console exposed the exact next
+  blocker: `quote collection failed: collecting quote run already exists:
+  2279`. This was a distinct restart-recovery gap, not a reason to disguise
+  the outage as a generic timeout.
+- [ROOT CAUSE / FIX] A daemon replacement kills its isolated child, but its
+  durable Quote lease may remain unexpired. The next sole supervised worker
+  previously tried admission before releasing that orphan. Commit `f83dae8`
+  adds a startup-only recovery step that fails only pre-existing collecting
+  runs with `collector-orphaned-on-worker-start`; normal cancellation keeps
+  its separate `collector-cancelled` receipt. The RED test proves cleanup
+  precedes first admission; focused worker/incident regressions and Ruff pass.
+- [DEPLOY / RECOVERY PROOF] Fly L1 release v311 runs exact
+  `f83dae873acaa088251167881630eb9716423519` on original-volume machine
+  `8906d6c644de18`. It automatically cleared the open incident and completed
+  attempt 493 / run 2282 for 40,495 tokens. External probes returned
+  `/healthz` 200 (Quote age 113.5s, collector pass), opportunities 200 with
+  ten certified candidates, and incident console 200 with `open_count=0`.
+  Polywatch recorded its prior failure/recovery, then its 22:42 UTC cycle saw
+  L1 and opportunities healthy, emitted no alert, and persisted an empty
+  incident state. The full operator chain is therefore observable rather than
+  silently paused.
+
+### [NEXT — CURRENT]
+
+Keep L1 v311 under natural Quote-cycle soak. Require several subsequent
+attempt/run replacements with health, opportunities, incident console and
+Polywatch remaining healthy. If a hard timeout recurs, use its console stage
+timings to decide whether the remaining bottleneck is fetch, persistence or
+certification; do not resume generic retry loops.
