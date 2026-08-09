@@ -815,14 +815,21 @@ class QuoteWorker:
                 attempt_started = self._monotonic()
                 retry_immediately = False
                 result = None
+                producer_slot_acquired = False
                 self.runtime.mark_pipeline_started()
                 try:
                     self.runtime.mark_started()
-                    if self._producer_lock is None:
-                        result = await self._collect_once()
-                    else:
-                        async with self._producer_lock:
-                            result = await self._collect_once()
+                    # Quote is the M2 source-of-truth producer.  Its durable
+                    # transaction is larger than the child collection alone:
+                    # certification and feed publication also read/write the
+                    # same SQLite database.  Releasing this slot after the
+                    # child returns allowed Structure writers to interleave
+                    # with that critical tail and stretch Quote persistence
+                    # from seconds to tens of seconds in production.
+                    if self._producer_lock is not None:
+                        await self._producer_lock.acquire()
+                        producer_slot_acquired = True
+                    result = await self._collect_once()
                     certified_projection = None
                     certified_opportunities = None
                     if self._certify_projection is not None:
@@ -878,6 +885,14 @@ class QuoteWorker:
                             f"{result.requested_token_count} "
                             f"elapsed_ms={result.elapsed_ms}"
                         )
+                        # The shared write-critical boundary ends at the
+                        # certified public feed. Retention, global observer
+                        # reconciliation and notification delivery are
+                        # deliberately outside it: they are fail-soft side
+                        # effects and must never monopolize Structure's slot.
+                        if producer_slot_acquired:
+                            self._producer_lock.release()
+                            producer_slot_acquired = False
                         if self._cleanup_old_runs is not None:
                             try:
                                 deleted_runs = await self._cleanup_old_runs()
@@ -971,6 +986,8 @@ class QuoteWorker:
                             f"elapsed_ms={result.elapsed_ms}"
                         )
                 finally:
+                    if producer_slot_acquired:
+                        self._producer_lock.release()
                     # Certification needs the full run legs, quotes, and source
                     # universe, but steady-state health/opportunity reads do not.
                     # Drop the local owner before the interval wait so the next

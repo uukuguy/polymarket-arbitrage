@@ -151,6 +151,45 @@ async def test_worker_waits_for_shared_producer_slot() -> None:
     assert calls == 1
 
 
+async def test_worker_keeps_shared_producer_slot_through_certification() -> None:
+    """Structure writers cannot interleave with a certified Quote publication."""
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    producer_lock = asyncio.Lock()
+    projection = _ProjectionFixture(run_id=1)
+    contender_entered = asyncio.Event()
+    contenders: list[asyncio.Task[None]] = []
+
+    async def collect_once() -> QuoteCollectionResult:
+        return _result(1)
+
+    async def certify_projection(_result: QuoteCollectionResult) -> _ProjectionFixture:
+        contenders.append(asyncio.create_task(_acquire_contender()))
+        await asyncio.sleep(0)
+        assert not contender_entered.is_set(), "producer slot released before certification"
+        return projection
+
+    async def _acquire_contender() -> None:
+        async with producer_lock:
+            contender_entered.set()
+
+    async def stop_after_once(_stop: asyncio.Event, _delay_s: float) -> bool:
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        certify_projection=certify_projection,
+        producer_lock=producer_lock,
+        interval_s=120,
+        wait_for_stop=stop_after_once,
+    )
+
+    await worker.run(asyncio.Event())
+    await contenders[0]
+
+    assert contender_entered.is_set()
+
+
 @pytest.mark.parametrize(
     ("finished_at", "expected_delay"),
     ((175.0, 45.0), (250.0, 0.0)),
