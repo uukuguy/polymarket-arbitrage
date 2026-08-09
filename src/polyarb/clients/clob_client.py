@@ -42,6 +42,7 @@ from loguru import logger
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import BookParams
 from py_clob_client.exceptions import PolyApiException
+from py_clob_client.http_helpers import helpers as clob_http_helpers
 
 from polyarb.config import Settings
 
@@ -128,6 +129,8 @@ class ClobReaderClient:
     No network I/O happens until a method is called.
     """
 
+    _transport_configured = False
+
     def __init__(
         self,
         settings: Settings,
@@ -135,11 +138,25 @@ class ClobReaderClient:
         executor: Executor | None = None,
     ) -> None:
         self._settings = settings
+        self._configure_sdk_transport(settings.clob_batch_max_concurrency)
         # L0 read-only: only host needed. NO key/creds/chain_id (tested in T5).
         self._client = ClobClient(settings.clob_url)
         self._limiter = AsyncLimiter(settings.clob_batch_rate_per_10s, 10)
         self._batch_semaphore = asyncio.Semaphore(settings.clob_batch_max_concurrency)
         self._executor = executor
+
+    @classmethod
+    def _configure_sdk_transport(cls, max_connections: int) -> None:
+        """Install one bounded HTTP/1.1 pool for the SDK in this process."""
+        if cls._transport_configured:
+            return
+        previous = clob_http_helpers._http_client
+        clob_http_helpers._http_client = httpx.Client(
+            http2=False,
+            limits=httpx.Limits(max_connections=max_connections),
+        )
+        previous.close()
+        cls._transport_configured = True
 
     async def _run_sync(self, function: Any, *args: Any) -> Any:
         if self._executor is None:
