@@ -285,6 +285,34 @@ def test_structure_status_backfill_does_not_rewrite_settled_snapshots(
     ]
 
 
+def test_structure_status_backfill_runs_only_when_status_column_is_added(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal daemon boots must not scan all historic Structure snapshots."""
+    db = tmp_path / "current-structure.db"
+    store = SQLiteStore(db)
+    store.init_schema()
+
+    statements: list[str] = []
+    original_connect = sqlite_store_module.sqlite3.connect
+
+    def traced_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        con = original_connect(*args, **kwargs)
+        con.set_trace_callback(statements.append)
+        return con
+
+    monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", traced_connect)
+    SQLiteStore(db).init_schema()
+
+    assert not [
+        statement
+        for statement in statements
+        if "FROM snapshots s " in statement
+        and "snapshot_status='ok'" in statement
+    ]
+
+
 def _read_market_view_published(db: Path) -> int:
     with sqlite3.connect(db) as con:
         return int(

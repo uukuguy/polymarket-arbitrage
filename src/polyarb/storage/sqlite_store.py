@@ -3292,7 +3292,7 @@ class SQLiteStore:
             # Note: SQLite ALTER TABLE ADD COLUMN cannot add NOT NULL columns
             # without a default — both targets are nullable, which is correct
             # (NULL = "never mirrored / not yet uploaded").
-            def _ensure_column(table: str, column: str, ddl: str) -> None:
+            def _ensure_column(table: str, column: str, ddl: str) -> bool:
                 rows = con.execute(f"PRAGMA table_info({table})").fetchall()
                 existing = {r[1] for r in rows}
                 if column not in existing:
@@ -3300,6 +3300,8 @@ class SQLiteStore:
                     logger.info(
                         f"sqlite_store: idempotent migration — ALTER {table} ADD COLUMN {column}"
                     )
+                    return True
+                return False
 
             _ensure_column("snapshots", "supabase_mirror_at_ms", "INTEGER")
             _ensure_column("snapshots", "parquet_r2_url", "TEXT")
@@ -3358,7 +3360,7 @@ class SQLiteStore:
                 "archive_status",
                 "TEXT NOT NULL DEFAULT 'legacy'",
             )
-            _ensure_column(
+            snapshot_status_added = _ensure_column(
                 "snapshots",
                 "snapshot_status",
                 "TEXT NOT NULL DEFAULT 'ok'",
@@ -3432,7 +3434,12 @@ class SQLiteStore:
             con.commit()
             _install_structure_generation_freeze_triggers(con)
             _install_structure_comparison_receipt_triggers(con)
-            _backfill_structure_snapshot_statuses(con)
+            # This projects pre-column history only during the schema upgrade
+            # that introduced ``snapshot_status``.  Re-running its joined,
+            # ordered query on every daemon boot scans the whole production
+            # snapshots table even when no legacy rows remain.
+            if snapshot_status_added:
+                _backfill_structure_snapshot_statuses(con)
             # H-009: quote collectors lease their collecting run.  A default
             # of zero makes any legacy collecting row immediately recoverable
             # rather than leaving the single-run gate permanently wedged.

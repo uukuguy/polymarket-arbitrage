@@ -6435,3 +6435,25 @@ HTTP startup, cleanup runtime ownership, and continued natural publication.
 Deploy the WAL-idempotence repair directly in R&D mode and verify the daemon
 crosses startup into HTTP/scheduler operation, then confirm cleanup heartbeat
 and opportunity pipeline health.
+
+## SESSION 142 — 2026-08-09 (startup historical-status scan removal)
+
+- [PRODUCTION EVIDENCE] The exact `9e172b3…` image reached the production
+  process, but process 662 remained in `D (disk sleep)` while performing
+  SQLite writes to the 38.7 GB `state.db` (2.7 GB read / 669 MB written at
+  capture). Kernel stack: `pwrite64 -> ext4_buffered_write_iter`.
+- [ROOT CAUSE] The legacy `snapshot_status` backfill still issued a joined,
+  ordered scan of every historical Structure snapshot on every daemon boot.
+  It is a schema-upgrade operation, not a runtime recovery action.
+- [FIXED LOCAL] `init_schema()` now runs that historical projection only when
+  it added the `snapshot_status` column in this invocation. Existing schemas
+  avoid the scan entirely; true legacy upgrades retain the projection.
+- [VERIFIED] New red/green regression plus all migration and active-publication
+  protection tests (11 total) and Ruff pass.
+
+### [NEXT — CURRENT]
+
+Deploy the one-time status-backfill repair directly in R&D mode, preserving
+drift enabled / legacy reads / Quote off / cleanup on. Verify the daemon
+crosses startup promptly, then observe cleanup heartbeat and the opportunity
+pipeline rather than declaring recovery from release metadata alone.
