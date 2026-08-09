@@ -51,3 +51,40 @@ def test_capacity_pressure_stays_open_until_receipted_normal_recovery(tmp_path) 
     verified = lifecycle.observe(recovered)
     assert verified is not None
     assert verified.state == "verified"
+
+
+def test_capacity_recovery_accepts_a_receipt_from_the_same_episode_after_refresh(
+    tmp_path,
+) -> None:
+    """A repeated pressure observation cannot invalidate its own recovery receipt."""
+    from polyarb.perception.capacity_incidents import CapacityIncidentLifecycle
+
+    db_path = tmp_path / "state.db"
+    sqlite_store = SQLiteStore(db_path)
+    sqlite_store.init_schema()
+    perception_store = OpportunityPerceptionStore(db_path)
+    perception_store.init_schema()
+    now = [1_000]
+    lifecycle = CapacityIncidentLifecycle(
+        IncidentManager(perception_store, clock_ms=lambda: now[0])
+    )
+
+    pressure = sqlite_store.record_capacity_controller_measurement(
+        state="pressure", free_bytes=15, free_percent=15.0, observed_at_ms=now[0]
+    )
+    lifecycle.observe(pressure)
+    now[0] = 1_100
+    sqlite_store.record_capacity_controller_reclaim(
+        action="reclaimed-snapshots", deleted_count=1, deleted_ids=[42], completed_at_ms=now[0]
+    )
+    now[0] = 1_200
+    lifecycle.observe(pressure)
+    now[0] = 2_000
+    normal = sqlite_store.record_capacity_controller_measurement(
+        state="normal", free_bytes=25, free_percent=25.0, observed_at_ms=now[0]
+    )
+
+    verified = lifecycle.observe(normal)
+
+    assert verified is not None
+    assert verified.state == "verified"

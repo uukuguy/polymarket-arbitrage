@@ -2211,7 +2211,17 @@ class IncidentManager:
             )
         if scope == "capacity":
             receipt_at_ms = verification_evidence.get("last_recovery_receipt_at_ms")
-            if type(receipt_at_ms) is not int or receipt_at_ms < recovery_started_at_ms:
+            episode = con.execute(
+                "SELECT MIN(occurred_at_ms) AS detected_at_ms "
+                "FROM neg_risk_incident_events WHERE incident_id=?",
+                (incident.id,),
+            ).fetchone()
+            detected_at_ms = None if episode is None else episode["detected_at_ms"]
+            if (
+                type(receipt_at_ms) is not int
+                or type(detected_at_ms) is not int
+                or receipt_at_ms < detected_at_ms
+            ):
                 return False
             receipt = con.execute(
                 "SELECT completed_at_ms,deleted_count FROM capacity_reclaim_receipts "
@@ -2225,7 +2235,7 @@ class IncidentManager:
             return bool(
                 receipt
                 and receipt["deleted_count"] > 0
-                and recovery_started_at_ms <= receipt["completed_at_ms"] <= verification_at_ms
+                and detected_at_ms <= receipt["completed_at_ms"] <= verification_at_ms
                 and runtime
                 and runtime["state"] == "normal"
                 and runtime["last_recovery_receipt_at_ms"] == receipt_at_ms
