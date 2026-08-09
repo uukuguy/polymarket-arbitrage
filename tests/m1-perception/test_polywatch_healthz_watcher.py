@@ -95,6 +95,11 @@ def test_quote_feed_unavailable_uses_p1_reminder_interval() -> None:
     assert WATCHER.l1_reminder_interval_s(health) == 300
 
 
+def test_healthz_timeout_keeps_the_l1_p1_reminder_path_operational() -> None:
+    """A failed health fetch must not crash the watcher before Telegram delivery."""
+    assert WATCHER.l1_reminder_interval_s(None) == 300
+
+
 def test_critical_capacity_incident_pushes_diagnosis_and_uses_p1_reminders() -> None:
     health = _health(
         status="fail",

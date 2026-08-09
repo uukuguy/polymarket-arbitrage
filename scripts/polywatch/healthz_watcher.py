@@ -142,8 +142,10 @@ def _extract_check(healthz: dict, check_key: str, default=None):
     return entries[0]
 
 
-def l1_reminder_interval_s(healthz: dict) -> int:
-    """Use a short reminder cycle only when certified Quote input is unavailable."""
+def l1_reminder_interval_s(healthz: dict | None) -> int:
+    """Use P1 cadence when Quote input or the health endpoint is unavailable."""
+    if not healthz:
+        return P1_QUOTE_REMINDER_S
     quote_age = _extract_check(healthz, "quote_feed:last_complete_age_seconds", {})
     if quote_age and quote_age.get("status") == "fail":
         return P1_QUOTE_REMINDER_S
