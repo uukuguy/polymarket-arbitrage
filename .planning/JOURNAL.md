@@ -6825,3 +6825,31 @@ identity on any future timeout without fault injection, and treat any repeated
 P1 burst as a dedicated CLOB/child-I/O throughput investigation. Continue the
 no-downtime historical SQLite capacity migration and independent Archive/R2/
 mirror remediation; M1 is not yet production-accepted.
+
+## SESSION 157 — 2026-08-10 (operator-surface alert routing)
+
+- [FIXED / DEPLOYED] Exact SHA
+  `21a405117c31cebc083598244a1f8a2c3358bb2b` runs as Fly v300. Polywatch
+  now separates the protected Vercel product route from the Fly direct incident
+  console. Vercel HTTP 200/302/307 is a reachable product surface; the Fly
+  console must be HTTP 200 and remains the operator-visibility alert gate.
+- [PRODUCTION EVIDENCE] Both read-only smoke commands passed against production:
+  Vercel `/perception` returned expected 302 and Fly `/perception/console`
+  returned 200. The first v300 cron tick logged
+  `Operator surfaces → noop` for the protected route, not the prior false
+  Dashboard visibility alarm. Its L1/opportunity alert was correctly caused by
+  the short restart window before a fresh Quote certification, not by Vercel.
+  Run 2167 then certified in about 10.2 seconds with 38,924/40,495 responses,
+  14 gross-before-fees candidates, Quote health pass and zero open incidents.
+- [HEALTH INTERPRETATION] Overall health remains `warn` for independent Archive,
+  Supabase/R2 and Structure maintenance evidence. Capacity remains normal.
+  Do not classify the protected Vercel product page as the sole incident-detail
+  path again.
+
+### [NEXT — CURRENT]
+
+Continue natural Quote monitoring on v300; investigate immediately if the P1
+timeout burst recurs and verify the newly recorded failed-attempt identity.
+Then proceed with the no-downtime SQLite history migration and the independent
+Archive/R2/mirror remediation. M1 remains unaccepted until continuous evidence
+and those independent domains are closed or explicitly remediated.
