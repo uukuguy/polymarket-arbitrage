@@ -1942,6 +1942,12 @@ CREATE TABLE IF NOT EXISTS neg_risk_quote_current_generation (
   singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
   quote_run_id INTEGER NOT NULL REFERENCES neg_risk_quote_runs(id)
 );
+CREATE TABLE IF NOT EXISTS neg_risk_quote_compact_feeds (
+  quote_run_id INTEGER PRIMARY KEY REFERENCES neg_risk_quote_runs(id),
+  payload_json TEXT NOT NULL,
+  payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=64),
+  created_at_ms INTEGER NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS trg_complete_quote_run_immutable_update
 BEFORE UPDATE ON neg_risk_quote_runs WHEN OLD.status='complete'
 BEGIN

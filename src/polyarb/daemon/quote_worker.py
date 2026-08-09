@@ -29,6 +29,8 @@ from polyarb.routing.neg_risk_quote_store import (
     QuoteProjectionIntegrityError,
 )
 from polyarb.routing.opportunity_scanner import (
+    NegRiskOpportunity,
+    OpportunityLeg,
     OpportunityScanResult,
     StaleQuoteRunError,
     scan_certified_neg_risk_quote_projection,
@@ -87,10 +89,7 @@ def _release_projection_memory() -> None:
         malloc_trim.restype = ctypes.c_int
         malloc_trim(0)
     except Exception as error:  # noqa: BLE001 - memory trim must stay fail-soft
-        logger.debug(
-            "certified projection memory release skipped "
-            f"kind={type(error).__name__}"
-        )
+        logger.debug(f"certified projection memory release skipped kind={type(error).__name__}")
 
 
 @dataclass(frozen=True)
@@ -355,9 +354,7 @@ async def certify_latest_quote_projection(
 ) -> CompleteQuoteProjection:
     """Build one full proof off-loop and bind it to the just-finished run."""
     started = time.perf_counter()
-    projection = await asyncio.to_thread(
-        quote_store.latest_complete_projection
-    )
+    projection = await asyncio.to_thread(quote_store.latest_complete_projection)
     if projection is None or projection.run_id != result.run_id:
         raise QuoteProjectionIntegrityError()
     logger.info(
@@ -450,9 +447,7 @@ async def _terminate_quote_child(
 async def collect_quotes_in_subprocess(
     settings: Settings,
     *,
-    spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (
-        asyncio.create_subprocess_exec
-    ),
+    spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (asyncio.create_subprocess_exec),
     terminate_timeout_s: float | None = None,
 ) -> QuoteCollectionResult:
     """Run all SDK fetch/decode/SQLite collection work outside the HTTP process."""
@@ -484,10 +479,7 @@ async def collect_quotes_in_subprocess(
         await _terminalize_quote_attempt(attempt_store, attempt_id, "spawn-failed")
         raise
     started = time.perf_counter()
-    logger.info(
-        "isolated quote collection started "
-        f"pid={getattr(process, 'pid', None)}"
-    )
+    logger.info(f"isolated quote collection started pid={getattr(process, 'pid', None)}")
     # Keep ownership of one pipe-reader task across cancellation.  Awaiting
     # communicate() directly lets task cancellation tear down its stream
     # readers; a second communicate() then cannot reliably reap the still-live
@@ -517,8 +509,7 @@ async def collect_quotes_in_subprocess(
         except Exception as child_error:  # preserve timeout evidence and cleanup
             termination_error = child_error
             logger.error(
-                "quote child reap failed "
-                f"attempt_id={attempt_id} kind={type(child_error).__name__}"
+                f"quote child reap failed attempt_id={attempt_id} kind={type(child_error).__name__}"
             )
         try:
             await asyncio.to_thread(
@@ -533,11 +524,7 @@ async def collect_quotes_in_subprocess(
         await _terminalize_quote_attempt(
             attempt_store,
             attempt_id,
-            (
-                "child-reap-timeout"
-                if termination_error is not None
-                else "child-hard-timeout"
-            ),
+            ("child-reap-timeout" if termination_error is not None else "child-hard-timeout"),
         )
         raise QuoteCollectionSubprocessError("timeout", attempt_id=attempt_id) from error
     except asyncio.CancelledError:
@@ -589,9 +576,7 @@ async def collect_quotes_in_subprocess(
                     attempt_id,
                     "child-fetch-timeout",
                 )
-                raise QuoteCollectionSubprocessError(
-                    "timeout", attempt_id=attempt_id
-                )
+                raise QuoteCollectionSubprocessError("timeout", attempt_id=attempt_id)
         await _terminalize_quote_attempt(attempt_store, attempt_id, "child-failed")
         diagnostic = _child_stderr_tail(stderr)
         if "verified universe snapshot is no longer the latest published truth" in (
@@ -734,9 +719,7 @@ class QuoteWorker:
         runtime: QuoteWorkerRuntime | None = None,
         wait_for_stop: WaitForStop = _wait_for_stop,
         monotonic: Callable[[], float] = time.monotonic,
-        release_projection_memory: ReleaseProjectionMemory = (
-            _release_projection_memory
-        ),
+        release_projection_memory: ReleaseProjectionMemory = (_release_projection_memory),
     ) -> None:
         if (
             isinstance(interval_s, bool)
@@ -822,15 +805,9 @@ class QuoteWorker:
                 return
             try:
                 released = await self._cleanup_collecting_runs()
-                logger.info(
-                    "released collecting quote runs after cancellation "
-                    f"count={released}"
-                )
+                logger.info(f"released collecting quote runs after cancellation count={released}")
             except Exception as error:  # preserve cancellation semantics
-                logger.warning(
-                    "collecting quote run cleanup failed "
-                    f"kind={type(error).__name__}"
-                )
+                logger.warning(f"collecting quote run cleanup failed kind={type(error).__name__}")
 
         try:
             if self._restore_feed is not None:
@@ -847,8 +824,7 @@ class QuoteWorker:
                     raise
                 except Exception as error:  # fail-soft; fresh collection follows
                     logger.warning(
-                        "certified quote feed restore failed "
-                        f"kind={type(error).__name__}"
+                        f"certified quote feed restore failed kind={type(error).__name__}"
                     )
             while not stop_event.is_set():
                 attempt_started = self._monotonic()
@@ -889,8 +865,7 @@ class QuoteWorker:
                                 certified_projection
                             )
                             if (
-                                certified_opportunities.quote_run_id
-                                != certified_projection.run_id
+                                certified_opportunities.quote_run_id != certified_projection.run_id
                                 or certified_opportunities.source_snapshot_id
                                 != certified_projection.universe_snapshot_id
                                 or certified_opportunities.universe_hash
@@ -903,9 +878,7 @@ class QuoteWorker:
                         # Telegram work slow; that side effect must not hold
                         # the fresh public feed in COLLECTING.
                         if certified_opportunities is None:
-                            self.runtime.publish_certified_projection(
-                                certified_projection
-                            )
+                            self.runtime.publish_certified_projection(certified_projection)
                         else:
                             self.runtime.publish_certified_feed(
                                 certified_projection,
@@ -944,10 +917,7 @@ class QuoteWorker:
                         if self._cleanup_old_runs is not None:
                             try:
                                 deleted_runs = await self._cleanup_old_runs()
-                                logger.info(
-                                    "old neg-risk quote runs purged "
-                                    f"count={deleted_runs}"
-                                )
+                                logger.info(f"old neg-risk quote runs purged count={deleted_runs}")
                                 self.runtime.mark_cleanup_success()
                             except Exception as error:
                                 self.runtime.mark_cleanup_failure(error)
@@ -957,9 +927,7 @@ class QuoteWorker:
                                 )
                         if self._reconcile_global_projection is not None:
                             try:
-                                await self._reconcile_global_projection(
-                                    certified_projection
-                                )
+                                await self._reconcile_global_projection(certified_projection)
                             except Exception as error:
                                 # A durable observer/Telegram failure must not
                                 # invalidate the independently certified quote
@@ -979,8 +947,7 @@ class QuoteWorker:
                     # operational incident.
                     retry_immediately = True
                     logger.info(
-                        "neg-risk quote collection superseded by Structure; "
-                        "retrying immediately"
+                        "neg-risk quote collection superseded by Structure; retrying immediately"
                     )
                 except QuoteCollectionSubprocessError as error:
                     # Child timeout/protocol/fetch failures already released
@@ -994,8 +961,7 @@ class QuoteWorker:
                         try:
                             reclaimed_runs = await self._reclaim_failed_payloads()
                             logger.info(
-                                "failed neg-risk quote payloads reclaimed "
-                                f"count={reclaimed_runs}"
+                                f"failed neg-risk quote payloads reclaimed count={reclaimed_runs}"
                             )
                         except Exception as reclaim_error:
                             logger.warning(
@@ -1095,30 +1061,53 @@ def load_certified_quote_feed(
         settings.db_path,
         structure_generation_read_mode=settings.structure_generation_read_mode,
     )
-    metadata = quote_store.latest_complete_projection_metadata()
+    compact_reader = getattr(quote_store, "latest_compact_feed", None)
+    compact = None if compact_reader is None else compact_reader()
+    if compact is None:
+        metadata_reader = getattr(quote_store, "latest_complete_projection_metadata", None)
+        metadata = None if metadata_reader is None else metadata_reader()
+        if metadata is not None and (
+            max(0.0, now_s() - metadata.quoted_at_ms / 1_000) > max_quote_age_s
+        ):
+            raise StaleQuoteRunError("quote age exceeds compact-feed limit")
+        return None
+    metadata, payload = compact
     if metadata is not None:
         quote_age_s = max(0.0, now_s() - metadata.quoted_at_ms / 1_000)
         if quote_age_s > max_quote_age_s:
-            raise StaleQuoteRunError(
-                f"quote age {quote_age_s:.1f}s exceeds {max_quote_age_s:.1f}s"
-            )
-    projection = quote_store.latest_complete_projection()
-    if projection is None:
-        return None
-    opportunities = scan_certified_neg_risk_quote_projection(
-        projection,
-        min_edge_bps=0,
-        limit=projection.requested_token_count,
-    )
-    if (
-        opportunities.quote_run_id != projection.run_id
-        or opportunities.source_snapshot_id != projection.universe_snapshot_id
-        or opportunities.universe_hash != projection.universe_hash
-    ):
-        raise QuoteProjectionIntegrityError()
+            raise StaleQuoteRunError(f"quote age {quote_age_s:.1f}s exceeds {max_quote_age_s:.1f}s")
+    opportunities = _compact_feed_scan(metadata, payload)
     return CertifiedQuoteFeed(
-        CertifiedQuoteMetadata.from_projection(projection),
+        CertifiedQuoteMetadata(
+            metadata.run_id,
+            metadata.universe_snapshot_id,
+            metadata.universe_taken_at_ms,
+            metadata.quoted_at_ms,
+            metadata.requested_token_count,
+            metadata.successful_response_count,
+            metadata.universe_hash,
+            metadata.source_truth_hash,
+        ),
         opportunities,
+    )
+
+
+def _compact_feed_scan(metadata, payload):
+    rows = payload.get("opportunities", [])
+    if not isinstance(rows, list):
+        raise QuoteProjectionIntegrityError()
+    values = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise QuoteProjectionIntegrityError()
+        legs = tuple(OpportunityLeg(**leg) for leg in row.pop("legs"))
+        values.append(NegRiskOpportunity(**row, legs=legs))
+    return OpportunityScanResult(
+        tuple(values),
+        payload.get("rejections", {}),
+        metadata.universe_snapshot_id,
+        metadata.universe_hash,
+        metadata.run_id,
     )
 
 
@@ -1177,6 +1166,14 @@ def build_production_quote_worker(
             projection,
             min_edge_bps=0,
             limit=projection.requested_token_count,
+        )
+        await asyncio.to_thread(
+            quote_store.persist_compact_feed,
+            projection.run_id,
+            {
+                "opportunities": [item.to_dict() for item in result.opportunities],
+                "rejections": dict(result.rejections),
+            },
         )
         logger.info(
             "neg-risk opportunity projection prepared "

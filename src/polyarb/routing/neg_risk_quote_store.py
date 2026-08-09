@@ -219,11 +219,7 @@ class NegRiskQuoteStore:
     ) -> None:
         checkpoint = self.current_time_ms() if checkpoint_at_ms is None else checkpoint_at_ms
         outcome = (
-            "complete"
-            if phase == "complete"
-            else "failed"
-            if phase == "failed"
-            else "collecting"
+            "complete" if phase == "complete" else "failed" if phase == "failed" else "collecting"
         )
         con = self._connect()
         try:
@@ -1082,8 +1078,7 @@ class NegRiskQuoteStore:
         con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
         try:
             pointer = con.execute(
-                "SELECT quote_run_id FROM neg_risk_quote_current_generation "
-                "WHERE singleton=1"
+                "SELECT quote_run_id FROM neg_risk_quote_current_generation WHERE singleton=1"
             ).fetchone()
             current_clause = "AND r.id=? " if pointer is not None else ""
             parameters = (int(pointer[0]),) if pointer is not None else ()
@@ -1093,10 +1088,7 @@ class NegRiskQuoteStore:
                 "completed_at_ms, universe_hash, source_truth_hash "
                 "FROM neg_risk_quote_runs r "
                 "WHERE r.status = 'complete' AND length(r.universe_hash)=64 "
-                "AND length(r.source_truth_hash)=64 "
-                + current_clause
-                +
-                "AND EXISTS ("
+                "AND length(r.source_truth_hash)=64 " + current_clause + "AND EXISTS ("
                 "SELECT 1 FROM snapshots s JOIN snapshot_source_coverage c "
                 "ON c.snapshot_id=s.id AND c.completed=1 "
                 "WHERE s.id=r.universe_snapshot_id AND s.market_view_published=1"
@@ -1128,8 +1120,7 @@ class NegRiskQuoteStore:
         try:
             con.execute("BEGIN")
             pointer = con.execute(
-                "SELECT quote_run_id FROM neg_risk_quote_current_generation "
-                "WHERE singleton=1"
+                "SELECT quote_run_id FROM neg_risk_quote_current_generation WHERE singleton=1"
             ).fetchone()
             if pointer is None:
                 run_rows = con.execute(
@@ -1289,8 +1280,7 @@ class NegRiskQuoteStore:
         try:
             con.execute("BEGIN")
             pointer = con.execute(
-                "SELECT quote_run_id FROM neg_risk_quote_current_generation "
-                "WHERE singleton=1"
+                "SELECT quote_run_id FROM neg_risk_quote_current_generation WHERE singleton=1"
             ).fetchone()
             if pointer is None:
                 row = con.execute(
@@ -1310,6 +1300,53 @@ class NegRiskQuoteStore:
                 ).fetchone()
             con.execute("COMMIT")
             return None if row is None else _quote_run_from_row(row)
+        finally:
+            con.close()
+
+    def persist_compact_feed(self, run_id: int, payload: dict[str, object]) -> None:
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        con = self._connect()
+        try:
+            self._begin_immediate(con)
+            current = con.execute(
+                "SELECT quote_run_id FROM neg_risk_quote_current_generation WHERE singleton=1"
+            ).fetchone()
+            if current is None or int(current[0]) != run_id:
+                raise QuoteProjectionIntegrityError()
+            con.execute(
+                "INSERT OR REPLACE INTO neg_risk_quote_compact_feeds("
+                "quote_run_id,payload_json,payload_sha256,created_at_ms) "
+                "VALUES(?,?,?,?)",
+                (run_id, encoded, digest, self.current_time_ms()),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def latest_compact_feed(self) -> tuple[QuoteRun, dict[str, object]] | None:
+        con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True, timeout=0.25)
+        try:
+            row = con.execute(
+                "SELECT r.id,r.universe_snapshot_id,r.universe_taken_at_ms,"
+                "r.quoted_at_ms,r.requested_token_count,"
+                "r.successful_response_count,r.status,r.failure_reason,"
+                "r.completed_at_ms,r.universe_hash,r.source_truth_hash,"
+                "f.payload_json,f.payload_sha256 "
+                "FROM neg_risk_quote_current_generation g "
+                "JOIN neg_risk_quote_runs r ON r.id=g.quote_run_id "
+                "JOIN neg_risk_quote_compact_feeds f ON f.quote_run_id=r.id "
+                "WHERE g.singleton=1 AND r.status='complete'"
+            ).fetchone()
+            if row is None:
+                return None
+            payload_json, digest = str(row[11]), str(row[12])
+            if hashlib.sha256(payload_json.encode()).hexdigest() != digest:
+                raise QuoteProjectionIntegrityError()
+            payload = json.loads(payload_json)
+            if not isinstance(payload, dict):
+                raise QuoteProjectionIntegrityError()
+            return _quote_run_from_row(row[:11]), payload
         finally:
             con.close()
 
