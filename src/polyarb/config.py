@@ -133,6 +133,13 @@ class Settings(BaseSettings):
     )
     opportunity_producer_supervisor_enabled: bool = False
     opportunity_resource_controller_enabled: bool = False
+    capacity_controller_enabled: bool = False
+    capacity_pressure_free_percent: float = Field(default=20.0, gt=0, lt=100)
+    capacity_critical_free_percent: float = Field(default=12.0, gt=0, lt=100)
+    capacity_exhaustion_free_percent: float = Field(default=6.0, gt=0, lt=100)
+    capacity_recovery_hold_s: float = Field(default=30.0, ge=0, allow_inf_nan=False)
+    capacity_interval_s: float = Field(default=30.0, gt=0, allow_inf_nan=False)
+    capacity_retry_delay_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     producer_stall_detection_s: float = Field(
         default=25.0,
         gt=0,
@@ -538,6 +545,12 @@ class Settings(BaseSettings):
             raise ValueError(
                 "resource_decision_ttl_s must exceed resource_sample_interval_s"
             )
+        if not (
+            self.capacity_exhaustion_free_percent
+            < self.capacity_critical_free_percent
+            < self.capacity_pressure_free_percent
+        ):
+            raise ValueError("invalid capacity controller watermarks")
         if (
             self.neg_risk_quote_interval_s
             + self.neg_risk_quote_child_hard_limit_s

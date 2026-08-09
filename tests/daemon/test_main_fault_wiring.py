@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from polyarb.perception.fault_runtime import FaultRuntime
@@ -90,3 +91,31 @@ def test_nonisolated_daemon_builders_receive_distinct_exact_fault_runtimes(
 
     assert disabled_workers[1] is None
     assert len(candidate_calls) == 1
+
+
+def test_capacity_worker_builds_without_opportunity_supervisor(tmp_path) -> None:
+    import polyarb.daemon.main as daemon_main
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "daemon.db")
+    store.init_schema()
+    settings = SimpleNamespace(
+        capacity_controller_enabled=True,
+        capacity_pressure_free_percent=20.0,
+        capacity_critical_free_percent=12.0,
+        capacity_exhaustion_free_percent=6.0,
+        capacity_recovery_hold_s=30.0,
+        capacity_interval_s=5.0,
+        capacity_retry_delay_s=5.0,
+        opportunity_producer_supervisor_enabled=False,
+        neg_risk_quote_interval_s=120.0,
+    )
+
+    worker = daemon_main._build_capacity_worker(
+        settings,
+        store,
+        asyncio.Lock(),
+        quote_worker_runtime=None,
+    )
+
+    assert worker is not None

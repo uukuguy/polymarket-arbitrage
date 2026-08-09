@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
+
+from loguru import logger
 
 CapacityState = Literal["normal", "pressure", "critical", "exhaustion-imminent"]
 
@@ -140,4 +143,63 @@ class CapacityController:
         )
 
 
-__all__ = ["CapacityController", "CapacityPolicy", "CapacityState"]
+class CapacityMaintenanceWorker:
+    """Resident capacity owner that releases the shared slot to Quote first."""
+
+    def __init__(
+        self,
+        *,
+        controller: CapacityController,
+        producer_lock: asyncio.Lock,
+        quote_worker_runtime: object | None,
+        quote_interval_s: float,
+        interval_s: float,
+    ) -> None:
+        if quote_interval_s <= 0 or interval_s <= 0:
+            raise ValueError("invalid-capacity-maintenance-interval")
+        self._controller = controller
+        self._producer_lock = producer_lock
+        self._quote_runtime = quote_worker_runtime
+        self._quote_interval_s = quote_interval_s
+        self._interval_s = interval_s
+
+    def _quote_priority(self) -> bool:
+        runtime = self._quote_runtime
+        return bool(
+            runtime is not None
+            and (runtime.pipeline_active() or runtime.pipeline_due(self._quote_interval_s))
+        )
+
+    async def _tick(self) -> None:
+        if self._quote_priority():
+            await asyncio.to_thread(self._controller.run_once, quote_priority=True)
+            return
+        async with self._producer_lock:
+            await asyncio.to_thread(
+                self._controller.run_once,
+                quote_priority=self._quote_priority(),
+            )
+
+    async def run(self, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                await self._tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - never kills Quote sibling
+                logger.exception(
+                    "capacity maintenance tick failed kind=%s",
+                    type(error).__name__,
+                )
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=self._interval_s)
+            except TimeoutError:
+                pass
+
+
+__all__ = [
+    "CapacityController",
+    "CapacityMaintenanceWorker",
+    "CapacityPolicy",
+    "CapacityState",
+]

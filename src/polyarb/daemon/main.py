@@ -53,6 +53,11 @@ from polyarb.perception.candidate_watcher import (
     CandidateWatcherScheduler,
     build_production_candidate_watcher,
 )
+from polyarb.perception.capacity_controller import (
+    CapacityController,
+    CapacityMaintenanceWorker,
+    CapacityPolicy,
+)
 from polyarb.perception.discovery import (
     CandidateFreshness,
     DiscoveryRunner,
@@ -577,6 +582,35 @@ def _build_generation_cleanup_worker(
     )
 
 
+def _build_capacity_worker(
+    settings,
+    sqlite_store: SQLiteStore,
+    producer_lock: asyncio.Lock,
+    *,
+    quote_worker_runtime: QuoteWorkerRuntime | None,
+) -> CapacityMaintenanceWorker | None:
+    """Capacity governance is independent of optional producer supervision."""
+    if not getattr(settings, "capacity_controller_enabled", False):
+        return None
+    policy = CapacityPolicy(
+        pressure_free_percent=float(settings.capacity_pressure_free_percent),
+        critical_free_percent=float(settings.capacity_critical_free_percent),
+        exhaustion_free_percent=float(settings.capacity_exhaustion_free_percent),
+        recovery_hold_ms=int(float(settings.capacity_recovery_hold_s) * 1_000),
+    )
+    return CapacityMaintenanceWorker(
+        controller=CapacityController(
+            store=sqlite_store,
+            policy=policy,
+            retry_delay_ms=int(float(settings.capacity_retry_delay_s) * 1_000),
+        ),
+        producer_lock=producer_lock,
+        quote_worker_runtime=quote_worker_runtime,
+        quote_interval_s=float(settings.neg_risk_quote_interval_s),
+        interval_s=float(settings.capacity_interval_s),
+    )
+
+
 def _start_generation_cleanup_worker(
     worker: StructureGenerationCleanupWorker | None,
     stop_event: asyncio.Event,
@@ -639,6 +673,12 @@ async def main() -> int:
         quote_worker.runtime if quote_worker is not None else None,
         isolated_producers=isolated_producers,
         structure_sync_enabled=scheduler.structure_sync_enabled,
+    )
+    capacity_worker = _build_capacity_worker(
+        settings,
+        sqlite_store,
+        producer_lock,
+        quote_worker_runtime=quote_worker.runtime if quote_worker is not None else None,
     )
     app = create_app(
         scheduler=scheduler,
@@ -708,6 +748,11 @@ async def main() -> int:
         interval_s=min(15.0, max(5.0, settings.neg_risk_quote_interval_s / 4)),
     )
     cleanup_worker_task = _start_generation_cleanup_worker(cleanup_worker, stop_event)
+    capacity_worker_task = (
+        asyncio.create_task(capacity_worker.run(stop_event))
+        if capacity_worker is not None
+        else None
+    )
     focused_watcher_task = _start_opportunity_watcher(
         None if isolated_producers else focused_watcher,
         stop_event,
@@ -751,6 +796,8 @@ async def main() -> int:
         quote_feed_hydrator_task.cancel()
     if cleanup_worker_task is not None:
         cleanup_worker_task.cancel()
+    if capacity_worker_task is not None:
+        capacity_worker_task.cancel()
     for task in supervised_tasks:
         task.cancel()
     if resource_task is not None:
@@ -773,6 +820,7 @@ async def main() -> int:
                     else []
                 ),
                 *([cleanup_worker_task] if cleanup_worker_task is not None else []),
+                *([capacity_worker_task] if capacity_worker_task is not None else []),
                 *([candidate_watcher_task] if candidate_watcher_task is not None else []),
                 *([discovery_task] if discovery_task is not None else []),
                 *([reconciliation_task] if reconciliation_task is not None else []),
