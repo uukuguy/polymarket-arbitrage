@@ -369,6 +369,35 @@ async def test_supervised_quote_worker_publishes_child_progress_each_cycle() -> 
     assert progress == ["progress"]
 
 
+async def test_worker_releases_orphaned_collection_before_first_admission() -> None:
+    """A restarted sole Quote worker must not wait for a dead predecessor lease."""
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    events: list[str] = []
+
+    async def cleanup_collecting_runs() -> int:
+        events.append("cleanup")
+        return 1
+
+    async def collect_once() -> QuoteCollectionResult:
+        events.append("collect")
+        return _result(1)
+
+    async def stop_after_first_attempt(_stop: asyncio.Event, _delay_s: float) -> bool:
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        recover_orphaned_collecting_runs=cleanup_collecting_runs,
+        interval_s=120,
+        wait_for_stop=stop_after_first_attempt,
+    )
+
+    await worker.run(asyncio.Event())
+
+    assert events == ["cleanup", "collect"]
+
+
 async def test_timeout_incident_receives_failed_attempt_identity() -> None:
     """A timeout must identify its failed run, never the prior successful run."""
     from polyarb.daemon.quote_worker import (

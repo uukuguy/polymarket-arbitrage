@@ -704,6 +704,7 @@ class QuoteWorker:
         prepare_opportunities: PrepareOpportunities | None = None,
         reconcile_global_projection: ReconcileGlobalProjection | None = None,
         restore_feed: RestoreFeed | None = None,
+        recover_orphaned_collecting_runs: CleanupCollectingRuns | None = None,
         cleanup_collecting_runs: CleanupCollectingRuns | None = None,
         cleanup_old_runs: CleanupOldRuns | None = None,
         reclaim_failed_payloads: ReclaimFailedPayloads | None = None,
@@ -738,6 +739,7 @@ class QuoteWorker:
         self._prepare_opportunities = prepare_opportunities
         self._reconcile_global_projection = reconcile_global_projection
         self._restore_feed = restore_feed
+        self._recover_orphaned_collecting_runs = recover_orphaned_collecting_runs
         self._cleanup_collecting_runs = cleanup_collecting_runs
         self._cleanup_old_runs = cleanup_old_runs
         self._reclaim_failed_payloads = reclaim_failed_payloads
@@ -810,6 +812,21 @@ class QuoteWorker:
                 logger.warning(f"collecting quote run cleanup failed kind={type(error).__name__}")
 
         try:
+            if self._recover_orphaned_collecting_runs is not None:
+                try:
+                    released = await self._recover_orphaned_collecting_runs()
+                    logger.info(
+                        "released orphaned collecting quote runs before admission "
+                        f"count={released}"
+                    )
+                except asyncio.CancelledError:
+                    await cleanup_after_cancellation()
+                    raise
+                except Exception as error:
+                    logger.warning(
+                        "orphaned collecting quote run recovery failed "
+                        f"kind={type(error).__name__}"
+                    )
             if self._restore_feed is not None:
                 try:
                     restored_feed = await self._restore_feed()
@@ -1225,6 +1242,13 @@ def build_production_quote_worker(
             failure_reason="collector-cancelled",
         )
 
+    async def recover_orphaned_collecting_runs() -> int:
+        """A newly started sole worker owns no predecessor child process."""
+        return await asyncio.to_thread(
+            quote_store.fail_collecting_runs,
+            failure_reason="collector-orphaned-on-worker-start",
+        )
+
     async def cleanup_old_runs() -> int:
         return await asyncio.to_thread(
             quote_store.purge_old_runs,
@@ -1308,6 +1332,7 @@ def build_production_quote_worker(
         prepare_opportunities=prepare_opportunities,
         reconcile_global_projection=reconcile_global_projection,
         restore_feed=restore_feed,
+        recover_orphaned_collecting_runs=recover_orphaned_collecting_runs,
         cleanup_collecting_runs=cleanup_collecting_runs,
         cleanup_old_runs=cleanup_old_runs,
         reclaim_failed_payloads=reclaim_failed_payloads,
