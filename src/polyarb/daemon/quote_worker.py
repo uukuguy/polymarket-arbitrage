@@ -16,6 +16,9 @@ from loguru import logger
 
 from polyarb.config import Settings
 from polyarb.daemon.opportunity_watcher import OpportunityWatcher
+from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
+from polyarb.perception.incidents import IncidentManager
+from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.routing.neg_risk_quote_collector import (
     QUOTE_FETCH_TIMEOUT_EXIT_CODE,
     QuoteCollectionResult,
@@ -46,6 +49,7 @@ WaitForStop = Callable[[asyncio.Event, float], Awaitable[bool]]
 ReleaseProjectionMemory = Callable[[], None]
 CompleteAttempt = Callable[[QuoteCollectionResult], Awaitable[None]]
 FailAttempt = Callable[[QuoteCollectionResult, str], Awaitable[None]]
+RecordTimeoutIncident = Callable[["QuoteWorkerRuntime"], Awaitable[None]]
 _BACKGROUND_REAP_TASKS: set[asyncio.Task[object]] = set()
 
 
@@ -90,6 +94,7 @@ class QuoteWorkerSnapshot:
     consecutive_failures: int
     last_attempt_started_at_s: float | None
     last_attempt_finished_at_s: float | None
+    last_success_at_s: float | None
     last_run_id: int | None
     last_requested_token_count: int | None
     last_successful_response_count: int | None
@@ -167,6 +172,7 @@ class QuoteWorkerRuntime:
         self.consecutive_failures = 0
         self.last_attempt_started_at_s: float | None = None
         self.last_attempt_finished_at_s: float | None = None
+        self.last_success_at_s: float | None = None
         self.last_run_id: int | None = None
         self.last_requested_token_count: int | None = None
         self.last_successful_response_count: int | None = None
@@ -213,6 +219,7 @@ class QuoteWorkerRuntime:
         self.success_count += 1
         self.consecutive_failures = 0
         self.last_attempt_finished_at_s = time.time()
+        self.last_success_at_s = self.last_attempt_finished_at_s
         self.last_run_id = result.run_id
         self.last_requested_token_count = result.requested_token_count
         self.last_successful_response_count = result.successful_response_count
@@ -290,6 +297,7 @@ class QuoteWorkerRuntime:
             consecutive_failures=self.consecutive_failures,
             last_attempt_started_at_s=self.last_attempt_started_at_s,
             last_attempt_finished_at_s=self.last_attempt_finished_at_s,
+            last_success_at_s=self.last_success_at_s,
             last_run_id=self.last_run_id,
             last_requested_token_count=self.last_requested_token_count,
             last_successful_response_count=self.last_successful_response_count,
@@ -679,6 +687,7 @@ class QuoteWorker:
         cleanup_old_runs: CleanupOldRuns | None = None,
         complete_attempt: CompleteAttempt | None = None,
         fail_attempt: FailAttempt | None = None,
+        record_timeout_incident: RecordTimeoutIncident | None = None,
         producer_lock: asyncio.Lock | None = None,
         interval_s: float,
         runtime: QuoteWorkerRuntime | None = None,
@@ -699,6 +708,7 @@ class QuoteWorker:
         self._cleanup_old_runs = cleanup_old_runs
         self._complete_attempt = complete_attempt
         self._fail_attempt = fail_attempt
+        self._record_timeout_incident = record_timeout_incident
         self._producer_lock = producer_lock
         self._interval_s = interval_s
         self._wait_for_stop = wait_for_stop
@@ -887,6 +897,14 @@ class QuoteWorker:
                     if result is not None and self._fail_attempt is not None:
                         await self._fail_attempt(result, type(error).__name__)
                     self.runtime.mark_failure(error)
+                    if self._record_timeout_incident is not None and error.reason == "timeout":
+                        try:
+                            await self._record_timeout_incident(self.runtime)
+                        except Exception as incident_error:
+                            logger.exception(
+                                "quote timeout incident recording failed "
+                                f"kind={type(incident_error).__name__}"
+                            )
                     logger.exception(
                         "neg-risk quote child failed "
                         f"retry_immediately={retry_immediately} "
@@ -967,6 +985,7 @@ def build_production_quote_worker(
     *,
     opportunity_watcher: OpportunityWatcher | None = None,
     producer_lock: asyncio.Lock | None = None,
+    perception_store: OpportunityPerceptionStore | None = None,
 ) -> QuoteWorker | None:
     """Build the public-read-only production worker when explicitly enabled."""
     if not settings.neg_risk_quote_worker_enabled:
@@ -1080,6 +1099,29 @@ def build_production_quote_worker(
     ) -> None:
         await opportunity_watcher.reconcile_global_projection(projection)
 
+    incident_lifecycle = (
+        None
+        if perception_store is None
+        else QuoteIncidentLifecycle(IncidentManager(perception_store))
+    )
+
+    async def record_timeout_incident(runtime: QuoteWorkerRuntime) -> None:
+        if incident_lifecycle is None:
+            return
+        snapshot = runtime.snapshot()
+        await asyncio.to_thread(
+            incident_lifecycle.record_timeout,
+            run_id=snapshot.last_run_id,
+            requested_token_count=snapshot.last_requested_token_count,
+            deadline_s=120,
+            consecutive_failures=snapshot.consecutive_failures,
+            last_success_age_s=(
+                None
+                if snapshot.last_success_at_s is None
+                else max(0.0, time.time() - snapshot.last_success_at_s)
+            ),
+        )
+
     return QuoteWorker(
         collect_once=collect_once,
         certify_projection=certify_projection,
@@ -1090,6 +1132,7 @@ def build_production_quote_worker(
         cleanup_old_runs=cleanup_old_runs,
         complete_attempt=complete_attempt,
         fail_attempt=fail_attempt,
+        record_timeout_incident=record_timeout_incident,
         producer_lock=producer_lock,
         interval_s=settings.neg_risk_quote_interval_s,
     )

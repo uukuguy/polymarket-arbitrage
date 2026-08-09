@@ -619,6 +619,7 @@ async def main() -> int:
         settings,
         opportunity_watcher=focused_watcher,
         producer_lock=producer_lock,
+        perception_store=perception_store,
     )
     scheduler = SnapshotScheduler(
         settings=settings,
