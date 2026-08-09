@@ -6467,3 +6467,13 @@ pipeline rather than declaring recovery from release metadata alone.
   migrations, additive migrations, and opportunity schema initialization.
   The next R&D restart will identify the remaining exact path from logs.
 - [VERIFIED] SQLite migration suite and Ruff pass.
+
+## SESSION 144 — 2026-08-09 (Structure migration narrowing)
+
+- [PRODUCTION EVIDENCE] v250 / `c67dc7a` logged base DDL and sync-window DDL
+  complete within 50ms. The remaining startup span begins in the subsequent
+  Structure migration sequence; at capture, process I/O was only 4KiB read
+  and 651KiB write, so the prior full scan was absent.
+- [FIXED LOCAL] The next restart logs start/complete around every Structure
+  migration function, making the remaining startup cost attributable rather
+  than inferred.
