@@ -18,6 +18,7 @@ def l2_console(_request: Request) -> HTMLResponse:
 </head><body><main><div class="row"><div><h1>L2 operations console</h1><div class="muted">Read-only, same-origin view of the live L2 health contract. A reachable page is not an all-clear.</div></div><button id="refresh">Refresh now</button><a href="/health">Health JSON</a><a href="/healthz">Probe JSON</a></div><p id="status" class="muted">Loading live L2 evidence…</p><section id="faults"></section><script>
 const root=document.getElementById("faults"),status=document.getElementById("status");
 const actions={
+ "ws:connection_state":"No manual recovery is required while event-age and L3 evidence checks pass. Investigate only if websocket freshness, mirror freshness, or L3 evidence is no longer passing.",
  "ws:last_event_age_seconds":"Inspect websocket reachability and the quiet-refresh evidence path; if retries remain exhausted, restart only through the approved L2 recovery runbook.",
  "mirror:l2_tob_age_seconds":"Inspect Supabase mirror writes and credentials; verify the next successful L2 mirror receipt before clearing the incident.",
  "l3:evidence_sample_age_seconds":"Inspect the evidence refresh cause (for example evidence_timeout) and runtime-event queue capacity; do not accept reconnect logs as recovery evidence.",

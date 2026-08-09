@@ -152,3 +152,17 @@ def test_console_exposes_read_only_failure_diagnosis(l2_http_test_client):
     assert 'fetch("/health"' in resp.text
     assert "Next operator action" in resp.text
     assert "evidence_timeout" in resp.text
+
+
+def test_console_explains_quiet_ws_warning_is_not_a_manual_recovery_action(
+    l2_http_test_client,
+):
+    """A fresh quiet websocket must not be presented as an actionable outage."""
+    resp = l2_http_test_client.get("/console")
+
+    assert resp.status_code == 200
+    assert "ws:connection_state" in resp.text
+    assert (
+        "No manual recovery is required while event-age and L3 evidence checks pass."
+        in resp.text
+    )
