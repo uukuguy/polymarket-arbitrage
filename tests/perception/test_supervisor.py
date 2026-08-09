@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import signal
+import sqlite3
 import sys
 import time
 from uuid import UUID
@@ -722,6 +723,121 @@ def test_output_hash_migration_backfills_legacy_receipt_and_is_idempotent(
     assert health.evidence_consistent is True
     supervisor = ProducerSupervisor(store=store, incidents=IncidentManager(store))
     assert supervisor._progress_marker("candidate", "run-1", 1) == (0, 0, 0)
+
+
+def test_quote_producer_schema_migration_preserves_legacy_evidence(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    con = sqlite3.connect(db_path)
+    try:
+        con.executescript(
+            """
+            CREATE TABLE neg_risk_producer_receipts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              component TEXT NOT NULL CHECK(component IN
+                ('candidate','discovery','reconciliation')),
+              attempt INTEGER NOT NULL CHECK(attempt >= 1),
+              started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+              finished_at_ms INTEGER NOT NULL CHECK(finished_at_ms >= started_at_ms),
+              outcome TEXT NOT NULL CHECK(outcome IN
+                ('success','nonzero','timeout','cancelled','spawn-error')),
+              exit_code INTEGER,
+              stdout_tail TEXT NOT NULL,
+              stderr_tail TEXT NOT NULL,
+              output_hash TEXT NOT NULL,
+              supervisor_run_id TEXT NOT NULL,
+              child_nonce TEXT NOT NULL DEFAULT '',
+              auth_domain TEXT NOT NULL,
+              child_auth_hash TEXT,
+              UNIQUE(component,attempt)
+            );
+            CREATE TABLE neg_risk_producer_child_starts (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              component TEXT NOT NULL CHECK(component IN
+                ('candidate','discovery','reconciliation')),
+              supervisor_run_id TEXT NOT NULL,
+              child_nonce TEXT NOT NULL DEFAULT '',
+              attempt INTEGER NOT NULL CHECK(attempt >= 1),
+              started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+              auth_domain TEXT NOT NULL,
+              child_auth_hash TEXT,
+              claimed_at_ms INTEGER,
+              UNIQUE(component,supervisor_run_id,attempt),
+              UNIQUE(component,attempt)
+            );
+            CREATE TABLE neg_risk_producer_heartbeats (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              component TEXT NOT NULL CHECK(component IN
+                ('candidate','discovery','reconciliation')),
+              supervisor_run_id TEXT NOT NULL,
+              child_nonce TEXT NOT NULL DEFAULT '',
+              attempt INTEGER NOT NULL CHECK(attempt >= 1),
+              auth_domain TEXT NOT NULL,
+              child_auth_hash TEXT NOT NULL,
+              sequence INTEGER NOT NULL CHECK(sequence >= 1),
+              observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+              state TEXT NOT NULL CHECK(state IN ('progress','yielded','paused')),
+              UNIQUE(component,supervisor_run_id,attempt,sequence)
+            );
+            CREATE INDEX idx_neg_risk_producer_heartbeat_component
+              ON neg_risk_producer_heartbeats(component,id);
+            INSERT INTO neg_risk_producer_child_starts(
+              component,supervisor_run_id,attempt,started_at_ms,auth_domain
+            ) VALUES('candidate','legacy-run',1,1000,'producer-heartbeat-v1');
+            INSERT INTO neg_risk_producer_receipts(
+              component,attempt,started_at_ms,finished_at_ms,outcome,exit_code,
+              stdout_tail,stderr_tail,output_hash,supervisor_run_id,auth_domain
+            ) VALUES('candidate',1,1000,1010,'success',0,'','',
+              '0000000000000000000000000000000000000000000000000000000000000000',
+              'legacy-run','producer-heartbeat-v1');
+            """
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    store = OpportunityPerceptionStore(db_path)
+    store.init_schema()
+
+    assert store.reserve_producer_attempt(
+        "quote", supervisor_run_id="quote-run", started_at_ms=2_000
+    ) == 1
+    with store._connect() as migrated:
+        for table in (
+            "neg_risk_producer_receipts",
+            "neg_risk_producer_child_starts",
+            "neg_risk_producer_heartbeats",
+        ):
+            sql = migrated.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()[0]
+            assert "'quote'" in sql
+        assert [
+            tuple(row)
+            for row in migrated.execute(
+                "SELECT component,attempt FROM neg_risk_producer_receipts"
+            ).fetchall()
+        ] == [("candidate", 1)]
+        assert migrated.execute(
+            "SELECT name FROM sqlite_master WHERE name LIKE '%_quote_legacy'"
+        ).fetchall() == []
+
+
+def test_quote_producer_can_publish_supervised_heartbeat(tmp_path, monkeypatch) -> None:
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    attempt = store.reserve_producer_attempt(
+        "quote", supervisor_run_id="quote-run", started_at_ms=1_000
+    )
+    monkeypatch.setenv("POLYARB_PRODUCER_SUPERVISOR_RUN_ID", "quote-run")
+    monkeypatch.setenv("POLYARB_PRODUCER_ATTEMPT", str(attempt))
+
+    store.claim_producer_heartbeat_authority("quote")
+
+    assert store.record_producer_heartbeat(
+        "quote", observed_at_ms=1_001
+    ) == 1
+    assert store.latest_producer_heartbeat_ms("quote") == 1_001
 
 
 def test_output_hash_migration_rejects_invalid_legacy_tail_without_partial_write(

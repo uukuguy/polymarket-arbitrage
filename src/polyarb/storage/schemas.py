@@ -1596,7 +1596,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_resource_decisions (
 CREATE TABLE IF NOT EXISTS neg_risk_producer_receipts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   component TEXT NOT NULL CHECK(component IN
-    ('candidate','discovery','reconciliation')),
+    ('candidate','discovery','reconciliation','quote')),
   attempt INTEGER NOT NULL CHECK(attempt >= 1),
   started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
   finished_at_ms INTEGER NOT NULL CHECK(finished_at_ms >= started_at_ms),
@@ -1616,7 +1616,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_producer_receipts (
 CREATE TABLE IF NOT EXISTS neg_risk_producer_child_starts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   component TEXT NOT NULL CHECK(component IN
-    ('candidate','discovery','reconciliation')),
+    ('candidate','discovery','reconciliation','quote')),
   supervisor_run_id TEXT NOT NULL,
   child_nonce TEXT NOT NULL DEFAULT '',
   attempt INTEGER NOT NULL CHECK(attempt >= 1),
@@ -1631,7 +1631,7 @@ CREATE TABLE IF NOT EXISTS neg_risk_producer_child_starts (
 CREATE TABLE IF NOT EXISTS neg_risk_producer_heartbeats (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   component TEXT NOT NULL CHECK(component IN
-    ('candidate','discovery','reconciliation')),
+    ('candidate','discovery','reconciliation','quote')),
   supervisor_run_id TEXT NOT NULL,
   child_nonce TEXT NOT NULL DEFAULT '',
   attempt INTEGER NOT NULL CHECK(attempt >= 1),

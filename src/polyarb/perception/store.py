@@ -785,7 +785,7 @@ def validate_producer_history(
     *,
     now_ms: int,
 ) -> ProducerHistoryState:
-    if component not in {"candidate", "discovery", "reconciliation"}:
+    if component not in {"candidate", "discovery", "reconciliation", "quote"}:
         raise ValueError("invalid-producer-component")
     con.row_factory = sqlite3.Row
     starts = con.execute(
@@ -2509,6 +2509,108 @@ class OpportunityPerceptionStore:
             raise ValueError("invalid-owner-authority-manifest")
         self._assert_owner_journal_clean(con)
 
+    @staticmethod
+    def _migrate_quote_producer_authority(con: sqlite3.Connection) -> None:
+        """Rebuild only legacy producer tables whose CHECK excludes Quote.
+
+        SQLite cannot alter a CHECK constraint in place.  This caller already
+        holds init_schema's immediate transaction, so the three tables move as
+        one atomic authority migration: legacy receipts survive, Quote gains
+        the same reservation/heartbeat contract, and no partial table set can
+        become visible to a concurrent worker.
+        """
+        tables = (
+            "neg_risk_producer_receipts",
+            "neg_risk_producer_child_starts",
+            "neg_risk_producer_heartbeats",
+        )
+        table_sql = {
+            str(row["name"]): str(row["sql"] or "")
+            for row in con.execute(
+                "SELECT name,sql FROM sqlite_master "
+                "WHERE type='table' AND name IN (?,?,?)",
+                tables,
+            )
+        }
+        if all("'quote'" in table_sql.get(table, "") for table in tables):
+            return
+        if set(table_sql) != set(tables):
+            raise ValueError("invalid-producer-authority-schema")
+
+        legacy_names = {table: f"{table}_quote_legacy" for table in tables}
+        con.execute("DROP INDEX IF EXISTS idx_neg_risk_producer_heartbeat_component")
+        for table in tables:
+            con.execute(f"ALTER TABLE {table} RENAME TO {legacy_names[table]}")
+        con.execute(
+            "CREATE TABLE neg_risk_producer_receipts ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "component TEXT NOT NULL CHECK(component IN "
+            "('candidate','discovery','reconciliation','quote')),"
+            "attempt INTEGER NOT NULL CHECK(attempt >= 1),"
+            "started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),"
+            "finished_at_ms INTEGER NOT NULL CHECK(finished_at_ms >= started_at_ms),"
+            "outcome TEXT NOT NULL CHECK(outcome IN "
+            "('success','nonzero','timeout','cancelled','spawn-error')),"
+            "exit_code INTEGER,stdout_tail TEXT NOT NULL,stderr_tail TEXT NOT NULL,"
+            "output_hash TEXT NOT NULL,supervisor_run_id TEXT NOT NULL,"
+            "child_nonce TEXT NOT NULL DEFAULT '',auth_domain TEXT NOT NULL,"
+            "child_auth_hash TEXT,UNIQUE(component,attempt))"
+        )
+        con.execute(
+            "CREATE TABLE neg_risk_producer_child_starts ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "component TEXT NOT NULL CHECK(component IN "
+            "('candidate','discovery','reconciliation','quote')),"
+            "supervisor_run_id TEXT NOT NULL,child_nonce TEXT NOT NULL DEFAULT '',"
+            "attempt INTEGER NOT NULL CHECK(attempt >= 1),"
+            "started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),"
+            "auth_domain TEXT NOT NULL,child_auth_hash TEXT,claimed_at_ms INTEGER,"
+            "UNIQUE(component,supervisor_run_id,attempt),UNIQUE(component,attempt))"
+        )
+        con.execute(
+            "CREATE TABLE neg_risk_producer_heartbeats ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "component TEXT NOT NULL CHECK(component IN "
+            "('candidate','discovery','reconciliation','quote')),"
+            "supervisor_run_id TEXT NOT NULL,child_nonce TEXT NOT NULL DEFAULT '',"
+            "attempt INTEGER NOT NULL CHECK(attempt >= 1),auth_domain TEXT NOT NULL,"
+            "child_auth_hash TEXT NOT NULL,sequence INTEGER NOT NULL CHECK(sequence >= 1),"
+            "observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),"
+            "state TEXT NOT NULL CHECK(state IN ('progress','yielded','paused')),"
+            "UNIQUE(component,supervisor_run_id,attempt,sequence))"
+        )
+        con.execute(
+            "INSERT INTO neg_risk_producer_receipts("
+            "id,component,attempt,started_at_ms,finished_at_ms,outcome,exit_code,"
+            "stdout_tail,stderr_tail,output_hash,supervisor_run_id,child_nonce,"
+            "auth_domain,child_auth_hash) SELECT "
+            "id,component,attempt,started_at_ms,finished_at_ms,outcome,exit_code,"
+            "stdout_tail,stderr_tail,output_hash,supervisor_run_id,child_nonce,"
+            "auth_domain,child_auth_hash FROM neg_risk_producer_receipts_quote_legacy"
+        )
+        con.execute(
+            "INSERT INTO neg_risk_producer_child_starts("
+            "id,component,supervisor_run_id,child_nonce,attempt,started_at_ms,"
+            "auth_domain,child_auth_hash,claimed_at_ms) SELECT "
+            "id,component,supervisor_run_id,child_nonce,attempt,started_at_ms,"
+            "auth_domain,child_auth_hash,claimed_at_ms "
+            "FROM neg_risk_producer_child_starts_quote_legacy"
+        )
+        con.execute(
+            "INSERT INTO neg_risk_producer_heartbeats("
+            "id,component,supervisor_run_id,child_nonce,attempt,auth_domain,"
+            "child_auth_hash,sequence,observed_at_ms,state) SELECT "
+            "id,component,supervisor_run_id,child_nonce,attempt,auth_domain,"
+            "child_auth_hash,sequence,observed_at_ms,state "
+            "FROM neg_risk_producer_heartbeats_quote_legacy"
+        )
+        con.execute(
+            "CREATE INDEX idx_neg_risk_producer_heartbeat_component "
+            "ON neg_risk_producer_heartbeats(component,id)"
+        )
+        for table in tables:
+            con.execute(f"DROP TABLE {legacy_names[table]}")
+
     def init_schema(self) -> None:
         con = self._connect()
         try:
@@ -2927,6 +3029,7 @@ class OpportunityPerceptionStore:
                         "WHERE id=? AND output_hash IS NULL",
                         (output_hash, receipt_id),
                     )
+            self._migrate_quote_producer_authority(con)
             sweep_id = 1
             batch_sequence = 0
             previous_completed = False
@@ -8299,7 +8402,7 @@ class OpportunityPerceptionStore:
 
     def record_producer_receipt(self, receipt: ProducerReceipt) -> None:
         if (
-            receipt.component not in {"candidate", "discovery", "reconciliation"}
+            receipt.component not in {"candidate", "discovery", "reconciliation", "quote"}
             or receipt.attempt < 1
             or receipt.started_at_ms < 0
             or receipt.finished_at_ms < receipt.started_at_ms
@@ -8365,7 +8468,7 @@ class OpportunityPerceptionStore:
             con.close()
 
     def producer_receipts(self, component: str) -> tuple[ProducerReceipt, ...]:
-        if component not in {"candidate", "discovery", "reconciliation"}:
+        if component not in {"candidate", "discovery", "reconciliation", "quote"}:
             raise ValueError("invalid-producer-component")
         con = self._connect()
         try:
@@ -8403,7 +8506,7 @@ class OpportunityPerceptionStore:
         started_at_ms: int,
     ) -> int:
         if (
-            component not in {"candidate", "discovery", "reconciliation"}
+            component not in {"candidate", "discovery", "reconciliation", "quote"}
             or not supervisor_run_id
             or started_at_ms < 0
         ):
@@ -8463,7 +8566,7 @@ class OpportunityPerceptionStore:
         run_id = os.environ.get("POLYARB_PRODUCER_SUPERVISOR_RUN_ID", "")
         attempt_text = os.environ.get("POLYARB_PRODUCER_ATTEMPT", "")
         if (
-            component not in {"candidate", "discovery", "reconciliation"}
+            component not in {"candidate", "discovery", "reconciliation", "quote"}
             or not run_id
             or not attempt_text.isdigit()
         ):
@@ -8506,7 +8609,7 @@ class OpportunityPerceptionStore:
         *,
         finished_at_ms: int,
     ) -> tuple[int, ...]:
-        if component not in {"candidate", "discovery", "reconciliation"}:
+        if component not in {"candidate", "discovery", "reconciliation", "quote"}:
             raise ValueError("invalid-producer-component")
         con = self._connect()
         try:
@@ -8583,7 +8686,7 @@ class OpportunityPerceptionStore:
             (component, run_id, attempt_value)
         )
         if (
-            component not in {"candidate", "discovery", "reconciliation"}
+            component not in {"candidate", "discovery", "reconciliation", "quote"}
             or observed_at_ms < 0
             or state not in {"progress", "yielded", "paused"}
             or not preimage
@@ -8639,7 +8742,7 @@ class OpportunityPerceptionStore:
             con.close()
 
     def latest_producer_heartbeat_ms(self, component: str) -> int | None:
-        if component not in {"candidate", "discovery", "reconciliation"}:
+        if component not in {"candidate", "discovery", "reconciliation", "quote"}:
             raise ValueError("invalid-producer-component")
         con = self._connect()
         try:
