@@ -50,6 +50,7 @@ ReleaseProjectionMemory = Callable[[], None]
 CompleteAttempt = Callable[[QuoteCollectionResult], Awaitable[None]]
 FailAttempt = Callable[[QuoteCollectionResult, str], Awaitable[None]]
 RecordTimeoutIncident = Callable[["QuoteWorkerRuntime"], Awaitable[None]]
+RecordCertifiedSuccessIncident = Callable[[QuoteCollectionResult], Awaitable[None]]
 _BACKGROUND_REAP_TASKS: set[asyncio.Task[object]] = set()
 
 
@@ -688,6 +689,7 @@ class QuoteWorker:
         complete_attempt: CompleteAttempt | None = None,
         fail_attempt: FailAttempt | None = None,
         record_timeout_incident: RecordTimeoutIncident | None = None,
+        record_certified_success_incident: RecordCertifiedSuccessIncident | None = None,
         producer_lock: asyncio.Lock | None = None,
         interval_s: float,
         runtime: QuoteWorkerRuntime | None = None,
@@ -709,6 +711,7 @@ class QuoteWorker:
         self._complete_attempt = complete_attempt
         self._fail_attempt = fail_attempt
         self._record_timeout_incident = record_timeout_incident
+        self._record_certified_success_incident = record_certified_success_incident
         self._producer_lock = producer_lock
         self._interval_s = interval_s
         self._wait_for_stop = wait_for_stop
@@ -841,6 +844,14 @@ class QuoteWorker:
                         # bounded housekeeping so a slow SQLite delete cannot
                         # falsely leave a usable feed in COLLECTING.
                         self.runtime.mark_success(result)
+                        if self._record_certified_success_incident is not None:
+                            try:
+                                await self._record_certified_success_incident(result)
+                            except Exception as incident_error:
+                                logger.exception(
+                                    "quote recovery incident recording failed "
+                                    f"kind={type(incident_error).__name__}"
+                                )
                         logger.info(
                             "neg-risk quote collection complete "
                             f"run_id={result.run_id} "
@@ -1122,6 +1133,10 @@ def build_production_quote_worker(
             ),
         )
 
+    async def record_certified_success_incident(result: QuoteCollectionResult) -> None:
+        if incident_lifecycle is not None:
+            await asyncio.to_thread(incident_lifecycle.record_certified_success, result)
+
     return QuoteWorker(
         collect_once=collect_once,
         certify_projection=certify_projection,
@@ -1133,6 +1148,7 @@ def build_production_quote_worker(
         complete_attempt=complete_attempt,
         fail_attempt=fail_attempt,
         record_timeout_incident=record_timeout_incident,
+        record_certified_success_incident=record_certified_success_incident,
         producer_lock=producer_lock,
         interval_s=settings.neg_risk_quote_interval_s,
     )

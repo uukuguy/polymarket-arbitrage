@@ -2209,6 +2209,25 @@ class IncidentManager:
                     )
                 )
             )
+        if scope == "quote-collection":
+            run_id = verification_evidence.get("run_id")
+            if type(run_id) is not int or run_id < 1:
+                return False
+            row = con.execute(
+                "SELECT id,status,completed_at_ms,requested_token_count,"
+                "successful_response_count FROM neg_risk_quote_runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            return bool(
+                row
+                and row["status"] == "complete"
+                and row["completed_at_ms"] is not None
+                and recovery_started_at_ms <= row["completed_at_ms"] <= verification_at_ms
+                and row["requested_token_count"]
+                == verification_evidence.get("requested_token_count")
+                and row["successful_response_count"]
+                == verification_evidence.get("successful_response_count")
+            )
         if scope.startswith("notification:"):
             try:
                 notification_id = int(scope.split(":", 1)[1])

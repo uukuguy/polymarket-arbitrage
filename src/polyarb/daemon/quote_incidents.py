@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from polyarb.perception.incidents import Incident, IncidentManager
+from polyarb.routing.neg_risk_quote_collector import QuoteCollectionResult
 
 
 class QuoteIncidentLifecycle:
@@ -52,3 +53,25 @@ class QuoteIncidentLifecycle:
             incident = self._incidents.transition(incident.id, "contained", evidence)
             return self._incidents.transition(incident.id, "recovering", evidence)
         return incident
+
+    def record_certified_success(self, result: QuoteCollectionResult) -> Incident | None:
+        active = next(
+            (
+                incident
+                for incident in self._incidents.open_incidents()
+                if incident.scope == self._SCOPE and incident.kind == self._KIND
+            ),
+            None,
+        )
+        if active is None:
+            return None
+        return self._incidents.transition(
+            active.id,
+            "verified",
+            {
+                "run_id": result.run_id,
+                "requested_token_count": result.requested_token_count,
+                "successful_response_count": result.successful_response_count,
+                "automatic_action": "certified-recovery",
+            },
+        )
