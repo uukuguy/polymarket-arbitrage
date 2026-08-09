@@ -6404,3 +6404,18 @@ then observe retirement of publication 880 and a natural successor window.
 Deploy the isolated-cleanup-owner repair directly in R&D mode. Verify its
 runtime checkpoint advances and health no longer reports it stale; continue
 natural Structure publication until market-truth and snapshot health recover.
+
+## SESSION 140 — 2026-08-09 (bounded startup status repair)
+
+- [ROOT CAUSE] The isolated cleanup repair reached release 245, but startup
+  remained blocked in `init_schema`. `_backfill_structure_snapshot_statuses`
+  fetched every historical Structure validation payload and rewrote every
+  status on every boot.
+- [FIXED LOCAL] Backfill now examines only default-`ok` legacy candidates with
+  `is_valid=0` or a Layer-1 issue. Settled degraded/failed rows are not reread
+  or rewritten. Migration and Ruff checks pass.
+
+### [NEXT — CURRENT]
+
+Deploy the bounded status-backfill repair directly in R&D mode. Verify prompt
+HTTP startup, cleanup runtime ownership, and continued natural publication.

@@ -26,8 +26,11 @@ import os
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 
+from polyarb.storage import sqlite_store as sqlite_store_module
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -247,6 +250,39 @@ def test_legacy_structure_snapshot_backfills_degraded_status(tmp_path: Path) -> 
             "SELECT snapshot_status FROM snapshots WHERE id=1"
         ).fetchone()[0]
     assert status == "degraded"
+
+
+def test_structure_status_backfill_does_not_rewrite_settled_snapshots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy repair must not rescan/rewrite settled production history."""
+    db = tmp_path / "settled-structure.db"
+    _create_legacy_snapshots_table(db)
+    store = SQLiteStore(db)
+    store.init_schema()
+    with sqlite3.connect(db) as con:
+        con.execute(
+            "UPDATE snapshots SET data_product='structure',snapshot_status='degraded' "
+            "WHERE id=1"
+        )
+
+    statements: list[str] = []
+    original_connect = sqlite_store_module.sqlite3.connect
+
+    def traced_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        con = original_connect(*args, **kwargs)
+        con.set_trace_callback(statements.append)
+        return con
+
+    monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", traced_connect)
+    SQLiteStore(db).init_schema()
+
+    assert not [
+        statement
+        for statement in statements
+        if statement.startswith("UPDATE snapshots SET snapshot_status")
+    ]
 
 
 def _read_market_view_published(db: Path) -> int:
