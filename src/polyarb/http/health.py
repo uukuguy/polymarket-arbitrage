@@ -471,6 +471,16 @@ def read_archive_health(path: Path, now_s: float) -> ArchiveHealth:
     )
 
 
+def read_capacity_controller_health(path: Path) -> dict[str, object] | None:
+    """Read the resident capacity checkpoint without treating absence as health."""
+    try:
+        from polyarb.storage.sqlite_store import SQLiteStore
+
+        return SQLiteStore(path).capacity_controller_runtime_status()
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+
+
 def _utc_now_iso() -> str:
     """Current UTC timestamp in ISO 8601 format with Z suffix."""
     return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1093,6 +1103,64 @@ def _build_health_checks(
             "observedUnit": "%",
             "status": volume_status,
             "output": volume_output,
+            "time": _utc_now_iso(),
+        }
+    ]
+
+    capacity_enabled = bool(getattr(settings, "capacity_controller_enabled", False))
+    capacity_runtime = read_capacity_controller_health(store.db_path)
+    if not capacity_enabled:
+        capacity_status = "pass"
+        capacity_output = "disabled"
+        capacity_value = "disabled"
+    elif capacity_runtime is None:
+        capacity_status = "fail"
+        capacity_output = "runtime=unavailable next_action=inspect-capacity-runtime"
+        capacity_value = "unavailable"
+    else:
+        capacity_state = str(capacity_runtime["state"])
+        measurement_age_s = max(
+            0.0,
+            now_s - int(capacity_runtime["last_measurement_at_ms"]) / 1_000,
+        )
+        maximum_age_s = max(
+            120.0,
+            float(getattr(settings, "capacity_interval_s", 30.0)) * 3,
+        )
+        capacity_status = (
+            "fail"
+            if capacity_state in {"critical", "exhaustion-imminent"}
+            or measurement_age_s > maximum_age_s
+            else "warn"
+            if capacity_state == "pressure"
+            else "pass"
+        )
+        capacity_value = capacity_state
+        next_action = (
+            "reclaim-bounded-history"
+            if capacity_state in {"pressure", "critical", "exhaustion-imminent"}
+            else "continue-normal-maintenance"
+        )
+        capacity_output = (
+            f"free_bytes={capacity_runtime['free_bytes']} "
+            f"free_percent={capacity_runtime['free_percent']} "
+            f"measurement_age_s={measurement_age_s:.1f} "
+            f"last_action={capacity_runtime['last_action']} "
+            f"consecutive_failures={capacity_runtime['consecutive_failures']} "
+            f"next_attempt_at_ms={capacity_runtime['next_attempt_at_ms']} "
+            f"last_error_kind={capacity_runtime['last_error_kind']} "
+            f"last_recovery_receipt_at_ms="
+            f"{capacity_runtime['last_recovery_receipt_at_ms']} "
+            f"next_action={next_action}"
+        )
+    overall = _severity(overall, capacity_status)
+    checks["perception:capacity_controller"] = [
+        {
+            "componentId": "capacity-controller",
+            "componentType": "component",
+            "observedValue": capacity_value,
+            "status": capacity_status,
+            "output": capacity_output,
             "time": _utc_now_iso(),
         }
     ]

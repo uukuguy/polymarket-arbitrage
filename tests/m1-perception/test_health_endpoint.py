@@ -890,6 +890,27 @@ def test_health_tracks_physical_volume_headroom(
     assert check["output"] == f"free_bytes={free} total_bytes=100"
 
 
+def test_health_exposes_critical_capacity_runtime(
+    http_test_client: TestClient,
+) -> None:
+    store = http_test_client.app.state.sqlite_store
+    http_test_client.app.state.settings.capacity_controller_enabled = True
+    store.record_capacity_controller_measurement(
+        state="critical",
+        free_bytes=11,
+        free_percent=11.0,
+        observed_at_ms=1_000,
+    )
+
+    check = http_test_client.get("/health").json()["checks"][
+        "perception:capacity_controller"
+    ][0]
+
+    assert check["status"] == "fail"
+    assert check["observedValue"] == "critical"
+    assert "next_action=reclaim-bounded-history" in check["output"]
+
+
 @pytest.mark.parametrize("handler_name", ["health", "healthz"])
 async def test_health_database_projection_runs_off_event_loop(
     daemon_settings_for_test: Any,
