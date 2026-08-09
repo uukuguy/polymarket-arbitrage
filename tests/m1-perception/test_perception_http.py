@@ -197,6 +197,8 @@ def test_perception_console_is_a_direct_operator_view(http_test_client) -> None:
     assert "Automatic action" in response.text
     assert "Next operator action" in response.text
     assert "read-model-unavailable" in response.text
+    assert "Recent recovered severe incidents" in response.text
+    assert "/perception/incidents/recent?scope=quote-collection" in response.text
 
 
 @pytest.mark.asyncio
