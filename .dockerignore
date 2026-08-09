@@ -13,3 +13,8 @@ __pycache__/
 .env
 .env.local
 node_modules/
+# The Fly L1 image contains only Python runtime artifacts. The Dashboard is
+# deployed independently, and its local build tree can otherwise add >500MB
+# to every remote Docker context.
+dashboard/
+.superpowers/
