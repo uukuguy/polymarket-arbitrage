@@ -7208,3 +7208,34 @@ Polywatch and strict-health evidence through additional L1 Quote generation
 replacements and L2 promoter/quiet-refresh cycles. Treat any repeated timeout,
 stale evidence or console-read failure as a visible P1 with diagnosis and a
 recovery trail, never as silent degradation.
+
+## SESSION 172 — 2026-08-10 (L2 console signal calibration and mirror replay repair)
+
+- [OPERATOR CLARITY] Release `9414eb1` adds an explicit console explanation
+  for `ws:connection_state=WAITING_FOR_EVENT`: it requires no manual recovery
+  while WS age, mirror freshness and L3 evidence pass. This does not change
+  strict health or silence an evidence failure; it removes a misleading
+  generic “inspect logs” instruction for the documented quiet observation.
+- [ROOT CAUSE / FIX] The first post-recovery L2 boot revealed real
+  `l2_book_levels` duplicate-key `23505` errors. The schema declares
+  `(asset_id, ts, side, level)` as the durable identity, but the write path
+  used `insert`; repeated/replayed book frames were therefore falsely logged
+  as errors before the next frame recovered. Release `c4c8e37` uses the exact
+  identity as an upsert conflict key. Test-first regression failed under the
+  old insert path and the mirror, WS evidence and health suites passed after
+  the repair.
+- [LIVE PROOF] The active original-volume L2 machine `85e647c4eed598` now runs
+  immutable image `registry.fly.io/polyarb-l2@sha256:debefe7e805c4dfa503ed96efe7b944b736ad8f7c7252a8904234302f3bd588a`,
+  release `c4c8e37`. Its boot log contains repeated successful book-level
+  writes and no `duplicate key` / `push_book_levels failed` rows. After the
+  visible cold-start strict fail, `/health` recovered to HTTP 200: L3 is
+  10/10, membership 5/5, durable sample 15.5s, worst input 57.3s, and TOB
+  mirror 28.1s. The direct console serves the current quiet-state action text.
+
+### [NEXT — CURRENT]
+
+Continue natural-cycle soak on L1 release `301ce714` and L2 release `c4c8e37`.
+Retain direct-console, Polywatch and strict-health evidence across further
+Quote replacements and L2 quiet-refresh cycles; immediately diagnose and
+record any timeout, stale evidence, mirror REST failure, or console-read
+failure rather than accepting a long-lived warning/degraded state.
