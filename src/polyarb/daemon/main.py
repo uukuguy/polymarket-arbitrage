@@ -347,13 +347,21 @@ def _start_supervised_producers(
     store: OpportunityPerceptionStore,
     stop_event: asyncio.Event,
 ) -> list[asyncio.Task[None]]:
-    if not settings.opportunity_producer_supervisor_enabled:
+    all_producers_supervised = settings.opportunity_producer_supervisor_enabled
+    quote_supervised = (
+        all_producers_supervised or settings.neg_risk_quote_supervisor_enabled
+    )
+    if not all_producers_supervised and not quote_supervised:
         return []
     flags = {
-        "candidate": settings.opportunity_first_watcher_enabled,
-        "discovery": settings.opportunity_discovery_enabled,
-        "reconciliation": settings.opportunity_reconciliation_enabled,
-        "quote": settings.neg_risk_quote_worker_enabled,
+        "candidate": (
+            all_producers_supervised and settings.opportunity_first_watcher_enabled
+        ),
+        "discovery": all_producers_supervised and settings.opportunity_discovery_enabled,
+        "reconciliation": (
+            all_producers_supervised and settings.opportunity_reconciliation_enabled
+        ),
+        "quote": quote_supervised and settings.neg_risk_quote_worker_enabled,
     }
     supervisor = ProducerSupervisor(
         store=store,
@@ -644,6 +652,9 @@ async def main() -> int:
     perception_store = OpportunityPerceptionStore(settings.db_path)
     perception_store.init_schema()
     isolated_producers = settings.opportunity_producer_supervisor_enabled
+    quote_supervised = (
+        isolated_producers or settings.neg_risk_quote_supervisor_enabled
+    )
     (
         focused_watcher,
         candidate_watcher,
@@ -743,11 +754,11 @@ async def main() -> int:
         None if isolated_producers else _start_structure_scheduler(scheduler, stop_event)
     )
     quote_worker_task = _start_quote_worker(
-        None if isolated_producers else quote_worker,
+        None if quote_supervised else quote_worker,
         stop_event,
     )
     quote_feed_hydrator_task = _start_durable_quote_feed_hydrator(
-        quote_worker.runtime if isolated_producers and quote_worker is not None else None,
+        quote_worker.runtime if quote_supervised and quote_worker is not None else None,
         getattr(app.state, "quote_feed_loader", None),
         stop_event,
         interval_s=min(15.0, max(5.0, settings.neg_risk_quote_interval_s / 4)),

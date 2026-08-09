@@ -81,6 +81,7 @@ async def test_quote_worker_cli_runs_only_the_supervised_quote_owner(
         db_path = tmp_path / "state.db"
         opportunity_producer_supervisor_enabled = True
         neg_risk_quote_worker_enabled = True
+        neg_risk_quote_supervisor_enabled = True
 
     calls: list[str] = []
 
@@ -119,6 +120,7 @@ async def test_quote_worker_cli_returns_recovery_exit_code_after_timeout_limit(
         db_path = tmp_path / "state.db"
         opportunity_producer_supervisor_enabled = True
         neg_risk_quote_worker_enabled = True
+        neg_risk_quote_supervisor_enabled = True
 
     class Worker:
         async def run(self, _stop_event) -> None:
@@ -147,11 +149,12 @@ async def test_isolated_topology_supervises_quote_as_its_only_collector(
     tmp_path, monkeypatch
 ) -> None:
     class Settings:
-        opportunity_producer_supervisor_enabled = True
+        opportunity_producer_supervisor_enabled = False
         opportunity_first_watcher_enabled = False
         opportunity_discovery_enabled = False
         opportunity_reconciliation_enabled = False
         neg_risk_quote_worker_enabled = True
+        neg_risk_quote_supervisor_enabled = True
         producer_stall_timeout_s = 180.0
         producer_stall_detection_s = 30.0
         producer_terminate_grace_s = 1.0

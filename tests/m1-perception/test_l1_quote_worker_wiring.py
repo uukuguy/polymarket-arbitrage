@@ -203,7 +203,7 @@ def test_l1_main_owns_quote_worker_shutdown() -> None:
     source = inspect.getsource(main.main)
     assert "build_production_quote_worker(" in source
     assert "opportunity_watcher=focused_watcher" in source
-    assert "None if isolated_producers else quote_worker" in source
+    assert "None if quote_supervised else quote_worker" in source
     assert "_start_durable_quote_feed_hydrator(" in source
     assert "quote_worker_task.cancel()" in source
     assert "quote_worker_task" in source.partition("asyncio.gather(")[2]
@@ -347,6 +347,7 @@ def test_fly_readonly_quote_release_enables_quote_and_keeps_cleanup_bounded() ->
 
     assert env["POLYARB_NEG_RISK_QUOTE_WORKER_ENABLED"] == "true"
     assert env["POLYARB_NEG_RISK_QUOTE_INTERVAL_S"] == "60"
+    assert env["POLYARB_NEG_RISK_QUOTE_SUPERVISOR_ENABLED"] == "true"
     assert env["POLYARB_STRUCTURE_GENERATION_READ_MODE"] == "generation"
     assert env["POLYARB_STRUCTURE_GENERATION_CLEANUP_ENABLED"] == "true"
     assert env["POLYARB_STRUCTURE_GENERATION_CLEANUP_MAX_ROWS"] == "500"

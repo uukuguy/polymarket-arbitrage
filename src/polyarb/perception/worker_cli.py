@@ -62,7 +62,12 @@ def _build_child_fault_runtime(component: str, settings):
 async def run_component(component: str, settings) -> int:
     if component not in _FLAG_BY_COMPONENT:
         raise ValueError("invalid-producer-component")
-    if not settings.opportunity_producer_supervisor_enabled:
+    supervisor_enabled = (
+        settings.neg_risk_quote_supervisor_enabled
+        if component == "quote"
+        else settings.opportunity_producer_supervisor_enabled
+    )
+    if not supervisor_enabled:
         raise RuntimeError("producer-supervisor-disabled")
     if not getattr(settings, _FLAG_BY_COMPONENT[component]):
         raise RuntimeError(f"{component}-producer-disabled")

@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     # known-universe opportunity feed. Disabled unless a deployment explicitly
     # opts in; production cadence stays below the hard 300-second feed SLA.
     neg_risk_quote_worker_enabled: bool = False
+    # Quote may be supervised independently of the legacy all-producer mode:
+    # the latter also isolates Structure and is intentionally not required for
+    # the Quote timeout containment path.
+    neg_risk_quote_supervisor_enabled: bool = False
     neg_risk_quote_interval_s: int = Field(default=120, gt=0, le=240)
     neg_risk_quote_child_hard_limit_s: float = Field(
         default=120.0, gt=0, le=120, allow_inf_nan=False
