@@ -86,6 +86,20 @@ def _trade_rows(n: int) -> list[dict]:
     ]
 
 
+def _book_level_rows(n: int) -> list[dict]:
+    return [
+        {
+            "asset_id": f"asset-{i}",
+            "ts": "2026-05-24T00:00:00Z",
+            "side": "BUY",
+            "level": 1,
+            "price": 0.5,
+            "size": 10.0,
+        }
+        for i in range(n)
+    ]
+
+
 # ── Tests ──────────────────────────────────────────────────────────────────
 
 
@@ -164,6 +178,36 @@ def test_push_trades_uses_on_conflict_trade_hash() -> None:
     assert captured.get("kwargs", {}).get("on_conflict") == "trade_hash", (
         f"expected on_conflict='trade_hash'; got {captured.get('kwargs')!r}"
     )
+
+
+def test_push_book_levels_upserts_duplicate_frame_identity() -> None:
+    """Repeated WS frames sharing a book identity are idempotent mirror writes."""
+    from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
+
+    mock = _make_supabase_mock()
+    captured: dict[str, object] = {}
+
+    def _table_mock(name: str) -> MagicMock:
+        table = MagicMock()
+
+        def _upsert(rows, **kwargs):
+            captured["name"] = name
+            captured["rows"] = rows
+            captured["kwargs"] = kwargs
+            return table
+
+        table.upsert.side_effect = _upsert
+        table.execute.return_value = MagicMock(data=[])
+        return table
+
+    mock.table.side_effect = _table_mock
+
+    with patch("polyarb.storage.l2_supabase_mirror.create_client", return_value=mock):
+        mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
+        assert mirror.push_book_levels(_book_level_rows(2)) is True
+
+    assert captured["name"] == "l2_book_levels"
+    assert captured["kwargs"] == {"on_conflict": "asset_id,ts,side,level"}
 
 
 def test_push_top_of_book_failsoft() -> None:

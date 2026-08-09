@@ -240,7 +240,10 @@ class L2SupabaseMirror:
         try:
             narrow = _project(rows, _NARROW_BOOK_LEVELS_COLUMNS)
             for chunk in _chunk(narrow, _CHUNK_SIZE):
-                self._client.table("l2_book_levels").insert(chunk).execute()
+                self._client.table("l2_book_levels").upsert(
+                    chunk,
+                    on_conflict="asset_id,ts,side,level",
+                ).execute()
             sentry_sdk.add_breadcrumb(
                 category="l2-mirror",
                 level="info",
