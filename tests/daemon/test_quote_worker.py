@@ -292,6 +292,31 @@ async def test_subprocess_failure_retries_without_cadence_sleep() -> None:
     assert worker.runtime.snapshot().success_count == 1
 
 
+async def test_supervised_worker_exits_after_bounded_consecutive_timeouts() -> None:
+    """The outer supervisor, not an endless inner loop, owns P1 recovery."""
+    from polyarb.daemon.quote_worker import QuoteCollectionSubprocessError, QuoteWorker
+
+    attempts = 0
+
+    async def collect_once() -> QuoteCollectionResult:
+        nonlocal attempts
+        attempts += 1
+        raise QuoteCollectionSubprocessError("timeout", attempt_id=attempts)
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        interval_s=120,
+        stop_after_consecutive_timeouts=3,
+    )
+
+    await worker.run(asyncio.Event())
+
+    snapshot = worker.runtime.snapshot()
+    assert attempts == 3
+    assert snapshot.consecutive_failures == 3
+    assert snapshot.state == "stopped"
+
+
 async def test_timeout_incident_receives_failed_attempt_identity() -> None:
     """A timeout must identify its failed run, never the prior successful run."""
     from polyarb.daemon.quote_worker import (

@@ -727,6 +727,7 @@ class QuoteWorker:
         record_certified_success_incident: RecordCertifiedSuccessIncident | None = None,
         producer_lock: asyncio.Lock | None = None,
         interval_s: float,
+        stop_after_consecutive_timeouts: int | None = None,
         runtime: QuoteWorkerRuntime | None = None,
         wait_for_stop: WaitForStop = _wait_for_stop,
         monotonic: Callable[[], float] = time.monotonic,
@@ -734,7 +735,17 @@ class QuoteWorker:
             _release_projection_memory
         ),
     ) -> None:
-        if isinstance(interval_s, bool) or interval_s <= 0:
+        if (
+            isinstance(interval_s, bool)
+            or interval_s <= 0
+            or (
+                stop_after_consecutive_timeouts is not None
+                and (
+                    isinstance(stop_after_consecutive_timeouts, bool)
+                    or stop_after_consecutive_timeouts < 1
+                )
+            )
+        ):
             raise ValueError("interval_s must be positive")
         self._collect_once = collect_once
         self._certify_projection = certify_projection
@@ -751,6 +762,7 @@ class QuoteWorker:
         self._record_certified_success_incident = record_certified_success_incident
         self._producer_lock = producer_lock
         self._interval_s = interval_s
+        self._stop_after_consecutive_timeouts = stop_after_consecutive_timeouts
         self._wait_for_stop = wait_for_stop
         self._monotonic = monotonic
         self._release_projection_memory = release_projection_memory
@@ -832,6 +844,7 @@ class QuoteWorker:
             while not stop_event.is_set():
                 attempt_started = self._monotonic()
                 retry_immediately = False
+                exit_for_supervisor = False
                 result = None
                 producer_slot_acquired = False
                 self.runtime.mark_pipeline_started()
@@ -994,6 +1007,18 @@ class QuoteWorker:
                         f"kind={type(error).__name__} "
                         f"consecutive={self.runtime.consecutive_failures}"
                     )
+                    if (
+                        error.reason == "timeout"
+                        and self._stop_after_consecutive_timeouts is not None
+                        and self.runtime.consecutive_failures
+                        >= self._stop_after_consecutive_timeouts
+                    ):
+                        exit_for_supervisor = True
+                        logger.error(
+                            "quote timeout threshold reached; "
+                            "exiting for outer supervisor recovery "
+                            f"threshold={self._stop_after_consecutive_timeouts}"
+                        )
                 except Exception as error:  # fail-soft producer boundary
                     if result is not None and self._fail_attempt is not None:
                         await self._fail_attempt(result, type(error).__name__)
@@ -1028,6 +1053,8 @@ class QuoteWorker:
                     finally:
                         self.runtime.mark_pipeline_finished()
                 elapsed_s = max(0.0, self._monotonic() - attempt_started)
+                if exit_for_supervisor:
+                    break
                 delay_s = 0.0 if retry_immediately else max(0.0, self._interval_s - elapsed_s)
                 if await self._wait_for_next_attempt(stop_event, delay_s):
                     break
