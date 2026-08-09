@@ -20,6 +20,7 @@ from urllib.parse import unquote
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from polyarb.http.opportunity_read_health import ReadLaneSaturatedError
 from polyarb.perception.models import GroupLeg, GroupRevision
 from polyarb.perception.store import OpportunityPerceptionStore
 
@@ -1452,20 +1453,20 @@ def _resources(
 async def _serve(request: Request, reader: Callable[[], dict[str, Any]]) -> JSONResponse:
     execution = _ReadExecution(time.monotonic() + _READ_SQL_DEADLINE_S)
     token = _READ_EXECUTION.set(execution)
-    task = asyncio.create_task(asyncio.to_thread(reader))
-    _READ_EXECUTION.reset(token)
+    try:
+        task = asyncio.create_task(
+            request.app.state.perception_read_lane.run(
+                reader,
+                timeout_s=_TIMEOUT_S,
+            )
+        )
+    finally:
+        _READ_EXECUTION.reset(token)
     try:
         try:
-            body = await asyncio.wait_for(asyncio.shield(task), timeout=_TIMEOUT_S)
+            body = await task
         except TimeoutError:
             execution.interrupt()
-            # All production readers and nested validators share the absolute
-            # SQLite/Python deadline. Awaiting convergence here prevents a
-            # timed-out request from leaving a live reader thread/connection.
-            try:
-                await task
-            except (TimeoutError, sqlite3.Error, ValueError):
-                pass
             raise
         if len(
             json.dumps(
@@ -1492,6 +1493,11 @@ async def _serve(request: Request, reader: Callable[[], dict[str, Any]]) -> JSON
             )
         return JSONResponse(
             {"status": "unavailable", "reason": "durable-evidence-invalid"},
+            status_code=503,
+        )
+    except ReadLaneSaturatedError:
+        return JSONResponse(
+            {"status": "unavailable", "reason": "read-model-saturated"},
             status_code=503,
         )
     except (TimeoutError, sqlite3.Error):

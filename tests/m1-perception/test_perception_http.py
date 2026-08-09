@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from polyarb.http import perception
+from polyarb.http.opportunity_read_health import BoundedReadLane
 from polyarb.perception.incidents import IncidentManager
 from polyarb.perception.models import (
     GroupLeg,
@@ -182,6 +185,35 @@ def test_perception_routes_exist_and_limits_are_validated(http_test_client) -> N
             "status": "invalid-request",
             "reason": "limit-must-be-an-integer-from-1-to-500",
         }
+
+
+@pytest.mark.asyncio
+async def test_perception_read_uses_dedicated_lane_when_default_executor_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An overloaded producer executor cannot starve the operator read model."""
+    lane = BoundedReadLane("test-perception-read", capacity=1)
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(perception_read_lane=lane))
+    )
+    blocked = threading.Event()
+    real_to_thread = asyncio.to_thread
+
+    async def blocked_default_executor(*_args, **_kwargs):
+        await real_to_thread(blocked.wait)
+
+    monkeypatch.setattr(perception.asyncio, "to_thread", blocked_default_executor)
+    monkeypatch.setattr(perception, "_TIMEOUT_S", 0.05)
+    asyncio.get_running_loop().call_later(0.1, blocked.set)
+
+    try:
+        response = await perception._serve(request, lambda: {"status": "available"})
+    finally:
+        blocked.set()
+        lane.shutdown()
+
+    assert response.status_code == 200
+    assert response.body == b'{"status":"available"}'
 
 
 def test_perception_status_distinguishes_available_zero_from_corrupt_evidence(

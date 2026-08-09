@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import sqlite3
 import threading
 import time
@@ -648,6 +649,18 @@ async def test_bounded_read_lane_rejects_zombie_queueing_and_recovers() -> None:
         break
     else:
         pytest.fail("read lane did not recover after timed-out worker completed")
+
+
+@pytest.mark.asyncio
+async def test_bounded_read_lane_propagates_request_context_to_its_worker() -> None:
+    request_token = contextvars.ContextVar("request-token")
+    token = request_token.set("operator-read")
+    lane = BoundedReadLane("test-opportunity-context", capacity=1)
+    try:
+        assert await lane.run(request_token.get, timeout_s=0.5) == "operator-read"
+    finally:
+        request_token.reset(token)
+        lane.shutdown()
 
 
 def test_read_health_rejects_stale_completion_in_both_orderings() -> None:

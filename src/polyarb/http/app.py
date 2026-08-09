@@ -204,6 +204,7 @@ def create_app(
 
     source_truth_lane = BoundedReadLane("opportunity-source-truth")
     lifecycle_lane = BoundedReadLane("opportunity-lifecycle")
+    perception_read_lane = BoundedReadLane("perception-read")
 
     @asynccontextmanager
     async def opportunity_read_lifespan(_app: Starlette):
@@ -212,6 +213,7 @@ def create_app(
         finally:
             source_truth_lane.shutdown()
             lifecycle_lane.shutdown()
+            perception_read_lane.shutdown()
 
     app = Starlette(
         routes=routes,
@@ -231,6 +233,7 @@ def create_app(
     app.state.opportunity_read_health = OpportunityReadHealth()
     app.state.opportunity_source_truth_lane = source_truth_lane
     app.state.opportunity_lifecycle_lane = lifecycle_lane
+    app.state.perception_read_lane = perception_read_lane
     # Slice B stores the exact runtime object mutated by Candidate Watcher.
     # Public HTTP exposure belongs to Task 6; keeping it on app.state now
     # preserves chain-truth without adding a premature route.
