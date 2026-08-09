@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import time
+from contextvars import ContextVar
 from math import isfinite
 from pathlib import Path
 
@@ -37,6 +38,10 @@ _ENDPOINT_TIMEOUT_S = 3.0
 # Fly's attached volume. Keep its cold-cache read bounded below the endpoint's
 # three-second absolute budget without rejecting every healthy restart.
 _FEED_HYDRATION_TIMEOUT_S = 2.5
+_SOURCE_TRUTH_READ_MODE: ContextVar[str] = ContextVar(
+    "opportunity_source_truth_read_mode",
+    default="legacy",
+)
 
 
 def _is_sha256(value: object) -> bool:
@@ -48,7 +53,11 @@ def _is_sha256(value: object) -> bool:
 
 
 def _market_truth(db_path: Path, now_s: float) -> MarketTruthHealth:
-    return read_market_truth_health(db_path, now_s)
+    return read_market_truth_health(
+        db_path,
+        now_s,
+        structure_generation_read_mode=_SOURCE_TRUTH_READ_MODE.get(),
+    )
 
 
 def _read_health(request: Request) -> OpportunityReadHealth:
@@ -134,8 +143,7 @@ def _require_available_feed(
         )
     if availability.reason == "stale-universe":
         raise StaleUniverseError(
-            "universe age "
-            f"{universe_age_seconds:.1f}s exceeds {UNIVERSE_SLA_SECONDS:.1f}s"
+            f"universe age {universe_age_seconds:.1f}s exceeds {UNIVERSE_SLA_SECONDS:.1f}s"
         )
     raise QuoteUniverseUnavailableError(availability.reason or "feed-unavailable")
 
@@ -204,12 +212,24 @@ async def _opportunities(request: Request) -> JSONResponse:
         )
         source_token = health.begin_source_attempt(now_s)
         try:
-            market_truth = await request.app.state.opportunity_source_truth_lane.run(
-                _market_truth,
-                request.app.state.sqlite_store.db_path,
-                now_s,
-                timeout_s=_SOURCE_TRUTH_READ_TIMEOUT_S,
+            mode_token = _SOURCE_TRUTH_READ_MODE.set(
+                str(
+                    getattr(
+                        request.app.state.settings,
+                        "structure_generation_read_mode",
+                        "legacy",
+                    )
+                )
             )
+            try:
+                market_truth = await request.app.state.opportunity_source_truth_lane.run(
+                    _market_truth,
+                    request.app.state.sqlite_store.db_path,
+                    now_s,
+                    timeout_s=_SOURCE_TRUTH_READ_TIMEOUT_S,
+                )
+            finally:
+                _SOURCE_TRUTH_READ_MODE.reset(mode_token)
             if (
                 market_truth.last_complete_snapshot_id is None
                 or getattr(market_truth, "coverage_status", "pass") == "fail"

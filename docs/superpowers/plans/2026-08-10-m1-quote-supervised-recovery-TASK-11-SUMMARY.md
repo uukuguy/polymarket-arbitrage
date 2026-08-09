@@ -14,3 +14,9 @@ failure on the next current-generation switch.  The complete-run and bounded
 retention transactions now delete a superseded compact artifact before
 deleting its owned Quote run.  A regression test proves an existing compact
 artifact cannot block certification of the next generation.
+
+Production follow-up: opportunity source-truth diagnostics now inherit the
+configured Structure generation-read mode through their bounded read lane.
+This prevents a generation-mode deployment from repeatedly misclassifying its
+authenticated pointer as legacy `source-truth-unavailable` while preserving
+the visible fallback path for genuine read failures.

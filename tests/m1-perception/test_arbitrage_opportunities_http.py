@@ -128,6 +128,35 @@ def test_opportunity_endpoint_returns_explicit_gross_basis(http_test_client, mon
     }
 
 
+def test_opportunity_source_truth_read_inherits_generation_mode(
+    http_test_client, monkeypatch
+) -> None:
+    """The diagnostic read must use the same authenticated structure pointer as production."""
+    import polyarb.http.arbitrage as arbitrage_module
+
+    runtime = QuoteWorkerRuntime()
+    _publish_feed(runtime)
+    http_test_client.app.state.quote_worker_runtime = runtime
+    http_test_client.app.state.settings.structure_generation_read_mode = "generation"
+    observed_modes: list[str] = []
+
+    def truth_with_observed_mode(_path, _now_s):
+        observed_modes.append(arbitrage_module._SOURCE_TRUTH_READ_MODE.get())
+        return _truth(10)
+
+    monkeypatch.setattr(
+        "polyarb.http.arbitrage._market_truth",
+        truth_with_observed_mode,
+    )
+    monkeypatch.setattr("polyarb.http.arbitrage.time.time", lambda: NOW_S)
+
+    response = http_test_client.get("/arbitrage/opportunities")
+
+    assert response.status_code == 200
+    assert response.json()["source_truth_status"] == "live"
+    assert observed_modes == ["generation"]
+
+
 def test_legacy_feed_does_not_attach_an_old_observer_after_new_structure_publishes(
     http_test_client, monkeypatch
 ) -> None:
