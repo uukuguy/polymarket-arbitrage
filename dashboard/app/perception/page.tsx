@@ -493,6 +493,12 @@ export default async function PerceptionOverviewPage() {
               <div style={muted}>
                 consecutive failures {incident.diagnosis?.consecutive_failures} · reminder every {incident.diagnosis?.reminder_interval_s}s
               </div>
+              <div style={muted}>
+                P1 failure: {incident.diagnosis?.failure_reason ?? "not recorded"}
+              </div>
+              <div style={muted}>
+                retries {incident.retry_count ?? "not recorded"} · next automatic retry {fmtTime(incident.next_retry_at_ms)}
+              </div>
             </div>
           ))}
         </section>
@@ -516,6 +522,12 @@ export default async function PerceptionOverviewPage() {
               <div><strong>Next action:</strong> {incident.diagnosis?.next_action.replaceAll("-", " ")}</div>
               <div style={muted}>
                 free space {incident.diagnosis?.free_percent}% · reminder every {incident.diagnosis?.reminder_interval_s}s
+              </div>
+              <div style={muted}>
+                P1 failure: {incident.diagnosis?.failure_reason ?? "not recorded"}
+              </div>
+              <div style={muted}>
+                retries {incident.retry_count ?? "not recorded"} · next automatic retry {fmtTime(incident.next_retry_at_ms)}
               </div>
             </div>
           ))}

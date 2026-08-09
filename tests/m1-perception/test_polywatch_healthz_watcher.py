@@ -1182,10 +1182,18 @@ def test_waiting_for_event_with_fresh_data_is_quiet() -> None:
     assert "ok" in reason.lower()
 
 
-@pytest.mark.parametrize("status", [200, 302, 307])
-def test_dashboard_live_or_sso_response_is_healthy(status: int) -> None:
+def test_dashboard_live_response_is_healthy() -> None:
+    status = 200
     action, _ = _decision("decide_dashboard")(status, {}, None)
     assert action == "noop"
+
+
+@pytest.mark.parametrize("status", [302, 307])
+def test_dashboard_auth_redirect_is_an_operator_visibility_fault(status: int) -> None:
+    action, reason = _decision("decide_dashboard")(status, {}, None)
+
+    assert action == "push"
+    assert "operator visibility" in reason.lower()
 
 
 def test_dashboard_missing_deployment_pushes() -> None:

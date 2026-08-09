@@ -300,6 +300,8 @@ def test_overview_has_prominent_p1_quote_incident_panel() -> None:
     assert "p1QuoteIncidents" in overview
     assert "Automatic action:" in overview
     assert "Next action:" in overview
+    assert "P1 failure:" in overview
+    assert "next automatic retry" in overview
 
 
 def test_overview_has_prominent_p1_capacity_incident_panel() -> None:
@@ -356,6 +358,7 @@ def test_make_smoke_and_living_manual_are_synchronized() -> None:
     assert ".PHONY: smoke-perception-dashboard" in makefile
     assert '"smoke-perception-dashboard"' in checker
     assert "`make smoke-perception-dashboard`" in manual
+    assert "operator visibility FAIL" in makefile
     assert (
         "<!-- m1-contract: route=/perception "
         "file=dashboard/app/perception/page.tsx -->"

@@ -932,8 +932,15 @@ def decide_dashboard(
     """Interpret a non-following probe of the canonical Vercel deployment."""
     if transport_error or status is None:
         return "push", f"Dashboard transport failure: {transport_error or 'unknown'}"
-    if status in {200, 302, 307}:
-        return "noop", f"Dashboard deployment reachable (HTTP {status})"
+    if status == 200:
+        return "noop", "Dashboard deployment and operator surface reachable (HTTP 200)"
+    if status in {302, 307}:
+        return (
+            "push",
+            "Dashboard operator visibility failure "
+            f"(HTTP {status} auth redirect): authorize the on-call viewer or "
+            "restore the authenticated operator route",
+        )
 
     vercel_error = next(
         (
