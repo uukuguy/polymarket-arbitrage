@@ -26,10 +26,10 @@ help:
 	@echo ""
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed -E 's/^## /  /' | sort
 
-## sqlite-volume-backup: Offline-only verified SQLite backup plus R2 receipt; source= and destination= must be explicit new local paths.
+## sqlite-volume-backup: Offline-only verified SQLite backup plus R2 receipt; source= destination= manifest= must be explicit new local paths.
 sqlite-volume-backup:
-	@test -n "$(source)" && test -n "$(destination)" || (echo "usage: make sqlite-volume-backup source=/path/state.db destination=/new/path/backup.db" >&2; exit 2)
-	@uv run python -m polyarb.cli_volume_recovery backup --source "$(source)" --destination "$(destination)"
+	@test -n "$(source)" && test -n "$(destination)" && test -n "$(manifest)" || (echo "usage: make sqlite-volume-backup source=/path/state.db destination=/new/path/backup.db manifest=/new/path/manifest.json" >&2; exit 2)
+	@uv run python -m polyarb.cli_volume_recovery backup --source "$(source)" --destination "$(destination)" --manifest "$(manifest)"
 
 ## sqlite-volume-restore-verify: Restore a verified R2 artifact only to a new local path; object_key= manifest= destination= are required.
 sqlite-volume-restore-verify:

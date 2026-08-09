@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     backup = commands.add_parser("backup")
     backup.add_argument("--source", type=Path, required=True)
     backup.add_argument("--destination", type=Path, required=True)
+    backup.add_argument("--manifest", type=Path, required=True)
     backup.add_argument("--pages-per-step", type=int, default=256)
     restore = commands.add_parser("restore-verify")
     restore.add_argument("--object-key", required=True)
@@ -42,9 +43,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     settings = load_settings()
     if args.command == "backup":
+        if args.manifest.exists() or not args.manifest.parent.is_dir():
+            raise ValueError("manifest-output-must-be-a-new-file-in-existing-directory")
         manifest = backup_sqlite(args.source, args.destination, pages_per_step=args.pages_per_step)
         object_key = upload_backup(manifest=manifest, backup=args.destination, settings=settings)
-        print(json.dumps({**_manifest_dict(manifest), "object_key": object_key}, sort_keys=True))
+        payload = {**_manifest_dict(manifest), "object_key": object_key}
+        args.manifest.write_text(json.dumps(payload, sort_keys=True) + "\n")
+        print(json.dumps(payload, sort_keys=True))
         return 0
     facts = json.loads(args.manifest.read_text())
     manifest = SQLiteBackupManifest(
