@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -130,3 +131,39 @@ def test_upload_backup_verifies_object_digest_before_writing_manifest(
     assert object_key == f"volume-backups/{manifest.backup_sha256}/state.db"
     assert [kind for kind, _ in calls] == ["upload", "head", "manifest"]
     assert calls[0][1]["extra"]["Metadata"]["sha256"] == manifest.backup_sha256
+
+
+def test_restore_backup_refuses_overwrite_and_verifies_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.ops import sqlite_volume_backup as recovery
+
+    source = tmp_path / "source.db"
+    backup = tmp_path / "backup.db"
+    restored = tmp_path / "restored.db"
+    _source_db(source)
+    manifest = recovery.backup_sqlite(source, backup)
+
+    class Client:
+        def get_object(self, **_kwargs):
+            return {"Body": BytesIO(backup.read_bytes())}
+
+    monkeypatch.setattr(recovery, "_r2_client", lambda _settings: Client())
+    settings = SimpleNamespace(r2_bucket="bucket", r2_endpoint="https://r2.example")
+    restored_manifest = recovery.restore_and_verify(
+        object_key=f"volume-backups/{manifest.backup_sha256}/state.db",
+        destination=restored,
+        expected_manifest=manifest,
+        settings=settings,
+    )
+
+    assert restored_manifest.backup_sha256 == manifest.backup_sha256
+    assert restored_manifest.integrity_check == "ok"
+    with pytest.raises(recovery.SQLiteBackupRefusal, match="destination-already-exists"):
+        recovery.restore_and_verify(
+            object_key=f"volume-backups/{manifest.backup_sha256}/state.db",
+            destination=restored,
+            expected_manifest=manifest,
+            settings=settings,
+        )

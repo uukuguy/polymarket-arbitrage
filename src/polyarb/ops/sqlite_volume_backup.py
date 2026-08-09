@@ -158,6 +158,57 @@ def upload_backup(*, manifest: SQLiteBackupManifest, backup: Path, settings) -> 
     return key
 
 
+def restore_and_verify(
+    *,
+    object_key: str,
+    destination: Path,
+    expected_manifest: SQLiteBackupManifest,
+    settings,
+) -> SQLiteBackupManifest:
+    """Restore one content-addressed artifact only to a new verified path."""
+    target = Path(destination)
+    expected_key = f"volume-backups/{expected_manifest.backup_sha256}/state.db"
+    if object_key != expected_key:
+        raise SQLiteBackupRefusal("restore-object-key-manifest-mismatch")
+    if target.exists():
+        raise SQLiteBackupRefusal(f"destination-already-exists:{target}")
+    if not target.parent.is_dir():
+        raise SQLiteBackupRefusal(f"destination-parent-missing:{target.parent}")
+    partial = target.with_name(f".{target.name}.partial")
+    if partial.exists():
+        raise SQLiteBackupRefusal(f"partial-destination-already-exists:{partial}")
+    try:
+        body = _r2_client(settings).get_object(
+            Bucket=settings.r2_bucket, Key=object_key
+        )["Body"]
+        with partial.open("xb") as output:
+            while block := body.read(1024 * 1024):
+                output.write(block)
+        verified = verify_sqlite(partial)
+        if (
+            verified.backup_sha256 != expected_manifest.backup_sha256
+            or verified.backup_size_bytes != expected_manifest.backup_size_bytes
+            or verified.page_count != expected_manifest.page_count
+            or verified.page_size != expected_manifest.page_size
+            or verified.integrity_check != expected_manifest.integrity_check
+        ):
+            raise SQLiteBackupError("restored-backup-manifest-mismatch")
+        os.replace(partial, target)
+        return SQLiteBackupManifest(
+            source_path=expected_manifest.source_path,
+            backup_path=target,
+            backup_sha256=verified.backup_sha256,
+            backup_size_bytes=verified.backup_size_bytes,
+            page_count=verified.page_count,
+            page_size=verified.page_size,
+            freelist_count=verified.freelist_count,
+            integrity_check=verified.integrity_check,
+        )
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
+
+
 def _r2_client(settings):
     return _build_client(
         settings.r2_endpoint,
