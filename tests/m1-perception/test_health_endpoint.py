@@ -74,14 +74,18 @@ def test_opportunity_authority_read_health_warns_then_fails_and_recovers() -> No
         registry,
         now_s=101.0,
     )
-    assert repeated["quote_feed:source_truth_read"][0]["status"] == "fail"
+    # A certified Quote binding remains a valid serving authority while the
+    # expensive live market-truth diagnostic read is temporarily unavailable.
+    # Keep the warning visible, but let the independent Quote/universe SLA
+    # checks decide whether the serving feed must fail closed.
+    assert repeated["quote_feed:source_truth_read"][0]["status"] == "warn"
     assert repeated["quote_feed:lifecycle_read"][0]["status"] == "fail"
 
     persistent = health_module._opportunity_read_health_checks(
         registry,
         now_s=401.0,
     )
-    assert persistent["quote_feed:source_truth_read"][0]["status"] == "fail"
+    assert persistent["quote_feed:source_truth_read"][0]["status"] == "warn"
     assert persistent["quote_feed:lifecycle_read"][0]["status"] == "fail"
     assert persistent["quote_feed:source_truth_read"][0]["observedValue"] == 301.0
 

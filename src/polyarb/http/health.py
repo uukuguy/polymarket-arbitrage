@@ -989,6 +989,13 @@ def _opportunity_read_health_checks(
             failure_started_at_s = snapshot["source_truth_failure_started_at_s"]
             healthy = status in {"live", "never-attempted"}
             authentication_invalid = status == "authentication-invalid"
+            # The opportunity endpoint permits this status only after proving
+            # the request is bound to its fresh, certified Quote projection.
+            # A slow diagnostic re-read of market truth is operationally
+            # relevant (and remains a visible warning), but it must not turn a
+            # still-authenticated, in-SLA M2 feed into a synthetic 503. Quote
+            # freshness and source identity have their own strict checks.
+            authenticated_fallback = status == "last-known-authenticated"
         else:
             status = str(snapshot["lifecycle_status"])
             failures = int(snapshot["lifecycle_consecutive_failures"])
@@ -996,6 +1003,7 @@ def _opportunity_read_health_checks(
             failure_started_at_s = snapshot["lifecycle_failure_started_at_s"]
             healthy = status in {"available", "never-attempted"}
             authentication_invalid = False
+            authenticated_fallback = False
         failure_age_s = (
             max(0.0, now_s - float(failure_started_at_s))
             if failure_started_at_s is not None
@@ -1003,6 +1011,8 @@ def _opportunity_read_health_checks(
         )
         if healthy:
             health_status = "pass"
+        elif authenticated_fallback:
+            health_status = "warn"
         elif (
             authentication_invalid
             or failures >= _OPPORTUNITY_READ_FAILURE_FAIL_COUNT
