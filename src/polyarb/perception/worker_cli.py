@@ -12,6 +12,7 @@ from uuid import UUID
 
 from polyarb.config import load_settings
 from polyarb.daemon.opportunity_watcher import build_focused_opportunity_watcher
+from polyarb.daemon.quote_worker import build_production_quote_worker
 from polyarb.perception.candidate_watcher import build_production_candidate_watcher
 from polyarb.perception.discovery import (
     CandidateFreshness,
@@ -30,7 +31,9 @@ _FLAG_BY_COMPONENT = {
     "candidate": "opportunity_first_watcher_enabled",
     "discovery": "opportunity_discovery_enabled",
     "reconciliation": "opportunity_reconciliation_enabled",
+    "quote": "neg_risk_quote_worker_enabled",
 }
+_QUOTE_SUPERVISED_TIMEOUT_LIMIT = 1
 
 
 def _build_child_fault_runtime(component: str, settings):
@@ -56,7 +59,7 @@ def _build_child_fault_runtime(component: str, settings):
     )
 
 
-async def run_component(component: str, settings) -> None:
+async def run_component(component: str, settings) -> int:
     if component not in _FLAG_BY_COMPONENT:
         raise ValueError("invalid-producer-component")
     if not settings.opportunity_producer_supervisor_enabled:
@@ -75,6 +78,26 @@ async def run_component(component: str, settings) -> None:
     store = OpportunityPerceptionStore(settings.db_path)
     store.init_schema()
     store.claim_producer_heartbeat_authority(component)
+    if component == "quote":
+
+        async def publish_progress() -> None:
+            await asyncio.to_thread(
+                store.record_producer_heartbeat,
+                "quote",
+                observed_at_ms=int(time.time() * 1_000),
+            )
+
+        worker = build_production_quote_worker(
+            settings,
+            perception_store=store,
+            stop_after_consecutive_timeouts=_QUOTE_SUPERVISED_TIMEOUT_LIMIT,
+            on_cycle_started=publish_progress,
+        )
+        if worker is None:
+            raise RuntimeError("quote-producer-disabled")
+        await worker.run(stop_event)
+        return 75 if worker.supervisor_recovery_requested else 0
+
     fault_runtime = _build_child_fault_runtime(component, settings)
     if component == "candidate":
         focused = build_focused_opportunity_watcher(settings)
@@ -105,6 +128,7 @@ async def run_component(component: str, settings) -> None:
             fault_runtime=fault_runtime,
         )
     await worker.run(stop_event)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -114,8 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=tuple(_FLAG_BY_COMPONENT),
     )
     args = parser.parse_args(argv)
-    asyncio.run(run_component(args.component, load_settings()))
-    return 0
+    return asyncio.run(run_component(args.component, load_settings()))
 
 
 if __name__ == "__main__":

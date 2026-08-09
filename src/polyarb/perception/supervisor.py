@@ -42,6 +42,12 @@ PRODUCER_COMMANDS = {
         "polyarb.perception.worker_cli",
         "reconciliation",
     ),
+    "quote": (
+        sys.executable,
+        "-m",
+        "polyarb.perception.worker_cli",
+        "quote",
+    ),
 }
 
 _AUTH_RE = re.compile(r"(?i)(authorization\s*:\s*(?:bearer|basic)\s+)[^\s\\]+")

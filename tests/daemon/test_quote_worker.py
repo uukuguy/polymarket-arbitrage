@@ -317,6 +317,32 @@ async def test_supervised_worker_exits_after_bounded_consecutive_timeouts() -> N
     assert snapshot.state == "stopped"
 
 
+async def test_supervised_quote_worker_publishes_child_progress_each_cycle() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker
+
+    progress: list[str] = []
+
+    async def collect_once() -> QuoteCollectionResult:
+        return _result(1)
+
+    async def on_cycle_started() -> None:
+        progress.append("progress")
+
+    async def stop_after_once(_stop: asyncio.Event, _delay_s: float) -> bool:
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        interval_s=120,
+        on_cycle_started=on_cycle_started,
+        wait_for_stop=stop_after_once,
+    )
+
+    await worker.run(asyncio.Event())
+
+    assert progress == ["progress"]
+
+
 async def test_timeout_incident_receives_failed_attempt_identity() -> None:
     """A timeout must identify its failed run, never the prior successful run."""
     from polyarb.daemon.quote_worker import (

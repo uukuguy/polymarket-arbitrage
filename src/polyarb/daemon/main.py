@@ -353,6 +353,7 @@ def _start_supervised_producers(
         "candidate": settings.opportunity_first_watcher_enabled,
         "discovery": settings.opportunity_discovery_enabled,
         "reconciliation": settings.opportunity_reconciliation_enabled,
+        "quote": settings.neg_risk_quote_worker_enabled,
     }
     supervisor = ProducerSupervisor(
         store=store,

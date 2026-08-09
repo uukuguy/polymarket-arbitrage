@@ -11,6 +11,8 @@ from uuid import UUID
 
 import pytest
 
+import polyarb.daemon.main as daemon_main
+import polyarb.perception.worker_cli as worker_cli_module
 from polyarb.http.health import read_producer_liveness_health
 from polyarb.perception.incidents import IncidentManager
 from polyarb.perception.models import GroupLeg, GroupRevision
@@ -43,6 +45,12 @@ def test_exact_commands_are_shell_free() -> None:
         "polyarb.perception.worker_cli",
         "candidate",
     )
+    assert PRODUCER_COMMANDS["quote"] == (
+        sys.executable,
+        "-m",
+        "polyarb.perception.worker_cli",
+        "quote",
+    )
     assert all(isinstance(command, tuple) for command in PRODUCER_COMMANDS.values())
 
 
@@ -63,6 +71,112 @@ async def test_worker_cli_rejects_disabled_component_without_touching_network() 
 
     with pytest.raises(RuntimeError, match="producer-supervisor-disabled"):
         await run_component("candidate", Settings())
+
+
+@pytest.mark.asyncio
+async def test_quote_worker_cli_runs_only_the_supervised_quote_owner(
+    tmp_path, monkeypatch
+) -> None:
+    class Settings:
+        db_path = tmp_path / "state.db"
+        opportunity_producer_supervisor_enabled = True
+        neg_risk_quote_worker_enabled = True
+
+    calls: list[str] = []
+
+    class Worker:
+        async def run(self, _stop_event) -> None:
+            calls.append("run")
+
+        @property
+        def supervisor_recovery_requested(self) -> bool:
+            return False
+
+    def build_worker(settings, *, perception_store, **_kwargs):
+        assert settings is Settings
+        assert perception_store.db_path == Settings.db_path
+        calls.append("build")
+        return Worker()
+
+    monkeypatch.setattr(worker_cli_module, "build_production_quote_worker", build_worker)
+    monkeypatch.setenv("POLYARB_PRODUCER_SUPERVISOR_RUN_ID", "quote-run")
+    monkeypatch.setenv("POLYARB_PRODUCER_ATTEMPT", "1")
+    store = OpportunityPerceptionStore(Settings.db_path)
+    store.init_schema()
+    assert store.reserve_producer_attempt(
+        "quote", supervisor_run_id="quote-run", started_at_ms=1_000
+    ) == 1
+
+    assert await run_component("quote", Settings) == 0
+    assert calls == ["build", "run"]
+
+
+@pytest.mark.asyncio
+async def test_quote_worker_cli_returns_recovery_exit_code_after_timeout_limit(
+    tmp_path, monkeypatch
+) -> None:
+    class Settings:
+        db_path = tmp_path / "state.db"
+        opportunity_producer_supervisor_enabled = True
+        neg_risk_quote_worker_enabled = True
+
+    class Worker:
+        async def run(self, _stop_event) -> None:
+            pass
+
+        @property
+        def supervisor_recovery_requested(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        worker_cli_module,
+        "build_production_quote_worker",
+        lambda *_args, **_kwargs: Worker(),
+    )
+    monkeypatch.setenv("POLYARB_PRODUCER_SUPERVISOR_RUN_ID", "quote-run")
+    monkeypatch.setenv("POLYARB_PRODUCER_ATTEMPT", "1")
+    store = OpportunityPerceptionStore(Settings.db_path)
+    store.init_schema()
+    store.reserve_producer_attempt("quote", supervisor_run_id="quote-run", started_at_ms=1)
+
+    assert await run_component("quote", Settings) == 75
+
+
+@pytest.mark.asyncio
+async def test_isolated_topology_supervises_quote_as_its_only_collector(
+    tmp_path, monkeypatch
+) -> None:
+    class Settings:
+        opportunity_producer_supervisor_enabled = True
+        opportunity_first_watcher_enabled = False
+        opportunity_discovery_enabled = False
+        opportunity_reconciliation_enabled = False
+        neg_risk_quote_worker_enabled = True
+        producer_stall_timeout_s = 180.0
+        producer_stall_detection_s = 30.0
+        producer_terminate_grace_s = 1.0
+        producer_max_restarts = 3
+        producer_backoff_initial_s = 1.0
+        producer_backoff_max_s = 30.0
+
+    specs = []
+
+    class Supervisor:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def run(self, spec, _stop_event) -> None:
+            specs.append(spec)
+
+    monkeypatch.setattr(daemon_main, "ProducerSupervisor", Supervisor)
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+
+    tasks = daemon_main._start_supervised_producers(Settings, store, asyncio.Event())
+    await asyncio.gather(*tasks)
+
+    assert [spec.component for spec in specs] == ["quote"]
+    assert specs[0].stall_detection_s is None
 
 
 @pytest.mark.asyncio

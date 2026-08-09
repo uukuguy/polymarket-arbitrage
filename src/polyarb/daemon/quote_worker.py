@@ -57,6 +57,7 @@ RecordFailureIncident = Callable[
     ["QuoteCollectionSubprocessError", "QuoteWorkerRuntime"], Awaitable[None]
 ]
 RecordCertifiedSuccessIncident = Callable[[QuoteCollectionResult], Awaitable[None]]
+OnCycleStarted = Callable[[], Awaitable[None]]
 _BACKGROUND_REAP_TASKS: set[asyncio.Task[object]] = set()
 
 
@@ -725,6 +726,7 @@ class QuoteWorker:
         record_timeout_incident: RecordTimeoutIncident | None = None,
         record_failure_incident: RecordFailureIncident | None = None,
         record_certified_success_incident: RecordCertifiedSuccessIncident | None = None,
+        on_cycle_started: OnCycleStarted | None = None,
         producer_lock: asyncio.Lock | None = None,
         interval_s: float,
         stop_after_consecutive_timeouts: int | None = None,
@@ -760,6 +762,7 @@ class QuoteWorker:
         self._record_timeout_incident = record_timeout_incident
         self._record_failure_incident = record_failure_incident
         self._record_certified_success_incident = record_certified_success_incident
+        self._on_cycle_started = on_cycle_started
         self._producer_lock = producer_lock
         self._interval_s = interval_s
         self._stop_after_consecutive_timeouts = stop_after_consecutive_timeouts
@@ -772,6 +775,11 @@ class QuoteWorker:
     @property
     def interval_s(self) -> float:
         return self._interval_s
+
+    @property
+    def supervisor_recovery_requested(self) -> bool:
+        """Whether a bounded timeout exit deliberately yielded to supervision."""
+        return getattr(self, "_supervisor_recovery_requested", False)
 
     def request_now(self) -> bool:
         """Queue one normal collection in the worker's existing single loop."""
@@ -850,6 +858,14 @@ class QuoteWorker:
                 self.runtime.mark_pipeline_started()
                 try:
                     self.runtime.mark_started()
+                    if self._on_cycle_started is not None:
+                        try:
+                            await self._on_cycle_started()
+                        except Exception as error:
+                            logger.warning(
+                                "quote supervised progress heartbeat failed "
+                                f"kind={type(error).__name__}"
+                            )
                     # Quote is the M2 source-of-truth producer.  Its durable
                     # transaction is larger than the child collection alone:
                     # certification and feed publication also read/write the
@@ -1014,6 +1030,7 @@ class QuoteWorker:
                         >= self._stop_after_consecutive_timeouts
                     ):
                         exit_for_supervisor = True
+                        self._supervisor_recovery_requested = True
                         logger.error(
                             "quote timeout threshold reached; "
                             "exiting for outer supervisor recovery "
@@ -1098,6 +1115,8 @@ def build_production_quote_worker(
     opportunity_watcher: OpportunityWatcher | None = None,
     producer_lock: asyncio.Lock | None = None,
     perception_store: OpportunityPerceptionStore | None = None,
+    stop_after_consecutive_timeouts: int | None = None,
+    on_cycle_started: OnCycleStarted | None = None,
 ) -> QuoteWorker | None:
     """Build the public-read-only production worker when explicitly enabled."""
     if not settings.neg_risk_quote_worker_enabled:
@@ -1278,6 +1297,8 @@ def build_production_quote_worker(
         record_timeout_incident=record_timeout_incident,
         record_failure_incident=record_failure_incident,
         record_certified_success_incident=record_certified_success_incident,
+        on_cycle_started=on_cycle_started,
         producer_lock=producer_lock,
         interval_s=settings.neg_risk_quote_interval_s,
+        stop_after_consecutive_timeouts=stop_after_consecutive_timeouts,
     )
