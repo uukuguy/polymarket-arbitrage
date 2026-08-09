@@ -1932,6 +1932,16 @@ CREATE TABLE IF NOT EXISTS neg_risk_quote_unsealed_receipts (
 CREATE TABLE IF NOT EXISTS neg_risk_quote_purge_authority (
   quote_run_id INTEGER PRIMARY KEY
 );
+
+-- The only scanner-visible current Quote generation.  A collector writes a
+-- collecting staging run first, then switches this one-row pointer in the
+-- same transaction that certifies its terminal rows.  Readers therefore see
+-- either the former certified generation or the exact replacement, never a
+-- partial staging payload.
+CREATE TABLE IF NOT EXISTS neg_risk_quote_current_generation (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  quote_run_id INTEGER NOT NULL REFERENCES neg_risk_quote_runs(id)
+);
 CREATE TRIGGER IF NOT EXISTS trg_complete_quote_run_immutable_update
 BEFORE UPDATE ON neg_risk_quote_runs WHEN OLD.status='complete'
 BEGIN

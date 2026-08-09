@@ -692,8 +692,9 @@ class NegRiskQuoteStore:
         *,
         completed_at_ms: int,
         successful_response_count: int,
+        publish_current_generation: bool = False,
     ) -> QuoteRun:
-        """Atomically promote a terminal run with its accepted CLOB response count."""
+        """Atomically certify a run and optionally switch the current feed pointer."""
         if isinstance(successful_response_count, bool) or not isinstance(
             successful_response_count, int
         ):
@@ -790,6 +791,22 @@ class NegRiskQuoteStore:
                     "successful_response_count = ?, completed_at_ms = ? WHERE id = ?",
                     (successful_response_count, completed_at_ms, run_id),
                 )
+                if publish_current_generation:
+                    previous = con.execute(
+                        "SELECT quote_run_id FROM neg_risk_quote_current_generation "
+                        "WHERE singleton=1"
+                    ).fetchone()
+                    con.execute(
+                        "INSERT INTO neg_risk_quote_current_generation(singleton,quote_run_id) "
+                        "VALUES (1,?) ON CONFLICT(singleton) DO UPDATE SET "
+                        "quote_run_id=excluded.quote_run_id",
+                        (run_id,),
+                    )
+                    if previous is not None and int(previous[0]) != run_id:
+                        self._purge_complete_run_payloads_in_transaction(
+                            con,
+                            (int(previous[0]),),
+                        )
                 row = con.execute(
                     "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
                     "requested_token_count, successful_response_count, status, failure_reason, "
@@ -804,6 +821,47 @@ class NegRiskQuoteStore:
                 raise
         finally:
             con.close()
+
+    @staticmethod
+    def _purge_complete_run_payloads_in_transaction(
+        con: sqlite3.Connection,
+        run_ids: tuple[int, ...],
+    ) -> None:
+        """Delete former current generations after their pointer is switched."""
+        if not run_ids:
+            return
+        placeholders = ",".join("?" for _ in run_ids)
+        con.executemany(
+            "INSERT INTO neg_risk_quote_purge_authority(quote_run_id) VALUES (?)",
+            ((run_id,) for run_id in run_ids),
+        )
+        con.execute(
+            f"DELETE FROM neg_risk_quotes WHERE quote_run_id IN ({placeholders})",
+            run_ids,
+        )
+        con.execute(
+            "UPDATE neg_risk_quote_attempts SET "
+            "quote_run_identity=COALESCE(quote_run_identity,quote_run_id),"
+            "quote_run_id=NULL WHERE quote_run_id IN ("
+            f"{placeholders})",
+            run_ids,
+        )
+        con.execute(
+            f"DELETE FROM neg_risk_quote_source_receipts WHERE quote_run_id IN ({placeholders})",
+            run_ids,
+        )
+        con.execute(
+            f"DELETE FROM neg_risk_quote_run_legs WHERE quote_run_id IN ({placeholders})",
+            run_ids,
+        )
+        con.execute(
+            f"DELETE FROM neg_risk_quote_runs WHERE id IN ({placeholders})",
+            run_ids,
+        )
+        con.execute(
+            f"DELETE FROM neg_risk_quote_purge_authority WHERE quote_run_id IN ({placeholders})",
+            run_ids,
+        )
 
     def fail_run(self, run_id: int, *, failure_reason: str) -> None:
         """Transition only a collecting run to failed, preserving complete runs."""
@@ -962,6 +1020,8 @@ class NegRiskQuoteStore:
                     ") SELECT id FROM neg_risk_quote_runs "
                     "WHERE status IN ('complete','failed') "
                     "AND id NOT IN (SELECT id FROM protected) "
+                    "AND id NOT IN (SELECT quote_run_id FROM "
+                    "neg_risk_quote_current_generation) "
                     "AND id NOT IN ("
                     "SELECT id FROM neg_risk_quote_runs WHERE status='failed' "
                     "ORDER BY quoted_at_ms DESC,id DESC LIMIT ?"
@@ -1021,6 +1081,12 @@ class NegRiskQuoteStore:
         """Return the newest complete run's metadata, without its terminal rows."""
         con = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
         try:
+            pointer = con.execute(
+                "SELECT quote_run_id FROM neg_risk_quote_current_generation "
+                "WHERE singleton=1"
+            ).fetchone()
+            current_clause = "AND r.id=? " if pointer is not None else ""
+            parameters = (int(pointer[0]),) if pointer is not None else ()
             row = con.execute(
                 "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
                 "requested_token_count, successful_response_count, status, failure_reason, "
@@ -1028,6 +1094,8 @@ class NegRiskQuoteStore:
                 "FROM neg_risk_quote_runs r "
                 "WHERE r.status = 'complete' AND length(r.universe_hash)=64 "
                 "AND length(r.source_truth_hash)=64 "
+                + current_clause
+                +
                 "AND EXISTS ("
                 "SELECT 1 FROM snapshots s JOIN snapshot_source_coverage c "
                 "ON c.snapshot_id=s.id AND c.completed=1 "
@@ -1043,7 +1111,8 @@ class NegRiskQuoteStore:
                 ") AND NOT EXISTS ("
                 "SELECT 1 FROM neg_risk_quotes q WHERE q.quote_run_id=r.id "
                 "AND (trim(q.event_id)='' OR trim(q.membership_hash)='')"
-                ") ORDER BY r.quoted_at_ms DESC, r.id DESC LIMIT 1"
+                ") ORDER BY r.quoted_at_ms DESC, r.id DESC LIMIT 1",
+                parameters,
             ).fetchone()
         finally:
             con.close()
@@ -1058,14 +1127,27 @@ class NegRiskQuoteStore:
         )
         try:
             con.execute("BEGIN")
-            run_rows = con.execute(
-                "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
-                "requested_token_count, successful_response_count, status, failure_reason, "
-                "completed_at_ms, universe_hash, source_truth_hash "
-                "FROM neg_risk_quote_runs "
-                "WHERE status='complete' "
-                "ORDER BY quoted_at_ms DESC,id DESC"
-            ).fetchall()
+            pointer = con.execute(
+                "SELECT quote_run_id FROM neg_risk_quote_current_generation "
+                "WHERE singleton=1"
+            ).fetchone()
+            if pointer is None:
+                run_rows = con.execute(
+                    "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
+                    "requested_token_count, successful_response_count, status, failure_reason, "
+                    "completed_at_ms, universe_hash, source_truth_hash "
+                    "FROM neg_risk_quote_runs "
+                    "WHERE status='complete' "
+                    "ORDER BY quoted_at_ms DESC,id DESC"
+                ).fetchall()
+            else:
+                run_rows = con.execute(
+                    "SELECT id, universe_snapshot_id, universe_taken_at_ms, quoted_at_ms, "
+                    "requested_token_count, successful_response_count, status, failure_reason, "
+                    "completed_at_ms, universe_hash, source_truth_hash "
+                    "FROM neg_risk_quote_runs WHERE id=? AND status='complete'",
+                    (int(pointer[0]),),
+                ).fetchall()
             for run_row in run_rows:
                 run = _quote_run_from_row(run_row)
                 if not run.source_truth_hash:

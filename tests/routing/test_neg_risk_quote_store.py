@@ -183,6 +183,60 @@ def _complete(store: NegRiskQuoteStore) -> int:
     return run_id
 
 
+def _complete_current(store: NegRiskQuoteStore) -> int:
+    run_id = _begin(store)
+    store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b")))
+    store.complete_run(
+        run_id,
+        completed_at_ms=NOW_MS + 1,
+        successful_response_count=2,
+        publish_current_generation=True,
+    )
+    return run_id
+
+
+def test_current_generation_hides_staging_and_replaces_previous_payload(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    previous_run_id = _complete_current(store)
+
+    staging_run_id = _begin(store)
+    store.record_terminal_quotes(staging_run_id, (_quote("token-a"), _quote("token-b")))
+
+    # A collecting replacement cannot displace the last certified feed.
+    assert store.latest_complete_projection() is not None
+    assert store.latest_complete_projection().run_id == previous_run_id
+
+    store.complete_run(
+        staging_run_id,
+        completed_at_ms=NOW_MS + 2,
+        successful_response_count=2,
+        publish_current_generation=True,
+    )
+
+    projection = store.latest_complete_projection()
+    assert projection is not None
+    assert projection.run_id == staging_run_id
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT quote_run_id FROM neg_risk_quote_current_generation WHERE singleton=1"
+        ).fetchone() == (staging_run_id,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_quote_runs WHERE id=?", (previous_run_id,)
+        ).fetchone() == (0,)
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_quotes WHERE quote_run_id=?", (previous_run_id,)
+        ).fetchone() == (0,)
+
+
+def test_current_generation_cannot_be_removed_by_legacy_retention_purge(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    current_run_id = _complete_current(store)
+
+    assert store.purge_old_runs(keep_last_per_status=0, max_runs=1) == 0
+    assert store.latest_complete_projection() is not None
+    assert store.latest_complete_projection().run_id == current_run_id
+
+
 def test_purge_old_runs_keeps_recent_complete_and_failed_history(quote_db, monkeypatch) -> None:
     store = NegRiskQuoteStore(quote_db)
     statements: list[str] = []

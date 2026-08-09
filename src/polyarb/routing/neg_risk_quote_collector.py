@@ -257,6 +257,7 @@ async def collect_neg_risk_quotes(
             run_id,
             completed_at_ms=completed_at_ms,
             successful_response_count=indexed_count,
+            publish_current_generation=True,
         )
         persist_ms = int((time.perf_counter() - stage_started) * 1000)
     except QuoteRunLeaseLostError:
