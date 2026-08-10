@@ -10,6 +10,7 @@ import pytest
 
 from polyarb.config import Settings
 from polyarb.http.app import create_app
+from polyarb.routing.opportunity_scanner import StaleQuoteRunError
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -132,6 +133,52 @@ async def test_isolated_parent_hydrates_durable_quote_feed_without_collecting() 
     assert hydrated is True
     loader.assert_called_once_with()
     runtime.restore_certified_feed.assert_called_once_with(feed)
+
+
+@pytest.mark.asyncio
+async def test_durable_hydrator_backs_off_stale_quote_without_hiding_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.daemon import main as main_module
+
+    runtime = MagicMock()
+    stop_event = asyncio.Event()
+    waits: list[float] = []
+
+    async def stop_after_first_retry(awaitable, *, timeout: float):
+        waits.append(timeout)
+        stop_event.set()
+        await awaitable
+
+    monkeypatch.setattr(main_module.asyncio, "wait_for", stop_after_first_retry)
+
+    await main_module._run_durable_quote_feed_hydrator(
+        runtime,
+        lambda: (_ for _ in ()).throw(StaleQuoteRunError("stale quote")),
+        stop_event,
+        interval_s=15.0,
+    )
+
+    assert waits == [60.0]
+    runtime.mark_hydration_failure.assert_called_once()
+
+
+def test_quote_runtime_records_and_clears_durable_hydration_failure() -> None:
+    """The parent-side feed retry is production evidence, not an untracked log."""
+    from polyarb.daemon.quote_worker import QuoteWorkerRuntime
+
+    runtime = QuoteWorkerRuntime()
+    runtime.mark_hydration_failure(StaleQuoteRunError("quote age exceeds compact-feed limit"))
+
+    failed = runtime.snapshot()
+    assert failed.hydration_consecutive_failures == 1
+    assert failed.hydration_last_error_kind == "StaleQuoteRunError"
+
+    runtime.restore_certified_feed(MagicMock())
+
+    recovered = runtime.snapshot()
+    assert recovered.hydration_consecutive_failures == 0
+    assert recovered.hydration_last_error_kind is None
 
 
 async def test_generation_cleanup_start_helper_is_optional_and_cancellable() -> None:

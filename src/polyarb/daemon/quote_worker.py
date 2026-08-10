@@ -118,6 +118,9 @@ class QuoteWorkerSnapshot:
     cleanup_failure_count: int
     cleanup_consecutive_failures: int
     last_cleanup_error_kind: str | None
+    hydration_consecutive_failures: int
+    hydration_last_error_kind: str | None
+    hydration_last_attempt_at_s: float | None
 
 
 @dataclass(frozen=True)
@@ -218,6 +221,9 @@ class QuoteWorkerRuntime:
         self.cleanup_failure_count = 0
         self.cleanup_consecutive_failures = 0
         self.last_cleanup_error_kind: str | None = None
+        self.hydration_consecutive_failures = 0
+        self.hydration_last_error_kind: str | None = None
+        self.hydration_last_attempt_at_s: float | None = None
         self._certified_feed: CertifiedQuoteFeed | None = None
         self._pipeline_active = False
 
@@ -283,6 +289,12 @@ class QuoteWorkerRuntime:
         self.cleanup_consecutive_failures += 1
         self.last_cleanup_error_kind = type(error).__name__
 
+    def mark_hydration_failure(self, error: Exception) -> None:
+        """Retain parent-side durable-feed retry evidence for health/dashboard."""
+        self.hydration_consecutive_failures += 1
+        self.hydration_last_error_kind = type(error).__name__
+        self.hydration_last_attempt_at_s = time.time()
+
     def publish_certified_projection(
         self,
         projection: CompleteQuoteProjection,
@@ -313,6 +325,9 @@ class QuoteWorkerRuntime:
         self.last_successful_response_count = feed.projection.successful_response_count
         self.last_elapsed_ms = None
         self.last_error_kind = None
+        self.hydration_consecutive_failures = 0
+        self.hydration_last_error_kind = None
+        self.hydration_last_attempt_at_s = time.time()
 
     def certified_feed(self) -> CertifiedQuoteFeed | None:
         """Return one immutable projection/result pair without SQLite work."""
@@ -343,6 +358,9 @@ class QuoteWorkerRuntime:
             cleanup_failure_count=self.cleanup_failure_count,
             cleanup_consecutive_failures=self.cleanup_consecutive_failures,
             last_cleanup_error_kind=self.last_cleanup_error_kind,
+            hydration_consecutive_failures=self.hydration_consecutive_failures,
+            hydration_last_error_kind=self.hydration_last_error_kind,
+            hydration_last_attempt_at_s=self.hydration_last_attempt_at_s,
         )
 
 

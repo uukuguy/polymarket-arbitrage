@@ -86,6 +86,7 @@ from polyarb.perception.resource_controller import (
 from polyarb.perception.resource_incidents import ResourcePressureIncidents
 from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.perception.supervisor import ProducerSpec, ProducerSupervisor
+from polyarb.routing.opportunity_scanner import StaleQuoteRunError
 from polyarb.routing.quote_timing import bounded_quote_supervisor_timeout_s
 from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -225,14 +226,22 @@ async def _run_durable_quote_feed_hydrator(
 ) -> None:
     """Keep the HTTP cache current when collection runs in a child process."""
     while not stop_event.is_set():
+        retry_delay_s = interval_s
         try:
             await _hydrate_durable_quote_feed(runtime, loader)
         except asyncio.CancelledError:
             raise
         except Exception as error:  # durable retry; endpoint keeps last valid feed
+            runtime.mark_hydration_failure(error)
+            # A stale certified run cannot become fresh until the isolated Quote
+            # producer commits a new run. Polling the same stale compact feed
+            # every 15 seconds only adds SQLite pressure while Structure is
+            # recovering, so retain the P1 and back off to one normal cadence.
+            if isinstance(error, StaleQuoteRunError):
+                retry_delay_s = max(interval_s, 60.0)
             logger.warning(f"durable quote feed hydration failed kind={type(error).__name__}")
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+            await asyncio.wait_for(stop_event.wait(), timeout=retry_delay_s)
         except TimeoutError:
             continue
 

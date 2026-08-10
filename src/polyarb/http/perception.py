@@ -144,13 +144,30 @@ async def producer_arbitration_status(request: Request) -> JSONResponse:
     )
 
 
-def _producer_progress(db_path: Path) -> dict[str, Any]:
+def _producer_progress(db_path: Path, quote_worker_runtime: Any | None = None) -> dict[str, Any]:
     """Return only the newest durable producer checkpoints for the console."""
     quote_attempt = NegRiskQuoteStore(db_path).latest_collection_attempt()
     structure_attempt = SQLiteStore(db_path).get_latest_snapshot_attempt()
+    snapshot = (
+        quote_worker_runtime.snapshot()
+        if quote_worker_runtime is not None
+        and callable(getattr(quote_worker_runtime, "snapshot", None))
+        else None
+    )
+    hydration = {
+        "consecutive_failures": (
+            0 if snapshot is None else snapshot.hydration_consecutive_failures
+        ),
+        "last_error_kind": (
+            None if snapshot is None else snapshot.hydration_last_error_kind
+        ),
+        "last_attempt_at_s": (
+            None if snapshot is None else snapshot.hydration_last_attempt_at_s
+        ),
+    }
     return {
         "status": "available",
-        "quote": {"attempt": quote_attempt},
+        "quote": {"attempt": quote_attempt, "hydration": hydration},
         "structure": {"attempt": structure_attempt},
         "automatic_action": (
             "Each producer persists a bounded checkpoint before its next expensive stage; "
@@ -168,7 +185,10 @@ async def producer_progress(request: Request) -> JSONResponse:
     db_path = Path(request.app.state.sqlite_store.db_path)
     return await _serve(
         request,
-        lambda: _producer_progress(db_path),
+        lambda: _producer_progress(
+            db_path,
+            getattr(request.app.state, "quote_worker_runtime", None),
+        ),
         lane_name="incident_read_lane",
         timeout_s=_INCIDENT_READ_TIMEOUT_S,
         sql_deadline_s=_INCIDENT_READ_SQL_DEADLINE_S,
@@ -197,7 +217,7 @@ const progressEndpoint="/perception/producer-progress";
 const status=document.getElementById("status"), root=document.getElementById("incidents"), recent=document.getElementById("recent"), handoff=document.getElementById("handoff"), progress=document.getElementById("progress");
 function field(card,label,value){const row=document.createElement("div");const key=document.createElement("strong");key.textContent=label+": ";row.append(key,document.createTextNode(value ?? "not recorded"));card.append(row)}
 function renderHandoff(body){handoff.replaceChildren();const card=document.createElement("article");card.className="card "+(body.status==="available"?"":"p1");const lease=body.current_lease||{};const title=document.createElement("h3");title.textContent=body.status==="available"?`Current owner: ${lease.owner||"none"}`:"Producer handoff read unavailable";card.append(title);field(card,"Lease expiry",lease.expires_at_ms?new Date(lease.expires_at_ms).toISOString():null);field(card,"Automatic action",body.automatic_action);field(card,"Operator action",body.operator_action);const detail=document.createElement("pre");detail.textContent="Durable handoff evidence\n"+JSON.stringify(body.recent_receipts||[],null,2);card.append(detail);handoff.append(card)}
-function renderProgress(body){progress.replaceChildren();const card=document.createElement("article");card.className="card "+(body.status==="available"?"":"p1");const title=document.createElement("h3");title.textContent=body.status==="available"?"Latest durable producer stages":"Producer checkpoint read unavailable";card.append(title);field(card,"Automatic action",body.automatic_action);field(card,"Operator action",body.operator_action);const detail=document.createElement("pre");detail.textContent="Quote checkpoint\n"+JSON.stringify(body.quote?.attempt??null,null,2)+"\n\nStructure checkpoint\n"+JSON.stringify(body.structure?.attempt??null,null,2);card.append(detail);progress.append(card)}
+function renderProgress(body){progress.replaceChildren();const card=document.createElement("article");card.className="card "+(body.status==="available"?"":"p1");const title=document.createElement("h3");title.textContent=body.status==="available"?"Latest durable producer stages":"Producer checkpoint read unavailable";card.append(title);field(card,"Automatic action",body.automatic_action);field(card,"Operator action",body.operator_action);const detail=document.createElement("pre");detail.textContent="Quote checkpoint\n"+JSON.stringify(body.quote?.attempt??null,null,2)+"\n\nQuote feed hydration\n"+JSON.stringify(body.quote?.hydration??null,null,2)+"\n\nStructure checkpoint\n"+JSON.stringify(body.structure?.attempt??null,null,2);card.append(detail);progress.append(card)}
 function render(body){root.replaceChildren();const items=Array.isArray(body.items)?body.items:[];status.textContent=`${body.open_count ?? "unknown"} open incident(s) · refreshed ${new Date().toISOString()}`;if(!items.length){const empty=document.createElement("p");empty.className="muted";empty.textContent="No open incident rows were returned. This is not proof of health when the read model is unavailable.";root.append(empty);return}for(const incident of items){const diagnosis=incident.diagnosis||{};const evidence=incident.recovery_start_evidence||incident.evidence||{};const card=document.createElement("article");card.className="card "+(diagnosis.severity||"");const title=document.createElement("h2");title.textContent=`${(diagnosis.severity||"incident").toUpperCase()} · ${incident.kind} · ${incident.state}`;card.append(title);field(card,"Scope",incident.scope);field(card,"Impact",diagnosis.impact);field(card,"Automatic action",diagnosis.automatic_action);field(card,"Next operator action",diagnosis.next_action);field(card,"Failure reason",diagnosis.failure_reason);field(card,"Failed attempt",evidence.attempt_id);field(card,"Retry count",incident.retry_count);field(card,"Next automatic retry",incident.next_retry_at_ms?new Date(incident.next_retry_at_ms).toISOString():null);field(card,"Lifecycle age",incident.lifecycle_age_ms==null?null:`${Math.round(incident.lifecycle_age_ms/1000)}s`);const detail=document.createElement("pre");detail.textContent="Recovery / current evidence\n"+JSON.stringify(evidence,null,2);card.append(detail);root.append(card)}}
 function renderRecent(histories){recent.replaceChildren();if(!histories.length){const empty=document.createElement("p");empty.className="muted";empty.textContent="No recovered Quote or capacity incidents in this 24-hour window.";recent.append(empty);return}for(const history of histories){const events=Array.isArray(history.items)?history.items:[];const first=events[0]||{}, last=events.at(-1)||{}, evidence=first.evidence||{}, recovered=last.evidence||{};const card=document.createElement("article");card.className="card "+(evidence.severity||"");const title=document.createElement("h3");title.textContent=`${(evidence.severity||"incident").toUpperCase()} · ${history.kind} · recovered as ${last.state||"unknown"}`;card.append(title);field(card,"Scope",history.scope);field(card,"Automatic action",evidence.automatic_action);field(card,"Next operator action",evidence.next_action);field(card,"Failure reason",evidence.failure_reason);field(card,"Failed attempt",evidence.attempt_id);field(card,"Recovery time",last.occurred_at_ms?new Date(last.occurred_at_ms).toISOString():null);const link=document.createElement("a");link.href=`/perception/incidents/${history.incident_id}/history`;link.textContent="Open complete lifecycle JSON";card.append(link);const proof=document.createElement("pre");proof.textContent="Recovery evidence\n"+JSON.stringify(recovered,null,2);card.append(proof);recent.append(card)}}
 async function loadRecent(){const after=Date.now()-24*60*60*1000;const responses=await Promise.all([fetch(`${recentQuoteEndpoint}&after_ms=${after}&limit=5`,{cache:"no-store"}),fetch(`${recentQuoteSupervisorEndpoint}&after_ms=${after}&limit=5`,{cache:"no-store"}),fetch(`${recentCapacityEndpoint}&after_ms=${after}&limit=5`,{cache:"no-store"})]);const bodies=await Promise.all(responses.map(async response=>{const body=await response.json();if(!response.ok||body.status!=="available")throw new Error(body.reason||`HTTP ${response.status}`);return body}));const ids=[...new Set(bodies.flatMap(body=>Array.isArray(body.items)?body.items.map(item=>item.incident_id):[]))].slice(0,10);const histories=await Promise.all(ids.map(async id=>{const response=await fetch(`/perception/incidents/${id}/history`,{cache:"no-store"});const body=await response.json();if(!response.ok||body.status!=="available")throw new Error(body.reason||`HTTP ${response.status}`);return body}));renderRecent(histories)}
