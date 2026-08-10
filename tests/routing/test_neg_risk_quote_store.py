@@ -134,6 +134,21 @@ def test_quote_writer_uses_shared_production_busy_timeout(quote_db, monkeypatch)
     assert observed_timeouts[-1] == SQLITE_BUSY_TIMEOUT_S
 
 
+def test_quote_writer_accepts_a_shorter_producer_specific_timeout(quote_db, monkeypatch) -> None:
+    real_connect = sqlite3.connect
+    observed_timeouts: list[float | None] = []
+
+    def recording_connect(*args, **kwargs):
+        observed_timeouts.append(kwargs.get("timeout"))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+    con = NegRiskQuoteStore(quote_db, writer_timeout_s=15)._connect()
+    con.close()
+
+    assert observed_timeouts[-1] == 15
+
+
 def _quote(token_id: str, *, terminal_state: str = "executable") -> PersistedQuote:
     leg = next(leg for leg in _legs() if leg.yes_token_id == token_id)
     if terminal_state == "executable":

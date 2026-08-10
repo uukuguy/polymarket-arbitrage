@@ -47,7 +47,9 @@ from polyarb.routing.engine import RoutingEngine
 from polyarb.routing.money import Money
 from polyarb.routing.neg_risk_quote_collector import (
     QUOTE_FETCH_TIMEOUT_EXIT_CODE,
+    QUOTE_PERSIST_TIMEOUT_EXIT_CODE,
     QuoteFetchTimeoutError,
+    QuotePersistenceTimeoutError,
     collect_neg_risk_quotes,
 )
 from polyarb.routing.neg_risk_quote_store import (
@@ -131,26 +133,32 @@ def collect_neg_risk_quotes_command(
                     structure_generation_read_mode=(
                         settings.structure_generation_read_mode
                     ),
+                    writer_timeout_s=settings.neg_risk_quote_writer_timeout_s,
                 ),
                 reader=ClobReaderClient(settings),
                 attempt_id=attempt_id,
                 fetch_timeout_s=settings.neg_risk_quote_fetch_timeout_s,
             )
         )
-    except QuoteFetchTimeoutError as error:
+    except (QuoteFetchTimeoutError, QuotePersistenceTimeoutError) as error:
+        reason, stage, exit_code = (
+            ("fetch-timeout", "fetch", QUOTE_FETCH_TIMEOUT_EXIT_CODE)
+            if isinstance(error, QuoteFetchTimeoutError)
+            else ("persist-timeout", "persist", QUOTE_PERSIST_TIMEOUT_EXIT_CODE)
+        )
         typer.echo(
             json.dumps(
                 {
                     "attempt_id": attempt_id,
                     "elapsed_ms": int((time.perf_counter() - started) * 1000),
                     "outcome": "failed",
-                    "reason": "fetch-timeout",
-                    "stage": "fetch",
+                    "reason": reason,
+                    "stage": stage,
                 },
                 sort_keys=True,
             )
         )
-        raise typer.Exit(code=QUOTE_FETCH_TIMEOUT_EXIT_CODE) from error
+        raise typer.Exit(code=exit_code) from error
     except Exception as error:
         typer.secho(f"quote collection failed: {error}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2) from error

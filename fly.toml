@@ -30,7 +30,11 @@ primary_region = "ams"
   # strictly inside the 300s public freshness SLA. The former 120s limit
   # cut off observed fetch/persist tail latency and caused restart loops.
   POLYARB_NEG_RISK_QUOTE_CHILD_HARD_LIMIT_S = "180"
-  POLYARB_NEG_RISK_QUOTE_FETCH_TIMEOUT_S = "150"
+  # Keep CLOB fetch and the final bulk SQLite transaction independently
+  # bounded. A writer conflict becomes a typed retry rather than a 180s child
+  # hard timeout that stalls the feed.
+  POLYARB_NEG_RISK_QUOTE_FETCH_TIMEOUT_S = "75"
+  POLYARB_NEG_RISK_QUOTE_WRITER_TIMEOUT_S = "15"
   # Quote hard child timeouts must enter the durable, bounded producer
   # supervisor instead of retrying forever in one daemon process.
   POLYARB_NEG_RISK_QUOTE_SUPERVISOR_ENABLED = "true"

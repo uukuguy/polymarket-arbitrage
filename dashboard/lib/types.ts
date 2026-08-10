@@ -478,12 +478,16 @@ export interface PerceptionResourcesEnvelope {
 
 export interface PerceptionProducerAttempt {
   id: number;
+  checkpoint_at_ms?: number;
   phase?: string;
   outcome?: string;
   failure_kind?: string | null;
+  target_count?: number | null;
+  phase_timings?: Record<string, number>;
   last_stage?: string | null;
   elapsed_ms?: number | null;
   chunks_processed?: number | null;
+  stderr_tail?: string | null;
 }
 
 export interface PerceptionProducerProgressEnvelope {

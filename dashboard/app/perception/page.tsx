@@ -40,6 +40,38 @@ function fmtDurationMs(value: number): string {
     : `${(seconds / 60).toFixed(1)}m`;
 }
 
+function producerDetail(
+  label: string,
+  attempt: {
+    id: number;
+    phase?: string;
+    outcome?: string;
+    failure_kind?: string | null;
+    target_count?: number | null;
+    phase_timings?: Record<string, number>;
+    last_stage?: string | null;
+    elapsed_ms?: number | null;
+    chunks_processed?: number | null;
+    stderr_tail?: string | null;
+  } | null,
+): string {
+  if (attempt === null) return `${label}: no attempt recorded`;
+  const stage = attempt.last_stage ?? attempt.phase ?? "stage not recorded";
+  const parts = [
+    `${label}: attempt ${attempt.id}`,
+    stage,
+    attempt.outcome ?? "outcome not recorded",
+  ];
+  if (attempt.elapsed_ms != null) parts.push(fmtDurationMs(attempt.elapsed_ms));
+  if (attempt.chunks_processed != null)
+    parts.push(`${attempt.chunks_processed} chunks`);
+  if (attempt.target_count != null)
+    parts.push(`${attempt.target_count} targets`);
+  if (attempt.failure_kind != null)
+    parts.push(`failure=${attempt.failure_kind}`);
+  return parts.join(" · ");
+}
+
 function countStatus(
   statuses: PerceptionGroupStatus[],
   status: PerceptionGroupStatus,
@@ -189,18 +221,24 @@ export default async function PerceptionOverviewPage() {
               Quote and Structure are independent durable checkpoints, not
               inferred from the browser process.
             </p>
+            <div>{producerDetail("Quote", producerProgress.quote.attempt)}</div>
+            {producerProgress.quote.attempt?.phase_timings && (
+              <p style={muted}>
+                Quote stage timings:{" "}
+                {Object.entries(producerProgress.quote.attempt.phase_timings)
+                  .map(([stage, ms]) => `${stage}=${fmtDurationMs(ms)}`)
+                  .join(" · ")}
+              </p>
+            )}
             <div>
-              <strong>Quote:</strong>{" "}
-              {producerProgress.quote.attempt === null
-                ? "no attempt recorded"
-                : `attempt ${producerProgress.quote.attempt.id} · ${producerProgress.quote.attempt.phase ?? "stage not recorded"} · ${producerProgress.quote.attempt.outcome ?? "outcome not recorded"}`}
+              {producerDetail("Structure", producerProgress.structure.attempt)}
             </div>
-            <div>
-              <strong>Structure:</strong>{" "}
-              {producerProgress.structure.attempt === null
-                ? "no attempt recorded"
-                : `attempt ${producerProgress.structure.attempt.id} · ${producerProgress.structure.attempt.last_stage ?? producerProgress.structure.attempt.phase ?? "stage not recorded"} · ${producerProgress.structure.attempt.outcome ?? "outcome not recorded"}${producerProgress.structure.attempt.elapsed_ms == null ? "" : ` · ${fmtDurationMs(producerProgress.structure.attempt.elapsed_ms)}`}${producerProgress.structure.attempt.chunks_processed == null ? "" : ` · ${producerProgress.structure.attempt.chunks_processed} chunks`}`}
-            </div>
+            {producerProgress.structure.attempt?.stderr_tail && (
+              <p style={muted}>
+                Structure child evidence:{" "}
+                {producerProgress.structure.attempt.stderr_tail}
+              </p>
+            )}
             <p style={muted}>
               <strong>Automatic action:</strong>{" "}
               {producerProgress.automatic_action}

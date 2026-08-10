@@ -159,10 +159,14 @@ class NegRiskQuoteStore:
         *,
         now_ms: Callable[[], int] | None = None,
         structure_generation_read_mode: str = "legacy",
+        writer_timeout_s: float = SQLITE_BUSY_TIMEOUT_S,
     ) -> None:
+        if writer_timeout_s <= 0:
+            raise ValueError("writer_timeout_s must be positive")
         self._db_path = Path(db_path)
         self._now_ms = now_ms or _wall_clock_ms
         self._structure_generation_read_mode = structure_generation_read_mode
+        self._writer_timeout_s = float(writer_timeout_s)
 
     def current_time_ms(self) -> int:
         """Return this store's authoritative, injectable lease clock."""
@@ -280,7 +284,7 @@ class NegRiskQuoteStore:
         con = sqlite3.connect(
             self._db_path,
             isolation_level=None,
-            timeout=SQLITE_BUSY_TIMEOUT_S,
+            timeout=self._writer_timeout_s,
         )
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA foreign_keys=ON")

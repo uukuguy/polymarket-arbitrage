@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     neg_risk_quote_fetch_timeout_s: float = Field(
         default=100.0, gt=0, le=150, allow_inf_nan=False
     )
+    # The final Quote write can contain tens of thousands of rows. Bound its
+    # SQLite lock acquisition separately so writer contention cannot consume
+    # the whole supervised child budget.
+    neg_risk_quote_writer_timeout_s: float = Field(
+        default=15.0, gt=0, le=30, allow_inf_nan=False
+    )
     neg_risk_quote_shutdown_reserve_s: float = Field(
         default=QUOTE_CHILD_SHUTDOWN_RESERVE_SECONDS,
         gt=0,

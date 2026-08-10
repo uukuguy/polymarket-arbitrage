@@ -11,6 +11,7 @@ from polyarb.perception.market_truth import SourceCoverage
 from polyarb.routing.neg_risk_quote_collector import (
     _QUOTE_RUN_LEASE_RENEWAL_S,
     QuoteCollectionIntegrityError,
+    QuotePersistenceTimeoutError,
     QuoteRunLeaseLostError,
     QuoteUniverseUnavailableError,
     collect_neg_risk_quotes,
@@ -421,6 +422,34 @@ def test_persistence_failure_fails_new_run_without_displacing_prior_complete_run
             "SELECT status, failure_reason FROM neg_risk_quote_runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
     assert failed == ("failed", "collector-error")
+
+
+def test_sqlite_writer_contention_is_typed_as_a_persist_timeout(
+    quote_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = NegRiskQuoteStore(quote_db, writer_timeout_s=15)
+
+    def busy_record(*args: object, **kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "record_terminal_quotes", busy_record)
+
+    with pytest.raises(QuotePersistenceTimeoutError, match="quote-persist-timeout"):
+        _collect(
+            store,
+            FakeReader(
+                [
+                    FixtureBook("token-a", [{"price": "0.4", "size": "4"}]),
+                    FixtureBook("token-b", [{"price": "0.5", "size": "4"}]),
+                ]
+            ),
+        )
+
+    with sqlite3.connect(quote_db) as con:
+        failed = con.execute(
+            "SELECT status,failure_reason FROM neg_risk_quote_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert failed == ("failed", "sqlite-persist-timeout")
 
 
 @pytest.mark.parametrize(

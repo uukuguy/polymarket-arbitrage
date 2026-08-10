@@ -22,6 +22,7 @@ from polyarb.perception.incidents import IncidentManager
 from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.routing.neg_risk_quote_collector import (
     QUOTE_FETCH_TIMEOUT_EXIT_CODE,
+    QUOTE_PERSIST_TIMEOUT_EXIT_CODE,
     QuoteCollectionResult,
 )
 from polyarb.routing.neg_risk_quote_store import (
@@ -478,7 +479,10 @@ async def collect_quotes_in_subprocess(
     attempt_started = time.monotonic()
     if terminate_timeout_s is None:
         terminate_timeout_s = settings.neg_risk_quote_shutdown_reserve_s / 2
-    attempt_store = NegRiskQuoteStore(settings.db_path)
+    attempt_store = NegRiskQuoteStore(
+        settings.db_path,
+        writer_timeout_s=settings.neg_risk_quote_writer_timeout_s,
+    )
     try:
         attempt_id = await asyncio.to_thread(attempt_store.start_collection_attempt)
     except sqlite3.OperationalError as error:
@@ -579,7 +583,10 @@ async def collect_quotes_in_subprocess(
         raise
 
     if process.returncode != 0:
-        if process.returncode == QUOTE_FETCH_TIMEOUT_EXIT_CODE:
+        if process.returncode in {
+            QUOTE_FETCH_TIMEOUT_EXIT_CODE,
+            QUOTE_PERSIST_TIMEOUT_EXIT_CODE,
+        }:
             try:
                 failure_payload = json.loads(stdout)
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -593,13 +600,43 @@ async def collect_quotes_in_subprocess(
                 and isinstance(failure_payload.get("elapsed_ms"), int)
                 and failure_payload["elapsed_ms"] >= 0
                 and failure_payload.get("outcome") == "failed"
-                and failure_payload.get("reason") == "fetch-timeout"
-                and failure_payload.get("stage") == "fetch"
+                and failure_payload.get("reason")
+                == (
+                    "fetch-timeout"
+                    if process.returncode == QUOTE_FETCH_TIMEOUT_EXIT_CODE
+                    else "persist-timeout"
+                )
+                and failure_payload.get("stage")
+                == (
+                    "fetch"
+                    if process.returncode == QUOTE_FETCH_TIMEOUT_EXIT_CODE
+                    else "persist"
+                )
             ):
+                failure_kind = (
+                    "child-fetch-timeout"
+                    if process.returncode == QUOTE_FETCH_TIMEOUT_EXIT_CODE
+                    else "child-persist-timeout"
+                )
+                failure_reason = (
+                    "collector-fetch-timeout"
+                    if process.returncode == QUOTE_FETCH_TIMEOUT_EXIT_CODE
+                    else "collector-persist-timeout"
+                )
+                try:
+                    await asyncio.to_thread(
+                        attempt_store.fail_collecting_runs,
+                        failure_reason=failure_reason,
+                    )
+                except Exception as cleanup_error:
+                    logger.error(
+                        "quote child timeout run cleanup failed "
+                        f"attempt_id={attempt_id} kind={type(cleanup_error).__name__}"
+                    )
                 await _terminalize_quote_attempt(
                     attempt_store,
                     attempt_id,
-                    "child-fetch-timeout",
+                    failure_kind,
                 )
                 raise QuoteCollectionSubprocessError("timeout", attempt_id=attempt_id)
         await _terminalize_quote_attempt(attempt_store, attempt_id, "child-failed")
@@ -1160,6 +1197,7 @@ def load_certified_quote_feed(
     quote_store = NegRiskQuoteStore(
         settings.db_path,
         structure_generation_read_mode=settings.structure_generation_read_mode,
+        writer_timeout_s=settings.neg_risk_quote_writer_timeout_s,
     )
     compact_reader = getattr(quote_store, "latest_compact_feed", None)
     compact = None if compact_reader is None else compact_reader()
@@ -1227,6 +1265,7 @@ def build_production_quote_worker(
     quote_store = NegRiskQuoteStore(
         settings.db_path,
         structure_generation_read_mode=settings.structure_generation_read_mode,
+        writer_timeout_s=settings.neg_risk_quote_writer_timeout_s,
     )
     opportunity_watcher = opportunity_watcher or OpportunityWatcher(settings)
 

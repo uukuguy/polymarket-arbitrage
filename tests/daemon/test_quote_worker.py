@@ -1294,6 +1294,59 @@ async def test_cli_fetch_timeout_envelope_drives_parent_timeout_retry(
     )
 
 
+async def test_cli_persist_timeout_envelope_releases_the_collecting_run(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from typer.testing import CliRunner
+
+    from polyarb import cli_arbitrage as cli_module
+    from polyarb.cli_arbitrage import app
+    from polyarb.daemon.quote_worker import (
+        QuoteCollectionSubprocessError,
+        collect_quotes_in_subprocess,
+    )
+    from polyarb.routing.neg_risk_quote_collector import (
+        QUOTE_PERSIST_TIMEOUT_EXIT_CODE,
+        QuotePersistenceTimeoutError,
+    )
+
+    db_path = tmp_path / "state.db"
+
+    async def persist_timeout(**_kwargs):
+        raise QuotePersistenceTimeoutError()
+
+    monkeypatch.setattr(cli_module, "collect_neg_risk_quotes", persist_timeout)
+    child = await asyncio.to_thread(
+        CliRunner().invoke,
+        app,
+        [
+            "collect-neg-risk-quotes",
+            "--db-path",
+            str(db_path),
+            "--attempt-id",
+            "1",
+        ],
+    )
+    assert child.exit_code == QUOTE_PERSIST_TIMEOUT_EXIT_CODE
+    envelope = json.loads(child.stdout)
+    assert envelope["reason"] == "persist-timeout"
+    assert envelope["stage"] == "persist"
+
+    async def spawn(*_args, **_kwargs):
+        return _FakeProcess(returncode=child.exit_code, stdout=child.stdout.encode())
+
+    with pytest.raises(QuoteCollectionSubprocessError, match="subprocess-timeout"):
+        await collect_quotes_in_subprocess(Settings(db_path=db_path), spawn=spawn)
+
+    attempt = NegRiskQuoteStore(db_path).latest_collection_attempt()
+    assert attempt is not None
+    assert (attempt["outcome"], attempt["failure_kind"]) == (
+        "failed",
+        "child-persist-timeout",
+    )
+
+
 def test_supervised_quote_cli_skips_schema_migration_after_parent_startup(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

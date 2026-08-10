@@ -687,14 +687,22 @@ function isProducerAttempt(value: unknown): boolean {
   return (
     isRecord(value) &&
     isPositiveInteger(value.id) &&
+    (value.checkpoint_at_ms === undefined ||
+      isNonNegativeInteger(value.checkpoint_at_ms)) &&
     (value.phase === undefined || typeof value.phase === "string") &&
     (value.outcome === undefined || typeof value.outcome === "string") &&
     (value.failure_kind === undefined || isStringOrNull(value.failure_kind)) &&
+    (value.target_count === undefined ||
+      isNonNegativeIntegerOrNull(value.target_count)) &&
+    (value.phase_timings === undefined ||
+      (isRecord(value.phase_timings) &&
+        Object.values(value.phase_timings).every(isNonNegativeInteger))) &&
     (value.last_stage === undefined || isStringOrNull(value.last_stage)) &&
     (value.elapsed_ms === undefined ||
       isNonNegativeIntegerOrNull(value.elapsed_ms)) &&
     (value.chunks_processed === undefined ||
-      isNonNegativeIntegerOrNull(value.chunks_processed))
+      isNonNegativeIntegerOrNull(value.chunks_processed)) &&
+    (value.stderr_tail === undefined || isStringOrNull(value.stderr_tail))
   );
 }
 

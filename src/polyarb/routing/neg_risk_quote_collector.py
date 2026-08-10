@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
@@ -37,6 +38,13 @@ class QuoteFetchTimeoutError(TimeoutError):
 
     def __init__(self) -> None:
         super().__init__("clob-fetch-timeout")
+
+
+class QuotePersistenceTimeoutError(TimeoutError):
+    """The bounded SQLite persistence stage could not acquire its writer."""
+
+    def __init__(self) -> None:
+        super().__init__("quote-persist-timeout")
 
 
 class BooksReader(Protocol):
@@ -104,6 +112,7 @@ class QuoteCollectionResult:
 _MISSING = object()
 _QUOTE_RUN_LEASE_RENEWAL_S = QUOTE_RUN_LEASE_MS / 3_000
 QUOTE_FETCH_TIMEOUT_EXIT_CODE = 75
+QUOTE_PERSIST_TIMEOUT_EXIT_CODE = 76
 
 
 async def collect_neg_risk_quotes(
@@ -246,19 +255,31 @@ async def collect_neg_risk_quotes(
                 },
             )
         stage_started = time.perf_counter()
-        await asyncio.to_thread(
-            quote_store.record_terminal_quotes,
-            run_id,
-            terminal_quotes,
-        )
+        try:
+            await asyncio.to_thread(
+                quote_store.record_terminal_quotes,
+                run_id,
+                terminal_quotes,
+            )
+        except sqlite3.OperationalError as error:
+            if not _is_sqlite_writer_timeout(error):
+                raise
+            failure_reason = "sqlite-persist-timeout"
+            raise QuotePersistenceTimeoutError() from error
         completed_at_ms = clock()
-        completed = await asyncio.to_thread(
-            quote_store.complete_run,
-            run_id,
-            completed_at_ms=completed_at_ms,
-            successful_response_count=indexed_count,
-            publish_current_generation=True,
-        )
+        try:
+            completed = await asyncio.to_thread(
+                quote_store.complete_run,
+                run_id,
+                completed_at_ms=completed_at_ms,
+                successful_response_count=indexed_count,
+                publish_current_generation=True,
+            )
+        except sqlite3.OperationalError as error:
+            if not _is_sqlite_writer_timeout(error):
+                raise
+            failure_reason = "sqlite-persist-timeout"
+            raise QuotePersistenceTimeoutError() from error
         persist_ms = int((time.perf_counter() - stage_started) * 1000)
     except QuoteRunLeaseLostError:
         failure_reason = "collector-lease-lost"
@@ -324,6 +345,10 @@ async def collect_neg_risk_quotes(
 
 def _wall_clock_ms() -> int:
     return time.time_ns() // 1_000_000
+
+
+def _is_sqlite_writer_timeout(error: sqlite3.OperationalError) -> bool:
+    return any(token in str(error).lower() for token in ("locked", "busy"))
 
 
 async def _get_books_with_lease(
