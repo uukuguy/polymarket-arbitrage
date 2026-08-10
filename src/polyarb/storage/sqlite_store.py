@@ -10875,10 +10875,18 @@ class SQLiteStore:
         )
 
     def advance_structure_certification_chunk(
-        self, publication_id: str, *, max_rows: int, now_ms: int
+        self,
+        publication_id: str,
+        *,
+        max_rows: int,
+        now_ms: int,
+        writer_timeout_s: float | None = None,
     ) -> StructureCertificationChunk:
         """Hash and validate at most one primary-key generation chunk."""
-        if not 1 <= max_rows <= STRUCTURE_PUBLICATION_MAX_ROWS:
+        if (
+            not 1 <= max_rows <= STRUCTURE_PUBLICATION_MAX_ROWS
+            or (writer_timeout_s is not None and writer_timeout_s <= 0)
+        ):
             raise ValueError("structure-certification-max-rows-must-be-positive")
         order = {
             "events": ("id",),
@@ -11376,7 +11384,7 @@ class SQLiteStore:
                     else certification_components[index + 1]
                 )
                 next_cursor = None
-        con = self._connect_writer()
+        con = self._connect_writer(timeout_s=writer_timeout_s)
         try:
             con.execute("BEGIN IMMEDIATE")
             cur = con.execute(

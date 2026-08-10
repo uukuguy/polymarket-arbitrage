@@ -514,6 +514,7 @@ def run_structure_publication_step(
                 publication.publication_id,
                 max_rows=max_rows,
                 now_ms=now_ms,
+                writer_timeout_s=writer_timeout_s,
             )
             return StructurePublicationCheckpoint(
                 "ready" if certification.ready else "certifying",
