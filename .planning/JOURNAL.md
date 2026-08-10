@@ -7461,3 +7461,30 @@ success boundary. Investigate/repair any recurring Quote producer exit or
 `StaleQuoteRunError`; preserve current P1 rows until matching receipt-backed
 verification. Keep testing dashboard and Polywatch visibility during this
 natural recovery rather than declaring a static successful probe as stability.
+
+## SESSION 180 — 2026-08-10 (Producer checkpoint dashboard deployed)
+
+- [DASHBOARD / DEPLOY] Commit `70c41e0` adds read-only
+  `GET /perception/producer-progress` and the **Current producer checkpoints**
+  card to the direct Fly incident console. The card exposes the newest durable
+  Quote and Structure attempt stages, timing fields and failure evidence beside
+  the existing cross-process producer lease; it has no mutation controls.
+  Authority and Polywatch cron both run image
+  `m1-producer-progress-70c41e0` digest `sha256:80c9c77f…`.
+- [LIVE EVIDENCE] The endpoint returned live Quote attempt `779` at stage
+  `universe` and Structure attempt `9148` failed at `gamma-markets` after
+  76,239 ms. The P1 therefore remains visible and actionable rather than
+  being collapsed into a generic unhealthy state.
+- [ROOT CAUSE REFINEMENT] Consecutive Quote hard-timeout attempts completed
+  CLOB fetch (40–90s) and transformation, then stopped before the durable
+  `persist` checkpoint. This points to post-fetch SQLite writer pressure / a
+  too-large all-universe atomic write, not only to CLOB latency. Health remains
+  fail correctly while no certified fresh feed exists.
+
+### [NEXT — CURRENT]
+
+Use the now-live producer checkpoint evidence to repair the recurring Quote
+post-fetch persistence timeout and the independent 75-second Structure
+`gamma-markets` timeout. Preserve atomic certification and P1 visibility;
+prove recovery with multiple natural successful Quote/Structure cycles before
+claiming M1 production stability.
