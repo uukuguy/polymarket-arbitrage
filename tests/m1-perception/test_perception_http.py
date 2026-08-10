@@ -989,6 +989,38 @@ def test_incident_history_endpoint_returns_not_found_without_guessing(
     }
 
 
+def test_open_incident_history_survives_event_prefix_compaction(
+    http_test_client,
+) -> None:
+    """An open P1 remains inspectable even after its event prefix is compacted."""
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
+    now = [1_000]
+    manager = IncidentManager(store, clock_ms=lambda: now[0])
+    incident = manager.detect("structure", "structure-producer-failure", {"attempt": 1})
+    now[0] += 1
+    manager.transition(incident.id, "classified", {"action": "classify"})
+    now[0] += 1
+    manager.transition(incident.id, "contained", {"action": "retry"})
+
+    # Keep the target incident open, then advance unrelated lifecycle traffic
+    # beyond the 512-event suffix budget so all target events leave the raw
+    # event table while its open-authority row remains canonical.
+    for index in range(260):
+        now[0] += 1
+        other = manager.detect(f"candidate:{index}", "worker-failure", {"attempt": index})
+        now[0] += 1
+        manager.transition(other.id, "classified", {"action": "classify"})
+
+    response = http_test_client.get(f"/perception/incidents/{incident.id}/history")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["history_complete"] is False
+    assert body["scope"] == "structure"
+    assert body["kind"] == "structure-producer-failure"
+    assert body["items"][-1]["state"] == "contained"
+
+
 def test_recent_incident_endpoint_discovers_latest_state_after_open_removal(
     http_test_client,
 ) -> None:

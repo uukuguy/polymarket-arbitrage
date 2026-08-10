@@ -565,7 +565,31 @@ class IncidentManager:
                 (incident_id, limit + 1),
             ).fetchall()
             if not rows:
-                return None
+                # Event prefixes are deliberately compacted, but an *open*
+                # incident remains an on-call obligation.  Its canonical open
+                # authority is independently checkpointed and hash-validated;
+                # return that current state instead of making the exact-ID
+                # operator link look like the incident never existed.
+                open_row = con.execute(
+                    "SELECT * FROM neg_risk_incident_open_authority "
+                    "WHERE incident_id=?",
+                    (incident_id,),
+                ).fetchone()
+                if open_row is None:
+                    return None
+                self._validate_open_authority_row(open_row)
+                return IncidentIdentityHistory(
+                    items=(
+                        IncidentScopeHistoryItem(
+                            # No raw lifecycle event survives for this
+                            # identity.  Zero is an explicit non-event marker,
+                            # never an invented SQLite event ID.
+                            event_id=0,
+                            incident=self._from_row(open_row),
+                        ),
+                    ),
+                    history_complete=False,
+                )
             retained = rows[:limit]
             retained.reverse()
             items = tuple(

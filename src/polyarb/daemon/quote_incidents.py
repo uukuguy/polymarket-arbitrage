@@ -189,10 +189,35 @@ class QuoteIncidentLifecycle:
     def record_certified_success(self, result: QuoteCollectionResult) -> Incident | None:
         verified: Incident | None = None
         for active in self._incidents.open_incidents():
-            if (
-                active.scope not in {self._SCOPE, "quote"}
-                or active.state != "recovering"
-            ):
+            if active.scope not in {self._SCOPE, "quote"}:
+                continue
+            if active.state == "contained":
+                if active.kind not in {
+                    self._KIND,
+                    "quote-collection-failure",
+                    "quote-projection-failure",
+                    "child-nonzero",
+                }:
+                    # An unrelated legacy row must not be reclassified merely
+                    # because it shares the broad Quote collection scope.
+                    continue
+                # Retained incidents created by an older producer can lack a
+                # recovering edge.  This certified run is genuine progress,
+                # but it cannot verify itself: write a recovery boundary now
+                # and require the next completed Quote run as post-boundary
+                # writer evidence.  Leaving it contained forever would make a
+                # recovered P1 permanently visible without an exit path.
+                self._incidents.transition(
+                    active.id,
+                    "recovering",
+                    {
+                        "automatic_action": "await-post-recovery-certified-run",
+                        "recovery_start_run_id": result.run_id,
+                        "quote_taken_at_ms": result.quote_taken_at_ms,
+                    },
+                )
+                continue
+            if active.state != "recovering":
                 continue
             verified = self._incidents.transition(
                 active.id,

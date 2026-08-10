@@ -248,6 +248,37 @@ def test_certified_quote_run_skips_contained_legacy_incident(tmp_path) -> None:
     }
 
 
+def test_certified_quote_run_marks_contained_collection_incident_recovering(tmp_path) -> None:
+    """A retained Quote P1 gains a durable recovery boundary on new success."""
+    from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
+
+    now = [1_000]
+    store = OpportunityPerceptionStore(tmp_path / "state.db")
+    store.init_schema()
+    incidents = IncidentManager(store, clock_ms=lambda: now[0])
+    incident = incidents.detect("quote-collection", "quote-collection-timeout", {"attempt": 1})
+    now[0] += 1
+    incidents.transition(incident.id, "classified", {"action": "classify"})
+    now[0] += 1
+    incidents.transition(incident.id, "contained", {"action": "retry"})
+
+    now[0] += 1
+    verified = QuoteIncidentLifecycle(incidents).record_certified_success(
+        QuoteCollectionResult(
+            run_id=7,
+            status="complete",
+            universe_snapshot_id=3,
+            requested_token_count=2,
+            successful_response_count=2,
+            quote_taken_at_ms=1_003,
+            elapsed_ms=1,
+        )
+    )
+
+    assert verified is None
+    assert incidents.open_incidents()[0].state == "recovering"
+
+
 def test_certified_quote_run_closes_escalated_quote_supervisor_incident_after_restart(
     tmp_path,
 ) -> None:
