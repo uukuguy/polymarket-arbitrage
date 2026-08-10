@@ -27,6 +27,19 @@ from polyarb.storage.sqlite_store import SQLiteStore, StructureMembershipInvalid
 
 _monotonic = time.monotonic
 
+# One Gamma page must leave enough of the cooperative child slice for its
+# durable SQLite checkpoint and orderly process shutdown.  Without this bound,
+# Gamma's own retry policy can outlive the slice and force the parent to kill
+# the child, losing the actionable cause of the stall.
+STRUCTURE_REMOTE_PAGE_MAX_ELAPSED_S = 35.0
+
+
+class StructurePageDeadlineExceeded(ValueError):
+    """A single Gamma page exhausted the Structure cooperative request budget."""
+
+    def __init__(self) -> None:
+        super().__init__("structure-page-deadline")
+
 
 class StructureGamma(Protocol):
     async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage: ...
@@ -66,7 +79,9 @@ class StructureSyncWorker:
         self._store = store
         self._page_limit = page_limit
 
-    async def run_batch(self) -> StructureSyncBatch:
+    async def run_batch(self, *, page_timeout_s: float | None = None) -> StructureSyncBatch:
+        if page_timeout_s is not None and page_timeout_s <= 0:
+            raise ValueError("structure-page-timeout-must-be-positive")
         window = await asyncio.to_thread(
             self._store.begin_or_resume_structure_sync,
             started_at_ms=int(time.time() * 1_000),
@@ -75,9 +90,18 @@ class StructureSyncWorker:
         if status == "open":
             started = time.monotonic()
             _emit_stage("gamma-events", "start", 0)
-            page = await self._gamma.fetch_active_event_page(
-                window["event_cursor"], self._page_limit
-            )
+            try:
+                if page_timeout_s is None:
+                    page = await self._gamma.fetch_active_event_page(
+                        window["event_cursor"], self._page_limit
+                    )
+                else:
+                    async with asyncio.timeout(page_timeout_s):
+                        page = await self._gamma.fetch_active_event_page(
+                            window["event_cursor"], self._page_limit
+                        )
+            except TimeoutError as error:
+                raise StructurePageDeadlineExceeded() from error
             if page.requested_cursor != window["event_cursor"]:
                 raise ValueError("structure-event-page-cursor-mismatch")
             await asyncio.to_thread(
@@ -95,9 +119,18 @@ class StructureSyncWorker:
         if status == "events_complete":
             started = time.monotonic()
             _emit_stage("gamma-markets", "start", 0)
-            page = await self._gamma.fetch_active_market_page(
-                window["market_cursor"], self._page_limit
-            )
+            try:
+                if page_timeout_s is None:
+                    page = await self._gamma.fetch_active_market_page(
+                        window["market_cursor"], self._page_limit
+                    )
+                else:
+                    async with asyncio.timeout(page_timeout_s):
+                        page = await self._gamma.fetch_active_market_page(
+                            window["market_cursor"], self._page_limit
+                        )
+            except TimeoutError as error:
+                raise StructurePageDeadlineExceeded() from error
             if page.requested_cursor != window["market_cursor"]:
                 raise ValueError("structure-market-page-cursor-mismatch")
             await asyncio.to_thread(
@@ -394,8 +427,16 @@ async def run_structure_sync_until_published(
         cursor_restarts = 0
         pages_processed = 0
         while True:
+            # Preserve the existing cooperative "check after each durable
+            # page" semantics while ensuring any individual network request
+            # cannot consume the parent process-kill envelope.
+            page_timeout_s = (
+                STRUCTURE_REMOTE_PAGE_MAX_ELAPSED_S
+                if max_elapsed_s is not None
+                else None
+            )
             try:
-                batch = await worker.run_batch()
+                batch = await worker.run_batch(page_timeout_s=page_timeout_s)
             except PaginationCursorRejectedError as error:
                 if cursor_restarts >= 1:
                     raise

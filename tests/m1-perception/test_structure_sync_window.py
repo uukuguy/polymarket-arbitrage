@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sqlite3
@@ -30,6 +31,7 @@ from polyarb.perception.structure_event_members import (
 )
 from polyarb.perception.structure_sync import (
     StagedGammaSource,
+    StructurePageDeadlineExceeded,
     StructureSyncCheckpoint,
     StructureSyncWorker,
     finalize_structure_window,
@@ -909,6 +911,26 @@ async def test_structure_worker_advances_one_event_then_one_market_page(tmp_path
     assert store.get_latest_structure_sync()["started_at_ms"] > 0
     assert (await worker.run_batch()).stage == "markets"
     assert store.get_latest_structure_sync()["status"] == "complete"
+
+
+async def test_structure_worker_bounds_a_hung_market_page(tmp_path) -> None:
+    """A stalled Gamma page must release the Structure producer before its parent kill."""
+
+    class Gamma:
+        async def fetch_active_event_page(self, cursor, limit):
+            return EventPage((), cursor, None, True, 10, 20)
+
+        async def fetch_active_market_page(self, cursor, limit):
+            await asyncio.sleep(1)
+            raise AssertionError("deadline must cancel the request")
+
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    worker = StructureSyncWorker(gamma=Gamma(), store=store)
+
+    assert (await worker.run_batch()).stage == "events"
+    with pytest.raises(StructurePageDeadlineExceeded, match="structure-page-deadline"):
+        await worker.run_batch(page_timeout_s=0.001)
 
 
 async def test_structure_sync_yields_after_bounded_pages_without_losing_cursor(
