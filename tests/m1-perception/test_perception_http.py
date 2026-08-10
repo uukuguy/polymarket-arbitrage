@@ -699,6 +699,28 @@ def test_quote_timeout_with_integral_float_deadline_exposes_operator_diagnosis(
     assert diagnosis["next_action"] == "inspect-stage-checkpoint-and-rebalance-child-budget"
 
 
+def test_quote_projection_failure_exposes_operator_diagnosis(http_test_client) -> None:
+    from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
+    from polyarb.daemon.quote_worker import QuoteWorkerRuntime
+    from polyarb.perception.incidents import IncidentManager
+    from polyarb.perception.store import OpportunityPerceptionStore
+    from polyarb.routing.opportunity_scanner import StaleUniverseError
+
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
+    runtime = QuoteWorkerRuntime()
+    runtime.mark_failure(StaleUniverseError("universe is stale"))
+    QuoteIncidentLifecycle(IncidentManager(store, clock_ms=lambda: 1_000)).record_pipeline_failure(
+        error=StaleUniverseError("universe is stale"), runtime=runtime, attempt_id=7, run_id=9
+    )
+
+    item = http_test_client.get("/perception/incidents?limit=10").json()["items"][0]
+
+    assert item["kind"] == "quote-projection-failure"
+    assert item["diagnosis"] is not None
+    assert item["diagnosis"]["deadline_s"] is None
+    assert item["diagnosis"]["next_action"] == "inspect-structure-publication-checkpoint"
+
+
 def test_structure_incident_exposes_operator_diagnosis(http_test_client) -> None:
     """A failed Structure publication is actionable from the main console API."""
     from polyarb.daemon.structure_incidents import StructureIncidentLifecycle
