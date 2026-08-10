@@ -10374,10 +10374,16 @@ class SQLiteStore:
         return result
 
     def seal_structure_publication_counts(
-        self, publication_id: str, *, now_ms: int
+        self,
+        publication_id: str,
+        *,
+        now_ms: int,
+        writer_timeout_s: float | None = None,
     ) -> dict[str, int]:
         """Freeze deterministic normalized counts before terminal certification."""
-        con = self._connect_writer()
+        if writer_timeout_s is not None and writer_timeout_s <= 0:
+            raise ValueError("invalid-structure-publication-seal")
+        con = self._connect_writer(timeout_s=writer_timeout_s)
         try:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
@@ -11586,6 +11592,7 @@ class SQLiteStore:
         *,
         failure_reason: str = "publication-contract-superseded",
         force_retire: bool = False,
+        writer_timeout_s: float | None = None,
     ) -> StructurePublicationContractReconciliation:
         """Fail one incompatible unpublished generation and its source atomically."""
         if (
@@ -11597,10 +11604,11 @@ class SQLiteStore:
                 "publication-contract-superseded",
                 "publication-membership-invalid",
             }
+            or (writer_timeout_s is not None and writer_timeout_s <= 0)
         ):
             raise ValueError("invalid-structure-publication-contract")
         reason = failure_reason
-        con = self._connect_writer()
+        con = self._connect_writer(timeout_s=writer_timeout_s)
         try:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(

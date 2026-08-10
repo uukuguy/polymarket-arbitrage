@@ -440,10 +440,19 @@ def run_structure_publication_step(
         assert progress is not None
     else:
         publication = progress.publication
+    writer_timeout_s = min(
+        STRUCTURE_PUBLICATION_CHUNK_WRITER_TIMEOUT_MAX_S,
+        max(
+            0.001,
+            max_elapsed_s
+            - STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S,
+        ),
+    )
     reconciliation = store.reconcile_structure_publication_contract(
         window_id,
         STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
         now_ms,
+        writer_timeout_s=writer_timeout_s,
     )
     if reconciliation.superseded:
         return StructurePublicationCheckpoint(
@@ -490,7 +499,9 @@ def run_structure_publication_step(
             )
             if certification_checkpoint is None:
                 store.seal_structure_publication_counts(
-                    publication.publication_id, now_ms=now_ms
+                    publication.publication_id,
+                    now_ms=now_ms,
+                    writer_timeout_s=writer_timeout_s,
                 )
                 return StructurePublicationCheckpoint(
                     "certifying",

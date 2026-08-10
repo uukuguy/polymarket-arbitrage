@@ -4045,6 +4045,33 @@ def test_normalization_chunk_writer_wait_is_explicitly_bounded(tmp_path: Path) -
         blocker.close()
 
 
+def test_publication_step_bounds_contract_reconciliation_writer_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings_for_test
+) -> None:
+    """Every per-chunk writer path receives the remaining slice budget."""
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window_id = _complete_window(store, "market-1", now_ms=100)
+    captured: list[float | None] = []
+    reconcile = store.reconcile_structure_publication_contract
+
+    def tracked_reconcile(*args, writer_timeout_s: float | None = None, **kwargs):
+        captured.append(writer_timeout_s)
+        return reconcile(*args, writer_timeout_s=writer_timeout_s, **kwargs)
+
+    monkeypatch.setattr(store, "reconcile_structure_publication_contract", tracked_reconcile)
+
+    run_structure_publication_step(
+        settings_for_test.model_copy(update={"db_path": store.db_path}),
+        window_id,
+        max_rows=1,
+        max_elapsed_s=20.0,
+        store=store,
+    )
+
+    assert captured == [5.0]
+
+
 @pytest.mark.asyncio
 async def test_historical_wait_natural_publish_supersedes_active_drift_and_resumes(
     tmp_path: Path,
