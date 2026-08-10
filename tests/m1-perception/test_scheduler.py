@@ -14,6 +14,7 @@ FAILURE_THRESHOLD 3 → 5 to absorb DNS jitter via tenacity retry):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import signal
@@ -706,6 +707,42 @@ async def test_event_member_child_timeout_records_breadcrumb_and_recovery_failur
     assert scheduler._producer_slot_owned is False
 
 
+@pytest.mark.asyncio
+async def test_event_member_child_timeout_does_not_wait_forever_for_killed_stdio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wedged pipe drain after SIGKILL cannot consume the next tick budget."""
+    from polyarb.daemon.scheduler import run_structure_event_members_in_subprocess
+
+    process = _KillDoesNotDrainProcess({}, returncode=0, block=True)
+
+    async def spawn(*_args: object, **_kwargs: object) -> _KillDoesNotDrainProcess:
+        return process
+
+    task = asyncio.create_task(
+        run_structure_event_members_in_subprocess(
+            db_path="/tmp/members.db",
+            window_id="window-1",
+            spawn=spawn,
+            timeout_s=0.001,
+            terminate_timeout_s=0.001,
+        )
+    )
+    try:
+        await asyncio.sleep(0.03)
+
+        assert task.done() is True
+        assert process.terminated is True
+        assert process.killed is True
+        with pytest.raises(Exception, match="structure-event-members-timeout"):
+            await task
+    finally:
+        process._reaped.set()
+        if not task.done():
+            with contextlib.suppress(Exception):
+                await task
+
+
 def test_structure_drift_attempt_lifecycle_recovery_and_retention(
     tmp_path: Path,
 ) -> None:
@@ -931,6 +968,17 @@ class _FakeProcess:
     def kill(self) -> None:
         self.killed = True
         self._reaped.set()
+
+
+class _KillDoesNotDrainProcess(_FakeProcess):
+    """Model a killed child whose stdio drain remains stuck.
+
+    The parent must report a bounded failure instead of holding the scheduler
+    (and its SQLite/HTTP pressure) forever waiting for pipe cleanup.
+    """
+
+    def kill(self) -> None:
+        self.killed = True
 
 
 def _seed_snapshot(store: Any, snapshot_id: int) -> None:

@@ -29,6 +29,7 @@ Source: RESEARCH.md §Architecture Patterns §2.5, CONTEXT.md D-13
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import re
@@ -336,7 +337,20 @@ async def run_structure_event_members_in_subprocess(
                 process.kill()
             except ProcessLookupError:
                 pass
-            return await asyncio.shield(communicate_task)
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(communicate_task), timeout=terminate_timeout_s
+                )
+            except TimeoutError:
+                # SIGKILL has already been sent.  A wedged stdio drain must
+                # not keep the resident scheduler (and its HTTP/SQLite lanes)
+                # hostage indefinitely.  The asyncio child watcher will reap
+                # the killed child; cancelling this local pipe reader releases
+                # the supervisor to record the durable timeout and retry.
+                communicate_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await communicate_task
+                return b"", b""
 
     try:
         stdout, stderr = await asyncio.wait_for(asyncio.shield(communicate_task), timeout=timeout_s)
