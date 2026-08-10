@@ -78,6 +78,7 @@ export default async function PerceptionOverviewPage() {
   }
 
   const {
+    health,
     status,
     currentOpportunities,
     groups,
@@ -118,6 +119,7 @@ export default async function PerceptionOverviewPage() {
   const validZero =
     opportunityStatus.status === "available" &&
     opportunityStatus.count === 0;
+  const healthReadFailure = health.checks["runtime:health_read_lane"]?.[0];
 
   return (
     <main
@@ -128,6 +130,38 @@ export default async function PerceptionOverviewPage() {
         Observer-only view of bounded Task 6 public GET contracts. Every unknown
         is labelled; it is never converted to zero.
       </p>
+
+      {healthReadFailure?.status === "fail" && (
+        <section
+          style={{
+            ...panel,
+            marginBottom: 12,
+            borderColor: "#f87171",
+            background: "#341414",
+          }}
+        >
+          <h2 style={{ marginTop: 0, color: "#fecaca" }}>
+            P1 operator-visibility incident
+          </h2>
+          <p>
+            <strong>Impact:</strong> {healthReadFailure.impact ?? "Health evidence is unavailable."}
+          </p>
+          <p>
+            <strong>Automatic action:</strong>{" "}
+            {healthReadFailure.automaticAction ?? "Polywatch alerts on the failed health result."}
+          </p>
+          <p>
+            <strong>Next operator action:</strong>{" "}
+            {healthReadFailure.operatorAction ?? "Open the Fly incident console and inspect SQLite pressure."}
+          </p>
+          <p style={muted}>
+            reason {String(healthReadFailure.observedValue)} · release {health.releaseId} · machine {health.machineId}
+          </p>
+          <p style={muted}>
+            This is a visibility fault, not evidence of zero incidents or zero opportunities.
+          </p>
+        </section>
+      )}
 
       <section style={{ margin: "20px 0" }}>
         <h2>Global Candidate state</h2>

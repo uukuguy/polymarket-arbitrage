@@ -2328,7 +2328,14 @@ class _SaturatedHealthReadLane:
 
 
 class _TimedOutHealthReadLane:
-    async def run(self, *_args: object, **_kwargs: object) -> object:
+    async def run(
+        self,
+        *_args: object,
+        on_timeout: object | None = None,
+        **_kwargs: object,
+    ) -> object:
+        assert callable(on_timeout)
+        on_timeout()
         raise TimeoutError("health-read-deadline")
 
 
@@ -2364,3 +2371,24 @@ def test_healthz_keeps_fly_routing_but_reports_p1_when_health_read_times_out(
         body["checks"]["runtime:health_read_lane"][0]["output"]
         == "reason=read-model-unavailable"
     )
+
+
+def test_health_read_execution_interrupts_every_registered_connection() -> None:
+    execution = health_module._HealthReadExecution(time.monotonic() + 1.0)
+
+    class Connection:
+        def __init__(self) -> None:
+            self.interrupt_count = 0
+
+        def interrupt(self) -> None:
+            self.interrupt_count += 1
+
+    first = Connection()
+    second = Connection()
+    execution.register(first)  # type: ignore[arg-type]
+    execution.register(second)  # type: ignore[arg-type]
+
+    execution.interrupt()
+
+    assert first.interrupt_count == 1
+    assert second.interrupt_count == 1

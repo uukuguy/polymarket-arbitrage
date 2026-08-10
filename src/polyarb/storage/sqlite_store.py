@@ -12288,6 +12288,7 @@ class SQLiteStore:
         retain_generations: int = 2,
         pressure_probe_limit: int = 8,
         trace_callback: Callable[[str], None] | None = None,
+        sqlite_progress_callback: Callable[[], int] | None = None,
     ) -> dict[str, object]:
         """Return bounded read-only rollout and evidence pressure metadata."""
         if retain_generations < 2:
@@ -12302,6 +12303,8 @@ class SQLiteStore:
             con.execute("BEGIN")
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
+            if sqlite_progress_callback is not None:
+                con.set_progress_handler(sqlite_progress_callback, 1)
             pointer = con.execute(
                 "SELECT g.snapshot_id,g.publication_id,g.validation_hash,g.counts_json,"
                 "g.certification_component,g.comparison_receipt_digest,g.switched_at_ms,"

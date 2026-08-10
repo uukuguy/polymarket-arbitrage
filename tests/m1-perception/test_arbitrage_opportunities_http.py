@@ -652,7 +652,7 @@ def test_source_truth_fallback_rejects_feed_without_authenticated_hash(
 
 
 @pytest.mark.asyncio
-async def test_bounded_read_lane_rejects_zombie_queueing_and_recovers() -> None:
+async def test_bounded_read_lane_interrupts_timed_out_worker_and_recovers() -> None:
     lane = BoundedReadLane("test-opportunity-read", capacity=1)
     release = threading.Event()
 
@@ -661,13 +661,7 @@ async def test_bounded_read_lane_rejects_zombie_queueing_and_recovers() -> None:
         return "released"
 
     with pytest.raises(TimeoutError):
-        await lane.run(blocked, timeout_s=0.01)
-    started = time.monotonic()
-    with pytest.raises(ReadLaneSaturatedError):
-        await lane.run(lambda: "must-not-queue", timeout_s=0.5)
-    assert time.monotonic() - started < 0.1
-
-    release.set()
+        await lane.run(blocked, timeout_s=0.01, on_timeout=release.set)
     for _ in range(100):
         try:
             result = await lane.run(lambda: "recovered", timeout_s=0.5)

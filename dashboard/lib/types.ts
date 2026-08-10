@@ -104,6 +104,26 @@ export interface PerceptionStatusEnvelope {
   open_incident_count: number;
 }
 
+export interface PerceptionHealthCheck {
+  componentId: string;
+  componentType?: string;
+  observedValue: unknown;
+  observedUnit?: string;
+  status: "pass" | "warn" | "fail";
+  output?: string;
+  impact?: string;
+  automaticAction?: string;
+  operatorAction?: string;
+}
+
+export interface PerceptionHealthEnvelope {
+  status: "pass" | "warn" | "fail";
+  releaseId: string;
+  machineId: string;
+  bootId: string;
+  checks: Record<string, PerceptionHealthCheck[]>;
+}
+
 export interface PerceptionCurrentOpportunity {
   group_id: string;
   event_id: string;
@@ -463,6 +483,7 @@ export interface PerceptionResourcesEnvelope {
 }
 
 export interface PerceptionOverview {
+  health: PerceptionHealthEnvelope;
   status: PerceptionStatusEnvelope;
   currentOpportunities: PerceptionCurrentOpportunitiesEnvelope;
   groups: PerceptionGroupsEnvelope;

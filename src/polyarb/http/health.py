@@ -46,9 +46,11 @@ Source: datatracker.ietf.org/doc/html/draft-inadarei-api-health-check-06
 
 from __future__ import annotations
 
+import contextvars
 import json
 import shutil
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -70,6 +72,35 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S,
 )
 from polyarb.routing.feed_handoff import decide_feed_availability
+
+_HEALTH_READ_EXECUTION: contextvars.ContextVar[_HealthReadExecution | None] = (
+    contextvars.ContextVar("health_read_execution", default=None)
+)
+
+
+class _HealthReadExecution:
+    """Tracks health SQLite handles so an HTTP deadline can interrupt them."""
+
+    def __init__(self, deadline_monotonic: float) -> None:
+        self.deadline_monotonic = deadline_monotonic
+        self._lock = threading.Lock()
+        self._connections: list[sqlite3.Connection] = []
+
+    def register(self, con: sqlite3.Connection) -> None:
+        with self._lock:
+            self._connections.append(con)
+
+    def interrupt(self) -> None:
+        with self._lock:
+            connections = tuple(self._connections)
+        for con in connections:
+            try:
+                con.interrupt()
+            except sqlite3.Error:
+                pass
+
+    def progress(self) -> int:
+        return int(time.monotonic() >= self.deadline_monotonic)
 
 HEALTH_CONTENT_TYPE = "application/health+json"
 
@@ -1848,12 +1879,16 @@ def _build_health_checks(
     }]
 
     try:
+        execution = _HEALTH_READ_EXECUTION.get()
         generation_status = store.structure_generation_status(
             retain_generations=int(
                 getattr(settings, "structure_generation_retention_floor", 2)
             ),
             pressure_probe_limit=int(
                 getattr(settings, "structure_generation_pressure_fail_count", 8)
+            ),
+            sqlite_progress_callback=(
+                None if execution is None else execution.progress
             ),
         )
         generation_checks = _structure_generation_health_checks(
@@ -2220,20 +2255,26 @@ async def _health_response(request: Request, *, probe: bool) -> JSONResponse:
 
     store: SQLiteStore = request.app.state.sqlite_store
     settings = request.app.state.settings
+    execution = _HealthReadExecution(time.monotonic() + 0.8)
+    token = _HEALTH_READ_EXECUTION.set(execution)
     try:
-        checks, overall = await request.app.state.health_read_lane.run(
-            _build_health_checks,
-            store,
-            settings,
-            time.time(),
-            getattr(request.app.state, "quote_worker_runtime", None),
-            getattr(request.app.state, "opportunity_read_health", None),
-            timeout_s=0.8,
-        )
-    except ReadLaneSaturatedError:
-        checks, overall = _health_read_failure_checks("read-model-saturated"), "fail"
-    except (TimeoutError, sqlite3.Error):
-        checks, overall = _health_read_failure_checks("read-model-unavailable"), "fail"
+        try:
+            checks, overall = await request.app.state.health_read_lane.run(
+                _build_health_checks,
+                store,
+                settings,
+                time.time(),
+                getattr(request.app.state, "quote_worker_runtime", None),
+                getattr(request.app.state, "opportunity_read_health", None),
+                timeout_s=0.8,
+                on_timeout=execution.interrupt,
+            )
+        except ReadLaneSaturatedError:
+            checks, overall = _health_read_failure_checks("read-model-saturated"), "fail"
+        except (TimeoutError, sqlite3.Error):
+            checks, overall = _health_read_failure_checks("read-model-unavailable"), "fail"
+    finally:
+        _HEALTH_READ_EXECUTION.reset(token)
     body = _build_health_body(
         overall,
         checks,

@@ -39,6 +39,7 @@ class BoundedReadLane:
         function: Callable[..., T],
         *args: Any,
         timeout_s: float,
+        on_timeout: Callable[[], None] | None = None,
         **kwargs: Any,
     ) -> T:
         with self._state_lock:
@@ -57,7 +58,17 @@ class BoundedReadLane:
                 raise
         future.add_done_callback(lambda _future: self._slots.release())
         wrapped = asyncio.wrap_future(future)
-        return await asyncio.wait_for(asyncio.shield(wrapped), timeout=timeout_s)
+        try:
+            return await asyncio.wait_for(asyncio.shield(wrapped), timeout=timeout_s)
+        except TimeoutError:
+            if on_timeout is not None:
+                try:
+                    on_timeout()
+                except Exception:
+                    # Timeout reporting must not be replaced by a best-effort
+                    # cancellation callback failure.
+                    pass
+            raise
 
     def shutdown(self) -> None:
         """Reject new work and abandon running operations without blocking."""

@@ -42,6 +42,15 @@ def test_event_member_contract_does_not_expand_row_chain_registry() -> None:
     assert ROW_CHAIN_DOMAINS == EVENT_MEMBER_DOMAINS_BEFORE
 
 
+def test_structure_generation_status_honors_sqlite_progress_cancellation(
+    generation_db: Path,
+) -> None:
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        SQLiteStore(generation_db).structure_generation_status(
+            sqlite_progress_callback=lambda: 1,
+        )
+
+
 def _seed_structure_revision(
     path: Path,
     *,

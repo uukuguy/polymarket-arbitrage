@@ -5,6 +5,7 @@ import type {
   PerceptionGroupHistoryEnvelope,
   PerceptionGroupTimelineEnvelope,
   PerceptionGroupsEnvelope,
+  PerceptionHealthEnvelope,
   PerceptionIncidentsEnvelope,
   PerceptionOverview,
   PerceptionReadResult,
@@ -643,6 +644,29 @@ function isIncident(value: unknown): boolean {
   );
 }
 
+function isHealthCheck(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.componentId === "string" &&
+    ["pass", "warn", "fail"].includes(String(value.status)) &&
+    "observedValue" in value
+  );
+}
+
+function isHealthEnvelope(value: unknown): value is PerceptionHealthEnvelope {
+  return (
+    isRecord(value) &&
+    ["pass", "warn", "fail"].includes(String(value.status)) &&
+    typeof value.releaseId === "string" &&
+    typeof value.machineId === "string" &&
+    typeof value.bootId === "string" &&
+    isRecord(value.checks) &&
+    Object.values(value.checks).every(
+      (entries) => Array.isArray(entries) && entries.every(isHealthCheck),
+    )
+  );
+}
+
 function isIncidentsEnvelope(
   value: unknown,
 ): value is PerceptionIncidentsEnvelope {
@@ -825,6 +849,7 @@ export async function readPerceptionOverview(): Promise<
   const signal = AbortSignal.timeout(3000);
   try {
     const [
+      health,
       status,
       currentOpportunities,
       groups,
@@ -834,6 +859,11 @@ export async function readPerceptionOverview(): Promise<
       resources,
     ] =
       await Promise.all([
+        fetchAvailable<PerceptionHealthEnvelope>(
+          "/healthz",
+          signal,
+          isHealthEnvelope,
+        ),
         fetchAvailable<PerceptionStatusEnvelope>(
           "/perception/status",
           signal,
@@ -885,6 +915,7 @@ export async function readPerceptionOverview(): Promise<
     return {
       status: "available",
       data: {
+        health,
         status,
         currentOpportunities,
         groups,
