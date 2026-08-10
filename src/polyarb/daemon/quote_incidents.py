@@ -128,6 +128,64 @@ class QuoteIncidentLifecycle:
             return self._incidents.transition(incident.id, "recovering", evidence)
         return incident
 
+    def record_pipeline_failure(
+        self,
+        *,
+        error: BaseException,
+        runtime: QuoteWorkerRuntime,
+        attempt_id: int | None,
+        run_id: int | None,
+    ) -> Incident:
+        """Expose a post-child certification failure instead of only logging it.
+
+        A successful child is not an operational success until its projection is
+        certified against current Structure truth.  In particular, a stale
+        universe requires Structure to finish publishing before Quote retries.
+        """
+        snapshot = runtime.snapshot()
+        age = (
+            None
+            if snapshot.last_success_at_s is None
+            else max(0.0, time.time() - snapshot.last_success_at_s)
+        )
+        is_stale_universe = type(error).__name__ == "StaleUniverseError"
+        impact = "feed-unavailable" if age is None or age > 300 else "feed-at-risk"
+        severity = (
+            "p1"
+            if impact == "feed-unavailable" or snapshot.consecutive_failures >= 3
+            else "p2"
+        )
+        evidence: dict[str, Any] = {
+            "attempt_id": attempt_id,
+            "run_id": run_id,
+            "failure_reason": f"quote-projection-{type(error).__name__}",
+            "consecutive_failures": snapshot.consecutive_failures,
+            "last_success_age_s": age,
+            "impact": impact,
+            "automatic_action": (
+                "await-fresh-structure-publication-and-retry"
+                if is_stale_universe
+                else "retry-at-next-cadence"
+            ),
+            "next_action": (
+                "inspect-structure-publication-checkpoint"
+                if is_stale_universe
+                else "inspect-quote-certification-boundary"
+            ),
+            "severity": severity,
+            "reminder_interval_s": 300 if severity == "p1" else 1800,
+            "error_kind": type(error).__name__,
+        }
+        incident = self._incidents.detect(self._SCOPE, "quote-projection-failure", evidence)
+        if incident.state == "detected":
+            incident = self._incidents.transition(incident.id, "classified", evidence)
+            incident = self._incidents.transition(incident.id, "contained", evidence)
+            return self._incidents.transition(incident.id, "recovering", evidence)
+        if incident.state == "recovering":
+            incident = self._incidents.transition(incident.id, "contained", evidence)
+            return self._incidents.transition(incident.id, "recovering", evidence)
+        return incident
+
     def record_certified_success(self, result: QuoteCollectionResult) -> Incident | None:
         verified: Incident | None = None
         for active in self._incidents.open_incidents():

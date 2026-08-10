@@ -60,6 +60,9 @@ RecordTimeoutIncident = Callable[
 RecordFailureIncident = Callable[
     ["QuoteCollectionSubprocessError", "QuoteWorkerRuntime"], Awaitable[None]
 ]
+RecordPipelineFailureIncident = Callable[
+    [BaseException, "QuoteWorkerRuntime", QuoteCollectionResult | None], Awaitable[None]
+]
 RecordCertifiedSuccessIncident = Callable[[QuoteCollectionResult], Awaitable[None]]
 OnCycleStarted = Callable[[], Awaitable[None]]
 _BACKGROUND_REAP_TASKS: set[asyncio.Task[object]] = set()
@@ -713,6 +716,7 @@ class QuoteWorker:
         fail_attempt: FailAttempt | None = None,
         record_timeout_incident: RecordTimeoutIncident | None = None,
         record_failure_incident: RecordFailureIncident | None = None,
+        record_pipeline_failure_incident: RecordPipelineFailureIncident | None = None,
         record_certified_success_incident: RecordCertifiedSuccessIncident | None = None,
         on_cycle_started: OnCycleStarted | None = None,
         producer_arbitrator: ProducerArbitrator | None = None,
@@ -750,6 +754,7 @@ class QuoteWorker:
         self._fail_attempt = fail_attempt
         self._record_timeout_incident = record_timeout_incident
         self._record_failure_incident = record_failure_incident
+        self._record_pipeline_failure_incident = record_pipeline_failure_incident
         self._record_certified_success_incident = record_certified_success_incident
         self._on_cycle_started = on_cycle_started
         self._producer_arbitrator = producer_arbitrator
@@ -1050,6 +1055,16 @@ class QuoteWorker:
                     if result is not None and self._fail_attempt is not None:
                         await self._fail_attempt(result, type(error).__name__)
                     self.runtime.mark_failure(error)
+                    if self._record_pipeline_failure_incident is not None:
+                        try:
+                            await self._record_pipeline_failure_incident(
+                                error, self.runtime, result
+                            )
+                        except Exception as incident_error:
+                            logger.exception(
+                                "quote pipeline failure incident recording failed "
+                                f"kind={type(incident_error).__name__}"
+                            )
                     logger.exception(
                         "neg-risk quote collection failed "
                         f"kind={type(error).__name__} "
@@ -1354,6 +1369,20 @@ def build_production_quote_worker(
                 runtime=runtime,
             )
 
+    async def record_pipeline_failure_incident(
+        error: BaseException,
+        runtime: QuoteWorkerRuntime,
+        result: QuoteCollectionResult | None,
+    ) -> None:
+        if incident_lifecycle is not None:
+            await asyncio.to_thread(
+                incident_lifecycle.record_pipeline_failure,
+                error=error,
+                runtime=runtime,
+                attempt_id=None if result is None else result.attempt_id,
+                run_id=None if result is None else result.run_id,
+            )
+
     async def record_certified_success_incident(result: QuoteCollectionResult) -> None:
         if incident_lifecycle is not None:
             await asyncio.to_thread(incident_lifecycle.record_certified_success, result)
@@ -1372,6 +1401,7 @@ def build_production_quote_worker(
         fail_attempt=fail_attempt,
         record_timeout_incident=record_timeout_incident,
         record_failure_incident=record_failure_incident,
+        record_pipeline_failure_incident=record_pipeline_failure_incident,
         record_certified_success_incident=record_certified_success_incident,
         on_cycle_started=on_cycle_started,
         producer_arbitrator=producer_arbitrator,

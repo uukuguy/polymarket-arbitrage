@@ -442,6 +442,37 @@ async def test_timeout_incident_receives_failed_attempt_identity() -> None:
     assert recorded == [(353, None, None)]
 
 
+async def test_certification_failure_records_pipeline_incident() -> None:
+    from polyarb.daemon.quote_worker import QuoteWorker
+    from polyarb.routing.opportunity_scanner import StaleUniverseError
+
+    recorded: list[tuple[str, int | None]] = []
+
+    async def collect_once() -> QuoteCollectionResult:
+        return _result(2156)
+
+    async def certify_projection(_result: QuoteCollectionResult):
+        raise StaleUniverseError("universe age 50401.0s exceeds 50400.0s")
+
+    async def record_pipeline_failure(error, _runtime, result) -> None:
+        recorded.append((type(error).__name__, None if result is None else result.run_id))
+
+    async def wait_for_stop(_stop: asyncio.Event, _delay_s: float) -> bool:
+        return True
+
+    worker = QuoteWorker(
+        collect_once=collect_once,
+        certify_projection=certify_projection,
+        record_pipeline_failure_incident=record_pipeline_failure,
+        interval_s=120,
+        wait_for_stop=wait_for_stop,
+    )
+
+    await worker.run(asyncio.Event())
+
+    assert recorded == [("StaleUniverseError", 2156)]
+
+
 async def test_failed_quote_payload_is_reclaimed_before_immediate_retry() -> None:
     from polyarb.daemon.quote_worker import QuoteCollectionSubprocessError, QuoteWorker
 

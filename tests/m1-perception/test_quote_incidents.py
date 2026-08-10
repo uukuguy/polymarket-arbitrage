@@ -114,6 +114,34 @@ def test_non_timeout_child_failure_creates_operator_incident(tmp_path) -> None:
     assert incident.evidence["failure_reason"] == "quote-collection-subprocess-failed"
 
 
+def test_stale_structure_certification_creates_operator_incident(tmp_path) -> None:
+    """A completed child still cannot silently lose its executable boundary."""
+    from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
+    from polyarb.daemon.quote_worker import QuoteWorkerRuntime
+    from polyarb.routing.opportunity_scanner import StaleUniverseError
+
+    runtime = QuoteWorkerRuntime()
+    runtime.mark_failure(StaleUniverseError("universe age 50401.0s exceeds 50400.0s"))
+    incident = QuoteIncidentLifecycle(_manager(tmp_path)).record_pipeline_failure(
+        error=StaleUniverseError("universe age 50401.0s exceeds 50400.0s"),
+        runtime=runtime,
+        attempt_id=731,
+        run_id=2515,
+    )
+
+    assert (incident.kind, incident.state) == (
+        "quote-projection-failure",
+        "recovering",
+    )
+    assert incident.evidence["severity"] == "p1"
+    assert incident.evidence["automatic_action"] == (
+        "await-fresh-structure-publication-and-retry"
+    )
+    assert incident.evidence["next_action"] == "inspect-structure-publication-checkpoint"
+    assert incident.evidence["attempt_id"] == 731
+    assert incident.evidence["run_id"] == 2515
+
+
 def test_certified_quote_run_verifies_open_timeout_incident(tmp_path) -> None:
     """A retry is not recovery: only a complete post-incident run closes it."""
     from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
