@@ -202,6 +202,7 @@ def test_perception_console_is_a_direct_operator_view(http_test_client) -> None:
     assert "/perception/producer-arbitration" in response.text
     assert "/perception/producer-progress" in response.text
     assert "Structure comparison progress" in response.text
+    assert "Structure sync window progress" in response.text
     assert "Current producer checkpoints" in response.text
     assert "/perception/incidents/recent?scope=quote-collection" in response.text
     assert (
@@ -238,7 +239,20 @@ def test_producer_progress_exposes_current_quote_and_structure_checkpoints(
     assert body["quote"]["hydration"]["consecutive_failures"] == 0
     assert body["structure"]["attempt"] is None
     assert body["structure"]["comparison"] is None
+    assert body["structure"]["sync_window"] is None
     assert "checkpoint" in body["automatic_action"]
+
+
+def test_producer_progress_exposes_durable_structure_window_progress(
+    http_test_client,
+) -> None:
+    store = http_test_client.app.state.sqlite_store
+    window = store.begin_or_resume_structure_sync(started_at_ms=1_700_000_000_000)
+
+    response = http_test_client.get("/perception/producer-progress")
+
+    assert response.status_code == 200
+    assert response.json()["structure"]["sync_window"] == window
 
 
 @pytest.mark.asyncio
