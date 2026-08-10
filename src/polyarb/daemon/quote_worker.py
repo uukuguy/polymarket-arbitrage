@@ -477,6 +477,7 @@ async def collect_quotes_in_subprocess(
             str(settings.db_path),
             "--attempt-id",
             str(attempt_id),
+            "--schema-ready",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

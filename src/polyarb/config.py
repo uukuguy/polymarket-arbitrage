@@ -151,6 +151,13 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
     )
     producer_stall_timeout_s: float = Field(default=180.0, gt=0, allow_inf_nan=False)
+    # Quote's child hard limit covers collection only. The isolated parent must
+    # retain a separate bounded tail for certification and compact-feed publish.
+    # Otherwise a completed full-universe child can be killed by the outer
+    # supervisor before M2 can consume its durable result.
+    neg_risk_quote_supervisor_timeout_s: float = Field(
+        default=210.0, gt=0, lt=300, allow_inf_nan=False
+    )
     producer_terminate_grace_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     producer_max_restarts: int = Field(default=3, ge=0, le=10)
     producer_backoff_initial_s: float = Field(default=1.0, ge=0, allow_inf_nan=False)
@@ -537,6 +544,14 @@ class Settings(BaseSettings):
         if self.producer_stall_detection_s >= self.producer_stall_timeout_s:
             raise ValueError(
                 "producer_stall_detection_s must be less than producer_stall_timeout_s"
+            )
+        if (
+            self.neg_risk_quote_supervisor_timeout_s
+            < self.neg_risk_quote_child_hard_limit_s + QUOTE_PUBLISH_RESERVE_SECONDS
+        ):
+            raise ValueError(
+                "neg-risk Quote supervisor timeout must reserve child collection "
+                "plus certification/publish tail"
             )
         if (
             self.opportunity_resource_controller_enabled

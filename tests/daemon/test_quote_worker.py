@@ -1031,7 +1031,13 @@ async def test_isolated_collection_parses_one_bounded_result(tmp_path) -> None:
     )
     args, kwargs = calls[0]
     assert args[1:4] == ("-m", "polyarb.cli_arbitrage", "collect-neg-risk-quotes")
-    assert args[-4:] == ("--db-path", str(settings.db_path), "--attempt-id", "1")
+    assert args[-5:] == (
+        "--db-path",
+        str(settings.db_path),
+        "--attempt-id",
+        "1",
+        "--schema-ready",
+    )
     assert kwargs["stdout"] == asyncio.subprocess.PIPE
     assert kwargs["stderr"] == asyncio.subprocess.PIPE
 
@@ -1269,6 +1275,42 @@ async def test_cli_fetch_timeout_envelope_drives_parent_timeout_retry(
         "failed",
         "child-fetch-timeout",
     )
+
+
+def test_supervised_quote_cli_skips_schema_migration_after_parent_startup(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A daemon child must not contend for a full schema migration every cycle."""
+    from typer.testing import CliRunner
+
+    from polyarb import cli_arbitrage as cli_module
+    from polyarb.cli_arbitrage import app
+    from polyarb.routing.neg_risk_quote_collector import QuoteFetchTimeoutError
+
+    migrations: list[object] = []
+
+    def unexpected_migration(self) -> None:
+        migrations.append(self)
+
+    async def fetch_timeout(**_kwargs):
+        raise QuoteFetchTimeoutError()
+
+    monkeypatch.setattr(cli_module.SQLiteStore, "init_schema", unexpected_migration)
+    monkeypatch.setattr(cli_module, "collect_neg_risk_quotes", fetch_timeout)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "collect-neg-risk-quotes",
+            "--db-path",
+            str(tmp_path / "state.db"),
+            "--schema-ready",
+        ],
+    )
+
+    assert result.exit_code == 75
+    assert migrations == []
 
 
 async def test_hard_timeout_explicitly_waits_if_killed_child_pipes_never_close(

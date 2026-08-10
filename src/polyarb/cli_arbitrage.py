@@ -111,13 +111,19 @@ def collect_neg_risk_quotes_command(
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     attempt_id: int = typer.Option(0, "--attempt-id", min=0),
+    schema_ready: bool = typer.Option(
+        False,
+        "--schema-ready",
+        help="Skip schema migration; only for a daemon child after parent startup verified it",
+    ),
 ) -> None:
     """Collect one local read-only CLOB quote run; not a scheduler or order command."""
     _setup_logger(verbose)
     started = time.perf_counter()
     try:
         settings = Settings()
-        SQLiteStore(db_path).init_schema()
+        if not schema_ready:
+            SQLiteStore(db_path).init_schema()
         result = asyncio.run(
             collect_neg_risk_quotes(
                 quote_store=NegRiskQuoteStore(
