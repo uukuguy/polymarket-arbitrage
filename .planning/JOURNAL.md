@@ -7357,3 +7357,38 @@ checkpoint progression to distinguish finite catch-up from recurring timeout;
 do not close the P1 or declare M1 production-stable until a new certified
 Structure snapshot, matching Incident verification, healthy opportunity reads,
 and repeated natural cycles are observed.
+
+## SESSION 177 — 2026-08-10 (Structure budget and SQLite contention recovery)
+
+- [ROOT CAUSE] Production health exposed `attempt_timeout_s=75`, while actual
+  cross-process Structure admission hard-coded a 45-second lease and child
+  cap. This contradicted the published safety contract and repeatedly killed
+  long-running market-page slices before the adaptive scheduler could help.
+- [REPAIR] Commit `f8b94bf` unifies the durable lease and child timeout at the
+  existing 75-second hard envelope. It also turns `database is locked`/`busy`
+  at producer arbitration into a durable
+  `producer-arbitration-writer-busy` defer and five-second retry rather than a
+  synthetic scheduler failure. P1 recovery remains receipt-gated.
+- [DEPLOY / LIVE EVIDENCE] Fly L1 v318 runs exact
+  `f8b94bf17b664a4032042f4e29c2c41f20ba9314`. Quote run 2468 then 2470
+  completed for 40,531 tokens. Structure attempts 9038–9042 checkpointed
+  `gamma-markets` in 10–15 seconds with failure counter zero, moving market
+  pages from 784 to 990. Arbitration receipts show Quote/Structure handoff;
+  new defers are visible as `producer-lease-held` rather than hidden stops.
+- [CURRENT] The active window has 187 event pages and 990 of an expected
+  roughly 1,400 market pages, so it is finite catch-up but not yet published.
+  Strict health is warn and the Structure P1 remains open by design. The
+  opportunity endpoint is again HTTP 200 with 20 authenticated gross
+  candidates (top observed 450 bps); this is opportunity observation, not
+  execution permission. Incident API recovered to HTTP 200 in 3.28 seconds
+  after a transient heavy-write timeout; operator-read latency remains an open
+  production concern to observe under the remaining catch-up load.
+
+### [NEXT — CURRENT]
+
+Keep L1 v318 under live recovery until the market window is published, the
+Structure P1 is verified using its matching durable snapshot attempt, and
+multiple Quote/Structure handoffs retain healthy opportunity and incident
+reads. Treat any renewed >3-second operator-read delay or 75-second child
+timeout as production evidence for the next repair; do not declare stable
+before natural-cycle proof.
