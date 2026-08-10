@@ -20,7 +20,11 @@ import pytest
 from starlette.testclient import TestClient
 
 from polyarb.http import health as health_module
-from polyarb.http.opportunity_read_health import OpportunityReadHealth
+from polyarb.http.opportunity_read_health import (
+    BoundedReadLane,
+    OpportunityReadHealth,
+    ReadLaneSaturatedError,
+)
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -987,6 +991,7 @@ async def test_health_database_projection_runs_off_event_loop(
         return {}, "pass"
 
     monkeypatch.setattr(health_module, "_build_health_checks", build_checks)
+    health_read_lane = BoundedReadLane("test-health-read", capacity=1)
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
@@ -995,11 +1000,15 @@ async def test_health_database_projection_runs_off_event_loop(
                 quote_worker_runtime=None,
                 machine_id="machine-test",
                 boot_id="boot-test",
+                health_read_lane=health_read_lane,
             )
         )
     )
 
-    response = await getattr(health_module, handler_name)(request)
+    try:
+        response = await getattr(health_module, handler_name)(request)
+    finally:
+        health_read_lane.shutdown()
 
     assert response.status_code == 200
     assert projection_threads
@@ -2311,3 +2320,47 @@ def test_healthz_body_has_status_field_and_content_type(
     # RESEARCH Pitfall 5: must use application/health+json content type
     ct = resp.headers.get("content-type", "")
     assert "health+json" in ct
+
+
+class _SaturatedHealthReadLane:
+    async def run(self, *_args: object, **_kwargs: object) -> object:
+        raise ReadLaneSaturatedError("read-lane-saturated")
+
+
+class _TimedOutHealthReadLane:
+    async def run(self, *_args: object, **_kwargs: object) -> object:
+        raise TimeoutError("health-read-deadline")
+
+
+def test_health_returns_p1_503_when_health_read_lane_is_saturated(
+    http_test_client: TestClient,
+) -> None:
+    http_test_client.app.state.health_read_lane = _SaturatedHealthReadLane()
+
+    response = http_test_client.get("/health")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "fail"
+    assert body["checks"]["runtime:health_read_lane"][0]["status"] == "fail"
+    assert (
+        body["checks"]["runtime:health_read_lane"][0]["output"]
+        == "reason=read-model-saturated"
+    )
+
+
+def test_healthz_keeps_fly_routing_but_reports_p1_when_health_read_times_out(
+    http_test_client: TestClient,
+) -> None:
+    http_test_client.app.state.health_read_lane = _TimedOutHealthReadLane()
+
+    response = http_test_client.get("/healthz")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "fail"
+    assert body["checks"]["runtime:health_read_lane"][0]["status"] == "fail"
+    assert (
+        body["checks"]["runtime:health_read_lane"][0]["output"]
+        == "reason=read-model-unavailable"
+    )

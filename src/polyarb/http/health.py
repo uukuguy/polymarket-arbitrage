@@ -46,7 +46,6 @@ Source: datatracker.ietf.org/doc/html/draft-inadarei-api-health-check-06
 
 from __future__ import annotations
 
-import asyncio
 import json
 import shutil
 import sqlite3
@@ -59,6 +58,7 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from polyarb.http.opportunity_read_health import ReadLaneSaturatedError
 from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V1,
     STRUCTURE_DRIFT_CLASSIFIER_V2,
@@ -2186,6 +2186,65 @@ def _build_health_body(
     }
 
 
+def _health_read_failure_checks(reason: str) -> dict[str, list[dict[str, object]]]:
+    """Return a credential-free P1 when durable health evidence cannot be read."""
+    return {
+        "runtime:health_read_lane": [
+            {
+                "componentId": "runtime:health_read_lane",
+                "componentType": "system",
+                "observedValue": reason,
+                "observedUnit": "status",
+                "status": "fail",
+                "output": f"reason={reason}",
+                "impact": (
+                    "M1 health and incident evidence could not be read "
+                    "within the production budget."
+                ),
+                "automaticAction": (
+                    "The dedicated health read lane rejects or times out the "
+                    "blocked read; Polywatch alerts on the fail result."
+                ),
+                "operatorAction": (
+                    "Inspect /perception/console, Structure/Quote writer pressure, "
+                    "and SQLite volume latency before retrying."
+                ),
+            }
+        ]
+    }
+
+
+async def _health_response(request: Request, *, probe: bool) -> JSONResponse:
+    """Build bounded health evidence without letting SQLite pressure hang HTTP."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store: SQLiteStore = request.app.state.sqlite_store
+    settings = request.app.state.settings
+    try:
+        checks, overall = await request.app.state.health_read_lane.run(
+            _build_health_checks,
+            store,
+            settings,
+            time.time(),
+            getattr(request.app.state, "quote_worker_runtime", None),
+            getattr(request.app.state, "opportunity_read_health", None),
+            timeout_s=0.8,
+        )
+    except ReadLaneSaturatedError:
+        checks, overall = _health_read_failure_checks("read-model-saturated"), "fail"
+    except (TimeoutError, sqlite3.Error):
+        checks, overall = _health_read_failure_checks("read-model-unavailable"), "fail"
+    body = _build_health_body(
+        overall,
+        checks,
+        settings,
+        machine_id=request.app.state.machine_id,
+        boot_id=request.app.state.boot_id,
+    )
+    http_status = 200 if probe else (503 if overall == "fail" else 200)
+    return JSONResponse(body, status_code=http_status, media_type=HEALTH_CONTENT_TYPE)
+
+
 async def health(request: Request) -> JSONResponse:
     """GET /health — IETF strict三态 health response.
 
@@ -2196,28 +2255,7 @@ async def health(request: Request) -> JSONResponse:
     Reads from app.state.sqlite_store and app.state.settings.
     All SQLite reads use mode=ro URI (P3.8: HTTP server never writes).
     """
-    from polyarb.storage.sqlite_store import SQLiteStore
-
-    store: SQLiteStore = request.app.state.sqlite_store
-    settings = request.app.state.settings
-
-    checks, overall = await asyncio.to_thread(
-        _build_health_checks,
-        store,
-        settings,
-        time.time(),
-        getattr(request.app.state, "quote_worker_runtime", None),
-        getattr(request.app.state, "opportunity_read_health", None),
-    )
-    body = _build_health_body(
-        overall,
-        checks,
-        settings,
-        machine_id=request.app.state.machine_id,
-        boot_id=request.app.state.boot_id,
-    )
-    http_status = 503 if overall == "fail" else 200
-    return JSONResponse(body, status_code=http_status, media_type=HEALTH_CONTENT_TYPE)
+    return await _health_response(request, probe=False)
 
 
 async def healthz(request: Request) -> JSONResponse:
@@ -2238,25 +2276,4 @@ async def healthz(request: Request) -> JSONResponse:
 
     D-22 + D-06: public endpoint, no HMAC, same body schema as /health.
     """
-    from polyarb.storage.sqlite_store import SQLiteStore
-
-    store: SQLiteStore = request.app.state.sqlite_store
-    settings = request.app.state.settings
-
-    checks, overall = await asyncio.to_thread(
-        _build_health_checks,
-        store,
-        settings,
-        time.time(),
-        getattr(request.app.state, "quote_worker_runtime", None),
-        getattr(request.app.state, "opportunity_read_health", None),
-    )
-    body = _build_health_body(
-        overall,
-        checks,
-        settings,
-        machine_id=request.app.state.machine_id,
-        boot_id=request.app.state.boot_id,
-    )
-    # KEY: ignore overall when deciding HTTP code — always 200.
-    return JSONResponse(body, status_code=200, media_type=HEALTH_CONTENT_TYPE)
+    return await _health_response(request, probe=True)
