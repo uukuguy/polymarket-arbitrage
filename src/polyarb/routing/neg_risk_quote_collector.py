@@ -348,7 +348,11 @@ def _wall_clock_ms() -> int:
 
 
 def _is_sqlite_writer_timeout(error: sqlite3.OperationalError) -> bool:
-    return any(token in str(error).lower() for token in ("locked", "busy"))
+    # ``interrupted`` is emitted only by NegRiskQuoteStore's local SQLite
+    # progress handler when the absolute writer deadline expires.  Treat it
+    # exactly like lock contention so the isolated child reports a typed
+    # persist timeout instead of escaping to its 180-second hard limit.
+    return any(token in str(error).lower() for token in ("locked", "busy", "interrupted"))
 
 
 async def _get_books_with_lease(

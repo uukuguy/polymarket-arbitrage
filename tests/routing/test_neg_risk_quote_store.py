@@ -166,6 +166,20 @@ def test_quote_writer_does_not_renegotiate_persistent_wal_mode(quote_db, monkeyp
     assert not any("journal_mode" in statement.lower() for statement in statements)
 
 
+def test_quote_terminal_persist_has_an_absolute_writer_deadline(quote_db, monkeypatch) -> None:
+    """A large atomic Quote write must not wait for the child hard limit."""
+    store = NegRiskQuoteStore(quote_db, writer_timeout_s=0.5)
+    run_id = _begin(store)
+    monotonic_values = iter((0.0, 1.0))
+    monkeypatch.setattr(quote_store_module.time, "monotonic", lambda: next(monotonic_values))
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        store.record_terminal_quotes(run_id, (_quote("token-a"), _quote("token-b")))
+
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute("SELECT COUNT(*) FROM neg_risk_quotes").fetchone() == (0,)
+
+
 def _quote(token_id: str, *, terminal_state: str = "executable") -> PersistedQuote:
     leg = next(leg for leg in _legs() if leg.yes_token_id == token_id)
     if terminal_state == "executable":

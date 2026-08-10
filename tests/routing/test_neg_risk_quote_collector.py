@@ -424,13 +424,15 @@ def test_persistence_failure_fails_new_run_without_displacing_prior_complete_run
     assert failed == ("failed", "collector-error")
 
 
-def test_sqlite_writer_contention_is_typed_as_a_persist_timeout(
+@pytest.mark.parametrize("error_text", ("database is locked", "interrupted"))
+def test_sqlite_writer_deadline_is_typed_as_a_persist_timeout(
+    error_text: str,
     quote_db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = NegRiskQuoteStore(quote_db, writer_timeout_s=15)
 
     def busy_record(*args: object, **kwargs: object) -> None:
-        raise sqlite3.OperationalError("database is locked")
+        raise sqlite3.OperationalError(error_text)
 
     monkeypatch.setattr(store, "record_terminal_quotes", busy_record)
 

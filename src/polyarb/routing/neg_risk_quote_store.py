@@ -298,6 +298,16 @@ class NegRiskQuoteStore:
             timeout=self._writer_timeout_s,
         )
         con.execute("PRAGMA foreign_keys=ON")
+        # ``timeout`` bounds waiting for SQLite's writer lock, but not a large
+        # atomic ``executemany`` once the lock was acquired.  Quote production
+        # must never let that second case consume the child hard limit: abort
+        # the whole transaction at the same production writer deadline so the
+        # parent can emit one typed, retryable persistence failure.
+        deadline = time.monotonic() + self._writer_timeout_s
+        con.set_progress_handler(
+            lambda: int(time.monotonic() >= deadline),
+            1_000,
+        )
         return con
 
     def _begin_immediate(self, con: sqlite3.Connection) -> None:
