@@ -201,6 +201,7 @@ def test_perception_console_is_a_direct_operator_view(http_test_client) -> None:
     assert "Recent recovered severe incidents" in response.text
     assert "/perception/producer-arbitration" in response.text
     assert "/perception/producer-progress" in response.text
+    assert "Structure comparison progress" in response.text
     assert "Current producer checkpoints" in response.text
     assert "/perception/incidents/recent?scope=quote-collection" in response.text
     assert (

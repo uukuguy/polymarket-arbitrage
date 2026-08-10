@@ -281,12 +281,22 @@ class NegRiskQuoteStore:
         }
 
     def _connect(self) -> sqlite3.Connection:
+        """Open a bounded Quote writer without renegotiating persistent WAL mode.
+
+        ``SQLiteStore.init_schema`` establishes WAL once for the authority
+        database. Repeating ``PRAGMA journal_mode=WAL`` here is not a no-op
+        under a concurrent writer: SQLite may coordinate a journal-mode
+        transition before it reaches the connection's ordinary busy handler.
+        That can strand an otherwise bounded Quote persist until the parent
+        hard limit kills the child. Quote writes must instead reach
+        ``BEGIN IMMEDIATE`` promptly, where ``timeout`` gives the collector a
+        typed, recoverable writer-contention result.
+        """
         con = sqlite3.connect(
             self._db_path,
             isolation_level=None,
             timeout=self._writer_timeout_s,
         )
-        con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA foreign_keys=ON")
         return con
 
@@ -1065,7 +1075,8 @@ class NegRiskQuoteStore:
                     run_ids,
                 )
                 con.execute(
-                    f"DELETE FROM neg_risk_quote_compact_feeds WHERE quote_run_id IN ({placeholders})",
+                    "DELETE FROM neg_risk_quote_compact_feeds "
+                    f"WHERE quote_run_id IN ({placeholders})",
                     run_ids,
                 )
                 con.execute(

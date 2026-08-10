@@ -149,6 +149,23 @@ def test_quote_writer_accepts_a_shorter_producer_specific_timeout(quote_db, monk
     assert observed_timeouts[-1] == 15
 
 
+def test_quote_writer_does_not_renegotiate_persistent_wal_mode(quote_db, monkeypatch) -> None:
+    """The hot Quote path must not block on a journal-mode transition."""
+    real_connect = sqlite3.connect
+    statements: list[str] = []
+
+    def recording_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+    con = NegRiskQuoteStore(quote_db, writer_timeout_s=0.01)._connect()
+    con.close()
+
+    assert not any("journal_mode" in statement.lower() for statement in statements)
+
+
 def _quote(token_id: str, *, terminal_state: str = "executable") -> PersistedQuote:
     leg = next(leg for leg in _legs() if leg.yes_token_id == token_id)
     if terminal_state == "executable":
