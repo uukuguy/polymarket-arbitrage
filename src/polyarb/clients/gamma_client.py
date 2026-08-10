@@ -50,6 +50,8 @@ from tenacity import (
 
 from polyarb.config import Settings
 
+GAMMA_CANCELLED_CLOSE_TIMEOUT_S = 2.0
+
 
 class _NonRetryableHTTPError(Exception):
     """Wraps a 4xx (non-429) httpx.HTTPStatusError so tenacity does NOT retry it.
@@ -164,6 +166,18 @@ class GammaClient:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
+        if exc_type is not None and issubclass(exc_type, asyncio.CancelledError):
+            try:
+                await asyncio.wait_for(
+                    self.aclose(),
+                    timeout=GAMMA_CANCELLED_CLOSE_TIMEOUT_S,
+                )
+            except TimeoutError:
+                # A bounded Structure child is about to report its real page
+                # deadline. Do not let a transport close wait consume the
+                # remaining parent process envelope.
+                logger.warning("gamma client close timed out after cancellation")
+            return None
         await self.aclose()
 
     async def _get(

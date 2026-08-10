@@ -31,6 +31,25 @@ from polyarb.snapshot.normalizer import normalize_events
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.mark.asyncio
+async def test_gamma_cancelled_context_exit_bounds_hung_http_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded Structure page cancellation must not hang during client cleanup."""
+    from polyarb.clients import gamma_client as gamma_module
+
+    client = GammaClient(Settings(scan_shared_secret="test"))
+    closed = asyncio.Event()
+
+    async def hung_close() -> None:
+        await closed.wait()
+
+    monkeypatch.setattr(client._http, "aclose", hung_close)
+    monkeypatch.setattr(gamma_module, "GAMMA_CANCELLED_CLOSE_TIMEOUT_S", 0.001)
+
+    await client.__aexit__(asyncio.CancelledError, None, None)
+
+
 def _fast_settings() -> Settings:
     """Settings with retry waits compressed to ~ms so tests stay fast."""
     return Settings(retry_min_wait_s=0.001, retry_max_wait_s=0.01)
