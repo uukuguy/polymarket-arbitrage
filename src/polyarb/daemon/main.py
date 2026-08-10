@@ -47,6 +47,7 @@ from polyarb.daemon.quote_worker import (
     load_certified_quote_feed,
 )
 from polyarb.daemon.scheduler import SnapshotScheduler
+from polyarb.daemon.structure_incidents import StructureIncidentLifecycle
 from polyarb.http.app import create_app
 from polyarb.observability.logging import init_logging
 from polyarb.observability.sentry import init_sentry
@@ -165,9 +166,7 @@ def _build_daemon_perception_workers(
     )
 
     def candidate_freshness() -> CandidateFreshness:
-        snapshot = perception_store.candidate_freshness_snapshot(
-            now_ms=int(time.time() * 1_000)
-        )
+        snapshot = perception_store.candidate_freshness_snapshot(now_ms=int(time.time() * 1_000))
         return CandidateFreshness(
             candidate_count=snapshot.candidate_count,
             quote_p95_age_ms=snapshot.quote_p95_age_ms,
@@ -229,10 +228,7 @@ async def _run_durable_quote_feed_hydrator(
         except asyncio.CancelledError:
             raise
         except Exception as error:  # durable retry; endpoint keeps last valid feed
-            logger.warning(
-                "durable quote feed hydration failed "
-                f"kind={type(error).__name__}"
-            )
+            logger.warning(f"durable quote feed hydration failed kind={type(error).__name__}")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
         except TimeoutError:
@@ -349,21 +345,18 @@ def _start_supervised_producers(
     stop_event: asyncio.Event,
 ) -> list[asyncio.Task[None]]:
     all_producers_supervised = settings.opportunity_producer_supervisor_enabled
-    quote_supervised = (
-        all_producers_supervised or settings.neg_risk_quote_supervisor_enabled
-    )
+    quote_supervised = all_producers_supervised or settings.neg_risk_quote_supervisor_enabled
     if not all_producers_supervised and not quote_supervised:
         return []
     flags = {
-        "candidate": (
-            all_producers_supervised and settings.opportunity_first_watcher_enabled
-        ),
+        "candidate": (all_producers_supervised and settings.opportunity_first_watcher_enabled),
         "discovery": all_producers_supervised and settings.opportunity_discovery_enabled,
         "reconciliation": (
             all_producers_supervised and settings.opportunity_reconciliation_enabled
         ),
         "quote": quote_supervised and settings.neg_risk_quote_worker_enabled,
     }
+
     async def run_supervisor_forever(component: str) -> None:
         """Keep the daemon's supervision plane alive after its own failure.
 
@@ -454,9 +447,7 @@ async def _run_resource_controller(
             )
             decision = await asyncio.to_thread(controller.decide, sample)
             previous_limit = decision.discovery_batch_limit
-            decision_id = await asyncio.to_thread(
-                store.latest_resource_decision_id
-            )
+            decision_id = await asyncio.to_thread(store.latest_resource_decision_id)
             await asyncio.to_thread(
                 pressure_incidents.observe,
                 decision,
@@ -529,9 +520,7 @@ async def _run_http_recovery_probe(
             None,
         )
         probe_nonce = (
-            recovering.evidence.get("probe_nonce")
-            if recovering is not None
-            else uuid.uuid4().hex
+            recovering.evidence.get("probe_nonce") if recovering is not None else uuid.uuid4().hex
         )
         if not isinstance(probe_nonce, str) or not probe_nonce:
             probe_nonce = uuid.uuid4().hex
@@ -690,9 +679,7 @@ async def main() -> int:
     perception_store = OpportunityPerceptionStore(settings.db_path)
     perception_store.init_schema()
     isolated_producers = settings.opportunity_producer_supervisor_enabled
-    quote_supervised = (
-        isolated_producers or settings.neg_risk_quote_supervisor_enabled
-    )
+    quote_supervised = isolated_producers or settings.neg_risk_quote_supervisor_enabled
     (
         focused_watcher,
         candidate_watcher,
@@ -708,17 +695,18 @@ async def main() -> int:
         producer_lock=producer_lock,
         perception_store=perception_store,
     )
+    structure_incidents = StructureIncidentLifecycle(IncidentManager(perception_store))
     scheduler = SnapshotScheduler(
         settings=settings,
         sqlite_store=sqlite_store,
         producer_lock=producer_lock,
-        on_snapshot_published=(
-            quote_worker.request_now if quote_worker is not None else None
-        ),
-        quote_worker_runtime=(
-            quote_worker.runtime if quote_worker is not None else None
-        ),
+        on_snapshot_published=(quote_worker.request_now if quote_worker is not None else None),
+        quote_worker_runtime=(quote_worker.runtime if quote_worker is not None else None),
         producer_arbitrator=(producer_arbitrator if quote_supervised else None),
+        on_structure_failure=lambda kind, elapsed_ms, stage: structure_incidents.record_failure(
+            failure_kind=kind, elapsed_ms=elapsed_ms, last_stage=stage
+        ),
+        on_structure_success=structure_incidents.record_success,
     )
     cleanup_worker = _build_generation_cleanup_worker(
         settings,
@@ -873,11 +861,7 @@ async def main() -> int:
                 *([scheduler_task] if scheduler_task is not None else []),
                 *([focused_watcher_task] if focused_watcher_task is not None else []),
                 *([quote_worker_task] if quote_worker_task is not None else []),
-                *(
-                    [quote_feed_hydrator_task]
-                    if quote_feed_hydrator_task is not None
-                    else []
-                ),
+                *([quote_feed_hydrator_task] if quote_feed_hydrator_task is not None else []),
                 *([cleanup_worker_task] if cleanup_worker_task is not None else []),
                 *([capacity_worker_task] if capacity_worker_task is not None else []),
                 *([candidate_watcher_task] if candidate_watcher_task is not None else []),
