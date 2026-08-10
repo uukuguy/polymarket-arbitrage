@@ -473,13 +473,31 @@ async def run_structure_sync_until_published(
         pages_processed = 0
         while True:
             # Preserve the existing cooperative "check after each durable
-            # page" semantics while ensuring any individual network request
-            # cannot consume the parent process-kill envelope.
-            page_timeout_s = (
-                STRUCTURE_REMOTE_PAGE_MAX_ELAPSED_S
-                if max_elapsed_s is not None
-                else None
-            )
+            # page" semantics while ensuring a page begun near the deadline
+            # cannot run into the parent process-kill envelope.  The fixed
+            # remote page cap is insufficient here: a 35-second request that
+            # starts at second 40 of a 45-second slice is killed by the
+            # 75-second parent before it can report its checkpoint.
+            page_timeout_s = None
+            if max_elapsed_s is not None:
+                remaining_s = max_elapsed_s - (_monotonic() - slice_started)
+                if remaining_s <= STRUCTURE_PAGE_COMMIT_WRITER_TIMEOUT_S:
+                    active_window = store.get_latest_structure_sync()
+                    if active_window is None:
+                        raise RuntimeError("structure-sync-window-missing")
+                    return StructureSyncCheckpoint(
+                        window_id=str(active_window["id"]),
+                        stage=(
+                            "events"
+                            if active_window["status"] == "open"
+                            else "markets"
+                        ),
+                        pages_processed=max(1, pages_processed),
+                    )
+                page_timeout_s = min(
+                    STRUCTURE_REMOTE_PAGE_MAX_ELAPSED_S,
+                    remaining_s - STRUCTURE_PAGE_COMMIT_WRITER_TIMEOUT_S,
+                )
             try:
                 batch = await worker.run_batch(page_timeout_s=page_timeout_s)
             except PaginationCursorRejectedError as error:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
 import sqlite3
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from polyarb.perception.structure_event_members import (
 from polyarb.perception.structure_sync import (
     StagedGammaSource,
     StructurePageDeadlineExceeded,
+    StructureSyncBatch,
     StructureSyncCheckpoint,
     StructureSyncWorker,
     finalize_structure_window,
@@ -1096,9 +1098,54 @@ async def test_structure_sync_checkpoints_on_elapsed_wall_clock(
     assert result == StructureSyncCheckpoint(
         window_id=store.get_latest_structure_sync()["id"],
         stage="events",
-        pages_processed=2,
+        pages_processed=1,
     )
-    assert cursors == [None, "event-2"]
+    assert cursors == [None]
+
+
+async def test_structure_sync_caps_a_late_page_to_remaining_slice_budget(
+    settings_for_test,
+) -> None:
+    """A page begun near the slice deadline cannot run into the parent kill."""
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=1)
+    page_timeouts: list[float | None] = []
+
+    class Gamma:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Worker:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def run_batch(self, *, page_timeout_s):
+            page_timeouts.append(page_timeout_s)
+            return StructureSyncBatch(
+                window_id=str(window["id"]), stage="events", completed=False
+            )
+
+    with (
+        patch("polyarb.perception.structure_sync.GammaClient", return_value=Gamma()),
+        patch("polyarb.perception.structure_sync.StructureSyncWorker", Worker),
+        patch(
+            "polyarb.perception.structure_sync._monotonic",
+            side_effect=[0.0, 37.0, 45.0],
+        ),
+    ):
+        result = await run_structure_sync_until_published(
+            settings_for_test,
+            max_elapsed_s=45.0,
+        )
+
+    assert result == StructureSyncCheckpoint(
+        window_id=str(window["id"]), stage="events", pages_processed=1
+    )
+    assert page_timeouts == [3.0]
 
 
 async def test_scheduler_schema_ready_contract_skips_child_schema_migration(
@@ -1184,8 +1231,11 @@ async def test_bounded_slice_uses_remaining_time_for_publication(
         ),
             patch(
                 "polyarb.perception.structure_sync._monotonic",
-                side_effect=[0.0, 1.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0],
-        ),
+                side_effect=itertools.chain(
+                    [0.0, 1.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0],
+                    itertools.repeat(5.0),
+                ),
+            ),
         patch(
             "polyarb.perception.structure_publication.run_structure_publication_slice",
             return_value=checkpoint,
