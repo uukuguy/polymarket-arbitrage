@@ -442,6 +442,29 @@ def test_start_attempt_closes_orphan_and_bounds_terminal_history(quote_db) -> No
     assert newest == ("universe", "collecting")
 
 
+def test_worker_start_recovery_terminalizes_live_attempt_and_run(quote_db) -> None:
+    """A restarted sole worker must not leave an abandoned attempt as collecting."""
+    store = NegRiskQuoteStore(quote_db)
+    attempt_id = store.start_collection_attempt(started_at_ms=NOW_MS)
+    run_id = _begin(store)
+    store.checkpoint_collection_attempt(attempt_id, phase="persist", quote_run_id=run_id)
+
+    assert store.recover_orphaned_collection_state() == 2
+
+    attempt = store.latest_collection_attempt()
+    assert attempt is not None
+    assert (attempt["id"], attempt["phase"], attempt["outcome"], attempt["failure_kind"]) == (
+        attempt_id,
+        "failed",
+        "failed",
+        "worker-start-orphaned",
+    )
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT status,failure_reason FROM neg_risk_quote_runs WHERE id=?", (run_id,)
+        ).fetchone() == ("failed", "collector-orphaned-on-worker-start")
+
+
 @pytest.mark.parametrize(
     ("keep_last_per_status", "max_runs"),
     [(-1, 1), (1, 0), (True, 1), (1, True)],

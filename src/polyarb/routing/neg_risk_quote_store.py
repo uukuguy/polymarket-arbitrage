@@ -928,6 +928,38 @@ class NegRiskQuoteStore:
         finally:
             con.close()
 
+    def recover_orphaned_collection_state(self) -> int:
+        """Terminalize both halves of a Quote child abandoned by a restart.
+
+        A fresh sole worker cannot own a predecessor's subprocess.  Recovering
+        only ``neg_risk_quote_runs`` releases the write lease but leaves the
+        operator-facing attempt falsely ``collecting`` until a later admission
+        ages it out.  Keep the attempt and run terminal transitions in one
+        writer transaction so Dashboard/health show the restart fault
+        immediately and the next supervised cycle starts from unambiguous
+        state.
+        """
+        con = self._connect()
+        try:
+            self._begin_immediate(con)
+            try:
+                attempt = con.execute(
+                    "UPDATE neg_risk_quote_attempts SET phase='failed',outcome='failed',"
+                    "failure_kind='worker-start-orphaned' WHERE outcome='collecting'"
+                )
+                run = con.execute(
+                    "UPDATE neg_risk_quote_runs SET status='failed',"
+                    "failure_reason='collector-orphaned-on-worker-start' "
+                    "WHERE status='collecting'"
+                )
+                con.execute("COMMIT")
+                return int(attempt.rowcount) + int(run.rowcount)
+            except Exception:
+                _rollback_without_masking(con)
+                raise
+        finally:
+            con.close()
+
     def reclaim_terminal_failed_payloads(self, *, max_runs: int = 1) -> int:
         """Release unpublishable failed-run payloads while retaining diagnosis.
 

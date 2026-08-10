@@ -1368,8 +1368,7 @@ def build_production_quote_worker(
     async def recover_orphaned_collecting_runs() -> int:
         """A newly started sole worker owns no predecessor child process."""
         return await asyncio.to_thread(
-            quote_store.fail_collecting_runs,
-            failure_reason="collector-orphaned-on-worker-start",
+            quote_store.recover_orphaned_collection_state,
         )
 
     async def cleanup_old_runs() -> int:
