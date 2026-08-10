@@ -3970,6 +3970,40 @@ def test_pointer_switch_deadline_rolls_back_all_authority(tmp_path: Path) -> Non
         ).fetchone() == window_before
 
 
+def test_publication_contract_deadline_rolls_back_before_authority_changes(
+    tmp_path: Path,
+) -> None:
+    from polyarb.perception.structure_contract import (
+        STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+    )
+
+    assert hasattr(sqlite_store_module, "StructurePublicationContractDeadlineError")
+    deadline_error = sqlite_store_module.StructurePublicationContractDeadlineError
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    publication = _begin_generation(
+        store,
+        snapshot_id=11,
+        market_id="new-market",
+        now_ms=11_000,
+    )
+
+    ticks = iter((0.0, 0.0, 6.0))
+    with pytest.raises(deadline_error, match="publication-contract-deadline"):
+        store.reconcile_structure_publication_contract(
+            publication.window_id,
+            STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+            now_ms=11_001,
+            writer_timeout_s=5.0,
+            transaction_deadline_s=5.0,
+            monotonic=lambda: next(ticks, 6.0),
+        )
+
+    progress = store.get_structure_publication_progress(publication.window_id)
+    assert progress is not None
+    assert progress.publication.status == "writing"
+
+
 def test_pointer_switch_writer_lock_timeout_preserves_authority(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()

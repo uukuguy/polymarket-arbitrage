@@ -450,6 +450,9 @@ def run_structure_publication_step(
         STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
         now_ms,
         writer_timeout_s=writer_timeout_s,
+        # Only ready→publish needs this extra authority boundary. Earlier
+        # publication checkpoints retain the caller's cooperative slice.
+        transaction_deadline_s=(writer_timeout_s if publication.status == "ready" else None),
     )
     if reconciliation.superseded:
         return StructurePublicationCheckpoint(

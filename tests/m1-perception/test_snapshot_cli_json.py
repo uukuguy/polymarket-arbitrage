@@ -377,6 +377,24 @@ def test_structure_sync_cli_emits_pointer_switch_deadline(monkeypatch) -> None:
     }
 
 
+def test_structure_sync_cli_emits_publication_contract_deadline(monkeypatch) -> None:
+    monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
+    monkeypatch.setenv("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
+    with patch(
+        "polyarb.snapshot.cli.run_structure_sync_until_published",
+        new=AsyncMock(side_effect=ValueError("publication-contract-deadline")),
+    ):
+        result = CliRunner().invoke(app, ["structure-sync", "--json"])
+
+    assert result.exit_code == 1
+    lines = result.stdout.splitlines()
+    assert lines[0] == "structure-sync-failure failure_kind=publication-contract-deadline"
+    assert json.loads(lines[-1]) == {
+        "failed": True,
+        "failure_kind": "publication-contract-deadline",
+    }
+
+
 def test_structure_sync_failure_uses_separate_os_pipe_contract() -> None:
     """The real process boundary keeps terminal JSON and failure marker separate."""
     script = """

@@ -108,7 +108,7 @@ _SNAPSHOT_ATTEMPT_STDERR_TAIL_RE = re.compile(
     r"structure-sync-failure failure_kind=(?:membership-invalid(?: "
     r"membership_kind=(?:active-market-missing|group-truth|market-identity|"
     r"terminal-invariant) key_sha256=[0-9a-f]{64})?|generation-count-mismatch|"
-    r"generation-incomplete|generation-validation-issues|pointer-switch-deadline|"
+    r"generation-incomplete|generation-validation-issues|pointer-switch-deadline|publication-contract-deadline|"
     r"source-truth-invalid|sqlite-busy|structure-child-error|"
     r"structure-page-deadline|"
     r"structure-publication-not-writing))"
@@ -2317,6 +2317,10 @@ class StructurePublicationCursorError(ValueError):
 
 class StructurePointerSwitchDeadlineError(ValueError):
     """Atomic generation-pointer transaction exceeded its authority budget."""
+
+
+class StructurePublicationContractDeadlineError(ValueError):
+    """Publication contract reconciliation exceeded its bounded writer budget."""
 
 
 class StructureMembershipInvalidError(ValueError):
@@ -11627,6 +11631,8 @@ class SQLiteStore:
         failure_reason: str = "publication-contract-superseded",
         force_retire: bool = False,
         writer_timeout_s: float | None = None,
+        transaction_deadline_s: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> StructurePublicationContractReconciliation:
         """Fail one incompatible unpublished generation and its source atomically."""
         if (
@@ -11639,12 +11645,25 @@ class SQLiteStore:
                 "publication-membership-invalid",
             }
             or (writer_timeout_s is not None and writer_timeout_s <= 0)
+            or (transaction_deadline_s is not None and transaction_deadline_s <= 0)
         ):
             raise ValueError("invalid-structure-publication-contract")
         reason = failure_reason
+        deadline = None if transaction_deadline_s is None else monotonic() + transaction_deadline_s
+
+        def ensure_deadline() -> None:
+            if deadline is not None and monotonic() >= deadline:
+                raise StructurePublicationContractDeadlineError(
+                    "publication-contract-deadline"
+                )
+
         con = self._connect_writer(timeout_s=writer_timeout_s)
         try:
+            if deadline is not None:
+                con.set_progress_handler(lambda: int(monotonic() >= deadline), 1_000)
+            ensure_deadline()
             con.execute("BEGIN IMMEDIATE")
+            ensure_deadline()
             row = con.execute(
                 "SELECT p.publication_id,p.snapshot_id,p.status,"
                 "p.normalization_contract_version,p.failure_reason,s.data_product,"
@@ -11741,15 +11760,27 @@ class SQLiteStore:
                 or window_change.rowcount != 1
             ):
                 raise ValueError("structure-publication-supersession-race")
+            ensure_deadline()
             con.execute("COMMIT")
             return StructurePublicationContractReconciliation(
                 publication_id, False, True
             )
-        except BaseException:
+        except BaseException as error:
+            con.set_progress_handler(None, 0)
             if con.in_transaction:
                 con.execute("ROLLBACK")
+            if (
+                deadline is not None
+                and isinstance(error, sqlite3.OperationalError)
+                and "interrupted" in str(error).lower()
+                and monotonic() >= deadline
+            ):
+                raise StructurePublicationContractDeadlineError(
+                    "publication-contract-deadline"
+                ) from error
             raise
         finally:
+            con.set_progress_handler(None, 0)
             con.close()
 
     def retire_membership_invalid_structure_publication(

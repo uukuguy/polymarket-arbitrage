@@ -49,6 +49,7 @@ _STRUCTURE_FAILURE_KINDS = frozenset(
         "generation-validation-issues",
         "membership-invalid",
         "pointer-switch-deadline",
+        "publication-contract-deadline",
         "source-truth-invalid",
         "structure-page-deadline",
         "structure-publication-not-writing",

@@ -163,7 +163,7 @@ _STRUCTURE_FAILURE_MARKER_RE = re.compile(
     rb"(?:membership-invalid(?: membership_kind=(?:active-market-missing|group-truth|"
     rb"market-identity|terminal-invariant) key_sha256=[0-9a-f]{64})?|"
     rb"generation-count-mismatch|generation-incomplete|generation-validation-issues|"
-    rb"pointer-switch-deadline|source-truth-invalid|sqlite-busy|structure-child-error|"
+    rb"pointer-switch-deadline|publication-contract-deadline|source-truth-invalid|sqlite-busy|structure-child-error|"
     rb"structure-page-deadline|"
     rb"structure-publication-not-writing)$",
     re.MULTILINE,
@@ -740,6 +740,7 @@ async def run_snapshot_in_subprocess(
                 "generation-validation-issues",
                 "membership-invalid",
                 "pointer-switch-deadline",
+                "publication-contract-deadline",
                 "source-truth-invalid",
                 "sqlite-busy",
                 "structure-page-deadline",
