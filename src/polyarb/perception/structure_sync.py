@@ -40,6 +40,14 @@ STRUCTURE_REMOTE_PAGE_REQUEST_TIMEOUT_S = 10.0
 # The online child must leave enough time to report a busy writer and retry the
 # same cursor. Offline/import callers retain SQLiteStore's longer default.
 STRUCTURE_PAGE_COMMIT_WRITER_TIMEOUT_S = 5.0
+# Relationship bootstrap reads the completed event catalogue and writes a
+# separate staging table.  Unlike a Gamma page, its work is local CPU + SQLite
+# and a 500-event chunk exceeded the 45-second cooperative slot in production.
+# Keep the online child to a small, independently committed unit so the outer
+# 75-second watchdog remains an emergency guard rather than the normal way to
+# make forward progress.
+STRUCTURE_BOOTSTRAP_MAX_EVENTS_PER_CHUNK = 50
+STRUCTURE_BOOTSTRAP_MAX_RELATIONSHIPS_PER_CHUNK = 50
 
 
 class StructurePageDeadlineExceeded(ValueError):
@@ -349,17 +357,39 @@ async def run_structure_sync_until_published(
         bootstrap_rows = 0
         bootstrap_completed = False
         while bootstrap_chunks < 100:
-            if (
-                max_elapsed_s is not None
-                and _monotonic() - slice_started >= max_elapsed_s
+            remaining_s = (
+                max_elapsed_s - (_monotonic() - slice_started)
+                if max_elapsed_s is not None
+                else None
+            )
+            if remaining_s is not None and (
+                remaining_s <= STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S
             ):
                 break
+            writer_timeout_s = min(
+                STRUCTURE_PAGE_COMMIT_WRITER_TIMEOUT_S,
+                max(
+                    0.001,
+                    (
+                        remaining_s - STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S
+                        if remaining_s is not None
+                        else STRUCTURE_PAGE_COMMIT_WRITER_TIMEOUT_S
+                    ),
+                ),
+            )
             migration = await asyncio.to_thread(
                 store.advance_structure_event_market_backfill,
                 window_id=str(latest["id"]),
-                max_events=max_publication_rows,
-                max_relationships=max_publication_rows,
+                max_events=min(
+                    max_publication_rows,
+                    STRUCTURE_BOOTSTRAP_MAX_EVENTS_PER_CHUNK,
+                ),
+                max_relationships=min(
+                    max_publication_rows,
+                    STRUCTURE_BOOTSTRAP_MAX_RELATIONSHIPS_PER_CHUNK,
+                ),
                 now_ms=int(time.time() * 1_000),
+                writer_timeout_s=writer_timeout_s,
             )
             bootstrap_chunks += 1
             bootstrap_rows += max(
@@ -382,7 +412,8 @@ async def run_structure_sync_until_published(
                 break
             if (
                 max_elapsed_s is not None
-                and _monotonic() - slice_started >= max_elapsed_s
+                and _monotonic() - slice_started
+                >= max_elapsed_s - STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S
             ):
                 break
         if not bootstrap_completed or bootstrap_chunks >= 100 or (

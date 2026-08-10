@@ -3510,6 +3510,23 @@ class SQLiteStore:
                 is not None
             )
             if has_snapshot_schema:
+                # The ordinal access-path index belongs to the current DDL,
+                # but pre-generation worker databases can still have the old
+                # staging shape.  Add the dependency before executescript()
+                # attempts to create that index; otherwise an old volume
+                # cannot even reach its resumable migration path.
+                for table in (
+                    "structure_sync_event_staging",
+                    "structure_sync_market_staging",
+                ):
+                    columns = {
+                        str(row[1])
+                        for row in con.execute(f"PRAGMA table_info({table})")
+                    }
+                    if columns and "source_ordinal" not in columns:
+                        con.execute(
+                            f"ALTER TABLE {table} ADD COLUMN source_ordinal INTEGER"
+                        )
                 con.executescript(STRUCTURE_SYNC_WINDOWS_DDL)
                 window_columns = {
                     str(row[1])
@@ -4851,6 +4868,7 @@ class SQLiteStore:
         max_relationships: int,
         now_ms: int,
         max_payload_bytes: int = STRUCTURE_BOOTSTRAP_PAYLOAD_MAX_BYTES,
+        writer_timeout_s: float | None = None,
     ) -> dict[str, object]:
         """Backfill a bounded event/relationship slice with a durable subcursor."""
         if (
@@ -4861,9 +4879,10 @@ class SQLiteStore:
             <= max_payload_bytes
             <= STRUCTURE_BOOTSTRAP_PAYLOAD_MAX_BYTES
             or now_ms < 0
+            or (writer_timeout_s is not None and writer_timeout_s <= 0)
         ):
             raise ValueError("invalid-structure-event-market-backfill")
-        con = self._connect_writer()
+        con = self._connect_writer(timeout_s=writer_timeout_s)
         try:
             con.execute("BEGIN IMMEDIATE")
             window = con.execute(

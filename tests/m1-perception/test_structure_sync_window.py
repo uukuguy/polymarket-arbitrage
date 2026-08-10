@@ -2605,6 +2605,72 @@ async def test_completed_legacy_window_checkpoints_bootstrap_before_publication(
     )["sealed"] is False
 
 
+async def test_online_bootstrap_caps_one_relationship_backfill_chunk_before_slice_deadline(
+    settings_for_test,
+) -> None:
+    """The online child must not let one bootstrap write consume its whole slot."""
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    events = [
+        {"id": f"event-{index:03d}", "markets": [{"id": f"market-{index:03d}"}]}
+        for index in range(60)
+    ]
+    store.commit_structure_event_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=events,
+        finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        markets=[{"id": f"market-{index:03d}"} for index in range(60)],
+        finished_at_ms=300,
+    )
+    writer_timeouts: list[float | None] = []
+    real_connect = SQLiteStore._connect_writer
+
+    def traced_connect(self, *, timeout_s=None):
+        writer_timeouts.append(timeout_s)
+        return real_connect(self, timeout_s=timeout_s)
+
+    class Gamma:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    with (
+        patch("polyarb.perception.structure_sync.GammaClient", return_value=Gamma()),
+        patch.object(SQLiteStore, "_connect_writer", new=traced_connect),
+        patch(
+            "polyarb.perception.structure_sync._monotonic",
+            side_effect=[0.0, 0.0, 0.0, 46.0],
+        ),
+    ):
+        result = await run_structure_sync_until_published(
+            settings_for_test,
+            max_elapsed_s=45.0,
+        )
+
+    assert result == StructureSyncCheckpoint(
+        window_id=window["id"], stage="bootstrap", pages_processed=50
+    )
+    assert writer_timeouts[-1] == 5.0
+    with sqlite3.connect(store.db_path) as con:
+        assert con.execute(
+            "SELECT events_processed,relationships_processed FROM "
+            "structure_sync_event_market_backfill_progress WHERE window_id=?",
+            (window["id"],),
+        ).fetchone() == (50, 50)
+
+
 def test_publication_cannot_begin_before_relationship_bootstrap_completes(
     settings_for_test,
 ) -> None:

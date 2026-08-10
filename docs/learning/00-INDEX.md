@@ -66,6 +66,7 @@
 | 52 | [Supervisor 故障收据](52-Supervisor故障收据.md) | Quote child/worker/supervisor 边界 / 无秘密诊断 / 有界 Dashboard 读取 |
 | 53 | [Structure 切片截止时间](53-Structure切片截止时间.md) | 45 秒正常 checkpoint 与 75 秒 watchdog 的区别 / 末页动态预算 / cursor 不丢失 |
 | 54 | [Structure 写入索引](54-Structure写入索引.md) | 事务内 `MAX` 为什么会阻塞恢复 / ordinal 覆盖索引 / query-plan 回归 |
+| 55 | [Structure 关系回填切片](55-Structure关系回填切片.md) | 为什么 cursor 不等于可持续恢复 / 50 行 checkpoint / SQLite writer 预算 / watchdog 只作兜底 |
 
 ## Phase 02.1 教学增量（2026-05）
 
