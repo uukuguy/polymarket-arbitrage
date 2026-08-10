@@ -233,6 +233,17 @@ export default async function PerceptionOverviewPage() {
             <div>
               {producerDetail("Structure", producerProgress.structure.attempt)}
             </div>
+            {producerProgress.structure.comparison && (
+              <p style={muted}>
+                Structure comparison:{" "}
+                {producerProgress.structure.comparison.phase} ·{" "}
+                {producerProgress.structure.comparison.phase_row_count} rows ·
+                checkpoint{" "}
+                {fmtTime(
+                  producerProgress.structure.comparison.checkpoint_at_ms,
+                )}
+              </p>
+            )}
             {producerProgress.structure.attempt?.stderr_tail && (
               <p style={muted}>
                 Structure child evidence:{" "}

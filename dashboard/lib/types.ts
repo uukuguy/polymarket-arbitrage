@@ -493,7 +493,16 @@ export interface PerceptionProducerAttempt {
 export interface PerceptionProducerProgressEnvelope {
   status: "available";
   quote: { attempt: PerceptionProducerAttempt | null };
-  structure: { attempt: PerceptionProducerAttempt | null };
+  structure: {
+    attempt: PerceptionProducerAttempt | null;
+    comparison?: {
+      publication_id: string;
+      generation_snapshot_id: number;
+      phase: string;
+      phase_row_count: number;
+      checkpoint_at_ms: number;
+    } | null;
+  };
   automatic_action: string;
   operator_action: string;
 }

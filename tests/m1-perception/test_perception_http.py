@@ -231,6 +231,7 @@ def test_producer_progress_exposes_current_quote_and_structure_checkpoints(
     assert body["quote"]["attempt"] is None
     assert body["quote"]["hydration"]["consecutive_failures"] == 0
     assert body["structure"]["attempt"] is None
+    assert body["structure"]["comparison"] is None
     assert "checkpoint" in body["automatic_action"]
 
 

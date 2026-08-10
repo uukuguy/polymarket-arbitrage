@@ -8269,6 +8269,26 @@ class SQLiteStore:
         finally:
             con.close()
 
+    def latest_structure_comparison_progress(self) -> dict[str, object] | None:
+        """Return the one active durable comparison cursor for operator reads."""
+        with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as con:
+            row = con.execute(
+                "SELECT publication_id,generation_snapshot_id,phase,phase_row_count,"
+                "row_cursor_json,checkpoint_at_ms FROM "
+                "structure_generation_comparison_progress WHERE phase!='sealed' "
+                "ORDER BY checkpoint_at_ms DESC,publication_id DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "publication_id": str(row[0]),
+            "generation_snapshot_id": int(row[1]),
+            "phase": str(row[2]),
+            "phase_row_count": int(row[3]),
+            "row_cursor": None if row[4] is None else json.loads(str(row[4])),
+            "checkpoint_at_ms": int(row[5]),
+        }
+
     def advance_structure_drift_comparison_chunk(
         self,
         comparison_id: str,

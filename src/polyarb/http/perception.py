@@ -147,7 +147,9 @@ async def producer_arbitration_status(request: Request) -> JSONResponse:
 def _producer_progress(db_path: Path, quote_worker_runtime: Any | None = None) -> dict[str, Any]:
     """Return only the newest durable producer checkpoints for the console."""
     quote_attempt = NegRiskQuoteStore(db_path).latest_collection_attempt()
-    structure_attempt = SQLiteStore(db_path).get_latest_snapshot_attempt()
+    structure_store = SQLiteStore(db_path)
+    structure_attempt = structure_store.get_latest_snapshot_attempt()
+    structure_comparison = structure_store.latest_structure_comparison_progress()
     snapshot = (
         quote_worker_runtime.snapshot()
         if quote_worker_runtime is not None
@@ -168,7 +170,10 @@ def _producer_progress(db_path: Path, quote_worker_runtime: Any | None = None) -
     return {
         "status": "available",
         "quote": {"attempt": quote_attempt, "hydration": hydration},
-        "structure": {"attempt": structure_attempt},
+        "structure": {
+            "attempt": structure_attempt,
+            "comparison": structure_comparison,
+        },
         "automatic_action": (
             "Each producer persists a bounded checkpoint before its next expensive stage; "
             "a timeout is terminalized and the next eligible cycle retries automatically."

@@ -717,6 +717,14 @@ function isProducerProgressEnvelope(
     (value.quote.attempt === null || isProducerAttempt(value.quote.attempt)) &&
     (value.structure.attempt === null ||
       isProducerAttempt(value.structure.attempt)) &&
+    (value.structure.comparison === undefined ||
+      value.structure.comparison === null ||
+      (isRecord(value.structure.comparison) &&
+        typeof value.structure.comparison.publication_id === "string" &&
+        isPositiveInteger(value.structure.comparison.generation_snapshot_id) &&
+        typeof value.structure.comparison.phase === "string" &&
+        isNonNegativeInteger(value.structure.comparison.phase_row_count) &&
+        isNonNegativeInteger(value.structure.comparison.checkpoint_at_ms))) &&
     typeof value.automatic_action === "string" &&
     typeof value.operator_action === "string"
   );
