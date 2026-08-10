@@ -478,26 +478,27 @@ class ProducerSupervisor:
                     "retry_count": retry_count,
                 },
             )
-            incident = self._incidents.transition(
-                incident.id,
-                "classified",
-                {
-                    "action": "classify-producer-failure",
-                    "class": "producer-process",
-                    "next_retry_at_ms": None,
-                    "retry_count": retry_count,
-                },
-            )
-            return self._incidents.transition(
-                incident.id,
-                "contained",
-                {
-                    "action": "restart-producer",
-                    "attempt": attempt,
-                    "next_retry_at_ms": None,
-                    "retry_count": retry_count,
-                },
-            )
+            if incident.state == "detected":
+                incident = self._incidents.transition(
+                    incident.id,
+                    "classified",
+                    {
+                        "action": "classify-producer-failure",
+                        "class": "producer-process",
+                        "next_retry_at_ms": None,
+                        "retry_count": retry_count,
+                    },
+                )
+                return self._incidents.transition(
+                    incident.id,
+                    "contained",
+                    {
+                        "action": "restart-producer",
+                        "attempt": attempt,
+                        "next_retry_at_ms": None,
+                        "retry_count": retry_count,
+                    },
+                )
         if incident.state == "recovering":
             return self._incidents.transition(
                 incident.id,

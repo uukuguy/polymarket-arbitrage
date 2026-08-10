@@ -54,6 +54,42 @@ def test_exact_commands_are_shell_free() -> None:
     assert all(isinstance(command, tuple) for command in PRODUCER_COMMANDS.values())
 
 
+def test_reconciled_abandoned_quote_attempt_reuses_recovering_incident(tmp_path) -> None:
+    """A restarted supervisor must not regress recovering back to classified."""
+    _store, supervisor = _supervisor(tmp_path)
+    incident = supervisor._incidents.detect(
+        "quote",
+        "child-abandoned",
+        {"action": "restart-producer", "retry_count": 0},
+    )
+    incident = supervisor._incidents.transition(
+        incident.id,
+        "classified",
+        {"action": "classify-producer-failure", "retry_count": 0},
+    )
+    incident = supervisor._incidents.transition(
+        incident.id,
+        "contained",
+        {"action": "restart-producer", "retry_count": 0},
+    )
+    supervisor._incidents.transition(
+        incident.id,
+        "recovering",
+        {"action": "restart-supervisor", "retry_count": 0},
+    )
+
+    updated = supervisor._record_failure(
+        None,
+        component="quote",
+        outcome="abandoned",
+        attempt=128,
+        retry_count=0,
+    )
+
+    assert updated.id == incident.id
+    assert updated.state == "contained"
+
+
 def test_early_stall_detection_must_precede_hard_restart_timeout() -> None:
     with pytest.raises(ValueError, match="invalid-producer-spec"):
         ProducerSpec(
