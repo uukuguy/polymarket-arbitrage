@@ -1179,11 +1179,24 @@ class SnapshotScheduler:
             return None
 
         if self._producer_arbitrator is not None:
-            lease = await asyncio.to_thread(
-                self._producer_arbitrator.acquire,
-                owner="structure",
-                lease_s=45.0,
-            )
+            try:
+                lease = await asyncio.to_thread(
+                    self._producer_arbitrator.acquire,
+                    owner="structure",
+                    lease_s=STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
+                )
+            except sqlite3.OperationalError as error:
+                if not any(token in str(error).lower() for token in ("locked", "busy")):
+                    raise
+                await self._record_structure_defer(
+                    reason="producer-arbitration-writer-busy",
+                    queued_at_ms=queued_at_ms,
+                )
+                self._checkpoint_pending = True
+                logger.warning(
+                    "Structure producer arbitration deferred for SQLite writer contention"
+                )
+                return None
             if lease is None:
                 await self._record_structure_defer(
                     reason="producer-lease-held",
@@ -1210,7 +1223,9 @@ class SnapshotScheduler:
                 reason = self._quote_priority_reason()
             if reason is None:
                 self._admitted_timeout_s = (
-                    min(timeout_s, 45.0) if self._producer_arbitrator is not None else timeout_s
+                    min(timeout_s, STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S)
+                    if self._producer_arbitrator is not None
+                    else timeout_s
                 )
                 attempt_id = self._sqlite_store.begin_snapshot_attempt(
                     started_at_ms=int(time.time() * 1_000),

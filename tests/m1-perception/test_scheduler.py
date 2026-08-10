@@ -2037,6 +2037,63 @@ async def test_incomplete_structure_slice_has_shorter_producer_slot_budget(
 
 
 @pytest.mark.asyncio
+async def test_cross_process_structure_lease_matches_admitted_child_budget(
+    daemon_settings_for_test,
+) -> None:
+    """The lease and child must share the published 75-second safety envelope."""
+    from polyarb.daemon.producer_arbitration import ProducerLease
+
+    lease = ProducerLease(
+        owner="structure",
+        lease_id="lease-1",
+        acquired_at_ms=1_000,
+        expires_at_ms=76_000,
+    )
+    arbitrator = MagicMock()
+    arbitrator.acquire.return_value = lease
+    store = MagicMock()
+    store.get_latest_structure_publication.return_value = None
+    store.begin_snapshot_attempt.return_value = 91
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+        producer_arbitrator=arbitrator,
+    )
+    scheduler._effective_timeout_s = 240
+
+    assert await scheduler._admit_snapshot(queued_at_ms=1_000) == 91
+
+    arbitrator.acquire.assert_called_once_with(owner="structure", lease_s=75.0)
+    assert scheduler._admitted_timeout_s == 75.0
+
+
+@pytest.mark.asyncio
+async def test_cross_process_sqlite_lock_defers_structure_without_counting_failure(
+    daemon_settings_for_test,
+) -> None:
+    """Writer contention retries through the visible defer lane, not failure escalation."""
+    arbitrator = MagicMock()
+    arbitrator.acquire.side_effect = sqlite3.OperationalError("database is locked")
+    store = MagicMock()
+    store.get_scheduler_state.return_value = None
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+        producer_arbitrator=arbitrator,
+    )
+
+    assert await scheduler._admit_snapshot(queued_at_ms=1_000) is None
+
+    store.record_structure_defer.assert_called_once()
+    assert store.record_structure_defer.call_args.args[:2] == (
+        "producer-arbitration-writer-busy",
+        1_000,
+    )
+    assert scheduler._checkpoint_pending is True
+    assert scheduler._failure_counter == 0
+
+
+@pytest.mark.asyncio
 async def test_ready_structure_publication_keeps_child_hard_envelope(
     daemon_settings_for_test,
     monkeypatch,
