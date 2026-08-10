@@ -31,7 +31,7 @@ class StructureIncidentLifecycle:
             incident = self._incidents.transition(incident.id, "recovering", evidence)
         return incident
 
-    def record_success(self, *, snapshot_id: int) -> None:
+    def record_success(self, snapshot_id: int) -> None:
         for incident in self._incidents.open_incidents():
             if incident.scope == "structure" and incident.kind == "structure-producer-failure":
                 recovery_evidence = {

@@ -39,6 +39,9 @@ def test_certified_snapshot_verifies_structure_incident_with_durable_attempt_pro
         )
     now[0] = 1_003
 
-    lifecycle.record_success(snapshot_id=42)
+    # SnapshotScheduler invokes its success callback positionally.  The
+    # production lifecycle must accept that callback contract so a successful
+    # Structure publish actually closes the operator-visible P1.
+    lifecycle.record_success(42)
 
     assert IncidentManager(store, clock_ms=lambda: now[0]).open_incidents() == ()

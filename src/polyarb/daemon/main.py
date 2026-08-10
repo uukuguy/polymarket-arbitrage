@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sqlite3
 import sys
 import time
 import uuid
@@ -708,6 +709,21 @@ async def main() -> int:
         ),
         on_structure_success=structure_incidents.record_success,
     )
+    # A deploy can occur between a durable pointer switch and the scheduler's
+    # success callback.  Reconcile that narrow window on startup: the incident
+    # manager independently requires a successful snapshot_attempt after the
+    # recovery event, so an old pointer can never close a newer P1 by itself.
+    try:
+        current_structure = sqlite_store.current_structure_generation()
+        if current_structure is not None:
+            structure_incidents.record_success(
+                int(current_structure["snapshot_id"])
+            )
+    except (KeyError, TypeError, ValueError, sqlite3.Error) as error:
+        logger.warning(
+            "structure incident startup reconciliation unavailable "
+            f"kind={type(error).__name__}"
+        )
     cleanup_worker = _build_generation_cleanup_worker(
         settings,
         sqlite_store,
