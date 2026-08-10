@@ -160,6 +160,11 @@ def l1_reminder_interval_s(healthz: dict | None) -> int:
         or capacity.get("observedValue") in {"critical", "exhaustion-imminent"}
     ):
         return P1_QUOTE_REMINDER_S
+    incidents = _extract_check(healthz, "perception:open_incidents", {})
+    if incidents and incidents.get("status") == "fail":
+        p1_count = _output_token(str(incidents.get("output") or ""), "p1_count")
+        if p1_count not in {None, "0"}:
+            return P1_QUOTE_REMINDER_S
     return REMINDER_S
 
 
@@ -691,6 +696,16 @@ def decide_l1(healthz: dict | None) -> tuple[str, str]:
             "L1 capacity controller "
             f"{capacity_state or 'failed'} "
             f"({capacity.get('output') or 'inspect Dashboard incident diagnosis'})",
+        )
+    incidents = _extract_check(healthz, "perception:open_incidents", {})
+    incident_output = str(incidents.get("output") or "") if incidents else ""
+    p1_count = _output_token(incident_output, "p1_count")
+    if incidents and incidents.get("status") == "fail" and p1_count not in {None, "0"}:
+        p1_scopes = _output_token(incident_output, "p1_scopes") or "unknown"
+        return (
+            "push",
+            "L1 open P1 incident(s) "
+            f"(count={p1_count}, scopes={p1_scopes}; inspect /perception/console)",
         )
     members = _extract_check(healthz, "snapshot:structure_event_members", {})
     if members and members.get("status") == "fail":

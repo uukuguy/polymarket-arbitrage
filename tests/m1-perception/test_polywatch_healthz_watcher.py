@@ -124,6 +124,33 @@ def test_critical_capacity_incident_pushes_diagnosis_and_uses_p1_reminders() -> 
     assert WATCHER.l1_reminder_interval_s(health) == 300
 
 
+def test_open_structure_p1_pushes_even_when_snapshot_age_is_within_legacy_window() -> None:
+    health = _health(
+        status="fail",
+        checks={
+            "perception:open_incidents": _check(
+                1,
+                status="fail",
+                output=(
+                    "scopes=structure p1_count=1 p1_scopes=structure "
+                    "evidence_consistent=True"
+                ),
+            ),
+            "snapshot:last_success_age_seconds": _check(45_000.0),
+            "market_truth:coverage": _check("complete"),
+            "quote_feed:last_complete_age_seconds": _check(60.0),
+            "quote_feed:collector_state": _check("pass"),
+        },
+    )
+
+    action, reason = WATCHER.decide_l1(health)
+
+    assert action == "push"
+    assert "open P1" in reason
+    assert "structure" in reason
+    assert WATCHER.l1_reminder_interval_s(health) == 300
+
+
 @pytest.mark.parametrize("reason", [
     "structure-event-member-checkpoint-invalid",
     "structure-event-source-receipt-invalid",

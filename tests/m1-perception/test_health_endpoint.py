@@ -945,6 +945,34 @@ def test_health_reports_capacity_incident_without_candidate_supervisor(
     assert "capacity" in check["output"]
 
 
+def test_health_surfaces_open_structure_p1_without_candidate_supervisor(
+    daemon_settings_for_test: Any,
+    http_test_client: TestClient,
+) -> None:
+    """A producer P1 must alarm even when optional candidate recovery is off."""
+    from polyarb.daemon.structure_incidents import StructureIncidentLifecycle
+    from polyarb.perception.incidents import IncidentManager
+    from polyarb.perception.store import OpportunityPerceptionStore
+
+    store = http_test_client.app.state.sqlite_store
+    StructureIncidentLifecycle(
+        IncidentManager(OpportunityPerceptionStore(store.db_path))
+    ).record_failure(
+        failure_kind="snapshot-subprocess-timeout",
+        elapsed_ms=75_000,
+        last_stage="gamma-markets",
+    )
+
+    check = http_test_client.get("/healthz").json()["checks"][
+        "perception:open_incidents"
+    ][0]
+
+    assert check["observedValue"] == 1
+    assert check["status"] == "fail"
+    assert "p1_count=1" in check["output"]
+    assert "p1_scopes=structure" in check["output"]
+
+
 @pytest.mark.parametrize("handler_name", ["health", "healthz"])
 async def test_health_database_projection_runs_off_event_loop(
     daemon_settings_for_test: Any,

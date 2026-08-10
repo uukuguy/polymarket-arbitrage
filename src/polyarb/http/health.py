@@ -124,6 +124,8 @@ class ReconciliationHealth:
 class PerceptionRecoveryHealth:
     open_count: int | None
     scopes: tuple[str, ...]
+    p1_count: int | None
+    p1_scopes: tuple[str, ...]
     resource_mode: str
     resource_reason: str | None
     evidence_consistent: bool
@@ -201,7 +203,9 @@ def read_perception_recovery_health(
     now_ms: int | None = None,
     include_resource: bool = True,
 ) -> PerceptionRecoveryHealth:
-    unavailable = PerceptionRecoveryHealth(None, (), "unavailable", None, False)
+    unavailable = PerceptionRecoveryHealth(
+        None, (), None, (), "unavailable", None, False
+    )
     try:
         from polyarb.perception.incidents import IncidentManager
         from polyarb.perception.resource_controller import (
@@ -214,9 +218,16 @@ def read_perception_recovery_health(
         open_count, candidate_open, http_open, other_open = (
             incident_manager.open_incident_status()
         )
-        capacity_open = any(
-            incident.scope == "capacity"
-            for incident in incident_manager.open_incidents()
+        open_incidents = incident_manager.open_incidents()
+        capacity_open = any(incident.scope == "capacity" for incident in open_incidents)
+        p1_scopes = tuple(
+            sorted(
+                {
+                    incident.scope
+                    for incident in open_incidents
+                    if incident.evidence.get("severity") == "p1"
+                }
+            )
         )
         scopes = []
         if candidate_open:
@@ -249,6 +260,12 @@ def read_perception_recovery_health(
         return PerceptionRecoveryHealth(
             open_count,
             tuple(scopes),
+            sum(
+                1
+                for incident in open_incidents
+                if incident.evidence.get("severity") == "p1"
+            ),
+            p1_scopes,
             mode,
             reason,
             True,
@@ -1217,7 +1234,12 @@ def _build_health_checks(
         include_resource=resource_enabled,
     )
     incident_status = "pass"
-    if recovery_enabled or "capacity" in recovery.scopes:
+    if recovery.p1_count:
+        # A durable producer P1 is a production alarm regardless of whether
+        # optional Candidate recovery is enabled.  The console owns diagnosis;
+        # this common health surface must never hide the alarm from Polywatch.
+        incident_status = "fail"
+    elif recovery_enabled or "capacity" in recovery.scopes:
         if not recovery.evidence_consistent:
             incident_status = "fail"
         elif "capacity" in recovery.scopes and capacity_status == "fail":
@@ -1243,14 +1265,20 @@ def _build_health_checks(
             "componentType": "component",
             "observedValue": (
                 recovery.open_count
-                if recovery_enabled or "capacity" in recovery.scopes
+                if recovery_enabled
+                or "capacity" in recovery.scopes
+                or recovery.p1_count
                 else 0
             ),
             "status": incident_status,
             "output": (
                 f"scopes={','.join(recovery.scopes)} "
+                f"p1_count={recovery.p1_count} "
+                f"p1_scopes={','.join(recovery.p1_scopes)} "
                 f"evidence_consistent={recovery.evidence_consistent}"
-                if recovery_enabled or "capacity" in recovery.scopes
+                if recovery_enabled
+                or "capacity" in recovery.scopes
+                or recovery.p1_count
                 else "disabled"
             ),
             "time": _utc_now_iso(),
