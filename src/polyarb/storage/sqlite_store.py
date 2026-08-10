@@ -11489,9 +11489,15 @@ class SQLiteStore:
         window_id: str,
         snapshot_metadata: dict[str, object],
         now_ms: int,
+        *,
+        writer_timeout_s: float | None = None,
     ) -> StructurePublicationState:
         """Create or resume the publication bound to one complete raw window."""
-        if not window_id or now_ms < 0:
+        if (
+            not window_id
+            or now_ms < 0
+            or (writer_timeout_s is not None and writer_timeout_s <= 0)
+        ):
             raise ValueError("invalid-structure-publication")
         snapshot_id = snapshot_metadata.get("snapshot_id")
         taken_at_ms = snapshot_metadata.get("taken_at_ms")
@@ -11526,7 +11532,7 @@ class SQLiteStore:
         counts = {component: 0 for component in _STRUCTURE_COMPONENTS}
         expected_json = json.dumps(expected, sort_keys=True, separators=(",", ":"))
         counts_json = json.dumps(counts, sort_keys=True, separators=(",", ":"))
-        con = self._connect_writer()
+        con = self._connect_writer(timeout_s=writer_timeout_s)
         try:
             con.execute("BEGIN IMMEDIATE")
             window = con.execute(

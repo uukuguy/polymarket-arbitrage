@@ -4045,6 +4045,32 @@ def test_normalization_chunk_writer_wait_is_explicitly_bounded(tmp_path: Path) -
         blocker.close()
 
 
+def test_publication_begin_writer_wait_is_explicitly_bounded(tmp_path: Path) -> None:
+    """The first persist write must not consume the child process budget."""
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window_id = _complete_window(store, "market-1", now_ms=100)
+    blocker = sqlite3.connect(store.db_path, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            store.begin_structure_publication(
+                window_id=window_id,
+                snapshot_metadata={
+                    "snapshot_id": 1,
+                    "taken_at_ms": 100,
+                    "mode": "full",
+                    "data_product": "structure",
+                    "expected_counts": {key: 0 for key in COMPONENT_COUNTS},
+                },
+                now_ms=100,
+                writer_timeout_s=0.01,
+            )
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+
 def test_publication_step_bounds_contract_reconciliation_writer_wait(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings_for_test
 ) -> None:
@@ -4054,12 +4080,19 @@ def test_publication_step_bounds_contract_reconciliation_writer_wait(
     window_id = _complete_window(store, "market-1", now_ms=100)
     captured: list[float | None] = []
     reconcile = store.reconcile_structure_publication_contract
+    begin = store.begin_structure_publication
 
     def tracked_reconcile(*args, writer_timeout_s: float | None = None, **kwargs):
         captured.append(writer_timeout_s)
         return reconcile(*args, writer_timeout_s=writer_timeout_s, **kwargs)
 
     monkeypatch.setattr(store, "reconcile_structure_publication_contract", tracked_reconcile)
+
+    def tracked_begin(*args, writer_timeout_s: float | None = None, **kwargs):
+        captured.append(writer_timeout_s)
+        return begin(*args, writer_timeout_s=writer_timeout_s, **kwargs)
+
+    monkeypatch.setattr(store, "begin_structure_publication", tracked_begin)
 
     run_structure_publication_step(
         settings_for_test.model_copy(update={"db_path": store.db_path}),
@@ -4069,7 +4102,7 @@ def test_publication_step_bounds_contract_reconciliation_writer_wait(
         store=store,
     )
 
-    assert captured == [5.0]
+    assert captured == [5.0, 5.0]
 
 
 def test_certification_chunk_writer_wait_is_explicitly_bounded(tmp_path: Path) -> None:

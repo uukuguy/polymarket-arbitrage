@@ -418,6 +418,10 @@ def run_structure_publication_step(
     if not 1 <= max_rows <= STRUCTURE_PUBLICATION_MAX_ROWS or max_elapsed_s <= 0:
         raise ValueError("invalid-structure-publication-budget")
     started_at = time.monotonic()
+    writer_timeout_s = min(
+        STRUCTURE_PUBLICATION_CHUNK_WRITER_TIMEOUT_MAX_S,
+        max(0.001, max_elapsed_s - STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S),
+    )
     if store is None:
         store = SQLiteStore(settings.db_path)
         store.init_structure_sync_schema()
@@ -435,19 +439,12 @@ def run_structure_publication_step(
                 "expected_counts": {component: 0 for component in STRUCTURE_COMPONENTS},
             },
             now_ms=now_ms,
+            writer_timeout_s=writer_timeout_s,
         )
         progress = store.get_structure_publication_progress(window_id)
         assert progress is not None
     else:
         publication = progress.publication
-    writer_timeout_s = min(
-        STRUCTURE_PUBLICATION_CHUNK_WRITER_TIMEOUT_MAX_S,
-        max(
-            0.001,
-            max_elapsed_s
-            - STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S,
-        ),
-    )
     reconciliation = store.reconcile_structure_publication_contract(
         window_id,
         STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
