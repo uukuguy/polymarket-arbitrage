@@ -7323,3 +7323,37 @@ Continue v311 natural-cycle observation across a longer window while retaining
 the same fail-closed feed and direct incident visibility. Investigate only a
 new evidence-bearing fault; do not churn documented non-gating quiet/archive
 warnings into unnecessary deployments.
+
+## SESSION 176 — 2026-08-10 (Structure P1 Dashboard closure deployed)
+
+- [LIVE DIAGNOSIS] L1 had a real active Structure P1: repeated bounded
+  `gamma-markets` timeout/checkpoint cycles and one parent-side
+  `database is locked` acquisition failure. Quote continued to make complete
+  runs; this is a Structure publication fault, not evidence of a stopped
+  daemon or a valid zero-opportunity state.
+- [DASHBOARD REPAIR] Commit `9fd69a5` extends the authenticated Incident API
+  consumed by Fly `/perception/console` with a typed `structure` diagnosis:
+  P1 severity, `market-map-stale` impact, bounded automatic retry, exact
+  failure reason, optional child elapsed/stage, and the operator path
+  `inspect-stage-checkpoint-and-child-budget`. Missing child timing for the
+  parent lock case is rendered as null, never as an omitted P1 card.
+- [RECOVERY CHAIN] A Structure Incident now verifies only after the matching
+  post-failure durable `snapshot_attempts` success receipt. Conversely,
+  Incident persistence failure is fail-soft and cannot convert an already
+  certified snapshot into a failed scheduler attempt.
+- [DEPLOY / LIVE PROOF] Fly L1 v317 runs exact release
+  `9fd69a5f64e93981155a887f66826815a4bb23c6`. The live
+  `/perception/incidents` response shows the open Structure incident in
+  `recovering` with the complete diagnosis for `database is locked`; direct
+  console route is reachable. Producer arbitration evidence shows alternating
+  Structure checkpoints and Quote leases. At close of observation Structure
+  was still executing market pages (`784`) and strict health was fail/warn,
+  so production stability is not yet claimed.
+
+### [NEXT — CURRENT]
+
+Continue the live Structure recovery evidence. Use the persisted attempt and
+checkpoint progression to distinguish finite catch-up from recurring timeout;
+do not close the P1 or declare M1 production-stable until a new certified
+Structure snapshot, matching Incident verification, healthy opportunity reads,
+and repeated natural cycles are observed.
