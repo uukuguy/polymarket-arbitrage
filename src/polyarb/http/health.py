@@ -1598,7 +1598,9 @@ def _build_health_checks(
         schedule_reason = "configured"
     else:
         persisted_timeout_s = int(schedule_adjustment["timeout_s"])
-        effective_cadence_s = int(schedule_adjustment["cadence_s"])
+        effective_cadence_s = min(
+            int(schedule_adjustment["cadence_s"]), configured_cadence_s
+        )
         schedule_value = "adaptive"
         success_sample_count = int(schedule_adjustment["success_sample_count"])
         success_p95_s = schedule_adjustment["success_p95_s"]

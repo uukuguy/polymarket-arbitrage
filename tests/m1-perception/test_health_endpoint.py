@@ -1668,9 +1668,10 @@ def test_health_uses_effective_snapshot_timeout_and_surfaces_schedule(
     daemon_settings_for_test: Any,
     http_test_client: TestClient,
 ) -> None:
-    """Producer-slot budget caps adaptive timeout and stays health-visible."""
+    """Health reports the resident scheduler's bounded timeout and cadence."""
     from polyarb.storage.sqlite_store import SQLiteStore
 
+    daemon_settings_for_test.scheduler_interval_s = 300
     now_ms = int(time.time() * 1000)
     snapshot_id = _insert_snapshot(
         daemon_settings_for_test.db_path,
@@ -1729,7 +1730,7 @@ def test_health_uses_effective_snapshot_timeout_and_surfaces_schedule(
         "generation_checkpoint_budget_s=45 generation_child_hard_limit_s=75 "
         "pointer_switch_transaction_deadline_s=15 "
         "pointer_switch_writer_lock_timeout_s=5 "
-        "configured_cadence_s=3600 effective_cadence_s=348 "
+        "configured_cadence_s=300 effective_cadence_s=300 "
         "success_samples=10 success_p95_s=236 reason=timeout-backoff"
     )
 
