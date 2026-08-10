@@ -32,6 +32,11 @@ _monotonic = time.monotonic
 # Gamma's own retry policy can outlive the slice and force the parent to kill
 # the child, losing the actionable cause of the stall.
 STRUCTURE_REMOTE_PAGE_MAX_ELAPSED_S = 35.0
+# Gamma retries use a shared client-wide request timeout. Keep each attempt at
+# ten seconds so the production default (three attempts plus 1s/2s backoff)
+# remains below the 35-second page envelope and can checkpoint or terminalize
+# before the 75-second subprocess kill.
+STRUCTURE_REMOTE_PAGE_REQUEST_TIMEOUT_S = 10.0
 
 
 class StructurePageDeadlineExceeded(ValueError):
@@ -440,7 +445,17 @@ async def run_structure_sync_until_published(
                 cursor=None,
                 publication_id=retired.publication_id,
             )
-    async with GammaClient(settings) as gamma:
+    gamma_settings = settings
+    if max_elapsed_s is not None:
+        gamma_settings = settings.model_copy(
+            update={
+                "http_timeout_s": min(
+                    settings.http_timeout_s,
+                    STRUCTURE_REMOTE_PAGE_REQUEST_TIMEOUT_S,
+                )
+            }
+        )
+    async with GammaClient(gamma_settings) as gamma:
         if latest is not None and latest["status"] == "complete":
             return await finalize_structure_window(
                 settings,

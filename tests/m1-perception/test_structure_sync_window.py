@@ -933,6 +933,36 @@ async def test_structure_worker_bounds_a_hung_market_page(tmp_path) -> None:
         await worker.run_batch(page_timeout_s=0.001)
 
 
+async def test_structure_sync_bounds_each_gamma_retry_attempt_inside_slice(
+    settings_for_test,
+) -> None:
+    """Three transient Gamma retries must finish before the parent kill envelope."""
+    captured_settings = []
+
+    class Gamma:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def fetch_active_event_page(self, cursor, limit):
+            return EventPage((), cursor, None, True, 10, 20)
+
+    def build_gamma(settings):
+        captured_settings.append(settings)
+        return Gamma()
+
+    with patch("polyarb.perception.structure_sync.GammaClient", side_effect=build_gamma):
+        await run_structure_sync_until_published(
+            settings_for_test.model_copy(update={"http_timeout_s": 15.0}),
+            max_pages=1,
+            max_elapsed_s=45.0,
+        )
+
+    assert captured_settings[0].http_timeout_s == 10.0
+
+
 async def test_structure_sync_yields_after_bounded_pages_without_losing_cursor(
     settings_for_test,
 ) -> None:
