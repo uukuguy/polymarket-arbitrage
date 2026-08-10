@@ -764,6 +764,8 @@ def test_structure_incident_exposes_operator_diagnosis(http_test_client) -> None
         "failure_reason": "snapshot-subprocess-timeout",
         "elapsed_ms": 45_198,
         "last_stage": "persist",
+        "cooperative_slice_budget_s": 45,
+        "child_hard_limit_s": 75,
     }
 
 
@@ -788,6 +790,31 @@ def test_structure_lock_incident_exposes_diagnosis_without_child_timing(
     assert diagnosis["failure_reason"] == "database is locked"
     assert diagnosis["elapsed_ms"] is None
     assert diagnosis["last_stage"] is None
+
+
+def test_legacy_structure_incident_receives_static_budget_context(http_test_client) -> None:
+    """A pre-budget P1 remains readable immediately after the Dashboard deploy."""
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
+    IncidentManager(store, clock_ms=lambda: 1_000).detect(
+        "structure",
+        "structure-producer-failure",
+        {
+            "severity": "p1",
+            "impact": "market-map-stale",
+            "automatic_action": "retry-bounded-structure-child",
+            "next_action": "inspect-stage-checkpoint-and-child-budget",
+            "failure_reason": "snapshot-subprocess-timeout",
+            "elapsed_ms": 75_000,
+            "last_stage": "persist",
+        },
+    )
+
+    diagnosis = http_test_client.get("/perception/incidents?limit=10").json()["items"][0][
+        "diagnosis"
+    ]
+
+    assert diagnosis["cooperative_slice_budget_s"] == 45
+    assert diagnosis["child_hard_limit_s"] == 75
 
 
 def test_quote_child_failure_exposes_diagnosis_without_prior_success(

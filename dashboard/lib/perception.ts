@@ -621,7 +621,24 @@ function isIncident(value: unknown): boolean {
         value.diagnosis.free_percent >= 0 &&
         value.diagnosis.free_percent <= 100 &&
         (value.diagnosis.failure_reason === null ||
-          typeof value.diagnosis.failure_reason === "string"))) &&
+          typeof value.diagnosis.failure_reason === "string")) ||
+      (isRecord(value.diagnosis) &&
+        (value.diagnosis.severity === "p1" || value.diagnosis.severity === "p2") &&
+        isPositiveInteger(value.diagnosis.reminder_interval_s) &&
+        value.diagnosis.impact === "market-map-stale" &&
+        value.diagnosis.automatic_action === "retry-bounded-structure-child" &&
+        value.diagnosis.next_action === "inspect-stage-checkpoint-and-child-budget" &&
+        value.diagnosis.deadline_s === null &&
+        isPositiveInteger(value.diagnosis.consecutive_failures) &&
+        value.diagnosis.last_success_age_s === null &&
+        value.diagnosis.free_percent === null &&
+        typeof value.diagnosis.failure_reason === "string" &&
+        isNonNegativeIntegerOrNull(value.diagnosis.elapsed_ms) &&
+        isStringOrNull(value.diagnosis.last_stage) &&
+        isPositiveInteger(value.diagnosis.cooperative_slice_budget_s) &&
+        isPositiveInteger(value.diagnosis.child_hard_limit_s) &&
+        value.diagnosis.cooperative_slice_budget_s <
+          value.diagnosis.child_hard_limit_s)) &&
     isRecord(value.evidence)
   );
 }

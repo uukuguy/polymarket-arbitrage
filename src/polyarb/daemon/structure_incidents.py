@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from polyarb.perception.incidents import Incident, IncidentManager
+from polyarb.perception.structure_contract import (
+    STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
+    STRUCTURE_GENERATION_COOPERATIVE_SLICE_S,
+)
 
 
 class StructureIncidentLifecycle:
@@ -20,6 +24,8 @@ class StructureIncidentLifecycle:
             "failure_reason": failure_kind,
             "elapsed_ms": elapsed_ms,
             "last_stage": last_stage,
+            "cooperative_slice_budget_s": int(STRUCTURE_GENERATION_COOPERATIVE_SLICE_S),
+            "child_hard_limit_s": int(STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S),
         }
         incident = self._incidents.detect("structure", "structure-producer-failure", evidence)
         if incident.state == "detected":

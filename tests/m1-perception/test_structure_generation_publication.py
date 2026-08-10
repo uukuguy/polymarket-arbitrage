@@ -4012,6 +4012,39 @@ def test_pointer_switch_writer_lock_timeout_preserves_authority(tmp_path: Path) 
     assert store.get_latest_structure_publication().status == "ready"
 
 
+def test_normalization_chunk_writer_wait_is_explicitly_bounded(tmp_path: Path) -> None:
+    """A blocked publication write must not inherit SQLite's 120-second default."""
+    store = SQLiteStore(tmp_path / "state.db")
+    store.init_schema()
+    window_id = _complete_window(store, "market-1", now_ms=100)
+    publication = store.begin_structure_publication(
+        window_id=window_id,
+        snapshot_metadata={
+            "snapshot_id": 1,
+            "taken_at_ms": 100,
+            "mode": "full",
+            "data_product": "structure",
+            "expected_counts": {key: 0 for key in COMPONENT_COUNTS},
+        },
+        now_ms=100,
+    )
+    blocker = sqlite3.connect(store.db_path, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            normalize_structure_component_chunk(
+                store,
+                publication,
+                "events",
+                None,
+                1,
+                writer_timeout_s=0.01,
+            )
+    finally:
+        blocker.execute("ROLLBACK")
+        blocker.close()
+
+
 @pytest.mark.asyncio
 async def test_historical_wait_natural_publish_supersedes_active_drift_and_resumes(
     tmp_path: Path,

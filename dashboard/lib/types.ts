@@ -370,23 +370,33 @@ export interface PerceptionIncident {
   diagnosis: {
     severity: "p1" | "p2";
     reminder_interval_s: number;
-    impact: "feed-at-risk" | "feed-unavailable" | "storage-exhaustion-risk";
+    impact:
+      | "feed-at-risk"
+      | "feed-unavailable"
+      | "storage-exhaustion-risk"
+      | "market-map-stale";
     automatic_action:
       | "retry-immediately"
       | "retry-at-next-cadence"
       | "reclaim-bounded-history"
       | "retry-supervised-producer"
-      | "automatic-retries-exhausted";
+      | "automatic-retries-exhausted"
+      | "retry-bounded-structure-child";
     next_action:
       | "inspect-clob-and-child-io"
       | "inspect-child-stderr"
       | "inspect-capacity-receipts"
-      | "inspect-producer-receipt-and-restart";
+      | "inspect-producer-receipt-and-restart"
+      | "inspect-stage-checkpoint-and-child-budget";
     deadline_s: number | null;
     consecutive_failures: number;
     last_success_age_s: number | null;
     free_percent: number | null;
     failure_reason: string | null;
+    elapsed_ms?: number | null;
+    last_stage?: string | null;
+    cooperative_slice_budget_s?: number;
+    child_hard_limit_s?: number;
   } | null;
   evidence: Record<string, unknown>;
 }

@@ -25,6 +25,17 @@ def test_dashboard_has_server_component_perception_pages() -> None:
     assert "readPerceptionGroupHistory" in history
 
 
+def test_dashboard_promotes_structure_p1_with_bounded_budget_evidence() -> None:
+    """A stale Structure map remains an actionable P1 in the Vercel view."""
+    overview = _source("dashboard/app/perception/page.tsx")
+    reader = _source("dashboard/lib/perception.ts")
+
+    assert "p1StructureIncidents" in overview
+    assert "P1 Structure publication incident" in overview
+    assert "cooperative checkpoint target" in overview
+    assert 'value.diagnosis.impact === "market-map-stale"' in reader
+
+
 def test_typed_reader_uses_only_task6_public_get_contracts() -> None:
     reader = _source("dashboard/lib/perception.ts")
     types = _source("dashboard/lib/types.ts")

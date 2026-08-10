@@ -100,6 +100,10 @@ export default async function PerceptionOverviewPage() {
     (incident) =>
       incident.scope === "capacity" && incident.diagnosis?.severity === "p1",
   );
+  const p1StructureIncidents = openIncidents.filter(
+    (incident) =>
+      incident.scope === "structure" && incident.diagnosis?.severity === "p1",
+  );
   const currentResourceSample =
     resources.current === null
       ? null
@@ -541,6 +545,52 @@ export default async function PerceptionOverviewPage() {
               <div style={muted}>
                 retries {incident.retry_count ?? "not recorded"} · next automatic retry {fmtTime(incident.next_retry_at_ms)}
               </div>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {p1StructureIncidents.length > 0 && (
+        <section
+          style={{
+            ...panel,
+            border: "2px solid #ef4444",
+            background: "#2a1212",
+          }}
+        >
+          <h2 style={{ marginTop: 0, color: "#fecaca" }}>
+            P1 Structure publication incident ({p1StructureIncidents.length})
+          </h2>
+          <p style={muted}>
+            The market map is stale. Opportunity candidates are not executable
+            until a fresh Structure pointer and later certified Quote run exist.
+          </p>
+          {p1StructureIncidents.map((incident) => (
+            <div key={incident.incident_id}>
+              <strong>Impact:</strong> {incident.diagnosis?.impact.replaceAll("-", " ")}
+              <div><strong>Automatic action:</strong> {incident.diagnosis?.automatic_action.replaceAll("-", " ")}</div>
+              <div><strong>Next action:</strong> {incident.diagnosis?.next_action.replaceAll("-", " ")}</div>
+              <div style={muted}>
+                failed stage {incident.diagnosis?.last_stage ?? "not recorded"} · elapsed {incident.diagnosis?.elapsed_ms == null ? "not recorded" : fmtDurationMs(incident.diagnosis.elapsed_ms)}
+              </div>
+              <div style={muted}>
+                cooperative checkpoint target {incident.diagnosis?.cooperative_slice_budget_s ?? "not recorded"}s · child hard limit {incident.diagnosis?.child_hard_limit_s ?? "not recorded"}s
+              </div>
+              <div style={muted}>
+                P1 failure: {incident.diagnosis?.failure_reason ?? "not recorded"} · reminder every {incident.diagnosis?.reminder_interval_s}s
+              </div>
+              {incident.recovery_start_evidence !== null && (
+                <pre
+                  style={{
+                    ...muted,
+                    margin: "6px 0 0",
+                    overflowWrap: "anywhere",
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  Recovery evidence {JSON.stringify(incident.recovery_start_evidence, null, 2)}
+                </pre>
+              )}
             </div>
           ))}
         </section>

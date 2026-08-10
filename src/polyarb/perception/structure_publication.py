@@ -33,6 +33,7 @@ MISSING_GROUP_NEG_RISK_QUARANTINE_REASON = (
 EVENT_ONLY_NEG_RISK_QUARANTINE_REASON = (
     "active-open-neg-risk-event-member-absent-from-complete-market-catalogue"
 )
+STRUCTURE_PUBLICATION_CHUNK_WRITER_TIMEOUT_MAX_S = 5.0
 
 
 def structure_market_source_hash(raw: dict) -> str:
@@ -239,11 +240,14 @@ def normalize_structure_component_chunk(
     component: str,
     after_source_key: str | None,
     max_source_rows: int,
+    *,
+    writer_timeout_s: float | None = None,
 ) -> NormalizationChunk:
     """Normalize one bounded raw keyset and atomically advance its cursor."""
     if (
         component not in STRUCTURE_COMPONENTS
         or not 1 <= max_source_rows <= STRUCTURE_PUBLICATION_MAX_ROWS
+        or (writer_timeout_s is not None and writer_timeout_s <= 0)
     ):
         raise ValueError("invalid-structure-normalization-chunk")
     source = "markets" if component == "markets" else "events"
@@ -374,6 +378,7 @@ def normalize_structure_component_chunk(
         expected_prior_cursor=progress.cursor,
         next_cursor=next_cursor,
         now_ms=int(time.time() * 1_000),
+        writer_timeout_s=writer_timeout_s,
     )
     return NormalizationChunk(
         component, len(rows), len(canonical), source_cursor, completed
@@ -508,8 +513,17 @@ def run_structure_publication_step(
             )
         component = STRUCTURE_COMPONENTS[index + 1]
     cursor = _source_cursor(component, progress.cursor)
+    writer_timeout_s = min(
+        STRUCTURE_PUBLICATION_CHUNK_WRITER_TIMEOUT_MAX_S,
+        max(0.001, max_elapsed_s - STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S),
+    )
     chunk = normalize_structure_component_chunk(
-        store, publication, component, cursor, max_rows
+        store,
+        publication,
+        component,
+        cursor,
+        max_rows,
+        writer_timeout_s=writer_timeout_s,
     )
     return StructurePublicationCheckpoint(
         "normalizing",

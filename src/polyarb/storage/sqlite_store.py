@@ -11806,13 +11806,19 @@ class SQLiteStore:
         expected_prior_cursor: str | None,
         next_cursor: str | None,
         now_ms: int,
+        *,
+        writer_timeout_s: float | None = None,
     ) -> None:
         """Write one bounded component chunk and its cursor in one transaction."""
         table = self._structure_component_table(component)
-        if not publication_id or now_ms < 0:
+        if (
+            not publication_id
+            or now_ms < 0
+            or (writer_timeout_s is not None and writer_timeout_s <= 0)
+        ):
             raise ValueError("invalid-structure-publication-chunk")
         materialized = tuple(rows)
-        con = self._connect_writer()
+        con = self._connect_writer(timeout_s=writer_timeout_s)
         try:
             con.execute("BEGIN IMMEDIATE")
             publication = con.execute(

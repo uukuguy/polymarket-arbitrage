@@ -1247,6 +1247,11 @@ def _structure_incident_diagnosis(
     evidence: dict[str, object],
 ) -> dict[str, object] | None:
     """Expose the complete, bounded disposition for a Structure outage."""
+    from polyarb.perception.structure_contract import (
+        STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
+        STRUCTURE_GENERATION_COOPERATIVE_SLICE_S,
+    )
+
     if (
         evidence.get("severity") not in {"p1", "p2"}
         or evidence.get("impact") != "market-map-stale"
@@ -1257,6 +1262,12 @@ def _structure_incident_diagnosis(
     failure_reason = evidence.get("failure_reason")
     elapsed_ms = evidence.get("elapsed_ms")
     last_stage = evidence.get("last_stage")
+    cooperative_slice_budget_s = evidence.get(
+        "cooperative_slice_budget_s", int(STRUCTURE_GENERATION_COOPERATIVE_SLICE_S)
+    )
+    child_hard_limit_s = evidence.get(
+        "child_hard_limit_s", int(STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S)
+    )
     if (
         not isinstance(failure_reason, str)
         or not failure_reason
@@ -1265,6 +1276,12 @@ def _structure_incident_diagnosis(
             and (isinstance(elapsed_ms, bool) or not isinstance(elapsed_ms, int) or elapsed_ms < 0)
         )
         or (last_stage is not None and not isinstance(last_stage, str))
+        or isinstance(cooperative_slice_budget_s, bool)
+        or not isinstance(cooperative_slice_budget_s, int)
+        or cooperative_slice_budget_s <= 0
+        or isinstance(child_hard_limit_s, bool)
+        or not isinstance(child_hard_limit_s, int)
+        or child_hard_limit_s <= cooperative_slice_budget_s
     ):
         return None
     return {
@@ -1280,6 +1297,8 @@ def _structure_incident_diagnosis(
         "failure_reason": failure_reason,
         "elapsed_ms": elapsed_ms,
         "last_stage": last_stage,
+        "cooperative_slice_budget_s": cooperative_slice_budget_s,
+        "child_hard_limit_s": child_hard_limit_s,
     }
 
 

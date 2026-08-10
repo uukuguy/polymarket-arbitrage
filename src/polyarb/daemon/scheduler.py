@@ -49,6 +49,7 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_DRIFT_CLASSIFIER_V4,
     STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS,
     STRUCTURE_GENERATION_CHILD_HARD_LIMIT_S,
+    STRUCTURE_GENERATION_COOPERATIVE_SLICE_S,
     valid_structure_publication_checkpoint,
 )
 from polyarb.validator.category import SnapshotStatus
@@ -118,7 +119,7 @@ SNAPSHOT_SUBPROCESS_TIMEOUT_S = 240.0
 # it must never let one Structure child monopolize that lane past the amount
 # production can absorb without violating the 300-second Quote hard SLA.
 STRUCTURE_SLICE_MAX_PAGES = 40
-STRUCTURE_SLICE_MAX_ELAPSED_S = 45.0
+STRUCTURE_SLICE_MAX_ELAPSED_S = STRUCTURE_GENERATION_COOPERATIVE_SLICE_S
 STRUCTURE_DEFER_RETRY_DELAY_S = 5.0
 RECOVERY_RETRY_DELAY_S = 5.0
 MAX_RECOVERY_RETRY_DELAY_S = 60.0
