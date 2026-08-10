@@ -13,6 +13,7 @@ import pytest
 
 import polyarb.daemon.main as daemon_main
 import polyarb.perception.worker_cli as worker_cli_module
+from polyarb.daemon.producer_arbitration import ProducerArbitrator
 from polyarb.http.health import read_producer_liveness_health
 from polyarb.perception.incidents import IncidentManager
 from polyarb.perception.models import GroupLeg, GroupRevision
@@ -23,6 +24,7 @@ from polyarb.perception.supervisor import (
     ProducerSupervisor,
 )
 from polyarb.perception.worker_cli import run_component
+from polyarb.storage.sqlite_store import SQLiteStore
 
 
 def _supervisor(tmp_path, *, component=None, command=None):
@@ -229,12 +231,51 @@ async def test_quote_worker_cli_runs_only_the_supervised_quote_owner(
     monkeypatch.setenv("POLYARB_PRODUCER_ATTEMPT", "1")
     store = OpportunityPerceptionStore(Settings.db_path)
     store.init_schema()
+    SQLiteStore(Settings.db_path).init_schema()
     assert store.reserve_producer_attempt(
         "quote", supervisor_run_id="quote-run", started_at_ms=1_000
     ) == 1
 
     assert await run_component("quote", Settings) == 0
     assert calls == ["build", "run"]
+
+
+@pytest.mark.asyncio
+async def test_quote_worker_cli_reclaims_its_orphaned_lease_before_worker_starts(
+    tmp_path, monkeypatch
+) -> None:
+    class Settings:
+        db_path = tmp_path / "state.db"
+        opportunity_producer_supervisor_enabled = True
+        neg_risk_quote_worker_enabled = True
+        neg_risk_quote_supervisor_enabled = True
+
+    class Worker:
+        async def run(self, _stop_event) -> None:
+            pass
+
+        @property
+        def supervisor_recovery_requested(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        worker_cli_module,
+        "build_production_quote_worker",
+        lambda *_args, **_kwargs: Worker(),
+    )
+    monkeypatch.setenv("POLYARB_PRODUCER_SUPERVISOR_RUN_ID", "quote-run")
+    monkeypatch.setenv("POLYARB_PRODUCER_ATTEMPT", "1")
+    store = OpportunityPerceptionStore(Settings.db_path)
+    store.init_schema()
+    SQLiteStore(Settings.db_path).init_schema()
+    assert ProducerArbitrator(Settings.db_path).acquire(owner="quote", lease_s=210) is not None
+    assert store.reserve_producer_attempt(
+        "quote", supervisor_run_id="quote-run", started_at_ms=1_000
+    ) == 1
+
+    assert await run_component("quote", Settings) == 0
+    assert ProducerArbitrator(Settings.db_path).current() is None
+    assert ProducerArbitrator(Settings.db_path).receipts(limit=1)[0].action == "released"
 
 
 @pytest.mark.asyncio
@@ -264,6 +305,7 @@ async def test_quote_worker_cli_returns_recovery_exit_code_after_timeout_limit(
     monkeypatch.setenv("POLYARB_PRODUCER_ATTEMPT", "1")
     store = OpportunityPerceptionStore(Settings.db_path)
     store.init_schema()
+    SQLiteStore(Settings.db_path).init_schema()
     store.reserve_producer_attempt("quote", supervisor_run_id="quote-run", started_at_ms=1)
 
     assert await run_component("quote", Settings) == 75

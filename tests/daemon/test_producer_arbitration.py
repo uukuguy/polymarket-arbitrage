@@ -55,3 +55,31 @@ def test_structure_yields_a_released_checkpoint_to_quote(tmp_path) -> None:
 
     assert arbitrator.acquire(owner="structure", lease_s=45) is None
     assert arbitrator.acquire(owner="quote", lease_s=60) is not None
+
+
+def test_new_supervised_quote_child_releases_only_its_orphaned_quote_lease(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    now = [1_000]
+    arbitrator = ProducerArbitrator(db_path, now_ms=lambda: now[0])
+    old_quote = arbitrator.acquire(owner="quote", lease_s=210)
+    assert old_quote is not None
+
+    now[0] = 1_001
+    assert arbitrator.relinquish_orphaned_quote_lease() == old_quote
+    assert arbitrator.current() is None
+    assert arbitrator.acquire(owner="quote", lease_s=210) is not None
+
+    structure = arbitrator.acquire(owner="structure", lease_s=45)
+    assert structure is None  # the new Quote lease still owns the slot
+
+
+def test_quote_orphan_reclaim_never_releases_a_structure_lease(tmp_path) -> None:
+    db_path = tmp_path / "state.db"
+    SQLiteStore(db_path).init_schema()
+    arbitrator = ProducerArbitrator(db_path, now_ms=lambda: 1_000)
+    structure = arbitrator.acquire(owner="structure", lease_s=45)
+    assert structure is not None
+
+    assert arbitrator.relinquish_orphaned_quote_lease() is None
+    assert arbitrator.current() == structure

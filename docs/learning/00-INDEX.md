@@ -68,6 +68,7 @@
 | 54 | [Structure 写入索引](54-Structure写入索引.md) | 事务内 `MAX` 为什么会阻塞恢复 / ordinal 覆盖索引 / query-plan 回归 |
 | 55 | [Structure 关系回填切片](55-Structure关系回填切片.md) | 为什么 cursor 不等于可持续恢复 / 50 行 checkpoint / SQLite writer 预算 / watchdog 只作兜底 |
 | 56 | [Structure 回填查询截止](56-Structure回填查询截止.md) | outer slice 为什么拦不住卡住 SQL / progress handler rollback / `bootstrap` 诊断边界 |
+| 57 | [Quote 重启租约回收](57-Quote重启租约回收.md) | 滚动发布为什么会留下 210 秒采集空窗 / Quote-only 回收如何保持 Structure 互斥 / `released` 收据如何审计 |
 
 ## Phase 02.1 教学增量（2026-05）
 

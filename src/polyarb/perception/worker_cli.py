@@ -10,6 +10,8 @@ import sys
 import time
 from uuid import UUID
 
+from loguru import logger
+
 from polyarb.config import load_settings
 from polyarb.daemon.opportunity_watcher import build_focused_opportunity_watcher
 from polyarb.daemon.producer_arbitration import ProducerArbitrator
@@ -85,6 +87,15 @@ async def run_component(component: str, settings) -> int:
     store.init_schema()
     store.claim_producer_heartbeat_authority(component)
     if component == "quote":
+        producer_arbitrator = ProducerArbitrator(settings.db_path)
+        orphaned_lease = producer_arbitrator.relinquish_orphaned_quote_lease()
+        if orphaned_lease is not None:
+            logger.warning(
+                "quote-supervisor-reclaimed-orphaned-lease "
+                "lease_id={} expires_at_ms={}",
+                orphaned_lease.lease_id,
+                orphaned_lease.expires_at_ms,
+            )
 
         async def publish_progress() -> None:
             await asyncio.to_thread(
@@ -98,7 +109,7 @@ async def run_component(component: str, settings) -> int:
             perception_store=store,
             stop_after_consecutive_timeouts=_QUOTE_SUPERVISED_TIMEOUT_LIMIT,
             on_cycle_started=publish_progress,
-            producer_arbitrator=ProducerArbitrator(settings.db_path),
+            producer_arbitrator=producer_arbitrator,
         )
         if worker is None:
             raise RuntimeError("quote-producer-disabled")

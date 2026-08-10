@@ -171,6 +171,51 @@ class ProducerArbitrator:
         finally:
             con.close()
 
+    def relinquish_orphaned_quote_lease(self) -> ProducerLease | None:
+        """Release a Quote lease left by a terminated supervised child.
+
+        This is deliberately narrow: a newly spawned Quote child can never
+        reclaim the Structure producer's lease. The caller is the single-
+        process supervisor topology, which starts a replacement only after its
+        former child has terminated.
+        """
+        now_ms = self._now_ms()
+        con = self._connect()
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute(
+                "SELECT owner,lease_id,acquired_at_ms,expires_at_ms "
+                "FROM producer_arbitration_leases WHERE resource=?",
+                (_RESOURCE,),
+            ).fetchone()
+            if row is None:
+                con.execute("ROLLBACK")
+                return None
+            current = self._lease_from_row(row)
+            if current.owner != "quote":
+                con.execute("ROLLBACK")
+                return None
+            deleted = con.execute(
+                "DELETE FROM producer_arbitration_leases "
+                "WHERE resource=? AND owner=? AND lease_id=?",
+                (_RESOURCE, current.owner, current.lease_id),
+            ).rowcount
+            if deleted != 1:
+                raise RuntimeError("orphaned-producer-lease-delete-failed")
+            con.execute(
+                "INSERT INTO producer_arbitration_receipts("
+                "owner,lease_id,action,observed_at_ms,expires_at_ms) VALUES (?,?,?,?,?)",
+                (current.owner, current.lease_id, "released", now_ms, current.expires_at_ms),
+            )
+            con.execute("COMMIT")
+            return current
+        except BaseException:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            raise
+        finally:
+            con.close()
+
     def current(self) -> ProducerLease | None:
         con = self._connect()
         try:
