@@ -97,6 +97,9 @@ _SNAPSHOT_ATTEMPT_STDERR_TAIL_RE = re.compile(
     r"(?:snapshot-stage stage="
     r"(?:gamma-events|gamma-markets|membership-recheck|validate|persist) "
     r"state=(?:start|complete) elapsed_ms=(?:0|[1-9][0-9]*)|"
+    r"structure-page-boundary stage=(?:gamma-events|gamma-markets) "
+    r"operation=(?:fetch|commit) state=(?:start|complete) "
+    r"elapsed_ms=(?:0|[1-9][0-9]*)|"
     r"structure-publication-progress "
     r"stage=(?:normalizing|certifying|ready) "
     r"component=(?:[a-z][a-z_-]{0,31}|none) "
@@ -106,6 +109,7 @@ _SNAPSHOT_ATTEMPT_STDERR_TAIL_RE = re.compile(
     r"terminal-invariant) key_sha256=[0-9a-f]{64})?|generation-count-mismatch|"
     r"generation-incomplete|generation-validation-issues|pointer-switch-deadline|"
     r"source-truth-invalid|sqlite-busy|structure-child-error|"
+    r"structure-page-deadline|"
     r"structure-publication-not-writing))"
     r"|structure-publication-superseded publication_id=[0-9a-f]{32}"
 )

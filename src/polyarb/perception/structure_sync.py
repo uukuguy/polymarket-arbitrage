@@ -90,6 +90,7 @@ class StructureSyncWorker:
         if status == "open":
             started = time.monotonic()
             _emit_stage("gamma-events", "start", 0)
+            _emit_page_boundary("gamma-events", "fetch", "start", 0)
             try:
                 if page_timeout_s is None:
                     page = await self._gamma.fetch_active_event_page(
@@ -102,23 +103,29 @@ class StructureSyncWorker:
                         )
             except TimeoutError as error:
                 raise StructurePageDeadlineExceeded() from error
+            _emit_page_boundary(
+                "gamma-events", "fetch", "complete", _elapsed_ms(started)
+            )
             if page.requested_cursor != window["event_cursor"]:
                 raise ValueError("structure-event-page-cursor-mismatch")
+            _emit_page_boundary("gamma-events", "commit", "start", _elapsed_ms(started))
             await asyncio.to_thread(
                 self._store.commit_structure_event_page,
                 window_id=window["id"], requested_cursor=page.requested_cursor,
                 next_cursor=page.next_cursor, completed=page.completed,
                 events=list(page.events), finished_at_ms=page.finished_at_ms,
             )
+            _emit_page_boundary("gamma-events", "commit", "complete", _elapsed_ms(started))
             _emit_stage(
                 "gamma-events",
                 "complete",
-                max(0, int((time.monotonic() - started) * 1_000)),
+                _elapsed_ms(started),
             )
             return StructureSyncBatch(str(window["id"]), "events", page.completed)
         if status == "events_complete":
             started = time.monotonic()
             _emit_stage("gamma-markets", "start", 0)
+            _emit_page_boundary("gamma-markets", "fetch", "start", 0)
             try:
                 if page_timeout_s is None:
                     page = await self._gamma.fetch_active_market_page(
@@ -131,18 +138,23 @@ class StructureSyncWorker:
                         )
             except TimeoutError as error:
                 raise StructurePageDeadlineExceeded() from error
+            _emit_page_boundary(
+                "gamma-markets", "fetch", "complete", _elapsed_ms(started)
+            )
             if page.requested_cursor != window["market_cursor"]:
                 raise ValueError("structure-market-page-cursor-mismatch")
+            _emit_page_boundary("gamma-markets", "commit", "start", _elapsed_ms(started))
             await asyncio.to_thread(
                 self._store.commit_structure_market_page,
                 window_id=window["id"], requested_cursor=page.requested_cursor,
                 next_cursor=page.next_cursor, completed=page.completed,
                 markets=list(page.markets), finished_at_ms=page.finished_at_ms,
             )
+            _emit_page_boundary("gamma-markets", "commit", "complete", _elapsed_ms(started))
             _emit_stage(
                 "gamma-markets",
                 "complete",
-                max(0, int((time.monotonic() - started) * 1_000)),
+                _elapsed_ms(started),
             )
             return StructureSyncBatch(str(window["id"]), "markets", page.completed)
         return StructureSyncBatch(str(window["id"]), "complete", True)
@@ -151,6 +163,19 @@ class StructureSyncWorker:
 def _emit_stage(stage: str, state: str, elapsed_ms: int) -> None:
     print(
         f"snapshot-stage stage={stage} state={state} elapsed_ms={elapsed_ms}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.monotonic() - started) * 1_000))
+
+
+def _emit_page_boundary(stage: str, operation: str, state: str, elapsed_ms: int) -> None:
+    print(
+        "structure-page-boundary "
+        f"stage={stage} operation={operation} state={state} elapsed_ms={elapsed_ms}",
         file=sys.stderr,
         flush=True,
     )

@@ -1860,6 +1860,25 @@ def test_snapshot_stderr_tail_discards_oversized_allowlisted_marker() -> None:
     assert _safe_stderr_tail(stderr) is None
 
 
+def test_snapshot_stderr_tail_keeps_last_structure_page_boundary() -> None:
+    """A parent-killed page identifies fetch vs durable SQLite commit safely."""
+    from polyarb.daemon.scheduler import _safe_stderr_tail
+
+    stderr = b"\n".join(
+        (
+            b"snapshot-stage stage=gamma-markets state=start elapsed_ms=0",
+            b"structure-page-boundary stage=gamma-markets "
+            b"operation=fetch state=complete elapsed_ms=42",
+            b"structure-page-boundary stage=gamma-markets "
+            b"operation=commit state=start elapsed_ms=43",
+        )
+    )
+
+    assert _safe_stderr_tail(stderr) == (
+        "structure-page-boundary stage=gamma-markets operation=commit state=start elapsed_ms=43"
+    )
+
+
 @pytest.mark.asyncio
 async def test_snapshot_subprocess_result_has_parent_elapsed_and_final_stage() -> None:
     """The parent returns bounded diagnostics, never the child's stderr payload."""

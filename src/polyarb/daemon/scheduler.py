@@ -143,6 +143,12 @@ _SNAPSHOT_STAGE_MARKER_RE = re.compile(
     rb"state=(?:start|complete) elapsed_ms=(?:0|[1-9][0-9]*)$",
     re.MULTILINE,
 )
+_STRUCTURE_PAGE_BOUNDARY_RE = re.compile(
+    rb"^structure-page-boundary stage=(gamma-events|gamma-markets) "
+    rb"operation=(fetch|commit) state=(?:start|complete) "
+    rb"elapsed_ms=(?:0|[1-9][0-9]*)$",
+    re.MULTILINE,
+)
 _STRUCTURE_PROGRESS_MARKER_RE = re.compile(
     rb"^structure-publication-progress "
     rb"stage=(?:normalizing|certifying|ready) "
@@ -191,6 +197,7 @@ def _parse_last_structure_chunks(stderr: bytes) -> int | None:
 def _safe_stderr_tail(stderr: bytes) -> str | None:
     """Retain only the final allowlisted marker, never arbitrary child output."""
     matches = [*_SNAPSHOT_STAGE_MARKER_RE.finditer(stderr)]
+    matches.extend(_STRUCTURE_PAGE_BOUNDARY_RE.finditer(stderr))
     matches.extend(_STRUCTURE_PROGRESS_MARKER_RE.finditer(stderr))
     matches.extend(_STRUCTURE_FAILURE_MARKER_RE.finditer(stderr))
     matches.extend(_STRUCTURE_SUPERSESSION_MARKER_RE.finditer(stderr))
