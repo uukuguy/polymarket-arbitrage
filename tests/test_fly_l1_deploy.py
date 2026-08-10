@@ -12,6 +12,7 @@ def test_deploy_l1_workflow_binds_release_id_to_deployed_sha() -> None:
     text = DEPLOY_L1_YML.read_text()
 
     assert '--env POLYARB_RELEASE_ID="${GITHUB_SHA}"' in text
+    assert "--ha=false --max-concurrent 1" in text
 
 
 def test_deploy_l1_workflow_ignores_documentation_only_pushes() -> None:

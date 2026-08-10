@@ -691,11 +691,11 @@ docker-smoke:
 # unavailable; the release identity and post-deploy gates remain identical.
 FLY_BUILD_MODE ?= --remote-only
 
-## deploy: Deploy to Fly.io prod; set FLY_BUILD_MODE=--local-only for Depot outages
+## deploy: Deploy the single-volume L1 serially; never create an unseeded HA app replica.
 deploy:
 	@RELEASE_ID="$$(git rev-parse HEAD)"; \
 		echo ">> deploy — flyctl deploy $(FLY_BUILD_MODE) (release=$$RELEASE_ID)"; \
-		FLY_API_TOKEN= flyctl deploy $(FLY_BUILD_MODE) --wait-timeout 600 \
+		FLY_API_TOKEN= flyctl deploy $(FLY_BUILD_MODE) --ha=false --max-concurrent 1 --wait-timeout 600 \
 			--env POLYARB_RELEASE_ID="$$RELEASE_ID"
 	@echo ">> ensuring process scale: app=1 cron=1 (W8 Supercronic)"
 	FLY_API_TOKEN= flyctl scale count app=1 cron=1 -a polyarb-l1 --yes

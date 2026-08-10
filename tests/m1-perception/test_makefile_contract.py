@@ -1189,4 +1189,5 @@ def test_l1_deploy_binds_exact_source_sha_and_scales_noninteractively() -> None:
     assert result.returncode == 0, result.stderr
     assert "git rev-parse HEAD" in result.stdout
     assert '--env POLYARB_RELEASE_ID="$RELEASE_ID"' in result.stdout
+    assert "--ha=false --max-concurrent 1" in result.stdout
     assert "flyctl scale count app=1 cron=1 -a polyarb-l1 --yes" in result.stdout
