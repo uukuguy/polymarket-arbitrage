@@ -2404,11 +2404,19 @@ def test_bootstrap_and_source_certification_keysets_use_indexes(tmp_path) -> Non
             "ORDER BY market_id LIMIT ?",
             ("window", "", 500),
         ).fetchall()
+        ordinal_plan = con.execute(
+            "EXPLAIN QUERY PLAN SELECT COALESCE(MAX(source_ordinal),0) FROM "
+            "structure_sync_market_staging WHERE window_id=?",
+            ("window",),
+        ).fetchall()
 
     for plan in (event_plan, market_plan):
         detail = " ".join(str(row[3]).upper() for row in plan)
         assert "SEARCH" in detail
         assert "TEMP B-TREE" not in detail
+
+    ordinal_detail = " ".join(str(row[3]).upper() for row in ordinal_plan)
+    assert "IDX_STRUCTURE_SYNC_MARKET_ORDINAL" in ordinal_detail
 
 
 def test_complete_structure_staging_is_database_frozen(tmp_path) -> None:

@@ -65,6 +65,7 @@
 | 51 | [Quote 分块 Staging](51-Quote分块Staging.md) | 为什么 500 行 staging 不会泄露半个 feed / current pointer 认证边界 / 持久化块进度 |
 | 52 | [Supervisor 故障收据](52-Supervisor故障收据.md) | Quote child/worker/supervisor 边界 / 无秘密诊断 / 有界 Dashboard 读取 |
 | 53 | [Structure 切片截止时间](53-Structure切片截止时间.md) | 45 秒正常 checkpoint 与 75 秒 watchdog 的区别 / 末页动态预算 / cursor 不丢失 |
+| 54 | [Structure 写入索引](54-Structure写入索引.md) | 事务内 `MAX` 为什么会阻塞恢复 / ordinal 覆盖索引 / query-plan 回归 |
 
 ## Phase 02.1 教学增量（2026-05）
 

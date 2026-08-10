@@ -2841,6 +2841,11 @@ CREATE TABLE IF NOT EXISTS structure_sync_market_staging (
     source_ordinal INTEGER,
     PRIMARY KEY(window_id,market_id)
 );
+-- Every incoming Gamma page needs the current ordinal.  The primary key ends
+-- in market_id, so MAX(source_ordinal) would otherwise scan the entire active
+-- window while it owns the SQLite writer transaction.
+CREATE INDEX IF NOT EXISTS idx_structure_sync_market_ordinal
+ON structure_sync_market_staging(window_id,source_ordinal DESC);
 CREATE TRIGGER IF NOT EXISTS trg_structure_event_staging_insert_guard
 BEFORE INSERT ON structure_sync_event_staging
 WHEN (SELECT status FROM structure_sync_windows WHERE id=NEW.window_id)!='open'
