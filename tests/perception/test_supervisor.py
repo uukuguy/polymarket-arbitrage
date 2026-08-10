@@ -100,6 +100,29 @@ def test_early_stall_detection_must_precede_hard_restart_timeout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_spawn_error_receipt_preserves_safe_supervisor_error_kind(
+    tmp_path, monkeypatch
+) -> None:
+    """An operator can diagnose a spawn failure without exposing its message."""
+    store, supervisor = _supervisor(tmp_path)
+
+    async def fail_spawn(*_args, **_kwargs):
+        raise OSError("token=must-not-reach-the-receipt")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_spawn)
+
+    await supervisor.run(
+        ProducerSpec(component="quote", timeout_s=2, max_restarts=0),
+        asyncio.Event(),
+    )
+
+    receipt = store.producer_receipts("quote")[0]
+    assert receipt.outcome == "spawn-error"
+    assert "supervisor-spawn-error:OSError" in receipt.stderr_tail
+    assert "must-not-reach-the-receipt" not in receipt.stderr_tail
+
+
+@pytest.mark.asyncio
 async def test_worker_cli_rejects_disabled_component_without_touching_network() -> None:
     class Settings:
         opportunity_producer_supervisor_enabled = False

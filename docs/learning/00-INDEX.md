@@ -63,6 +63,7 @@
 | 49 | [常驻保留维护](49-常驻保留维护.md) | authority/payload/runtime 三层 / Quote 优先 / 500 行事务 / backoff、告警与恢复 / 30 万行验收 |
 | 50 | [Classifier-v3 候选守恒](50-Classifier-v3候选守恒.md) | complete scan 与策略域的区别 / candidate 三出口守恒 / 七类 expected exclusion / 166,926 行 chunk-invariant 证明 |
 | 51 | [Quote 分块 Staging](51-Quote分块Staging.md) | 为什么 500 行 staging 不会泄露半个 feed / current pointer 认证边界 / 持久化块进度 |
+| 52 | [Supervisor 故障收据](52-Supervisor故障收据.md) | Quote child/worker/supervisor 边界 / 无秘密诊断 / 有界 Dashboard 读取 |
 
 ## Phase 02.1 教学增量（2026-05）
 

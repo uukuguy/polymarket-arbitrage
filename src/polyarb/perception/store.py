@@ -8494,6 +8494,34 @@ class OpportunityPerceptionStore:
         finally:
             con.close()
 
+    def latest_producer_receipt(self, component: str) -> ProducerReceipt | None:
+        """Read one bounded supervisor receipt for an operator projection."""
+        if component not in {"candidate", "discovery", "reconciliation", "quote"}:
+            raise ValueError("invalid-producer-component")
+        con = self._connect()
+        try:
+            row = con.execute(
+                "SELECT * FROM neg_risk_producer_receipts WHERE component=? "
+                "ORDER BY attempt DESC LIMIT 1",
+                (component,),
+            ).fetchone()
+            if row is None:
+                return None
+            return ProducerReceipt(
+                component=row["component"],
+                attempt=row["attempt"],
+                started_at_ms=row["started_at_ms"],
+                finished_at_ms=row["finished_at_ms"],
+                outcome=row["outcome"],
+                exit_code=row["exit_code"],
+                stdout_tail=row["stdout_tail"],
+                stderr_tail=row["stderr_tail"],
+                supervisor_run_id=row["supervisor_run_id"],
+                child_auth_hash=row["child_auth_hash"],
+            )
+        finally:
+            con.close()
+
     def producer_state(self, component: str) -> str:
         receipts = self.producer_receipts(component)
         return receipts[-1].outcome if receipts else "never-started"

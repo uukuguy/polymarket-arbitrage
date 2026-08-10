@@ -21,7 +21,11 @@ from polyarb.perception.resource_controller import (
     ResourceController,
     ResourceSample,
 )
-from polyarb.perception.store import DiscoveryAdmissionProof, OpportunityPerceptionStore
+from polyarb.perception.store import (
+    DiscoveryAdmissionProof,
+    OpportunityPerceptionStore,
+    ProducerReceipt,
+)
 
 
 def _seed_candidate_authority(db_path) -> None:
@@ -237,6 +241,7 @@ def test_producer_progress_exposes_current_quote_and_structure_checkpoints(
     assert body["status"] == "available"
     assert body["quote"]["attempt"] is None
     assert body["quote"]["hydration"]["consecutive_failures"] == 0
+    assert body["quote"]["supervisor_receipt"] is None
     assert body["structure"]["attempt"] is None
     assert body["structure"]["comparison"] is None
     assert body["structure"]["sync_window"] is None
@@ -253,6 +258,36 @@ def test_producer_progress_exposes_durable_structure_window_progress(
 
     assert response.status_code == 200
     assert response.json()["structure"]["sync_window"] == window
+
+
+def test_producer_progress_exposes_latest_quote_supervisor_receipt(
+    http_test_client,
+) -> None:
+    store = OpportunityPerceptionStore(http_test_client.app.state.settings.db_path)
+    attempt = store.reserve_producer_attempt(
+        "quote", supervisor_run_id="supervisor-1", started_at_ms=1_700_000_000_000
+    )
+    store.record_producer_receipt(
+        ProducerReceipt(
+            component="quote",
+            attempt=attempt,
+            started_at_ms=1_700_000_000_000,
+            finished_at_ms=1_700_000_000_010,
+            outcome="spawn-error",
+            exit_code=None,
+            stdout_tail="",
+            stderr_tail="supervisor-spawn-error:OSError",
+            supervisor_run_id="supervisor-1",
+            child_auth_hash=None,
+        )
+    )
+
+    response = http_test_client.get("/perception/producer-progress")
+
+    assert response.status_code == 200
+    receipt = response.json()["quote"]["supervisor_receipt"]
+    assert receipt["outcome"] == "spawn-error"
+    assert receipt["stderr_tail"] == "supervisor-spawn-error:OSError"
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,8 @@ import urllib.parse
 import uuid
 from dataclasses import dataclass
 
+from loguru import logger
+
 from polyarb.perception.incidents import (
     Incident,
     IncidentManager,
@@ -138,6 +140,7 @@ class ProducerSupervisor:
             stderr_task = None
             outcome = "spawn-error"
             exit_code = None
+            supervisor_error_kind: str | None = None
             try:
                 attempt_recovery_anchor = self._recovery_anchor(
                     spec.component,
@@ -185,15 +188,23 @@ class ProducerSupervisor:
                 if process is not None:
                     await asyncio.shield(self._terminate(process, spec.terminate_grace_s))
                 raise
-            except OSError:
+            except OSError as error:
                 outcome = "spawn-error"
-            except Exception:
+                supervisor_error_kind = f"supervisor-spawn-error:{type(error).__name__}"
+                logger.warning(supervisor_error_kind)
+            except Exception as error:
                 outcome = "spawn-error"
+                supervisor_error_kind = f"supervisor-control-error:{type(error).__name__}"
+                logger.exception(supervisor_error_kind)
                 if process is not None:
                     await self._terminate(process, spec.terminate_grace_s)
             finally:
                 stdout = await self._drain_result(stdout_task)
                 stderr = await self._drain_result(stderr_task)
+                if supervisor_error_kind is not None:
+                    stderr = (
+                        stderr + b"\n" + supervisor_error_kind.encode("ascii")
+                    )[-spec.output_limit_bytes :]
                 self._store.record_producer_receipt(
                     ProducerReceipt(
                         component=spec.component,
