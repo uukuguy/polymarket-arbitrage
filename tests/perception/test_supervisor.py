@@ -123,6 +123,72 @@ async def test_spawn_error_receipt_preserves_safe_supervisor_error_kind(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_supervisor_retries_locked_terminal_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    """Deploy cancellation must not turn one transient SQLite lock into a crash."""
+    store, supervisor = _supervisor(
+        tmp_path,
+        component="quote",
+        command=(sys.executable, "-c", "import time; time.sleep(5)"),
+    )
+    original_record = store.record_producer_receipt
+    writes = 0
+
+    def lock_once(receipt) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            raise sqlite3.OperationalError("database is locked")
+        original_record(receipt)
+
+    monkeypatch.setattr(store, "record_producer_receipt", lock_once)
+    task = asyncio.create_task(
+        supervisor.run(ProducerSpec(component="quote", timeout_s=2), asyncio.Event())
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert writes == 2
+    assert store.producer_receipts("quote")[0].outcome == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_stop_signal_retries_locked_terminal_receipt_without_crashing(
+    tmp_path, monkeypatch
+) -> None:
+    store, supervisor = _supervisor(
+        tmp_path,
+        component="quote",
+        command=(sys.executable, "-c", "import time; time.sleep(5)"),
+    )
+    original_record = store.record_producer_receipt
+    writes = 0
+
+    def lock_once(receipt) -> None:
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            raise sqlite3.OperationalError("database is locked")
+        original_record(receipt)
+
+    monkeypatch.setattr(store, "record_producer_receipt", lock_once)
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        supervisor.run(ProducerSpec(component="quote", timeout_s=2), stop_event)
+    )
+    await asyncio.sleep(0.05)
+    stop_event.set()
+    await task
+
+    assert writes == 2
+    assert store.producer_receipts("quote")[0].outcome == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_worker_cli_rejects_disabled_component_without_touching_network() -> None:
     class Settings:
         opportunity_producer_supervisor_enabled = False

@@ -141,6 +141,7 @@ class ProducerSupervisor:
             outcome = "spawn-error"
             exit_code = None
             supervisor_error_kind: str | None = None
+            shutdown_requested = False
             try:
                 attempt_recovery_anchor = self._recovery_anchor(
                     spec.component,
@@ -177,6 +178,7 @@ class ProducerSupervisor:
                 )
                 if signal == "stop":
                     outcome = "cancelled"
+                    shutdown_requested = True
                     await self._terminate(process, spec.terminate_grace_s)
                 elif signal == "timeout":
                     outcome = "timeout"
@@ -185,6 +187,7 @@ class ProducerSupervisor:
                     outcome = "success" if exit_code == 0 else "nonzero"
             except asyncio.CancelledError:
                 outcome = "cancelled"
+                shutdown_requested = True
                 if process is not None:
                     await asyncio.shield(self._terminate(process, spec.terminate_grace_s))
                 raise
@@ -205,7 +208,7 @@ class ProducerSupervisor:
                     stderr = (
                         stderr + b"\n" + supervisor_error_kind.encode("ascii")
                     )[-spec.output_limit_bytes :]
-                self._store.record_producer_receipt(
+                await self._record_terminal_receipt(
                     ProducerReceipt(
                         component=spec.component,
                         attempt=attempt,
@@ -221,7 +224,8 @@ class ProducerSupervisor:
                             supervisor_run_id,
                             attempt,
                         ),
-                    )
+                    ),
+                    preserve_shutdown=shutdown_requested,
                 )
 
             if outcome == "cancelled":
@@ -252,6 +256,37 @@ class ProducerSupervisor:
                 return
             except TimeoutError:
                 pass
+
+    async def _record_terminal_receipt(
+        self,
+        receipt: ProducerReceipt,
+        *,
+        preserve_shutdown: bool,
+    ) -> None:
+        """Persist a terminal receipt without masking deploy cancellation.
+
+        A deployment can cancel the supervisor while its child still releases a
+        SQLite writer.  Retry that short handoff; if shutdown wins the race,
+        preserve cancellation so the parent exits cleanly and startup can
+        reconcile the remaining reservation rather than spinning a supervisor.
+        """
+        for retry in range(5):
+            try:
+                self._store.record_producer_receipt(receipt)
+                return
+            except sqlite3.OperationalError as error:
+                if not any(token in str(error).lower() for token in ("locked", "busy")):
+                    raise
+                if retry == 4:
+                    if not preserve_shutdown:
+                        raise
+                    logger.error(
+                        "producer terminal receipt deferred during shutdown "
+                        f"component={receipt.component} attempt={receipt.attempt} "
+                        f"error_kind={type(error).__name__}"
+                    )
+                    return
+                await asyncio.sleep(0.05 * (2**retry))
 
     async def _wait(
         self,

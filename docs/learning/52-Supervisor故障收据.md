@@ -21,6 +21,10 @@ checkpoint 放在一起，所以可以判断失败发生在启动 child 前，�
 “这是 spawn 失败，异常类别是 OSError”，而不是原始 message。因此收据记录
 `supervisor-spawn-error:OSError`，而不记录 message；后者既不安全，也不稳定。
 
+部署关闭时 child 可能尚在释放 SQLite writer。supervisor 因此会在短的有界窗口
+重试终态 receipt；若仍失败，必须保留 shutdown/cancellation 语义，不能用写失败
+覆盖它并把控制面重启成另一条假故障。
+
 ## 自检题
 
 1. 为什么 Dashboard 要同时看 Quote attempt 和 supervisor receipt？

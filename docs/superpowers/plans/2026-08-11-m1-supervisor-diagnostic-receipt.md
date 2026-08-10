@@ -14,3 +14,10 @@ or upstream URL. The existing receipt sanitizer remains the final boundary.
 message and proves that the receipt contains only
 `supervisor-spawn-error:OSError`. HTTP tests prove no phantom receipt and the
 exact latest durable receipt. Run focused supervision/console tests and Ruff.
+
+**Shutdown repair:** When Fly sends stop/cancellation while a child still
+releases SQLite, retry the terminal receipt write five times over a sub-second
+bounded window.  On final shutdown failure preserve the shutdown signal rather
+than crash/restart the supervisor; the durable reservation remains available
+for startup reconciliation.  Test both cancellation and ordinary stop-event
+paths with an injected first `database is locked` result.
