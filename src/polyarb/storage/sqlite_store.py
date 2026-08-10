@@ -48,6 +48,7 @@ from polyarb.perception.structure_contract import (
     STRUCTURE_EVENT_MEMBER_METADATA_CONTRACT,
     STRUCTURE_EVENT_SOURCE_CONTRACT,
     STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
+    STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S,
     STRUCTURE_PROJECTION_EXCLUSION_REASONS,
     STRUCTURE_PUBLICATION_MAX_ROWS,
     STRUCTURE_SOURCE_COMPONENTS,
@@ -10582,7 +10583,13 @@ class SQLiteStore:
             prior_state = str(progress[7])
             prior_cursor = progress[6]
             prior_checkpoint = int(progress[13])
-        writer = self._connect_writer()
+        # Comparison is a low-priority, resumable producer.  Do not inherit
+        # SQLite's 120-second bulk-writer timeout here: a contended checkpoint
+        # must fail visibly and retry, not consume the child hard-limit while
+        # the higher-priority Quote producer needs the same database.
+        writer = self._connect_writer(
+            timeout_s=STRUCTURE_POINTER_SWITCH_WRITER_LOCK_TIMEOUT_S
+        )
         try:
             writer.execute("BEGIN IMMEDIATE")
             writer_legacy = self._comparison_legacy_identity(writer)
