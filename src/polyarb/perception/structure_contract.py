@@ -30,6 +30,11 @@ STRUCTURE_PUBLICATION_CHECKPOINT_STAGES = (
     "superseded",
 )
 STRUCTURE_PUBLICATION_MAX_ROWS = 500
+# The generation-vs-legacy comparison is markedly more expensive than a normal
+# normalization/certification chunk.  Cap it independently of wall time: a
+# congested SQLite writer can make a monotonic-time check arrive too late, but
+# every completed comparison chunk is already a durable recovery checkpoint.
+STRUCTURE_COMPARISON_MAX_CHUNKS_PER_SLICE = 8
 STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS = 100
 STRUCTURE_DRIFT_SOURCE_EVENT_MAX_MEMBER_WORK = 500
 STRUCTURE_DRIFT_SOURCE_EVENT_MAX_PAYLOAD_BYTES = 512 * 1024

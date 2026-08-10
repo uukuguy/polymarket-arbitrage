@@ -12,6 +12,7 @@ from pathlib import Path
 from polyarb.config import Settings
 from polyarb.perception.market_truth import EventMember, GroupTruth, membership_hash
 from polyarb.perception.structure_contract import (
+    STRUCTURE_COMPARISON_MAX_CHUNKS_PER_SLICE,
     STRUCTURE_COMPONENTS,
     STRUCTURE_NORMALIZATION_CONTRACT_VERSION,
     STRUCTURE_POINTER_SWITCH_TRANSACTION_DEADLINE_S,
@@ -546,6 +547,7 @@ def run_structure_publication_slice(
     )
     rows_processed = 0
     chunks_processed = 0
+    comparison_chunks_processed = 0
     publication_id: str | None = None
     final_checkpoint: StructurePublicationCheckpoint | None = None
 
@@ -570,6 +572,13 @@ def run_structure_publication_slice(
         chunks_processed += 1
         rows_processed += result.rows_processed
         final_checkpoint = result
+        if result.component in {
+            "legacy-universe",
+            "generation-universe",
+            "legacy-rejections",
+            "generation-rejections",
+        }:
+            comparison_chunks_processed += 1
         if result.stage != "superseded":
             print(
                 "structure-publication-progress "
@@ -579,7 +588,11 @@ def run_structure_publication_slice(
                 flush=True,
             )
         elapsed_s = time.monotonic() - started_at
-        if result.stage in {"ready", "superseded"} or elapsed_s >= max_elapsed_s:
+        if (
+            result.stage in {"ready", "superseded"}
+            or elapsed_s >= max_elapsed_s
+            or comparison_chunks_processed >= STRUCTURE_COMPARISON_MAX_CHUNKS_PER_SLICE
+        ):
             break
 
     if final_checkpoint is None:

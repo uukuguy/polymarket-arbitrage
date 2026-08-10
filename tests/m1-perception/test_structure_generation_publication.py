@@ -168,6 +168,38 @@ def test_publication_slice_stops_before_starting_chunk_at_elapsed_deadline(
     assert result.elapsed_ms == 45_000
 
 
+def test_publication_slice_bounds_expensive_comparison_chunks(
+    settings_for_test, monkeypatch
+) -> None:
+    """A stalled clock must not let comparison monopolize the producer lane."""
+    calls = 0
+
+    def advance(_settings, _window_id, _max_rows, _remaining_s, *, store=None):
+        nonlocal calls
+        calls += 1
+        return StructurePublicationCheckpoint(
+            "certifying", "legacy-universe", 500, f"legacy-{calls}", "publication-1"
+        )
+
+    monkeypatch.setattr(structure_publication_module.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        structure_publication_module, "run_structure_publication_step", advance
+    )
+
+    result = run_structure_publication_slice(
+        settings_for_test,
+        "window-1",
+        max_rows=500,
+        max_elapsed_s=45.0,
+        max_chunks=100,
+        store=object(),
+    )
+
+    assert calls == 8
+    assert result.chunks_processed == 8
+    assert result.rows_processed == 4_000
+
+
 def test_publication_slice_rejects_mixed_publication_identity(
     settings_for_test, monkeypatch
 ) -> None:
