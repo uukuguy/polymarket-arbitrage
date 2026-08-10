@@ -34,7 +34,10 @@ STRUCTURE_PUBLICATION_MAX_ROWS = 500
 # normalization/certification chunk.  Cap it independently of wall time: a
 # congested SQLite writer can make a monotonic-time check arrive too late, but
 # every completed comparison chunk is already a durable recovery checkpoint.
-STRUCTURE_COMPARISON_MAX_CHUNKS_PER_SLICE = 8
+# Production evidence: four comparison chunks can consume 54 seconds under
+# SQLite writer pressure.  Three leaves a bounded margin below the 75-second
+# child kill boundary while each completed chunk remains resumable.
+STRUCTURE_COMPARISON_MAX_CHUNKS_PER_SLICE = 3
 STRUCTURE_DRIFT_SOURCE_EVENT_MAX_ROWS = 100
 STRUCTURE_DRIFT_SOURCE_EVENT_MAX_MEMBER_WORK = 500
 STRUCTURE_DRIFT_SOURCE_EVENT_MAX_PAYLOAD_BYTES = 512 * 1024

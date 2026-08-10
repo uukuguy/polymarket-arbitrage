@@ -195,9 +195,9 @@ def test_publication_slice_bounds_expensive_comparison_chunks(
         store=object(),
     )
 
-    assert calls == 8
-    assert result.chunks_processed == 8
-    assert result.rows_processed == 4_000
+    assert calls == 3
+    assert result.chunks_processed == 3
+    assert result.rows_processed == 1_500
 
 
 def test_publication_slice_rejects_mixed_publication_identity(
