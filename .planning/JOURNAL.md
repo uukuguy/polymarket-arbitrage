@@ -7561,3 +7561,31 @@ receipt and matching certified Quote run. Confirm the P1 transitions to a
 durable recovered history row only when that chain is proven; then gather
 multi-cycle continuity evidence for Quote, Structure, opportunity feed, Fly
 console, and Polywatch before claiming M1 production stability.
+
+## SESSION 183 — 2026-08-11 (Quote atomic persistence architecture fault)
+
+- [EVIDENCE] Authority DB is 44.24GB on a 100GB Fly volume (56.95GB free).
+  Quote runs write 41,302 token records atomically. Runs 2669, 2670, 2671,
+  2675, 2676 and 2677 all reached the `persist` boundary then terminalized as
+  `child-persist-timeout`; successful comparable writes observed 7.96–13.38s.
+  This is a persistence-tail/atomic-write problem, not an unobserved CLOB
+  failure or a silent daemon stop.
+- [CONTAINMENT / REJECTED HYPOTHESIS] Commit `f8ae780` raised the independently
+  bounded Quote writer budget from 15 to 30 seconds (well inside the 180s
+  child envelope), with a red/green Fly wiring test. Release v337 proves the
+  setting loaded as `30.0`, but run 2677 still terminalized as
+  `child-persist-timeout`. Therefore a slightly wider timeout is not a
+  production fix; do not keep tuning this value.
+- [LIVE FAULT PATH] Strict health is fail, the incident console exposes Quote
+  P1 `feed-unavailable`, Quote-collection P1 with the staged timings, and the
+  independent Structure P1. Resident Polywatch's 21:36Z tick pushed the P1
+  set and opportunity endpoint failure to Telegram with `ok=True`.
+
+### [NEXT — DECISION REQUIRED]
+
+The single 41k-token atomic Quote write must be replaced by durable bounded
+staging chunks followed by one small atomic certification/pointer switch.
+This preserves no-partial-feed serving while removing the false choice between
+unbounded SQLite timeouts and normal tail-latency failures. Obtain approval
+for this structural persistence plan before implementation; do not make a
+fourth timeout-only adjustment.
