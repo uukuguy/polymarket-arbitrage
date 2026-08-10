@@ -56,8 +56,19 @@ def derive_structure_schedule(
     previous_timeout_s: int,
     previous_cadence_s: int,
     attempts_since_adjustment: int,
+    minimum_timeout_s: int = MIN_TIMEOUT_S,
+    maximum_timeout_s: int = MAX_TIMEOUT_S,
+    minimum_cadence_s: int = MIN_CADENCE_S,
+    maximum_cadence_s: int = MAX_CADENCE_S,
 ) -> StructureScheduleDecision:
     """Derive one bounded schedule from durable terminal attempt evidence."""
+    if (
+        minimum_timeout_s <= 0
+        or maximum_timeout_s < minimum_timeout_s
+        or minimum_cadence_s <= 0
+        or maximum_cadence_s < minimum_cadence_s
+    ):
+        raise ValueError("invalid-structure-schedule-bounds")
     successes = [
         duration_s
         for attempt in attempts
@@ -85,8 +96,8 @@ def derive_structure_schedule(
                 math.ceil(previous_timeout_s * 1.2),
                 (success_p95_s + 30) if success_p95_s is not None else 0,
             ),
-            MIN_TIMEOUT_S,
-            MAX_TIMEOUT_S,
+            minimum_timeout_s,
+            maximum_timeout_s,
         )
         cadence_s = _clamp(
             max(
@@ -94,8 +105,8 @@ def derive_structure_schedule(
                 timeout_s + 60,
                 (success_p95_s + 90) if success_p95_s is not None else 0,
             ),
-            MIN_CADENCE_S,
-            MAX_CADENCE_S,
+            minimum_cadence_s,
+            maximum_cadence_s,
         )
         reason = "timeout-backoff"
     elif attempts_since_adjustment < ADJUSTMENT_COOLDOWN_ATTEMPTS:
@@ -103,15 +114,23 @@ def derive_structure_schedule(
         cadence_s = previous_cadence_s
         reason = "cooldown"
     elif success_p95_s is None:
-        timeout_s = configured_timeout_s
-        cadence_s = max(configured_cadence_s, timeout_s + 60)
+        timeout_s = _clamp(configured_timeout_s, minimum_timeout_s, maximum_timeout_s)
+        cadence_s = _clamp(
+            max(configured_cadence_s, timeout_s + 60),
+            minimum_cadence_s,
+            maximum_cadence_s,
+        )
         reason = "bootstrap"
     else:
-        timeout_s = _clamp(success_p95_s + 30, MIN_TIMEOUT_S, MAX_TIMEOUT_S)
+        timeout_s = _clamp(
+            success_p95_s + 30,
+            minimum_timeout_s,
+            maximum_timeout_s,
+        )
         cadence_s = _clamp(
             max(timeout_s + 60, success_p95_s + 90),
-            MIN_CADENCE_S,
-            MAX_CADENCE_S,
+            minimum_cadence_s,
+            maximum_cadence_s,
         )
         if (
             abs(timeout_s - previous_timeout_s) < MIN_ADJUSTMENT_S

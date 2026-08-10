@@ -940,7 +940,7 @@ class SnapshotScheduler:
         self._request_now_event = asyncio.Event()
         self._restore_state()
         self._recover_structure_drift_attempts()
-        self._effective_timeout_s = int(SNAPSHOT_SUBPROCESS_TIMEOUT_S)
+        self._effective_timeout_s = int(structure_attempt_slot_budget_s(None))
         self._effective_cadence_s = int(getattr(settings, "scheduler_interval_s", 300))
         self._restore_effective_schedule()
 
@@ -1011,10 +1011,18 @@ class SnapshotScheduler:
     def _restore_effective_schedule(self) -> None:
         """Restore or derive one bounded schedule from durable attempt truth."""
         try:
+            slot_budget_s = int(structure_attempt_slot_budget_s(None))
+            configured_cadence_s = int(
+                getattr(self._settings, "scheduler_interval_s", 300)
+            )
             latest_adjustment = self._sqlite_store.get_latest_structure_schedule_adjustment()
             if latest_adjustment is not None:
-                self._effective_timeout_s = int(latest_adjustment["timeout_s"])
-                self._effective_cadence_s = int(latest_adjustment["cadence_s"])
+                self._effective_timeout_s = min(
+                    int(latest_adjustment["timeout_s"]), slot_budget_s
+                )
+                self._effective_cadence_s = min(
+                    int(latest_adjustment["cadence_s"]), configured_cadence_s
+                )
 
             attempts = self._sqlite_store.get_snapshot_attempts(limit=30)
             if not attempts:
@@ -1033,17 +1041,21 @@ class SnapshotScheduler:
             )
             decision = derive_structure_schedule(
                 attempts,
-                configured_timeout_s=int(SNAPSHOT_SUBPROCESS_TIMEOUT_S),
-                configured_cadence_s=int(getattr(self._settings, "scheduler_interval_s", 300)),
+                configured_timeout_s=slot_budget_s,
+                configured_cadence_s=configured_cadence_s,
                 previous_timeout_s=self._effective_timeout_s,
                 previous_cadence_s=self._effective_cadence_s,
                 attempts_since_adjustment=attempts_since_adjustment,
+                minimum_timeout_s=slot_budget_s,
+                maximum_timeout_s=slot_budget_s,
+                minimum_cadence_s=configured_cadence_s,
+                maximum_cadence_s=configured_cadence_s,
             )
             changed = (
                 decision.timeout_s != self._effective_timeout_s
                 or decision.cadence_s != self._effective_cadence_s
             )
-            if not changed:
+            if not changed and latest_adjustment is not None:
                 return
             previous_timeout_s = self._effective_timeout_s
             previous_cadence_s = self._effective_cadence_s

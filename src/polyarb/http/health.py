@@ -1590,14 +1590,14 @@ def _build_health_checks(
     configured_timeout_s = int(SNAPSHOT_SUBPROCESS_TIMEOUT_S)
     configured_cadence_s = int(settings.scheduler_interval_s)
     if schedule_adjustment is None:
-        effective_timeout_s = configured_timeout_s
+        persisted_timeout_s = configured_timeout_s
         effective_cadence_s = configured_cadence_s
         schedule_value = "configured"
         success_sample_count = 0
         success_p95_s: object = None
         schedule_reason = "configured"
     else:
-        effective_timeout_s = int(schedule_adjustment["timeout_s"])
+        persisted_timeout_s = int(schedule_adjustment["timeout_s"])
         effective_cadence_s = int(schedule_adjustment["cadence_s"])
         schedule_value = "adaptive"
         success_sample_count = int(schedule_adjustment["success_sample_count"])
@@ -1607,7 +1607,8 @@ def _build_health_checks(
     publication = store.get_latest_structure_publication()
     publication_status = publication.status if publication is not None else None
     producer_slot_budget_s = int(structure_attempt_slot_budget_s(publication_status))
-    attempt_timeout_s = min(effective_timeout_s, producer_slot_budget_s)
+    effective_timeout_s = min(persisted_timeout_s, producer_slot_budget_s)
+    attempt_timeout_s = effective_timeout_s
 
     checks["snapshot:schedule"] = [
         {

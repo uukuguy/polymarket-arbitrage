@@ -1724,7 +1724,7 @@ def test_health_uses_effective_snapshot_timeout_and_surfaces_schedule(
     assert schedule["observedValue"] == "adaptive"
     assert schedule["status"] == "pass"
     assert schedule["output"] == (
-        "configured_timeout_s=240 effective_timeout_s=288 "
+        "configured_timeout_s=240 effective_timeout_s=75 "
         "producer_slot_budget_s=75 attempt_timeout_s=75 "
         "generation_checkpoint_budget_s=45 generation_child_hard_limit_s=75 "
         "pointer_switch_transaction_deadline_s=15 "

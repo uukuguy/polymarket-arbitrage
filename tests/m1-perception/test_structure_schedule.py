@@ -169,16 +169,16 @@ def test_scheduler_bootstraps_and_persists_effective_schedule(
         sqlite_store=store,
     )
 
-    assert scheduler.effective_timeout_s == 288
-    assert scheduler.effective_cadence_s == 348
+    assert scheduler.effective_timeout_s == 75
+    assert scheduler.effective_cadence_s == 300
     assert store.get_latest_structure_schedule_adjustment() == {
         "source_attempt_id": 11,
         "success_sample_count": 10,
         "success_p95_s": 236,
-        "previous_timeout_s": 240,
+        "previous_timeout_s": 75,
         "previous_cadence_s": 300,
-        "timeout_s": 288,
-        "cadence_s": 348,
+        "timeout_s": 75,
+        "cadence_s": 300,
         "reason": "timeout-backoff",
     }
 
@@ -202,7 +202,7 @@ async def test_scheduler_caps_adaptive_timeout_at_producer_slot_budget(
     ) as run_child:
         await scheduler._run_snapshot()
 
-    assert scheduler.effective_timeout_s == 288
+    assert scheduler.effective_timeout_s == 75
     run_child.assert_awaited_once_with(timeout_s=75.0)
 
 
@@ -225,7 +225,7 @@ async def test_scheduler_waits_with_effective_cadence(
 
     await scheduler.run(asyncio.Event())
 
-    assert scheduler._wait_for_next_tick.await_args_list[1].args[1] == 348
+    assert scheduler._wait_for_next_tick.await_args_list[1].args[1] == 300
 
 
 @pytest.mark.asyncio
@@ -260,6 +260,31 @@ def test_scheduler_restart_does_not_repeat_timeout_backoff(
     first = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
     second = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
 
-    assert first.effective_timeout_s == 288
-    assert second.effective_timeout_s == 288
+    assert first.effective_timeout_s == 75
+    assert second.effective_timeout_s == 75
     assert store.count_structure_schedule_adjustments() == 1
+
+
+def test_scheduler_clamps_legacy_persisted_budget_to_producer_slot(
+    daemon_settings_for_test: Any,
+) -> None:
+    daemon_settings_for_test.scheduler_interval_s = 300
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    _seed_production_timing_history(daemon_settings_for_test.db_path)
+    store.append_structure_schedule_adjustment(
+        source_attempt_id=11,
+        decided_at_ms=12_000_000,
+        success_sample_count=0,
+        success_p95_s=None,
+        previous_timeout_s=600,
+        previous_cadence_s=660,
+        timeout_s=600,
+        cadence_s=660,
+        reason="timeout-backoff",
+    )
+
+    scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
+
+    assert scheduler.effective_timeout_s == 75
+    assert scheduler.effective_cadence_s == 300
