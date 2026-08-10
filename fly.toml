@@ -34,7 +34,10 @@ primary_region = "ams"
   # bounded. A writer conflict becomes a typed retry rather than a 180s child
   # hard timeout that stalls the feed.
   POLYARB_NEG_RISK_QUOTE_FETCH_TIMEOUT_S = "75"
-  POLYARB_NEG_RISK_QUOTE_WRITER_TIMEOUT_S = "15"
+  # Production evidence: on the 44GB authority volume, a 41k-token atomic
+  # persist completes in 8–13.4s. Thirty seconds preserves deterministic
+  # headroom while remaining far inside the 180s child envelope.
+  POLYARB_NEG_RISK_QUOTE_WRITER_TIMEOUT_S = "30"
   # Quote hard child timeouts must enter the durable, bounded producer
   # supervisor instead of retrying forever in one daemon process.
   POLYARB_NEG_RISK_QUOTE_SUPERVISOR_ENABLED = "true"

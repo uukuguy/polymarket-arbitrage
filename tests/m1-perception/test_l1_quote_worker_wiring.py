@@ -405,6 +405,10 @@ def test_fly_readonly_quote_release_enables_quote_and_keeps_cleanup_bounded() ->
     assert env["POLYARB_NEG_RISK_QUOTE_WORKER_ENABLED"] == "true"
     assert env["POLYARB_NEG_RISK_QUOTE_INTERVAL_S"] == "60"
     assert env["POLYARB_NEG_RISK_QUOTE_SUPERVISOR_ENABLED"] == "true"
+    # A 44GB production authority database has observed successful atomic
+    # 41k-token Quote persistence at 13.4 seconds. The writer budget must
+    # preserve headroom instead of classifying normal tail latency as failure.
+    assert env["POLYARB_NEG_RISK_QUOTE_WRITER_TIMEOUT_S"] == "30"
     assert env["POLYARB_STRUCTURE_GENERATION_READ_MODE"] == "generation"
     assert env["POLYARB_STRUCTURE_GENERATION_CLEANUP_ENABLED"] == "true"
     assert env["POLYARB_STRUCTURE_GENERATION_CLEANUP_MAX_ROWS"] == "500"
