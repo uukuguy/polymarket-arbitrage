@@ -7488,3 +7488,39 @@ post-fetch persistence timeout and the independent 75-second Structure
 `gamma-markets` timeout. Preserve atomic certification and P1 visibility;
 prove recovery with multiple natural successful Quote/Structure cycles before
 claiming M1 production stability.
+
+## SESSION 181 — 2026-08-11 (Dashboard truth and live Quote recovery)
+
+- [DASHBOARD] The direct Fly operator console now renders both the latest
+  Structure child checkpoint and the independently durable Structure
+  comparison progress. Operators no longer confuse a normal checkpointed
+  child cancellation with a stalled comparison. The console, progress API,
+  incident API, and Polywatch remain read-only diagnostic surfaces.
+- [QUOTE REPAIR / LIVE] Release `f6e82a9` removes repeated
+  `PRAGMA journal_mode=WAL` negotiation from the hot Quote writer connection;
+  WAL remains established by schema initialization. Production Quote runs
+  `2659`, `2660`, and `2661` each completed 41,613 targets with persistence
+  times of 9.678s, 11.632s, and 8.774s, replacing the prior generic 180-second
+  hard-timeout behaviour with successful natural cycles.
+- [RESTART REPAIR / LIVE] A duplicate release invocation briefly stopped both
+  Fly machines; both were immediately restarted and the incident was visible
+  externally as `/healthz` timeout. Commit `db5f418` then made worker-start
+  recovery atomically terminalize both a collecting Quote run and its matching
+  producer attempt (`worker-start-orphaned`), rather than leaving a false live
+  `persist` stage. It is live as release `db5f418` and the Fly app/cron
+  machines are started with the app service check passing.
+- [CURRENT] Production opportunity feed is HTTP 200 with 13 authenticated
+  gross-edge candidates and fresh certified Quote run `2661`; these are
+  observation candidates, not execution permission. Structure generation
+  `891` remains in bounded comparison certification (33,500 rows observed),
+  so the old Structure P1 correctly remains `recovering` and strict health is
+  still fail-closed. Polywatch ran at 20:44 and 20:46 UTC, delivered its first
+  alert with `ok=True`, and suppressed duplicates thereafter.
+
+### [NEXT — CURRENT]
+
+Let Structure generation `891` finish its bounded comparison, publish its
+pointer, and prove an ensuing certified Quote uses that exact new Structure
+receipt. Verify the Structure P1 closes only through that matching recovery
+chain, then collect multi-cycle Quote/Structure/opportunity/Polywatch evidence
+before claiming M1 production-stable or acceptance-ready.
