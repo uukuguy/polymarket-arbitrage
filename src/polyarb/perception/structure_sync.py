@@ -37,6 +37,9 @@ STRUCTURE_REMOTE_PAGE_MAX_ELAPSED_S = 35.0
 # remains below the 35-second page envelope and can checkpoint or terminalize
 # before the 75-second subprocess kill.
 STRUCTURE_REMOTE_PAGE_REQUEST_TIMEOUT_S = 10.0
+# The online child must leave enough time to report a busy writer and retry the
+# same cursor. Offline/import callers retain SQLiteStore's longer default.
+STRUCTURE_PAGE_COMMIT_WRITER_TIMEOUT_S = 5.0
 
 
 class StructurePageDeadlineExceeded(ValueError):
@@ -119,6 +122,7 @@ class StructureSyncWorker:
                 window_id=window["id"], requested_cursor=page.requested_cursor,
                 next_cursor=page.next_cursor, completed=page.completed,
                 events=list(page.events), finished_at_ms=page.finished_at_ms,
+                writer_timeout_s=STRUCTURE_PAGE_COMMIT_WRITER_TIMEOUT_S,
             )
             _emit_page_boundary("gamma-events", "commit", "complete", _elapsed_ms(started))
             _emit_stage(
@@ -154,6 +158,7 @@ class StructureSyncWorker:
                 window_id=window["id"], requested_cursor=page.requested_cursor,
                 next_cursor=page.next_cursor, completed=page.completed,
                 markets=list(page.markets), finished_at_ms=page.finished_at_ms,
+                writer_timeout_s=STRUCTURE_PAGE_COMMIT_WRITER_TIMEOUT_S,
             )
             _emit_page_boundary("gamma-markets", "commit", "complete", _elapsed_ms(started))
             _emit_stage(

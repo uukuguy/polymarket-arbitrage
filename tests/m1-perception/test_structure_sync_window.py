@@ -864,6 +864,44 @@ def test_structure_writer_uses_production_busy_timeout(tmp_path, monkeypatch) ->
     assert observed_timeouts[-1] == SQLITE_BUSY_TIMEOUT_S
 
 
+def test_structure_market_page_can_use_a_bounded_online_writer_deadline(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """One online page must yield on a busy writer before its child is killed."""
+    db_path = tmp_path / "state.db"
+    store = SQLiteStore(db_path)
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[],
+        finished_at_ms=200,
+    )
+    real_connect = sqlite3.connect
+    observed_timeouts: list[float | None] = []
+
+    def recording_connect(*args, **kwargs):
+        observed_timeouts.append(kwargs.get("timeout"))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+    store.commit_structure_market_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor="opaque-market-2",
+        completed=False,
+        markets=[{"id": "market-1", "active": True, "closed": False}],
+        finished_at_ms=300,
+        writer_timeout_s=5.0,
+    )
+
+    assert observed_timeouts[-1] == 5.0
+
+
 def test_structure_window_stages_markets_only_after_event_coverage_completes(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "state.db")
     store.init_schema()

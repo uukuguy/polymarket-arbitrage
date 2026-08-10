@@ -14370,6 +14370,7 @@ class SQLiteStore:
         completed: bool,
         events: list[dict],
         finished_at_ms: int,
+        writer_timeout_s: float | None = None,
     ) -> None:
         """Stage one validated event page and advance its opaque cursor together."""
         if not isinstance(window_id, str) or not window_id:
@@ -14395,7 +14396,7 @@ class SQLiteStore:
                 hashlib.sha256(payload.encode()).hexdigest(),
                 len(payload.encode()),
             ))
-        con = self._connect_writer()
+        con = self._connect_writer(timeout_s=writer_timeout_s)
         try:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
@@ -14600,6 +14601,7 @@ class SQLiteStore:
         completed: bool,
         markets: list[dict],
         finished_at_ms: int,
+        writer_timeout_s: float | None = None,
     ) -> None:
         """Stage one market page only after complete event coverage is durable."""
         if not isinstance(window_id, str) or not window_id:
@@ -14614,7 +14616,7 @@ class SQLiteStore:
             serialized.append(
                 (market_id, json.dumps(market, sort_keys=True), requested_cursor)
             )
-        con = self._connect_writer()
+        con = self._connect_writer(timeout_s=writer_timeout_s)
         try:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute(
