@@ -447,6 +447,7 @@ async def test_certification_failure_records_pipeline_incident() -> None:
     from polyarb.routing.opportunity_scanner import StaleUniverseError
 
     recorded: list[tuple[str, int | None]] = []
+    delays: list[float] = []
 
     async def collect_once() -> QuoteCollectionResult:
         return _result(2156)
@@ -458,6 +459,7 @@ async def test_certification_failure_records_pipeline_incident() -> None:
         recorded.append((type(error).__name__, None if result is None else result.run_id))
 
     async def wait_for_stop(_stop: asyncio.Event, _delay_s: float) -> bool:
+        delays.append(_delay_s)
         return True
 
     worker = QuoteWorker(
@@ -471,6 +473,7 @@ async def test_certification_failure_records_pipeline_incident() -> None:
     await worker.run(asyncio.Event())
 
     assert recorded == [("StaleUniverseError", 2156)]
+    assert delays == pytest.approx([300.0], abs=0.1)
 
 
 async def test_failed_quote_payload_is_reclaimed_before_immediate_retry() -> None:

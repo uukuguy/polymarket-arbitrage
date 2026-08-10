@@ -34,6 +34,7 @@ from polyarb.routing.opportunity_scanner import (
     OpportunityLeg,
     OpportunityScanResult,
     StaleQuoteRunError,
+    StaleUniverseError,
     scan_certified_neg_risk_quote_projection,
 )
 from polyarb.storage.sqlite_store import SQLiteStore
@@ -856,6 +857,7 @@ class QuoteWorker:
             while not stop_event.is_set():
                 attempt_started = self._monotonic()
                 retry_immediately = False
+                next_delay_override_s: float | None = None
                 exit_for_supervisor = False
                 result = None
                 producer_slot_acquired = False
@@ -1070,6 +1072,14 @@ class QuoteWorker:
                         f"kind={type(error).__name__} "
                         f"consecutive={self.runtime.consecutive_failures}"
                     )
+                    if isinstance(error, StaleUniverseError):
+                        # The completed child proved the currently published
+                        # Structure truth is too old. Repeating a 40k-token
+                        # fetch only starves the in-flight Structure
+                        # publication that can make the universe valid again.
+                        # A successful pointer switch calls request_now(), so
+                        # this bounded backoff never delays actual recovery.
+                        next_delay_override_s = 300.0
                 else:
                     # Collection-only test workers have no certification
                     # boundary, so their successful result is published here.
@@ -1102,7 +1112,14 @@ class QuoteWorker:
                 elapsed_s = max(0.0, self._monotonic() - attempt_started)
                 if exit_for_supervisor:
                     break
-                delay_s = 0.0 if retry_immediately else max(0.0, self._interval_s - elapsed_s)
+                delay_s = (
+                    0.0
+                    if retry_immediately
+                    else max(
+                        0.0,
+                        (next_delay_override_s or self._interval_s) - elapsed_s,
+                    )
+                )
                 if await self._wait_for_next_attempt(stop_event, delay_s):
                     break
         finally:
