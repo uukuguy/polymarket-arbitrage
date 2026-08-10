@@ -7524,3 +7524,40 @@ pointer, and prove an ensuing certified Quote uses that exact new Structure
 receipt. Verify the Structure P1 closes only through that matching recovery
 chain, then collect multi-cycle Quote/Structure/opportunity/Polywatch evidence
 before claiming M1 production-stable or acceptance-ready.
+
+## SESSION 182 — 2026-08-11 (Typed Structure boundary and live operator proof)
+
+- [REPAIR / DEPLOY] Commit `c9c6c22` makes the Structure publication-contract
+  reconciliation at the ready-to-publish authority boundary subject to a
+  five-second SQLite progress-handler deadline. It atomically rolls back and
+  reports the allowlisted child protocol value
+  `publication-contract-deadline`, rather than consuming the 75-second parent
+  envelope as an unclassified timeout. CLI, scheduler marker parsing, durable
+  stderr tail, and rollback behavior are covered by focused regression tests.
+- [DASHBOARD] The direct Fly console now includes Structure recovered-severe
+  history alongside Quote, capacity, live producer arbitration, and durable
+  producer checkpoints. It is available at
+  `https://polyarb-l1.fly.dev/perception/console`; unavailable reads are shown
+  as an operator-visibility fault, never as an empty incident set.
+- [LIVE EVIDENCE] Release `c9c6c22c95cd33754c7172fa809461650138bb24` runs as
+  Fly v336 (app `871353b0660468`, cron `2862244f3727e8`) with the routing
+  service check passing. Quote runs `2673` and `2674` completed 41,302 targets
+  with 10.8–13.4 second persistence. The opportunity API served 15 live gross
+  candidates using Structure snapshot `891`; all remain `not-verified` for
+  execution.
+- [FAULT VISIBILITY] The historical Structure P1 remains open and visible with
+  the exact `snapshot-subprocess-timeout`, stage `gamma-events`, 76.481-second
+  elapsed evidence, automatic bounded retry, and operator action. At 21:24Z
+  the resident Polywatch cron pushed that P1 to Telegram with `ok=True`, while
+  separately reporting the opportunity endpoint healthy (`count=15`). New
+  Structure children checkpoint 40 event pages in 10.9–13.1 seconds rather
+  than timing out; their source window is still progressing, so the P1 is not
+  prematurely closed.
+
+### [NEXT — CURRENT]
+
+Observe the active Structure source window through a post-failure publication
+receipt and matching certified Quote run. Confirm the P1 transitions to a
+durable recovered history row only when that chain is proven; then gather
+multi-cycle continuity evidence for Quote, Structure, opportunity feed, Fly
+console, and Polywatch before claiming M1 production stability.
