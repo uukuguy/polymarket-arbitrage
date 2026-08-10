@@ -673,6 +673,32 @@ def test_quote_timeout_incident_exposes_operator_diagnosis(http_test_client) -> 
     }
 
 
+def test_quote_timeout_with_integral_float_deadline_exposes_operator_diagnosis(
+    http_test_client,
+) -> None:
+    """Production timeout budgets are floats and must not make dashboard diagnosis blank."""
+    from polyarb.daemon.quote_incidents import QuoteIncidentLifecycle
+
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
+    QuoteIncidentLifecycle(IncidentManager(store, clock_ms=lambda: 1_000)).record_timeout(
+        run_id=1909,
+        requested_token_count=38_972,
+        deadline_s=180.0,
+        consecutive_failures=1,
+        last_success_age_s=None,
+        failure_kind="child-hard-timeout",
+    )
+
+    diagnosis = http_test_client.get("/perception/incidents?limit=10").json()["items"][0][
+        "diagnosis"
+    ]
+
+    assert diagnosis is not None
+    assert diagnosis["severity"] == "p1"
+    assert diagnosis["deadline_s"] == 180.0
+    assert diagnosis["next_action"] == "inspect-stage-checkpoint-and-rebalance-child-budget"
+
+
 def test_structure_incident_exposes_operator_diagnosis(http_test_client) -> None:
     """A failed Structure publication is actionable from the main console API."""
     from polyarb.daemon.structure_incidents import StructureIncidentLifecycle

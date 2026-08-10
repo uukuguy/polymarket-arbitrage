@@ -9,6 +9,7 @@ import base64
 import binascii
 import contextvars
 import json
+import math
 import re
 import sqlite3
 import threading
@@ -1078,7 +1079,8 @@ def _quote_incident_diagnosis(evidence: dict[str, object]) -> dict[str, object] 
     age = evidence.get("last_success_age_s")
     if (
         isinstance(deadline_s, bool)
-        or not isinstance(deadline_s, int)
+        or not isinstance(deadline_s, (int, float))
+        or not math.isfinite(float(deadline_s))
         or deadline_s <= 0
         or isinstance(failures, bool)
         or not isinstance(failures, int)
@@ -1104,7 +1106,7 @@ def _quote_incident_diagnosis(evidence: dict[str, object]) -> dict[str, object] 
         "impact": evidence["impact"],
         "automatic_action": evidence["automatic_action"],
         "next_action": evidence["next_action"],
-        "deadline_s": deadline_s,
+        "deadline_s": float(deadline_s),
         "consecutive_failures": failures,
         "last_success_age_s": None if age is None else float(age),
         "free_percent": None,
