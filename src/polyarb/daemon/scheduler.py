@@ -1960,6 +1960,15 @@ class SnapshotScheduler:
                 )
                 # FAILED status
                 self._failure_counter += 1
+                if self._on_structure_failure is not None:
+                    try:
+                        self._on_structure_failure(
+                            "snapshot-status-failed",
+                            getattr(result, "elapsed_ms", None),
+                            getattr(result, "last_stage", None),
+                        )
+                    except Exception:
+                        logger.warning("structure incident recording failed")
                 logger.warning(
                     f"snapshot tick FAILED: status={result_status} "
                     f"failure_counter={self._failure_counter}/{self.FAILURE_THRESHOLD}"
