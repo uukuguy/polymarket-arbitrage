@@ -37,6 +37,7 @@ from polyarb.routing.opportunity_scanner import (
     StaleUniverseError,
     scan_certified_neg_risk_quote_projection,
 )
+from polyarb.routing.quote_timing import bounded_quote_supervisor_timeout_s
 from polyarb.storage.sqlite_store import SQLiteStore
 
 CollectOnce = Callable[[], Awaitable[QuoteCollectionResult]]
@@ -1423,7 +1424,14 @@ def build_production_quote_worker(
         record_certified_success_incident=record_certified_success_incident,
         on_cycle_started=on_cycle_started,
         producer_arbitrator=producer_arbitrator,
-        producer_lease_s=settings.neg_risk_quote_child_hard_limit_s,
+        # The process child has a 180s collection cap, but the lease must
+        # protect the entire supervised pipeline through certification and
+        # compact-feed publication. Otherwise its lease expires while that
+        # tail is still writing and a replacement worker overlaps it.
+        producer_lease_s=bounded_quote_supervisor_timeout_s(
+            settings.neg_risk_quote_supervisor_timeout_s,
+            settings.neg_risk_quote_interval_s,
+        ),
         producer_lock=producer_lock,
         interval_s=settings.neg_risk_quote_interval_s,
         stop_after_consecutive_timeouts=stop_after_consecutive_timeouts,

@@ -942,6 +942,23 @@ def test_builder_is_disabled_by_default_and_honors_interval(tmp_path) -> None:
     assert worker.interval_s == 77
 
 
+def test_production_worker_lease_covers_the_supervised_certification_tail(tmp_path) -> None:
+    """A replacement Quote child must not overlap a timed-out predecessor's tail."""
+    from polyarb.daemon.quote_worker import build_production_quote_worker
+
+    settings = Settings(
+        db_path=tmp_path / "supervised.db",
+        neg_risk_quote_worker_enabled=True,
+        neg_risk_quote_child_hard_limit_s=180,
+        neg_risk_quote_supervisor_timeout_s=210,
+    )
+
+    worker = build_production_quote_worker(settings)
+
+    assert worker is not None
+    assert worker._producer_lease_s == 210
+
+
 class _FakeProcess:
     def __init__(
         self,

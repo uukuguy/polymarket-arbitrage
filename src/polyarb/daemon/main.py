@@ -86,7 +86,7 @@ from polyarb.perception.resource_controller import (
 from polyarb.perception.resource_incidents import ResourcePressureIncidents
 from polyarb.perception.store import OpportunityPerceptionStore
 from polyarb.perception.supervisor import ProducerSpec, ProducerSupervisor
-from polyarb.routing.quote_timing import QUOTE_AGE_SLA_SECONDS
+from polyarb.routing.quote_timing import bounded_quote_supervisor_timeout_s
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
@@ -381,11 +381,9 @@ def _start_supervised_producers(
                     ProducerSpec(
                         component=component,
                         timeout_s=(
-                            min(
+                            bounded_quote_supervisor_timeout_s(
                                 settings.neg_risk_quote_supervisor_timeout_s,
-                                QUOTE_AGE_SLA_SECONDS
-                                - settings.neg_risk_quote_interval_s
-                                - 1.0,
+                                settings.neg_risk_quote_interval_s,
                             )
                             if component == "quote"
                             else settings.producer_stall_timeout_s
