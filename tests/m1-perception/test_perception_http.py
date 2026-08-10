@@ -224,9 +224,7 @@ async def test_perception_read_uses_dedicated_lane_when_default_executor_is_bloc
 ) -> None:
     """An overloaded producer executor cannot starve the operator read model."""
     lane = BoundedReadLane("test-perception-read", capacity=1)
-    request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(perception_read_lane=lane))
-    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(perception_read_lane=lane)))
     blocked = threading.Event()
     real_to_thread = asyncio.to_thread
 
@@ -279,9 +277,7 @@ def test_status_and_current_opportunities_expose_authenticated_candidate_state(
     _seed_candidate_authority(db_path)
 
     status = http_test_client.get("/perception/status")
-    opportunities = http_test_client.get(
-        "/perception/opportunities?limit=1&after_group_id="
-    )
+    opportunities = http_test_client.get("/perception/opportunities?limit=1&after_group_id=")
 
     assert status.status_code == 200
     status_body = status.json()
@@ -326,7 +322,7 @@ def test_status_and_current_opportunities_expose_authenticated_candidate_state(
         ],
         "limit": 1,
         "next_after_group_id": None,
-        }
+    }
 
 
 def test_group_timeline_merges_four_classes_with_stable_equal_time_cursor(
@@ -370,9 +366,7 @@ def test_group_timeline_cursor_is_canonical_and_bound_to_group_identity(
 ) -> None:
     db_path = http_test_client.app.state.sqlite_store.db_path
     _seed_equal_timestamp_group_timeline(db_path)
-    cursor = http_test_client.get(
-        "/perception/groups/g-1/timeline?limit=1"
-    ).json()["next_before"]
+    cursor = http_test_client.get("/perception/groups/g-1/timeline?limit=1").json()["next_before"]
 
     wrong_group = http_test_client.get(
         "/perception/groups/g-2/timeline",
@@ -451,14 +445,8 @@ def test_group_timeline_represents_transition_across_candidate_floor(
         last_result="no-edge",
     )
 
-    body_a = http_test_client.get(
-        "/perception/groups/g-a/timeline?limit=100"
-    ).json()
-    transition = next(
-        item
-        for item in body_a["items"]
-        if item["class"] == "opportunity_transition"
-    )
+    body_a = http_test_client.get("/perception/groups/g-a/timeline?limit=100").json()
+    transition = next(item for item in body_a["items"] if item["class"] == "opportunity_transition")
     assert transition["from"] == {
         "last_result": "watching",
         "opportunity": True,
@@ -468,9 +456,7 @@ def test_group_timeline_represents_transition_across_candidate_floor(
         "opportunity": False,
     }
     assert {
-        item["quote_batch_id"]
-        for item in body_a["items"]
-        if item["class"] == "quote_batch"
+        item["quote_batch_id"] for item in body_a["items"] if item["class"] == "quote_batch"
     } == {"q-a2"}
     assert body_a["history_complete"] == {
         "membership": True,
@@ -479,9 +465,7 @@ def test_group_timeline_represents_transition_across_candidate_floor(
         "incident": True,
     }
 
-    body_b = http_test_client.get(
-        "/perception/groups/g-b/timeline?limit=100"
-    ).json()
+    body_b = http_test_client.get("/perception/groups/g-b/timeline?limit=100").json()
     assert body_b["history_complete"]["quote"] is False
     assert body_b["history_complete"]["opportunity"] is False
     assert body_b["history_floor"]["quote"]["scope"] == "global"
@@ -515,9 +499,7 @@ def test_group_timeline_enforces_shared_deadline_and_response_cap(
 
     monkeypatch.setattr(perception, "_timeline", slow_timeline)
     started = time.monotonic()
-    response = http_test_client.get(
-        "/perception/groups/g-1/timeline?limit=2"
-    )
+    response = http_test_client.get("/perception/groups/g-1/timeline?limit=2")
 
     assert response.status_code == 503
     assert time.monotonic() - started <= 1.1
@@ -528,9 +510,7 @@ def test_group_timeline_enforces_shared_deadline_and_response_cap(
         "_timeline",
         lambda *_args: {"status": "available", "oversized": "x" * 1_048_576},
     )
-    response = http_test_client.get(
-        "/perception/groups/g-1/timeline?limit=2"
-    )
+    response = http_test_client.get("/perception/groups/g-1/timeline?limit=2")
     assert response.status_code == 503
     assert response.json() == {
         "status": "unavailable",
@@ -603,9 +583,7 @@ def test_group_reads_page_safely_beyond_total_history_bound(
     http_test_client,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = OpportunityPerceptionStore(
-        http_test_client.app.state.sqlite_store.db_path
-    )
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
     legs = (
         GroupLeg("m-1", "c-1", "yes-1", "One"),
         GroupLeg("m-2", "c-2", "yes-2", "Two"),
@@ -626,15 +604,12 @@ def test_group_reads_page_safely_beyond_total_history_bound(
     groups = http_test_client.get("/perception/groups?limit=10")
     assert groups.status_code == 200
     assert groups.json()["items"][0]["revision"] == 3
-    latest = http_test_client.get(
-        "/perception/groups/long-history/history?limit=2"
-    )
+    latest = http_test_client.get("/perception/groups/long-history/history?limit=2")
     assert latest.status_code == 200
     assert [item["revision"] for item in latest.json()["items"]] == [3, 2]
     assert latest.json()["next_before_revision"] == 2
     oldest = http_test_client.get(
-        "/perception/groups/long-history/history"
-        "?limit=2&before_revision=2"
+        "/perception/groups/long-history/history?limit=2&before_revision=2"
     )
     assert oldest.status_code == 200
     assert [item["revision"] for item in oldest.json()["items"]] == [1]
@@ -690,12 +665,65 @@ def test_quote_timeout_incident_exposes_operator_diagnosis(http_test_client) -> 
         "impact": "feed-unavailable",
         "automatic_action": "retry-immediately",
         "next_action": "inspect-clob-and-child-io",
-            "deadline_s": 120,
-            "consecutive_failures": 3,
-            "last_success_age_s": 3057.8,
-            "free_percent": None,
-            "failure_reason": "quote-collection-subprocess-timeout",
-        }
+        "deadline_s": 120,
+        "consecutive_failures": 3,
+        "last_success_age_s": 3057.8,
+        "free_percent": None,
+        "failure_reason": "quote-collection-subprocess-timeout",
+    }
+
+
+def test_structure_incident_exposes_operator_diagnosis(http_test_client) -> None:
+    """A failed Structure publication is actionable from the main console API."""
+    from polyarb.daemon.structure_incidents import StructureIncidentLifecycle
+
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
+    StructureIncidentLifecycle(IncidentManager(store, clock_ms=lambda: 1_000)).record_failure(
+        failure_kind="snapshot-subprocess-timeout",
+        elapsed_ms=45_198,
+        last_stage="persist",
+    )
+
+    item = http_test_client.get("/perception/incidents?limit=10").json()["items"][0]
+
+    assert item["scope"] == "structure"
+    assert item["diagnosis"] == {
+        "severity": "p1",
+        "reminder_interval_s": 300,
+        "impact": "market-map-stale",
+        "automatic_action": "retry-bounded-structure-child",
+        "next_action": "inspect-stage-checkpoint-and-child-budget",
+        "deadline_s": None,
+        "consecutive_failures": 1,
+        "last_success_age_s": None,
+        "free_percent": None,
+        "failure_reason": "snapshot-subprocess-timeout",
+        "elapsed_ms": 45_198,
+        "last_stage": "persist",
+    }
+
+
+def test_structure_lock_incident_exposes_diagnosis_without_child_timing(
+    http_test_client,
+) -> None:
+    """A parent-side SQLite lock is still a P1 even without child diagnostics."""
+    from polyarb.daemon.structure_incidents import StructureIncidentLifecycle
+
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
+    StructureIncidentLifecycle(IncidentManager(store, clock_ms=lambda: 1_000)).record_failure(
+        failure_kind="database is locked",
+        elapsed_ms=None,
+        last_stage=None,
+    )
+
+    diagnosis = http_test_client.get("/perception/incidents?limit=10").json()["items"][0][
+        "diagnosis"
+    ]
+
+    assert diagnosis is not None
+    assert diagnosis["failure_reason"] == "database is locked"
+    assert diagnosis["elapsed_ms"] is None
+    assert diagnosis["last_stage"] is None
 
 
 def test_quote_child_failure_exposes_diagnosis_without_prior_success(
@@ -806,9 +834,7 @@ def test_capacity_incident_exposes_operator_diagnosis(http_test_client) -> None:
 def test_incident_history_endpoint_exposes_exact_bounded_lifecycle(
     http_test_client,
 ) -> None:
-    store = OpportunityPerceptionStore(
-        http_test_client.app.state.sqlite_store.db_path
-    )
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
     now = [1_000]
     manager = IncidentManager(store, clock_ms=lambda: now[0])
     incident = manager.detect("candidate", "child-failed", {"attempt": 1})
@@ -819,9 +845,7 @@ def test_incident_history_endpoint_exposes_exact_bounded_lifecycle(
     now[0] += 1
     manager.transition(incident.id, "recovering", {"retry": 1})
 
-    response = http_test_client.get(
-        f"/perception/incidents/{incident.id}/history"
-    )
+    response = http_test_client.get(f"/perception/incidents/{incident.id}/history")
 
     assert response.status_code == 200
     body = response.json()
@@ -843,9 +867,7 @@ def test_incident_history_endpoint_exposes_exact_bounded_lifecycle(
 def test_incident_history_endpoint_exposes_verified_candidate_writer(
     http_test_client,
 ) -> None:
-    store = OpportunityPerceptionStore(
-        http_test_client.app.state.sqlite_store.db_path
-    )
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
     now = [1]
     manager = IncidentManager(store, clock_ms=lambda: now[0])
     incident = manager.detect("candidate", "child-failed", {"attempt": 1})
@@ -869,9 +891,7 @@ def test_incident_history_endpoint_exposes_verified_candidate_writer(
         },
     )
 
-    response = http_test_client.get(
-        f"/perception/incidents/{incident.id}/history"
-    )
+    response = http_test_client.get(f"/perception/incidents/{incident.id}/history")
 
     assert response.status_code == 200
     body = response.json()
@@ -887,9 +907,7 @@ def test_incident_history_endpoint_rejects_invalid_identity(
     http_test_client,
     incident_id: str,
 ) -> None:
-    response = http_test_client.get(
-        f"/perception/incidents/{incident_id}/history"
-    )
+    response = http_test_client.get(f"/perception/incidents/{incident_id}/history")
 
     assert response.status_code == 400
     assert response.json()["reason"] == "invalid-incident-id"
@@ -898,9 +916,7 @@ def test_incident_history_endpoint_rejects_invalid_identity(
 def test_incident_history_endpoint_returns_not_found_without_guessing(
     http_test_client,
 ) -> None:
-    response = http_test_client.get(
-        f"/perception/incidents/{'a' * 32}/history"
-    )
+    response = http_test_client.get(f"/perception/incidents/{'a' * 32}/history")
 
     assert response.status_code == 404
     assert response.json() == {
@@ -912,9 +928,7 @@ def test_incident_history_endpoint_returns_not_found_without_guessing(
 def test_recent_incident_endpoint_discovers_latest_state_after_open_removal(
     http_test_client,
 ) -> None:
-    store = OpportunityPerceptionStore(
-        http_test_client.app.state.sqlite_store.db_path
-    )
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
     now = [1_000]
     manager = IncidentManager(store, clock_ms=lambda: now[0])
     incident = manager.detect("candidate", "child-nonzero", {"attempt": 1})
@@ -1044,8 +1058,7 @@ def test_qualification_endpoint_counts_mismatch_and_expired_collecting_lease(
             ),
         )
         con.execute(
-            "UPDATE neg_risk_quote_runs SET status='complete',completed_at_ms=2 "
-            "WHERE id=?",
+            "UPDATE neg_risk_quote_runs SET status='complete',completed_at_ms=2 WHERE id=?",
             (complete,),
         )
         con.execute(
@@ -1066,9 +1079,7 @@ def test_qualification_endpoint_counts_mismatch_and_expired_collecting_lease(
 def test_resource_endpoint_returns_current_and_keyset_history(
     http_test_client,
 ) -> None:
-    store = OpportunityPerceptionStore(
-        http_test_client.app.state.sqlite_store.db_path
-    )
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
     now = [2_000]
     controller = ResourceController(
         store,
@@ -1096,13 +1107,9 @@ def test_resource_endpoint_returns_current_and_keyset_history(
     assert body["next_before_sequence"] == 2
     assert body["history_floor"] is None
 
-    second = http_test_client.get(
-        "/perception/resources?limit=2&before_sequence=2"
-    )
+    second = http_test_client.get("/perception/resources?limit=2&before_sequence=2")
     assert second.status_code == 200
-    assert [
-        item["decision"]["sequence"] for item in second.json()["items"]
-    ] == [1]
+    assert [item["decision"]["sequence"] for item in second.json()["items"]] == [1]
     assert second.json()["next_before_sequence"] is None
 
 
@@ -1116,17 +1123,13 @@ def test_resource_endpoint_rejects_invalid_sequence_cursor(
         params={"before_sequence": value},
     )
     assert response.status_code == 400
-    assert response.json()["reason"] == (
-        "before-sequence-must-be-a-positive-integer"
-    )
+    assert response.json()["reason"] == ("before-sequence-must-be-a-positive-integer")
 
 
 def test_incident_endpoint_pages_more_than_legacy_history_cap(
     http_test_client,
 ) -> None:
-    store = OpportunityPerceptionStore(
-        http_test_client.app.state.sqlite_store.db_path
-    )
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
     now = [1_000]
     manager = IncidentManager(store, clock_ms=lambda: now[0])
     for sequence in range(600):
@@ -1150,17 +1153,15 @@ def test_incident_endpoint_pages_more_than_legacy_history_cap(
     assert second.status_code == 200
     second_body = second.json()
     assert len(second_body["items"]) == 100
-    assert {
-        item["incident_id"] for item in first_body["items"]
-    }.isdisjoint(item["incident_id"] for item in second_body["items"])
+    assert {item["incident_id"] for item in first_body["items"]}.isdisjoint(
+        item["incident_id"] for item in second_body["items"]
+    )
 
 
 def test_status_uses_open_aggregate_after_incident_compaction(
     http_test_client,
 ) -> None:
-    store = OpportunityPerceptionStore(
-        http_test_client.app.state.sqlite_store.db_path
-    )
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
     now = [1_000]
     manager = IncidentManager(store, clock_ms=lambda: now[0])
     for sequence in range(600):
@@ -1181,9 +1182,7 @@ def test_discovery_status_does_not_permanently_fail_on_old_receipt_volume(
     http_test_client,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = OpportunityPerceptionStore(
-        http_test_client.app.state.sqlite_store.db_path
-    )
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
     store.configure_discovery_admission(
         DiscoveryAdmissionProof(
             effective_capacity=2,
@@ -1218,9 +1217,7 @@ def test_discovery_status_does_not_permanently_fail_on_old_receipt_volume(
 def test_discovery_exposes_validated_coverage_load_and_admission_evidence(
     http_test_client,
 ) -> None:
-    store = OpportunityPerceptionStore(
-        http_test_client.app.state.sqlite_store.db_path
-    )
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
     proof = DiscoveryAdmissionProof(
         effective_capacity=2,
         candidate_max_wait_ms=60_000,
@@ -1288,9 +1285,7 @@ def test_discovery_exposes_validated_coverage_load_and_admission_evidence(
 def test_reconciliation_exposes_validated_duration_and_diff_counts(
     http_test_client,
 ) -> None:
-    store = OpportunityPerceptionStore(
-        http_test_client.app.state.sqlite_store.db_path
-    )
+    store = OpportunityPerceptionStore(http_test_client.app.state.sqlite_store.db_path)
     window = store.begin_reconciliation(started_at_ms=10)
 
     response = http_test_client.get("/perception/reconciliation")
@@ -1322,7 +1317,7 @@ def test_incidents_recursively_redact_legacy_secret_shapes(http_test_client) -> 
                 "db": "postgresql://user:hunter2@db.invalid/x?password=hunter2",
                 "note": "password=hunter2",
                 "cookie": "session=hunter2",
-            }
+            },
         },
     )
     response = http_test_client.get("/perception/incidents")
@@ -1344,10 +1339,7 @@ def test_status_rejects_forged_candidate_receipt_rowid(http_test_client) -> None
     db_path = http_test_client.app.state.sqlite_store.db_path
     _seed_candidate_authority(db_path)
     with sqlite3.connect(db_path) as con:
-        con.execute(
-            "UPDATE neg_risk_candidate_success_receipts "
-            "SET group_revision_row_id=999"
-        )
+        con.execute("UPDATE neg_risk_candidate_success_receipts SET group_revision_row_id=999")
     assert http_test_client.get("/perception/status").status_code == 503
 
 

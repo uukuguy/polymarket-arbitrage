@@ -118,11 +118,15 @@ async def producer_arbitration_status(request: Request) -> JSONResponse:
     now_ms = int(time.time() * 1_000)
     lease = None if current is None else asdict(current)
     if current is None:
-        action = "No producer owns the slot; the next scheduled Quote or Structure cycle may acquire it."
+        action = (
+            "No producer owns the slot; the next scheduled Quote or Structure cycle may acquire it."
+        )
     elif current.expires_at_ms <= now_ms:
         action = "Lease is expired and will be atomically reclaimed by the next producer; inspect recent receipts if it does not clear."
     elif current.owner == "structure":
-        action = "Structure has a bounded 45-second window; Quote retries automatically after release."
+        action = (
+            "Structure has a bounded 45-second window; Quote retries automatically after release."
+        )
     else:
         action = "Quote owns its bounded collection window; Structure records a defer and retries on its next tick."
     return JSONResponse(
@@ -179,18 +183,14 @@ def _read_store(db_path: Path) -> OpportunityPerceptionStore:
         db_path,
         read_only=True,
         busy_timeout_ms=_BUSY_TIMEOUT_MS,
-        deadline_monotonic=(
-            None if execution is None else execution.deadline_monotonic
-        ),
+        deadline_monotonic=(None if execution is None else execution.deadline_monotonic),
     )
 
 
 def _validate_recovery_batch(
     con: sqlite3.Connection,
     db_path: Path,
-    proofs: list[
-        tuple[str, int, int, dict[str, Any], dict[str, Any]]
-    ],
+    proofs: list[tuple[str, int, int, dict[str, Any], dict[str, Any]]],
 ) -> None:
     """Validate all verified incidents with fixed-count bulk reads."""
     if not proofs:
@@ -202,9 +202,7 @@ def _validate_recovery_batch(
         store.validated_candidate_opportunity_count(_connection=con)
         candidate_receipts = {
             str(row["quote_batch_id"]): row
-            for row in con.execute(
-                "SELECT * FROM neg_risk_candidate_success_receipts"
-            ).fetchall()
+            for row in con.execute("SELECT * FROM neg_risk_candidate_success_receipts").fetchall()
         }
     discovery_batches: dict[int, sqlite3.Row] = {}
     latest_discovery_id: int | None = None
@@ -241,9 +239,7 @@ def _validate_recovery_batch(
         resource_decision = validate_resource_history(con)
         resource_rows = {
             int(row["id"]): row
-            for row in con.execute(
-                "SELECT * FROM neg_risk_resource_decisions"
-            ).fetchall()
+            for row in con.execute("SELECT * FROM neg_risk_resource_decisions").fetchall()
         }
     for scope, recovery_at, verified_at, recovery, verification in proofs:
         _check_read_deadline()
@@ -255,10 +251,7 @@ def _validate_recovery_batch(
             valid = bool(
                 isinstance(group_id, str)
                 and group_id
-                and (
-                    not scope.startswith("candidate:")
-                    or group_id == scope.split(":", 1)[1]
-                )
+                and (not scope.startswith("candidate:") or group_id == scope.split(":", 1)[1])
                 and type(anchor) is int
                 and receipt is not None
                 and int(receipt["id"]) > anchor
@@ -269,11 +262,7 @@ def _validate_recovery_batch(
             )
         elif scope == "discovery":
             batch_id = verification.get("batch_id")
-            row = (
-                discovery_batches.get(batch_id)
-                if type(batch_id) is int
-                else None
-            )
+            row = discovery_batches.get(batch_id) if type(batch_id) is int else None
             valid = bool(
                 row is not None
                 and int(row["id"]) == latest_discovery_id
@@ -287,8 +276,7 @@ def _validate_recovery_batch(
                 and current_window is not None
                 and current_window.id == row["id"]
                 and recovery_at < int(row["checkpoint_at_ms"]) <= verified_at
-                and int(row["pages_completed"])
-                > int(recovery.get("pages_completed", -1))
+                and int(row["pages_completed"]) > int(recovery.get("pages_completed", -1))
             )
         elif scope == "http":
             release = recovery.get("release_id")
@@ -457,18 +445,14 @@ def _validate_group_history(
         _check_read_deadline()
         item = _validate_revision(row)
         previous = previous_by_group.get(item["group_id"])
-        if (
-            (previous is None and item["revision"] != 1 and not allow_prefix)
-            or (
-                previous is not None
-                and (
-                    item["event_id"] != previous["event_id"]
-                    or item["revision"] != previous["revision"] + 1
-                    or item["started_at_ms"] < previous["started_at_ms"]
-                    or item["observed_at_ms"] < previous["observed_at_ms"]
-                    or item["status"]
-                    not in allowed_transitions[previous["status"]]
-                )
+        if (previous is None and item["revision"] != 1 and not allow_prefix) or (
+            previous is not None
+            and (
+                item["event_id"] != previous["event_id"]
+                or item["revision"] != previous["revision"] + 1
+                or item["started_at_ms"] < previous["started_at_ms"]
+                or item["observed_at_ms"] < previous["observed_at_ms"]
+                or item["status"] not in allowed_transitions[previous["status"]]
             )
         ):
             raise ValueError("invalid-group-history")
@@ -486,11 +470,7 @@ def _read_incident_history(con: sqlite3.Connection, db_path: Path) -> list[dict[
     ).fetchone()
     max_evidence = int(evidence_size[0])
     total_evidence = int(evidence_size[1])
-    if (
-        count > _HISTORY_CAP
-        or max_evidence > 4_096
-        or total_evidence > 1_048_576
-    ):
+    if count > _HISTORY_CAP or max_evidence > 4_096 or total_evidence > 1_048_576:
         raise ValueError("incident-history-too-large")
     rows = con.execute(
         "SELECT incident_id,sequence,scope,kind,state,occurred_at_ms,evidence_json "
@@ -566,14 +546,10 @@ def _status(db_path: Path) -> dict[str, Any]:
             candidate_incident_open,
             _http_incident_open,
             _other_incident_open,
-        ) = IncidentManager(
-            store
-        ).open_incident_status(_connection=con)
+        ) = IncidentManager(store).open_incident_status(_connection=con)
         if candidate_incident_open:
             raise ValueError("candidate-worker-unavailable")
-        summary = store.candidate_current_summary(
-            _connection=con
-        )
+        summary = store.candidate_current_summary(_connection=con)
         count = summary.opportunity_count
         con.execute("COMMIT")
         return {
@@ -662,10 +638,7 @@ def _groups(db_path: Path, limit: int, after: str) -> dict[str, Any]:
                 "limit": limit,
                 "next_after": None,
             }
-        if any(
-            int(row["legs_bytes"] or 0) > _LEGS_JSON_MAX_BYTES
-            for row in current_meta
-        ):
+        if any(int(row["legs_bytes"] or 0) > _LEGS_JSON_MAX_BYTES for row in current_meta):
             raise ValueError("group-legs-json-too-large")
         has_more = len(current_meta) > limit
         current_meta = current_meta[:limit]
@@ -682,8 +655,7 @@ def _groups(db_path: Path, limit: int, after: str) -> dict[str, Any]:
                 None
                 if revision == 1
                 else con.execute(
-                    "SELECT * FROM neg_risk_group_revisions "
-                    "WHERE group_id=? AND revision=?",
+                    "SELECT * FROM neg_risk_group_revisions WHERE group_id=? AND revision=?",
                     (row["group_id"], revision - 1),
                 ).fetchone()
             )
@@ -696,9 +668,7 @@ def _groups(db_path: Path, limit: int, after: str) -> dict[str, Any]:
             "status": "available",
             "items": [_validate_revision(row) for row in current],
             "limit": limit,
-            "next_after": (
-                str(current_meta[-1]["group_id"]) if has_more else None
-            ),
+            "next_after": (str(current_meta[-1]["group_id"]) if has_more else None),
         }
     except BaseException:
         if con.in_transaction:
@@ -717,11 +687,7 @@ def _history(
     con = _connect(db_path)
     try:
         con.execute("BEGIN")
-        upper_revision = (
-            9_223_372_036_854_775_807
-            if before_revision is None
-            else before_revision
-        )
+        upper_revision = 9_223_372_036_854_775_807 if before_revision is None else before_revision
         rows = con.execute(
             "SELECT * FROM neg_risk_group_revisions "
             "WHERE group_id=? AND revision<? "
@@ -744,8 +710,7 @@ def _history(
             None
             if oldest_revision == 1
             else con.execute(
-                "SELECT * FROM neg_risk_group_revisions "
-                "WHERE group_id=? AND revision=?",
+                "SELECT * FROM neg_risk_group_revisions WHERE group_id=? AND revision=?",
                 (group_id, oldest_revision - 1),
             ).fetchone()
         )
@@ -765,9 +730,7 @@ def _history(
             "group_id": group_id,
             "items": items,
             "limit": limit,
-            "next_before_revision": (
-                items[-1]["revision"] if has_more else None
-            ),
+            "next_before_revision": (items[-1]["revision"] if has_more else None),
         }
     except BaseException:
         if con.in_transaction:
@@ -784,9 +747,7 @@ def _discovery(db_path: Path) -> dict[str, Any]:
         if con.execute("SELECT 1 FROM neg_risk_discovery_state WHERE id=1").fetchone() is None:
             con.execute("COMMIT")
             return {"status": "available", "discovery": None}
-        status = _read_store(db_path).discovery_status(
-            int(time.time() * 1_000), _connection=con
-        )
+        status = _read_store(db_path).discovery_status(int(time.time() * 1_000), _connection=con)
         con.execute("COMMIT")
     except BaseException:
         if con.in_transaction:
@@ -809,26 +770,18 @@ def _discovery(db_path: Path) -> dict[str, Any]:
             "promotion_queue_depth": status.promotion_queue_depth,
             "outstanding_admitted_count": status.outstanding_admitted_count,
             "candidate_attempt_start_count": status.candidate_attempt_start_count,
-            "candidate_start_deadline_breach_count": (
-                status.candidate_start_deadline_breach_count
-            ),
+            "candidate_start_deadline_breach_count": (status.candidate_start_deadline_breach_count),
             "candidate_start_ready": status.candidate_start_ready,
             "coverage": {
                 "known_groups": status.coverage.known_groups,
-                "total_liquidity_weight": float(
-                    status.coverage.total_liquidity_weight
-                ),
+                "total_liquidity_weight": float(status.coverage.total_liquidity_weight),
                 "by_minutes": {
                     str(minutes): {
                         "visited_groups": window.visited_groups,
                         "raw_fraction": float(window.raw_fraction),
-                        "liquidity_weighted_fraction": float(
-                            window.liquidity_weighted_fraction
-                        ),
+                        "liquidity_weighted_fraction": float(window.liquidity_weighted_fraction),
                     }
-                    for minutes, window in sorted(
-                        status.coverage.by_minutes.items()
-                    )
+                    for minutes, window in sorted(status.coverage.by_minutes.items())
                 },
             },
             "load_state": {
@@ -843,25 +796,17 @@ def _discovery(db_path: Path) -> dict[str, Any]:
                 if status.admission_proof is None
                 else {
                     "effective_capacity": status.admission_proof.effective_capacity,
-                    "candidate_max_wait_ms": (
-                        status.admission_proof.candidate_max_wait_ms
-                    ),
+                    "candidate_max_wait_ms": (status.admission_proof.candidate_max_wait_ms),
                     "selection_budget_ms": status.admission_proof.selection_budget_ms,
                     "poll_interval_ms": status.admission_proof.poll_interval_ms,
                     "group_timeout_ms": status.admission_proof.group_timeout_ms,
-                    "terminal_write_budget_ms": (
-                        status.admission_proof.terminal_write_budget_ms
-                    ),
+                    "terminal_write_budget_ms": (status.admission_proof.terminal_write_budget_ms),
                     "attempt_start_write_budget_ms": (
                         status.admission_proof.attempt_start_write_budget_ms
                     ),
                     "high_burst_groups": status.admission_proof.high_burst_groups,
-                    "reserved_non_high_slots": (
-                        status.admission_proof.reserved_non_high_slots
-                    ),
-                    "effective_start_bound_ms": (
-                        status.admission_proof.effective_start_bound_ms
-                    ),
+                    "reserved_non_high_slots": (status.admission_proof.reserved_non_high_slots),
+                    "effective_start_bound_ms": (status.admission_proof.effective_start_bound_ms),
                 }
             ),
         },
@@ -898,8 +843,7 @@ def _reconciliation(db_path: Path) -> dict[str, Any]:
             "rejected_count": window.rejected_count,
             "duration_ms": max(
                 0,
-                (window.finished_at_ms or window.checkpoint_at_ms)
-                - window.started_at_ms,
+                (window.finished_at_ms or window.checkpoint_at_ms) - window.started_at_ms,
             ),
             "observations_count": window.observations_count,
             "baseline_count": window.baseline_count,
@@ -1036,9 +980,7 @@ def _timeline(
             "opportunity_transition",
         )
         merged: list[dict[str, Any]] = []
-        for class_order, source_name in enumerate(
-            ("membership", "quote", "opportunity")
-        ):
+        for class_order, source_name in enumerate(("membership", "quote", "opportunity")):
             for source_item in sources[source_name]:
                 merged.append(
                     {
@@ -1077,8 +1019,7 @@ def _timeline(
         )
         page_items = merged[:limit]
         candidate_has_more = any(
-            len(sources[name]) > limit
-            for name in ("membership", "quote", "opportunity")
+            len(sources[name]) > limit for name in ("membership", "quote", "opportunity")
         )
         has_more = (
             len(merged) > limit
@@ -1115,9 +1056,7 @@ def _timeline(
             "history_complete": {
                 "membership": floors["membership"]["compacted_count"] == 0,
                 "quote": floors["quote"]["compacted_count"] == 0,
-                "opportunity": (
-                    floors["opportunity"]["source_rows_compacted"] == 0
-                ),
+                "opportunity": (floors["opportunity"]["source_rows_compacted"] == 0),
                 "incident": incident_floor["compacted_count"] == 0,
             },
         }
@@ -1146,11 +1085,7 @@ def _quote_incident_diagnosis(evidence: dict[str, object]) -> dict[str, object] 
         or failures < 1
         or (
             age is not None
-            and (
-                isinstance(age, bool)
-                or not isinstance(age, (int, float))
-                or age < 0
-            )
+            and (isinstance(age, bool) or not isinstance(age, (int, float)) or age < 0)
         )
     ):
         return None
@@ -1174,9 +1109,7 @@ def _quote_incident_diagnosis(evidence: dict[str, object]) -> dict[str, object] 
         "last_success_age_s": None if age is None else float(age),
         "free_percent": None,
         "failure_reason": (
-            evidence["failure_reason"]
-            if isinstance(evidence.get("failure_reason"), str)
-            else None
+            evidence["failure_reason"] if isinstance(evidence.get("failure_reason"), str) else None
         ),
     }
 
@@ -1251,6 +1184,46 @@ def _quote_supervisor_incident_diagnosis(
     }
 
 
+def _structure_incident_diagnosis(
+    evidence: dict[str, object],
+) -> dict[str, object] | None:
+    """Expose the complete, bounded disposition for a Structure outage."""
+    if (
+        evidence.get("severity") not in {"p1", "p2"}
+        or evidence.get("impact") != "market-map-stale"
+        or evidence.get("automatic_action") != "retry-bounded-structure-child"
+        or evidence.get("next_action") != "inspect-stage-checkpoint-and-child-budget"
+    ):
+        return None
+    failure_reason = evidence.get("failure_reason")
+    elapsed_ms = evidence.get("elapsed_ms")
+    last_stage = evidence.get("last_stage")
+    if (
+        not isinstance(failure_reason, str)
+        or not failure_reason
+        or (
+            elapsed_ms is not None
+            and (isinstance(elapsed_ms, bool) or not isinstance(elapsed_ms, int) or elapsed_ms < 0)
+        )
+        or (last_stage is not None and not isinstance(last_stage, str))
+    ):
+        return None
+    return {
+        "severity": evidence["severity"],
+        "reminder_interval_s": 300,
+        "impact": evidence["impact"],
+        "automatic_action": evidence["automatic_action"],
+        "next_action": evidence["next_action"],
+        "deadline_s": None,
+        "consecutive_failures": 1,
+        "last_success_age_s": None,
+        "free_percent": None,
+        "failure_reason": failure_reason,
+        "elapsed_ms": elapsed_ms,
+        "last_stage": last_stage,
+    }
+
+
 def _incidents(
     db_path: Path,
     limit: int,
@@ -1288,8 +1261,7 @@ def _incidents(
                     "lifecycle_age_ms": max(0, now_ms - item.detected_at_ms),
                     "action": (
                         item.incident.evidence.get("action")
-                        if item.incident.evidence.get("action")
-                        in canonical_actions
+                        if item.incident.evidence.get("action") in canonical_actions
                         else None
                     ),
                     "retry_count": (
@@ -1309,17 +1281,14 @@ def _incidents(
                         and item.incident.evidence["next_retry_at_ms"] >= 0
                         else None
                     ),
-                    "recovery_start_evidence": _safe_evidence(
-                        item.recovery_evidence
-                    ),
+                    "recovery_start_evidence": _safe_evidence(item.recovery_evidence),
                     "recovery_occurred_at_ms": item.recovery_occurred_at_ms,
                     "history_floor": (
                         None
                         if item.history_floor_event_id is None
                         else {
                             "through_event_id": item.history_floor_event_id,
-                            "compacted_event_count":
-                                item.history_floor_compacted_count,
+                            "compacted_event_count": item.history_floor_compacted_count,
                         }
                     ),
                     "notification_delivery_tracked": False,
@@ -1334,6 +1303,8 @@ def _incidents(
                         if item.incident.scope == "quote"
                         else _capacity_incident_diagnosis(item.incident.evidence)
                         if item.incident.scope == "capacity"
+                        else _structure_incident_diagnosis(item.incident.evidence)
+                        if item.incident.scope == "structure"
                         else None
                     ),
                     "evidence": _safe_evidence(item.incident.evidence),
@@ -1343,9 +1314,7 @@ def _incidents(
             "limit": limit,
             "open_count": page.open_count,
             "next_before": (
-                None
-                if page.next_before is None
-                else _encode_incident_cursor(page.next_before)
+                None if page.next_before is None else _encode_incident_cursor(page.next_before)
             ),
         }
     finally:
@@ -1501,9 +1470,7 @@ def _qualification(db_path: Path) -> dict[str, Any]:
         con.execute("COMMIT")
         return {
             "status": "available",
-            "cross_membership_quote_batches": (
-                candidate_mismatches + legacy_mismatches
-            ),
+            "cross_membership_quote_batches": (candidate_mismatches + legacy_mismatches),
             "orphan_collecting_runs": orphan_collecting,
         }
     except BaseException:
@@ -1548,11 +1515,7 @@ def _resources(
             ],
             "limit": limit,
             "next_before_sequence": page.next_before_sequence,
-            "history_floor": (
-                None
-                if page.history_floor is None
-                else asdict(page.history_floor)
-            ),
+            "history_floor": (None if page.history_floor is None else asdict(page.history_floor)),
         }
     finally:
         con.close()
@@ -1583,14 +1546,17 @@ async def _serve(
         except TimeoutError:
             execution.interrupt()
             raise
-        if len(
-            json.dumps(
-                body,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        ) > 1_048_576:
+        if (
+            len(
+                json.dumps(
+                    body,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            )
+            > 1_048_576
+        ):
             raise ValueError("response-output-too-large")
         return JSONResponse(body)
     except _IncidentNotFoundError:
@@ -1693,12 +1659,8 @@ async def perception_group_history(request: Request) -> JSONResponse:
     raw_before = request.query_params.get("before_revision")
     try:
         before_revision = None if raw_before is None else int(raw_before)
-        if (
-            before_revision is not None
-            and (
-                before_revision < 1
-                or str(before_revision) != raw_before
-            )
+        if before_revision is not None and (
+            before_revision < 1 or str(before_revision) != raw_before
         ):
             raise ValueError
     except ValueError:
@@ -1775,9 +1737,8 @@ async def perception_incidents(request: Request) -> JSONResponse:
 
 async def perception_incident_history(request: Request) -> JSONResponse:
     incident_id = str(request.path_params["incident_id"])
-    if (
-        len(incident_id) != 32
-        or any(character not in "0123456789abcdef" for character in incident_id)
+    if len(incident_id) != 32 or any(
+        character not in "0123456789abcdef" for character in incident_id
     ):
         return JSONResponse(
             {"status": "invalid-request", "reason": "invalid-incident-id"},
@@ -1795,10 +1756,7 @@ async def perception_incident_history(request: Request) -> JSONResponse:
 
 async def perception_recent_incidents(request: Request) -> JSONResponse:
     scope = request.query_params.get("scope", "")
-    if (
-        re.fullmatch(r"[a-z][a-z0-9:_-]{0,127}", scope) is None
-        or "\x00" in scope
-    ):
+    if re.fullmatch(r"[a-z][a-z0-9:_-]{0,127}", scope) is None or "\x00" in scope:
         return JSONResponse(
             {"status": "invalid-request", "reason": "invalid-incident-scope"},
             status_code=400,
@@ -1851,12 +1809,8 @@ async def perception_resources(request: Request) -> JSONResponse:
     try:
         raw_before = request.query_params.get("before_sequence")
         before_sequence = None if raw_before is None else int(raw_before, 10)
-        if (
-            before_sequence is not None
-            and (
-                before_sequence <= 0
-                or str(before_sequence) != raw_before
-            )
+        if before_sequence is not None and (
+            before_sequence <= 0 or str(before_sequence) != raw_before
         ):
             raise ValueError
     except ValueError:

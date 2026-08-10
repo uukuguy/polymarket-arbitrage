@@ -108,18 +108,23 @@ async def test_event_member_sidecar_precedes_structure_drift(
     store.get_latest_structure_sync.return_value = {"id": "w", "status": "complete"}
     store.structure_event_member_status.return_value = {"sealed": False}
     member_child = AsyncMock(
-        side_effect=lambda **_kwargs: calls.append("members")
-        or scheduler_module.IsolatedStructureEventMemberCheckpoint(
-            window_id="w", rows_processed=500, chunks_processed=1,
-            sealed=False, deferred=False, defer_reason=None,
-            stop_reason="max-elapsed-seconds", elapsed_ms=45_000,
+        side_effect=lambda **_kwargs: (
+            calls.append("members")
+            or scheduler_module.IsolatedStructureEventMemberCheckpoint(
+                window_id="w",
+                rows_processed=500,
+                chunks_processed=1,
+                sealed=False,
+                deferred=False,
+                defer_reason=None,
+                stop_reason="max-elapsed-seconds",
+                elapsed_ms=45_000,
+            )
         )
     )
-    monkeypatch.setattr(
-        scheduler_module, "run_structure_event_members_in_subprocess", member_child
-    )
-    store.structure_generation_drift_status.side_effect = (
-        lambda: calls.append("drift") or {"authorized": True}
+    monkeypatch.setattr(scheduler_module, "run_structure_event_members_in_subprocess", member_child)
+    store.structure_generation_drift_status.side_effect = lambda: (
+        calls.append("drift") or {"authorized": True}
     )
     scheduler = SnapshotScheduler(
         settings=SimpleNamespace(
@@ -128,7 +133,9 @@ async def test_event_member_sidecar_precedes_structure_drift(
             structure_generation_drift_compare_enabled=True,
             scheduler_interval_s=300,
             db_path="unused.db",
-        ), sqlite_store=store, producer_lock=asyncio.Lock(),
+        ),
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
     )
     assert await scheduler._tick_once(queued_at_ms=1) is True
     assert calls == ["members"]
@@ -166,16 +173,12 @@ async def test_event_member_waits_for_event_market_backfill_authority(
         finished_at_ms=3,
     )
     scheduler = SnapshotScheduler(
-        settings=daemon_settings_for_test.model_copy(
-            update={"structure_sync_enabled": True}
-        ),
+        settings=daemon_settings_for_test.model_copy(update={"structure_sync_enabled": True}),
         sqlite_store=store,
         producer_lock=asyncio.Lock(),
     )
 
-    assert await scheduler._maybe_advance_structure_event_members(
-        queued_at_ms=4
-    ) is None
+    assert await scheduler._maybe_advance_structure_event_members(queued_at_ms=4) is None
     assert store.structure_event_member_status(window_id=window_id)["sealed"] is False
     with sqlite3.connect(store.db_path) as con:
         assert con.execute(
@@ -202,12 +205,14 @@ async def test_scheduler_production_order_seals_shared_market_conflict(
         {
             "id": event_id,
             "negRiskMarketID": f"group-{event_id}",
-            "markets": [{
-                "id": "market-shared",
-                "active": True,
-                "closed": False,
-                "negRiskOther": False,
-            }],
+            "markets": [
+                {
+                    "id": "market-shared",
+                    "active": True,
+                    "closed": False,
+                    "negRiskOther": False,
+                }
+            ],
         }
         for event_id in ("a", "b")
     ]
@@ -237,25 +242,22 @@ async def test_scheduler_production_order_seals_shared_market_conflict(
         finished_at_ms=3,
     )
     scheduler = SnapshotScheduler(
-        settings=daemon_settings_for_test.model_copy(
-            update={"structure_sync_enabled": True}
-        ),
+        settings=daemon_settings_for_test.model_copy(update={"structure_sync_enabled": True}),
         sqlite_store=store,
         producer_lock=asyncio.Lock(),
     )
 
-    assert await scheduler._maybe_advance_structure_event_members(
-        queued_at_ms=4
-    ) is None
-    assert store.advance_structure_event_market_backfill(
-        window_id=window_id,
-        max_events=500,
-        max_relationships=500,
-        now_ms=5,
-    )["completed"] is True
-    assert await scheduler._maybe_advance_structure_event_members(
-        queued_at_ms=6
-    ) is True
+    assert await scheduler._maybe_advance_structure_event_members(queued_at_ms=4) is None
+    assert (
+        store.advance_structure_event_market_backfill(
+            window_id=window_id,
+            max_events=500,
+            max_relationships=500,
+            now_ms=5,
+        )["completed"]
+        is True
+    )
+    assert await scheduler._maybe_advance_structure_event_members(queued_at_ms=6) is True
     assert store.structure_event_member_status(window_id=window_id)["sealed"] is True
 
     with sqlite3.connect(store.db_path) as con:
@@ -283,9 +285,7 @@ async def test_scheduler_production_order_seals_shared_market_conflict(
         cursor=None,
         limit=500,
     )
-    assert [item.code for item in chunk.diagnostics] == [
-        "conflicting-event-membership"
-    ]
+    assert [item.code for item in chunk.diagnostics] == ["conflicting-event-membership"]
 
 
 @pytest.mark.asyncio
@@ -308,7 +308,9 @@ async def test_event_source_unavailable_historical_window_is_not_retried() -> No
             legacy_structure_reconciliation_enabled=False,
             structure_generation_drift_compare_enabled=False,
             scheduler_interval_s=300,
-        ), sqlite_store=store, producer_lock=asyncio.Lock(),
+        ),
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
     )
     assert await scheduler._maybe_advance_structure_event_members(queued_at_ms=1) is None
     store.advance_structure_event_member_staging_chunk.assert_not_called()
@@ -350,17 +352,13 @@ async def test_historical_memberless_drift_yields_to_natural_snapshot(
             "window_id": "historical-window",
         }
     )
-    store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v2"
-    )
+    store.initialize_structure_drift_comparison = MagicMock(return_value="comparison-v2")
     scheduler = SnapshotScheduler(
         settings=settings,
         sqlite_store=store,
         producer_lock=asyncio.Lock(),
     )
-    scheduler._run_snapshot = AsyncMock(
-        return_value=_FakeResult(SnapshotStatus.OK, snapshot_id=1)
-    )
+    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.OK, snapshot_id=1))
 
     assert await scheduler._tick_once(queued_at_ms=1_000) is True
 
@@ -374,7 +372,8 @@ async def test_historical_memberless_drift_yields_to_natural_snapshot(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tamper", ["checkpoint", "source", "missing-progress"])
 async def test_event_member_invalid_authority_blocks_scheduler_without_advancing(
-    daemon_settings_for_test: Any, tamper: str,
+    daemon_settings_for_test: Any,
+    tamper: str,
 ) -> None:
     from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -382,19 +381,28 @@ async def test_event_member_invalid_authority_blocks_scheduler_without_advancing
     store.init_schema()
     window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
     store.commit_structure_event_page(
-        window_id=window_id, requested_cursor=None, next_cursor=None,
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
         completed=True,
-        events=[{"id": "event-1", "markets": [
-            {"id": "m-1", "negRiskOther": False, "active": True, "closed": False},
-            {"id": "m-2", "negRiskOther": False, "active": True, "closed": False},
-        ]}], finished_at_ms=2,
+        events=[
+            {
+                "id": "event-1",
+                "markets": [
+                    {"id": "m-1", "negRiskOther": False, "active": True, "closed": False},
+                    {"id": "m-2", "negRiskOther": False, "active": True, "closed": False},
+                ],
+            }
+        ],
+        finished_at_ms=2,
     )
     with sqlite3.connect(store.db_path) as con:
         con.execute("UPDATE structure_sync_windows SET status='complete'")
         con.execute(
             "INSERT INTO structure_sync_event_market_backfill_progress("
             "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
-            "VALUES (?,?,?,?)", (window_id, 2, 2, 2)
+            "VALUES (?,?,?,?)",
+            (window_id, 2, 2, 2),
         )
     if tamper != "missing-progress":
         store.advance_structure_event_member_staging_chunk(window_id=window_id, limit=1)
@@ -407,7 +415,8 @@ async def test_event_member_invalid_authority_blocks_scheduler_without_advancing
         else:
             table = (
                 "structure_sync_event_member_progress"
-                if tamper == "checkpoint" else "structure_sync_event_source_receipts"
+                if tamper == "checkpoint"
+                else "structure_sync_event_source_receipts"
             )
             column = "checkpoint_digest" if tamper == "checkpoint" else "receipt_digest"
             if tamper == "source":
@@ -417,9 +426,7 @@ async def test_event_member_invalid_authority_blocks_scheduler_without_advancing
                 ("f" * 64, window_id),
             )
     scheduler = SnapshotScheduler(
-        settings=daemon_settings_for_test.model_copy(
-            update={"structure_sync_enabled": True}
-        ),
+        settings=daemon_settings_for_test.model_copy(update={"structure_sync_enabled": True}),
         sqlite_store=store,
         producer_lock=asyncio.Lock(),
     )
@@ -432,13 +439,17 @@ async def test_event_member_invalid_authority_blocks_scheduler_without_advancing
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("active_checks", [
-    (True,),
-    (False, True),
-    (False, False, True),
-])
+@pytest.mark.parametrize(
+    "active_checks",
+    [
+        (True,),
+        (False, True),
+        (False, False, True),
+    ],
+)
 async def test_event_member_checks_quote_priority_at_every_double_check_boundary(
-    daemon_settings_for_test: Any, active_checks: tuple[bool, ...],
+    daemon_settings_for_test: Any,
+    active_checks: tuple[bool, ...],
 ) -> None:
     from polyarb.storage.sqlite_store import SQLiteStore
 
@@ -446,18 +457,27 @@ async def test_event_member_checks_quote_priority_at_every_double_check_boundary
     store.init_schema()
     window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
     store.commit_structure_event_page(
-        window_id=window_id, requested_cursor=None, next_cursor=None,
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
         completed=True,
-        events=[{"id": "event-1", "markets": [
-            {"id": "m-1", "negRiskOther": False, "active": True, "closed": False},
-        ]}], finished_at_ms=2,
+        events=[
+            {
+                "id": "event-1",
+                "markets": [
+                    {"id": "m-1", "negRiskOther": False, "active": True, "closed": False},
+                ],
+            }
+        ],
+        finished_at_ms=2,
     )
     with sqlite3.connect(store.db_path) as con:
         con.execute("UPDATE structure_sync_windows SET status='complete'")
         con.execute(
             "INSERT INTO structure_sync_event_market_backfill_progress("
             "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
-            "VALUES (?,?,?,?)", (window_id, 2, 2, 2)
+            "VALUES (?,?,?,?)",
+            (window_id, 2, 2, 2),
         )
 
     class QuoteRuntime:
@@ -471,9 +491,7 @@ async def test_event_member_checks_quote_priority_at_every_double_check_boundary
             return False
 
     scheduler = SnapshotScheduler(
-        settings=daemon_settings_for_test.model_copy(
-            update={"structure_sync_enabled": True}
-        ),
+        settings=daemon_settings_for_test.model_copy(update={"structure_sync_enabled": True}),
         sqlite_store=store,
         producer_lock=asyncio.Lock(),
         quote_worker_runtime=QuoteRuntime(),
@@ -499,27 +517,29 @@ async def test_event_member_waits_for_and_releases_shared_producer_lock(
     store.init_schema()
     window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
     store.commit_structure_event_page(
-        window_id=window_id, requested_cursor=None, next_cursor=None,
-        completed=True, events=[{"id": "event-1", "markets": []}], finished_at_ms=2,
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[{"id": "event-1", "markets": []}],
+        finished_at_ms=2,
     )
     with sqlite3.connect(store.db_path) as con:
         con.execute("UPDATE structure_sync_windows SET status='complete'")
         con.execute(
             "INSERT INTO structure_sync_event_market_backfill_progress("
             "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
-            "VALUES (?,?,?,?)", (window_id, 2, 2, 2)
+            "VALUES (?,?,?,?)",
+            (window_id, 2, 2, 2),
         )
     producer_lock = asyncio.Lock()
     await producer_lock.acquire()
     scheduler = SnapshotScheduler(
-        settings=daemon_settings_for_test.model_copy(
-            update={"structure_sync_enabled": True}
-        ),
-        sqlite_store=store, producer_lock=producer_lock,
+        settings=daemon_settings_for_test.model_copy(update={"structure_sync_enabled": True}),
+        sqlite_store=store,
+        producer_lock=producer_lock,
     )
-    running = asyncio.create_task(
-        scheduler._maybe_advance_structure_event_members(queued_at_ms=3)
-    )
+    running = asyncio.create_task(scheduler._maybe_advance_structure_event_members(queued_at_ms=3))
     await asyncio.sleep(0)
     assert running.done() is False
     assert store.structure_event_member_status(window_id=window_id).get("sealed") is not True
@@ -566,12 +586,11 @@ async def test_event_member_scheduler_slice_seals_1200_members_in_one_admission(
         con.execute(
             "INSERT INTO structure_sync_event_market_backfill_progress("
             "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
-            "VALUES (?,?,?,?)", (window_id, 2, 2, 2)
+            "VALUES (?,?,?,?)",
+            (window_id, 2, 2, 2),
         )
     scheduler = SnapshotScheduler(
-        settings=daemon_settings_for_test.model_copy(
-            update={"structure_sync_enabled": True}
-        ),
+        settings=daemon_settings_for_test.model_copy(update={"structure_sync_enabled": True}),
         sqlite_store=store,
         producer_lock=asyncio.Lock(),
     )
@@ -608,9 +627,7 @@ async def test_event_member_checkpoint_releases_slot_and_next_admission_yields_t
             elapsed_ms=45_000,
         )
     )
-    monkeypatch.setattr(
-        scheduler_module, "run_structure_event_members_in_subprocess", child
-    )
+    monkeypatch.setattr(scheduler_module, "run_structure_event_members_in_subprocess", child)
 
     class QuoteRuntime:
         active = False
@@ -624,9 +641,7 @@ async def test_event_member_checkpoint_releases_slot_and_next_admission_yields_t
     runtime = QuoteRuntime()
     lock = asyncio.Lock()
     scheduler = SnapshotScheduler(
-        settings=daemon_settings_for_test.model_copy(
-            update={"structure_sync_enabled": True}
-        ),
+        settings=daemon_settings_for_test.model_copy(update={"structure_sync_enabled": True}),
         sqlite_store=store,
         producer_lock=lock,
         quote_worker_runtime=runtime,
@@ -654,7 +669,9 @@ async def test_event_member_child_timeout_records_breadcrumb_and_recovery_failur
     store.init_schema()
     window_id = str(store.begin_or_resume_structure_sync(started_at_ms=1)["id"])
     store.commit_structure_event_page(
-        window_id=window_id, requested_cursor=None, next_cursor=None,
+        window_id=window_id,
+        requested_cursor=None,
+        next_cursor=None,
         completed=True,
         events=[{"id": "event-1", "negRiskMarketID": "group-1", "markets": []}],
         finished_at_ms=2,
@@ -664,27 +681,28 @@ async def test_event_member_child_timeout_records_breadcrumb_and_recovery_failur
         con.execute(
             "INSERT INTO structure_sync_event_market_backfill_progress("
             "window_id,window_checkpoint_at_ms,checkpoint_at_ms,completed_at_ms) "
-            "VALUES (?,?,?,?)", (window_id, 2, 2, 2)
+            "VALUES (?,?,?,?)",
+            (window_id, 2, 2, 2),
         )
     monkeypatch.setattr(
         scheduler_module,
         "run_structure_event_members_in_subprocess",
-        AsyncMock(side_effect=scheduler_module.SnapshotSubprocessError(
-            "structure-event-members-timeout",
-            last_stage="structure-event-members",
-            elapsed_ms=75_000,
-        )),
+        AsyncMock(
+            side_effect=scheduler_module.SnapshotSubprocessError(
+                "structure-event-members-timeout",
+                last_stage="structure-event-members",
+                elapsed_ms=75_000,
+            )
+        ),
     )
     scheduler = SnapshotScheduler(
-        settings=daemon_settings_for_test.model_copy(
-            update={"structure_sync_enabled": True}
-        ), sqlite_store=store, producer_lock=asyncio.Lock(),
+        settings=daemon_settings_for_test.model_copy(update={"structure_sync_enabled": True}),
+        sqlite_store=store,
+        producer_lock=asyncio.Lock(),
     )
     assert await scheduler._tick_once(queued_at_ms=3) is True
     assert scheduler._failure_counter == 1
-    assert store.get_latest_structure_defer()["reason"] == (
-        "structure-event-members:child-timeout"
-    )
+    assert store.get_latest_structure_defer()["reason"] == ("structure-event-members:child-timeout")
     assert scheduler._producer_slot_owned is False
 
 
@@ -707,10 +725,7 @@ def test_structure_drift_attempt_lifecycle_recovery_and_retention(
         started_at_ms=1_000,
     )
     assert store.recover_orphaned_structure_drift_attempts(recovered_at_ms=2_000) == 1
-    assert (
-        store.get_latest_structure_drift_attempt()["failure_kind"]
-        == "parent-restarted-orphan"
-    )
+    assert store.get_latest_structure_drift_attempt()["failure_kind"] == "parent-restarted-orphan"
 
     attempt_id = store.begin_structure_drift_attempt(
         identity=identity,
@@ -737,9 +752,7 @@ def test_structure_drift_attempt_lifecycle_recovery_and_retention(
     assert latest["stderr_bytes"] == 55
     assert (
         latest["stderr_sha256"]
-        == hashlib.sha256(
-            b"structure-drift stage=legacy-members chunks=2 rows=1000"
-        ).hexdigest()
+        == hashlib.sha256(b"structure-drift stage=legacy-members chunks=2 rows=1000").hexdigest()
     )
     assert latest["stderr_safe_marker"] == (
         "structure-drift stage=legacy-members chunks=2 rows=1000"
@@ -774,9 +787,7 @@ def test_structure_drift_attempt_lifecycle_recovery_and_retention(
             failure_kind=None,
         )
     with sqlite3.connect(store.db_path) as con:
-        assert con.execute(
-            "SELECT COUNT(*) FROM structure_drift_attempts"
-        ).fetchone() == (100,)
+        assert con.execute("SELECT COUNT(*) FROM structure_drift_attempts").fetchone() == (100,)
 
 
 def test_structure_drift_attempt_schema_migrates_legacy_database(
@@ -798,9 +809,7 @@ def test_structure_drift_attempt_schema_migrates_legacy_database(
     store.init_schema()
     columns = {
         row[1]
-        for row in sqlite3.connect(db_path).execute(
-            "PRAGMA table_info(structure_drift_attempts)"
-        )
+        for row in sqlite3.connect(db_path).execute("PRAGMA table_info(structure_drift_attempts)")
     }
     assert {"identity_json", "progress_id", "stderr_safe_marker"} <= columns
     assert store.recover_orphaned_structure_drift_attempts(recovered_at_ms=10) == 1
@@ -837,15 +846,14 @@ def test_structure_drift_attempt_rejects_fresh_owner_and_recovers_stale(
     ("raw secret", "structure-drift stage=none chunks=0 rows=0秘密"),
 )
 def test_structure_drift_attempt_rejects_untrusted_explicit_marker(
-    tmp_path: Path, marker: str,
+    tmp_path: Path,
+    marker: str,
 ) -> None:
     from polyarb.storage.sqlite_store import SQLiteStore
 
     store = SQLiteStore(tmp_path / "marker.db")
     store.init_schema()
-    attempt_id = store.begin_structure_drift_attempt(
-        identity={}, progress_id=None, started_at_ms=1
-    )
+    attempt_id = store.begin_structure_drift_attempt(identity={}, progress_id=None, started_at_ms=1)
     with pytest.raises(ValueError, match="stderr"):
         store.finish_structure_drift_attempt(
             attempt_id=attempt_id,
@@ -904,9 +912,7 @@ class _FakeProcess:
         block: bool = False,
         stderr: bytes = b"bounded stderr",
     ) -> None:
-        self.stdout = (
-            payload if isinstance(payload, bytes) else json.dumps(payload).encode()
-        )
+        self.stdout = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         self.returncode = returncode
         self.block = block
         self.stderr = stderr
@@ -981,9 +987,7 @@ def test_snapshot_attempt_diagnostic_columns_migrate_legacy_rows(
     fresh_db = tmp_path / "fresh.db"
     SQLiteStore(fresh_db).init_schema()
     with sqlite3.connect(fresh_db) as con:
-        fresh_columns = {
-            row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")
-        }
+        fresh_columns = {row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")}
     diagnostic_columns = {
         "elapsed_ms",
         "last_stage",
@@ -1012,9 +1016,7 @@ def test_snapshot_attempt_diagnostic_columns_migrate_legacy_rows(
     legacy_store.init_schema()
 
     with sqlite3.connect(legacy_db) as con:
-        legacy_columns = {
-            row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")
-        }
+        legacy_columns = {row[1] for row in con.execute("PRAGMA table_info(snapshot_attempts)")}
         historical_diagnostics = con.execute(
             "SELECT last_stage,elapsed_ms,chunks_processed,stderr_bytes,stderr_sha256,"
             "stderr_tail "
@@ -1083,8 +1085,7 @@ def test_snapshot_attempt_terminal_row_cannot_be_rewritten(
         {
             "stderr_bytes": 1,
             "stderr_sha256": "0" * 64,
-            "stderr_tail": "snapshot-stage stage=persist state=start elapsed_ms="
-            + "1" * 300,
+            "stderr_tail": "snapshot-stage stage=persist state=start elapsed_ms=" + "1" * 300,
         },
         {"stderr_bytes": 1},
     ),
@@ -1424,9 +1425,7 @@ async def test_structure_drift_child_timeout_reaps_before_failure() -> None:
     async def spawn(*_args, **_kwargs):
         return process
 
-    with pytest.raises(
-        SnapshotSubprocessError, match="structure-drift-timeout"
-    ) as raised:
+    with pytest.raises(SnapshotSubprocessError, match="structure-drift-timeout") as raised:
         await run_structure_drift_in_subprocess(
             db_path="/tmp/drift.db",
             max_rows=500,
@@ -1460,7 +1459,10 @@ async def test_structure_drift_child_rejects_impossible_commit_marker(
     )
 
     process = _FakeProcess(
-        {}, returncode=0, block=True, stderr=marker,
+        {},
+        returncode=0,
+        block=True,
+        stderr=marker,
     )
 
     async def spawn(*_args, **_kwargs):
@@ -1468,8 +1470,12 @@ async def test_structure_drift_child_rejects_impossible_commit_marker(
 
     with pytest.raises(SnapshotSubprocessError) as raised:
         await run_structure_drift_in_subprocess(
-            db_path="/tmp/drift.db", max_rows=500, max_chunks=100,
-            max_elapsed_s=45.0, spawn=spawn, timeout_s=0.001,
+            db_path="/tmp/drift.db",
+            max_rows=500,
+            max_chunks=100,
+            max_elapsed_s=45.0,
+            spawn=spawn,
+            timeout_s=0.001,
             terminate_timeout_s=0.001,
         )
     assert raised.value.chunks_processed == 0
@@ -1596,9 +1602,7 @@ async def test_snapshot_subprocess_accepts_publication_checkpoint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_snapshot_subprocess_accepts_exact_contract_supersession_checkpoint() -> (
-    None
-):
+async def test_snapshot_subprocess_accepts_exact_contract_supersession_checkpoint() -> None:
     from polyarb.daemon.scheduler import (
         IsolatedStructurePublicationCheckpoint,
         run_snapshot_in_subprocess,
@@ -1711,9 +1715,7 @@ async def test_snapshot_subprocess_rejects_nonzero_supersession_work(
     async def spawn(*_args, **_kwargs):
         return process
 
-    with pytest.raises(
-        SnapshotSubprocessError, match="snapshot-subprocess-invalid-json"
-    ):
+    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-invalid-json"):
         await run_snapshot_in_subprocess(spawn=spawn)
 
 
@@ -1828,9 +1830,7 @@ async def test_snapshot_subprocess_rejects_invalid_publication_checkpoint_pair(
     async def spawn(*_args, **_kwargs):
         return process
 
-    with pytest.raises(
-        SnapshotSubprocessError, match="snapshot-subprocess-invalid-json"
-    ):
+    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-invalid-json"):
         await run_snapshot_in_subprocess(spawn=spawn)
 
 
@@ -2052,9 +2052,7 @@ async def test_ready_structure_publication_keeps_child_hard_envelope(
 
     monkeypatch.setattr(scheduler_module, "run_snapshot_in_subprocess", run_snapshot)
     store = MagicMock()
-    store.get_latest_structure_publication.return_value = SimpleNamespace(
-        status="ready"
-    )
+    store.get_latest_structure_publication.return_value = SimpleNamespace(status="ready")
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
     scheduler._effective_timeout_s = 240
 
@@ -2081,9 +2079,7 @@ def test_structure_defer_receipts_are_restart_visible_and_bounded(
     restarted = SQLiteStore(daemon_settings_for_test.db_path)
     latest = restarted.get_latest_structure_defer()
     with sqlite3.connect(store.db_path) as con:
-        retained_count = con.execute(
-            "SELECT COUNT(*) FROM structure_defer_receipts"
-        ).fetchone()[0]
+        retained_count = con.execute("SELECT COUNT(*) FROM structure_defer_receipts").fetchone()[0]
 
     assert latest == {
         "id": receipt_id,
@@ -2143,9 +2139,7 @@ def test_legacy_structure_defer_table_migrates_add_only_identity_columns(
     store.init_schema()
 
     with sqlite3.connect(db_path) as con:
-        columns = [row[1] for row in con.execute(
-            "PRAGMA table_info(structure_defer_receipts)"
-        )]
+        columns = [row[1] for row in con.execute("PRAGMA table_info(structure_defer_receipts)")]
     assert columns[-3:] == [
         "initialized_comparison_id",
         "current_comparison_id",
@@ -2237,9 +2231,7 @@ async def test_pending_structure_drift_slice_precedes_snapshot_child(
             "progress_id": "comparison-v2",
         }
     )
-    store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v2"
-    )
+    store.initialize_structure_drift_comparison = MagicMock(return_value="comparison-v2")
     child = AsyncMock(
         return_value=IsolatedStructureDriftCheckpoint(
             phase="legacy-members",
@@ -2319,9 +2311,7 @@ async def test_structure_drift_does_not_immediately_resume_without_durable_progr
             "classifier_contract_version": "structure-drift-classifier-v3",
         }
     )
-    store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v2"
-    )
+    store.initialize_structure_drift_comparison = MagicMock(return_value="comparison-v2")
     child = AsyncMock(
         return_value=IsolatedStructureDriftCheckpoint(
             phase=phase,
@@ -2376,9 +2366,7 @@ async def test_structure_drift_rechecks_quote_after_shared_lock(
             "classifier_contract_version": classifier_contract,
         }
     )
-    store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v2"
-    )
+    store.initialize_structure_drift_comparison = MagicMock(return_value="comparison-v2")
     active = iter((False, True))
     runtime = MagicMock()
     runtime.pipeline_active.side_effect = lambda: next(active)
@@ -2425,9 +2413,7 @@ async def test_structure_drift_quote_due_wins_next_slice_admission(
             "progress_id": "comparison-v2",
         }
     )
-    store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v2"
-    )
+    store.initialize_structure_drift_comparison = MagicMock(return_value="comparison-v2")
     runtime = MagicMock()
     runtime.pipeline_active.return_value = False
     runtime.pipeline_due.side_effect = (False, False, False, True)
@@ -2482,9 +2468,7 @@ async def test_request_now_reaches_same_structure_drift_child_path(
             "progress_id": "comparison-v2",
         }
     )
-    store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v2"
-    )
+    store.initialize_structure_drift_comparison = MagicMock(return_value="comparison-v2")
     stop_event = asyncio.Event()
 
     async def child(**_kwargs):
@@ -2501,9 +2485,7 @@ async def test_request_now_reaches_same_structure_drift_child_path(
         )
 
     child_mock = AsyncMock(side_effect=child)
-    monkeypatch.setattr(
-        scheduler_module, "run_structure_drift_in_subprocess", child_mock
-    )
+    monkeypatch.setattr(scheduler_module, "run_structure_drift_in_subprocess", child_mock)
     scheduler = SnapshotScheduler(
         settings=settings,
         sqlite_store=store,
@@ -2538,9 +2520,7 @@ async def test_structure_drift_cancellation_releases_shared_producer_lock(
             "progress_id": "comparison-v2",
         }
     )
-    store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v2"
-    )
+    store.initialize_structure_drift_comparison = MagicMock(return_value="comparison-v2")
     cancelled = StructureDriftCancelled(
         last_stage="source-events",
         chunks_processed=1,
@@ -2611,17 +2591,18 @@ async def test_structure_drift_terminal_write_failure_is_isolated_and_blocks_res
         contract_initialized = True
         return "comparison-v2"
 
-    store.structure_generation_drift_status = MagicMock(
-        side_effect=current_contract_status
-    )
-    store.initialize_structure_drift_comparison = MagicMock(
-        side_effect=initialize_current_contract
-    )
+    store.structure_generation_drift_status = MagicMock(side_effect=current_contract_status)
+    store.initialize_structure_drift_comparison = MagicMock(side_effect=initialize_current_contract)
     child = AsyncMock(
         return_value=IsolatedStructureDriftCheckpoint(
-            phase="source-events", rows_processed=1, chunks_processed=1,
-            ready=False, deferred=False, defer_reason=None,
-            stop_reason="max-chunks", elapsed_ms=1,
+            phase="source-events",
+            rows_processed=1,
+            chunks_processed=1,
+            ready=False,
+            deferred=False,
+            defer_reason=None,
+            stop_reason="max-chunks",
+            elapsed_ms=1,
         )
     )
     monkeypatch.setattr(scheduler_module, "run_structure_drift_in_subprocess", child)
@@ -2674,14 +2655,11 @@ async def test_structure_drift_cancel_survives_terminal_write_failure(
         contract_initialized = True
         return "comparison-v2"
 
-    store.structure_generation_drift_status = MagicMock(
-        side_effect=current_contract_status
-    )
-    store.initialize_structure_drift_comparison = MagicMock(
-        side_effect=initialize_current_contract
-    )
+    store.structure_generation_drift_status = MagicMock(side_effect=current_contract_status)
+    store.initialize_structure_drift_comparison = MagicMock(side_effect=initialize_current_contract)
     monkeypatch.setattr(
-        scheduler_module, "run_structure_drift_in_subprocess",
+        scheduler_module,
+        "run_structure_drift_in_subprocess",
         AsyncMock(side_effect=asyncio.CancelledError),
     )
     store.finish_structure_drift_attempt = MagicMock(
@@ -2747,9 +2725,7 @@ async def test_structure_drift_identity_change_after_initialize_blocks_snapshot(
             },
         )
     )
-    store.structure_generation_drift_status = MagicMock(
-        side_effect=lambda: next(statuses)
-    )
+    store.structure_generation_drift_status = MagicMock(side_effect=lambda: next(statuses))
     store.initialize_structure_drift_comparison = MagicMock(
         side_effect=("comparison-old", "comparison-new")
     )
@@ -2765,9 +2741,7 @@ async def test_structure_drift_identity_change_after_initialize_blocks_snapshot(
             elapsed_ms=1,
         )
     )
-    monkeypatch.setattr(
-        scheduler_module, "run_structure_drift_in_subprocess", drift_child
-    )
+    monkeypatch.setattr(scheduler_module, "run_structure_drift_in_subprocess", drift_child)
     scheduler = SnapshotScheduler(
         settings=settings,
         sqlite_store=store,
@@ -2784,16 +2758,12 @@ async def test_structure_drift_identity_change_after_initialize_blocks_snapshot(
     assert defer["reason"] == "structure-drift-identity-stale"
     assert defer["initialized_comparison_id"] == "comparison-old"
     assert defer["current_comparison_id"] == "comparison-new"
-    assert defer["classifier_contract_version"] == (
-        "structure-drift-classifier-v3"
-    )
+    assert defer["classifier_contract_version"] == ("structure-drift-classifier-v3")
 
     assert await scheduler._tick_once(queued_at_ms=2_000) is True
     scheduler._run_snapshot.assert_not_awaited()
     drift_child.assert_awaited_once()
-    assert store.get_latest_structure_drift_attempt()["progress_id"] == (
-        "comparison-new"
-    )
+    assert store.get_latest_structure_drift_attempt()["progress_id"] == ("comparison-new")
 
 
 @pytest.mark.asyncio
@@ -2808,31 +2778,29 @@ async def test_post_initialize_status_unavailable_defer_binds_current_identity(
     )
     store = SQLiteStore(settings.db_path)
     store.init_schema()
-    statuses = iter((
-        {
-            "authorized": False,
-            "phase": None,
-            "reason": "structure-drift-progress-missing",
-        },
-        {
-            "authorized": False,
-            "phase": None,
-            "reason": "structure-drift-progress-missing",
-        },
-        {
-            "authorized": False,
-            "phase": "unexpected-phase",
-            "reason": "structure-drift-incomplete",
-            "progress_id": "comparison-v2",
-            "classifier_contract_version": "structure-drift-classifier-v3",
-        },
-    ))
-    store.structure_generation_drift_status = MagicMock(
-        side_effect=lambda: next(statuses)
+    statuses = iter(
+        (
+            {
+                "authorized": False,
+                "phase": None,
+                "reason": "structure-drift-progress-missing",
+            },
+            {
+                "authorized": False,
+                "phase": None,
+                "reason": "structure-drift-progress-missing",
+            },
+            {
+                "authorized": False,
+                "phase": "unexpected-phase",
+                "reason": "structure-drift-incomplete",
+                "progress_id": "comparison-v2",
+                "classifier_contract_version": "structure-drift-classifier-v3",
+            },
+        )
     )
-    store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v2"
-    )
+    store.structure_generation_drift_status = MagicMock(side_effect=lambda: next(statuses))
+    store.initialize_structure_drift_comparison = MagicMock(return_value="comparison-v2")
     scheduler = SnapshotScheduler(
         settings=settings,
         sqlite_store=store,
@@ -2847,9 +2815,7 @@ async def test_post_initialize_status_unavailable_defer_binds_current_identity(
     assert defer["reason"] == "structure-drift-status-unavailable"
     assert defer["initialized_comparison_id"] == "comparison-v2"
     assert defer["current_comparison_id"] == "comparison-v2"
-    assert defer["classifier_contract_version"] == (
-        "structure-drift-classifier-v3"
-    )
+    assert defer["classifier_contract_version"] == ("structure-drift-classifier-v3")
     scheduler._run_snapshot.assert_not_awaited()
 
 
@@ -2880,9 +2846,7 @@ async def test_unavailable_drift_status_defer_uses_expected_v4_contract(
     defer = store.get_latest_structure_defer()
     assert defer is not None
     assert defer["reason"] == "structure-drift-status-unavailable"
-    assert defer["classifier_contract_version"] == (
-        "structure-drift-classifier-v4"
-    )
+    assert defer["classifier_contract_version"] == ("structure-drift-classifier-v4")
 
 
 @pytest.mark.asyncio
@@ -2910,9 +2874,7 @@ async def test_drift_child_defer_preserves_current_v3_contract(
         "classifier_contract_version": "structure-drift-classifier-v3",
     }
     store.structure_generation_drift_status = MagicMock(return_value=status)
-    store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v3"
-    )
+    store.initialize_structure_drift_comparison = MagicMock(return_value="comparison-v3")
     monkeypatch.setattr(
         scheduler_module,
         "run_structure_drift_in_subprocess",
@@ -2941,9 +2903,7 @@ async def test_drift_child_defer_preserves_current_v3_contract(
     defer = store.get_latest_structure_defer()
     assert defer is not None
     assert defer["reason"] == "structure-drift-writer-busy"
-    assert defer["classifier_contract_version"] == (
-        "structure-drift-classifier-v3"
-    )
+    assert defer["classifier_contract_version"] == ("structure-drift-classifier-v3")
 
 
 @pytest.mark.asyncio
@@ -2978,9 +2938,7 @@ async def test_structure_drift_parent_terminalizes_child_failures(
             "progress_id": "comparison-v2",
         }
     )
-    store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v2"
-    )
+    store.initialize_structure_drift_comparison = MagicMock(return_value="comparison-v2")
     monkeypatch.setattr(
         scheduler_module,
         "run_structure_drift_in_subprocess",
@@ -2993,9 +2951,7 @@ async def test_structure_drift_parent_terminalizes_child_failures(
                     else "structure-drift"
                 ),
                 elapsed_ms=75_000,
-                chunks_processed=(
-                    1 if failure_kind == "structure-drift-timeout" else 0
-                ),
+                chunks_processed=(1 if failure_kind == "structure-drift-timeout" else 0),
                 rows_processed=(100 if failure_kind == "structure-drift-timeout" else 0),
                 stderr=(
                     b"structure-drift stage=source-events chunks=1 rows=100"
@@ -3054,9 +3010,7 @@ async def test_drift_timeout_with_durable_same_identity_progress_requests_immedi
     store.structure_generation_drift_status = MagicMock(
         side_effect=(initial, initial, initial, advanced)
     )
-    store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v3"
-    )
+    store.initialize_structure_drift_comparison = MagicMock(return_value="comparison-v3")
     monkeypatch.setattr(
         scheduler_module,
         "run_structure_drift_in_subprocess",
@@ -3124,9 +3078,7 @@ async def test_drift_timeout_without_same_identity_durable_progress_does_not_ret
     store.structure_generation_drift_status = MagicMock(
         side_effect=(initial, initial, initial, {**initial, **advanced_status})
     )
-    store.initialize_structure_drift_comparison = MagicMock(
-        return_value="comparison-v3"
-    )
+    store.initialize_structure_drift_comparison = MagicMock(return_value="comparison-v3")
     monkeypatch.setattr(
         scheduler_module,
         "run_structure_drift_in_subprocess",
@@ -3360,9 +3312,7 @@ async def test_cancellation_after_admission_closes_local_attempt_ownership(
     assert scheduler._admitted_timeout_s is None
 
 
-async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics() -> (
-    None
-):
+async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics() -> None:
     """Timeout data arrives only from the child communicate result after reaping."""
     from polyarb.daemon.scheduler import (
         SnapshotSubprocessError,
@@ -3381,9 +3331,7 @@ async def test_snapshot_timeout_reaps_before_reading_bounded_stage_diagnostics()
     async def spawn(*_args, **_kwargs):
         return process
 
-    with pytest.raises(
-        SnapshotSubprocessError, match="snapshot-subprocess-timeout"
-    ) as raised:
+    with pytest.raises(SnapshotSubprocessError, match="snapshot-subprocess-timeout") as raised:
         await run_snapshot_in_subprocess(
             spawn=spawn,
             timeout_s=0.01,
@@ -3508,9 +3456,7 @@ async def test_snapshot_subprocess_accepts_pointer_switch_deadline() -> None:
 
 
 @pytest.mark.asyncio
-async def test_snapshot_subprocess_accepts_allowlisted_membership_evidence_marker() -> (
-    None
-):
+async def test_snapshot_subprocess_accepts_allowlisted_membership_evidence_marker() -> None:
     from polyarb.daemon.scheduler import (
         SnapshotSubprocessError,
         run_snapshot_in_subprocess,
@@ -3737,9 +3683,7 @@ async def test_no_pause_after_degraded_then_ok(
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
 
     # Tick 1: DEGRADED
-    scheduler._run_snapshot = AsyncMock(
-        return_value=_FakeResult(SnapshotStatus.DEGRADED)
-    )
+    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.DEGRADED))
     await scheduler._tick()
     assert scheduler._failure_counter == 0  # DEGRADED does not count as failure
     assert scheduler.state == SchedulerState.RUNNING
@@ -3787,9 +3731,7 @@ async def test_degraded_does_not_count_as_failure(
     store.init_schema()
 
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
-    scheduler._run_snapshot = AsyncMock(
-        return_value=_FakeResult(SnapshotStatus.DEGRADED)
-    )
+    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.DEGRADED))
 
     for _ in range(5):  # More than FAILURE_THRESHOLD
         await scheduler._tick()
@@ -3885,10 +3827,7 @@ async def test_pointer_switch_recovery_persists_failure_then_certified_success(
             SnapshotSubprocessError(
                 "pointer-switch-deadline",
                 elapsed_ms=15_000,
-                stderr=(
-                    b"structure-sync-failure "
-                    b"failure_kind=pointer-switch-deadline\n"
-                ),
+                stderr=(b"structure-sync-failure failure_kind=pointer-switch-deadline\n"),
             ),
             _FakeResult(SnapshotStatus.OK, snapshot_id=868),
         )
@@ -3898,9 +3837,7 @@ async def test_pointer_switch_recovery_persists_failure_then_certified_success(
     failed_attempt = store.get_latest_snapshot_attempt()
     assert failed_attempt is not None
     assert failed_attempt["outcome"] == "failed"
-    assert failed_attempt["failure_kind"] == (
-        "snapshot-subprocess-pointer-switch-deadline"
-    )
+    assert failed_attempt["failure_kind"] == ("snapshot-subprocess-pointer-switch-deadline")
     assert scheduler.state == SchedulerState.RECOVERING
     assert scheduler._failure_counter == 5
 
@@ -4021,6 +3958,32 @@ async def test_successful_tick_calls_heartbeat_ok(
     with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()) as hb_mock:
         await scheduler._tick()
         hb_mock.assert_called_once_with(daemon_settings_for_test)
+
+
+@pytest.mark.asyncio
+async def test_structure_incident_success_callback_cannot_fail_a_certified_snapshot(
+    daemon_settings_for_test: Any,
+) -> None:
+    """Incident persistence is observable, but never a new recovery failure."""
+    from polyarb.storage.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(daemon_settings_for_test.db_path)
+    store.init_schema()
+    callback = MagicMock(side_effect=RuntimeError("incident-store-unavailable"))
+    scheduler = SnapshotScheduler(
+        settings=daemon_settings_for_test,
+        sqlite_store=store,
+        on_structure_success=callback,
+    )
+    _seed_snapshot(store, 42)
+    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.OK, snapshot_id=42))
+
+    with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()):
+        assert await scheduler._tick_once(queued_at_ms=1) is True
+
+    callback.assert_called_once_with(42)
+    assert scheduler.state == SchedulerState.RUNNING
+    assert store.get_latest_snapshot_attempt()["outcome"] == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -4163,9 +4126,7 @@ async def test_degraded_tick_also_calls_heartbeat_ok(
     store.init_schema()
 
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
-    scheduler._run_snapshot = AsyncMock(
-        return_value=_FakeResult(SnapshotStatus.DEGRADED)
-    )
+    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.DEGRADED))
 
     with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()) as hb_mock:
         await scheduler._tick()
@@ -4212,9 +4173,7 @@ async def test_counter_persists_across_restart(
     pre_shutdown_counter = threshold - 1  # one short of trigger
 
     # First instance: run threshold-1 failures, then "shut down"
-    scheduler1 = SnapshotScheduler(
-        settings=daemon_settings_for_test, sqlite_store=store
-    )
+    scheduler1 = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
     scheduler1._run_snapshot = AsyncMock(side_effect=RuntimeError("failed"))
 
     for _ in range(pre_shutdown_counter):
@@ -4224,9 +4183,7 @@ async def test_counter_persists_across_restart(
     assert scheduler1.state == SchedulerState.RUNNING
 
     # Second instance reads from DB → restores counter
-    scheduler2 = SnapshotScheduler(
-        settings=daemon_settings_for_test, sqlite_store=store
-    )
+    scheduler2 = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
 
     assert scheduler2._failure_counter == pre_shutdown_counter, (
         f"Expected restored counter={pre_shutdown_counter}, "
@@ -4252,8 +4209,7 @@ async def test_failure_threshold_enters_recovering_and_a_later_success_self_heal
     scheduler = SnapshotScheduler(settings=daemon_settings_for_test, sqlite_store=store)
     scheduler._run_snapshot = AsyncMock(
         side_effect=[
-            RuntimeError("upstream unavailable")
-            for _ in range(SnapshotScheduler.FAILURE_THRESHOLD)
+            RuntimeError("upstream unavailable") for _ in range(SnapshotScheduler.FAILURE_THRESHOLD)
         ]
         + [_FakeResult(SnapshotStatus.OK, snapshot_id=99)]
     )
@@ -4268,6 +4224,4 @@ async def test_failure_threshold_enters_recovering_and_a_later_success_self_heal
 
     assert scheduler.state == SchedulerState.RUNNING
     assert scheduler._failure_counter == 0
-    assert (
-        scheduler._run_snapshot.await_count == SnapshotScheduler.FAILURE_THRESHOLD + 1
-    )
+    assert scheduler._run_snapshot.await_count == SnapshotScheduler.FAILURE_THRESHOLD + 1

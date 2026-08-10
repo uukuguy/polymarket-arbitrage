@@ -189,8 +189,7 @@ class IncidentManager:
             if row is None:
                 self._store._assert_owner_journal_clean(con)
                 row = con.execute(
-                    "SELECT * FROM neg_risk_incident_open_authority "
-                    "WHERE incident_id=?",
+                    "SELECT * FROM neg_risk_incident_open_authority WHERE incident_id=?",
                     (incident_id,),
                 ).fetchone()
                 if row is not None:
@@ -201,22 +200,19 @@ class IncidentManager:
             if now_ms < latest.occurred_at_ms:
                 raise InvalidIncidentTransitionError("incident-clock-regression")
             if state == "recovering" and (
-                latest.scope == "candidate"
-                or latest.scope.startswith("candidate:")
+                latest.scope == "candidate" or latest.scope.startswith("candidate:")
             ):
                 evidence = {
                     **evidence,
                     "candidate_success_receipt_row_id": con.execute(
-                        "SELECT COALESCE(MAX(id),0) "
-                        "FROM neg_risk_candidate_success_receipts"
+                        "SELECT COALESCE(MAX(id),0) FROM neg_risk_candidate_success_receipts"
                     ).fetchone()[0],
                 }
             if state == "recovering" and latest.scope == "http":
                 evidence = {
                     **evidence,
                     "http_probe_row_id": con.execute(
-                        "SELECT COALESCE(MAX(rowid),0) "
-                        "FROM neg_risk_http_probe_receipts"
+                        "SELECT COALESCE(MAX(rowid),0) FROM neg_risk_http_probe_receipts"
                     ).fetchone()[0],
                 }
             if state == "verified":
@@ -227,33 +223,27 @@ class IncidentManager:
                     (incident_id,),
                 ).fetchone()
                 recovery_started_at_ms = (
-                    None
-                    if recovery is None
-                    else int(recovery["occurred_at_ms"])
+                    None if recovery is None else int(recovery["occurred_at_ms"])
                 )
                 recovery_evidence = (
-                    None
-                    if recovery is None
-                    else json.loads(str(recovery["evidence_json"]))
+                    None if recovery is None else json.loads(str(recovery["evidence_json"]))
                 )
                 if recovery is None and "recovery_occurred_at_ms" in row.keys():
                     recovery_started_at_ms = row["recovery_occurred_at_ms"]
                     recovery_json = row["recovery_evidence_json"]
                     recovery_evidence = (
-                        None
-                        if recovery_json is None
-                        else json.loads(str(recovery_json))
+                        None if recovery_json is None else json.loads(str(recovery_json))
                     )
                 if (
                     recovery_started_at_ms is None
                     or not isinstance(recovery_evidence, dict)
                     or not self._has_recovery_proof(
-                    con,
-                    latest,
-                    recovery_started_at_ms=recovery_started_at_ms,
-                    verification_at_ms=now_ms,
-                    recovery_evidence=recovery_evidence,
-                    verification_evidence=evidence,
+                        con,
+                        latest,
+                        recovery_started_at_ms=recovery_started_at_ms,
+                        verification_at_ms=now_ms,
+                        recovery_evidence=recovery_evidence,
+                        verification_evidence=evidence,
                     )
                 ):
                     raise RecoveryEvidenceRequiredError("post-recovery-writer-evidence-required")
@@ -329,8 +319,7 @@ class IncidentManager:
                     None if recovery_json is None else json.loads(str(recovery_json))
                 )
                 if not isinstance(evidence, dict) or (
-                    recovery_evidence is not None
-                    and not isinstance(recovery_evidence, dict)
+                    recovery_evidence is not None and not isinstance(recovery_evidence, dict)
                 ):
                     raise ValueError("invalid-incident-open-authority")
                 payload = {
@@ -381,10 +370,7 @@ class IncidentManager:
                 before_ms, before_id = before
                 if before_ms < 0 or not before_id:
                     raise ValueError("invalid-incident-page-cursor")
-                where = (
-                    "WHERE occurred_at_ms<? OR "
-                    "(occurred_at_ms=? AND incident_id<?) "
-                )
+                where = "WHERE occurred_at_ms<? OR (occurred_at_ms=? AND incident_id<?) "
                 parameters = (before_ms, before_ms, before_id)
             rows = con.execute(
                 "SELECT * FROM neg_risk_incident_open_authority "
@@ -415,17 +401,13 @@ class IncidentManager:
                         detected_at_ms=int(row["detected_at_ms"]),
                         recovery_occurred_at_ms=row["recovery_occurred_at_ms"],
                         recovery_evidence=(
-                            None
-                            if recovery_json is None
-                            else json.loads(str(recovery_json))
+                            None if recovery_json is None else json.loads(str(recovery_json))
                         ),
                         history_floor_event_id=(
                             None if floor is None else int(floor["through_event_id"])
                         ),
                         history_floor_compacted_count=(
-                            None
-                            if floor is None
-                            else int(floor["compacted_event_count"])
+                            None if floor is None else int(floor["compacted_event_count"])
                         ),
                     )
                 )
@@ -506,9 +488,7 @@ class IncidentManager:
             raise ValueError("invalid-group-incident-history-request")
         if before_event_id is not None and before_event_id <= 0:
             raise ValueError("invalid-group-incident-history-request")
-        if before_order_key is not None and (
-            before_order_key[0] < 0 or before_order_key[1] <= 0
-        ):
+        if before_order_key is not None and (before_order_key[0] < 0 or before_order_key[1] <= 0):
             raise ValueError("invalid-group-incident-history-request")
         if before_event_id is not None and before_order_key is not None:
             raise ValueError("invalid-group-incident-history-request")
@@ -523,22 +503,14 @@ class IncidentManager:
             parameters: tuple[Any, ...] = (scope,)
             if before_order_key is not None:
                 before_ms, before_id = before_order_key
-                where += (
-                    "AND (occurred_at_ms<? OR "
-                    "(occurred_at_ms=? AND id<?)) "
-                )
+                where += "AND (occurred_at_ms<? OR (occurred_at_ms=? AND id<?)) "
                 parameters = (scope, before_ms, before_ms, before_id)
             elif before_event_id is not None:
                 where += "AND id<? "
                 parameters = (scope, before_event_id)
-            order_by = (
-                "occurred_at_ms DESC,id DESC"
-                if before_order_key is not None
-                else "id DESC"
-            )
+            order_by = "occurred_at_ms DESC,id DESC" if before_order_key is not None else "id DESC"
             rows = con.execute(
-                "SELECT * FROM neg_risk_incident_events "
-                f"WHERE {where}ORDER BY {order_by} LIMIT ?",
+                f"SELECT * FROM neg_risk_incident_events WHERE {where}ORDER BY {order_by} LIMIT ?",
                 (*parameters, limit + 1),
             ).fetchall()
             page_rows = rows[:limit]
@@ -558,18 +530,10 @@ class IncidentManager:
                     )
                     for row in page_rows
                 ),
-                next_before_event_id=(
-                    None
-                    if len(rows) <= limit
-                    else int(page_rows[-1]["id"])
-                ),
-                floor_event_id=(
-                    None if floor is None else int(floor["through_event_id"])
-                ),
+                next_before_event_id=(None if len(rows) <= limit else int(page_rows[-1]["id"])),
+                floor_event_id=(None if floor is None else int(floor["through_event_id"])),
                 floor_compacted_count=(
-                    None
-                    if floor is None
-                    else int(floor["compacted_event_count"])
+                    None if floor is None else int(floor["compacted_event_count"])
                 ),
             )
         finally:
@@ -631,12 +595,7 @@ class IncidentManager:
         limit: int,
         _connection: sqlite3.Connection | None = None,
     ) -> tuple[Incident, ...]:
-        if (
-            not scope
-            or len(scope) > 128
-            or after_ms < 0
-            or not 1 <= limit <= 500
-        ):
+        if not scope or len(scope) > 128 or after_ms < 0 or not 1 <= limit <= 500:
             raise ValueError("invalid-recent-incident-request")
         con = _connection or self._connect(read_only=True)
         try:
@@ -693,10 +652,7 @@ class IncidentManager:
             or actual_open_count > INCIDENT_OPEN_AUTHORITY_MAX_ROWS
             or open_count != actual_open_count
             or len(aggregate_digest) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in aggregate_digest
-            )
+            or any(character not in "0123456789abcdef" for character in aggregate_digest)
             or str(aggregate["row_hash"]) != expected_hash
         ):
             raise ValueError("invalid-incident-open-aggregate")
@@ -849,8 +805,7 @@ class IncidentManager:
         try:
             con.execute("BEGIN IMMEDIATE")
             existing = con.execute(
-                "SELECT 1 FROM neg_risk_evidence_failures "
-                "WHERE component='incident'"
+                "SELECT 1 FROM neg_risk_evidence_failures WHERE component='incident'"
             ).fetchone()
             payload = {
                 "component": "incident",
@@ -940,13 +895,10 @@ class IncidentManager:
         con: sqlite3.Connection,
     ) -> tuple[int, int | None, int | None, str]:
         checkpoint = con.execute(
-            "SELECT prefix_hash FROM neg_risk_incident_authority_checkpoint "
-            "WHERE id=1"
+            "SELECT prefix_hash FROM neg_risk_incident_authority_checkpoint WHERE id=1"
         ).fetchone()
         previous_hash = (
-            "sha256:" + ("0" * 64)
-            if checkpoint is None
-            else str(checkpoint["prefix_hash"])
+            "sha256:" + ("0" * 64) if checkpoint is None else str(checkpoint["prefix_hash"])
         )
         rows = con.execute(
             "SELECT id,incident_id,sequence,scope,kind,state,occurred_at_ms,"
@@ -1009,9 +961,7 @@ class IncidentManager:
             event = self._from_row(row)
             histories.setdefault(event.id, []).append(event)
         anchors: dict[str, Incident] = {}
-        for row in con.execute(
-            "SELECT * FROM neg_risk_incident_replay_anchors"
-        ).fetchall():
+        for row in con.execute("SELECT * FROM neg_risk_incident_replay_anchors").fetchall():
             anchors[str(row["incident_id"])] = self._validate_replay_anchor_row(row)
         for incident_id, history in histories.items():
             first = history[0]
@@ -1061,9 +1011,7 @@ class IncidentManager:
     def _validate_open_authority_row(self, row: sqlite3.Row) -> Incident:
         incident = self._from_row(row)
         recovery_json = row["recovery_evidence_json"]
-        recovery_evidence = (
-            None if recovery_json is None else json.loads(str(recovery_json))
-        )
+        recovery_evidence = None if recovery_json is None else json.loads(str(recovery_json))
         if recovery_evidence is not None and not isinstance(recovery_evidence, dict):
             raise ValueError("invalid-incident-open-authority")
         payload = {
@@ -1089,9 +1037,7 @@ class IncidentManager:
     def _validate_replay_anchor_row(self, row: sqlite3.Row) -> Incident:
         incident = self._from_row(row)
         recovery_json = row["recovery_evidence_json"]
-        recovery_evidence = (
-            None if recovery_json is None else json.loads(str(recovery_json))
-        )
+        recovery_evidence = None if recovery_json is None else json.loads(str(recovery_json))
         if recovery_evidence is not None and not isinstance(recovery_evidence, dict):
             raise ValueError("invalid-incident-replay-anchor")
         payload = {
@@ -1207,9 +1153,7 @@ class IncidentManager:
                 str(authority["chain_hash"]),
             )
         else:
-            event_count, first_event_id, last_event_id, chain_hash = (
-                self._suffix_chain_values(con)
-            )
+            event_count, first_event_id, last_event_id, chain_hash = self._suffix_chain_values(con)
         self._execute_owner_mutation(
             con,
             owner_batch,
@@ -1259,10 +1203,7 @@ class IncidentManager:
                 table_name="neg_risk_incident_open_authority",
                 operation="DELETE",
                 row_key=str(event["incident_id"]),
-                sql=(
-                    "DELETE FROM neg_risk_incident_open_authority "
-                    "WHERE incident_id=?"
-                ),
+                sql=("DELETE FROM neg_risk_incident_open_authority WHERE incident_id=?"),
                 parameters=(event["incident_id"],),
             )
             count -= 1
@@ -1270,19 +1211,21 @@ class IncidentManager:
             if old is None and count >= INCIDENT_OPEN_AUTHORITY_MAX_ROWS:
                 raise ValueError("incident-open-authority-cap")
             detected_at = (
-                int(event["occurred_at_ms"])
-                if old is None
-                else int(old["detected_at_ms"])
+                int(event["occurred_at_ms"]) if old is None else int(old["detected_at_ms"])
             )
             recovery_at = (
                 int(event["occurred_at_ms"])
                 if event["state"] == "recovering"
-                else None if old is None else old["recovery_occurred_at_ms"]
+                else None
+                if old is None
+                else old["recovery_occurred_at_ms"]
             )
             recovery_json = (
                 str(event["evidence_json"])
                 if event["state"] == "recovering"
-                else None if old is None else old["recovery_evidence_json"]
+                else None
+                if old is None
+                else old["recovery_evidence_json"]
             )
             payload = {
                 "evidence": json.loads(str(event["evidence_json"])),
@@ -1323,10 +1266,17 @@ class IncidentManager:
                     "row_hash=excluded.row_hash"
                 ),
                 parameters=(
-                    event["incident_id"], event["sequence"], event["scope"],
-                    event["kind"], event["state"], detected_at,
-                    event["occurred_at_ms"], event["evidence_json"], recovery_at,
-                    recovery_json, row_hash,
+                    event["incident_id"],
+                    event["sequence"],
+                    event["scope"],
+                    event["kind"],
+                    event["state"],
+                    detected_at,
+                    event["occurred_at_ms"],
+                    event["evidence_json"],
+                    recovery_at,
+                    recovery_json,
+                    row_hash,
                 ),
             )
             digest ^= int(row_hash.removeprefix("sha256:"), 16)
@@ -1365,8 +1315,7 @@ class IncidentManager:
         if int(event["sequence"]) <= 1:
             return
         retained_predecessor = con.execute(
-            "SELECT 1 FROM neg_risk_incident_events "
-            "WHERE incident_id=? AND sequence=?",
+            "SELECT 1 FROM neg_risk_incident_events WHERE incident_id=? AND sequence=?",
             (event["incident_id"], int(event["sequence"]) - 1),
         ).fetchone()
         if retained_predecessor is not None:
@@ -1390,13 +1339,10 @@ class IncidentManager:
     ) -> None:
         evidence = json.loads(str(predecessor["evidence_json"]))
         recovery_evidence = (
-            None
-            if recovery_evidence_json is None
-            else json.loads(recovery_evidence_json)
+            None if recovery_evidence_json is None else json.loads(recovery_evidence_json)
         )
         if not isinstance(evidence, dict) or (
-            recovery_evidence is not None
-            and not isinstance(recovery_evidence, dict)
+            recovery_evidence is not None and not isinstance(recovery_evidence, dict)
         ):
             raise ValueError("invalid-incident-replay-anchor")
         payload = {
@@ -1576,15 +1522,10 @@ class IncidentManager:
                     floor_row_hash,
                 ),
             )
-        deleted_by_identity = {
-            (str(row["incident_id"]), int(row["sequence"])): row
-            for row in rows
-        }
+        deleted_by_identity = {(str(row["incident_id"]), int(row["sequence"])): row for row in rows}
         existing_anchors = {
             str(row["incident_id"]): row
-            for row in con.execute(
-                "SELECT * FROM neg_risk_incident_replay_anchors"
-            ).fetchall()
+            for row in con.execute("SELECT * FROM neg_risk_incident_replay_anchors").fetchall()
         }
         retained_first_rows = con.execute(
             "SELECT e.* FROM neg_risk_incident_events e JOIN ("
@@ -1602,16 +1543,8 @@ class IncidentManager:
             if predecessor is None:
                 continue
             prior_anchor = existing_anchors.get(incident_id)
-            recovery_at = (
-                None
-                if prior_anchor is None
-                else prior_anchor["recovery_occurred_at_ms"]
-            )
-            recovery_json = (
-                None
-                if prior_anchor is None
-                else prior_anchor["recovery_evidence_json"]
-            )
+            recovery_at = None if prior_anchor is None else prior_anchor["recovery_occurred_at_ms"]
+            recovery_json = None if prior_anchor is None else prior_anchor["recovery_evidence_json"]
             for deleted in rows:
                 if (
                     str(deleted["incident_id"]) == incident_id
@@ -1643,10 +1576,7 @@ class IncidentManager:
                 table_name="neg_risk_incident_replay_anchors",
                 operation="DELETE",
                 row_key=incident_id,
-                sql=(
-                    "DELETE FROM neg_risk_incident_replay_anchors "
-                    "WHERE incident_id=?"
-                ),
+                sql=("DELETE FROM neg_risk_incident_replay_anchors WHERE incident_id=?"),
                 parameters=(incident_id,),
             )
         con.execute(
@@ -1668,8 +1598,7 @@ class IncidentManager:
                 raise ValueError("invalid-incident-migration-target")
         histories: dict[str, list[Incident]] = {}
         rows = con.execute(
-            "SELECT * FROM neg_risk_incident_events "
-            "ORDER BY incident_id,sequence LIMIT ?",
+            "SELECT * FROM neg_risk_incident_events ORDER BY incident_id,sequence LIMIT ?",
             (513,),
         ).fetchall()
         if len(rows) > 512:
@@ -1714,16 +1643,12 @@ class IncidentManager:
         ).fetchone()
         if checkpoint is not None:
             old_checkpoint_payload = {
-                "compacted_event_count": int(
-                    checkpoint["compacted_event_count"]
-                ),
+                "compacted_event_count": int(checkpoint["compacted_event_count"]),
                 "generation": int(checkpoint["generation"]),
                 "prefix_hash": str(checkpoint["prefix_hash"]),
                 "through_event_id": int(checkpoint["through_event_id"]),
             }
-            if self._row_hash(old_checkpoint_payload)[1] != str(
-                checkpoint["checkpoint_hash"]
-            ):
+            if self._row_hash(old_checkpoint_payload)[1] != str(checkpoint["checkpoint_hash"]):
                 raise ValueError("invalid-v4-incident-checkpoint")
         raw_rows = con.execute(
             "SELECT * FROM neg_risk_incident_events ORDER BY id LIMIT ?",
@@ -1734,8 +1659,7 @@ class IncidentManager:
         for row in raw_rows:
             self._from_row(row)
         open_rows = con.execute(
-            "SELECT * FROM neg_risk_incident_open_authority "
-            "ORDER BY incident_id LIMIT ?",
+            "SELECT * FROM neg_risk_incident_open_authority ORDER BY incident_id LIMIT ?",
             (INCIDENT_OPEN_AUTHORITY_MAX_ROWS + 1,),
         ).fetchall()
         if len(open_rows) > INCIDENT_OPEN_AUTHORITY_MAX_ROWS:
@@ -1744,9 +1668,7 @@ class IncidentManager:
         for row in open_rows:
             incident = self._from_row(row)
             recovery_json = row["recovery_evidence_json"]
-            recovery_evidence = (
-                None if recovery_json is None else json.loads(str(recovery_json))
-            )
+            recovery_evidence = None if recovery_json is None else json.loads(str(recovery_json))
             old_payload = {
                 "evidence": incident.evidence,
                 "incident_id": incident.id,
@@ -1763,8 +1685,7 @@ class IncidentManager:
                 raise ValueError("invalid-v4-incident-open-authority")
             old_digest ^= int(expected_hash.removeprefix("sha256:"), 16)
         aggregate = con.execute(
-            "SELECT open_count,aggregate_digest FROM "
-            "neg_risk_incident_open_aggregate WHERE id=1"
+            "SELECT open_count,aggregate_digest FROM neg_risk_incident_open_aggregate WHERE id=1"
         ).fetchone()
         if aggregate is not None and (
             int(aggregate["open_count"]) != len(open_rows)
@@ -1774,8 +1695,7 @@ class IncidentManager:
         if aggregate is None and open_rows:
             raise ValueError("invalid-v4-incident-open-aggregate")
         floor_rows = con.execute(
-            "SELECT * FROM neg_risk_incident_scope_floors "
-            "ORDER BY scope LIMIT ?",
+            "SELECT * FROM neg_risk_incident_scope_floors ORDER BY scope LIMIT ?",
             (INCIDENT_SCOPE_FLOOR_MAX_ROWS + 1,),
         ).fetchall()
         if len(floor_rows) > INCIDENT_SCOPE_FLOOR_MAX_ROWS:
@@ -1857,14 +1777,11 @@ class IncidentManager:
         for row in open_rows:
             incident = self._from_row(row)
             detected_row = con.execute(
-                "SELECT MIN(occurred_at_ms) FROM neg_risk_incident_events "
-                "WHERE incident_id=?",
+                "SELECT MIN(occurred_at_ms) FROM neg_risk_incident_events WHERE incident_id=?",
                 (incident.id,),
             ).fetchone()
             detected_at_ms = (
-                incident.occurred_at_ms
-                if detected_row[0] is None
-                else int(detected_row[0])
+                incident.occurred_at_ms if detected_row[0] is None else int(detected_row[0])
             )
             recovery_json = row["recovery_evidence_json"]
             payload = {
@@ -1874,9 +1791,7 @@ class IncidentManager:
                 "detected_at_ms": detected_at_ms,
                 "occurred_at_ms": incident.occurred_at_ms,
                 "recovery_evidence": (
-                    None
-                    if recovery_json is None
-                    else json.loads(str(recovery_json))
+                    None if recovery_json is None else json.loads(str(recovery_json))
                 ),
                 "recovery_occurred_at_ms": row["recovery_occurred_at_ms"],
                 "scope": incident.scope,
@@ -1938,9 +1853,7 @@ class IncidentManager:
             )
         if checkpoint is not None:
             checkpoint_payload = {
-                "compacted_event_count": int(
-                    checkpoint["compacted_event_count"]
-                ),
+                "compacted_event_count": int(checkpoint["compacted_event_count"]),
                 "generation": int(checkpoint["generation"]),
                 "prefix_hash": str(checkpoint["prefix_hash"]),
                 "scope_floor_count": len(floor_rows),
@@ -1971,9 +1884,7 @@ class IncidentManager:
             con.execute(f'DROP TABLE "{table}"')
 
     def _initialize_empty_v4_authority(self, con: sqlite3.Connection) -> None:
-        if con.execute(
-            "SELECT 1 FROM neg_risk_incident_events LIMIT 1"
-        ).fetchone() is not None:
+        if con.execute("SELECT 1 FROM neg_risk_incident_events LIMIT 1").fetchone() is not None:
             raise ValueError("invalid-incident-bootstrap")
         aggregate_digest = "0" * 64
         _, aggregate_hash = self._row_hash(
@@ -1983,9 +1894,10 @@ class IncidentManager:
             }
         )
         owner_batch = self._new_owner_batch()
-        if con.execute(
-            "SELECT 1 FROM neg_risk_incident_open_aggregate WHERE id=1"
-        ).fetchone() is None:
+        if (
+            con.execute("SELECT 1 FROM neg_risk_incident_open_aggregate WHERE id=1").fetchone()
+            is None
+        ):
             self._execute_owner_mutation(
                 con,
                 owner_batch,
@@ -2050,8 +1962,7 @@ class IncidentManager:
             if type(receipt_anchor) is not int or receipt_anchor < 0:
                 return False
             receipt = con.execute(
-                "SELECT * FROM neg_risk_candidate_success_receipts "
-                "WHERE quote_batch_id=?",
+                "SELECT * FROM neg_risk_candidate_success_receipts WHERE quote_batch_id=?",
                 (quote.quote_batch_id,),
             ).fetchone()
             if receipt is None:
@@ -2203,10 +2114,7 @@ class IncidentManager:
                         "resource-disk-pressure",
                         "resource-contention",
                     }
-                    or (
-                        decision.mode == "normal"
-                        and decision.health_claimed
-                    )
+                    or (decision.mode == "normal" and decision.health_claimed)
                 )
             )
         if scope == "capacity":
@@ -2279,20 +2187,32 @@ class IncidentManager:
                 and row["successful_response_count"]
                 == verification_evidence.get("successful_response_count")
             )
+        if scope == "structure":
+            snapshot_id = verification_evidence.get("snapshot_id")
+            if type(snapshot_id) is not int or snapshot_id < 1:
+                return False
+            row = con.execute(
+                "SELECT snapshot_id,finished_at_ms,outcome FROM snapshot_attempts "
+                "WHERE snapshot_id=? AND outcome='succeeded' "
+                "ORDER BY id DESC LIMIT 1",
+                (snapshot_id,),
+            ).fetchone()
+            return bool(
+                row
+                and row["finished_at_ms"] is not None
+                and recovery_started_at_ms <= row["finished_at_ms"] <= verification_at_ms
+            )
         if scope.startswith("notification:"):
             try:
                 notification_id = int(scope.split(":", 1)[1])
             except ValueError:
                 return False
             failed_attempt_id = recovery_evidence.get("failed_attempt_id")
-            delivered_attempt_id = verification_evidence.get(
-                "delivered_attempt_id"
-            )
+            delivered_attempt_id = verification_evidence.get("delivered_attempt_id")
             if (
                 type(failed_attempt_id) is not int
                 or type(delivered_attempt_id) is not int
-                or verification_evidence.get("notification_id")
-                != notification_id
+                or verification_evidence.get("notification_id") != notification_id
                 or delivered_attempt_id <= failed_attempt_id
             ):
                 return False
@@ -2350,8 +2270,7 @@ class IncidentManager:
                 or row["sequence"] < 1
                 or type(row["occurred_at_ms"]) is not int
                 or row["occurred_at_ms"] < 0
-                or len(str(row["evidence_json"]).encode("utf-8"))
-                > INCIDENT_EVIDENCE_MAX_BYTES
+                or len(str(row["evidence_json"]).encode("utf-8")) > INCIDENT_EVIDENCE_MAX_BYTES
                 or not isinstance(evidence, dict)
                 or not all(isinstance(key, str) for key in evidence)
             ):

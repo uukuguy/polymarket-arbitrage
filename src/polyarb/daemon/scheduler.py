@@ -1872,7 +1872,13 @@ class SnapshotScheduler:
                     logger.info("structure recovery confirmed by certified snapshot")
                 self.state = SchedulerState.RUNNING
                 if self._on_structure_success is not None:
-                    self._on_structure_success(snapshot_id)
+                    try:
+                        self._on_structure_success(snapshot_id)
+                    except Exception as error:
+                        logger.warning(
+                            "structure recovery incident recording failed "
+                            f"kind={type(error).__name__}"
+                        )
                 logger.info(
                     f"snapshot tick success: status={result_status} failure_counter reset to 0"
                 )
