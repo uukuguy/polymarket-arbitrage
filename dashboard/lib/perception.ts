@@ -8,6 +8,7 @@ import type {
   PerceptionHealthEnvelope,
   PerceptionIncidentsEnvelope,
   PerceptionOverview,
+  PerceptionProducerProgressEnvelope,
   PerceptionReadResult,
   PerceptionReconciliationEnvelope,
   PerceptionResourceDecision,
@@ -33,14 +34,13 @@ function isStringOrNull(value: unknown): value is string | null {
 }
 
 function isSha256(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^sha256:[0-9a-f]{64}$/.test(value)
-  );
+  return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
 function isNumberOrNull(value: unknown): value is number | null {
-  return (typeof value === "number" && Number.isFinite(value)) || value === null;
+  return (
+    (typeof value === "number" && Number.isFinite(value)) || value === null
+  );
 }
 
 function isNonNegativeNumber(value: unknown): value is number {
@@ -154,9 +154,7 @@ export function isStatusEnvelope(
     !isNonNegativeInteger(stateCounts["no-edge"]) ||
     !isNonNegativeInteger(stateCounts.unavailable) ||
     !isNonNegativeInteger(value.current_candidate_group_count) ||
-    stateCounts.watching +
-      stateCounts["no-edge"] +
-      stateCounts.unavailable !==
+    stateCounts.watching + stateCounts["no-edge"] + stateCounts.unavailable !==
       value.current_candidate_group_count
   ) {
     return false;
@@ -408,8 +406,7 @@ function isGroupTimelineEnvelope(
     incidentFloor.scope !== `candidate:${expectedGroupId}` ||
     complete.membership !== (membershipFloor.compacted_count === 0) ||
     complete.quote !== (quoteFloor.compacted_count === 0) ||
-    complete.opportunity !==
-      (floor.opportunity.source_rows_compacted === 0) ||
+    complete.opportunity !== (floor.opportunity.source_rows_compacted === 0) ||
     complete.incident !== (incidentFloor.compacted_count === 0)
   ) {
     return false;
@@ -590,7 +587,8 @@ function isIncident(value: unknown): boolean {
     value.notification_delivery_tracked === false &&
     (value.diagnosis === null ||
       (isRecord(value.diagnosis) &&
-        (value.diagnosis.severity === "p1" || value.diagnosis.severity === "p2") &&
+        (value.diagnosis.severity === "p1" ||
+          value.diagnosis.severity === "p2") &&
         isPositiveInteger(value.diagnosis.reminder_interval_s) &&
         (value.diagnosis.impact === "feed-at-risk" ||
           value.diagnosis.impact === "feed-unavailable") &&
@@ -600,7 +598,8 @@ function isIncident(value: unknown): boolean {
           value.diagnosis.automatic_action === "automatic-retries-exhausted") &&
         (value.diagnosis.next_action === "inspect-clob-and-child-io" ||
           value.diagnosis.next_action === "inspect-child-stderr" ||
-          value.diagnosis.next_action === "inspect-producer-receipt-and-restart") &&
+          value.diagnosis.next_action ===
+            "inspect-producer-receipt-and-restart") &&
         (isPositiveInteger(value.diagnosis.deadline_s) ||
           value.diagnosis.deadline_s === null) &&
         isPositiveInteger(value.diagnosis.consecutive_failures) &&
@@ -610,7 +609,8 @@ function isIncident(value: unknown): boolean {
         (value.diagnosis.failure_reason === null ||
           typeof value.diagnosis.failure_reason === "string")) ||
       (isRecord(value.diagnosis) &&
-        (value.diagnosis.severity === "p1" || value.diagnosis.severity === "p2") &&
+        (value.diagnosis.severity === "p1" ||
+          value.diagnosis.severity === "p2") &&
         isPositiveInteger(value.diagnosis.reminder_interval_s) &&
         value.diagnosis.impact === "storage-exhaustion-risk" &&
         value.diagnosis.automatic_action === "reclaim-bounded-history" &&
@@ -624,11 +624,13 @@ function isIncident(value: unknown): boolean {
         (value.diagnosis.failure_reason === null ||
           typeof value.diagnosis.failure_reason === "string")) ||
       (isRecord(value.diagnosis) &&
-        (value.diagnosis.severity === "p1" || value.diagnosis.severity === "p2") &&
+        (value.diagnosis.severity === "p1" ||
+          value.diagnosis.severity === "p2") &&
         isPositiveInteger(value.diagnosis.reminder_interval_s) &&
         value.diagnosis.impact === "market-map-stale" &&
         value.diagnosis.automatic_action === "retry-bounded-structure-child" &&
-        value.diagnosis.next_action === "inspect-stage-checkpoint-and-child-budget" &&
+        value.diagnosis.next_action ===
+          "inspect-stage-checkpoint-and-child-budget" &&
         value.diagnosis.deadline_s === null &&
         isPositiveInteger(value.diagnosis.consecutive_failures) &&
         value.diagnosis.last_success_age_s === null &&
@@ -678,6 +680,37 @@ function isIncidentsEnvelope(
     typeof value.limit === "number" &&
     isNonNegativeInteger(value.open_count) &&
     (value.next_before === null || typeof value.next_before === "string")
+  );
+}
+
+function isProducerAttempt(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isPositiveInteger(value.id) &&
+    (value.phase === undefined || typeof value.phase === "string") &&
+    (value.outcome === undefined || typeof value.outcome === "string") &&
+    (value.failure_kind === undefined || isStringOrNull(value.failure_kind)) &&
+    (value.last_stage === undefined || isStringOrNull(value.last_stage)) &&
+    (value.elapsed_ms === undefined ||
+      isNonNegativeIntegerOrNull(value.elapsed_ms)) &&
+    (value.chunks_processed === undefined ||
+      isNonNegativeIntegerOrNull(value.chunks_processed))
+  );
+}
+
+function isProducerProgressEnvelope(
+  value: unknown,
+): value is PerceptionProducerProgressEnvelope {
+  return (
+    isRecord(value) &&
+    value.status === "available" &&
+    isRecord(value.quote) &&
+    isRecord(value.structure) &&
+    (value.quote.attempt === null || isProducerAttempt(value.quote.attempt)) &&
+    (value.structure.attempt === null ||
+      isProducerAttempt(value.structure.attempt)) &&
+    typeof value.automatic_action === "string" &&
+    typeof value.operator_action === "string"
   );
 }
 
@@ -772,8 +805,7 @@ export function isResourcesEnvelope(
       !isRecord(item.sample) ||
       !isRecord(item.decision) ||
       item.sample.observed_at_ms > item.decision.decided_at_ms ||
-      (previousSequence !== null &&
-        item.decision.sequence >= previousSequence)
+      (previousSequence !== null && item.decision.sequence >= previousSequence)
     ) {
       return false;
     }
@@ -800,10 +832,13 @@ async function fetchAvailable<T>(
   signal: AbortSignal,
   validate: (value: unknown) => value is T,
 ): Promise<T> {
-  const response = await fetch(`${PERCEPTION_BASE_URL.replace(/\/$/, "")}${path}`, {
-    cache: "no-store",
-    signal,
-  });
+  const response = await fetch(
+    `${PERCEPTION_BASE_URL.replace(/\/$/, "")}${path}`,
+    {
+      cache: "no-store",
+      signal,
+    },
+  );
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -837,8 +872,8 @@ export function candidateEnvelopesAgree(
     status.opportunities.status === "available" &&
     status.opportunities.count ===
       currentOpportunities.current_opportunity_count &&
-    (currentOpportunities.current_opportunity_count >
-      currentOpportunities.items.length) ===
+    currentOpportunities.current_opportunity_count >
+      currentOpportunities.items.length ===
       (currentOpportunities.next_after_group_id !== null)
   );
 }
@@ -857,49 +892,54 @@ export async function readPerceptionOverview(): Promise<
       reconciliation,
       incidents,
       resources,
-    ] =
-      await Promise.all([
-        fetchAvailable<PerceptionHealthEnvelope>(
-          "/healthz",
-          signal,
-          isHealthEnvelope,
-        ),
-        fetchAvailable<PerceptionStatusEnvelope>(
-          "/perception/status",
-          signal,
-          isStatusEnvelope,
-        ),
-        fetchAvailable<PerceptionCurrentOpportunitiesEnvelope>(
-          `/perception/opportunities?limit=${OPPORTUNITY_LIMIT}`,
-          signal,
-          isCurrentOpportunitiesEnvelope,
-        ),
-        fetchAvailable<PerceptionGroupsEnvelope>(
-          `/perception/groups?limit=${GROUP_LIMIT}`,
-          signal,
-          isGroupsEnvelope,
-        ),
-        fetchAvailable<PerceptionDiscoveryEnvelope>(
-          "/perception/discovery",
-          signal,
-          isDiscoveryEnvelope,
-        ),
-        fetchAvailable<PerceptionReconciliationEnvelope>(
-          "/perception/reconciliation",
-          signal,
-          isReconciliationEnvelope,
-        ),
-        fetchAvailable<PerceptionIncidentsEnvelope>(
-          `/perception/incidents?limit=${INCIDENT_LIMIT}`,
-          signal,
-          isIncidentsEnvelope,
-        ),
-        fetchAvailable<PerceptionResourcesEnvelope>(
-          `/perception/resources?limit=${RESOURCE_LIMIT}`,
-          signal,
-          isResourcesEnvelope,
-        ),
-      ]);
+      producerProgress,
+    ] = await Promise.all([
+      fetchAvailable<PerceptionHealthEnvelope>(
+        "/healthz",
+        signal,
+        isHealthEnvelope,
+      ),
+      fetchAvailable<PerceptionStatusEnvelope>(
+        "/perception/status",
+        signal,
+        isStatusEnvelope,
+      ),
+      fetchAvailable<PerceptionCurrentOpportunitiesEnvelope>(
+        `/perception/opportunities?limit=${OPPORTUNITY_LIMIT}`,
+        signal,
+        isCurrentOpportunitiesEnvelope,
+      ),
+      fetchAvailable<PerceptionGroupsEnvelope>(
+        `/perception/groups?limit=${GROUP_LIMIT}`,
+        signal,
+        isGroupsEnvelope,
+      ),
+      fetchAvailable<PerceptionDiscoveryEnvelope>(
+        "/perception/discovery",
+        signal,
+        isDiscoveryEnvelope,
+      ),
+      fetchAvailable<PerceptionReconciliationEnvelope>(
+        "/perception/reconciliation",
+        signal,
+        isReconciliationEnvelope,
+      ),
+      fetchAvailable<PerceptionIncidentsEnvelope>(
+        `/perception/incidents?limit=${INCIDENT_LIMIT}`,
+        signal,
+        isIncidentsEnvelope,
+      ),
+      fetchAvailable<PerceptionResourcesEnvelope>(
+        `/perception/resources?limit=${RESOURCE_LIMIT}`,
+        signal,
+        isResourcesEnvelope,
+      ),
+      fetchAvailable<PerceptionProducerProgressEnvelope>(
+        "/perception/producer-progress",
+        signal,
+        isProducerProgressEnvelope,
+      ).catch(() => null),
+    ]);
     if (!candidateEnvelopesAgree(status, currentOpportunities)) {
       throw new Error("candidate read snapshots changed");
     }
@@ -907,8 +947,7 @@ export async function readPerceptionOverview(): Promise<
       (resources.current === null && resources.items.length !== 0) ||
       (resources.current !== null &&
         (resources.items.length === 0 ||
-          resources.current.sequence !==
-            resources.items[0].decision.sequence))
+          resources.current.sequence !== resources.items[0].decision.sequence))
     ) {
       throw new Error("resource read snapshot changed");
     }
@@ -923,6 +962,7 @@ export async function readPerceptionOverview(): Promise<
         reconciliation,
         incidents,
         resources,
+        producerProgress,
       },
     };
   } catch (error) {

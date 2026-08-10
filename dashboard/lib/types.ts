@@ -1,7 +1,8 @@
 // Phase 02 Plan 02-06 — TypeScript mirror of Supabase narrow schema (Alembic 001 + 002).
 // Plan 03 snapshots/markets_latest, Plan 02-08 top_movers_view.
 
-export type SnapshotStatus = "OK" | "DEGRADED" | "FAILED" | "pass" | "warn" | "fail";
+export type SnapshotStatus =
+  "OK" | "DEGRADED" | "FAILED" | "pass" | "warn" | "fail";
 
 // Snapshot row — Alembic 001 schema exactly (8 columns).
 // Earlier draft included parquet_r2_url / supabase_mirror_at_ms / is_valid which
@@ -64,11 +65,7 @@ export interface ScanResponse {
 // Task 6 bounded public perception read models.
 export type PerceptionAvailability = "available" | "unavailable";
 export type PerceptionGroupStatus =
-  | "discovered"
-  | "certified"
-  | "stale"
-  | "invalidated"
-  | "closed";
+  "discovered" | "certified" | "stale" | "invalidated" | "closed";
 
 export interface PerceptionUnavailable {
   status: "unavailable";
@@ -81,8 +78,7 @@ export interface PerceptionAvailable<T> {
 }
 
 export type PerceptionReadResult<T> =
-  | PerceptionAvailable<T>
-  | PerceptionUnavailable;
+  PerceptionAvailable<T> | PerceptionUnavailable;
 
 export interface PerceptionOpportunityStatus {
   status: PerceptionAvailability;
@@ -181,8 +177,7 @@ interface PerceptionTimelineBase {
   occurred_at_ms: number;
 }
 
-export interface PerceptionMembershipTimelineItem
-  extends PerceptionTimelineBase {
+export interface PerceptionMembershipTimelineItem extends PerceptionTimelineBase {
   class: "membership_revision";
   group_id: string;
   event_id: string;
@@ -209,8 +204,7 @@ export interface PerceptionOpportunityTimelineState {
   opportunity: boolean;
 }
 
-export interface PerceptionOpportunityTimelineItem
-  extends PerceptionTimelineBase {
+export interface PerceptionOpportunityTimelineItem extends PerceptionTimelineBase {
   class: "opportunity_transition";
   from: PerceptionOpportunityTimelineState | null;
   to: PerceptionOpportunityTimelineState;
@@ -482,6 +476,24 @@ export interface PerceptionResourcesEnvelope {
   } | null;
 }
 
+export interface PerceptionProducerAttempt {
+  id: number;
+  phase?: string;
+  outcome?: string;
+  failure_kind?: string | null;
+  last_stage?: string | null;
+  elapsed_ms?: number | null;
+  chunks_processed?: number | null;
+}
+
+export interface PerceptionProducerProgressEnvelope {
+  status: "available";
+  quote: { attempt: PerceptionProducerAttempt | null };
+  structure: { attempt: PerceptionProducerAttempt | null };
+  automatic_action: string;
+  operator_action: string;
+}
+
 export interface PerceptionOverview {
   health: PerceptionHealthEnvelope;
   status: PerceptionStatusEnvelope;
@@ -491,6 +503,7 @@ export interface PerceptionOverview {
   reconciliation: PerceptionReconciliationEnvelope;
   incidents: PerceptionIncidentsEnvelope;
   resources: PerceptionResourcesEnvelope;
+  producerProgress: PerceptionProducerProgressEnvelope | null;
 }
 
 export interface PerceptionGroupDetail {

@@ -62,7 +62,9 @@ export default async function PerceptionOverviewPage() {
     return (
       <main style={{ padding: 24, maxWidth: 1280, margin: "0 auto" }}>
         <h1 style={{ fontSize: 26 }}>Perception overview</h1>
-        <section style={{ ...panel, borderColor: "#6b4a10", background: "#302408" }}>
+        <section
+          style={{ ...panel, borderColor: "#6b4a10", background: "#302408" }}
+        >
           <h2 style={{ marginTop: 0, color: "#ffd47a" }}>
             Perception unavailable
           </h2>
@@ -86,6 +88,7 @@ export default async function PerceptionOverviewPage() {
     reconciliation,
     incidents,
     resources,
+    producerProgress,
   } = overview.data;
   const groupStatuses = groups.items.map((group) => group.status);
   const opportunityStatus = status.opportunities;
@@ -117,8 +120,7 @@ export default async function PerceptionOverviewPage() {
       item.decision.mode !== resources.items[index + 1].decision.mode,
   );
   const validZero =
-    opportunityStatus.status === "available" &&
-    opportunityStatus.count === 0;
+    opportunityStatus.status === "available" && opportunityStatus.count === 0;
   const healthReadFailure = health.checks["runtime:health_read_lane"]?.[0];
 
   return (
@@ -144,24 +146,71 @@ export default async function PerceptionOverviewPage() {
             P1 operator-visibility incident
           </h2>
           <p>
-            <strong>Impact:</strong> {healthReadFailure.impact ?? "Health evidence is unavailable."}
+            <strong>Impact:</strong>{" "}
+            {healthReadFailure.impact ?? "Health evidence is unavailable."}
           </p>
           <p>
             <strong>Automatic action:</strong>{" "}
-            {healthReadFailure.automaticAction ?? "Polywatch alerts on the failed health result."}
+            {healthReadFailure.automaticAction ??
+              "Polywatch alerts on the failed health result."}
           </p>
           <p>
             <strong>Next operator action:</strong>{" "}
-            {healthReadFailure.operatorAction ?? "Open the Fly incident console and inspect SQLite pressure."}
+            {healthReadFailure.operatorAction ??
+              "Open the Fly incident console and inspect SQLite pressure."}
           </p>
           <p style={muted}>
-            reason {String(healthReadFailure.observedValue)} · release {health.releaseId} · machine {health.machineId}
+            reason {String(healthReadFailure.observedValue)} · release{" "}
+            {health.releaseId} · machine {health.machineId}
           </p>
           <p style={muted}>
-            This is a visibility fault, not evidence of zero incidents or zero opportunities.
+            This is a visibility fault, not evidence of zero incidents or zero
+            opportunities.
           </p>
         </section>
       )}
+
+      <section
+        style={{
+          ...panel,
+          marginBottom: 12,
+          borderColor: producerProgress === null ? "#d2a85a" : "#4b5563",
+        }}
+      >
+        <h2 style={{ marginTop: 0 }}>Live producer recovery</h2>
+        {producerProgress === null ? (
+          <p style={{ color: "#ffd47a" }}>
+            Checkpoint read unavailable. Open incidents above remain
+            authoritative; unavailable is not proof that recovery has stopped.
+          </p>
+        ) : (
+          <>
+            <p style={muted}>
+              Quote and Structure are independent durable checkpoints, not
+              inferred from the browser process.
+            </p>
+            <div>
+              <strong>Quote:</strong>{" "}
+              {producerProgress.quote.attempt === null
+                ? "no attempt recorded"
+                : `attempt ${producerProgress.quote.attempt.id} · ${producerProgress.quote.attempt.phase ?? "stage not recorded"} · ${producerProgress.quote.attempt.outcome ?? "outcome not recorded"}`}
+            </div>
+            <div>
+              <strong>Structure:</strong>{" "}
+              {producerProgress.structure.attempt === null
+                ? "no attempt recorded"
+                : `attempt ${producerProgress.structure.attempt.id} · ${producerProgress.structure.attempt.last_stage ?? producerProgress.structure.attempt.phase ?? "stage not recorded"} · ${producerProgress.structure.attempt.outcome ?? "outcome not recorded"}${producerProgress.structure.attempt.elapsed_ms == null ? "" : ` · ${fmtDurationMs(producerProgress.structure.attempt.elapsed_ms)}`}${producerProgress.structure.attempt.chunks_processed == null ? "" : ` · ${producerProgress.structure.attempt.chunks_processed} chunks`}`}
+            </div>
+            <p style={muted}>
+              <strong>Automatic action:</strong>{" "}
+              {producerProgress.automatic_action}
+              <br />
+              <strong>Operator action:</strong>{" "}
+              {producerProgress.operator_action}
+            </p>
+          </>
+        )}
+      </section>
 
       <section style={{ margin: "20px 0" }}>
         <h2>Global Candidate state</h2>
@@ -259,7 +308,10 @@ export default async function PerceptionOverviewPage() {
             </thead>
             <tbody>
               {currentOpportunities.items.map((item) => (
-                <tr key={item.group_id} style={{ borderBottom: "1px solid #222" }}>
+                <tr
+                  key={item.group_id}
+                  style={{ borderBottom: "1px solid #222" }}
+                >
                   <td style={{ padding: 8, overflowWrap: "anywhere" }}>
                     <a
                       href={`/perception/${encodeURIComponent(item.group_id)}`}
@@ -296,7 +348,9 @@ export default async function PerceptionOverviewPage() {
 
       <section style={{ ...panel, marginBottom: 12 }}>
         <h2 style={{ marginTop: 0 }}>Coverage windows</h2>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <table
+          style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}
+        >
           <thead>
             <tr style={{ textAlign: "left", borderBottom: "1px solid #333" }}>
               <th style={{ padding: 8 }}>Window</th>
@@ -353,7 +407,9 @@ export default async function PerceptionOverviewPage() {
               <p>completed: {String(discovery.discovery.completed)}</p>
               <p>groups seen: {discovery.discovery.groups_seen}</p>
               <p>promoted: {discovery.discovery.promoted_count}</p>
-              <p>promotion queue: {discovery.discovery.promotion_queue_depth}</p>
+              <p>
+                promotion queue: {discovery.discovery.promotion_queue_depth}
+              </p>
               <p>
                 queue classes:{" "}
                 {Object.entries(discovery.discovery.queue_depth_by_class)
@@ -381,7 +437,9 @@ export default async function PerceptionOverviewPage() {
                 candidate_start_deadline_breach_count:{" "}
                 {discovery.discovery.candidate_start_deadline_breach_count}
               </p>
-              <p>last finish: {fmtTime(discovery.discovery.last_finished_at_ms)}</p>
+              <p>
+                last finish: {fmtTime(discovery.discovery.last_finished_at_ms)}
+              </p>
             </>
           ) : (
             <p style={muted}>No discovery run has been recorded.</p>
@@ -405,28 +463,31 @@ export default async function PerceptionOverviewPage() {
                 added_count:{" "}
                 {fmtOptionalCount(reconciliation.reconciliation.added_count)} ·
                 changed_count:{" "}
-                {fmtOptionalCount(reconciliation.reconciliation.changed_count)} ·
-                closed_count:{" "}
+                {fmtOptionalCount(reconciliation.reconciliation.changed_count)}{" "}
+                · closed_count:{" "}
                 {fmtOptionalCount(reconciliation.reconciliation.closed_count)}
               </p>
               <p>
                 unchanged_count:{" "}
-                {fmtOptionalCount(reconciliation.reconciliation.unchanged_count)} ·
-                applied_rejected_count:{" "}
+                {fmtOptionalCount(
+                  reconciliation.reconciliation.unchanged_count,
+                )}{" "}
+                · applied_rejected_count:{" "}
                 {fmtOptionalCount(
                   reconciliation.reconciliation.applied_rejected_count,
                 )}
               </p>
               <p>
-                checkpoint: {fmtTime(reconciliation.reconciliation.checkpoint_at_ms)}
+                checkpoint:{" "}
+                {fmtTime(reconciliation.reconciliation.checkpoint_at_ms)}
               </p>
             </>
           ) : (
             <p style={muted}>No reconciliation run has been recorded.</p>
           )}
           <p style={muted}>
-            Historical duration distribution is not tracked; duration_ms is
-            the current validated window only.
+            Historical duration distribution is not tracked; duration_ms is the
+            current validated window only.
           </p>
         </section>
       </div>
@@ -461,9 +522,8 @@ export default async function PerceptionOverviewPage() {
               discovery batch {resources.current.discovery_batch_limit} · duty{" "}
               {resources.current.discovery_duty_multiplier} · reconciliation{" "}
               {resources.current.reconciliation_enabled ? "enabled" : "shed"} ·
-              policy TTL{" "}
-              {fmtDurationMs(resources.current.decision_ttl_ms)} · mode changed{" "}
-              {fmtTime(resources.current.mode_changed_at_ms)}
+              policy TTL {fmtDurationMs(resources.current.decision_ttl_ms)} ·
+              mode changed {fmtTime(resources.current.mode_changed_at_ms)}
             </p>
             {currentResourceSample !== null && (
               <p style={muted}>
@@ -474,8 +534,7 @@ export default async function PerceptionOverviewPage() {
                   : fmtDurationMs(
                       currentResourceSample.candidate_quote_p95_ms,
                     )}{" "}
-                ·
-                missing quotes{" "}
+                · missing quotes{" "}
                 {currentResourceSample.candidate_missing_quote_count} ·
                 candidate worker{" "}
                 {currentResourceSample.candidate_worker_ok ? "ok" : "failed"} ·
@@ -525,17 +584,27 @@ export default async function PerceptionOverviewPage() {
           </h2>
           {p1QuoteIncidents.map((incident) => (
             <div key={incident.incident_id}>
-              <strong>Impact:</strong> {incident.diagnosis?.impact.replace("-", " ")}
-              <div><strong>Automatic action:</strong> {incident.diagnosis?.automatic_action.replaceAll("-", " ")}</div>
-              <div><strong>Next action:</strong> {incident.diagnosis?.next_action.replaceAll("-", " ")}</div>
-              <div style={muted}>
-                consecutive failures {incident.diagnosis?.consecutive_failures} · reminder every {incident.diagnosis?.reminder_interval_s}s
+              <strong>Impact:</strong>{" "}
+              {incident.diagnosis?.impact.replace("-", " ")}
+              <div>
+                <strong>Automatic action:</strong>{" "}
+                {incident.diagnosis?.automatic_action.replaceAll("-", " ")}
+              </div>
+              <div>
+                <strong>Next action:</strong>{" "}
+                {incident.diagnosis?.next_action.replaceAll("-", " ")}
               </div>
               <div style={muted}>
-                P1 failure: {incident.diagnosis?.failure_reason ?? "not recorded"}
+                consecutive failures {incident.diagnosis?.consecutive_failures}{" "}
+                · reminder every {incident.diagnosis?.reminder_interval_s}s
               </div>
               <div style={muted}>
-                retries {incident.retry_count ?? "not recorded"} · next automatic retry {fmtTime(incident.next_retry_at_ms)}
+                P1 failure:{" "}
+                {incident.diagnosis?.failure_reason ?? "not recorded"}
+              </div>
+              <div style={muted}>
+                retries {incident.retry_count ?? "not recorded"} · next
+                automatic retry {fmtTime(incident.next_retry_at_ms)}
               </div>
               {incident.recovery_start_evidence !== null && (
                 <pre
@@ -546,7 +615,8 @@ export default async function PerceptionOverviewPage() {
                     whiteSpace: "pre-wrap",
                   }}
                 >
-                  Recovery evidence {JSON.stringify(incident.recovery_start_evidence, null, 2)}
+                  Recovery evidence{" "}
+                  {JSON.stringify(incident.recovery_start_evidence, null, 2)}
                 </pre>
               )}
             </div>
@@ -567,17 +637,27 @@ export default async function PerceptionOverviewPage() {
           </h2>
           {p1CapacityIncidents.map((incident) => (
             <div key={incident.incident_id}>
-              <strong>Impact:</strong> {incident.diagnosis?.impact.replaceAll("-", " ")}
-              <div><strong>Automatic action:</strong> {incident.diagnosis?.automatic_action.replaceAll("-", " ")}</div>
-              <div><strong>Next action:</strong> {incident.diagnosis?.next_action.replaceAll("-", " ")}</div>
-              <div style={muted}>
-                free space {incident.diagnosis?.free_percent}% · reminder every {incident.diagnosis?.reminder_interval_s}s
+              <strong>Impact:</strong>{" "}
+              {incident.diagnosis?.impact.replaceAll("-", " ")}
+              <div>
+                <strong>Automatic action:</strong>{" "}
+                {incident.diagnosis?.automatic_action.replaceAll("-", " ")}
+              </div>
+              <div>
+                <strong>Next action:</strong>{" "}
+                {incident.diagnosis?.next_action.replaceAll("-", " ")}
               </div>
               <div style={muted}>
-                P1 failure: {incident.diagnosis?.failure_reason ?? "not recorded"}
+                free space {incident.diagnosis?.free_percent}% · reminder every{" "}
+                {incident.diagnosis?.reminder_interval_s}s
               </div>
               <div style={muted}>
-                retries {incident.retry_count ?? "not recorded"} · next automatic retry {fmtTime(incident.next_retry_at_ms)}
+                P1 failure:{" "}
+                {incident.diagnosis?.failure_reason ?? "not recorded"}
+              </div>
+              <div style={muted}>
+                retries {incident.retry_count ?? "not recorded"} · next
+                automatic retry {fmtTime(incident.next_retry_at_ms)}
               </div>
             </div>
           ))}
@@ -601,17 +681,34 @@ export default async function PerceptionOverviewPage() {
           </p>
           {p1StructureIncidents.map((incident) => (
             <div key={incident.incident_id}>
-              <strong>Impact:</strong> {incident.diagnosis?.impact.replaceAll("-", " ")}
-              <div><strong>Automatic action:</strong> {incident.diagnosis?.automatic_action.replaceAll("-", " ")}</div>
-              <div><strong>Next action:</strong> {incident.diagnosis?.next_action.replaceAll("-", " ")}</div>
-              <div style={muted}>
-                failed stage {incident.diagnosis?.last_stage ?? "not recorded"} · elapsed {incident.diagnosis?.elapsed_ms == null ? "not recorded" : fmtDurationMs(incident.diagnosis.elapsed_ms)}
+              <strong>Impact:</strong>{" "}
+              {incident.diagnosis?.impact.replaceAll("-", " ")}
+              <div>
+                <strong>Automatic action:</strong>{" "}
+                {incident.diagnosis?.automatic_action.replaceAll("-", " ")}
+              </div>
+              <div>
+                <strong>Next action:</strong>{" "}
+                {incident.diagnosis?.next_action.replaceAll("-", " ")}
               </div>
               <div style={muted}>
-                cooperative checkpoint target {incident.diagnosis?.cooperative_slice_budget_s ?? "not recorded"}s · child hard limit {incident.diagnosis?.child_hard_limit_s ?? "not recorded"}s
+                failed stage {incident.diagnosis?.last_stage ?? "not recorded"}{" "}
+                · elapsed{" "}
+                {incident.diagnosis?.elapsed_ms == null
+                  ? "not recorded"
+                  : fmtDurationMs(incident.diagnosis.elapsed_ms)}
               </div>
               <div style={muted}>
-                P1 failure: {incident.diagnosis?.failure_reason ?? "not recorded"} · reminder every {incident.diagnosis?.reminder_interval_s}s
+                cooperative checkpoint target{" "}
+                {incident.diagnosis?.cooperative_slice_budget_s ??
+                  "not recorded"}
+                s · child hard limit{" "}
+                {incident.diagnosis?.child_hard_limit_s ?? "not recorded"}s
+              </div>
+              <div style={muted}>
+                P1 failure:{" "}
+                {incident.diagnosis?.failure_reason ?? "not recorded"} ·
+                reminder every {incident.diagnosis?.reminder_interval_s}s
               </div>
               {incident.recovery_start_evidence !== null && (
                 <pre
@@ -622,7 +719,8 @@ export default async function PerceptionOverviewPage() {
                     whiteSpace: "pre-wrap",
                   }}
                 >
-                  Recovery evidence {JSON.stringify(incident.recovery_start_evidence, null, 2)}
+                  Recovery evidence{" "}
+                  {JSON.stringify(incident.recovery_start_evidence, null, 2)}
                 </pre>
               )}
             </div>
@@ -640,8 +738,8 @@ export default async function PerceptionOverviewPage() {
         </p>
         <p style={muted}>
           Notification delivery is not tracked. These rows prove durable
-          lifecycle/operator state only; they do not claim that an alert
-          reached any external channel.
+          lifecycle/operator state only; they do not claim that an alert reached
+          any external channel.
         </p>
         {incidents.next_before !== null && (
           <p style={{ color: "#ffd47a" }}>
@@ -683,21 +781,45 @@ export default async function PerceptionOverviewPage() {
                     background: "#2d1717",
                   }}
                 >
-                  <div><strong>Severity:</strong> {incident.diagnosis.severity.toUpperCase()} · reminder every {incident.diagnosis.reminder_interval_s}s</div>
-                  <div><strong>Impact:</strong> {incident.diagnosis.impact.replace("-", " ")}</div>
-                  <div><strong>Automatic action:</strong> {incident.diagnosis.automatic_action.replace("-", " ")}</div>
-                  <div><strong>Next action:</strong> {incident.diagnosis.next_action.replaceAll("-", " ")}</div>
-                  {incident.diagnosis.deadline_s !== null && incident.diagnosis.last_success_age_s !== null ? (
+                  <div>
+                    <strong>Severity:</strong>{" "}
+                    {incident.diagnosis.severity.toUpperCase()} · reminder every{" "}
+                    {incident.diagnosis.reminder_interval_s}s
+                  </div>
+                  <div>
+                    <strong>Impact:</strong>{" "}
+                    {incident.diagnosis.impact.replace("-", " ")}
+                  </div>
+                  <div>
+                    <strong>Automatic action:</strong>{" "}
+                    {incident.diagnosis.automatic_action.replace("-", " ")}
+                  </div>
+                  <div>
+                    <strong>Next action:</strong>{" "}
+                    {incident.diagnosis.next_action.replaceAll("-", " ")}
+                  </div>
+                  {incident.diagnosis.deadline_s !== null &&
+                  incident.diagnosis.last_success_age_s !== null ? (
                     <div style={muted}>
-                      Evidence: deadline {incident.diagnosis.deadline_s}s · consecutive failures {incident.diagnosis.consecutive_failures} · last certified success age {fmtDurationMs(incident.diagnosis.last_success_age_s * 1000)}
+                      Evidence: deadline {incident.diagnosis.deadline_s}s ·
+                      consecutive failures{" "}
+                      {incident.diagnosis.consecutive_failures} · last certified
+                      success age{" "}
+                      {fmtDurationMs(
+                        incident.diagnosis.last_success_age_s * 1000,
+                      )}
                     </div>
                   ) : (
                     <div style={muted}>
-                      Evidence: free space {incident.diagnosis.free_percent}% · consecutive failures {incident.diagnosis.consecutive_failures}
+                      Evidence: free space {incident.diagnosis.free_percent}% ·
+                      consecutive failures{" "}
+                      {incident.diagnosis.consecutive_failures}
                     </div>
                   )}
                   {incident.diagnosis.failure_reason !== null && (
-                    <div style={muted}>Failure: {incident.diagnosis.failure_reason}</div>
+                    <div style={muted}>
+                      Failure: {incident.diagnosis.failure_reason}
+                    </div>
                   )}
                 </div>
               )}
@@ -727,7 +849,9 @@ export default async function PerceptionOverviewPage() {
       </section>
 
       <section style={{ ...panel, marginTop: 12 }}>
-        <h2 style={{ marginTop: 0 }}>Observed groups (returned bounded page)</h2>
+        <h2 style={{ marginTop: 0 }}>
+          Observed groups (returned bounded page)
+        </h2>
         {groups.next_after !== null && (
           <p style={{ color: "#ffd47a" }}>
             More groups exist after this page; the Structure stale/invalidated
@@ -746,7 +870,9 @@ export default async function PerceptionOverviewPage() {
               {group.group_id}
             </a>
             <span style={muted}>
-              {" "}· {group.status} · revision {group.revision} · {group.leg_count} legs
+              {" "}
+              · {group.status} · revision {group.revision} · {group.leg_count}{" "}
+              legs
             </span>
           </div>
         ))}
