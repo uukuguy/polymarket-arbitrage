@@ -7426,3 +7426,38 @@ a `structure-page-deadline` or a certified publication. Verify both application
 machines share producer arbitration safely, preserve the P1 until its matching
 successful snapshot receipt, and do not declare M1 stable while this mismatch,
 the P1, or stale Structure snapshot remains.
+
+## SESSION 179 — 2026-08-10 (Dashboard fault visibility and bounded health reads)
+
+- [ROOT CAUSE] Under Structure/Quote SQLite write pressure, the 44 GB L1
+  state database made health aggregation take 6.8–21 seconds. Fly timed out
+  waiting for headers and the edge console intermittently became unreachable.
+  Health bypassed the existing bounded read-lane mechanism.
+- [REPAIR / DEPLOY] Commit `81996f9` adds a dedicated one-slot, 0.8-second
+  health read lane. Saturation and timeout are explicit credential-free P1
+  `runtime:health_read_lane` checks: strict `/health` is 503; `/healthz`
+  remains 200 only to preserve Fly routing while its body is `fail`.
+- [DASHBOARD REPAIR / DEPLOY] Commit `1878441` fixes a production evidence
+  shape mismatch: Quote timeout deadlines are floats (e.g. `180.0`) but the
+  incident view accepted only ints, silently yielding `diagnosis=null`.
+  Finite positive numeric budgets now retain full P1 impact, automatic action,
+  operator action, and failure reason.
+- [LIVE EVIDENCE] App and cron both run image
+  `m1-dashboard-diagnosis-1878441`; authority volume remains
+  `vol_40olm80dgol2xqn4`. Fly service check is passing. Five edge console
+  probes returned 200 in 0.68–1.29 seconds. Polywatch's 13:10Z production
+  tick pushed L1 P1, opportunity 503, and L2 evidence failures to Telegram
+  with `ok=True`.
+- [CURRENT] The console/API now exposes the historical Quote collection P1
+  with diagnosis (`retry-immediately`, 180.0-second deadline, and concrete
+  operator action). Structure sidecar sealed 177,329 rows, but open Quote and
+  Structure P1 incidents remain. M1 is observable and self-alerting but not
+  production-stable or ready for final acceptance.
+
+### [NEXT — CURRENT]
+
+Observe the new Quote run and post-seal Structure snapshot through a certified
+success boundary. Investigate/repair any recurring Quote producer exit or
+`StaleQuoteRunError`; preserve current P1 rows until matching receipt-backed
+verification. Keep testing dashboard and Polywatch visibility during this
+natural recovery rather than declaring a static successful probe as stability.
