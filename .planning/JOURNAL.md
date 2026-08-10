@@ -7392,3 +7392,37 @@ multiple Quote/Structure handoffs retain healthy opportunity and incident
 reads. Treat any renewed >3-second operator-read delay or 75-second child
 timeout as production evidence for the next repair; do not declare stable
 before natural-cycle proof.
+
+## SESSION 178 — 2026-08-10 (Bounded Gamma page failure deployed)
+
+- [ROOT CAUSE] After v318 aligned the admission lease to 75 seconds, attempts
+  9043 and 9044 still timed out at 76–77 seconds in `gamma-markets`. Their
+  stderr retained only the stage-start marker. Gamma's 15-second request
+  timeout plus three retries/backoff could outlive the 45-second cooperative
+  slice, so the parent killed the child before it could emit a precise cause.
+- [REPAIR / DEPLOY] Commit `9a64995` adds a 35-second deadline to each Gamma
+  page inside a bounded Structure slice and maps it to the allowlisted,
+  redacted `structure-page-deadline` failure. It preserves durable cursors and
+  the existing recovery loop; it does not convert a failed page to a success.
+  RED/GREEN coverage proves a hung page is cancelled and the child protocol
+  reports the diagnosis. Focused Structure-sync, CLI JSON, scheduler
+  regressions and Ruff passed. Fly v319 and final v320 deployed the same exact
+  worktree revision; v320 is complete and the public health endpoint is 200.
+- [LIVE / OPEN] The old P1 remains correctly `recovering` with its full
+  timeout/stage diagnosis and the incident API remains available. Production
+  source progress reached 1,009 market pages before the deployment. A local
+  safe control invocation could not be performed because the HMAC key is not
+  present in this worktree; no secret was exported from Fly to bypass that
+  boundary. Automatic recovery is still enabled, but restart restored a
+  historic `effective_timeout_s=600` / cadence 660 while physical Structure
+  child admission remains 75 seconds. This is a new health/schedule-contract
+  mismatch, not a production-ready result.
+
+### [NEXT — CURRENT]
+
+Repair the persisted adaptive schedule so every displayed/retried Structure
+budget is bounded by the actual 75-second child envelope, then observe either
+a `structure-page-deadline` or a certified publication. Verify both application
+machines share producer arbitration safely, preserve the P1 until its matching
+successful snapshot receipt, and do not declare M1 stable while this mismatch,
+the P1, or stale Structure snapshot remains.
