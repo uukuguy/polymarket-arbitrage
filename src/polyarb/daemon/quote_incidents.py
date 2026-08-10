@@ -131,7 +131,10 @@ class QuoteIncidentLifecycle:
     def record_certified_success(self, result: QuoteCollectionResult) -> Incident | None:
         verified: Incident | None = None
         for active in self._incidents.open_incidents():
-            if active.scope not in {self._SCOPE, "quote"}:
+            if (
+                active.scope not in {self._SCOPE, "quote"}
+                or active.state != "recovering"
+            ):
                 continue
             verified = self._incidents.transition(
                 active.id,
