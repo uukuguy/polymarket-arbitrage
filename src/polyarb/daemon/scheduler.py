@@ -141,7 +141,7 @@ def structure_attempt_slot_budget_s(publication_status: object) -> float:
 
 _SNAPSHOT_STAGE_MARKER_RE = re.compile(
     rb"^snapshot-stage stage="
-    rb"(gamma-events|gamma-markets|membership-recheck|validate|persist) "
+    rb"(gamma-events|gamma-markets|bootstrap|membership-recheck|validate|persist) "
     rb"state=(?:start|complete) elapsed_ms=(?:0|[1-9][0-9]*)$",
     re.MULTILINE,
 )

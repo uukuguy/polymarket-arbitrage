@@ -4869,6 +4869,7 @@ class SQLiteStore:
         now_ms: int,
         max_payload_bytes: int = STRUCTURE_BOOTSTRAP_PAYLOAD_MAX_BYTES,
         writer_timeout_s: float | None = None,
+        execution_deadline_s: float | None = None,
     ) -> dict[str, object]:
         """Backfill a bounded event/relationship slice with a durable subcursor."""
         if (
@@ -4880,10 +4881,21 @@ class SQLiteStore:
             <= STRUCTURE_BOOTSTRAP_PAYLOAD_MAX_BYTES
             or now_ms < 0
             or (writer_timeout_s is not None and writer_timeout_s <= 0)
+            or (execution_deadline_s is not None and execution_deadline_s <= 0)
         ):
             raise ValueError("invalid-structure-event-market-backfill")
         con = self._connect_writer(timeout_s=writer_timeout_s)
+        deadline = (
+            None
+            if execution_deadline_s is None
+            else time.monotonic() + execution_deadline_s
+        )
         try:
+            if deadline is not None:
+                con.set_progress_handler(
+                    lambda: int(time.monotonic() >= deadline),
+                    1_000,
+                )
             con.execute("BEGIN IMMEDIATE")
             window = con.execute(
                 "SELECT status,checkpoint_at_ms FROM structure_sync_windows WHERE id=?",
@@ -5184,6 +5196,7 @@ class SQLiteStore:
                 con.execute("ROLLBACK")
             raise
         finally:
+            con.set_progress_handler(None, 0)
             con.close()
 
     def structure_event_market_backfill_complete(self, window_id: str) -> bool:

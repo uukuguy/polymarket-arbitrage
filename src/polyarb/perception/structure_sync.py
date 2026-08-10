@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import sys
 import time
 from collections import deque
@@ -48,6 +49,10 @@ STRUCTURE_PAGE_COMMIT_WRITER_TIMEOUT_S = 5.0
 # make forward progress.
 STRUCTURE_BOOTSTRAP_MAX_EVENTS_PER_CHUNK = 50
 STRUCTURE_BOOTSTRAP_MAX_RELATIONSHIPS_PER_CHUNK = 50
+# A single local SQLite statement must leave enough time for the child to
+# checkpoint normally. This is deliberately much smaller than the 45-second
+# slice: a progress-handler interruption rolls back only this small unit.
+STRUCTURE_BOOTSTRAP_CHUNK_MAX_ELAPSED_S = 5.0
 
 
 class StructurePageDeadlineExceeded(ValueError):
@@ -356,6 +361,7 @@ async def run_structure_sync_until_published(
     ):
         bootstrap_rows = 0
         bootstrap_completed = False
+        _emit_stage("bootstrap", "start", _elapsed_ms(slice_started))
         while bootstrap_chunks < 100:
             remaining_s = (
                 max_elapsed_s - (_monotonic() - slice_started)
@@ -377,20 +383,42 @@ async def run_structure_sync_until_published(
                     ),
                 ),
             )
-            migration = await asyncio.to_thread(
-                store.advance_structure_event_market_backfill,
-                window_id=str(latest["id"]),
-                max_events=min(
-                    max_publication_rows,
-                    STRUCTURE_BOOTSTRAP_MAX_EVENTS_PER_CHUNK,
-                ),
-                max_relationships=min(
-                    max_publication_rows,
-                    STRUCTURE_BOOTSTRAP_MAX_RELATIONSHIPS_PER_CHUNK,
-                ),
-                now_ms=int(time.time() * 1_000),
-                writer_timeout_s=writer_timeout_s,
-            )
+            try:
+                migration = await asyncio.to_thread(
+                    store.advance_structure_event_market_backfill,
+                    window_id=str(latest["id"]),
+                    max_events=min(
+                        max_publication_rows,
+                        STRUCTURE_BOOTSTRAP_MAX_EVENTS_PER_CHUNK,
+                    ),
+                    max_relationships=min(
+                        max_publication_rows,
+                        STRUCTURE_BOOTSTRAP_MAX_RELATIONSHIPS_PER_CHUNK,
+                    ),
+                    now_ms=int(time.time() * 1_000),
+                    writer_timeout_s=writer_timeout_s,
+                    execution_deadline_s=min(
+                        STRUCTURE_BOOTSTRAP_CHUNK_MAX_ELAPSED_S,
+                        max(
+                            0.001,
+                            (
+                                remaining_s
+                                - STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S
+                                if remaining_s is not None
+                                else STRUCTURE_BOOTSTRAP_CHUNK_MAX_ELAPSED_S
+                            ),
+                        ),
+                    ),
+                )
+            except sqlite3.OperationalError as error:
+                if "interrupted" not in str(error).lower():
+                    raise
+                _emit_stage("bootstrap", "complete", _elapsed_ms(slice_started))
+                return StructureSyncCheckpoint(
+                    window_id=str(latest["id"]),
+                    stage="bootstrap",
+                    pages_processed=max(1, bootstrap_rows),
+                )
             bootstrap_chunks += 1
             bootstrap_rows += max(
                 int(migration["events_processed"]),
@@ -420,6 +448,7 @@ async def run_structure_sync_until_published(
             max_elapsed_s is not None
             and _monotonic() - slice_started >= max_elapsed_s
         ):
+            _emit_stage("bootstrap", "complete", _elapsed_ms(slice_started))
             return StructureSyncCheckpoint(
                 window_id=str(latest["id"]),
                 stage="bootstrap",

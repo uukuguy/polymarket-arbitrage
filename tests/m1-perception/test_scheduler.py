@@ -1894,10 +1894,11 @@ def test_snapshot_stage_parser_keeps_only_final_allowlisted_marker() -> None:
             b"snapshot-stage stage=gamma-markets state=unexpected elapsed_ms=14",
             b"snapshot-stage stage=gamma-markets state=start elapsed_ms=-1",
             b"snapshot-stage stage=gamma-markets state=start elapsed_ms=15",
+            b"snapshot-stage stage=bootstrap state=complete elapsed_ms=16",
         )
     )
 
-    assert _parse_last_snapshot_stage(stderr) == "gamma-markets"
+    assert _parse_last_snapshot_stage(stderr) == "bootstrap"
 
 
 def test_snapshot_stderr_tail_discards_oversized_allowlisted_marker() -> None:

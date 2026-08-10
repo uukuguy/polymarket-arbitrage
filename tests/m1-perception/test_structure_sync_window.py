@@ -2671,6 +2671,45 @@ async def test_online_bootstrap_caps_one_relationship_backfill_chunk_before_slic
         ).fetchone() == (50, 50)
 
 
+async def test_online_bootstrap_interrupt_returns_checkpoint_not_parent_timeout(
+    settings_for_test,
+) -> None:
+    """A bounded SQLite interruption is recoverable child progress, not P1 spin."""
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    window = store.begin_or_resume_structure_sync(started_at_ms=100)
+    store.commit_structure_event_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        events=[{"id": "event-1", "markets": [{"id": "market-1"}]}],
+        finished_at_ms=200,
+    )
+    store.commit_structure_market_page(
+        window_id=window["id"],
+        requested_cursor=None,
+        next_cursor=None,
+        completed=True,
+        markets=[{"id": "market-1"}],
+        finished_at_ms=300,
+    )
+
+    with patch.object(
+        SQLiteStore,
+        "advance_structure_event_market_backfill",
+        side_effect=sqlite3.OperationalError("interrupted"),
+    ):
+        result = await run_structure_sync_until_published(
+            settings_for_test,
+            max_elapsed_s=45.0,
+        )
+
+    assert result == StructureSyncCheckpoint(
+        window_id=window["id"], stage="bootstrap", pages_processed=1
+    )
+
+
 def test_publication_cannot_begin_before_relationship_bootstrap_completes(
     settings_for_test,
 ) -> None:
