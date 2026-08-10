@@ -34,7 +34,8 @@ switches `neg_risk_quote_current_generation` atomically.
 
 ## Bounds
 
-- Default chunk size is 1,000 terminal rows.
+- Default chunk size is 500 terminal rows, keeping the membership validation
+  query below SQLite's conservative bind-variable limit.
 - Each chunk uses the existing independently bounded writer connection.
 - The 180-second subprocess envelope remains unchanged.
 - No wallet, order, signing, execution, or external write capability is added.

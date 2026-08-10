@@ -29,7 +29,7 @@ continues to be the only certification and pointer-switch boundary.
   the prior current projection remains selected, and asserts no result is
   visible until the existing `complete_run` call.
 - [ ] Run the node with `uv run pytest tests/routing/test_neg_risk_quote_store.py::<node> -q`; expect missing chunked API.
-- [ ] Add `record_terminal_quotes_chunked(run_id, quotes, *, chunk_size=1000,
+- [ ] Add `record_terminal_quotes_chunked(run_id, quotes, *, chunk_size=500,
   on_chunk_committed=None)`, using one `BEGIN IMMEDIATE` per chunk and the
   same token-identity validation as the one-shot writer.
 - [ ] Add a failing-chunk test proving a prior certified pointer survives and

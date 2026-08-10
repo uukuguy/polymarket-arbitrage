@@ -274,6 +274,71 @@ def test_current_generation_hides_staging_and_replaces_previous_payload(quote_db
         ).fetchone() == (0,)
 
 
+def test_chunked_terminal_quotes_stay_staged_until_atomic_certification(quote_db) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    previous_run_id = _complete_current(store)
+    staging_run_id = _begin(store)
+    progress: list[tuple[int, int]] = []
+
+    store.record_terminal_quotes_chunked(
+        staging_run_id,
+        (_quote("token-a"), _quote("token-b")),
+        chunk_size=1,
+        on_chunk_committed=lambda committed, total: progress.append((committed, total)),
+    )
+
+    # Per-chunk commits are durable staging only; all readers still use the
+    # last complete generation until the existing certification boundary moves.
+    projection = store.latest_complete_projection()
+    assert projection is not None
+    assert projection.run_id == previous_run_id
+    assert progress == [(1, 2), (2, 2)]
+    with sqlite3.connect(quote_db) as con:
+        assert con.execute(
+            "SELECT COUNT(*) FROM neg_risk_quotes WHERE quote_run_id=?",
+            (staging_run_id,),
+        ).fetchone() == (2,)
+
+    store.complete_run(
+        staging_run_id,
+        completed_at_ms=NOW_MS + 2,
+        successful_response_count=2,
+        publish_current_generation=True,
+    )
+    certified = store.latest_complete_projection()
+    assert certified is not None
+    assert certified.run_id == staging_run_id
+
+
+def test_chunked_terminal_quote_validation_reads_only_the_current_chunk(
+    quote_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = NegRiskQuoteStore(quote_db)
+    run_id = _begin(store)
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+    store.record_terminal_quotes_chunked(
+        run_id,
+        (_quote("token-a"), _quote("token-b")),
+        chunk_size=1,
+    )
+
+    lookups = [
+        statement
+        for statement in statements
+        if "FROM neg_risk_quote_run_legs" in statement
+    ]
+    assert len(lookups) == 2
+    assert all("yes_token_id IN" in statement for statement in lookups)
+
+
 def test_current_generation_replacement_removes_superseded_compact_feed(quote_db) -> None:
     """A compact feed must not block the next certified generation switch."""
     store = NegRiskQuoteStore(quote_db)

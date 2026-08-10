@@ -212,6 +212,8 @@ def test_collection_attempt_checkpoints_every_terminal_phase(quote_db) -> None:
         "admission_ms",
         "fetch_ms",
         "transform_ms",
+        "persist_chunks",
+        "persisted_quotes",
         "persist_ms",
     }
 
@@ -401,7 +403,7 @@ def test_persistence_failure_fails_new_run_without_displacing_prior_complete_run
     def fail_record(*args: object, **kwargs: object) -> None:
         raise sqlite3.OperationalError("fixture write failure")
 
-    monkeypatch.setattr(store, "record_terminal_quotes", fail_record)
+    monkeypatch.setattr(store, "record_terminal_quotes_chunked", fail_record)
     with pytest.raises(sqlite3.OperationalError, match="fixture write failure"):
         _collect(
             store,
@@ -434,7 +436,7 @@ def test_sqlite_writer_deadline_is_typed_as_a_persist_timeout(
     def busy_record(*args: object, **kwargs: object) -> None:
         raise sqlite3.OperationalError(error_text)
 
-    monkeypatch.setattr(store, "record_terminal_quotes", busy_record)
+    monkeypatch.setattr(store, "record_terminal_quotes_chunked", busy_record)
 
     with pytest.raises(QuotePersistenceTimeoutError, match="quote-persist-timeout"):
         _collect(

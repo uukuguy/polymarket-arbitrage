@@ -645,6 +645,39 @@ class NegRiskQuoteStore:
         quotes: tuple[PersistedQuote, ...],
     ) -> None:
         """Append observations only while this run still owns its live lease."""
+        self._record_terminal_quote_chunk(run_id, quotes)
+
+    def record_terminal_quotes_chunked(
+        self,
+        run_id: int,
+        quotes: tuple[PersistedQuote, ...],
+        *,
+        chunk_size: int = 500,
+        on_chunk_committed: Callable[[int, int], None] | None = None,
+    ) -> None:
+        """Durably stage one bounded Quote chunk at a time before certification.
+
+        A collecting run is invisible to the current-generation readers, so a
+        committed chunk cannot expose a partial feed.  Validate the complete
+        payload before the first mutation to reject duplicate or malformed
+        cross-chunk input deterministically; each chunk then has its own
+        bounded writer transaction.
+        """
+        if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
+            raise ValueError("quote-chunk-size-must-be-positive")
+        _validate_quotes(quotes)
+        total = len(quotes)
+        for start in range(0, total, chunk_size):
+            self._record_terminal_quote_chunk(run_id, quotes[start : start + chunk_size])
+            if on_chunk_committed is not None:
+                on_chunk_committed(min(total, start + chunk_size), total)
+
+    def _record_terminal_quote_chunk(
+        self,
+        run_id: int,
+        quotes: tuple[PersistedQuote, ...],
+    ) -> None:
+        """Append one transaction-sized quote staging chunk for a collecting run."""
         _validate_quotes(quotes)
         con = self._connect()
         try:
@@ -652,13 +685,16 @@ class NegRiskQuoteStore:
             try:
                 now_ms = self.current_time_ms()
                 _require_live_collecting(con, run_id, now_ms=now_ms)
+                token_ids = tuple(quote.yes_token_id for quote in quotes)
+                placeholders = ",".join("?" for _ in token_ids)
                 requested = {
                     str(row[4]): UniverseLeg(*row)
                     for row in con.execute(
                         "SELECT neg_risk_market_id, market_id, condition_id, slug, yes_token_id, "
                         "event_id, membership_hash "
-                        "FROM neg_risk_quote_run_legs WHERE quote_run_id = ?",
-                        (run_id,),
+                        "FROM neg_risk_quote_run_legs WHERE quote_run_id = ? "
+                        f"AND yes_token_id IN ({placeholders})",
+                        (run_id, *token_ids),
                     )
                 }
                 for quote in quotes:

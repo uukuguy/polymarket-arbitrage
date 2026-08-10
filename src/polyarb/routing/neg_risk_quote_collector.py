@@ -255,11 +255,34 @@ async def collect_neg_risk_quotes(
                 },
             )
         stage_started = time.perf_counter()
+        persist_chunks = 0
+        persisted_quotes = 0
+
+        def checkpoint_persist_chunk(committed: int, total: int) -> None:
+            nonlocal persist_chunks, persisted_quotes
+            persist_chunks += 1
+            persisted_quotes = committed
+            if attempt_id:
+                quote_store.checkpoint_collection_attempt(
+                    attempt_id,
+                    phase="persist",
+                    phase_timings={
+                        "universe_ms": universe_ms,
+                        "admission_ms": begin_ms,
+                        "fetch_ms": fetch_ms,
+                        "transform_ms": transform_ms,
+                        "persist_chunks": persist_chunks,
+                        "persisted_quotes": persisted_quotes,
+                        "target_quotes": total,
+                    },
+                )
+
         try:
             await asyncio.to_thread(
-                quote_store.record_terminal_quotes,
+                quote_store.record_terminal_quotes_chunked,
                 run_id,
                 terminal_quotes,
+                on_chunk_committed=checkpoint_persist_chunk,
             )
         except sqlite3.OperationalError as error:
             if not _is_sqlite_writer_timeout(error):
@@ -314,6 +337,8 @@ async def collect_neg_risk_quotes(
         f"begin_ms={begin_ms} "
         f"fetch_ms={fetch_ms} "
         f"transform_ms={transform_ms} "
+        f"persist_chunks={persist_chunks} "
+        f"persisted_quotes={persisted_quotes} "
         f"persist_ms={persist_ms}"
     )
     timings = {
@@ -321,6 +346,8 @@ async def collect_neg_risk_quotes(
         "admission_ms": begin_ms,
         "fetch_ms": fetch_ms,
         "transform_ms": transform_ms,
+        "persist_chunks": persist_chunks,
+        "persisted_quotes": persisted_quotes,
         "persist_ms": persist_ms,
     }
     if attempt_id:
