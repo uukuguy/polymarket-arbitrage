@@ -254,6 +254,31 @@ def test_issue_normalization_maps_expired_read_budget_to_publication_checkpoint(
         )
 
 
+def test_certification_rejects_an_expired_publication_slice_budget(
+    settings_for_test,
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    publication = _begin_generation(
+        store, snapshot_id=1, market_id="market-1", now_ms=100
+    )
+    _normalize_component_to_done(store, publication, "events")
+    _normalize_component_to_done(store, publication, "event_tags")
+    _normalize_component_to_done(store, publication, "memberships")
+    _normalize_component_to_done(store, publication, "group_truth")
+    _normalize_component_to_done(store, publication, "markets")
+    _normalize_component_to_done(store, publication, "issues")
+    store.seal_structure_publication_counts(publication.publication_id, now_ms=200)
+
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        store.advance_structure_certification_chunk(
+            publication.publication_id,
+            max_rows=500,
+            now_ms=201,
+            deadline_monotonic=time.monotonic() - 0.001,
+        )
+
+
 def test_publication_slice_bounds_expensive_comparison_chunks(
     settings_for_test, monkeypatch
 ) -> None:

@@ -525,12 +525,18 @@ def run_structure_publication_step(
                     None,
                     publication.publication_id,
                 )
-            certification = store.advance_structure_certification_chunk(
-                publication.publication_id,
-                max_rows=max_rows,
-                now_ms=now_ms,
-                writer_timeout_s=writer_timeout_s,
-            )
+            try:
+                certification = store.advance_structure_certification_chunk(
+                    publication.publication_id,
+                    max_rows=max_rows,
+                    now_ms=now_ms,
+                    writer_timeout_s=writer_timeout_s,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except sqlite3.OperationalError as error:
+                if deadline_monotonic is not None and "interrupted" in str(error).lower():
+                    raise StructurePublicationDeadlineReached() from error
+                raise
             return StructurePublicationCheckpoint(
                 "ready" if certification.ready else "certifying",
                 _checkpoint_component(certification.component),

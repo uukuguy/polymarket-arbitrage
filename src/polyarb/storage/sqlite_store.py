@@ -10981,6 +10981,7 @@ class SQLiteStore:
         max_rows: int,
         now_ms: int,
         writer_timeout_s: float | None = None,
+        deadline_monotonic: float | None = None,
     ) -> StructureCertificationChunk:
         """Hash and validate at most one primary-key generation chunk."""
         if (
@@ -10998,7 +10999,7 @@ class SQLiteStore:
             "source_events": ("event_id",),
             "source_markets": ("market_id",),
         }
-        with sqlite3.connect(self._db_path) as read_con:
+        with self._connect_deadline_read(deadline_monotonic) as read_con:
             publication = read_con.execute(
                 "SELECT p.snapshot_id,p.window_id,p.status,p.expected_counts_json,"
                 "committed_counts_json,certification_component,"
