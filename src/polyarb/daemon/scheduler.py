@@ -1729,6 +1729,14 @@ class SnapshotScheduler:
                 f"rows={checkpoint.rows_processed} chunks={checkpoint.chunks_processed} "
                 f"sealed={checkpoint.sealed} stop={checkpoint.stop_reason}"
             )
+            if checkpoint.deferred:
+                # A writer-busy child made no new durable Structure progress.
+                # Returning ``True`` here would end this tick and wait the
+                # normal (five-minute in production) cadence before trying
+                # again.  Let _tick use its bounded defer loop instead: this
+                # yields to Quote for five seconds without turning a transient
+                # SQLite writer conflict into hours of recovery lag.
+                return False
             if not checkpoint.sealed and not checkpoint.deferred:
                 # The outer resident loop uses this flag for a 100ms
                 # continuation instead of the ordinary production cadence.

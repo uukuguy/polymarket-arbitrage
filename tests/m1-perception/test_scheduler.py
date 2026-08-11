@@ -659,6 +659,62 @@ async def test_event_member_checkpoint_releases_slot_and_next_admission_yields_t
 
 
 @pytest.mark.asyncio
+async def test_event_member_writer_busy_checkpoint_retries_within_the_bounded_defer_loop(
+    daemon_settings_for_test: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A durable writer-busy checkpoint must not fall back to the full cadence."""
+    from polyarb.daemon import scheduler as scheduler_module
+
+    store = MagicMock()
+    store.get_scheduler_state.return_value = None
+    store.get_snapshot_attempts.return_value = []
+    store.get_latest_structure_schedule_adjustment.return_value = None
+    store.recover_orphaned_structure_drift_attempts.return_value = 0
+    store.get_latest_structure_sync.return_value = {"id": "w", "status": "complete"}
+    store.structure_event_member_status.return_value = {"sealed": False}
+    child = AsyncMock(
+        side_effect=(
+            scheduler_module.IsolatedStructureEventMemberCheckpoint(
+                window_id="w",
+                rows_processed=500,
+                chunks_processed=1,
+                sealed=False,
+                deferred=True,
+                defer_reason="writer-busy",
+                stop_reason="writer-busy",
+                elapsed_ms=10,
+            ),
+            scheduler_module.IsolatedStructureEventMemberCheckpoint(
+                window_id="w",
+                rows_processed=1,
+                chunks_processed=1,
+                sealed=True,
+                deferred=False,
+                defer_reason=None,
+                stop_reason="sealed",
+                elapsed_ms=10,
+            ),
+        )
+    )
+    monkeypatch.setattr(scheduler_module, "run_structure_event_members_in_subprocess", child)
+    sleep = AsyncMock()
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", sleep)
+
+    scheduler = scheduler_module.SnapshotScheduler(
+        settings=daemon_settings_for_test.model_copy(update={"structure_sync_enabled": True}),
+        sqlite_store=store,
+        producer_arbitrator=MagicMock(),
+    )
+
+    await scheduler._tick()
+
+    assert child.await_count == 2
+    sleep.assert_awaited_once_with(scheduler_module.STRUCTURE_DEFER_RETRY_DELAY_S)
+    assert scheduler._checkpoint_pending is False
+
+
+@pytest.mark.asyncio
 async def test_event_member_child_timeout_records_breadcrumb_and_recovery_failure(
     daemon_settings_for_test: Any,
     monkeypatch: pytest.MonkeyPatch,
