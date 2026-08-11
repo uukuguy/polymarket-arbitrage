@@ -113,10 +113,12 @@ _MIRROR_WARN_S = 25 * 3600
 _MIRROR_FAIL_S = 48 * 3600
 _OPPORTUNITY_READ_FAILURE_FAIL_COUNT = 3
 _OPPORTUNITY_READ_FAILURE_SLA_S = 300.0
-# The full production projection includes durable Structure recovery evidence.
-# Under normal write pressure it needs about 3 seconds; four seconds leaves
-# bounded jitter headroom while preserving an actionable fast failure.
-_HEALTH_READ_TIMEOUT_S = 4.0
+# The full production projection includes several independent durable authority
+# reads. Under active Structure/Quote writes their individual 250ms SQLite
+# budgets can accumulate beyond four seconds. Eight seconds leaves response
+# serialization/network headroom under Fly and Polywatch's ten-second deadline,
+# while preserving a bounded failure instead of stranding the one read lane.
+_HEALTH_READ_TIMEOUT_S = 8.0
 
 
 @dataclass(frozen=True)

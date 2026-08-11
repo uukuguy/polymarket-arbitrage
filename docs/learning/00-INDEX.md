@@ -71,6 +71,7 @@
 | 57 | [Quote 重启租约回收](57-Quote重启租约回收.md) | 滚动发布为什么会留下 210 秒采集空窗 / Quote-only 回收如何保持 Structure 互斥 / `released` 收据如何审计 |
 | 58 | [健康读取预算与取消](58-健康读取预算与取消.md) | 为什么完整健康检查不能套 0.8 秒 / SQLite connection 如何随 deadline 中断 / 真 P1 与自报 P1 的边界 |
 | 59 | [Structure 写忙恢复重试](59-Structure写忙恢复重试.md) | checkpoint 不等于完成 / 五秒有界 defer / Quote 优先而不把 Structure 饿死 |
+| 60 | [健康投影总预算](60-健康投影总预算.md) | 多个短 SQLite 读的总时限 / 8s 内部预算 / 10s 外部告警边界 |
 
 ## Phase 02.1 教学增量（2026-05）
 

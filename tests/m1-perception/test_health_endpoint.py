@@ -2349,16 +2349,16 @@ class _RecordingHealthReadLane:
         return {}, "pass"
 
 
-def test_health_allows_the_measured_full_projection_budget(
+def test_health_reserves_budget_for_full_projection_below_external_ten_second_deadline(
     http_test_client: TestClient,
 ) -> None:
-    """A normal Structure-write health projection must not self-report P1 at 0.8s."""
+    """Writer contention must fit inside Fly/Polywatch's ten-second deadline."""
     lane = _RecordingHealthReadLane()
     http_test_client.app.state.health_read_lane = lane
 
     assert http_test_client.get("/healthz").status_code == 200
     assert lane.timeout_s == health_module._HEALTH_READ_TIMEOUT_S
-    assert lane.timeout_s >= 3.0
+    assert lane.timeout_s == 8.0
 
 
 def test_health_returns_p1_503_when_health_read_lane_is_saturated(
