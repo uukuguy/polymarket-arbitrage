@@ -129,8 +129,8 @@ OPPORTUNITY_FEED_CHAIN_TRUTH_GATE_COMMANDS = {
     ],
 }
 OPPORTUNITY_FEED_CADENCE_SLA_GATE_COMMANDS = {
-    "collect-dry-run": ["make", "-n", "collect-neg-risk-quotes"],
-    "quote-store-collector": [
+    "planning": ["make", "-n", "collect-neg-risk-quotes"],
+    "unit": [
         "uv",
         "run",
         "pytest",
@@ -138,7 +138,7 @@ OPPORTUNITY_FEED_CADENCE_SLA_GATE_COMMANDS = {
         "tests/routing/test_neg_risk_quote_collector.py",
         "-q",
     ],
-    "scanner-http": [
+    "integration": [
         "uv",
         "run",
         "pytest",
@@ -146,7 +146,7 @@ OPPORTUNITY_FEED_CADENCE_SLA_GATE_COMMANDS = {
         "tests/m1-perception/test_arbitrage_opportunities_http.py",
         "-q",
     ],
-    "quote-cli": [
+    "cli": [
         "uv",
         "run",
         "pytest",
@@ -155,7 +155,7 @@ OPPORTUNITY_FEED_CADENCE_SLA_GATE_COMMANDS = {
         "collect_neg_risk_quotes or scan_quotes",
         "-q",
     ],
-    "scan-dry-run": ["make", "-n", "scan-arb-quotes"],
+    "restart": ["make", "-n", "scan-arb-quotes"],
 }
 L3_PREREQUISITE_CHAIN_TRUTH_GATE_COMMANDS = {
     "planning": ["make", "planning-status"],

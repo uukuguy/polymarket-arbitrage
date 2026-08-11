@@ -90,6 +90,7 @@ def test_opportunity_feed_chain_truth_profile_is_dedicated() -> None:
 def test_opportunity_feed_cadence_sla_profile_is_fixture_only() -> None:
     commands = eval_local.gate_commands_for({"paradigm": "opportunity-feed-cadence-sla"})
 
+    assert tuple(commands) == ("planning", "unit", "integration", "cli", "restart")
     required_tests = {
         "tests/routing/test_neg_risk_quote_store.py",
         "tests/routing/test_neg_risk_quote_collector.py",

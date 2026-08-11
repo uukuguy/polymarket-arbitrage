@@ -4,7 +4,7 @@
 
 ## Session
 
-- Last cycle: 11
+- Last cycle: 12
 - Next action: rank next pending hypothesis
 
 ## In flight
@@ -16,7 +16,7 @@
 - **H-001** [confirmed]: Transactional SQLite repository prevents cross-process state loss
 - **H-007** [confirmed]: A hybrid M1 living manual with offline contract validation and a narrow staged-change guard prevents operator-document drift without copying volatile production state
 - **H-008** [confirmed]: A feed-specific chain-truth diagnostic can distinguish production opportunity endpoint unavailability from a valid zero-opportunity market result and prevent HTTP 503 from being misreported as no edge
-- **H-009** [pending]: An explicit producer cadence and freshness SLA can turn a classified stale opportunity feed into an operationally consumable M2 input without treating stale data as a valid zero-opportunity result
+- **H-009** [confirmed]: An explicit producer cadence and freshness SLA can turn a classified stale opportunity feed into an operationally consumable M2 input without treating stale data as a valid zero-opportunity result
 - **H-010** [confirmed]: A bounded liquid mid-market L2 seed plus durable Yes/No token-pair projection can make the strict five-market L3 gate reachable without relaxing spread or depth thresholds
 - **H-011** [confirmed]: A durable, bounded Structure synchronization window that checkpoints Gamma cursors and stages verified pages can recover across timeout and restart without publishing a partial market universe or permanently pausing collection.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
@@ -38,3 +38,4 @@
 - 20260718-191126-h-008: 100.0 (confirmed) evidence=6db94caf54d3
 - 20260720-100100-h-010: 100.0 (confirmed)
 - 20260811-183703-h-011: 100.0 (confirmed)
+- 20260811-184042-h-009: 100.0 (confirmed)

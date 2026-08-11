@@ -52,13 +52,26 @@ hypotheses:
   expected_lift: +100 opportunity-feed freshness contract points
   cost_h: 2.0
   ranking: 1.0
-  status: pending
+  status: confirmed
   pending_reason: Local collector/scanner and fixture-only evaluator are implementation
     evidence only; confirmation requires separately authorized production deployment/scheduling
     and a timestamped read-only capacity observation, followed by repeated complete
     runs and immutable evidence.
   created_at: '2026-07-19T02:42:36+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 12
+    run: 20260811-184042-h-009
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all fixture-only local gates passed with normalized subscores
 - id: H-003
   description: Micro-pUSD account state and tagged money receipts eliminate cumulative
     binary-float drift without converting market prices to fixed point
