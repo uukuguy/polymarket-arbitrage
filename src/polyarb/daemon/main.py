@@ -31,10 +31,12 @@ import uuid
 from collections.abc import Callable
 from uuid import UUID
 
+import psycopg
 import uvicorn
 from loguru import logger
 
 from polyarb.config import load_settings
+from polyarb.control_plane.postgres import PostgresControlPlane
 from polyarb.daemon.generation_cleanup_worker import StructureGenerationCleanupWorker
 from polyarb.daemon.opportunity_watcher import (
     OpportunityWatcher,
@@ -756,6 +758,12 @@ async def main() -> int:
         producer_lock,
         quote_worker_runtime=quote_worker.runtime if quote_worker is not None else None,
     )
+    control_plane_dsn = settings.supabase_db_dsn.get_secret_value().strip()
+    control_plane = (
+        PostgresControlPlane(lambda: psycopg.connect(control_plane_dsn))
+        if control_plane_dsn
+        else None
+    )
     app = create_app(
         scheduler=scheduler,
         sqlite_store=sqlite_store,
@@ -766,6 +774,7 @@ async def main() -> int:
         candidate_watcher_runtime=(
             candidate_watcher.runtime if candidate_watcher is not None else None
         ),
+        control_plane=control_plane,
     )
     # The producer supervisor intentionally puts Quote collection in another
     # process. The HTTP parent may therefore hydrate this read-only, already

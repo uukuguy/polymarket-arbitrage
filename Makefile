@@ -12,7 +12,7 @@
 # `source .venv/bin/activate` needed. To bootstrap: `uv sync --extra dev`.
 
 .DEFAULT_GOAL := help
-.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-opportunities perception-groups perception-incidents perception-resources queue-discovery queue-reconciliation sqlite-volume-backup sqlite-volume-restore-verify qualify-replacement-volume
+.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-control-plane perception-opportunities perception-groups perception-incidents perception-resources queue-discovery queue-reconciliation sqlite-volume-backup sqlite-volume-restore-verify qualify-replacement-volume
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -95,6 +95,10 @@ PERCEPTION_CURL = curl --disable --connect-timeout 3 --max-time 10 --retry 0 -fs
 ## perception-status: Cloud read-only opportunity-first status; valid zero is distinct from unavailable.
 perception-status:
 	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/status" | python -m json.tool
+
+## perception-control-plane: Cloud durable job/incident/outbox view; unavailable is a typed P1, never an empty success.
+perception-control-plane:
+	@$(PERCEPTION_CURL) "$(POLYARB_PERCEPTION_URL)/perception/control-plane" | python -m json.tool
 
 ## perception-opportunities: Cloud read-only authenticated current opportunities; optional limit=1..500 and after_group_id=.
 perception-opportunities:

@@ -43,6 +43,7 @@ from polyarb.http.control import (
     scan_neg_risk_map,
     unpause,
 )
+from polyarb.http.control_plane import control_plane_status
 from polyarb.http.health import health, healthz
 from polyarb.http.market_map import (
     market_map,
@@ -106,6 +107,7 @@ def create_app(
     quote_worker: Any | None = None,
     opportunity_watcher: Any | None = None,
     candidate_watcher_runtime: Any | None = None,
+    control_plane: Any | None = None,
 ) -> Starlette:
     """Factory: build Starlette app with /health + /scan routes.
 
@@ -138,6 +140,7 @@ def create_app(
         Route("/market-map", market_map, methods=["GET"]),
         Route("/opportunity-watch/status", opportunity_watch_status, methods=["GET"]),
         Route("/perception/status", perception_status, methods=["GET"]),
+        Route("/perception/control-plane", control_plane_status, methods=["GET"]),
         Route("/perception/console", perception_console, methods=["GET"]),
         Route("/perception/producer-arbitration", producer_arbitration_status, methods=["GET"]),
         Route("/perception/producer-progress", producer_progress, methods=["GET"]),
@@ -254,5 +257,8 @@ def create_app(
     # Public HTTP exposure belongs to Task 6; keeping it on app.state now
     # preserves chain-truth without adding a premature route.
     app.state.candidate_watcher_runtime = candidate_watcher_runtime
+    # A missing authority stays explicitly unavailable; the route never falls
+    # back to SQLite under data-plane pressure.
+    app.state.control_plane = control_plane
 
     return app
