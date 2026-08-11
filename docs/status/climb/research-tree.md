@@ -4,12 +4,12 @@
 
 ## Session
 
-- Last cycle: 10
-- Next action: H-011 RED: specify durable Structure window, restart, and atomic-publication contracts
+- Last cycle: 11
+- Next action: rank next pending hypothesis
 
 ## In flight
 
-- H-011
+- None
 
 ## Hypothesis pool
 
@@ -18,7 +18,7 @@
 - **H-008** [confirmed]: A feed-specific chain-truth diagnostic can distinguish production opportunity endpoint unavailability from a valid zero-opportunity market result and prevent HTTP 503 from being misreported as no edge
 - **H-009** [pending]: An explicit producer cadence and freshness SLA can turn a classified stale opportunity feed into an operationally consumable M2 input without treating stale data as a valid zero-opportunity result
 - **H-010** [confirmed]: A bounded liquid mid-market L2 seed plus durable Yes/No token-pair projection can make the strict five-market L3 gate reachable without relaxing spread or depth thresholds
-- **H-011** [in-flight]: A durable, bounded Structure synchronization window that checkpoints Gamma cursors and stages verified pages can recover across timeout and restart without publishing a partial market universe or permanently pausing collection.
+- **H-011** [confirmed]: A durable, bounded Structure synchronization window that checkpoints Gamma cursors and stages verified pages can recover across timeout and restart without publishing a partial market universe or permanently pausing collection.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
@@ -37,3 +37,4 @@
 - 20260718-185917-h-008: 100.0 (superseded)
 - 20260718-191126-h-008: 100.0 (confirmed) evidence=6db94caf54d3
 - 20260720-100100-h-010: 100.0 (confirmed)
+- 20260811-183703-h-011: 100.0 (confirmed)

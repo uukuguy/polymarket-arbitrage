@@ -270,9 +270,23 @@ hypotheses:
     Gamma cursors and stages verified pages can recover across timeout and restart
     without publishing a partial market universe or permanently pausing collection.
   parent_paradigm: checkpointed-structure-recovery
-  expected_lift: Restore continuous certified Structure publication within the 30-minute SLA
+  expected_lift: Restore continuous certified Structure publication within the 30-minute
+    SLA
   cost_h: 8.0
   ranking: 1.0
-  status: in-flight
+  status: confirmed
   created_at: '2026-07-31T00:00:00+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 11
+    run: 20260811-183703-h-011
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all bounded local gates passed
