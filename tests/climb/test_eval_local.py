@@ -134,6 +134,32 @@ def test_l3_prerequisite_profile_uses_only_local_relevant_gates() -> None:
     }
 
 
+def test_checkpointed_structure_recovery_profile_uses_bounded_local_gates() -> None:
+    commands = eval_local.gate_commands_for({"paradigm": "checkpointed-structure-recovery"})
+
+    flattened = [argument for command in commands.values() for argument in command]
+    assert commands["planning"] == ["make", "planning-status"]
+    for required in (
+        "tests/m1-perception/test_structure_generation_publication.py",
+        "tests/m1-perception/test_control_plane_postgres.py",
+        "tests/m1-perception/test_control_plane_shadow.py",
+    ):
+        assert required in flattened
+    assert commands["unit"][-3:] == [
+        "-k",
+        "expired_read_budget or preserves_prior_checkpoint or certification_rejects",
+        "-q",
+    ]
+    assert not {
+        argument.lower()
+        for argument in flattened
+        if any(
+            forbidden in argument.lower()
+            for forbidden in ("http://", "https://", "flyctl", "deploy", "migrate")
+        )
+    }
+
+
 def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:
     assert eval_local.gate_commands_for({"paradigm": "repository"}) == GATE_COMMANDS
     assert eval_local.gate_commands_for({"paradigm": "unknown"}) == GATE_COMMANDS
@@ -252,6 +278,19 @@ def test_evaluate_gates_records_bounded_command_evidence(tmp_path: Path) -> None
     assert payload["total"] == 50.0
     assert len(payload["commands"]["planning"]["output"]) == 8_000
     assert json.loads(output_path.read_text()) == payload
+
+
+def test_run_command_records_timeout_as_a_failed_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"], output="partial output")
+
+    monkeypatch.setattr(eval_local.subprocess, "run", timeout)
+
+    result = eval_local.run_command(["pytest", "slow-test"])
+
+    assert result.passed is False
+    assert result.returncode == 124
+    assert "timed out" in result.output
 
 
 def test_train_script_is_compatible_with_system_bash(tmp_path: Path) -> None:

@@ -50,6 +50,7 @@ def evaluate_gates(
 
 
 ROOT = Path(__file__).resolve().parents[2]
+GATE_TIMEOUT_S = 120
 GATE_COMMANDS = {
     "planning": ["make", "planning-status"],
     "unit": [
@@ -194,6 +195,41 @@ L3_PREREQUISITE_CHAIN_TRUTH_GATE_COMMANDS = {
         "-q",
     ],
 }
+CHECKPOINTED_STRUCTURE_RECOVERY_GATE_COMMANDS = {
+    "planning": ["make", "planning-status"],
+    "unit": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_structure_generation_publication.py",
+        "-k",
+        "expired_read_budget or preserves_prior_checkpoint or certification_rejects",
+        "-q",
+    ],
+    "integration": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_postgres.py",
+        "-q",
+    ],
+    "cli": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_shadow.py",
+        "-q",
+    ],
+    "restart": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_structure_generation_publication.py",
+        "-k",
+        "expired_read_budget or preserves_prior_checkpoint or certification_rejects",
+        "-q",
+    ],
+}
 
 
 def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]:
@@ -205,20 +241,33 @@ def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]
         commands = OPPORTUNITY_FEED_CADENCE_SLA_GATE_COMMANDS
     elif manifest.get("paradigm") == "l3-prerequisite-chain-truth":
         commands = L3_PREREQUISITE_CHAIN_TRUTH_GATE_COMMANDS
+    elif manifest.get("paradigm") == "checkpointed-structure-recovery":
+        commands = CHECKPOINTED_STRUCTURE_RECOVERY_GATE_COMMANDS
     else:
         commands = GATE_COMMANDS
     return {name: list(command) for name, command in commands.items()}
 
 
 def run_command(command: list[str]) -> GateResult:
-    completed = subprocess.run(
-        command,
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=GATE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as error:
+        output = error.output or ""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        return GateResult(
+            passed=False,
+            returncode=124,
+            output=f"gate timed out after {GATE_TIMEOUT_S}s\n{output}",
+        )
     return GateResult(
         passed=completed.returncode == 0,
         returncode=completed.returncode,
