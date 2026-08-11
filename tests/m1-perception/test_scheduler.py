@@ -711,7 +711,7 @@ async def test_event_member_writer_busy_checkpoint_retries_within_the_bounded_de
 
     assert child.await_count == 2
     sleep.assert_awaited_once_with(scheduler_module.STRUCTURE_DEFER_RETRY_DELAY_S)
-    assert scheduler._checkpoint_pending is False
+    assert scheduler._checkpoint_pending is True
 
 
 @pytest.mark.asyncio

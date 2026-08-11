@@ -1740,10 +1740,11 @@ class SnapshotScheduler:
                 # yields to Quote for five seconds without turning a transient
                 # SQLite writer conflict into hours of recovery lag.
                 return False
-            if not checkpoint.sealed and not checkpoint.deferred:
-                # The outer resident loop uses this flag for a 100ms
-                # continuation instead of the ordinary production cadence.
-                # The next call re-enters every Quote-priority admission check.
+            if not checkpoint.deferred:
+                # A sealed member sidecar unblocks the fresh Structure snapshot
+                # that can certify recovery. Do not wait the ordinary cadence
+                # after either partial progress or sealing; the next tick still
+                # re-enters every Quote-priority admission check.
                 self._checkpoint_pending = True
             return True
         finally:
