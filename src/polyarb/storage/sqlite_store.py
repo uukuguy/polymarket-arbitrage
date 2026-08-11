@@ -3629,11 +3629,21 @@ class SQLiteStore:
     def advance_structure_event_member_staging_chunk(
         self, *, window_id: str, limit: int = 500,
         inspection_callback: Callable[[int], None] | None = None,
+        execution_deadline_s: float | None = None,
     ) -> dict[str, object]:
         """Derive and atomically checkpoint at most 500 raw event members."""
-        if not window_id or not 1 <= limit <= 500:
+        if (
+            not window_id
+            or not 1 <= limit <= 500
+            or (execution_deadline_s is not None and execution_deadline_s <= 0)
+        ):
             raise ValueError("invalid-structure-event-member-advance")
         now_ms = int(time.time() * 1_000)
+        deadline = (
+            None
+            if execution_deadline_s is None
+            else time.monotonic() + execution_deadline_s
+        )
         con = self._connect_writer()
         progress_sql = (
             "SELECT event_cursor,member_ordinal,rows_written,member_byte_offset,"
@@ -3643,6 +3653,10 @@ class SQLiteStore:
             "structure_sync_event_member_progress WHERE window_id=?"
         )
         try:
+            if deadline is not None:
+                con.set_progress_handler(
+                    lambda: int(time.monotonic() >= deadline), 1_000
+                )
             con.execute("BEGIN IMMEDIATE")
             window = con.execute(
                 "SELECT status,checkpoint_at_ms FROM structure_sync_windows WHERE id=?",
@@ -3715,7 +3729,10 @@ class SQLiteStore:
                 raise ValueError("structure-event-member-progress-invalid")
             if phase == "group-truth":
                 return self._advance_structure_event_group_truth_chunk(
-                    window_id=window_id, limit=limit, now_ms=now_ms
+                    window_id=window_id,
+                    limit=limit,
+                    now_ms=now_ms,
+                    deadline_monotonic=deadline,
                 )
             if phase == "merkle":
                 children = con.execute(
@@ -4383,10 +4400,15 @@ class SQLiteStore:
         window_id: str,
         limit: int,
         now_ms: int,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, object]:
         """Derive receipt-bound source group truth with at most ``limit`` members."""
         con = self._connect_writer()
         try:
+            if deadline_monotonic is not None:
+                con.set_progress_handler(
+                    lambda: int(time.monotonic() >= deadline_monotonic), 1_000
+                )
             progress = con.execute(
                 "SELECT event_cursor,group_cursor,market_cursor,member_ordinal,"
                 "membership_state,member_count,active_named_count,invalid_member_count,"

@@ -42,6 +42,12 @@ def _is_sqlite_writer_busy(error: sqlite3.OperationalError) -> bool:
     }
 
 
+def _is_sqlite_deadline_interrupt(error: sqlite3.OperationalError) -> bool:
+    """Recognize a cooperative SQLite progress-handler interruption."""
+    code = getattr(error, "sqlite_errorcode", None)
+    return isinstance(code, int) and (code & 0xFF) == sqlite3.SQLITE_INTERRUPT
+
+
 _STRUCTURE_FAILURE_KINDS = frozenset(
     {
         "generation-count-mismatch",
@@ -376,6 +382,11 @@ def structure_generation_drift_advance(
                 now_ms=int(time.time() * 1_000),
             )
         except sqlite3.OperationalError as error:
+            if _is_sqlite_deadline_interrupt(error):
+                deferred = True
+                defer_reason = "deadline"
+                stop_reason = "deadline"
+                break
             if not _is_sqlite_writer_busy(error):
                 raise
             deferred = True
@@ -466,8 +477,14 @@ def structure_event_members_advance(
             stop_reason = "max-elapsed-seconds"
             break
         try:
+            remaining_s = max_elapsed_seconds - (time.monotonic() - started)
+            if remaining_s <= 0:
+                stop_reason = "max-elapsed-seconds"
+                break
             chunk = store.advance_structure_event_member_staging_chunk(
-                window_id=window_id, limit=max_rows
+                window_id=window_id,
+                limit=max_rows,
+                execution_deadline_s=remaining_s,
             )
         except sqlite3.OperationalError as error:
             if not _is_sqlite_writer_busy(error):

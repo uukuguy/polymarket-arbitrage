@@ -398,9 +398,9 @@ async def run_structure_event_members_in_subprocess(
         or type(payload["sealed"]) is not bool
         or type(payload["deferred"]) is not bool
         or (defer_reason is not None and not isinstance(defer_reason, str))
-        or bool(payload["deferred"]) != (defer_reason == "writer-busy")
+        or bool(payload["deferred"]) != (defer_reason in {"writer-busy", "deadline"})
         or payload["stop_reason"]
-        not in {"complete", "max-chunks", "max-elapsed-seconds", "writer-busy"}
+        not in {"complete", "max-chunks", "max-elapsed-seconds", "writer-busy", "deadline"}
         or process.returncode != 0
     ):
         raise SnapshotSubprocessError("structure-event-members-invalid-json")
@@ -1719,7 +1719,10 @@ class SnapshotScheduler:
                 raise
             if checkpoint.deferred:
                 await self._record_structure_defer(
-                    reason="structure-event-members:writer-busy",
+                    reason=(
+                        "structure-event-members:"
+                        f"{checkpoint.defer_reason or 'writer-busy'}"
+                    ),
                     queued_at_ms=queued_at_ms,
                 )
             else:

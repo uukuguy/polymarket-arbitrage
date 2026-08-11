@@ -71,6 +71,7 @@ def test_structure_drift_internal_child_keeps_partial_commit_at_post_deadline(
 
     class FakeStore:
         calls = 0
+        call_kwargs: list[dict[str, object]] = []
 
         def __init__(self, *_args, **_kwargs) -> None:
             pass
@@ -80,7 +81,7 @@ def test_structure_drift_internal_child_keeps_partial_commit_at_post_deadline(
             return StructureCertificationChunk("source-events", "cursor", 500, False)
 
     fake = FakeStore()
-    clock = iter((0.0, 0.0, 46.0, 46.0))
+    clock = iter((0.0, 0.0, 0.0, 46.0, 46.0))
     monkeypatch.setattr(store_module, "SQLiteStore", lambda *_a, **_k: fake)
     monkeypatch.setattr(cli_module.time, "monotonic", lambda: next(clock))
     result = CliRunner().invoke(
@@ -113,16 +114,18 @@ def test_event_member_internal_child_keeps_partial_commit_at_45_second_deadline(
 
     class FakeStore:
         calls = 0
+        call_kwargs: list[dict[str, object]] = []
 
         def __init__(self, *_args, **_kwargs) -> None:
             pass
 
         def advance_structure_event_member_staging_chunk(self, **_kwargs):
             self.calls += 1
+            self.call_kwargs.append(_kwargs)
             return {"rows_written": 500, "sealed": False}
 
     fake = FakeStore()
-    clock = iter((0.0, 0.0, 46.0, 46.0))
+    clock = iter((0.0, 0.0, 0.0, 46.0, 46.0))
     monkeypatch.setattr(store_module, "SQLiteStore", lambda *_a, **_k: fake)
     monkeypatch.setattr(cli_module.time, "monotonic", lambda: next(clock))
     result = CliRunner().invoke(
@@ -143,6 +146,7 @@ def test_event_member_internal_child_keeps_partial_commit_at_45_second_deadline(
     assert payload["sealed"] is False
     assert payload["stop_reason"] == "max-elapsed-seconds"
     assert fake.calls == 1
+    assert fake.call_kwargs[0]["execution_deadline_s"] == 45.0
 
 
 def test_event_member_internal_child_caps_production_slice_at_50000_rows(
