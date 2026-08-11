@@ -3207,6 +3207,24 @@ class SQLiteStore:
         con.execute("PRAGMA foreign_keys=ON")
         return con
 
+    def _connect_deadline_read(
+        self, deadline_monotonic: float | None
+    ) -> sqlite3.Connection:
+        """Open one read handle which cannot outlive a cooperative slice."""
+        if deadline_monotonic is None:
+            return sqlite3.connect(self._db_path)
+        remaining_s = deadline_monotonic - time.monotonic()
+        if remaining_s <= 0:
+            raise sqlite3.OperationalError("interrupted")
+        con = sqlite3.connect(
+            self._db_path,
+            timeout=min(SQLITE_BUSY_TIMEOUT_S, max(0.001, remaining_s)),
+        )
+        con.set_progress_handler(
+            lambda: int(time.monotonic() >= deadline_monotonic), 1_000
+        )
+        return con
+
     @property
     def db_path(self) -> Path:
         return self._db_path
@@ -5895,6 +5913,7 @@ class SQLiteStore:
         source: str,
         after_key: str | None,
         limit: int,
+        deadline_monotonic: float | None = None,
     ) -> list[tuple[str, dict]]:
         """Read at most ``limit`` completed raw rows using stable keyset order."""
         if source not in {"events", "markets"} or limit < 1:
@@ -5903,7 +5922,7 @@ class SQLiteStore:
             f"structure_sync_{source[:-1] if source == 'events' else 'market'}_staging"
         )
         key = "event_id" if source == "events" else "market_id"
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_deadline_read(deadline_monotonic) as con:
             status = con.execute(
                 "SELECT status FROM structure_sync_windows WHERE id=?", (window_id,)
             ).fetchone()
@@ -5917,7 +5936,7 @@ class SQLiteStore:
         return [(str(item[0]), json.loads(str(item[1]))) for item in rows]
 
     def structure_publication_taken_at_ms(self, publication_id: str) -> int:
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_deadline_read(None) as con:
             row = con.execute(
                 "SELECT s.taken_at_ms FROM structure_publications p JOIN snapshots s "
                 "ON s.id=p.snapshot_id WHERE p.publication_id=?",
@@ -6002,6 +6021,8 @@ class SQLiteStore:
         self,
         publication_id: str,
         market_ids: list[str],
+        *,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, str]:
         """Resolve one bounded market chunk's parents with fixed SQL/connection cost."""
         if (
@@ -6017,7 +6038,7 @@ class SQLiteStore:
             return {}
         placeholders = ",".join("?" for _ in market_ids)
         resolved: dict[str, str] = {}
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_deadline_read(deadline_monotonic) as con:
             staged = con.execute(
                 "SELECT mine.market_id,mine.event_id FROM structure_publications p JOIN "
                 "structure_sync_event_market_staging mine ON mine.window_id=p.window_id "

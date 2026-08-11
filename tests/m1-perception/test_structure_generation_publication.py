@@ -102,7 +102,9 @@ def test_publication_slice_advances_multiple_durable_chunks_before_returning(
     )
     calls: list[tuple[int, float, object]] = []
 
-    def advance(_settings, _window_id, max_rows, remaining_s, *, store=None):
+    def advance(
+        _settings, _window_id, max_rows, remaining_s, *, store=None, deadline_monotonic=None
+    ):
         calls.append((max_rows, remaining_s, store))
         return next(checkpoints)
 
@@ -141,7 +143,9 @@ def test_publication_slice_stops_before_starting_chunk_at_elapsed_deadline(
 ) -> None:
     calls = 0
 
-    def advance(_settings, _window_id, _max_rows, _remaining_s, *, store=None):
+    def advance(
+        _settings, _window_id, _max_rows, _remaining_s, *, store=None, deadline_monotonic=None
+    ):
         nonlocal calls
         calls += 1
         return StructurePublicationCheckpoint(
@@ -168,13 +172,77 @@ def test_publication_slice_stops_before_starting_chunk_at_elapsed_deadline(
     assert result.elapsed_ms == 45_000
 
 
+def test_publication_slice_preserves_prior_checkpoint_when_current_chunk_deadlines(
+    settings_for_test, monkeypatch
+) -> None:
+    """A current-chunk SQLite interruption is resumable, not a child timeout."""
+    calls = 0
+
+    def advance(
+        _settings, _window_id, _max_rows, _remaining_s, *, store=None, deadline_monotonic=None
+    ):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return StructurePublicationCheckpoint(
+                "normalizing", "markets", 500, "market-500", "publication-1"
+            )
+        raise structure_publication_module.StructurePublicationDeadlineReached()
+
+    monkeypatch.setattr(
+        structure_publication_module, "run_structure_publication_step", advance
+    )
+    ticks = iter((100.0, 100.0, 101.0, 101.0))
+    monkeypatch.setattr(structure_publication_module.time, "monotonic", lambda: next(ticks))
+
+    result = run_structure_publication_slice(
+        settings_for_test,
+        "window-1",
+        max_rows=500,
+        max_elapsed_s=45.0,
+        store=object(),
+    )
+
+    assert result == StructurePublicationCheckpoint(
+        "normalizing",
+        "markets",
+        500,
+        "market-500",
+        "publication-1",
+        chunks_processed=1,
+        elapsed_ms=1_000,
+    )
+
+
+def test_normalization_maps_expired_read_budget_to_publication_checkpoint(
+    settings_for_test,
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    publication = _begin_generation(
+        store, snapshot_id=1, market_id="market-1", now_ms=100
+    )
+
+    with pytest.raises(structure_publication_module.StructurePublicationDeadlineReached):
+        normalize_structure_component_chunk(
+            store,
+            publication,
+            "markets",
+            after_source_key=None,
+            max_source_rows=500,
+            deadline_monotonic=time.monotonic() - 0.001,
+        )
+
+
 def test_publication_slice_bounds_expensive_comparison_chunks(
     settings_for_test, monkeypatch
 ) -> None:
     """A stalled clock must not let comparison monopolize the producer lane."""
     calls = 0
 
-    def advance(_settings, _window_id, _max_rows, _remaining_s, *, store=None):
+    def advance(
+        _settings, _window_id, _max_rows, _remaining_s, *, store=None, deadline_monotonic=None
+    ):
         nonlocal calls
         calls += 1
         return StructurePublicationCheckpoint(

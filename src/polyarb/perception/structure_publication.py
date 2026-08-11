@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -34,6 +35,10 @@ EVENT_ONLY_NEG_RISK_QUARANTINE_REASON = (
     "active-open-neg-risk-event-member-absent-from-complete-market-catalogue"
 )
 STRUCTURE_PUBLICATION_CHUNK_WRITER_TIMEOUT_MAX_S = 5.0
+
+
+class StructurePublicationDeadlineReached(RuntimeError):
+    """The current publication chunk exhausted its cooperative slice budget."""
 
 
 def structure_market_source_hash(raw: dict) -> str:
@@ -242,6 +247,7 @@ def normalize_structure_component_chunk(
     max_source_rows: int,
     *,
     writer_timeout_s: float | None = None,
+    deadline_monotonic: float | None = None,
 ) -> NormalizationChunk:
     """Normalize one bounded raw keyset and atomically advance its cursor."""
     if (
@@ -254,19 +260,25 @@ def normalize_structure_component_chunk(
     progress = store.get_structure_publication_progress(publication.window_id)
     if progress is None or progress.publication.publication_id != publication.publication_id:
         raise ValueError("structure-publication-not-found")
-    if component == "issues":
-        rows = store.fetch_structure_issue_source_chunk(
-            window_id=publication.window_id,
-            after_market_id=after_source_key,
-            limit=max_source_rows,
-        )
-    else:
-        rows = store.fetch_structure_staging_chunk(
-            window_id=publication.window_id,
-            source=source,
-            after_key=after_source_key,
-            limit=max_source_rows,
-        )
+    try:
+        if component == "issues":
+            rows = store.fetch_structure_issue_source_chunk(
+                window_id=publication.window_id,
+                after_market_id=after_source_key,
+                limit=max_source_rows,
+            )
+        else:
+            rows = store.fetch_structure_staging_chunk(
+                window_id=publication.window_id,
+                source=source,
+                after_key=after_source_key,
+                limit=max_source_rows,
+                deadline_monotonic=deadline_monotonic,
+            )
+    except sqlite3.OperationalError as error:
+        if deadline_monotonic is not None and "interrupted" in str(error).lower():
+            raise StructurePublicationDeadlineReached() from error
+        raise
     duplicate_event_ids = (
         store.structure_events_with_duplicate_markets(
             publication.publication_id,
@@ -287,6 +299,7 @@ def normalize_structure_component_chunk(
         store.structure_event_ids_for_markets(
             publication.publication_id,
             [str(source_key) for source_key, _raw in rows],
+            deadline_monotonic=deadline_monotonic,
         )
         if component == "markets"
         else {}
@@ -413,6 +426,7 @@ def run_structure_publication_step(
     max_elapsed_s: float,
     *,
     store: SQLiteStore | None = None,
+    deadline_monotonic: float | None = None,
 ) -> StructurePublicationCheckpoint | SnapshotResult:
     """Advance at most one normalization/certification chunk or pointer switch."""
     if not 1 <= max_rows <= STRUCTURE_PUBLICATION_MAX_ROWS or max_elapsed_s <= 0:
@@ -536,6 +550,7 @@ def run_structure_publication_step(
         cursor,
         max_rows,
         writer_timeout_s=writer_timeout_s,
+        deadline_monotonic=deadline_monotonic,
     )
     return StructurePublicationCheckpoint(
         "normalizing",
@@ -566,6 +581,7 @@ def run_structure_publication_slice(
         store = SQLiteStore(settings.db_path)
         store.init_structure_sync_schema()
     started_at = time.monotonic()
+    deadline_monotonic = started_at + max_elapsed_s
     print(
         "snapshot-stage stage=persist state=start elapsed_ms=0",
         file=sys.stderr,
@@ -582,13 +598,19 @@ def run_structure_publication_slice(
         remaining_s = max_elapsed_s - elapsed_s
         if remaining_s < STRUCTURE_PUBLICATION_MIN_CHUNK_REMAINING_S:
             break
-        result = run_structure_publication_step(
-            settings,
-            window_id,
-            max_rows,
-            remaining_s,
-            store=store,
-        )
+        try:
+            result = run_structure_publication_step(
+                settings,
+                window_id,
+                max_rows,
+                remaining_s,
+                store=store,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except StructurePublicationDeadlineReached:
+            if final_checkpoint is None:
+                raise
+            break
         if isinstance(result, SnapshotResult):
             return result
         if publication_id is None:
