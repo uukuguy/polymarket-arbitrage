@@ -7589,3 +7589,34 @@ This preserves no-partial-feed serving while removing the false choice between
 unbounded SQLite timeouts and normal tail-latency failures. Obtain approval
 for this structural persistence plan before implementation; do not make a
 fourth timeout-only adjustment.
+
+## SESSION 184 — 2026-08-11 (Structure writer-busy retry and live fault evidence)
+
+- [REPAIR / DEPLOY] Commit `5151630` fixes Structure event-member recovery:
+  a durable `writer-busy` checkpoint now stays in the scheduler's five-second
+  bounded defer loop instead of ending the tick and waiting the normal
+  five-minute cadence. Quote retains write priority; Structure resumes from
+  its durable cursor. Focused red/green regression and adjacent scheduler
+  tests pass; full scheduler-file suite was stopped by the execution harness
+  after 86%, so it must not be reported as complete.
+- [LIVE] Fly release v352 runs image `5151630` and both app/cron machines are
+  started with the service check passing. Recovery advanced from 52,500 to
+  189,170 member rows within minutes, versus roughly 1,000 rows per prior
+  five-minute tick. Two identical releases (v351/v352) were created when an
+  execution session was lost; no third deploy was attempted.
+- [OPEN FAULT] During the high-write recovery, the operator producer-progress
+  endpoint returned `read-model-unavailable` and strict health reported
+  `runtime:health_read_lane` saturation. At 00:40:42Z the member child also
+  hit its 75-second outer watchdog; scheduler recorded failure_counter=1/5
+  and retained automatic retry. These are visible but disqualify M1 from a
+  stable-production claim. Root-cause work must cover health read connection
+  cancellation beyond the generation query and the event-member child timeout
+  chain.
+
+### [NEXT — CURRENT]
+
+Diagnose the event-member 75-second child timeout and high-write health-read
+lane saturation from durable/run-time evidence. Do not claim Structure P1
+recovery or M1 production stability until a new certified Structure publication
+closes the incident, Quote continues across that receipt, and the Dashboard/
+health paths remain readable through the recovery load.
