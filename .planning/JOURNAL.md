@@ -7620,3 +7620,33 @@ lane saturation from durable/run-time evidence. Do not claim Structure P1
 recovery or M1 production stability until a new certified Structure publication
 closes the incident, Quote continues across that receipt, and the Dashboard/
 health paths remain readable through the recovery load.
+
+## SESSION 185 — 2026-08-11 (M1 durable transactional control-plane foundation)
+
+- [DELIVERED] Commits `8090e65` and `da96bb8` add additive Alembic revision
+  `009` plus a real-PostgreSQL-tested fenced job repository. Jobs are claimed
+  with `FOR UPDATE SKIP LOCKED`; each takeover advances `lease_epoch`; stale
+  workers cannot heartbeat, checkpoint, or finish after a newer owner claims.
+  Checkpoint receipts are idempotent and incident event plus alert outbox is
+  one transaction. No production migration, pointer switch, or Fly deploy has
+  occurred for these commits.
+- [VERIFY] `test_control_plane_postgres.py` has four PostgreSQL 16
+  testcontainer cases covering expired-lease takeover, stale fencing,
+  checkpoint idempotency/retry/quarantine, and incident/outbox idempotency;
+  all passed. `make planning-status` reports no drift.
+- [LIVE P1] At 15:08Z, public `/healthz` timed out in ten seconds; Fly service
+  check itself reports `runtime:health_read_lane=read-model-unavailable`.
+  The resident Polywatch cron independently detected the health timeout and
+  opportunity HTTP 503, emitted the open P1 set, and Telegram delivery logged
+  `ok=True`. App logs show repeated `StaleQuoteRunError`, SQLite writer
+  contention, and snapshot subprocess timeout (`failure_counter=114/5`).
+  Release remains v358, so the new control-plane code is not involved.
+
+### [NEXT — CURRENT]
+
+Treat the current v358 health-read/SQLite contention and repeated snapshot
+timeout as active P1. Continue the approved strangler path by building the
+read-only SQLite-to-Postgres shadow projection, while separately diagnosing
+the v358 contention chain from its durable SQLite evidence. Do not deploy the
+new foundation or claim M1 stability until its migration, double shadow-sync,
+pointer non-mutation, and bounded independent read API are verified.
