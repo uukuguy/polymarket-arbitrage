@@ -10391,11 +10391,12 @@ class SQLiteStore:
         window_id: str,
         after_market_id: str | None,
         limit: int,
+        deadline_monotonic: float | None = None,
     ) -> list[tuple[str, dict[str, object]]]:
         """Read a bounded union of market-side and unique event-only candidates."""
         if not window_id or not 1 <= limit <= 500:
             raise ValueError("invalid-structure-issue-source-chunk")
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_deadline_read(deadline_monotonic) as con:
             market_cursor_clause = ""
             event_cursor_clause = ""
             market_parameters: list[object] = [window_id]

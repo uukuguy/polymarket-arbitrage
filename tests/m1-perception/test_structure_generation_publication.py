@@ -234,6 +234,26 @@ def test_normalization_maps_expired_read_budget_to_publication_checkpoint(
         )
 
 
+def test_issue_normalization_maps_expired_read_budget_to_publication_checkpoint(
+    settings_for_test,
+) -> None:
+    store = SQLiteStore(settings_for_test.db_path)
+    store.init_schema()
+    publication = _begin_generation(
+        store, snapshot_id=1, market_id="market-1", now_ms=100
+    )
+
+    with pytest.raises(structure_publication_module.StructurePublicationDeadlineReached):
+        normalize_structure_component_chunk(
+            store,
+            publication,
+            "issues",
+            after_source_key=None,
+            max_source_rows=500,
+            deadline_monotonic=time.monotonic() - 0.001,
+        )
+
+
 def test_publication_slice_bounds_expensive_comparison_chunks(
     settings_for_test, monkeypatch
 ) -> None:

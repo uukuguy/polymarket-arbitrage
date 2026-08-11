@@ -266,6 +266,7 @@ def normalize_structure_component_chunk(
                 window_id=publication.window_id,
                 after_market_id=after_source_key,
                 limit=max_source_rows,
+                deadline_monotonic=deadline_monotonic,
             )
         else:
             rows = store.fetch_structure_staging_chunk(
