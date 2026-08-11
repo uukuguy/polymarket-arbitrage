@@ -608,7 +608,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -628,6 +628,16 @@ supabase-migrate-test:
 	uv run alembic downgrade -1 && \
 	uv run alembic upgrade head && \
 	uv run alembic current
+
+## control-plane-migrate-test: Test-only 009 forward→reverse→forward roundtrip; requires POLYARB_CONTROL_PLANE_TEST_DSN and exits 77 if absent.
+control-plane-migrate-test:
+	@echo ">> control-plane-migrate-test — upgrade 009 → downgrade 008 → upgrade 009"
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_CONTROL_PLANE_TEST_DSN" ]; then echo "POLYARB_CONTROL_PLANE_TEST_DSN unset — skip"; exit 77; fi; \
+	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 009 && \
+	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic downgrade 008 && \
+	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 009 && \
+	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic current
 
 ## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots (auto-loads .env)
 supabase-reconcile:
