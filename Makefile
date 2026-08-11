@@ -612,7 +612,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-shadow-sync control-plane-status supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -642,6 +642,18 @@ control-plane-migrate-test:
 	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic downgrade 008 && \
 	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 009 && \
 	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic current
+
+## control-plane-shadow-sync: Read local SQLite facts and idempotently project them to Postgres; never switches pointers. Optional db_path=/data/state.db limit=100.
+control-plane-shadow-sync:
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
+	uv run python -m polyarb.cli_control_plane shadow-sync --db-path "$(or $(db_path),data/state.db)" --limit "$(or $(limit),100)" --json
+
+## control-plane-status: Read bounded durable M1 jobs/incidents/outbox. Optional limit=20.
+control-plane-status:
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
+	uv run python -m polyarb.cli_control_plane status --limit "$(or $(limit),20)" --json
 
 ## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots (auto-loads .env)
 supabase-reconcile:
