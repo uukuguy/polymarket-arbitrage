@@ -263,3 +263,70 @@ def test_incident_event_and_alert_outbox_are_one_idempotent_transaction(
             assert cursor.fetchall() == [("dashboard",), ("webhook",)]
     finally:
         connection.close()
+
+
+def test_operational_snapshot_reads_fenced_work_and_alert_intent(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """The operator plane reads Postgres evidence without SQLite authority."""
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    control_plane.enqueue_job(
+        job_key="structure:window-a",
+        job_type="structure-fetch",
+        input_identity="window-a",
+        now=now - timedelta(seconds=90),
+    )
+    control_plane.enqueue_job(
+        job_key="quote:generation-a:batch-0001",
+        job_type="quote-batch",
+        input_identity="generation-a:batch-0001",
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id="structure-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now - timedelta(seconds=60),
+    )
+    assert lease is not None
+    control_plane.record_incident_event(
+        incident_key="quote-unavailable-a",
+        dedupe_key="quote-unavailable-a",
+        component="quote",
+        severity="critical",
+        summary="certified quote projection unavailable",
+        kind="detected",
+        detail={"run_id": "3035"},
+        idempotency_key="quote-unavailable-a:detected",
+        channels=("telegram",),
+        now=now,
+    )
+
+    snapshot = control_plane.operational_snapshot(now=now, sample_limit=20)
+
+    assert snapshot["job_counts"] == {"leased": 1, "runnable": 1}
+    assert snapshot["oldest_runnable_age_seconds"] == 0.0
+    assert snapshot["expired_leases"] == 1
+    assert snapshot["recent_attempts"] == [
+        {
+            "job_key": "structure:window-a",
+            "lease_epoch": 1,
+            "worker_id": "structure-worker-a",
+            "state": "running",
+        }
+    ]
+    assert snapshot["open_incidents"] == [
+        {
+            "incident_key": "quote-unavailable-a",
+            "component": "quote",
+            "severity": "critical",
+            "summary": "certified quote projection unavailable",
+        }
+    ]
+    assert snapshot["pending_alert_outbox"] == [
+        {
+            "incident_key": "quote-unavailable-a",
+            "channel": "telegram",
+            "state": "pending",
+        }
+    ]

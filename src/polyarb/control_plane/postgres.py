@@ -392,6 +392,112 @@ class PostgresControlPlane:
                 )
             return event_id
 
+    def operational_snapshot(
+        self,
+        *,
+        now: datetime,
+        sample_limit: int = 20,
+    ) -> dict[str, object]:
+        """Read the bounded, durable operator view without touching SQLite.
+
+        This projection deliberately uses only control-plane facts.  A stalled
+        data worker or unavailable Fly volume must therefore not turn an
+        operator incident into an empty/healthy response.
+        """
+        self._validate_aware(now, "now")
+        if not 1 <= sample_limit <= 100:
+            raise ValueError("sample_limit must be in 1..100")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
+            cursor.execute(
+                "SELECT state, count(*) AS count FROM m1_jobs GROUP BY state"
+            )
+            job_counts = {
+                str(row["state"]): int(row["count"])
+                for row in cursor.fetchall()
+            }
+            cursor.execute(
+                """
+                SELECT extract(epoch FROM (%s - min(created_at))) AS age_seconds
+                FROM m1_jobs WHERE state IN ('runnable', 'retryable', 'checkpointed')
+                """,
+                (now,),
+            )
+            oldest = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT count(*) AS count FROM m1_jobs
+                WHERE state = 'leased' AND lease_expires_at <= %s
+                """,
+                (now,),
+            )
+            expired = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT job_key, lease_epoch, worker_id, state
+                FROM m1_job_attempts ORDER BY started_at DESC, attempt_id DESC LIMIT %s
+                """,
+                (sample_limit,),
+            )
+            attempts = [
+                {
+                    "job_key": str(row["job_key"]),
+                    "lease_epoch": int(row["lease_epoch"]),
+                    "worker_id": str(row["worker_id"]),
+                    "state": str(row["state"]),
+                }
+                for row in cursor.fetchall()
+            ]
+            cursor.execute(
+                """
+                SELECT incident_key, component, severity, summary
+                FROM m1_incidents WHERE state = 'open'
+                ORDER BY opened_at DESC, incident_key DESC LIMIT %s
+                """,
+                (sample_limit,),
+            )
+            incidents = [
+                {
+                    "incident_key": str(row["incident_key"]),
+                    "component": str(row["component"]),
+                    "severity": str(row["severity"]),
+                    "summary": str(row["summary"]),
+                }
+                for row in cursor.fetchall()
+            ]
+            cursor.execute(
+                """
+                SELECT i.incident_key, o.channel, o.state
+                FROM m1_alert_outbox o
+                JOIN m1_incident_events e ON e.incident_event_id = o.incident_event_id
+                JOIN m1_incidents i ON i.incident_key = e.incident_key
+                WHERE o.state = 'pending'
+                ORDER BY o.created_at DESC, o.outbox_id DESC LIMIT %s
+                """,
+                (sample_limit,),
+            )
+            outbox = [
+                {
+                    "incident_key": str(row["incident_key"]),
+                    "channel": str(row["channel"]),
+                    "state": str(row["state"]),
+                }
+                for row in cursor.fetchall()
+            ]
+        age = None if oldest is None else oldest["age_seconds"]
+        return {
+            "job_counts": job_counts,
+            "oldest_runnable_age_seconds": None if age is None else float(age),
+            "expired_leases": 0 if expired is None else int(expired["count"]),
+            "recent_attempts": attempts,
+            "open_incidents": incidents,
+            "pending_alert_outbox": outbox,
+        }
+
     @staticmethod
     def _receipt(row: dict[str, Any]) -> CheckpointReceipt:
         return CheckpointReceipt(
