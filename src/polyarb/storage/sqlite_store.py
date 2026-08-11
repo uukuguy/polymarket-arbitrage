@@ -12378,6 +12378,7 @@ class SQLiteStore:
         pressure_probe_limit: int = 8,
         trace_callback: Callable[[str], None] | None = None,
         sqlite_progress_callback: Callable[[], int] | None = None,
+        sqlite_connection_callback: Callable[[sqlite3.Connection], None] | None = None,
     ) -> dict[str, object]:
         """Return bounded read-only rollout and evidence pressure metadata."""
         if retain_generations < 2:
@@ -12387,8 +12388,11 @@ class SQLiteStore:
         with sqlite3.connect(
             f"file:{self._db_path}?mode=ro",
             uri=True,
+            timeout=0.25 if sqlite_connection_callback is not None else 5.0,
         ) as con:
             con.execute("PRAGMA query_only=ON")
+            if sqlite_connection_callback is not None:
+                sqlite_connection_callback(con)
             con.execute("BEGIN")
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)

@@ -113,6 +113,10 @@ _MIRROR_WARN_S = 25 * 3600
 _MIRROR_FAIL_S = 48 * 3600
 _OPPORTUNITY_READ_FAILURE_FAIL_COUNT = 3
 _OPPORTUNITY_READ_FAILURE_SLA_S = 300.0
+# The full production projection includes durable Structure recovery evidence.
+# Under normal write pressure it needs about 3 seconds; four seconds leaves
+# bounded jitter headroom while preserving an actionable fast failure.
+_HEALTH_READ_TIMEOUT_S = 4.0
 
 
 @dataclass(frozen=True)
@@ -1893,6 +1897,9 @@ def _build_health_checks(
             sqlite_progress_callback=(
                 None if execution is None else execution.progress
             ),
+            sqlite_connection_callback=(
+                None if execution is None else execution.register
+            ),
         )
         generation_checks = _structure_generation_health_checks(
             generation_status,
@@ -2258,7 +2265,7 @@ async def _health_response(request: Request, *, probe: bool) -> JSONResponse:
 
     store: SQLiteStore = request.app.state.sqlite_store
     settings = request.app.state.settings
-    execution = _HealthReadExecution(time.monotonic() + 0.8)
+    execution = _HealthReadExecution(time.monotonic() + _HEALTH_READ_TIMEOUT_S)
     token = _HEALTH_READ_EXECUTION.set(execution)
     try:
         try:
@@ -2269,7 +2276,7 @@ async def _health_response(request: Request, *, probe: bool) -> JSONResponse:
                 time.time(),
                 getattr(request.app.state, "quote_worker_runtime", None),
                 getattr(request.app.state, "opportunity_read_health", None),
-                timeout_s=0.8,
+                timeout_s=_HEALTH_READ_TIMEOUT_S,
                 on_timeout=execution.interrupt,
             )
         except ReadLaneSaturatedError:

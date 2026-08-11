@@ -51,6 +51,18 @@ def test_structure_generation_status_honors_sqlite_progress_cancellation(
         )
 
 
+def test_structure_generation_status_exposes_connection_to_health_deadline(
+    generation_db: Path,
+) -> None:
+    connections: list[sqlite3.Connection] = []
+
+    SQLiteStore(generation_db).structure_generation_status(
+        sqlite_connection_callback=connections.append,
+    )
+
+    assert len(connections) == 1
+
+
 def _seed_structure_revision(
     path: Path,
     *,
