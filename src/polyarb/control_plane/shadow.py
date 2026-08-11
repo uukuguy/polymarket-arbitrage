@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,3 +32,45 @@ def shadow_identity(source: ShadowSource) -> str:
     if not source.kind or not source.identity:
         raise ValueError("shadow source must have a non-empty kind and identity")
     return f"sqlite:{source.kind}:{source.identity}"
+
+
+def read_shadow_sources(db_path: Path | str, *, limit: int = 100) -> tuple[ShadowSource, ...]:
+    """Read a bounded evidence slice without acquiring a SQLite write lock."""
+    if limit < 1 or limit > 500:
+        raise ValueError("limit must be in 1..500")
+    path = Path(db_path).resolve()
+    sources: list[ShadowSource] = []
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        publications = connection.execute(
+            """
+            SELECT publication_id, write_component, write_row_cursor
+            FROM structure_publications
+            WHERE write_component IS NOT NULL AND write_row_cursor IS NOT NULL
+            ORDER BY rowid DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        quotes = connection.execute(
+            """
+            SELECT id FROM neg_risk_quote_attempts
+            ORDER BY id DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        incidents = connection.execute(
+            """
+            SELECT incident_id, sequence FROM neg_risk_incident_events
+            ORDER BY id DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    sources.extend(
+        ShadowSource.structure_publication(str(publication_id), f"{component}:{cursor}")
+        for publication_id, component, cursor in publications
+    )
+    sources.extend(ShadowSource.quote_attempt(int(attempt_id)) for (attempt_id,) in quotes)
+    sources.extend(
+        ShadowSource.incident(str(incident_id), int(sequence))
+        for incident_id, sequence in incidents
+    )
+    return tuple(sources)
