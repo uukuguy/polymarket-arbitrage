@@ -7670,3 +7670,38 @@ then use explicitly designated production authority credentials to run the
 additive migration and double shadow sync. Keep v358 P1 diagnosis active and
 do not deploy or claim recovery merely because the control-plane foundation
 tests pass.
+
+## SESSION 187 — 2026-08-12 (v360 Structure recovery evidence; Quote transaction boundary remains P1)
+
+- [DEPLOY / IDENTITY] Releases v359 and v360 both run exact source
+  `16f266eb9119ece5da1d3088e73680a0487ab666`; v360 is the final serial
+  replacement, with app boot `2e142aca-35f4-445c-aa67-a91ccf1783db` and image
+  digest `sha256:2ab61f364fbc84b370ae2c493648bd7e326e8212319f1d6ce99d5e8c5b41b55e`.
+  The release followed focused Structure/control-plane regression plus Ruff;
+  no pointer migration or Supabase control-plane production mutation occurred.
+- [RECOVERY EVIDENCE] The previously repeating 75-second Structure timeout no
+  longer occurs on v360. The new boot committed checkpointed slices at
+  20.483s (events), 22.192s (events), 15.870s (events), and 11.541s
+  (markets); every observed scheduler receipt has `failure_counter=0`.
+  This validates the deadline-aware Structure read path, but not M1 as a whole.
+- [ROOT CAUSE REFINED] The Fly volume is not the immediate blocker: it has
+  56.97GB free of 105.57GB and SQLite is in WAL mode. Health read saturation
+  is a bounded, visible P1 response during competing full SQLite projection
+  reads, not a healthy empty result. A subsequent serialized probe completed,
+  so this symptom must be removed by the independent control-plane read path,
+  not hidden by increasing lane capacity.
+- [OPEN P1] Quote remains unavailable after restart. The durable quote attempt
+  `1264` (run `3035`) failed with a target universe of `42,235` tokens;
+  `quote_feed:last_complete_age_seconds` is absent and the collector is
+  `cold-start`. This is the already-identified oversized atomic persistence
+  boundary, not evidence that the CLOB feed has no opportunities. Do not tune
+  the 180s child or writer timeout again: split Quote into checkpointed token
+  batches and publish only a certified terminal projection under fenced jobs.
+
+### [NEXT — CURRENT]
+
+Implement the planned independent Postgres control-plane read API and
+operator CLI first, then execute the explicitly designated additive migration
+and double shadow sync. In parallel, move Quote collection from one 42k-token
+atomic run to fenced bounded batch jobs. M1 remains P1/fail until a newly
+certified Quote projection and durable operator read path both recover.
