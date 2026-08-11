@@ -7705,3 +7705,23 @@ operator CLI first, then execute the explicitly designated additive migration
 and double shadow sync. In parallel, move Quote collection from one 42k-token
 atomic run to fenced bounded batch jobs. M1 remains P1/fail until a newly
 certified Quote projection and durable operator read path both recover.
+
+## SESSION 188 — 2026-08-12 (control-plane bounded operator projection)
+
+- [DELIVERED] Commit `2c74393` adds `PostgresControlPlane.operational_snapshot`:
+  one read-only Postgres transaction with a five-second statement timeout and
+  bounded samples. It returns job counts, oldest runnable age, expired leases,
+  recent attempts, open incidents, and pending alert outbox receipts without
+  reading SQLite.
+- [VERIFY] A PostgreSQL 16 contract seeds one expired Structure lease, one
+  runnable Quote batch job, and one Quote critical incident/outbox intent;
+  `test_control_plane_postgres.py` passes all five tests and Ruff passes.
+  `make planning-status` remains no-drift.
+
+### [NEXT — CURRENT]
+
+Expose this durable projection through the authenticated operator route and
+Makefile entry, then perform the additive production migration and double
+shadow sync. The live Quote 42,235-token atomic persistence boundary remains
+the P1 data-plane repair; do not classify Structure checkpoint recovery as
+complete M1 recovery.
