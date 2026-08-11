@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Double-buffer locally verified across 3783 tests; exact L1 deploy and natural handoff proof remain
-last_updated: "2026-08-01T03:16:28Z"
+stopped_at: Durable M1 control-plane shadow projection committed; v358 health-read/SQLite contention remains active P1
+last_updated: "2026-08-12T00:00:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -18,23 +18,28 @@ progress:
 
 ## Current Position
 
-Phase: 05.6 (self-healing Structure production) — Plan 02 in progress
+Phase: 05.6 (self-healing Structure production) — transactional control-plane foundation in progress
 
-- **Exact L1:** release `f662b2cc9aff2e4702a365c8385c746639cc7338`,
-  machine `6830939c0070d8`, digest `sha256:1bb7117f…`, Quote trigger 60 seconds.
-- **Exact L2:** release `a9a282586c3f1e1a452aa96dee99fc9af1f47be0`,
-  machine `85e647c4eed598`, digest `sha256:60dd2631…`; strict 5/5 and
-  10/10/10 convergence passes.
-- **Current production:** L1/L2 strict health HTTP 200, snapshot 781 complete,
-  opportunity runs advancing, resident Polywatch alert/recovery chain proven.
-- **Open gate:** Structure publication creates a measured 93-second
-  opportunity 503 window while the matching Quote is produced. The user
-  approved the bounded double-buffer direction and written spec `7fa4004`.
-  TDD commits `83fb405`, `05decdf`, and `cf8698b` now implement the shared
-  policy, HTTP serving contract, strict health, and Polywatch chain truth.
-  All 3,783 repository tests pass with one expected xfail and one skip. Exact
-  L1 deployment and a natural production handoff proof remain; do not mark
-  Plan 05.6-02 complete before those gates pass.
+- **Current production:** Fly L1 remains release v358. The app service check
+  reports `runtime:health_read_lane=read-model-unavailable`; public `/healthz`
+  has timed out and the opportunity endpoint returned 503. This is an active
+  P1, not a degraded success state.
+- **Observed failure chain:** repeated SQLite writer contention, Quote
+  `StaleQuoteRunError`, and 75-second snapshot child timeout
+  (`failure_counter=114/5`). Resident Polywatch detects the failure set and
+  Telegram delivery is recorded as `ok=True`.
+- **Approved replacement path:** commits `8090e65`, `da96bb8`, `07aa9b7`,
+  `0ccc335`, and `b4d10e0` add the additive Alembic 009 schema, fenced
+  Postgres job repository, bounded SQLite source reader, and idempotent
+  shadow-to-job projection. Real PostgreSQL tests prove repeated projection
+  leaves `m1_publication_pointers` empty. No production migration, pointer
+  switch, or Fly deploy has occurred.
+- **Open gate:** add the operator CLI/read model, apply the additive migration
+  to an explicitly designated production DB, execute shadow twice with stable
+  counts and pointer-nonmutation proof, then migrate Structure and Quote one
+  independently fenced worker at a time. Do not claim M1 production stability
+  until the P1 is recovered and the control-plane read path remains available
+  under write pressure.
 
 Phase: 05 (WS /book + /prices 增量推送) — Plan 06 operational closure in progress
 

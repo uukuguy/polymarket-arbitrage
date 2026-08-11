@@ -7650,3 +7650,23 @@ read-only SQLite-to-Postgres shadow projection, while separately diagnosing
 the v358 contention chain from its durable SQLite evidence. Do not deploy the
 new foundation or claim M1 stability until its migration, double shadow-sync,
 pointer non-mutation, and bounded independent read API are verified.
+
+## SESSION 186 — 2026-08-12 (shadow projection integration)
+
+- [DELIVERED] Commit `b4d10e0` completes the shadow primitive: bounded,
+  read-only SQLite source facts are idempotently projected as Postgres jobs.
+  A real PostgreSQL 16 testcontainer runs the same Structure/Quote/incident
+  source set twice and proves `m1_jobs=3` and
+  `m1_publication_pointers=0`. This is deliberately not a production sync or
+  a pointer switch.
+- [STATE REPAIR] `STATE.md` previously still reported obsolete 8/1 success
+  facts. It is now aligned to the authoritative JOURNAL P1 evidence and the
+  approved transactional migration path.
+
+### [NEXT — CURRENT]
+
+Add the operator-safe shadow CLI and bounded control-plane read projection;
+then use explicitly designated production authority credentials to run the
+additive migration and double shadow sync. Keep v358 P1 diagnosis active and
+do not deploy or claim recovery merely because the control-plane foundation
+tests pass.
