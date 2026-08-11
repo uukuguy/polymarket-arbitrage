@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+
+from .postgres import PostgresControlPlane
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,3 +77,21 @@ def read_shadow_sources(db_path: Path | str, *, limit: int = 100) -> tuple[Shado
         for incident_id, sequence in incidents
     )
     return tuple(sources)
+
+
+def project_shadow_sources(
+    sources: tuple[ShadowSource, ...],
+    *,
+    control_plane: PostgresControlPlane,
+    now: datetime,
+) -> int:
+    """Idempotently project source facts into jobs without switching pointers."""
+    for source in sources:
+        identity = shadow_identity(source)
+        control_plane.enqueue_job(
+            job_key=identity,
+            job_type=f"shadow:{source.kind}",
+            input_identity=identity,
+            now=now,
+        )
+    return len(sources)
