@@ -8058,3 +8058,38 @@ workers from configured DSN/R2 clients and emit exact turns. It must refuse
 before DB/R2 connection without enable and remain unscheduled. Follow with
 testcontainer kill-after-upload/before-receipt takeover tests before any cloud
 action.
+
+## SESSION 203 — 2026-08-12 (guarded tick and Structure crash-window proof)
+
+- [COMMITTED] `fa8b0a4` (`05.6-102`) exposes exactly one default-off operator
+  tick: `make control-plane-tick-once enable=1 max_turns=N`. It composes the
+  fenced Structure range/certifier and Quote batch/certifier workers from the
+  configured Postgres/R2 clients, returns every bounded turn outcome, refuses
+  before any dependency connection without acknowledgement, and starts no
+  timer or service loop.
+- [COMMITTED] `8653d51` (`05.6-103`) proves the important Structure process
+  loss window against Testcontainers Postgres: R2 PUT+HEAD succeeds, process
+  death happens before the receipt transaction, lease expiry lets a replacement
+  complete, and exactly one durable range receipt exists. Deterministic R2
+  keys make the retry safe even though the physical PUT is repeated.
+- [VERIFY] Focused Postgres/Structure/scheduler/CLI regression: 38 passed;
+  Ruff and `make planning-status` are green.
+- [DESIGN] The controlling design is
+  `docs/superpowers/specs/2026-08-11-m1-transactional-cloud-control-plane-design.md`:
+  at-least-once workers with exactly-once durable effects, Postgres authority,
+  R2 immutable artifacts, SQLite demotion, gradual shadow/parity/reversible
+  switch, then cloud migration and fault/soak acceptance.
+- [BOUNDARY] No designated-cloud migration, persistent scheduler, live R2
+  write, pointer move, deploy or production soak has occurred. Next, convert
+  the remaining acceptance matrix into explicit guarded commands and
+  testcontainer evidence—especially Quote's equivalent crash/takeover path—
+  before requesting authorization for the designated cloud environment.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then add the corresponding real-Postgres Quote crash-after-R2-upload/before-
+receipt takeover proof. Ensure it uses the immutable admitted batch input,
+lease expiry, a replacement worker, and proves one durable batch receipt plus
+unmoved publication pointer. Then review the existing guarded migration and
+shadow commands against the production-acceptance matrix; do not start a
+persistent scheduler or perform cloud mutations without explicit designated-
+environment authorization.
