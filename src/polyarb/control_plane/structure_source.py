@@ -19,7 +19,9 @@ from .structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
     canonical_structure_bundle_bytes,
+    upload_structure_bundle_artifact,
 )
+from .structure_shadow import plan_structure_ranges
 from .structure_worker import StructureWorkerResult
 
 
@@ -34,6 +36,8 @@ class _GammaReader(Protocol):
 
 
 class _ObjectClient(Protocol):
+    def get_object(self, **kwargs: Any) -> Mapping[str, Any]: ...
+
     def put_object(self, **kwargs: Any) -> Any: ...
 
     def head_object(self, **kwargs: Any) -> dict[str, Any]: ...
@@ -401,3 +405,106 @@ def _canonical_json(value: Mapping[str, object]) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode()
+
+
+class TransactionalStructureSourceMaterializer:
+    """Turn one terminal source window into fenced Structure range work."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        object_client: _ObjectClient,
+        bucket: str,
+        worker_id: str,
+        now: Callable[[], datetime],
+        range_max_rows: int,
+        lease_seconds: int = 120,
+        retry_delay: timedelta = timedelta(seconds=15),
+    ) -> None:
+        if not bucket or not worker_id:
+            raise ValueError("bucket and worker_id must be non-empty")
+        if range_max_rows <= 0 or lease_seconds <= 0 or retry_delay.total_seconds() <= 0:
+            raise ValueError("materializer bounds must be positive")
+        self._control_plane = control_plane
+        self._object_client = object_client
+        self._bucket = bucket
+        self._worker_id = worker_id
+        self._now = now
+        self._range_max_rows = range_max_rows
+        self._lease_seconds = lease_seconds
+        self._retry_delay = retry_delay
+
+    async def run_once(self) -> StructureWorkerResult:
+        lease = self._control_plane.claim_job(
+            worker_id=self._worker_id,
+            job_types=("structure-materialize",),
+            lease_seconds=self._lease_seconds,
+            now=self._now(),
+        )
+        if lease is None:
+            return StructureWorkerResult(job_key=None, outcome="idle")
+        try:
+            pages = tuple(
+                (spec, self._read_page_artifact(key=key, digest=digest))
+                for spec, key, digest in self._control_plane.structure_source_window_pages(
+                    lease.input_identity
+                )
+            )
+            bundle = materialize_structure_source_pages(pages)
+            upload_structure_bundle_artifact(
+                self._object_client, bucket=self._bucket, artifact=bundle
+            )
+            self._control_plane.admit_structure_source_bundle(
+                lease,
+                identity=parse_structure_bundle_identity(bundle),
+                bundle=bundle,
+                ranges=plan_structure_ranges(
+                    parse_structure_bundle_components(bundle), max_rows=self._range_max_rows
+                ),
+                now=self._now(),
+            )
+            return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
+        except StaleLeaseError:
+            raise
+        except Exception as error:
+            self._control_plane.finish(
+                lease,
+                state=JobState.RETRYABLE,
+                next_attempt_at=self._now() + self._retry_delay,
+                error_class=type(error).__name__,
+                now=self._now(),
+            )
+            raise
+
+    def _read_page_artifact(self, *, key: str, digest: str) -> StructureSourcePageArtifact:
+        response = self._object_client.get_object(Bucket=self._bucket, Key=key)
+        body = response.get("Body")
+        if body is None or not hasattr(body, "read"):
+            raise StructureSourceError("source page artifact body unavailable")
+        payload = body.read()
+        if not isinstance(payload, bytes):
+            raise StructureSourceError("source page artifact body is not bytes")
+        return StructureSourcePageArtifact(payload=payload, sha256=digest, key=key)
+
+
+def parse_structure_bundle_identity(bundle: StructureBundleArtifact) -> StructureBundleIdentity:
+    """Avoid trusting an in-memory identity after R2 upload preparation."""
+    from .structure_artifact import parse_structure_bundle_bytes
+
+    identity, _components = parse_structure_bundle_bytes(
+        bundle.payload, expected_sha256=bundle.sha256
+    )
+    return identity
+
+
+def parse_structure_bundle_components(
+    bundle: StructureBundleArtifact,
+) -> dict[str, tuple[dict[str, object], ...]]:
+    """Return authenticated components for deterministic range planning only."""
+    from .structure_artifact import parse_structure_bundle_bytes
+
+    _identity, components = parse_structure_bundle_bytes(
+        bundle.payload, expected_sha256=bundle.sha256
+    )
+    return components

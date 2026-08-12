@@ -8356,3 +8356,27 @@ then add an additive materializer receipt schema and real-Postgres RED tests:
 terminal market receipt must release one `structure-materialize` job; only its
 current lease may persist a source-window bundle and enqueue the existing
 Structure range/certifier jobs.
+
+## SESSION 215 — 2026-08-12 (transactional Structure materializer)
+
+- [COMMITTED] `a3f04db` (`05.6-113`) completed the pure source-page parsing
+  and six-component bundle kernel. This slice adds additive revision 011:
+  sealed source-window bundle receipts and the durable `structure-materialize`
+  admission boundary.
+- [IMPLEMENTED] A terminal market source receipt releases exactly one
+  materializer job. Its current lease authenticates the R2 pages, rebuilds the
+  bundle, writes the immutable receipt, and atomically creates the existing
+  Structure range/certifier work. A stale lease cannot publish or enqueue.
+- [VERIFY] Real PostgreSQL tests cover the full source-window-to-runnable-
+  normalizer chain, alongside Alembic 011 and worker contracts. The final
+  focused suite, Ruff, manual check, diff check, and planning-status are the
+  required commit gate.
+- [BOUNDARY] This is still local/tested control-plane work. No named cloud
+  database, R2 bucket, Fly app, scheduler process, pointer, legacy shutdown,
+  or cutover has been touched.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then connect the existing scheduler to the two bounded source workers under
+default-off named configuration. Prove `structure-source` and
+`structure-materialize` leases drain without SQLite reads before rendering any
+cloud rollout artifacts.

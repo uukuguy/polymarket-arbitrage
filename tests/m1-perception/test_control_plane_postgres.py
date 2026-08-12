@@ -12,7 +12,12 @@ from hashlib import sha256
 import psycopg
 import pytest
 
-from polyarb.control_plane.models import JobState, QuoteBatchLeg, QuoteBatchSpec
+from polyarb.control_plane.models import (
+    JobState,
+    QuoteBatchLeg,
+    QuoteBatchSpec,
+    StructureSourcePageSpec,
+)
 from polyarb.control_plane.postgres import (
     CheckpointConflictError,
     IncompleteQuoteGenerationError,
@@ -30,7 +35,11 @@ from polyarb.control_plane.structure_artifact import (
     canonical_structure_bundle_bytes,
     canonical_structure_manifest_bytes,
 )
-from polyarb.control_plane.structure_source import TransactionalStructureSourceWorker
+from polyarb.control_plane.structure_source import (
+    StructureSourcePageArtifact,
+    TransactionalStructureSourceMaterializer,
+    TransactionalStructureSourceWorker,
+)
 from polyarb.control_plane.structure_worker import TransactionalStructureWorker
 
 
@@ -59,7 +68,7 @@ def postgres_dsn() -> Iterator[str]:
             for role in ("anon", "authenticated", "service_role"):
                 connection.execute(f"CREATE ROLE {role} NOLOGIN")
         result = subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "010"],
+            ["uv", "run", "alembic", "upgrade", "011"],
             env={**os.environ, "POLYARB_SUPABASE_DB_DSN": dsn},
             capture_output=True,
             text=True,
@@ -76,6 +85,7 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
 
     with connect() as connection:
         for table in (
+            "m1_structure_source_window_bundles",
             "m1_structure_source_page_receipts",
             "m1_structure_source_page_inputs",
             "m1_structure_source_windows",
@@ -315,6 +325,287 @@ def test_terminal_event_page_creates_first_market_page(
     assert market.requested_cursor is None
 
 
+def test_terminal_market_page_releases_one_fenced_materializer_job(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.admit_structure_source_window(window_key="source-window:materialize", now=now)
+    event = control_plane.claim_job(
+        worker_id="source-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert event is not None
+    control_plane.record_structure_source_page(
+        event,
+        artifact_key="m1/structure/source/materialize/events-0.json",
+        artifact_digest="d" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        now=now,
+    )
+    market = control_plane.claim_job(
+        worker_id="source-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert market is not None
+    control_plane.record_structure_source_page(
+        market,
+        artifact_key="m1/structure/source/materialize/markets-0.json",
+        artifact_digest="e" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        now=now,
+    )
+
+    materializer = control_plane.claim_job(
+        worker_id="materializer-a",
+        job_types=("structure-materialize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert materializer is not None
+    assert materializer.job_key == "source-window:materialize:materialize"
+    assert materializer.input_identity == "source-window:materialize"
+
+
+def test_materializer_lease_atomically_records_bundle_and_admits_ranges(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    window_key = "source-window:admit-bundle"
+    control_plane.admit_structure_source_window(window_key=window_key, now=now)
+    event = control_plane.claim_job(
+        worker_id="source-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert event is not None
+    control_plane.record_structure_source_page(
+        event,
+        artifact_key="m1/structure/source/admit/events-0.json",
+        artifact_digest="f" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=0,
+        now=now,
+    )
+    market = control_plane.claim_job(
+        worker_id="source-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert market is not None
+    control_plane.record_structure_source_page(
+        market,
+        artifact_key="m1/structure/source/admit/markets-0.json",
+        artifact_digest="a" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=0,
+        now=now,
+    )
+    materializer = control_plane.claim_job(
+        worker_id="materializer-a",
+        job_types=("structure-materialize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert materializer is not None
+    source_digest = control_plane.structure_source_window_digest(window_key)
+    identity = StructureBundleIdentity(
+        publication_id=f"source-window:{window_key}",
+        window_id=window_key,
+        snapshot_id=0,
+        comparison_receipt_digest=source_digest,
+        normalization_contract_version="gamma-source-window-v1",
+        component_counts={
+            "events": 1,
+            "event_tags": 0,
+            "memberships": 0,
+            "group_truth": 0,
+            "markets": 0,
+            "issues": 0,
+        },
+        source_kind="gamma-source-window-v1",
+    )
+    bundle = StructureBundleArtifact.from_bytes(
+        canonical_structure_bundle_bytes(
+            identity=identity,
+            components={
+                "events": ({"id": "event-a"},),
+                "event_tags": (),
+                "memberships": (),
+                "group_truth": (),
+                "markets": (),
+                "issues": (),
+            },
+        )
+    )
+
+    admitted = control_plane.admit_structure_source_bundle(
+        materializer,
+        identity=identity,
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )
+
+    assert len(admitted) == 1
+    assert admitted[0].bundle_digest == bundle.sha256
+    assert control_plane.structure_source_window_bundle(window_key) == {
+        "source_digest": source_digest,
+        "bundle_key": bundle.key,
+        "bundle_digest": bundle.sha256,
+    }
+    range_lease = control_plane.claim_job(
+        worker_id="normalizer-a",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert range_lease is not None
+    assert range_lease.job_key == admitted[0].job_key
+
+
+def test_real_source_window_materializer_turn_admits_normalizer_work(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    window_key = "source-window:real-materializer"
+    event_spec = StructureSourcePageSpec(
+        window_key=window_key, stream="events", ordinal=0, requested_cursor=None
+    )
+    market_spec = StructureSourcePageSpec(
+        window_key=window_key, stream="markets", ordinal=0, requested_cursor=None
+    )
+    event_artifact = StructureSourcePageArtifact.from_page(
+        spec=event_spec,
+        records=(
+            {
+                "id": "event-a",
+                "slug": "event-a",
+                "active": True,
+                "closed": False,
+                "markets": [
+                    {
+                        "id": "market-a",
+                        "active": True,
+                        "closed": False,
+                        "negRiskOther": False,
+                    }
+                ],
+            },
+        ),
+        next_cursor=None,
+        completed=True,
+        started_at_ms=1,
+        finished_at_ms=2,
+    )
+    market_artifact = StructureSourcePageArtifact.from_page(
+        spec=market_spec,
+        records=(
+            {
+                "id": "market-a",
+                "conditionId": "condition-a",
+                "clobTokenIds": '["yes-a", "no-a"]',
+                "outcomePrices": '["0.4", "0.6"]',
+                "active": True,
+                "closed": False,
+                "negRisk": False,
+            },
+        ),
+        next_cursor=None,
+        completed=True,
+        started_at_ms=3,
+        finished_at_ms=4,
+    )
+
+    class MemoryR2:
+        def __init__(self) -> None:
+            self.objects = {
+                event_artifact.key: event_artifact.payload,
+                market_artifact.key: market_artifact.payload,
+            }
+            self.metadata = {
+                event_artifact.key: {"sha256": event_artifact.sha256},
+                market_artifact.key: {"sha256": market_artifact.sha256},
+            }
+
+        def get_object(self, **kwargs: object) -> dict[str, object]:
+            payload = self.objects[str(kwargs["Key"])]
+            return {"Body": type("Body", (), {"read": lambda _self: payload})()}
+
+        def put_object(self, **kwargs: object) -> None:
+            key = str(kwargs["Key"])
+            self.objects[key] = bytes(kwargs["Body"])
+            self.metadata[key] = dict(kwargs["Metadata"])
+
+        def head_object(self, **kwargs: object) -> dict[str, object]:
+            key = str(kwargs["Key"])
+            return {
+                "ContentLength": len(self.objects[key]),
+                "Metadata": self.metadata[key],
+            }
+
+    control_plane.admit_structure_source_window(window_key=window_key, now=now)
+    event = control_plane.claim_job(
+        worker_id="source-worker-a", job_types=("structure-fetch",), lease_seconds=30, now=now
+    )
+    assert event is not None
+    control_plane.record_structure_source_page(
+        event,
+        artifact_key=event_artifact.key,
+        artifact_digest=event_artifact.sha256,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        now=now,
+    )
+    market = control_plane.claim_job(
+        worker_id="source-worker-a", job_types=("structure-fetch",), lease_seconds=30, now=now
+    )
+    assert market is not None
+    control_plane.record_structure_source_page(
+        market,
+        artifact_key=market_artifact.key,
+        artifact_digest=market_artifact.sha256,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        now=now,
+    )
+
+    objects = MemoryR2()
+    worker = TransactionalStructureSourceMaterializer(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="structure",
+        worker_id="materializer-a",
+        now=lambda: now,
+        range_max_rows=100,
+    )
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    bundle = control_plane.structure_source_window_bundle(window_key)
+    assert bundle is not None
+    assert bundle["bundle_key"] in objects.objects
+    normalizer = control_plane.claim_job(
+        worker_id="normalizer-a",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert normalizer is not None
+    assert normalizer.job_key.startswith(f"structure:{bundle['bundle_digest']}:normalize:")
+
+
 def test_stale_source_page_lease_cannot_advance_cursor(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -473,7 +764,7 @@ def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
     assert batch.input_identity.startswith(f"quote:{'a' * 64}:{'b' * 64}:2:")
 
 
-def test_deployment_preflight_requires_named_database_and_all_010_tables(
+def test_deployment_preflight_requires_named_database_and_all_011_tables(
     control_plane: PostgresControlPlane,
 ) -> None:
     with control_plane._connection_factory() as connection:  # noqa: SLF001
@@ -481,7 +772,7 @@ def test_deployment_preflight_requires_named_database_and_all_010_tables(
     assert database_name is not None
     result = control_plane.deployment_preflight(expected_database=str(database_name[0]))
     assert result["database_name"] == database_name[0]
-    assert result["revision_010_tables"] == 17
+    assert result["revision_011_tables"] == 18
     with pytest.raises(Exception, match="database identity mismatch"):
         control_plane.deployment_preflight(expected_database="not-the-control-plane")
 

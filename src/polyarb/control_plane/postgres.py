@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -106,7 +107,7 @@ class PostgresControlPlane:
         self._connection_factory = connection_factory
 
     def deployment_preflight(self, *, expected_database: str) -> dict[str, object]:
-        """Prove the named authority has the complete additive 010 schema.
+        """Prove the named authority has the complete additive 011 schema.
 
         This is intentionally read-only: passing it authorizes shadow-only
         operator steps, never a migration, scheduler loop, or pointer change.
@@ -131,6 +132,7 @@ class PostgresControlPlane:
             "m1_structure_source_windows",
             "m1_structure_source_page_inputs",
             "m1_structure_source_page_receipts",
+            "m1_structure_source_window_bundles",
         )
         with (
             self._connection_factory() as connection,
@@ -156,11 +158,11 @@ class PostgresControlPlane:
             )
             found = {str(row["relname"]) for row in cursor.fetchall()}
             if found != set(required_tables):
-                raise ControlPlaneError("control-plane revision 010 schema is incomplete")
+                raise ControlPlaneError("control-plane revision 011 schema is incomplete")
             return {
                 "database_name": str(identity["database_name"]),
                 "postgres_version": str(identity["postgres_version"]),
-                "revision_010_tables": len(found),
+                "revision_011_tables": len(found),
             }
 
     def enqueue_job(
@@ -275,6 +277,233 @@ class PostgresControlPlane:
             "completed": bool(row["completed"]),
             "record_count": int(row["record_count"]),
         }
+
+    def structure_source_window_digest(self, window_key: str) -> str:
+        """Return the exact ordered page-receipt digest a materializer must bind."""
+        self._validate_nonempty(window_key=window_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            return self._structure_source_window_digest_cursor(cursor, window_key)
+
+    def structure_source_window_bundle(self, window_key: str) -> dict[str, str] | None:
+        """Read the one immutable bundle receipt bound to a source window."""
+        self._validate_nonempty(window_key=window_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT source_digest, bundle_key, bundle_digest
+                FROM m1_structure_source_window_bundles WHERE window_key = %s
+                """,
+                (window_key,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "source_digest": str(row["source_digest"]),
+            "bundle_key": str(row["bundle_key"]),
+            "bundle_digest": str(row["bundle_digest"]),
+        }
+
+    def structure_source_window_pages(
+        self, window_key: str
+    ) -> tuple[tuple[StructureSourcePageSpec, str, str], ...]:
+        """Return only receipt-authenticated R2 page references for one terminal window."""
+        self._validate_nonempty(window_key=window_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            self._structure_source_window_digest_cursor(cursor, window_key)
+            cursor.execute(
+                """
+                SELECT input.window_key, input.stream, input.ordinal, input.requested_cursor,
+                       receipt.artifact_key, receipt.artifact_digest
+                FROM m1_structure_source_page_inputs AS input
+                JOIN m1_structure_source_page_receipts AS receipt
+                  ON receipt.job_key = input.job_key
+                WHERE input.window_key = %s
+                ORDER BY CASE input.stream WHEN 'events' THEN 0 WHEN 'markets' THEN 1 END,
+                         input.ordinal
+                """,
+                (window_key,),
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            (
+                StructureSourcePageSpec(
+                    window_key=str(row["window_key"]),
+                    stream=str(row["stream"]),
+                    ordinal=int(row["ordinal"]),
+                    requested_cursor=(
+                        None
+                        if row["requested_cursor"] is None
+                        else str(row["requested_cursor"])
+                    ),
+                ),
+                str(row["artifact_key"]),
+                str(row["artifact_digest"]),
+            )
+            for row in rows
+        )
+
+    def admit_structure_source_bundle(
+        self,
+        lease: JobLease,
+        *,
+        identity: StructureBundleIdentity,
+        bundle: StructureBundleArtifact,
+        ranges: Sequence[tuple[str, str, str]],
+        now: datetime,
+    ) -> tuple[StructureRangeSpec, ...]:
+        """Fence one source-window bundle receipt and all downstream range jobs together."""
+        self._validate_aware(now, "now")
+        if lease.job_type != "structure-materialize":
+            raise ValueError("source bundle admission requires a structure-materialize lease")
+        if identity.source_kind != "gamma-source-window-v1":
+            raise ValueError("source bundle identity must name a Gamma source window")
+        if identity.window_id != lease.input_identity:
+            raise JobIdentityConflict("source bundle lease names another window")
+        if not ranges:
+            raise ValueError("Structure generation requires at least one range")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            source_digest = self._structure_source_window_digest_cursor(cursor, identity.window_id)
+            if identity.comparison_receipt_digest != source_digest:
+                raise CheckpointConflictError("source bundle does not bind current page receipts")
+            cursor.execute(
+                """
+                SELECT source_digest, bundle_key, bundle_digest
+                FROM m1_structure_source_window_bundles
+                WHERE window_key = %s
+                """,
+                (identity.window_id,),
+            )
+            existing = cursor.fetchone()
+            expected = {
+                "source_digest": source_digest,
+                "bundle_key": bundle.key,
+                "bundle_digest": bundle.sha256,
+            }
+            if existing is not None:
+                persisted = {
+                    "source_digest": str(existing["source_digest"]),
+                    "bundle_key": str(existing["bundle_key"]),
+                    "bundle_digest": str(existing["bundle_digest"]),
+                }
+                if persisted != expected:
+                    raise CheckpointConflictError("source window names another bundle")
+                return self._structure_generation_specs_cursor(cursor, bundle.sha256)
+            cursor.execute(
+                """
+                UPDATE m1_jobs
+                SET state = 'succeeded', checkpoint_cursor = 'bundle', checkpoint_digest = %s,
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = %s
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s AND state = 'leased'
+                """,
+                (bundle.sha256, now, lease.job_key, lease.lease_owner, lease.lease_epoch),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            cursor.execute(
+                """
+                INSERT INTO m1_structure_source_window_bundles (
+                    window_key, producer_job_key, source_digest, bundle_key, bundle_digest,
+                    committed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    identity.window_id,
+                    lease.job_key,
+                    source_digest,
+                    bundle.key,
+                    bundle.sha256,
+                    now,
+                ),
+            )
+            specs = self._enqueue_structure_generation_cursor(
+                cursor, identity=identity, bundle=bundle, ranges=ranges, now=now
+            )
+            cursor.execute(
+                """
+                UPDATE m1_job_attempts
+                SET state = 'succeeded', finished_at = %s
+                WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
+                """,
+                (now, lease.job_key, lease.lease_epoch),
+            )
+            return specs
+
+    @staticmethod
+    def _structure_generation_specs_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]], bundle_digest: str
+    ) -> tuple[StructureRangeSpec, ...]:
+        cursor.execute(
+            """
+            SELECT job_key, bundle_key, bundle_digest, component, ordinal, range_start, range_end
+            FROM m1_structure_range_inputs WHERE bundle_digest = %s
+            ORDER BY component, ordinal
+            """,
+            (bundle_digest,),
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            raise ControlPlaneError("source bundle has no Structure range inputs")
+        return tuple(
+            StructureRangeSpec.create(
+                bundle_key=str(row["bundle_key"]),
+                bundle_digest=str(row["bundle_digest"]),
+                component=str(row["component"]),
+                ordinal=int(row["ordinal"]),
+                range_start=str(row["range_start"]),
+                range_end=str(row["range_end"]),
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _structure_source_window_digest_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]], window_key: str
+    ) -> str:
+        cursor.execute(
+            "SELECT state FROM m1_structure_source_windows WHERE window_key = %s FOR SHARE",
+            (window_key,),
+        )
+        window = cursor.fetchone()
+        if window is None or str(window["state"]) != "complete":
+            raise IncompleteStructureGenerationError("source window is not terminal")
+        cursor.execute(
+            """
+            SELECT input.stream, input.ordinal, receipt.artifact_digest
+            FROM m1_structure_source_page_inputs AS input
+            LEFT JOIN m1_structure_source_page_receipts AS receipt
+              ON receipt.job_key = input.job_key
+            WHERE input.window_key = %s
+            ORDER BY CASE input.stream WHEN 'events' THEN 0 WHEN 'markets' THEN 1 END, input.ordinal
+            """,
+            (window_key,),
+        )
+        rows = cursor.fetchall()
+        if not rows or any(row["artifact_digest"] is None for row in rows):
+            raise IncompleteStructureGenerationError("source window is missing page receipts")
+        receipts = [
+            {
+                "stream": str(row["stream"]),
+                "ordinal": int(row["ordinal"]),
+                "artifact_digest": str(row["artifact_digest"]),
+            }
+            for row in rows
+        ]
+        return sha256(
+            json.dumps({"pages": receipts}, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
     def record_structure_source_page(
         self,
@@ -430,6 +659,14 @@ class PostgresControlPlane:
                 )
                 if cursor.rowcount != 1:
                     raise CheckpointConflictError("market stream completed before events stream")
+                materializer_job_key = f"{spec.window_key}:materialize"
+                self._enqueue_job_cursor(
+                    cursor,
+                    job_key=materializer_job_key,
+                    job_type="structure-materialize",
+                    input_identity=spec.window_key,
+                    now=now,
+                )
             return successor
 
     @staticmethod
@@ -715,6 +952,94 @@ class PostgresControlPlane:
                 input_identity=generation_key,
                 now=now,
             )
+        return specs
+
+    def _enqueue_structure_generation_cursor(
+        self,
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        identity: StructureBundleIdentity,
+        bundle: StructureBundleArtifact,
+        ranges: Sequence[tuple[str, str, str]],
+        now: datetime,
+    ) -> tuple[StructureRangeSpec, ...]:
+        """Cursor-scoped form keeps source bundle receipt and child jobs atomic."""
+        specs = tuple(
+            StructureRangeSpec.create(
+                bundle_key=bundle.key,
+                bundle_digest=bundle.sha256,
+                component=component,
+                ordinal=ordinal,
+                range_start=range_start,
+                range_end=range_end,
+            )
+            for ordinal, (component, range_start, range_end) in enumerate(ranges)
+        )
+        if len({spec.job_key for spec in specs}) != len(specs):
+            raise ValueError("Structure ranges must have unique component/ordinal identities")
+        generation_key = specs[0].generation_key
+        identity_payload = identity.header()
+        cursor.execute(
+            """
+            INSERT INTO m1_structure_generation_inputs (
+                generation_key, bundle_key, bundle_digest, identity, admitted_at
+            ) VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (generation_key) DO NOTHING
+            """,
+            (generation_key, bundle.key, bundle.sha256, Jsonb(identity_payload), now),
+        )
+        cursor.execute(
+            """
+            SELECT bundle_key, bundle_digest, identity
+            FROM m1_structure_generation_inputs WHERE generation_key = %s
+            """,
+            (generation_key,),
+        )
+        persisted_generation = cursor.fetchone()
+        if persisted_generation is None or (
+            persisted_generation["bundle_key"] != bundle.key
+            or persisted_generation["bundle_digest"] != bundle.sha256
+            or persisted_generation["identity"] != identity_payload
+        ):
+            raise JobIdentityConflict(
+                f"Structure generation {generation_key!r} names another immutable input"
+            )
+        for spec in specs:
+            self._enqueue_job_cursor(
+                cursor,
+                job_key=spec.job_key,
+                job_type="structure-normalize",
+                input_identity=spec.input_identity,
+                now=now,
+            )
+            cursor.execute(
+                """
+                INSERT INTO m1_structure_range_inputs (
+                    job_key, generation_key, bundle_key, bundle_digest, component, ordinal,
+                    range_start, range_end, range_digest, admitted_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (job_key) DO NOTHING
+                """,
+                (
+                    spec.job_key,
+                    generation_key,
+                    spec.bundle_key,
+                    spec.bundle_digest,
+                    spec.component,
+                    spec.ordinal,
+                    spec.range_start,
+                    spec.range_end,
+                    spec.range_digest,
+                    now,
+                ),
+            )
+        self._enqueue_job_cursor(
+            cursor,
+            job_key=f"{generation_key}:certify",
+            job_type="structure-certify",
+            input_identity=generation_key,
+            now=now,
+        )
         return specs
 
     def structure_range_spec(self, job_key: str) -> StructureRangeSpec:
