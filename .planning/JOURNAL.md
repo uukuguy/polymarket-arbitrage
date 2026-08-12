@@ -8035,3 +8035,26 @@ must execute at most configured Structure/Quote turns per tick, use the same
 Postgres-only state to prevent overlapping local loops, report every outcome,
 and expose a Make/CLI operation mode that is still disabled unless explicitly
 authorized. Do not deploy it before testcontainer takeover/lease-expiry tests.
+
+## SESSION 202 — 2026-08-12 (bounded transactional scheduler kernel)
+
+- [COMMITTED] `2b1fabd` (`05.6-101`) adds the library-only bounded
+  transactional scheduler. It runs at most configured worker turns per tick,
+  prevents overlapping ticks in one process and rotates priority across ticks
+  so Structure does not starve Quote. Cross-instance ownership remains the
+  existing Postgres job claim/lease epoch fence.
+- [VERIFY] Scheduler contract proves bounded Structure turns in tick one and
+  Quote turns in tick two; scheduler/Structure/Postgres/CLI regression: 35
+  passed, Ruff and planning-status green.
+- [BOUNDARY] There is no CLI, service/timer, deployment, cloud migration or
+  live invocation. Before any persistent scheduling, add one explicit guarded
+  tick operator command, run real PostgreSQL lease-expiry and crash-window
+  takeover tests, then use an authorized designated environment for migration
+  and soak.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then add `control-plane tick-once --enable --max-turns N`: compose all four
+workers from configured DSN/R2 clients and emit exact turns. It must refuse
+before DB/R2 connection without enable and remain unscheduled. Follow with
+testcontainer kill-after-upload/before-receipt takeover tests before any cloud
+action.
