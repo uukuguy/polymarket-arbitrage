@@ -8119,3 +8119,50 @@ connectivity/read budget checks, no-pointer-mutation shadow steps, rollback
 criteria, worker/scheduler deployment configuration, and exact fault/soak
 commands. Keep it default-off and do not execute it until the designated cloud
 environment is explicitly confirmed.
+
+## SESSION 205 — 2026-08-12 (named cloud control-plane preflight)
+
+- [COMMITTED] `be14aa2` (`05.6-105`) adds the read-only deployment gate:
+  `make control-plane-preflight expected_database=<name>`. It proves the
+  precise Postgres database identity, all 14 revision-009 tables and
+  read-only R2 bucket access. Its only successful status is
+  `ready-for-shadow-only`; no migration, worker loop or pointer command is
+  implied.
+- [VERIFY] CLI named-target/R2 contract plus Testcontainers database identity,
+  schema completeness and mismatch refusal pass. Full transactional
+  Postgres/Quote/Structure/scheduler/CLI regression: 44 passed; Ruff and
+  planning status pass.
+- [BOUNDARY] The cloud authority’s expected database name is intentionally not
+  guessed from a DSN or environment file. No cloud connection has been made.
+  The remaining local work is an explicit rollout/soak contract and a
+  persistent worker service wrapper; actual staging/production steps require
+  a designated environment identity.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then add a default-off persistent scheduler service wrapper with signal-safe
+shutdown, bounded tick interval, stable worker identity and emitted tick
+outcomes. It must have unit contracts and no deployment wiring. In parallel,
+maintain the cloud rollout checklist: preflight → 009 migration → shadow-only
+runs → fault/soak evidence → separately authorized reversible pointer switch.
+
+## SESSION 206 — 2026-08-12 (persistent transactional scheduler primitive)
+
+- [COMMITTED] `0d7f732` (`05.6-106`) adds a signal-safe, fixed-cadence
+  `TransactionalControlPlaneScheduler.run_until_stopped` and default-off
+  `make control-plane-serve enable=1`. It emits each bounded tick and stops
+  gracefully on SIGINT/SIGTERM; Postgres leases/epochs remain cross-process
+  authority and no Fly/deploy wiring exists.
+- [VERIFY] Scheduler service/CLI contracts plus complete transactional
+  Postgres/Quote/Structure/scheduler/CLI regression: 47 passed; Ruff,
+  Make dry-run and planning status pass.
+- [BOUNDARY] The local implementation now contains both a named cloud
+  preflight and a runnable service primitive. It is still not an online M1:
+  a dedicated worker deployment topology, target environment migration,
+  shadow parity, live fault injection and sustained soak are required.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then map the existing Fly process model and write/test a dedicated default-off
+control-plane deployment contract (separate API/read worker and transactional
+scheduler process, immutable config/health/readiness behavior). It must not
+alter the legacy single-volume service or deploy. Afterwards bind it to the
+named-environment preflight/shadow/soak rollout checklist.
