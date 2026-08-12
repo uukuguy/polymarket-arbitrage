@@ -7890,3 +7890,27 @@ receipt, construct a canonical generation manifest from the frozen bundle and
 ordered artifacts, and reject missing/substituted ranges under its lease
 fence. Do not introduce a pointer mutation until the following explicit
 parity/pointer-gate slice.
+
+## SESSION 196 — 2026-08-12 (Structure terminal integrity gate)
+
+- [COMMITTED] `47e6a70` (`05.6-93`) adds deterministic
+  `structure-certify` admission and fenced repository certification.  The
+  certifier requires a receipt for every admitted range, checks the frozen
+  bundle/component/range identities, recomputes the ordered manifest digest
+  from immutable range artifact identities, and stores one manifest only under
+  its current lease epoch.
+- [VERIFY] Real PostgreSQL adversarial coverage proves a partial generation
+  refuses before manifest creation; after the missing receipt is supplied,
+  only the exact recomputed digest succeeds. Control-plane/worker/CLI/migration
+  regression: 30 passed; Ruff and planning-status are clean.
+- [BOUNDARY] The repository intentionally requires a PUT/HEAD-authenticated
+  manifest artifact supplied by a future certifier worker. No worker uploads
+  it yet, and no Structure pointer/parity/live scheduling/cloud action was
+  attempted.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then add a `TransactionalStructureCertifier` that claims `structure-certify`,
+builds a canonical manifest from admitted inputs and typed receipts, uploads
+it to R2 with HEAD verification, then calls `certify_structure_generation`.
+It must recover a durable manifest without re-upload and mark incomplete
+generations retryable. Pointer mutation remains forbidden in that slice.
