@@ -8012,3 +8012,26 @@ Structure projection: range/certifier state counts, retry age, manifest
 identity and isolated shadow pointer. It must be Postgres-only and unavailable
 on DB errors—never a SQLite fallback. Add HTTP health/read-model wiring before
 introducing any scheduler.
+
+## SESSION 201 — 2026-08-12 (durable Structure operator projection)
+
+- [COMMITTED] `b03e235` (`05.6-100`) extends the Postgres-only operator
+  snapshot with Structure normalization/certifier state counts, retry age,
+  latest manifest identity and isolated shadow-pointer identity. The query
+  remains read-only, bounded and statement-time-limited; no SQLite or legacy
+  pointer fallback exists.
+- [VERIFY] Real PostgreSQL empty-shape contract plus artifact/exporter/worker/
+  Postgres/CLI/HTTP/migration regression: 47 passed; Ruff and planning-status
+  green. HTTP retains typed `control-plane-read-unavailable` on dependency
+  failure.
+- [BOUNDARY] Nothing schedules or deploys these workers. The system has now
+  reached a transactionally safe, observable library/operator state, but M1 is
+  not online-useful until scheduler control, designated cloud migration,
+  crash/takeover evidence and sustained soak are executed.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then design and implement a default-off bounded control-plane scheduler: it
+must execute at most configured Structure/Quote turns per tick, use the same
+Postgres-only state to prevent overlapping local loops, report every outcome,
+and expose a Make/CLI operation mode that is still disabled unless explicitly
+authorized. Do not deploy it before testcontainer takeover/lease-expiry tests.
