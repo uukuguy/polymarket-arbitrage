@@ -297,6 +297,49 @@ def test_control_plane_tick_once_reports_bounded_turns(monkeypatch, capsys) -> N
     }
 
 
+def test_control_plane_preflight_proves_named_database_and_r2_readiness(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    class ControlPlane:
+        def deployment_preflight(self, *, expected_database: str):
+            assert expected_database == "control_plane_staging"
+            return {
+                "database_name": expected_database,
+                "postgres_version": "PostgreSQL 16.4",
+                "revision_009_tables": 14,
+            }
+
+    class ObjectClient:
+        def head_bucket(self, **kwargs):
+            assert kwargs == {"Bucket": "control-plane-artifacts"}
+
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_structure_object_client",
+        lambda: (ObjectClient(), "control-plane-artifacts"),
+    )
+
+    assert (
+        cli_control_plane.main(
+            ["preflight", "--expected-database", "control_plane_staging", "--json"]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "control_plane": {
+            "database_name": "control_plane_staging",
+            "postgres_version": "PostgreSQL 16.4",
+            "revision_009_tables": 14,
+        },
+        "r2": {"bucket": "control-plane-artifacts", "reachable": True},
+        "status": "ready-for-shadow-only",
+    }
+
+
 def test_shadow_sync_requires_dsn_without_printing_it(monkeypatch, capsys, tmp_path) -> None:
     from polyarb import cli_control_plane
 

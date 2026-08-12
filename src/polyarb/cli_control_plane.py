@@ -51,6 +51,12 @@ def _parser() -> argparse.ArgumentParser:
     status = subcommands.add_parser("status", help="read bounded durable operator state")
     status.add_argument("--limit", type=int, default=20)
     status.add_argument("--json", action="store_true")
+    preflight = subcommands.add_parser(
+        "preflight",
+        help="read-only proof that one named database and R2 bucket are ready for shadow work",
+    )
+    preflight.add_argument("--expected-database", required=True)
+    preflight.add_argument("--json", action="store_true")
     quote_once = subcommands.add_parser(
         "quote-once",
         help="explicitly run at most one transactional Quote batch and certification attempt",
@@ -224,6 +230,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("POLYARB_SUPABASE_DB_DSN is required", file=sys.stderr)
         return 2
     try:
+        if args.command == "preflight":
+            database = control_plane.deployment_preflight(
+                expected_database=args.expected_database
+            )
+            object_client, bucket = _structure_object_client()
+            object_client.head_bucket(Bucket=bucket)
+            _write(
+                {
+                    "status": "ready-for-shadow-only",
+                    "control_plane": database,
+                    "r2": {"bucket": bucket, "reachable": True},
+                },
+                as_json=args.json,
+            )
+            return 0
         if args.command == "shadow-sync":
             sources = read_shadow_sources(args.db_path, limit=args.limit)
             projected = project_shadow_sources(

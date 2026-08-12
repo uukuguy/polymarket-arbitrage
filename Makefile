@@ -612,7 +612,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -642,6 +642,13 @@ control-plane-migrate-test:
 	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic downgrade 008 && \
 	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 009 && \
 	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic current
+
+## control-plane-preflight: Read-only proof of the named 009 database and configured R2 bucket. This authorizes shadow-only work, never a migration or pointer move. Requires expected_database=.
+control-plane-preflight:
+	@test -n "$(expected_database)" || (echo "usage: make control-plane-preflight expected_database=<database-name>" >&2; exit 2)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
+	uv run python -m polyarb.cli_control_plane preflight --expected-database "$(expected_database)" --json
 
 ## control-plane-shadow-sync: Read local SQLite facts and idempotently project them to Postgres; never switches pointers. Optional db_path=/data/state.db limit=100.
 control-plane-shadow-sync:

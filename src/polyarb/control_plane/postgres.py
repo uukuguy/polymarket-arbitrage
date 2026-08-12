@@ -104,6 +104,61 @@ class PostgresControlPlane:
     def __init__(self, connection_factory: ConnectionFactory) -> None:
         self._connection_factory = connection_factory
 
+    def deployment_preflight(self, *, expected_database: str) -> dict[str, object]:
+        """Prove the named authority has the complete additive 009 schema.
+
+        This is intentionally read-only: passing it authorizes shadow-only
+        operator steps, never a migration, scheduler loop, or pointer change.
+        """
+        if not expected_database:
+            raise ValueError("expected_database must be non-empty")
+        required_tables = (
+            "m1_jobs",
+            "m1_job_attempts",
+            "m1_checkpoint_receipts",
+            "m1_quote_batch_inputs",
+            "m1_quote_batch_receipts",
+            "m1_structure_generation_inputs",
+            "m1_structure_range_inputs",
+            "m1_structure_range_receipts",
+            "m1_generation_manifests",
+            "m1_publication_pointers",
+            "m1_incidents",
+            "m1_incident_events",
+            "m1_alert_outbox",
+            "m1_alert_deliveries",
+        )
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
+            cursor.execute(
+                "SELECT current_database() AS database_name, version() AS postgres_version"
+            )
+            identity = cursor.fetchone()
+            if identity is None or str(identity["database_name"]) != expected_database:
+                raise ControlPlaneError("control-plane database identity mismatch")
+            cursor.execute(
+                """
+                SELECT relname
+                FROM pg_catalog.pg_class
+                JOIN pg_catalog.pg_namespace ON pg_namespace.oid = pg_class.relnamespace
+                WHERE pg_namespace.nspname = 'public' AND relkind = 'r'
+                  AND relname = ANY(%s)
+                """,
+                (list(required_tables),),
+            )
+            found = {str(row["relname"]) for row in cursor.fetchall()}
+            if found != set(required_tables):
+                raise ControlPlaneError("control-plane revision 009 schema is incomplete")
+            return {
+                "database_name": str(identity["database_name"]),
+                "postgres_version": str(identity["postgres_version"]),
+                "revision_009_tables": len(found),
+            }
+
     def enqueue_job(
         self,
         *,
