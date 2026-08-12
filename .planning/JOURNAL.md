@@ -7841,3 +7841,20 @@ analogue.
 `make planning-status`, then implement the read-only legacy exporter and a
 transactional Structure range worker. The exporter alone may read SQLite;
 takeover/execution must read the admitted R2 bundle and Postgres range only.
+
+## SESSION 194 — 2026-08-12 (Structure shadow source boundary)
+
+- [COMMITTED] `24f59b9` (`05.6-86`) adds `read_legacy_structure_bundle`, the
+  only allowed SQLite source adapter for the new Structure path. It requires a
+  published current generation, the exact current publication/snapshot binding
+  and a 64-character comparison receipt, then exports the six components in
+  stable order for canonical R2 bundling.
+- [FAIL-CLOSED] Non-current, partial, receiptless, unreadable or binary legacy
+  sources refuse before any job, R2 object, receipt or pointer operation.
+- [VERIFY] Export/canonicalization, Structure/Quote artifacts, PostgreSQL and
+  Alembic contracts pass 24 focused cases; planning-status remains zero drift.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, start with
+`make planning-status`, then implement an R2-bundle-only Structure range
+worker and its receipt. Do not let that worker import SQLite or use a legacy
+publication id; its only source is `StructureRangeSpec.bundle_key/digest`.
