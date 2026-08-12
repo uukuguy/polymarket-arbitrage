@@ -12,6 +12,7 @@
 
 - No partial generation changes `neg_risk_quote_current_generation` or serves through the opportunity feed.
 - A batch key is `quote:<structure-receipt-digest>:batch:<ordinal>` and its input identity includes the universe hash and token-range digest.
+- Each admitted batch persists its exact ordered token ids in the control plane; a replacement worker must load that immutable input rather than reconstructing it from SQLite or a newer Structure pointer.
 - Every effect is fenced by `(job_key, lease_owner, lease_epoch)` and an idempotency key.
 - A retry uses its original immutable token range and never reads a newer Structure pointer.
 - SQLite remains comparison-only until shadow parity and a separately authorized pointer switch.

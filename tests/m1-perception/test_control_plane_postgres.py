@@ -68,6 +68,7 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
             "m1_publication_pointers",
             "m1_generation_manifests",
             "m1_quote_batch_receipts",
+            "m1_quote_batch_inputs",
             "m1_checkpoint_receipts",
             "m1_job_attempts",
             "m1_jobs",
@@ -123,6 +124,21 @@ def test_enqueue_quote_generation_is_deterministic(control_plane: PostgresContro
             ]
     finally:
         connection.close()
+
+
+def test_quote_batch_input_survives_admission_for_worker_takeover(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    admitted = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        token_ids=("token-3", "token-1", "token-2"),
+        batch_size=2,
+        now=now,
+    )
+
+    assert control_plane.quote_batch_spec(admitted[0].job_key) == admitted[0]
 
 
 def test_quote_batch_receipt_is_fenced_and_idempotent(control_plane: PostgresControlPlane) -> None:

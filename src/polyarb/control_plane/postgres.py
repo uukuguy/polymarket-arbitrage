@@ -58,25 +58,13 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            cursor.execute(
-                """
-                INSERT INTO m1_jobs (
-                    job_key, job_type, input_identity, state, next_attempt_at,
-                    created_at, updated_at
-                ) VALUES (%s, %s, %s, 'runnable', %s, %s, %s)
-                ON CONFLICT (job_key) DO NOTHING
-                """,
-                (job_key, job_type, input_identity, now, now, now),
+            self._enqueue_job_cursor(
+                cursor,
+                job_key=job_key,
+                job_type=job_type,
+                input_identity=input_identity,
+                now=now,
             )
-            cursor.execute(
-                "SELECT job_type, input_identity FROM m1_jobs WHERE job_key = %s",
-                (job_key,),
-            )
-            existing = cursor.fetchone()
-            if existing is None:
-                raise ControlPlaneError("job insert was not durable")
-            if existing["job_type"] != job_type or existing["input_identity"] != input_identity:
-                raise JobIdentityConflict(f"job key {job_key!r} names another input")
 
     def enqueue_quote_generation(
         self,
@@ -103,21 +91,118 @@ class PostgresControlPlane:
             )
             for ordinal, start in enumerate(range(0, len(normalized), batch_size))
         )
-        for batch in batches:
-            self.enqueue_job(
-                job_key=batch.job_key,
-                job_type="quote-batch",
-                input_identity=batch.input_identity,
+        generation_key = batches[0].generation_key
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            for batch in batches:
+                self._enqueue_job_cursor(
+                    cursor,
+                    job_key=batch.job_key,
+                    job_type="quote-batch",
+                    input_identity=batch.input_identity,
+                    now=now,
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO m1_quote_batch_inputs (
+                        job_key, structure_receipt_digest, universe_hash,
+                        token_range_digest, token_ids, admitted_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (job_key) DO NOTHING
+                    """,
+                    (
+                        batch.job_key,
+                        batch.structure_receipt_digest,
+                        batch.universe_hash,
+                        batch.token_range_digest,
+                        Jsonb(batch.token_ids),
+                        now,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    SELECT structure_receipt_digest, universe_hash, token_range_digest, token_ids
+                    FROM m1_quote_batch_inputs WHERE job_key = %s
+                    """,
+                    (batch.job_key,),
+                )
+                persisted = cursor.fetchone()
+                if persisted is None or (
+                    persisted["structure_receipt_digest"] != batch.structure_receipt_digest
+                    or persisted["universe_hash"] != batch.universe_hash
+                    or persisted["token_range_digest"] != batch.token_range_digest
+                    or tuple(persisted["token_ids"]) != batch.token_ids
+                ):
+                    raise JobIdentityConflict(
+                        f"quote batch {batch.job_key!r} names another immutable input"
+                    )
+            self._enqueue_job_cursor(
+                cursor,
+                job_key=f"{generation_key}:certify",
+                job_type="quote-certify",
+                input_identity=f"{generation_key}:{universe_hash}",
                 now=now,
             )
-        generation_key = batches[0].generation_key
-        self.enqueue_job(
-            job_key=f"{generation_key}:certify",
-            job_type="quote-certify",
-            input_identity=f"{generation_key}:{universe_hash}",
-            now=now,
-        )
         return batches
+
+    def quote_batch_spec(self, job_key: str) -> QuoteBatchSpec:
+        """Load the admitted immutable token range for a replacement worker."""
+        self._validate_nonempty(job_key=job_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT structure_receipt_digest, universe_hash, token_ids
+                FROM m1_quote_batch_inputs WHERE job_key = %s
+                """,
+                (job_key,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise ControlPlaneError(f"quote batch input is unavailable for {job_key!r}")
+        try:
+            ordinal = int(job_key.rsplit(":", maxsplit=1)[1])
+        except (IndexError, ValueError) as error:
+            raise JobIdentityConflict(f"quote batch has malformed job key {job_key!r}") from error
+        return QuoteBatchSpec.from_tokens(
+            structure_receipt_digest=str(row["structure_receipt_digest"]),
+            universe_hash=str(row["universe_hash"]),
+            ordinal=ordinal,
+            token_ids=tuple(str(token_id) for token_id in row["token_ids"]),
+        )
+
+    @staticmethod
+    def _enqueue_job_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        job_key: str,
+        job_type: str,
+        input_identity: str,
+        now: datetime,
+    ) -> None:
+        cursor.execute(
+            """
+            INSERT INTO m1_jobs (
+                job_key, job_type, input_identity, state, next_attempt_at,
+                created_at, updated_at
+            ) VALUES (%s, %s, %s, 'runnable', %s, %s, %s)
+            ON CONFLICT (job_key) DO NOTHING
+            """,
+            (job_key, job_type, input_identity, now, now, now),
+        )
+        cursor.execute(
+            "SELECT job_type, input_identity FROM m1_jobs WHERE job_key = %s",
+            (job_key,),
+        )
+        existing = cursor.fetchone()
+        if existing is None:
+            raise ControlPlaneError("job insert was not durable")
+        if existing["job_type"] != job_type or existing["input_identity"] != input_identity:
+            raise JobIdentityConflict(f"job key {job_key!r} names another input")
 
     def record_quote_batch(
         self,
