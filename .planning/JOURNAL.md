@@ -7966,3 +7966,26 @@ control: require explicit enable plus the exact certified generation key,
 surface old/new shadow pointer identities and reject all legacy-pointer paths.
 Add bounded control-plane status projection for Structure jobs/manifests before
 any cloud action. Then implement stable-key slicing for admission.
+
+## SESSION 199 — 2026-08-12 (guarded Structure shadow publication)
+
+- [COMMITTED] `77e61a0` (`05.6-98`) adds the default-off
+  `make structure-control-plane-shadow-publish enable=1
+  generation_key=structure:<sha256>` operator route. It requires explicit
+  acknowledgement before DB connection, accepts only a Structure generation,
+  reads prior shadow identity, invokes the certified-manifest gate, and emits
+  auditable previous/current identities plus `legacy_pointer_mutations=0`.
+- [VERIFY] CLI tests prove acknowledgement-before-connect and old/new output;
+  full focused Structure/control-plane suite: 42 passed, Ruff and
+  planning-status green.
+- [BOUNDARY] No cloud invocation/migration/R2 write/actual pointer move or
+  schedule occurred. Admission currently gives each component one whole range,
+  unsuitable for large continuous generations. Status/health projection,
+  stable-key slicing, deploy wiring, fault injection and soak acceptance remain.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then replace whole-component shadow admission with deterministic stable-key
+slice boundaries. Persist the exact component/range plan before jobs are
+created; prove retries/takeover retain it and content parity combines all
+slices. Add Structure job/manifest/shadow status into the bounded
+control-plane operator projection before scheduling anything.
