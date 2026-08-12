@@ -80,6 +80,22 @@ class StructureBundleArtifact:
         return cls(payload=payload, sha256=digest, key=structure_bundle_artifact_key(digest))
 
 
+@dataclass(frozen=True, slots=True)
+class StructureRangeArtifact:
+    """Canonical normalized output for one frozen Structure input range."""
+
+    payload: bytes
+    sha256: str
+    key: str
+
+    @classmethod
+    def from_bytes(cls, payload: bytes) -> StructureRangeArtifact:
+        if not payload:
+            raise ValueError("Structure range payload must be non-empty")
+        digest = hashlib.sha256(payload).hexdigest()
+        return cls(payload=payload, sha256=digest, key=structure_range_artifact_key(digest))
+
+
 def canonical_structure_bundle_bytes(
     *,
     identity: StructureBundleIdentity,
@@ -116,6 +132,34 @@ def structure_bundle_artifact_key(sha256: str) -> str:
     if len(sha256) != 64:
         raise ValueError("sha256 must be a sha256 digest")
     return f"structure-bundles/{sha256}/generation.ndjson"
+
+
+def canonical_structure_range_bytes(
+    *,
+    bundle_digest: str,
+    component: str,
+    range_digest: str,
+    rows: Sequence[Mapping[str, object]],
+) -> bytes:
+    """Serialize normalized rows bound to exactly one admitted source range."""
+    if len(bundle_digest) != 64 or len(range_digest) != 64 or component not in _COMPONENTS:
+        raise ValueError("invalid Structure range artifact identity")
+    records = [
+        {
+            "bundle_digest": bundle_digest,
+            "component": component,
+            "kind": "structure-range",
+            "range_digest": range_digest,
+        },
+        *({"row": dict(row)} for row in sorted(rows, key=_canonical_json)),
+    ]
+    return b"".join(_canonical_json(record) + b"\n" for record in records)
+
+
+def structure_range_artifact_key(sha256: str) -> str:
+    if len(sha256) != 64:
+        raise ValueError("sha256 must be a sha256 digest")
+    return f"structure-ranges/{sha256}/rows.ndjson"
 
 
 def parse_structure_bundle_bytes(

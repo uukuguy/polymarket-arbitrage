@@ -10,7 +10,9 @@ from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     StructureBundleError,
     StructureBundleIdentity,
+    StructureRangeArtifact,
     canonical_structure_bundle_bytes,
+    canonical_structure_range_bytes,
     parse_structure_bundle_bytes,
     structure_bundle_artifact_key,
     upload_structure_bundle_artifact,
@@ -93,6 +95,19 @@ def test_structure_bundle_parse_authenticates_digest_and_recovers_components() -
     assert components["events"] == ({"id": "event-a"}, {"id": "event-b"})
     with pytest.raises(StructureBundleError, match="digest-mismatch"):
         parse_structure_bundle_bytes(payload, expected_sha256="b" * 64)
+
+
+def test_structure_range_output_is_bound_to_one_bundle_and_range() -> None:
+    payload = canonical_structure_range_bytes(
+        bundle_digest="a" * 64,
+        component="markets",
+        range_digest="b" * 64,
+        rows=({"market_id": "b"}, {"market_id": "a"}),
+    )
+    artifact = StructureRangeArtifact.from_bytes(payload)
+
+    assert artifact.key == f"structure-ranges/{artifact.sha256}/rows.ndjson"
+    assert payload.splitlines()[1] == b'{"row":{"market_id":"a"}}'
 
 
 def test_structure_bundle_upload_requires_head_identity() -> None:
