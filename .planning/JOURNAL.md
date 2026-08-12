@@ -8289,3 +8289,26 @@ write the real-Postgres RED case for source-window admission and fenced page
 receipt/successor creation, then implement it before building the Gamma page
 worker. Run `make planning-status` before committing; do not stage existing
 `.planning/HANDOFF.json` or `.superpowers/sdd/*` user changes.
+
+## SESSION 212 — 2026-08-12 (transactional Gamma source worker)
+
+- [COMMITTED] `0878914` (`05.6-111`) establishes revision-010 source windows:
+  durable event/market page authority, fenced cursor receipt and successor
+  transitions, named target preflight, Make roundtrip contract, operator sync
+  log, and learning document 66. Real Postgres tests prove stale leases cannot
+  advance source cursors.
+- [IN PROGRESS] The next commit adds `TransactionalStructureSourceWorker`.
+  It performs one Gamma page request, canonical R2 PUT+HEAD, then the fenced
+  source receipt. A real Postgres crash test proves R2 upload before receipt
+  causes a lease-expiry takeover and one receipt, not a skipped cursor.
+- [BOUNDARY] The worker is local/tested only; no source window has been run in
+  a cloud environment. A sealed R2 page sequence still needs a SQLite-free
+  materializer into the existing Structure bundle before cloud shadow evidence
+  can be meaningful.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then implement Task 3 of `docs/superpowers/plans/2026-08-12-m1-transactional-
+structure-source.md`: write the RED terminal source-window artifact parsing/
+bundle-materialization test, then derive the current six-component Structure
+bundle from sealed R2 pages without any SQLite read. Do not deploy or infer
+cloud target identities.

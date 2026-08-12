@@ -30,6 +30,7 @@ from polyarb.control_plane.structure_artifact import (
     canonical_structure_bundle_bytes,
     canonical_structure_manifest_bytes,
 )
+from polyarb.control_plane.structure_source import TransactionalStructureSourceWorker
 from polyarb.control_plane.structure_worker import TransactionalStructureWorker
 
 
@@ -358,6 +359,105 @@ def test_stale_source_page_lease_cannot_advance_cursor(
     assert control_plane.structure_source_page_spec(
         "source-window:stale:fetch:events:1"
     ).requested_cursor == "replacement-cursor"
+
+
+def test_source_worker_takeover_after_upload_before_receipt_has_one_page_receipt(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """A dead process after R2 authentication cannot skip the source cursor."""
+    from polyarb.clients.gamma_client import EventPage
+
+    now = _now()
+    control_plane.admit_structure_source_window(window_key="source-window:crash", now=now)
+
+    class Gamma:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage:
+            self.calls += 1
+            assert cursor is None
+            assert limit == 100
+            return EventPage(
+                events=({"id": "event-a", "markets": []},),
+                requested_cursor=cursor,
+                next_cursor="event-next",
+                completed=False,
+                started_at_ms=1,
+                finished_at_ms=2,
+            )
+
+        async def fetch_active_market_page(self, cursor: str | None, limit: int):
+            raise AssertionError("market page must not run before event completion")
+
+    class MemoryR2:
+        def __init__(self) -> None:
+            self.objects: dict[str, bytes] = {}
+            self.metadata: dict[str, dict[str, str]] = {}
+            self.put_calls = 0
+
+        def put_object(self, **kwargs: object) -> None:
+            self.put_calls += 1
+            key = str(kwargs["Key"])
+            self.objects[key] = bytes(kwargs["Body"])
+            self.metadata[key] = dict(kwargs["Metadata"])
+
+        def head_object(self, **kwargs: object) -> dict[str, object]:
+            key = str(kwargs["Key"])
+            return {
+                "ContentLength": len(self.objects[key]),
+                "Metadata": self.metadata[key],
+            }
+
+    class CrashBeforeReceipt:
+        def __init__(self, delegate: PostgresControlPlane) -> None:
+            self._delegate = delegate
+            self.crash = True
+
+        def __getattr__(self, name: str):
+            return getattr(self._delegate, name)
+
+        def record_structure_source_page(self, *args: object, **kwargs: object):
+            if self.crash:
+                self.crash = False
+                raise KeyboardInterrupt("simulated source process death after R2 upload")
+            return self._delegate.record_structure_source_page(*args, **kwargs)
+
+    gamma = Gamma()
+    objects = MemoryR2()
+    crashing = TransactionalStructureSourceWorker(
+        control_plane=CrashBeforeReceipt(control_plane),  # type: ignore[arg-type]
+        gamma=gamma,
+        object_client=objects,
+        bucket="structure",
+        worker_id="source-worker-crashed",
+        now=lambda: now,
+        lease_seconds=1,
+    )
+    with pytest.raises(KeyboardInterrupt, match="after R2 upload"):
+        asyncio.run(crashing.run_once())
+    job_key = "source-window:crash:fetch:events:0"
+    assert control_plane.structure_source_page_receipt(job_key) is None
+
+    recovered = TransactionalStructureSourceWorker(
+        control_plane=control_plane,
+        gamma=gamma,
+        object_client=objects,
+        bucket="structure",
+        worker_id="source-worker-replacement",
+        now=lambda: now + timedelta(seconds=2),
+        lease_seconds=30,
+    )
+    assert asyncio.run(recovered.run_once()).outcome == "succeeded"
+    assert gamma.calls == 2
+    assert objects.put_calls == 2
+    assert control_plane.structure_source_page_receipt(job_key) == {
+        "artifact_key": next(iter(objects.objects)),
+        "artifact_digest": next(iter(objects.metadata.values()))["sha256"],
+        "next_cursor": "event-next",
+        "completed": False,
+        "record_count": 1,
+    }
 
 
 def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
