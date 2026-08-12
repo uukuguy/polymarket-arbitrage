@@ -173,6 +173,24 @@ def upgrade() -> None:
     )
 
     op.create_table(
+        "m1_structure_range_receipts",
+        sa.Column("job_key", sa.Text, nullable=False),
+        sa.Column("bundle_digest", sa.Text, nullable=False),
+        sa.Column("component", sa.Text, nullable=False),
+        sa.Column("range_digest", sa.Text, nullable=False),
+        sa.Column("artifact_key", sa.Text, nullable=False),
+        sa.Column("artifact_digest", sa.Text, nullable=False),
+        sa.Column("record_count", sa.BigInteger, nullable=False),
+        _timestamp("committed_at"),
+        sa.PrimaryKeyConstraint("job_key", name="pk_m1_structure_range_receipts"),
+        sa.ForeignKeyConstraint(
+            ["job_key"], ["m1_structure_range_inputs.job_key"],
+            name="fk_m1_structure_range_receipt_job",
+        ),
+        sa.CheckConstraint("record_count >= 0", name="ck_m1_structure_range_receipt_count"),
+    )
+
+    op.create_table(
         "m1_generation_manifests",
         sa.Column("generation_key", sa.Text, nullable=False),
         sa.Column("producer_job_key", sa.Text, nullable=False),
@@ -301,6 +319,7 @@ def downgrade() -> None:
     op.drop_table("m1_incidents")
     op.drop_table("m1_publication_pointers")
     op.drop_table("m1_generation_manifests")
+    op.drop_table("m1_structure_range_receipts")
     op.drop_table("m1_structure_range_inputs")
     op.drop_table("m1_structure_generation_inputs")
     op.drop_table("m1_quote_batch_receipts")

@@ -76,6 +76,7 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
             "m1_incidents",
             "m1_publication_pointers",
             "m1_generation_manifests",
+            "m1_structure_range_receipts",
             "m1_structure_range_inputs",
             "m1_structure_generation_inputs",
             "m1_quote_batch_receipts",
@@ -224,6 +225,55 @@ def test_structure_range_input_survives_admission_for_worker_takeover(
     assert first.component == "events"
     assert first.range_start == ""
     assert first.range_end == "m"
+
+
+def test_structure_range_receipt_is_fenced_and_idempotent(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    artifact = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=artifact,
+        ranges=(("events", "", "m"),),
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="structure-a", job_types=("structure-normalize",), lease_seconds=1, now=now
+    )
+    assert lease is not None
+    receipt = control_plane.record_structure_range(
+        lease,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/c/rows.ndjson",
+        artifact_digest="c" * 64,
+        record_count=3,
+        now=now,
+    )
+    assert control_plane.record_structure_range(
+        lease,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/c/rows.ndjson",
+        artifact_digest="c" * 64,
+        record_count=3,
+        now=now + timedelta(seconds=1),
+    ) == receipt
+    replacement = control_plane.claim_job(
+        worker_id="structure-b",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=2),
+    )
+    assert replacement is not None
+    with pytest.raises(StaleLeaseError):
+        control_plane.record_structure_range(
+            lease,
+            range_digest=spec.range_digest,
+            artifact_key="structure-ranges/d/rows.ndjson",
+            artifact_digest="d" * 64,
+            record_count=3,
+            now=now + timedelta(seconds=2),
+        )
 
 
 def test_quote_batch_input_preserves_leg_identity_for_worker_takeover(

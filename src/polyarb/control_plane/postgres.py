@@ -559,6 +559,146 @@ class PostgresControlPlane:
             )
             return receipt
 
+    def record_structure_range(
+        self,
+        lease: JobLease,
+        *,
+        range_digest: str,
+        artifact_key: str,
+        artifact_digest: str,
+        record_count: int,
+        now: datetime,
+    ) -> CheckpointReceipt:
+        """Atomically checkpoint one normalized Structure range under its lease fence."""
+        self._validate_aware(now, "now")
+        if lease.job_type != "structure-normalize":
+            raise ValueError("structure range receipt requires a structure-normalize lease")
+        for field, value in (("range_digest", range_digest), ("artifact_digest", artifact_digest)):
+            if len(value) != 64:
+                raise ValueError(f"{field} must be a sha256 digest")
+        if not artifact_key:
+            raise ValueError("artifact_key must not be empty")
+        if isinstance(record_count, bool) or record_count < 0:
+            raise ValueError("record_count must be non-negative")
+
+        spec = self.structure_range_spec(lease.job_key)
+        if range_digest != spec.range_digest:
+            raise CheckpointConflictError("Structure range does not match its job identity")
+        checkpoint_cursor = f"{spec.component}:{spec.ordinal}"
+        idempotency_key = f"structure-range:{lease.job_key}:{artifact_digest}"
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT checkpoint.receipt_id, checkpoint.checkpoint_cursor,
+                       checkpoint.checkpoint_digest, checkpoint.lease_epoch,
+                       checkpoint.committed_at, structure.bundle_digest,
+                       structure.component, structure.range_digest, structure.artifact_key,
+                       structure.artifact_digest, structure.record_count
+                FROM m1_checkpoint_receipts AS checkpoint
+                LEFT JOIN m1_structure_range_receipts AS structure
+                    ON structure.job_key = checkpoint.job_key
+                WHERE checkpoint.idempotency_key = %s
+                """,
+                (idempotency_key,),
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                if (
+                    str(existing["checkpoint_cursor"]) != checkpoint_cursor
+                    or str(existing["checkpoint_digest"]) != artifact_digest
+                    or str(existing["bundle_digest"]) != spec.bundle_digest
+                    or str(existing["component"]) != spec.component
+                    or str(existing["range_digest"]) != range_digest
+                    or str(existing["artifact_key"]) != artifact_key
+                    or str(existing["artifact_digest"]) != artifact_digest
+                    or int(existing["record_count"]) != record_count
+                ):
+                    raise CheckpointConflictError(
+                        f"idempotency conflict for {idempotency_key!r}"
+                    )
+                return CheckpointReceipt(
+                    receipt_id=str(existing["receipt_id"]),
+                    job_key=lease.job_key,
+                    lease_epoch=int(existing["lease_epoch"]),
+                    idempotency_key=idempotency_key,
+                    checkpoint_cursor=checkpoint_cursor,
+                    checkpoint_digest=artifact_digest,
+                    committed_at=existing["committed_at"],
+                )
+            cursor.execute(
+                """
+                UPDATE m1_jobs
+                SET checkpoint_cursor = %s, checkpoint_digest = %s, state = 'checkpointed',
+                    updated_at = %s
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s AND state = 'leased'
+                """,
+                (
+                    checkpoint_cursor,
+                    artifact_digest,
+                    now,
+                    lease.job_key,
+                    lease.lease_owner,
+                    lease.lease_epoch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            receipt = CheckpointReceipt(
+                receipt_id=str(uuid4()),
+                job_key=lease.job_key,
+                lease_epoch=lease.lease_epoch,
+                idempotency_key=idempotency_key,
+                checkpoint_cursor=checkpoint_cursor,
+                checkpoint_digest=artifact_digest,
+                committed_at=now,
+            )
+            cursor.execute(
+                """
+                INSERT INTO m1_checkpoint_receipts (
+                    receipt_id, job_key, lease_epoch, idempotency_key, checkpoint_cursor,
+                    checkpoint_digest, committed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    receipt.receipt_id,
+                    receipt.job_key,
+                    receipt.lease_epoch,
+                    receipt.idempotency_key,
+                    receipt.checkpoint_cursor,
+                    receipt.checkpoint_digest,
+                    receipt.committed_at,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO m1_structure_range_receipts (
+                    job_key, bundle_digest, component, range_digest, artifact_key,
+                    artifact_digest, record_count, committed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    lease.job_key,
+                    spec.bundle_digest,
+                    spec.component,
+                    range_digest,
+                    artifact_key,
+                    artifact_digest,
+                    record_count,
+                    now,
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE m1_job_attempts SET state = 'checkpointed', finished_at = %s
+                WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
+                """,
+                (now, lease.job_key, lease.lease_epoch),
+            )
+            return receipt
+
     def certify_quote_generation(
         self,
         lease: JobLease,
