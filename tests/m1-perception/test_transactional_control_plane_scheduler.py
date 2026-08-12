@@ -32,6 +32,7 @@ def test_bounded_tick_runs_only_configured_number_of_turns() -> None:
     structure = _AsyncWorker("structure-range")
     quote = _AsyncWorker("quote-batch")
     structure_certifier = _SyncWorker("structure-certify")
+    quote_admitter = _AsyncWorker("quote-admit")
     quote_certifier = _SyncWorker("quote-certify")
     scheduler = TransactionalControlPlaneScheduler(
         structure_source_admitter=admitter,
@@ -40,6 +41,7 @@ def test_bounded_tick_runs_only_configured_number_of_turns() -> None:
         structure_worker=structure,
         quote_worker=quote,
         structure_certifier=structure_certifier,
+        quote_admitter=quote_admitter,
         quote_certifier=quote_certifier,
         max_turns=2,
     )
@@ -74,6 +76,14 @@ def test_bounded_tick_runs_only_configured_number_of_turns() -> None:
         },
         {"worker": "structure-range", "job_key": "structure-range", "outcome": "succeeded"},
     ]
+    assert asyncio.run(scheduler.run_tick())["turns"] == [
+        {"worker": "structure-certify", "job_key": "structure-certify", "outcome": "certified"},
+        {"worker": "quote-admit", "job_key": "quote-admit", "outcome": "succeeded"},
+    ]
+    assert asyncio.run(scheduler.run_tick())["turns"] == [
+        {"worker": "quote-batch", "job_key": "quote-batch", "outcome": "succeeded"},
+        {"worker": "quote-certify", "job_key": "quote-certify", "outcome": "certified"},
+    ]
 
 
 def test_scheduler_service_emits_tick_then_stops_without_sleeping() -> None:
@@ -89,6 +99,7 @@ def test_scheduler_service_emits_tick_then_stops_without_sleeping() -> None:
         structure_worker=structure,
         structure_certifier=_SyncWorker("structure-certify"),
         quote_worker=_AsyncWorker("quote-batch"),
+        quote_admitter=_AsyncWorker("quote-admit"),
         quote_certifier=_SyncWorker("quote-certify"),
         max_turns=1,
     )

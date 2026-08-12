@@ -8427,6 +8427,26 @@ worker between Structure certification and Quote batches, update preflight and
 rollout artifact revision to 012, then commit the scheduler slice before any
 cloud deployment work.
 
+## SESSION 220 — 2026-08-12 (continuous Structure-to-Quote scheduler)
+
+- [COMMITTED] `e12b39f` (`05.6-118`) creates revision-012 quote-admission
+  inputs atomically with Structure manifests and proves the fenced R2-bundle to
+  Quote-input bridge.
+- [IMPLEMENTED] The service scheduler now rotates eight bounded fenced turns:
+  source admission, source page, source materialization, Structure range,
+  Structure certification, Quote admission, Quote batch, Quote certification.
+  The bridge is worker-only; API still has no Gamma/R2/CLOB data-plane role.
+- [VERIFY] Scheduler, CLI, admission, Structure and Quote focused contracts,
+  Ruff, manual contract, and planning status are the commit gate.
+- [BOUNDARY] The code is locally complete through continuous Quote work but has
+  never been deployed or continuously run in a named cloud environment. The
+  revision-012 rollout checklist must be aligned before preflight/migration.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, update pure-local rollout
+artifacts from revision 011 to revision 012 and add Quote-admit evidence steps.
+Then commit, pending explicit non-production Fly app/database identities for
+real deployment, shadow comparison, worker-loss, and 24-hour soak.
+
 ## SESSION 217 — 2026-08-12 (rollout evidence contract corrected)
 
 - [DISCOVERED] The local rollout renderer still emitted a revision-009

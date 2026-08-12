@@ -23,6 +23,7 @@ class TransactionalControlPlaneScheduler:
         structure_source_materializer: _Worker,
         structure_worker: _Worker,
         structure_certifier: _Worker,
+        quote_admitter: _Worker,
         quote_worker: _Worker,
         quote_certifier: _Worker,
         max_turns: int,
@@ -35,6 +36,7 @@ class TransactionalControlPlaneScheduler:
             ("structure-source-materialize", structure_source_materializer),
             ("structure-range", structure_worker),
             ("structure-certify", structure_certifier),
+            ("quote-admit", quote_admitter),
             ("quote-batch", quote_worker),
             ("quote-certify", quote_certifier),
         )

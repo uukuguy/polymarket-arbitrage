@@ -19,6 +19,7 @@ from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
 from polyarb.control_plane.fault_soak import verify_fault_soak
 from polyarb.control_plane.postgres import PostgresControlPlane
+from polyarb.control_plane.quote_admission import TransactionalQuoteAdmitter
 from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
@@ -264,6 +265,23 @@ def _transactional_structure_source_admitter(
     )
 
 
+def _transactional_quote_admitter(
+    control_plane: PostgresControlPlane,
+    *,
+    worker_id: str,
+) -> TransactionalQuoteAdmitter:
+    """Build the R2-only Structure-to-Quote bridge in the worker service."""
+    object_client, bucket = _structure_object_client()
+    return TransactionalQuoteAdmitter(
+        control_plane=control_plane,
+        object_client=object_client,
+        bucket=bucket,
+        worker_id=worker_id,
+        now=lambda: datetime.now(UTC),
+        batch_size=Settings().clob_batch_size,
+    )
+
+
 def _transactional_scheduler(
     control_plane: PostgresControlPlane,
     *,
@@ -295,6 +313,9 @@ def _transactional_scheduler(
             bucket=bucket,
             worker_id=f"{worker_id}:structure-certifier",
             now=lambda: datetime.now(UTC),
+        ),
+        quote_admitter=_transactional_quote_admitter(
+            control_plane, worker_id=f"{worker_id}:quote-admitter"
         ),
         quote_worker=quote_worker,
         quote_certifier=quote_certifier,
