@@ -8166,3 +8166,29 @@ control-plane deployment contract (separate API/read worker and transactional
 scheduler process, immutable config/health/readiness behavior). It must not
 alter the legacy single-volume service or deploy. Afterwards bind it to the
 named-environment preflight/shadow/soak rollout checklist.
+
+## SESSION 207 — 2026-08-12 (independent control-api topology)
+
+- [COMMITTED] `bbfc193` (`05.6-107`) splits the durable read path into
+  `polyarb.control_plane.api`: only `/healthz` and
+  `/perception/control-plane`, no SQLite/R2/scheduler/data-worker dependency.
+  Database unreadability produces typed 503 readiness, never a healthy empty
+  response. Two static Fly templates deliberately split API and scheduler into
+  separate app identities: API gets only read-Postgres credentials; worker gets
+  writer/R2 credentials; neither gets a volume.
+- [COMMITTED] `9658b22` adds learning document 64, explaining the real
+  execution/commit semantics, crash windows, independent read plane and
+  rollout ordering. `make docs-m1-check` passes.
+- [VERIFY] Full transactional control-plane regression: 51 passed; Ruff,
+  template contracts, Make dry-run and planning status pass.
+- [BOUNDARY] Templates contain explicit app-name placeholders. Existing
+  `polyarb-l1` remains untouched and continues to own the legacy volume/data
+  path. No Fly application, secret, machine, route, database or R2 resource
+  was read or changed.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then implement a default-off rollout artifact renderer/validator. It must
+accept explicit API app, worker app and expected database names, render no
+ambiguous Fly config, reject legacy `polyarb-l1`, and generate a machine-
+readable staged checklist (preflight → migration → shadow parity → fault/soak
+→ switch). It must not invoke Fly, R2 or Postgres.
