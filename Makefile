@@ -612,7 +612,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-shadow-once supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -668,6 +668,14 @@ structure-control-plane-once:
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane structure-once --enable --worker-id "$(or $(worker_id),structure-operator-once)" --json
+
+## structure-control-plane-shadow-once: Export/admit one current legacy Structure publication; requires enable=1, db_path, publication_id, DSN and R2. Never changes pointers.
+structure-control-plane-shadow-once:
+	@test "$(enable)" = "1" || (echo "usage: make structure-control-plane-shadow-once enable=1 db_path=/data/state.db publication_id=<id>" >&2; exit 2)
+	@test -n "$(publication_id)" || (echo "publication_id is required" >&2; exit 2)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
+	uv run python -m polyarb.cli_control_plane structure-shadow-once --enable --db-path "$(or $(db_path),data/state.db)" --publication-id "$(publication_id)" --json
 
 ## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots (auto-loads .env)
 supabase-reconcile:

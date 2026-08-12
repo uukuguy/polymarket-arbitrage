@@ -39,6 +39,35 @@ def test_structure_control_plane_once_requires_explicit_enable(monkeypatch, caps
     assert "postgresql://" not in captured.err
 
 
+def test_structure_shadow_once_requires_explicit_enable(monkeypatch, capsys, tmp_path) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setattr(
+        cli_control_plane.psycopg,
+        "connect",
+        lambda _dsn: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert (
+        cli_control_plane.main(
+            [
+                "structure-shadow-once",
+                "--db-path",
+                str(tmp_path / "state.db"),
+                "--publication-id",
+                "publication-1",
+                "--json",
+            ]
+        )
+        == 2
+    )
+
+    captured = capsys.readouterr()
+    assert "--enable is required" in captured.err
+    assert "postgresql://" not in captured.err
+
+
 def test_quote_control_plane_once_runs_one_batch_then_certifier(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
@@ -105,6 +134,77 @@ def test_structure_control_plane_once_runs_one_range_without_pointer_mutation(
         "range": {"job_key": "structure:one:normalize:events:0", "outcome": "succeeded"},
         "status": "ok",
     }
+
+
+def test_structure_shadow_once_exports_admits_without_pointer_mutation(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.structure_artifact import StructureBundleIdentity
+
+    identity = StructureBundleIdentity(
+        publication_id="publication-1",
+        window_id="window-1",
+        snapshot_id=42,
+        comparison_receipt_digest="a" * 64,
+        normalization_contract_version="structure-v7",
+        component_counts={
+            "events": 0,
+            "event_tags": 0,
+            "memberships": 0,
+            "group_truth": 0,
+            "markets": 0,
+            "issues": 0,
+        },
+    )
+
+    class ObjectClient:
+        pass
+
+    class ControlPlane:
+        def enqueue_structure_generation(self, **kwargs):
+            assert kwargs["identity"] == identity
+            assert len(kwargs["ranges"]) == 6
+            return tuple(range(6))
+
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setattr(cli_control_plane.psycopg, "connect", lambda _dsn: object())
+    monkeypatch.setattr(
+        cli_control_plane,
+        "read_legacy_structure_bundle",
+        lambda _path, *, publication_id: (identity, {key: () for key in identity.component_counts}),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_structure_object_client",
+        lambda: (ObjectClient(), "structure"),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "upload_structure_bundle_artifact",
+        lambda _client, *, bucket, artifact: artifact,
+    )
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+
+    assert (
+        cli_control_plane.main(
+            [
+                "structure-shadow-once",
+                "--enable",
+                "--db-path",
+                str(tmp_path / "state.db"),
+                "--publication-id",
+                "publication-1",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "ok"
+    assert result["admitted_job_count"] == 6
+    assert result["pointer_mutations"] == 0
+    assert result["source_identity"]["publication_id"] == "publication-1"
 
 
 def test_shadow_sync_requires_dsn_without_printing_it(monkeypatch, capsys, tmp_path) -> None:

@@ -21,6 +21,12 @@ from polyarb.control_plane.quote_worker import (
     TransactionalQuoteCertifier,
 )
 from polyarb.control_plane.shadow import project_shadow_sources, read_shadow_sources
+from polyarb.control_plane.structure_artifact import (
+    StructureBundleArtifact,
+    canonical_structure_bundle_bytes,
+    upload_structure_bundle_artifact,
+)
+from polyarb.control_plane.structure_shadow import read_legacy_structure_bundle
 from polyarb.control_plane.structure_worker import TransactionalStructureWorker
 from polyarb.storage.r2_sync import _build_client
 
@@ -60,6 +66,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     structure_once.add_argument("--worker-id", default="structure-operator-once")
     structure_once.add_argument("--json", action="store_true")
+    structure_shadow_once = subcommands.add_parser(
+        "structure-shadow-once",
+        help="export and admit one current legacy Structure publication without pointer changes",
+    )
+    structure_shadow_once.add_argument("--enable", action="store_true")
+    structure_shadow_once.add_argument("--db-path", type=Path, required=True)
+    structure_shadow_once.add_argument("--publication-id", required=True)
+    structure_shadow_once.add_argument("--json", action="store_true")
     return parser
 
 
@@ -115,26 +129,34 @@ def _transactional_structure_worker(
     worker_id: str,
 ) -> TransactionalStructureWorker:
     """Build an explicitly invoked worker; it never exports or changes pointers."""
-    settings = Settings()
-    if not settings.r2_enabled:
-        raise RuntimeError("transactional Structure requires configured R2 credentials")
-    object_client = _build_client(
-        settings.r2_endpoint,
-        settings.r2_access_key_id.get_secret_value(),
-        settings.r2_secret_access_key.get_secret_value(),
-    )
+    object_client, bucket = _structure_object_client()
     return TransactionalStructureWorker(
         control_plane=control_plane,
         object_client=object_client,
-        bucket=settings.r2_bucket,
+        bucket=bucket,
         worker_id=worker_id,
         now=lambda: datetime.now(UTC),
     )
 
 
+def _structure_object_client() -> tuple[object, str]:
+    settings = Settings()
+    if not settings.r2_enabled:
+        raise RuntimeError("transactional Structure requires configured R2 credentials")
+    return (
+        _build_client(
+            settings.r2_endpoint,
+            settings.r2_access_key_id.get_secret_value(),
+            settings.r2_secret_access_key.get_secret_value(),
+        ),
+        settings.r2_bucket,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command in {"quote-once", "structure-once"} and not args.enable:
+    requires_enable = {"quote-once", "structure-once", "structure-shadow-once"}
+    if args.command in requires_enable and not args.enable:
         print(f"--enable is required for {args.command}", file=sys.stderr)
         return 2
     control_plane = _control_plane_from_env()
@@ -186,6 +208,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {
                     "status": "ok",
                     "range": {"job_key": result.job_key, "outcome": result.outcome},
+                    "pointer_mutations": 0,
+                },
+                as_json=args.json,
+            )
+            return 0
+        if args.command == "structure-shadow-once":
+            identity, components = read_legacy_structure_bundle(
+                args.db_path, publication_id=args.publication_id
+            )
+            artifact = StructureBundleArtifact.from_bytes(
+                canonical_structure_bundle_bytes(identity=identity, components=components)
+            )
+            object_client, bucket = _structure_object_client()
+            upload_structure_bundle_artifact(object_client, bucket=bucket, artifact=artifact)
+            admitted = control_plane.enqueue_structure_generation(
+                identity=identity,
+                bundle=artifact,
+                ranges=tuple((component, "", "") for component in identity.component_counts),
+                now=datetime.now(UTC),
+            )
+            _write(
+                {
+                    "status": "ok",
+                    "source_identity": identity.header(),
+                    "bundle_digest": artifact.sha256,
+                    "admitted_job_count": len(admitted),
                     "pointer_mutations": 0,
                 },
                 as_json=args.json,
