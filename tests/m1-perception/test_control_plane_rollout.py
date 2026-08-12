@@ -24,18 +24,22 @@ def test_rollout_renderer_writes_two_named_apps_and_staged_checklist(tmp_path: P
         "checklist": str(tmp_path / "rollout-checklist.json"),
     }
     assert 'app = "polyarb-control-api-staging"' in (tmp_path / "fly-control-api.toml").read_text()
-    assert 'app = "polyarb-control-worker-staging"' in (
-        tmp_path / "fly-control-worker.toml"
-    ).read_text()
+    assert (
+        'app = "polyarb-control-worker-staging"'
+        in (tmp_path / "fly-control-worker.toml").read_text()
+    )
     checklist = json.loads((tmp_path / "rollout-checklist.json").read_text())
     assert checklist["expected_database"] == "control_plane_staging"
     assert checklist["steps"] == [
         "preflight",
-        "revision-009-migration",
-        "shadow-parity",
-        "fault-and-soak",
+        "revision-011-migration",
+        "isolated-api-and-worker-deploy",
+        "three-fresh-source-window-shadows",
+        "source-worker-loss-and-api-readability",
+        "continuous-24-hour-soak",
         "authorized-reversible-switch",
     ]
+    assert checklist["source_window_admission"] == "explicit-operator-command"
 
 
 @pytest.mark.parametrize("api_app,worker_app", [("polyarb-l1", "worker"), ("api", "polyarb-l1")])

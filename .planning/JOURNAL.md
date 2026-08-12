@@ -8404,3 +8404,22 @@ then inspect the local rollout renderer against the source-worker entrypoint.
 Render only local artifacts once two isolated non-production Fly app names and
 one named Postgres database are designated; then run the read-only preflight,
 revision-011 migration, and actual continuous shadow collection.
+
+## SESSION 217 — 2026-08-12 (rollout evidence contract corrected)
+
+- [DISCOVERED] The local rollout renderer still emitted a revision-009
+  checklist even though the actual source authority requires revision 011.
+  That would let an operator collect evidence against the wrong deployment
+  contract.
+- [IMPLEMENTED] Artifact version 2 now requires named preflight, revision-011
+  migration, isolated API/worker deployment, three fresh source-window shadows,
+  worker-loss/API readability, and a 24-hour continuous soak before a separate
+  reversible-switch authorization. It records explicit source-window admission.
+- [VERIFY] Rollout renderer, static Fly templates, control-plane CLI, Ruff, and
+  diff checks pass. No cloud action was performed.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`.
+Then, after the user designates two new non-production Fly apps and one named
+Postgres database, run only `make control-plane-render-rollout` followed by the
+read-only named preflight. Do not infer identities from the legacy L1 app or
+apply a migration until those identities are explicit.

@@ -46,24 +46,25 @@ def render_rollout_artifacts(
         "fly-control-worker.toml.template", "__CONTROL_PLANE_WORKER_APP__", worker_app
     )
     checklist = {
-        "artifact_version": 1,
+        "artifact_version": 2,
         "api_app": api_app,
         "worker_app": worker_app,
         "expected_database": expected_database,
         "steps": [
             "preflight",
-            "revision-009-migration",
-            "shadow-parity",
-            "fault-and-soak",
+            "revision-011-migration",
+            "isolated-api-and-worker-deploy",
+            "three-fresh-source-window-shadows",
+            "source-worker-loss-and-api-readability",
+            "continuous-24-hour-soak",
             "authorized-reversible-switch",
         ],
+        "source_window_admission": "explicit-operator-command",
         "cloud_actions_performed": False,
     }
     destinations["api_config"].write_text(api_config)
     destinations["worker_config"].write_text(worker_config)
-    destinations["checklist"].write_text(
-        json.dumps(checklist, sort_keys=True, indent=2) + "\n"
-    )
+    destinations["checklist"].write_text(json.dumps(checklist, sort_keys=True, indent=2) + "\n")
     return {name: str(path) for name, path in destinations.items()}
 
 
