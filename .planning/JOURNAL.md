@@ -8467,6 +8467,25 @@ After explicit designation of API app, worker app, and Postgres database, render
 the v3 artifacts, run named read-only preflight, then apply revision 012 and
 begin actual source-window Structure/Quote shadow collection.
 
+## SESSION 222 — 2026-08-12 (continuous recovery visibility)
+
+- [DISCOVERED] The durable API reported legacy transactional Structure range
+  and Quote batch states but did not expose the newly authoritative source
+  fetch/materializer and Quote-admit boundaries. A continuous worker could
+  therefore back off without a bounded operator view of where recovery stopped.
+- [IMPLEMENTED] The Postgres-only snapshot now reports all eight service turns
+  at their data boundaries and reports retry age for source and Quote-admit.
+  The read API remains independent of SQLite, Gamma, R2 and CLOB.
+- [VERIFY] Real PostgreSQL proves 45-second retry age visibility for source and
+  Quote-admit; HTTP projection and focused source/control-plane checks pass.
+- [BOUNDARY] This improves cloud acceptance observability but does not produce
+  live evidence. No deployment or external resource was accessed.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run the focused transactional
+suite, docs check and planning status; commit 05.6-121. Then only explicit
+non-production API app, worker app, and database identities can unlock the
+actual rollout/preflight/migration/shadow/worker-loss/24-hour evidence lane.
+
 ## SESSION 217 — 2026-08-12 (rollout evidence contract corrected)
 
 - [DISCOVERED] The local rollout renderer still emitted a revision-009

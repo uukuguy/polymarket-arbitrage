@@ -1753,6 +1753,18 @@ def test_operational_snapshot_reads_fenced_work_and_alert_intent(
         input_identity="generation-a:batch-0001",
         now=now,
     )
+    control_plane.enqueue_job(
+        job_key="structure:window-a:materialize",
+        job_type="structure-materialize",
+        input_identity="window-a",
+        now=now,
+    )
+    control_plane.enqueue_job(
+        job_key="structure:generation-a:quote-admit",
+        job_type="quote-admit",
+        input_identity="structure:generation-a:bundle:abc",
+        now=now,
+    )
     lease = control_plane.claim_job(
         worker_id="structure-worker-a",
         job_types=("structure-fetch",),
@@ -1775,16 +1787,21 @@ def test_operational_snapshot_reads_fenced_work_and_alert_intent(
 
     snapshot = control_plane.operational_snapshot(now=now, sample_limit=20)
 
-    assert snapshot["job_counts"] == {"leased": 1, "runnable": 1}
+    assert snapshot["job_counts"] == {"leased": 1, "runnable": 3}
     assert snapshot["oldest_runnable_age_seconds"] == 0.0
     assert snapshot["expired_leases"] == 1
     assert snapshot["quote"] == {
+        "admission_job_states": {"runnable": 1},
+        "oldest_retryable_admission_age_seconds": None,
         "batch_job_states": {"runnable": 1},
         "certifier_job_states": {},
         "oldest_retryable_batch_age_seconds": None,
         "current_pointer": None,
     }
     assert snapshot["structure"] == {
+        "source_fetch_job_states": {"leased": 1},
+        "oldest_retryable_source_age_seconds": None,
+        "source_materializer_job_states": {"runnable": 1},
         "range_job_states": {},
         "certifier_job_states": {},
         "oldest_retryable_range_age_seconds": None,
@@ -1814,3 +1831,42 @@ def test_operational_snapshot_reads_fenced_work_and_alert_intent(
             "state": "pending",
         }
     ]
+
+
+def test_operational_snapshot_reports_retry_age_for_source_and_quote_admission(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    control_plane.enqueue_job(
+        job_key="source-retry", job_type="structure-fetch", input_identity="source", now=now
+    )
+    source_lease = control_plane.claim_job(
+        worker_id="source", job_types=("structure-fetch",), lease_seconds=30, now=now
+    )
+    assert source_lease is not None
+    control_plane.finish(
+        source_lease,
+        state=JobState.RETRYABLE,
+        next_attempt_at=now + timedelta(seconds=15),
+        error_class="TimeoutError",
+        now=now,
+    )
+    control_plane.enqueue_job(
+        job_key="quote-admit-retry", job_type="quote-admit", input_identity="quote", now=now
+    )
+    quote_lease = control_plane.claim_job(
+        worker_id="quote", job_types=("quote-admit",), lease_seconds=30, now=now
+    )
+    assert quote_lease is not None
+    control_plane.finish(
+        quote_lease,
+        state=JobState.RETRYABLE,
+        next_attempt_at=now + timedelta(seconds=15),
+        error_class="QuoteAdmissionError",
+        now=now,
+    )
+
+    snapshot = control_plane.operational_snapshot(now=now + timedelta(seconds=45))
+
+    assert snapshot["structure"]["oldest_retryable_source_age_seconds"] == 45.0
+    assert snapshot["quote"]["oldest_retryable_admission_age_seconds"] == 45.0

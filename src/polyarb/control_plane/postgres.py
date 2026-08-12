@@ -2601,6 +2601,23 @@ class PostgresControlPlane:
             cursor.execute(
                 """
                 SELECT state, count(*) AS count
+                FROM m1_jobs WHERE job_type = 'quote-admit' GROUP BY state
+                """
+            )
+            quote_admission_states = {
+                str(row["state"]): int(row["count"]) for row in cursor.fetchall()
+            }
+            cursor.execute(
+                """
+                SELECT extract(epoch FROM (%s - min(created_at))) AS age_seconds
+                FROM m1_jobs WHERE job_type = 'quote-admit' AND state = 'retryable'
+                """,
+                (now,),
+            )
+            retryable_quote_admission_age = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT state, count(*) AS count
                 FROM m1_jobs WHERE job_type = 'quote-certify' GROUP BY state
                 """
             )
@@ -2636,6 +2653,34 @@ class PostgresControlPlane:
             structure_range_states = {
                 str(row["state"]): int(row["count"]) for row in cursor.fetchall()
             }
+            cursor.execute(
+                """
+                SELECT state, count(*) AS count
+                FROM m1_jobs WHERE job_type = 'structure-fetch' GROUP BY state
+                """
+            )
+            source_fetch_states = {
+                str(row["state"]): int(row["count"]) for row in cursor.fetchall()
+            }
+            cursor.execute(
+                """
+                SELECT state, count(*) AS count
+                FROM m1_jobs WHERE job_type = 'structure-materialize' GROUP BY state
+                """
+            )
+            source_materializer_states = {
+                str(row["state"]): int(row["count"]) for row in cursor.fetchall()
+            }
+            cursor.execute(
+                """
+                SELECT extract(epoch FROM (%s - min(created_at))) AS age_seconds
+                FROM m1_jobs
+                WHERE job_type IN ('structure-fetch', 'structure-materialize')
+                  AND state = 'retryable'
+                """,
+                (now,),
+            )
+            retryable_source_age = cursor.fetchone()
             cursor.execute(
                 """
                 SELECT state, count(*) AS count
@@ -2747,6 +2792,14 @@ class PostgresControlPlane:
         quote_retry_age = (
             None if retryable_quote_age is None else retryable_quote_age["age_seconds"]
         )
+        quote_admission_retry_age = (
+            None
+            if retryable_quote_admission_age is None
+            else retryable_quote_admission_age["age_seconds"]
+        )
+        source_retry_age = (
+            None if retryable_source_age is None else retryable_source_age["age_seconds"]
+        )
         structure_retry_age = (
             None if retryable_structure_age is None else retryable_structure_age["age_seconds"]
         )
@@ -2758,6 +2811,10 @@ class PostgresControlPlane:
             "open_incidents": incidents,
             "pending_alert_outbox": outbox,
             "quote": {
+                "admission_job_states": quote_admission_states,
+                "oldest_retryable_admission_age_seconds": (
+                    None if quote_admission_retry_age is None else float(quote_admission_retry_age)
+                ),
                 "batch_job_states": quote_batch_states,
                 "certifier_job_states": quote_certifier_states,
                 "oldest_retryable_batch_age_seconds": (
@@ -2776,6 +2833,11 @@ class PostgresControlPlane:
                 ),
             },
             "structure": {
+                "source_fetch_job_states": source_fetch_states,
+                "oldest_retryable_source_age_seconds": (
+                    None if source_retry_age is None else float(source_retry_age)
+                ),
+                "source_materializer_job_states": source_materializer_states,
                 "range_job_states": structure_range_states,
                 "certifier_job_states": structure_certifier_states,
                 "oldest_retryable_range_age_seconds": (
