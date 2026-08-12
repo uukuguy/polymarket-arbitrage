@@ -68,7 +68,7 @@ def postgres_dsn() -> Iterator[str]:
             for role in ("anon", "authenticated", "service_role"):
                 connection.execute(f"CREATE ROLE {role} NOLOGIN")
         result = subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "013"],
+            ["uv", "run", "alembic", "upgrade", "014"],
             env={**os.environ, "POLYARB_SUPABASE_DB_DSN": dsn},
             capture_output=True,
             text=True,
@@ -103,6 +103,7 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
             "m1_quote_admission_inputs",
             "m1_checkpoint_receipts",
             "m1_job_attempts",
+            "m1_job_circuits",
             "m1_jobs",
         ):
             connection.execute(f"TRUNCATE {table} CASCADE")
@@ -789,7 +790,7 @@ def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
     assert batch.input_identity.startswith(f"quote:{'a' * 64}:{'b' * 64}:2:")
 
 
-def test_deployment_preflight_requires_named_database_and_all_013_tables(
+def test_deployment_preflight_requires_named_database_and_all_014_tables(
     control_plane: PostgresControlPlane,
 ) -> None:
     with control_plane._connection_factory() as connection:  # noqa: SLF001
@@ -797,7 +798,7 @@ def test_deployment_preflight_requires_named_database_and_all_013_tables(
     assert database_name is not None
     result = control_plane.deployment_preflight(expected_database=str(database_name[0]))
     assert result["database_name"] == database_name[0]
-    assert result["revision_013_tables"] == 19
+    assert result["revision_014_tables"] == 20
     with pytest.raises(Exception, match="database identity mismatch"):
         control_plane.deployment_preflight(expected_database="not-the-control-plane")
 
@@ -1757,7 +1758,6 @@ def test_retryable_finish_creates_one_durable_incident_and_alert_intent(
 
     control_plane.finish_retryable_with_incident(
         lease,
-        next_attempt_at=now + timedelta(seconds=15),
         error_class="TimeoutError",
         incident_key="incident:job-retry:structure:window-a:fetch:events:0",
         dedupe_key="job-retry:structure:window-a:fetch:events:0",
@@ -1782,6 +1782,132 @@ def test_retryable_finish_creates_one_durable_incident_and_alert_intent(
             assert cursor.fetchone() == ("attempt-failed",)
             cursor.execute("SELECT channel, state FROM m1_alert_outbox")
             assert cursor.fetchone() == ("dashboard", "pending")
+    finally:
+        connection.close()
+
+
+def test_retry_circuit_opens_on_third_failure_with_bounded_probe_delay(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="structure:window-a:fetch:events:0",
+        job_type="structure-fetch",
+        input_identity="window-a:events:0:<start>",
+        now=now,
+    )
+    delays: list[timedelta] = []
+    for attempt in range(1, 8):
+        attempted_at = now + sum(delays, timedelta())
+        lease = control_plane.claim_job(
+            worker_id=f"worker-{attempt}",
+            job_types=("structure-fetch",),
+            lease_seconds=30,
+            now=attempted_at,
+        )
+        assert lease is not None
+        next_attempt_at = control_plane.finish_retryable_with_incident(
+            lease,
+            error_class="TimeoutError",
+            incident_key="incident:job-retry:structure:window-a:fetch:events:0",
+            dedupe_key="job-retry:structure:window-a:fetch:events:0",
+            component="structure-fetch",
+            summary="structure-fetch retryable failure",
+            detail={"job_key": lease.job_key},
+            channels=("dashboard",),
+            now=attempted_at,
+        )
+        delays.append(next_attempt_at - attempted_at)
+
+    assert delays == [
+        timedelta(seconds=15),
+        timedelta(seconds=30),
+        timedelta(seconds=60),
+        timedelta(seconds=120),
+        timedelta(seconds=240),
+        timedelta(seconds=300),
+        timedelta(seconds=300),
+    ]
+    connection = control_plane._connection_factory()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT consecutive_failures, state FROM m1_job_circuits WHERE job_key = %s",
+                ("structure:window-a:fetch:events:0",),
+            )
+            assert cursor.fetchone() == (7, "open")
+            cursor.execute(
+                "SELECT kind FROM m1_incident_events ORDER BY occurred_at, incident_event_id"
+            )
+            assert [row[0] for row in cursor.fetchall()] == [
+                "attempt-failed",
+                "attempt-failed",
+                "circuit-opened",
+                "circuit-probe-failed",
+                "circuit-probe-failed",
+                "circuit-probe-failed",
+                "circuit-probe-failed",
+            ]
+    finally:
+        connection.close()
+
+
+def test_successful_terminal_job_closes_circuit_and_resolves_retry_incident(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    job_key = "structure:window-a:fetch:events:recovery"
+    control_plane.enqueue_job(
+        job_key=job_key,
+        job_type="structure-fetch",
+        input_identity="window-a:events:recovery:<start>",
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id="worker-failure", job_types=("structure-fetch",), lease_seconds=30, now=now
+    )
+    assert lease is not None
+    control_plane.finish_retryable_with_incident(
+        lease,
+        error_class="TimeoutError",
+        incident_key=f"incident:job-retry:{job_key}",
+        dedupe_key=f"job-retry:{job_key}",
+        component="structure-fetch",
+        summary="structure-fetch retryable failure",
+        detail={"job_key": job_key},
+        channels=("dashboard",),
+        now=now,
+    )
+    recovered = control_plane.claim_job(
+        worker_id="worker-recovery",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=15),
+    )
+    assert recovered is not None
+    control_plane.finish(recovered, state=JobState.SUCCEEDED, now=now + timedelta(seconds=16))
+    assert control_plane.record_job_recovery(
+        recovered,
+        component="structure-fetch",
+        channels=("dashboard",),
+        now=now + timedelta(seconds=16),
+    )
+
+    connection = control_plane._connection_factory()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT consecutive_failures, state, next_probe_at "
+                "FROM m1_job_circuits WHERE job_key = %s",
+                (job_key,),
+            )
+            assert cursor.fetchone() == (0, "closed", None)
+            cursor.execute("SELECT state, resolved_at IS NOT NULL FROM m1_incidents")
+            assert cursor.fetchone() == ("resolved", True)
+            cursor.execute(
+                "SELECT kind FROM m1_incident_events ORDER BY occurred_at, incident_event_id"
+            )
+            assert [row[0] for row in cursor.fetchall()] == ["attempt-failed", "recovered"]
     finally:
         connection.close()
 
@@ -1889,6 +2015,8 @@ def test_operational_snapshot_reads_fenced_work_and_alert_intent(
     assert snapshot["job_counts"] == {"leased": 1, "runnable": 3}
     assert snapshot["oldest_runnable_age_seconds"] == 0.0
     assert snapshot["expired_leases"] == 1
+    assert snapshot["open_circuit_count"] == 0
+    assert snapshot["open_circuits"] == []
     assert snapshot["quote"] == {
         "admission_job_states": {"runnable": 1},
         "oldest_retryable_admission_age_seconds": None,

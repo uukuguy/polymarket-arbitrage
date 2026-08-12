@@ -156,13 +156,18 @@ class TransactionalQuoteAdmitter:
                 batch_size=self._batch_size,
                 now=self._now(),
             )
+            self._control_plane.record_job_recovery(
+                lease,
+                component="quote-admit",
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
             return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="admitted")
         except StaleLeaseError:
             raise
         except Exception as error:
             self._control_plane.finish_retryable_with_incident(
                 lease,
-                next_attempt_at=self._now() + self._retry_delay,
                 error_class=type(error).__name__,
                 incident_key=f"incident:job-retry:{lease.job_key}",
                 dedupe_key=f"job-retry:{lease.job_key}",

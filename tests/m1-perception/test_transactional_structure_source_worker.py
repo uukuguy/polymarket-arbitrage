@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
@@ -23,6 +23,7 @@ class FakeControlPlane:
         self.recorded: dict[str, object] | None = None
         self.finished: list[JobState] = []
         self.retry_incidents: list[dict[str, object]] = []
+        self.recoveries: list[dict[str, object]] = []
 
     def claim_job(self, **kwargs: object) -> JobLease:
         assert kwargs["job_types"] == ("structure-fetch",)
@@ -51,6 +52,10 @@ class FakeControlPlane:
 
     def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
         self.retry_incidents.append(kwargs)
+
+    def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
+        self.recoveries.append(kwargs)
+        return False
 
 
 class FakeGamma:
@@ -160,6 +165,9 @@ def test_source_worker_fetches_one_event_page_uploads_then_records_receipt() -> 
     assert control_plane.recorded["next_cursor"] == "event-next"
     assert control_plane.recorded["completed"] is False
     assert control_plane.recorded["record_count"] == 1
+    assert control_plane.recoveries == [
+        {"component": "structure-fetch", "channels": ("dashboard",), "now": NOW}
+    ]
     records = [json.loads(line) for line in objects.upload["Body"].splitlines()]
     assert records[0]["kind"] == "structure-source-page"
     assert records[0]["stream"] == "events"
@@ -184,7 +192,6 @@ def test_source_worker_marks_only_current_page_retryable_when_gamma_fails() -> N
     assert control_plane.finished == []
     assert control_plane.retry_incidents == [
         {
-            "next_attempt_at": NOW + timedelta(seconds=15),
             "error_class": "TimeoutError",
             "incident_key": "incident:job-retry:source-window:one:fetch:events:0",
             "dedupe_key": "job-retry:source-window:one:fetch:events:0",

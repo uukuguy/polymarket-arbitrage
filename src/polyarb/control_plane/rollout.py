@@ -59,10 +59,10 @@ def render_rollout_artifacts(
         "expected_database": expected_database,
         "steps": [
             "preflight",
-            "revision-013-migration",
+            "revision-014-migration",
             "isolated-api-data-worker-and-alert-worker-deploy",
             "three-fresh-source-window-structure-quote-shadows",
-            "source-and-quote-admitter-worker-loss-and-api-readability",
+            "source-and-quote-admitter-worker-loss-circuit-probe-and-api-readability",
             "continuous-24-hour-soak",
             "authorized-reversible-switch",
         ],

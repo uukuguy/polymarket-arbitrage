@@ -30,17 +30,17 @@ def test_rollout_renderer_writes_three_isolated_apps_and_staged_checklist(tmp_pa
         'app = "polyarb-control-worker-staging"'
         in (tmp_path / "fly-control-worker.toml").read_text()
     )
-    assert 'app = "polyarb-control-alert-staging"' in (
-        tmp_path / "fly-control-alert.toml"
-    ).read_text()
+    assert (
+        'app = "polyarb-control-alert-staging"' in (tmp_path / "fly-control-alert.toml").read_text()
+    )
     checklist = json.loads((tmp_path / "rollout-checklist.json").read_text())
     assert checklist["expected_database"] == "control_plane_staging"
     assert checklist["steps"] == [
         "preflight",
-        "revision-013-migration",
+        "revision-014-migration",
         "isolated-api-data-worker-and-alert-worker-deploy",
         "three-fresh-source-window-structure-quote-shadows",
-        "source-and-quote-admitter-worker-loss-and-api-readability",
+        "source-and-quote-admitter-worker-loss-circuit-probe-and-api-readability",
         "continuous-24-hour-soak",
         "authorized-reversible-switch",
     ]

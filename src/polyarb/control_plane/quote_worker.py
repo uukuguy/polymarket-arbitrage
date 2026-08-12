@@ -101,13 +101,18 @@ class TransactionalQuoteBatchWorker:
                 now=self._now(),
             )
             self._control_plane.finish(lease, state=JobState.SUCCEEDED, now=self._now())
+            self._control_plane.record_job_recovery(
+                lease,
+                component="quote-batch",
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
             return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="succeeded")
         except StaleLeaseError:
             raise
         except Exception as error:
             self._control_plane.finish_retryable_with_incident(
                 lease,
-                next_attempt_at=self._now() + self._retry_delay,
                 error_class=type(error).__name__,
                 incident_key=f"incident:job-retry:{lease.job_key}",
                 dedupe_key=f"job-retry:{lease.job_key}",
@@ -142,14 +147,10 @@ class TransactionalQuoteBatchWorker:
             structure_receipt_digest=batch.structure_receipt_digest,
             universe_hash=batch.universe_hash,
             token_range_digest=batch.token_range_digest,
-            quotes=tuple(
-                {"token_id": quote.yes_token_id, **asdict(quote)} for quote in quotes
-            ),
+            quotes=tuple({"token_id": quote.yes_token_id, **asdict(quote)} for quote in quotes),
         )
         artifact = QuoteBatchArtifact.from_bytes(payload)
-        upload_quote_batch_artifact(
-            self._object_client, bucket=self._bucket, artifact=artifact
-        )
+        upload_quote_batch_artifact(self._object_client, bucket=self._bucket, artifact=artifact)
         return artifact, successful_count
 
 
@@ -187,6 +188,12 @@ class TransactionalQuoteCertifier:
             self._control_plane.certify_quote_generation(
                 lease, generation_key=generation_key, now=self._now()
             )
+            self._control_plane.record_job_recovery(
+                lease,
+                component="quote-certify",
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
             return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="certified")
         except IncompleteQuoteGenerationError:
             self._control_plane.finish(
@@ -202,7 +209,6 @@ class TransactionalQuoteCertifier:
         except Exception as error:
             self._control_plane.finish_retryable_with_incident(
                 lease,
-                next_attempt_at=self._now() + self._retry_delay,
                 error_class=type(error).__name__,
                 incident_key=f"incident:job-retry:{lease.job_key}",
                 dedupe_key=f"job-retry:{lease.job_key}",

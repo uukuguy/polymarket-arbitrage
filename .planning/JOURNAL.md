@@ -8578,3 +8578,24 @@ apply a migration until those identities are explicit.
 transactional-suite result, commit 05.6-117, then render revision-011 rollout
 artifacts only after two non-production Fly app names and one named Postgres
 database are designated.
+
+## SESSION 226 — 2026-08-12 (transactional circuit recovery)
+
+- [IMPLEMENTED] Revision 014 adds one fenced retry circuit per immutable M1
+  `job_key`. The retry transaction atomically updates job/attempt/circuit,
+  records threshold-aware incident evidence, and emits alert intent with a
+  deterministic 15/30/60/120/240/300-second schedule.
+- [IMPLEMENTED] A durable terminal success closes only its matching circuit,
+  resolves the matching retry incident, and appends recovery event/outbox
+  evidence under the terminal lease epoch. The Postgres-only snapshot exposes
+  bounded open-circuit facts.
+- [VERIFY] Focused revision-014 control-plane, worker, CLI, HTTP, rollout and
+  Alembic contracts: 78 passed; Ruff and `make docs-m1-check` passed.
+- [BOUNDARY] No cloud migration, deploy, alert delivery, shadow collection,
+  worker-loss experiment, or soak has occurred. The remaining acceptance lane
+  needs named isolated non-production API/data-worker/alert Fly apps and a
+  Postgres database.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+commit the revision-014 local circuit work, then obtain named non-production
+cloud identities before rendering rollout artifacts or collecting live evidence.

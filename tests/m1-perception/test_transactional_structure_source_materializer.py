@@ -43,6 +43,7 @@ class FakeControlPlane:
         self.pages = pages
         self.admitted: dict[str, object] | None = None
         self.retry_incidents: list[dict[str, object]] = []
+        self.recoveries: list[dict[str, object]] = []
 
     def claim_job(self, **kwargs: object) -> JobLease:
         assert kwargs["job_types"] == ("structure-materialize",)
@@ -67,6 +68,10 @@ class FakeControlPlane:
 
     def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
         self.retry_incidents.append(kwargs)
+
+    def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
+        self.recoveries.append(kwargs)
+        return False
 
 
 class MemoryR2:

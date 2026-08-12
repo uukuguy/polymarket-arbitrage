@@ -98,6 +98,12 @@ class TransactionalStructureWorker:
                 now=self._now(),
             )
             self._control_plane.finish(lease, state=JobState.SUCCEEDED, now=self._now())
+            self._control_plane.record_job_recovery(
+                lease,
+                component="structure-normalize",
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
             return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
         except (StructureBundleError, StructureWorkerError):
             self._control_plane.finish(
@@ -112,7 +118,6 @@ class TransactionalStructureWorker:
         except Exception as error:
             self._control_plane.finish_retryable_with_incident(
                 lease,
-                next_attempt_at=self._now() + self._retry_delay,
                 error_class=type(error).__name__,
                 incident_key=f"incident:job-retry:{lease.job_key}",
                 dedupe_key=f"job-retry:{lease.job_key}",
@@ -206,13 +211,18 @@ class TransactionalStructureCertifier:
                 artifact_digest=artifact.sha256,
                 now=self._now(),
             )
+            self._control_plane.record_job_recovery(
+                lease,
+                component="structure-certify",
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
             return StructureWorkerResult(job_key=lease.job_key, outcome="certified")
         except StaleLeaseError:
             raise
         except Exception as error:
             self._control_plane.finish_retryable_with_incident(
                 lease,
-                next_attempt_at=self._now() + self._retry_delay,
                 error_class=type(error).__name__,
                 incident_key=f"incident:job-retry:{lease.job_key}",
                 dedupe_key=f"job-retry:{lease.job_key}",

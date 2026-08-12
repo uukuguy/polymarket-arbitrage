@@ -633,17 +633,17 @@ supabase-migrate-test:
 	uv run alembic upgrade head && \
 	uv run alembic current
 
-## control-plane-migrate-test: Test-only 013 forward→reverse→forward roundtrip; requires POLYARB_CONTROL_PLANE_TEST_DSN and exits 77 if absent.
+## control-plane-migrate-test: Test-only 014 forward→reverse→forward roundtrip; requires POLYARB_CONTROL_PLANE_TEST_DSN and exits 77 if absent.
 control-plane-migrate-test:
-	@echo ">> control-plane-migrate-test — upgrade 013 → downgrade 012 → upgrade 013"
+	@echo ">> control-plane-migrate-test — upgrade 014 → downgrade 013 → upgrade 014"
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_CONTROL_PLANE_TEST_DSN" ]; then echo "POLYARB_CONTROL_PLANE_TEST_DSN unset — skip"; exit 77; fi; \
-	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 013 && \
-	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic downgrade 012 && \
-	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 013 && \
+	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 014 && \
+	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic downgrade 013 && \
+	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 014 && \
 	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic current
 
-## control-plane-preflight: Read-only proof of the named 013 database and configured R2 bucket. This authorizes source-window shadow work, never a migration or pointer move. Requires expected_database=.
+## control-plane-preflight: Read-only proof of the named 014 database and configured R2 bucket. This authorizes source-window shadow work, never a migration or pointer move. Requires expected_database=.
 control-plane-preflight:
 	@test -n "$(expected_database)" || (echo "usage: make control-plane-preflight expected_database=<database-name>" >&2; exit 2)
 	@set -a; [ -f .env ] && . ./.env; set +a; \

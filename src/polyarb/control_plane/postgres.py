@@ -108,7 +108,7 @@ class PostgresControlPlane:
         self._connection_factory = connection_factory
 
     def deployment_preflight(self, *, expected_database: str) -> dict[str, object]:
-        """Prove the named authority has the complete additive 013 schema.
+        """Prove the named authority has the complete additive 014 schema.
 
         This is intentionally read-only: passing it authorizes shadow-only
         operator steps, never a migration, scheduler loop, or pointer change.
@@ -117,6 +117,7 @@ class PostgresControlPlane:
             raise ValueError("expected_database must be non-empty")
         required_tables = (
             "m1_jobs",
+            "m1_job_circuits",
             "m1_job_attempts",
             "m1_checkpoint_receipts",
             "m1_quote_batch_inputs",
@@ -160,7 +161,7 @@ class PostgresControlPlane:
             )
             found = {str(row["relname"]) for row in cursor.fetchall()}
             if found != set(required_tables):
-                raise ControlPlaneError("control-plane revision 013 schema is incomplete")
+                raise ControlPlaneError("control-plane revision 014 schema is incomplete")
             cursor.execute(
                 """
                 SELECT attname FROM pg_catalog.pg_attribute
@@ -176,7 +177,7 @@ class PostgresControlPlane:
             return {
                 "database_name": str(identity["database_name"]),
                 "postgres_version": str(identity["postgres_version"]),
-                "revision_013_tables": len(found),
+                "revision_014_tables": len(found),
             }
 
     def enqueue_job(
@@ -2546,7 +2547,6 @@ class PostgresControlPlane:
         self,
         lease: JobLease,
         *,
-        next_attempt_at: datetime,
         error_class: str,
         incident_key: str,
         dedupe_key: str,
@@ -2555,10 +2555,9 @@ class PostgresControlPlane:
         detail: dict[str, object],
         channels: Sequence[str],
         now: datetime,
-    ) -> str:
-        """Fence retry state and its durable alert intent in one transaction."""
+    ) -> datetime:
+        """Fence retry, circuit state, and durable alert intent in one transaction."""
         self._validate_aware(now, "now")
-        self._validate_aware(next_attempt_at, "next_attempt_at")
         self._validate_nonempty(
             error_class=error_class,
             incident_key=incident_key,
@@ -2574,6 +2573,21 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            cursor.execute(
+                """
+                SELECT consecutive_failures, state, opened_at
+                FROM m1_job_circuits WHERE job_key = %s FOR UPDATE
+                """,
+                (lease.job_key,),
+            )
+            circuit = cursor.fetchone()
+            failures = (0 if circuit is None else int(circuit["consecutive_failures"])) + 1
+            delay_seconds = min(15 * (2 ** (failures - 1)), 300)
+            next_attempt_at = now + timedelta(seconds=delay_seconds)
+            circuit_state = "open" if failures >= 3 else "closed"
+            opened_at = (
+                now if failures == 3 else (None if circuit is None else circuit["opened_at"])
+            )
             cursor.execute(
                 """
                 UPDATE m1_jobs
@@ -2601,19 +2615,43 @@ class PostgresControlPlane:
                 """,
                 (now, error_class, lease.job_key, lease.lease_epoch),
             )
-            return self._record_incident_event(
+            cursor.execute(
+                """
+                INSERT INTO m1_job_circuits (
+                    job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (job_key) DO UPDATE
+                SET consecutive_failures = EXCLUDED.consecutive_failures,
+                    state = EXCLUDED.state, opened_at = EXCLUDED.opened_at,
+                    next_probe_at = EXCLUDED.next_probe_at, updated_at = EXCLUDED.updated_at
+                """,
+                (lease.job_key, failures, circuit_state, opened_at, next_attempt_at, now),
+            )
+            kind = (
+                "circuit-opened"
+                if failures == 3
+                else ("circuit-probe-failed" if failures > 3 else "attempt-failed")
+            )
+            self._record_incident_event(
                 cursor,
                 incident_key=incident_key,
                 dedupe_key=dedupe_key,
                 component=component,
                 severity="warning",
                 summary=summary,
-                kind="attempt-failed",
-                detail=detail,
+                kind=kind,
+                detail={
+                    **detail,
+                    "consecutive_failures": failures,
+                    "circuit_state": circuit_state,
+                    "next_probe_at": next_attempt_at.isoformat(),
+                    "retry_after_seconds": delay_seconds,
+                },
                 idempotency_key=f"job-retry:{lease.job_key}:{lease.lease_epoch}",
                 channels=channels,
                 now=now,
             )
+            return next_attempt_at
 
     def claim_alert_delivery(
         self,
@@ -2668,6 +2706,126 @@ class PostgresControlPlane:
                 lease_expires_at=expires_at,
                 attempt_number=attempt_number,
             )
+
+    def record_job_recovery(
+        self,
+        lease: JobLease,
+        *,
+        component: str,
+        channels: Sequence[str],
+        now: datetime,
+    ) -> bool:
+        """Close a failed job's circuit only after its terminal success is durable.
+
+        The prior retry and this recovery are independently committed because a
+        worker can crash between them.  The terminal job state plus lease epoch
+        fences that second transition, and the recovery event has an immutable
+        epoch key so replay stays harmless.
+        """
+        self._validate_aware(now, "now")
+        self._validate_nonempty(component=component)
+        if not channels or any(not channel.strip() for channel in channels):
+            raise ValueError("channels must contain non-empty values")
+        if len(set(channels)) != len(channels):
+            raise ValueError("channels must be unique")
+        dedupe_key = f"job-retry:{lease.job_key}"
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT state, lease_epoch FROM m1_jobs
+                WHERE job_key = %s FOR UPDATE
+                """,
+                (lease.job_key,),
+            )
+            job = cursor.fetchone()
+            if (
+                job is None
+                or str(job["state"]) != JobState.SUCCEEDED.value
+                or int(job["lease_epoch"]) != lease.lease_epoch
+            ):
+                raise StaleLeaseError(f"terminal success is no longer current for {lease.job_key}")
+            cursor.execute(
+                """
+                SELECT consecutive_failures FROM m1_job_circuits
+                WHERE job_key = %s FOR UPDATE
+                """,
+                (lease.job_key,),
+            )
+            circuit = cursor.fetchone()
+            if circuit is None or int(circuit["consecutive_failures"]) == 0:
+                return False
+            cursor.execute(
+                """
+                UPDATE m1_job_circuits
+                SET consecutive_failures = 0, state = 'closed', opened_at = NULL,
+                    next_probe_at = NULL, updated_at = %s
+                WHERE job_key = %s
+                """,
+                (now, lease.job_key),
+            )
+            cursor.execute(
+                """
+                UPDATE m1_incidents
+                SET state = 'resolved', resolved_at = %s, updated_at = %s
+                WHERE dedupe_key = %s AND state <> 'resolved'
+                RETURNING incident_key
+                """,
+                (now, now, dedupe_key),
+            )
+            incident = cursor.fetchone()
+            if incident is None:
+                return False
+            incident_key = str(incident["incident_key"])
+            idempotency_key = f"job-recovery:{lease.job_key}:{lease.lease_epoch}"
+            cursor.execute(
+                "SELECT incident_event_id FROM m1_incident_events WHERE idempotency_key = %s",
+                (idempotency_key,),
+            )
+            if cursor.fetchone() is not None:
+                return True
+            event_id = str(uuid4())
+            cursor.execute(
+                """
+                INSERT INTO m1_incident_events (
+                    incident_event_id, incident_key, kind, detail, idempotency_key, occurred_at
+                ) VALUES (%s, %s, 'recovered', %s, %s, %s)
+                """,
+                (
+                    event_id,
+                    incident_key,
+                    Jsonb(
+                        {
+                            "job_key": lease.job_key,
+                            "lease_epoch": lease.lease_epoch,
+                            "component": component,
+                        }
+                    ),
+                    idempotency_key,
+                    now,
+                ),
+            )
+            for channel in channels:
+                cursor.execute(
+                    """
+                    INSERT INTO m1_alert_outbox (
+                        outbox_id, incident_event_id, channel, payload, state,
+                        next_attempt_at, created_at
+                    ) VALUES (%s, %s, %s, %s, 'pending', %s, %s)
+                    ON CONFLICT (incident_event_id, channel) DO NOTHING
+                    """,
+                    (
+                        str(uuid4()),
+                        event_id,
+                        channel,
+                        Jsonb({"incident_key": incident_key, "kind": "recovered"}),
+                        now,
+                        now,
+                    ),
+                )
+            return True
 
     def finish_alert_delivery(
         self,
@@ -2954,6 +3112,24 @@ class PostgresControlPlane:
                 (now,),
             )
             expired = cursor.fetchone()
+            cursor.execute("SELECT count(*) AS count FROM m1_job_circuits WHERE state = 'open'")
+            open_circuit_count = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT job_key, consecutive_failures, next_probe_at
+                FROM m1_job_circuits WHERE state = 'open'
+                ORDER BY updated_at DESC, job_key DESC LIMIT %s
+                """,
+                (sample_limit,),
+            )
+            open_circuits = [
+                {
+                    "job_key": str(row["job_key"]),
+                    "consecutive_failures": int(row["consecutive_failures"]),
+                    "next_probe_at": row["next_probe_at"].isoformat(),
+                }
+                for row in cursor.fetchall()
+            ]
             cursor.execute(
                 """
                 SELECT job_key, lease_epoch, worker_id, state
@@ -3025,6 +3201,10 @@ class PostgresControlPlane:
             "job_counts": job_counts,
             "oldest_runnable_age_seconds": None if age is None else float(age),
             "expired_leases": 0 if expired is None else int(expired["count"]),
+            "open_circuit_count": (
+                0 if open_circuit_count is None else int(open_circuit_count["count"])
+            ),
+            "open_circuits": open_circuits,
             "recent_attempts": attempts,
             "open_incidents": incidents,
             "pending_alert_outbox": outbox,

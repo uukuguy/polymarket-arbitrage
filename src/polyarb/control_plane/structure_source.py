@@ -367,13 +367,18 @@ class TransactionalStructureSourceWorker:
                 record_count=record_count,
                 now=self._now(),
             )
+            self._control_plane.record_job_recovery(
+                lease,
+                component="structure-fetch",
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
             return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
         except StaleLeaseError:
             raise
         except Exception as error:
             self._control_plane.finish_retryable_with_incident(
                 lease,
-                next_attempt_at=self._now() + self._retry_delay,
                 error_class=type(error).__name__,
                 incident_key=f"incident:job-retry:{lease.job_key}",
                 dedupe_key=f"job-retry:{lease.job_key}",
@@ -505,13 +510,18 @@ class TransactionalStructureSourceMaterializer:
                 ),
                 now=self._now(),
             )
+            self._control_plane.record_job_recovery(
+                lease,
+                component="structure-materialize",
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
             return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
         except StaleLeaseError:
             raise
         except Exception as error:
             self._control_plane.finish_retryable_with_incident(
                 lease,
-                next_attempt_at=self._now() + self._retry_delay,
                 error_class=type(error).__name__,
                 incident_key=f"incident:job-retry:{lease.job_key}",
                 dedupe_key=f"job-retry:{lease.job_key}",

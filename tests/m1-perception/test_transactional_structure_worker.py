@@ -83,6 +83,7 @@ class FakeControlPlane:
         self.prior = prior
         self.finished: list[JobState] = []
         self.recorded: dict[str, object] | None = None
+        self.recoveries: list[dict[str, object]] = []
 
     def claim_job(self, **kwargs: object) -> JobLease:
         return JobLease(
@@ -109,6 +110,10 @@ class FakeControlPlane:
 
     def finish(self, lease: JobLease, *, state: JobState, **kwargs: object) -> None:
         self.finished.append(state)
+
+    def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
+        self.recoveries.append(kwargs)
+        return False
 
 
 def _spec(bundle: StructureBundleArtifact) -> StructureRangeSpec:
@@ -187,6 +192,7 @@ def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit
         def __init__(self) -> None:
             self.finished: list[JobState] = []
             self.certified: dict[str, object] | None = None
+            self.recoveries: list[dict[str, object]] = []
 
         def claim_job(self, **kwargs: object) -> JobLease:
             return JobLease(
@@ -227,6 +233,10 @@ def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit
 
         def finish(self, lease: JobLease, *, state: JobState, **kwargs: object) -> None:
             self.finished.append(state)
+
+        def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
+            self.recoveries.append(kwargs)
+            return False
 
     class ObjectClient:
         def __init__(self) -> None:
