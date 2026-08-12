@@ -58,7 +58,7 @@ def postgres_dsn() -> Iterator[str]:
             for role in ("anon", "authenticated", "service_role"):
                 connection.execute(f"CREATE ROLE {role} NOLOGIN")
         result = subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "009"],
+            ["uv", "run", "alembic", "upgrade", "010"],
             env={**os.environ, "POLYARB_SUPABASE_DB_DSN": dsn},
             capture_output=True,
             text=True,
@@ -75,6 +75,9 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
 
     with connect() as connection:
         for table in (
+            "m1_structure_source_page_receipts",
+            "m1_structure_source_page_inputs",
+            "m1_structure_source_windows",
             "m1_alert_deliveries",
             "m1_alert_outbox",
             "m1_incident_events",
@@ -240,6 +243,123 @@ def test_structure_worker_takeover_after_upload_before_receipt_has_one_receipt(
     assert objects.put_calls == 2
 
 
+def test_source_window_page_receipt_fences_cursor_and_advances_event_stream(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    admitted = control_plane.admit_structure_source_window(
+        window_key="source-window:one", now=now
+    )
+    assert len(admitted) == 1
+    assert admitted[0].stream == "events"
+    assert admitted[0].ordinal == 0
+    assert admitted[0].requested_cursor is None
+
+    first = control_plane.claim_job(
+        worker_id="source-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert first is not None
+    successor = control_plane.record_structure_source_page(
+        first,
+        artifact_key="m1/structure/source/window-one/events-0.json",
+        artifact_digest="a" * 64,
+        next_cursor="event-cursor-1",
+        completed=False,
+        record_count=100,
+        now=now,
+    )
+    assert successor is not None
+    assert successor.stream == "events"
+    assert successor.ordinal == 1
+    assert successor.requested_cursor == "event-cursor-1"
+    receipt = control_plane.structure_source_page_receipt(first.job_key)
+    assert receipt == {
+        "artifact_key": "m1/structure/source/window-one/events-0.json",
+        "artifact_digest": "a" * 64,
+        "next_cursor": "event-cursor-1",
+        "completed": False,
+        "record_count": 100,
+    }
+
+
+def test_terminal_event_page_creates_first_market_page(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.admit_structure_source_window(window_key="source-window:two", now=now)
+    event = control_plane.claim_job(
+        worker_id="source-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert event is not None
+
+    market = control_plane.record_structure_source_page(
+        event,
+        artifact_key="m1/structure/source/window-two/events-0.json",
+        artifact_digest="b" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        now=now,
+    )
+
+    assert market is not None
+    assert market.stream == "markets"
+    assert market.ordinal == 0
+    assert market.requested_cursor is None
+
+
+def test_stale_source_page_lease_cannot_advance_cursor(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.admit_structure_source_window(window_key="source-window:stale", now=now)
+    old_lease = control_plane.claim_job(
+        worker_id="source-worker-old",
+        job_types=("structure-fetch",),
+        lease_seconds=1,
+        now=now,
+    )
+    assert old_lease is not None
+    replacement = control_plane.claim_job(
+        worker_id="source-worker-new",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=2),
+    )
+    assert replacement is not None
+
+    with pytest.raises(StaleLeaseError, match="no longer current"):
+        control_plane.record_structure_source_page(
+            old_lease,
+            artifact_key="m1/structure/source/stale/events-0.json",
+            artifact_digest="c" * 64,
+            next_cursor="forbidden-cursor",
+            completed=False,
+            record_count=1,
+            now=now + timedelta(seconds=2),
+        )
+
+    assert control_plane.structure_source_page_receipt(old_lease.job_key) is None
+    control_plane.record_structure_source_page(
+        replacement,
+        artifact_key="m1/structure/source/stale/events-0.json",
+        artifact_digest="c" * 64,
+        next_cursor="replacement-cursor",
+        completed=False,
+        record_count=1,
+        now=now + timedelta(seconds=2),
+    )
+    assert control_plane.structure_source_page_spec(
+        "source-window:stale:fetch:events:1"
+    ).requested_cursor == "replacement-cursor"
+
+
 def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
     batch = QuoteBatchSpec.from_tokens(
         structure_receipt_digest="a" * 64,
@@ -253,7 +373,7 @@ def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
     assert batch.input_identity.startswith(f"quote:{'a' * 64}:{'b' * 64}:2:")
 
 
-def test_deployment_preflight_requires_named_database_and_all_009_tables(
+def test_deployment_preflight_requires_named_database_and_all_010_tables(
     control_plane: PostgresControlPlane,
 ) -> None:
     with control_plane._connection_factory() as connection:  # noqa: SLF001
@@ -261,7 +381,7 @@ def test_deployment_preflight_requires_named_database_and_all_009_tables(
     assert database_name is not None
     result = control_plane.deployment_preflight(expected_database=str(database_name[0]))
     assert result["database_name"] == database_name[0]
-    assert result["revision_009_tables"] == 14
+    assert result["revision_010_tables"] == 17
     with pytest.raises(Exception, match="database identity mismatch"):
         control_plane.deployment_preflight(expected_database="not-the-control-plane")
 

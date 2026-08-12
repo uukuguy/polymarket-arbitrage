@@ -21,6 +21,7 @@ from .models import (
     QuoteBatchSpec,
     StructureRangeReceipt,
     StructureRangeSpec,
+    StructureSourcePageSpec,
 )
 from .structure_artifact import (
     StructureBundleArtifact,
@@ -105,7 +106,7 @@ class PostgresControlPlane:
         self._connection_factory = connection_factory
 
     def deployment_preflight(self, *, expected_database: str) -> dict[str, object]:
-        """Prove the named authority has the complete additive 009 schema.
+        """Prove the named authority has the complete additive 010 schema.
 
         This is intentionally read-only: passing it authorizes shadow-only
         operator steps, never a migration, scheduler loop, or pointer change.
@@ -127,6 +128,9 @@ class PostgresControlPlane:
             "m1_incident_events",
             "m1_alert_outbox",
             "m1_alert_deliveries",
+            "m1_structure_source_windows",
+            "m1_structure_source_page_inputs",
+            "m1_structure_source_page_receipts",
         )
         with (
             self._connection_factory() as connection,
@@ -152,11 +156,11 @@ class PostgresControlPlane:
             )
             found = {str(row["relname"]) for row in cursor.fetchall()}
             if found != set(required_tables):
-                raise ControlPlaneError("control-plane revision 009 schema is incomplete")
+                raise ControlPlaneError("control-plane revision 010 schema is incomplete")
             return {
                 "database_name": str(identity["database_name"]),
                 "postgres_version": str(identity["postgres_version"]),
-                "revision_009_tables": len(found),
+                "revision_010_tables": len(found),
             }
 
     def enqueue_job(
@@ -180,6 +184,346 @@ class PostgresControlPlane:
                 input_identity=input_identity,
                 now=now,
             )
+
+    def admit_structure_source_window(
+        self,
+        *,
+        window_key: str,
+        now: datetime,
+    ) -> tuple[StructureSourcePageSpec, ...]:
+        """Create one source window and its first, restart-safe event page.
+
+        The input cursor is deliberately absent for ordinal zero.  Markets are
+        not admitted here: an event terminal receipt is the only authority
+        allowed to release the market traversal for the same source window.
+        """
+        self._validate_nonempty(window_key=window_key)
+        self._validate_aware(now, "now")
+        first = StructureSourcePageSpec(
+            window_key=window_key,
+            stream="events",
+            ordinal=0,
+            requested_cursor=None,
+        )
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                INSERT INTO m1_structure_source_windows (
+                    window_key, state, admitted_at, updated_at
+                ) VALUES (%s, 'running', %s, %s)
+                ON CONFLICT (window_key) DO NOTHING
+                """,
+                (window_key, now, now),
+            )
+            self._enqueue_structure_source_page_cursor(cursor, spec=first, now=now)
+        return (first,)
+
+    def structure_source_page_spec(self, job_key: str) -> StructureSourcePageSpec:
+        """Load an admitted source page exactly as a replacement worker sees it."""
+        self._validate_nonempty(job_key=job_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT window_key, stream, ordinal, requested_cursor
+                FROM m1_structure_source_page_inputs
+                WHERE job_key = %s
+                """,
+                (job_key,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise ControlPlaneError(f"Structure source page is unavailable for {job_key!r}")
+        return StructureSourcePageSpec(
+            window_key=str(row["window_key"]),
+            stream=str(row["stream"]),
+            ordinal=int(row["ordinal"]),
+            requested_cursor=(
+                None if row["requested_cursor"] is None else str(row["requested_cursor"])
+            ),
+        )
+
+    def structure_source_page_receipt(self, job_key: str) -> dict[str, object] | None:
+        """Return one authenticated source-page effect, never a mutable cursor view."""
+        self._validate_nonempty(job_key=job_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT artifact_key, artifact_digest, next_cursor, completed, record_count
+                FROM m1_structure_source_page_receipts
+                WHERE job_key = %s
+                """,
+                (job_key,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "artifact_key": str(row["artifact_key"]),
+            "artifact_digest": str(row["artifact_digest"]),
+            "next_cursor": (
+                None if row["next_cursor"] is None else str(row["next_cursor"])
+            ),
+            "completed": bool(row["completed"]),
+            "record_count": int(row["record_count"]),
+        }
+
+    def record_structure_source_page(
+        self,
+        lease: JobLease,
+        *,
+        artifact_key: str,
+        artifact_digest: str,
+        next_cursor: str | None,
+        completed: bool,
+        record_count: int,
+        now: datetime,
+    ) -> StructureSourcePageSpec | None:
+        """Atomically record one source page and release only its legal successor.
+
+        A process crash before this transaction leaves the original page leased
+        and reclaimable.  A crash after it leaves both receipt and successor,
+        so replay cannot skip the opaque continuation.
+        """
+        self._validate_aware(now, "now")
+        if lease.job_type != "structure-fetch":
+            raise ValueError("source page receipt requires a structure-fetch lease")
+        self._validate_nonempty(artifact_key=artifact_key)
+        if len(artifact_digest) != 64:
+            raise ValueError("artifact_digest must be a sha256 digest")
+        if isinstance(record_count, bool) or record_count < 0:
+            raise ValueError("record_count must be non-negative")
+        if completed and next_cursor is not None:
+            raise ValueError("completed source page cannot name a successor cursor")
+        if not completed and (next_cursor is None or not next_cursor):
+            raise ValueError("incomplete source page requires a successor cursor")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            spec = self._structure_source_page_spec_cursor(cursor, lease.job_key)
+            if lease.input_identity != spec.input_identity:
+                raise JobIdentityConflict("source page lease identity does not match input")
+            cursor.execute(
+                """
+                SELECT artifact_key, artifact_digest, next_cursor, completed, record_count
+                FROM m1_structure_source_page_receipts WHERE job_key = %s
+                """,
+                (lease.job_key,),
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                persisted = {
+                    "artifact_key": str(existing["artifact_key"]),
+                    "artifact_digest": str(existing["artifact_digest"]),
+                    "next_cursor": (
+                        None if existing["next_cursor"] is None else str(existing["next_cursor"])
+                    ),
+                    "completed": bool(existing["completed"]),
+                    "record_count": int(existing["record_count"]),
+                }
+                expected = {
+                    "artifact_key": artifact_key,
+                    "artifact_digest": artifact_digest,
+                    "next_cursor": next_cursor,
+                    "completed": completed,
+                    "record_count": record_count,
+                }
+                if persisted != expected:
+                    raise CheckpointConflictError(
+                        f"source page receipt conflicts for {lease.job_key!r}"
+                    )
+                return self._source_successor_spec_cursor(
+                    cursor, spec=spec, next_cursor=next_cursor, completed=completed
+                )
+            cursor.execute(
+                """
+                UPDATE m1_jobs
+                SET checkpoint_cursor = %s, checkpoint_digest = %s, state = 'succeeded',
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = %s
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s AND state = 'leased'
+                """,
+                (
+                    f"{spec.stream}:{spec.ordinal}",
+                    artifact_digest,
+                    now,
+                    lease.job_key,
+                    lease.lease_owner,
+                    lease.lease_epoch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            receipt = CheckpointReceipt(
+                receipt_id=str(uuid4()),
+                job_key=lease.job_key,
+                lease_epoch=lease.lease_epoch,
+                idempotency_key=f"structure-source-page:{lease.job_key}:{artifact_digest}",
+                checkpoint_cursor=f"{spec.stream}:{spec.ordinal}",
+                checkpoint_digest=artifact_digest,
+                committed_at=now,
+            )
+            cursor.execute(
+                """
+                INSERT INTO m1_checkpoint_receipts (
+                    receipt_id, job_key, lease_epoch, idempotency_key, checkpoint_cursor,
+                    checkpoint_digest, artifact_key, committed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    receipt.receipt_id,
+                    receipt.job_key,
+                    receipt.lease_epoch,
+                    receipt.idempotency_key,
+                    receipt.checkpoint_cursor,
+                    receipt.checkpoint_digest,
+                    artifact_key,
+                    receipt.committed_at,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO m1_structure_source_page_receipts (
+                    job_key, artifact_key, artifact_digest, next_cursor, completed,
+                    record_count, committed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    lease.job_key,
+                    artifact_key,
+                    artifact_digest,
+                    next_cursor,
+                    completed,
+                    record_count,
+                    now,
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE m1_job_attempts
+                SET state = 'succeeded', finished_at = %s
+                WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
+                """,
+                (now, lease.job_key, lease.lease_epoch),
+            )
+            successor = self._source_successor_spec_cursor(
+                cursor, spec=spec, next_cursor=next_cursor, completed=completed
+            )
+            if successor is not None:
+                self._enqueue_structure_source_page_cursor(cursor, spec=successor, now=now)
+            elif completed and spec.stream == "markets":
+                cursor.execute(
+                    """
+                    UPDATE m1_structure_source_windows
+                    SET state = 'complete', updated_at = %s
+                    WHERE window_key = %s AND state = 'events-complete'
+                    """,
+                    (now, spec.window_key),
+                )
+                if cursor.rowcount != 1:
+                    raise CheckpointConflictError("market stream completed before events stream")
+            return successor
+
+    @staticmethod
+    def _source_successor_spec_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        spec: StructureSourcePageSpec,
+        next_cursor: str | None,
+        completed: bool,
+    ) -> StructureSourcePageSpec | None:
+        if not completed:
+            assert next_cursor is not None
+            return StructureSourcePageSpec(
+                window_key=spec.window_key,
+                stream=spec.stream,
+                ordinal=spec.ordinal + 1,
+                requested_cursor=next_cursor,
+            )
+        if spec.stream == "events":
+            cursor.execute(
+                """
+                UPDATE m1_structure_source_windows
+                SET state = 'events-complete', updated_at = clock_timestamp()
+                WHERE window_key = %s AND state = 'running'
+                """,
+                (spec.window_key,),
+            )
+            if cursor.rowcount != 1:
+                raise CheckpointConflictError("event stream terminal transition is invalid")
+            return StructureSourcePageSpec(
+                window_key=spec.window_key,
+                stream="markets",
+                ordinal=0,
+                requested_cursor=None,
+            )
+        return None
+
+    def _enqueue_structure_source_page_cursor(
+        self,
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        spec: StructureSourcePageSpec,
+        now: datetime,
+    ) -> None:
+        self._enqueue_job_cursor(
+            cursor,
+            job_key=spec.job_key,
+            job_type="structure-fetch",
+            input_identity=spec.input_identity,
+            now=now,
+        )
+        cursor.execute(
+            """
+            INSERT INTO m1_structure_source_page_inputs (
+                job_key, window_key, stream, ordinal, requested_cursor, admitted_at
+            ) VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (job_key) DO NOTHING
+            """,
+            (
+                spec.job_key,
+                spec.window_key,
+                spec.stream,
+                spec.ordinal,
+                spec.requested_cursor,
+                now,
+            ),
+        )
+        persisted = self._structure_source_page_spec_cursor(cursor, spec.job_key)
+        if persisted != spec:
+            raise JobIdentityConflict(f"source page {spec.job_key!r} names another input")
+
+    @staticmethod
+    def _structure_source_page_spec_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]], job_key: str
+    ) -> StructureSourcePageSpec:
+        cursor.execute(
+            """
+            SELECT window_key, stream, ordinal, requested_cursor
+            FROM m1_structure_source_page_inputs
+            WHERE job_key = %s
+            """,
+            (job_key,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise ControlPlaneError(f"Structure source page is unavailable for {job_key!r}")
+        return StructureSourcePageSpec(
+            window_key=str(row["window_key"]),
+            stream=str(row["stream"]),
+            ordinal=int(row["ordinal"]),
+            requested_cursor=(
+                None if row["requested_cursor"] is None else str(row["requested_cursor"])
+            ),
+        )
 
     def enqueue_quote_generation(
         self,

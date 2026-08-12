@@ -20,6 +20,42 @@ class JobState(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class StructureSourcePageSpec:
+    """One immutable, bounded Gamma page owned by a source window.
+
+    ``requested_cursor`` is intentionally opaque: the control plane stores and
+    replays it verbatim, but never derives or interprets it.  The ordinal is
+    the stable durable work identity, while the cursor authenticates the exact
+    upstream continuation that this page is allowed to consume.
+    """
+
+    window_key: str
+    stream: str
+    ordinal: int
+    requested_cursor: str | None
+
+    def __post_init__(self) -> None:
+        _require_identity(self.window_key, "window_key")
+        if self.stream not in {"events", "markets"}:
+            raise ValueError("stream must be events or markets")
+        if self.ordinal < 0:
+            raise ValueError("ordinal must be non-negative")
+        if self.requested_cursor is not None and not self.requested_cursor:
+            raise ValueError("requested_cursor must be non-empty when present")
+
+    @property
+    def job_key(self) -> str:
+        return f"{self.window_key}:fetch:{self.stream}:{self.ordinal}"
+
+    @property
+    def input_identity(self) -> str:
+        return (
+            f"{self.window_key}:{self.stream}:{self.ordinal}:"
+            f"{self.requested_cursor if self.requested_cursor is not None else '<start>'}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class QuoteBatchLeg:
     """Frozen market identity needed to turn a token book into a Quote row."""
 

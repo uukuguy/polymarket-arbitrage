@@ -8262,3 +8262,30 @@ two new Fly app names, render the rollout artifacts, run the read-only named
 preflight, apply/roundtrip revision 009 there, and collect the three shadow
 and fault/soak evidence files. Do not infer those cloud identities from the
 legacy L1 configuration or mutate any cloud resource before designation.
+
+## SESSION 211 — 2026-08-12 (corrected source-authority route, in progress)
+
+- [DISCOVERED] The existing transactional Structure path only normalizes an
+  immutable bundle exported from legacy SQLite. It proves artifact/receipt
+  recovery but leaves live Gamma fetching, page cursors, and raw source truth
+  in the single-machine SQLite process. Treating the prior three-run and
+  fault/soak gates as enough for production cutover would therefore be false.
+- [PLANNED] `docs/superpowers/plans/2026-08-12-m1-transactional-structure-source.md`
+  defines the missing source-window path: fenced page fetch → authenticated
+  R2 evidence → fenced Postgres cursor receipt → sealed source window → current
+  Structure normalize/certify/Quote graph. Cloud rollout follows this work,
+  not the other way around.
+- [IN PROGRESS] Alembic 010 and `StructureSourcePageSpec` now establish the
+  additive window/page/receipt contract. The new RED→GREEN contract suite has
+  5 passing tests plus targeted Ruff. Repository fenced commits and the actual
+  Gamma worker are intentionally not yet claimed.
+- [BOUNDARY] No cloud/database/Fly/R2 resource was accessed or changed. The
+  existing legacy SQLite exporter remains shadow-only and cannot be called the
+  replacement production collector.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, continue Task 1 from
+`docs/superpowers/plans/2026-08-12-m1-transactional-structure-source.md`:
+write the real-Postgres RED case for source-window admission and fenced page
+receipt/successor creation, then implement it before building the Gamma page
+worker. Run `make planning-status` before committing; do not stage existing
+`.planning/HANDOFF.json` or `.superpowers/sdd/*` user changes.
