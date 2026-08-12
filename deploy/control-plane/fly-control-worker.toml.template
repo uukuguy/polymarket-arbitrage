@@ -1,0 +1,15 @@
+# Render with an explicitly designated Fly app name; this template is never
+# deployed directly. This app receives transactional-writer Postgres and R2
+# secrets, but has no public HTTP service and no persistent volume.
+app = "__CONTROL_PLANE_WORKER_APP__"
+primary_region = "ams"
+
+[build]
+
+[processes]
+worker = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane --max-turns 4 --interval-seconds 15 --json"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "512mb"
+processes = ["worker"]
