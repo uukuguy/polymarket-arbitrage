@@ -7939,3 +7939,30 @@ parity check: download each receipt artifact plus the admitted bundle, verify
 headers/digests/ranges, reassemble every component canonically, and require
 exact source-bundle equality before manifest certification. Only after that
 may work begin on the separate shadow-pointer authorization gate.
+
+## SESSION 198 — 2026-08-12 (Structure full content parity and shadow gate)
+
+- [COMMITTED] `d9c1d36` (`05.6-96`) adds authenticated Structure range
+  parsing plus certifier content parity. The certifier now re-reads the sealed
+  R2 bundle and every receipt R2 artifact, validates all digest/header/range
+  bindings, and canonical-reassembles every component; no manifest PUT occurs
+  if reconstructed bytes differ from the legacy sealed bundle.
+- [COMMITTED] `abbbe4e` (`05.6-97`) adds the isolated
+  `structure:current:shadow` persistence gate. Only a matching certified
+  Structure manifest can move it; the predecessor is retained for reversal;
+  legacy `structure:current` remains untouched.
+- [VERIFY] Full artifact/worker/real PostgreSQL/CLI/migration focused suite:
+  40 passed, Ruff and planning-status clean. A valid-looking row-dropping
+  range artifact is refused before manifest upload, and uncertified shadow
+  publication is refused.
+- [BOUNDARY] This is still repository capability, not production action.
+  No production migration/R2 write/pointer change/schedule/soak occurred.
+  Explicit operator authorization, control-plane observability, bounded
+  stable-key slicing, schedule deployment and chaos/soak acceptance remain.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then implement separately default-off `structure-shadow-publish` operator
+control: require explicit enable plus the exact certified generation key,
+surface old/new shadow pointer identities and reject all legacy-pointer paths.
+Add bounded control-plane status projection for Structure jobs/manifests before
+any cloud action. Then implement stable-key slicing for admission.
