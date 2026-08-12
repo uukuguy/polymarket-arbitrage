@@ -313,8 +313,14 @@ class PostgresControlPlane:
         ):
             cursor.execute(
                 """
-                SELECT receipt_id, checkpoint_cursor, checkpoint_digest, lease_epoch, committed_at
-                FROM m1_checkpoint_receipts WHERE idempotency_key = %s
+                SELECT checkpoint.receipt_id, checkpoint.checkpoint_cursor,
+                       checkpoint.checkpoint_digest, checkpoint.lease_epoch,
+                       checkpoint.committed_at, batch.artifact_key,
+                       batch.artifact_digest, batch.successful_response_count
+                FROM m1_checkpoint_receipts AS checkpoint
+                LEFT JOIN m1_quote_batch_receipts AS batch
+                    ON batch.job_key = checkpoint.job_key
+                WHERE checkpoint.idempotency_key = %s
                 """,
                 (idempotency_key,),
             )
@@ -323,7 +329,9 @@ class PostgresControlPlane:
                 if (
                     str(existing["checkpoint_cursor"]) != ordinal
                     or str(existing["checkpoint_digest"]) != quote_digest
-                    or int(existing["lease_epoch"]) != lease.lease_epoch
+                    or str(existing["artifact_key"]) != artifact_key
+                    or str(existing["artifact_digest"]) != artifact_digest
+                    or int(existing["successful_response_count"]) != successful_response_count
                 ):
                     raise CheckpointConflictError(
                         f"idempotency conflict for {idempotency_key!r}"
@@ -331,7 +339,7 @@ class PostgresControlPlane:
                 return CheckpointReceipt(
                     receipt_id=str(existing["receipt_id"]),
                     job_key=lease.job_key,
-                    lease_epoch=lease.lease_epoch,
+                    lease_epoch=int(existing["lease_epoch"]),
                     idempotency_key=idempotency_key,
                     checkpoint_cursor=ordinal,
                     checkpoint_digest=quote_digest,
