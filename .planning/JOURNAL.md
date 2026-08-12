@@ -7791,3 +7791,30 @@ complete M1 recovery.
 [NEXT] In `.worktrees/m1-self-healing-structure`, continue from
 `make planning-status`, then add the default-off `quote-control-plane-once`
 operator route and its tests before attempting any cloud action.
+
+## SESSION 192 — 2026-08-12 (transactional Quote operation boundary)
+
+- [COMMITTED] `8479139` (`05.6-83`) adds `make quote-control-plane-once
+  enable=1`: it refuses before connecting without explicit acknowledgement,
+  then runs at most one batch and one certification turn. The command is still
+  unscheduled and not a pointer-cutover authorization.
+- [OBSERVABILITY] `/perception/control-plane` now exposes a Postgres-only
+  `quote` projection: batch/certifier states, retry age, and authenticated
+  current pointer identity. It still returns typed unavailable rather than
+  falling back to SQLite.
+- [TEACHING] Added `docs/learning/63-事务型Quote云端控制面.md`, including the
+  key recovery rule: receipt-before-finish means a replacement worker verifies
+  and completes rather than refetches.
+- [VERIFY] 26 focused CLI/HTTP/worker/migration/PostgreSQL tests, Ruff, and
+  `make docs-m1-check` pass; planning-status remains zero drift.
+- [CRITICAL GAP] Structure has only SQLite-source shadow projection today;
+  unlike Quote it is not yet a transactional worker chain. Do not claim M1
+  complete. Next design/implementation slice must create frozen Structure
+  inputs, immutable artifacts, fenced receipts, and terminal shadow comparison
+  while keeping the legacy Structure pointer authoritative.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then inspect the transactional-cloud-control-plane design and Structure
+publication contract before writing the Structure transaction model. Do not
+collapse the existing multi-stage Structure evidence into a token-only batch
+analogue.
