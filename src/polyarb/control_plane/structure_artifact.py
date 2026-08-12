@@ -118,6 +118,45 @@ def structure_bundle_artifact_key(sha256: str) -> str:
     return f"structure-bundles/{sha256}/generation.ndjson"
 
 
+def parse_structure_bundle_bytes(
+    payload: bytes,
+    *,
+    expected_sha256: str,
+) -> tuple[StructureBundleIdentity, dict[str, tuple[dict[str, object], ...]]]:
+    """Authenticate and decode a canonical bundle before a worker uses any row."""
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise StructureBundleError("structure-bundle-digest-mismatch")
+    try:
+        lines = [json.loads(line) for line in payload.splitlines()]
+        header = lines[0]
+        if not isinstance(header, dict) or header.pop("kind", None) != "structure-bundle":
+            raise ValueError("header")
+        identity = StructureBundleIdentity(
+            publication_id=str(header["publication_id"]),
+            window_id=str(header["window_id"]),
+            snapshot_id=int(header["snapshot_id"]),
+            comparison_receipt_digest=str(header["comparison_receipt_digest"]),
+            normalization_contract_version=str(header["normalization_contract_version"]),
+            component_counts=header["component_counts"],
+        )
+        components: dict[str, list[dict[str, object]]] = {
+            component: [] for component in _COMPONENTS
+        }
+        for record in lines[1:]:
+            if not isinstance(record, dict):
+                raise ValueError("record")
+            component, row = record.get("component"), record.get("row")
+            if component not in components or not isinstance(row, dict):
+                raise ValueError("record")
+            components[component].append(row)
+        frozen = {component: tuple(rows) for component, rows in components.items()}
+        if canonical_structure_bundle_bytes(identity=identity, components=frozen) != payload:
+            raise ValueError("noncanonical")
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise StructureBundleError("structure-bundle-malformed") from error
+    return identity, frozen
+
+
 def upload_structure_bundle_artifact(
     client: _ObjectClient,
     *,

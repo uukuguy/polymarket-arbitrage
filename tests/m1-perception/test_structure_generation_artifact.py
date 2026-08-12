@@ -11,6 +11,7 @@ from polyarb.control_plane.structure_artifact import (
     StructureBundleError,
     StructureBundleIdentity,
     canonical_structure_bundle_bytes,
+    parse_structure_bundle_bytes,
     structure_bundle_artifact_key,
     upload_structure_bundle_artifact,
 )
@@ -70,6 +71,28 @@ def test_structure_bundle_refuses_component_count_or_duplicate_record_mismatch()
     }
     with pytest.raises(ValueError, match="duplicate"):
         canonical_structure_bundle_bytes(identity=_identity(), components=components)
+
+
+def test_structure_bundle_parse_authenticates_digest_and_recovers_components() -> None:
+    payload = canonical_structure_bundle_bytes(
+        identity=_identity(),
+        components={
+            "events": ({"id": "event-a"}, {"id": "event-b"}),
+            "event_tags": (),
+            "memberships": (),
+            "group_truth": (),
+            "markets": ({"market_id": "market-a"},),
+            "issues": (),
+        },
+    )
+    identity, components = parse_structure_bundle_bytes(
+        payload, expected_sha256=sha256(payload).hexdigest()
+    )
+
+    assert identity == _identity()
+    assert components["events"] == ({"id": "event-a"}, {"id": "event-b"})
+    with pytest.raises(StructureBundleError, match="digest-mismatch"):
+        parse_structure_bundle_bytes(payload, expected_sha256="b" * 64)
 
 
 def test_structure_bundle_upload_requires_head_identity() -> None:
