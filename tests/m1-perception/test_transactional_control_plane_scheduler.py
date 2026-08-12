@@ -26,6 +26,7 @@ class _SyncWorker:
 
 
 def test_bounded_tick_runs_only_configured_number_of_turns() -> None:
+    admitter = _AsyncWorker("structure-source-admit")
     source = _AsyncWorker("structure-source")
     materializer = _AsyncWorker("structure-source-materialize")
     structure = _AsyncWorker("structure-range")
@@ -33,6 +34,7 @@ def test_bounded_tick_runs_only_configured_number_of_turns() -> None:
     structure_certifier = _SyncWorker("structure-certify")
     quote_certifier = _SyncWorker("quote-certify")
     scheduler = TransactionalControlPlaneScheduler(
+        structure_source_admitter=admitter,
         structure_source_worker=source,
         structure_source_materializer=materializer,
         structure_worker=structure,
@@ -47,34 +49,41 @@ def test_bounded_tick_runs_only_configured_number_of_turns() -> None:
     assert result == {
         "status": "ok",
         "turns": [
-            {"worker": "structure-source", "job_key": "structure-source", "outcome": "succeeded"},
             {
-                "worker": "structure-source-materialize",
-                "job_key": "structure-source-materialize",
+                "worker": "structure-source-admit",
+                "job_key": "structure-source-admit",
                 "outcome": "succeeded",
             },
+            {"worker": "structure-source", "job_key": "structure-source", "outcome": "succeeded"},
         ],
     }
     assert (
+        admitter.calls,
         source.calls,
         materializer.calls,
         structure.calls,
         structure_certifier.calls,
         quote.calls,
         quote_certifier.calls,
-    ) == (1, 1, 0, 0, 0, 0)
+    ) == (1, 1, 0, 0, 0, 0, 0)
     assert asyncio.run(scheduler.run_tick())["turns"] == [
+        {
+            "worker": "structure-source-materialize",
+            "job_key": "structure-source-materialize",
+            "outcome": "succeeded",
+        },
         {"worker": "structure-range", "job_key": "structure-range", "outcome": "succeeded"},
-        {"worker": "structure-certify", "job_key": "structure-certify", "outcome": "certified"},
     ]
 
 
 def test_scheduler_service_emits_tick_then_stops_without_sleeping() -> None:
+    admitter = _AsyncWorker("structure-source-admit")
     source = _AsyncWorker("structure-source")
     structure = _AsyncWorker("structure-range")
     stop_event = asyncio.Event()
     outcomes: list[dict[str, object]] = []
     scheduler = TransactionalControlPlaneScheduler(
+        structure_source_admitter=admitter,
         structure_source_worker=source,
         structure_source_materializer=_AsyncWorker("structure-source-materialize"),
         structure_worker=structure,
@@ -96,8 +105,8 @@ def test_scheduler_service_emits_tick_then_stops_without_sleeping() -> None:
             "status": "ok",
             "turns": [
                 {
-                    "worker": "structure-source",
-                    "job_key": "structure-source",
+                    "worker": "structure-source-admit",
+                    "job_key": "structure-source-admit",
                     "outcome": "succeeded",
                 }
             ],

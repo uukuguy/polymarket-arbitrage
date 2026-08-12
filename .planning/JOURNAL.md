@@ -8423,3 +8423,25 @@ Then, after the user designates two new non-production Fly apps and one named
 Postgres database, run only `make control-plane-render-rollout` followed by the
 read-only named preflight. Do not infer identities from the legacy L1 app or
 apply a migration until those identities are explicit.
+
+## SESSION 218 — 2026-08-12 (continuous source-window admission)
+
+- [DISCOVERED] An explicit source-window command plus a drain-only scheduler
+  is resumable but not continuous online collection; it still depends on an
+  operator creating every new Gamma traversal.
+- [IMPLEMENTED] A cadence admitter now runs before source fetches. Postgres
+  advisory transaction locking plus a deterministic 300-second bucket makes
+  admission idempotent across worker machines/restarts. An unfinished running
+  or events-complete window blocks all later buckets, so source scans cannot
+  overlap.
+- [VERIFY] The real-Postgres bucket/overlap contract and scheduler/source
+  contracts pass; the full focused M1 transactional regression is running as
+  the final commit gate. No cloud resource was contacted.
+- [BOUNDARY] The 300-second cadence is an implementation default, not a cloud
+  performance claim. It still needs named-environment shadow/soak evidence and
+  deliberate operational tuning.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, await/record the focused
+transactional-suite result, commit 05.6-117, then render revision-011 rollout
+artifacts only after two non-production Fly app names and one named Postgres
+database are designated.

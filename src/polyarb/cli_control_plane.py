@@ -37,6 +37,7 @@ from polyarb.control_plane.structure_shadow import (
     read_legacy_structure_bundle,
 )
 from polyarb.control_plane.structure_source import (
+    TransactionalStructureSourceAdmitter,
     TransactionalStructureSourceMaterializer,
     TransactionalStructureSourceWorker,
 )
@@ -252,6 +253,17 @@ def _transactional_structure_source_materializer(
     )
 
 
+def _transactional_structure_source_admitter(
+    control_plane: PostgresControlPlane,
+) -> TransactionalStructureSourceAdmitter:
+    """Open cadence windows only inside the transactional worker service."""
+    return TransactionalStructureSourceAdmitter(
+        control_plane=control_plane,
+        cadence_seconds=300,
+        now=lambda: datetime.now(UTC),
+    )
+
+
 def _transactional_scheduler(
     control_plane: PostgresControlPlane,
     *,
@@ -263,6 +275,7 @@ def _transactional_scheduler(
     )
     object_client, bucket = _structure_object_client()
     return TransactionalControlPlaneScheduler(
+        structure_source_admitter=_transactional_structure_source_admitter(control_plane),
         structure_source_worker=_transactional_structure_source_worker(
             control_plane, worker_id=f"{worker_id}:structure-source"
         ),

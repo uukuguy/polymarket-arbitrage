@@ -223,6 +223,65 @@ class PostgresControlPlane:
             self._enqueue_structure_source_page_cursor(cursor, spec=first, now=now)
         return (first,)
 
+    def admit_due_structure_source_window(
+        self,
+        *,
+        cadence_seconds: int,
+        now: datetime,
+    ) -> StructureSourcePageSpec | None:
+        """Admit one deterministic current window unless a source traversal is active.
+
+        The advisory transaction lock gives every replaceable scheduler process
+        the same admission boundary. A time bucket is the durable idempotency
+        key: restarts cannot create another collection in the same cadence.
+        """
+        if isinstance(cadence_seconds, bool) or cadence_seconds <= 0:
+            raise ValueError("cadence_seconds must be positive")
+        self._validate_aware(now, "now")
+        bucket = int(now.timestamp()) // cadence_seconds
+        window_key = f"structure-source:{cadence_seconds}:{bucket}"
+        first = StructureSourcePageSpec(
+            window_key=window_key,
+            stream="events",
+            ordinal=0,
+            requested_cursor=None,
+        )
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                ("m1:structure-source-window-admission",),
+            )
+            cursor.execute(
+                """
+                SELECT window_key FROM m1_structure_source_windows
+                WHERE state IN ('running', 'events-complete')
+                ORDER BY admitted_at
+                LIMIT 1
+                FOR UPDATE
+                """
+            )
+            if cursor.fetchone() is not None:
+                return None
+            cursor.execute(
+                "SELECT window_key FROM m1_structure_source_windows WHERE window_key = %s",
+                (window_key,),
+            )
+            if cursor.fetchone() is not None:
+                return None
+            cursor.execute(
+                """
+                INSERT INTO m1_structure_source_windows (
+                    window_key, state, admitted_at, updated_at
+                ) VALUES (%s, 'running', %s, %s)
+                """,
+                (window_key, now, now),
+            )
+            self._enqueue_structure_source_page_cursor(cursor, spec=first, now=now)
+        return first
+
     def structure_source_page_spec(self, job_key: str) -> StructureSourcePageSpec:
         """Load an admitted source page exactly as a replacement worker sees it."""
         self._validate_nonempty(job_key=job_key)
@@ -271,9 +330,7 @@ class PostgresControlPlane:
         return {
             "artifact_key": str(row["artifact_key"]),
             "artifact_digest": str(row["artifact_digest"]),
-            "next_cursor": (
-                None if row["next_cursor"] is None else str(row["next_cursor"])
-            ),
+            "next_cursor": (None if row["next_cursor"] is None else str(row["next_cursor"])),
             "completed": bool(row["completed"]),
             "record_count": int(row["record_count"]),
         }
@@ -341,9 +398,7 @@ class PostgresControlPlane:
                     stream=str(row["stream"]),
                     ordinal=int(row["ordinal"]),
                     requested_cursor=(
-                        None
-                        if row["requested_cursor"] is None
-                        else str(row["requested_cursor"])
+                        None if row["requested_cursor"] is None else str(row["requested_cursor"])
                     ),
                 ),
                 str(row["artifact_key"]),
@@ -940,9 +995,16 @@ class PostgresControlPlane:
                     ON CONFLICT (job_key) DO NOTHING
                     """,
                     (
-                        spec.job_key, generation_key, spec.bundle_key, spec.bundle_digest,
-                        spec.component, spec.ordinal, spec.range_start, spec.range_end,
-                        spec.range_digest, now,
+                        spec.job_key,
+                        generation_key,
+                        spec.bundle_key,
+                        spec.bundle_digest,
+                        spec.component,
+                        spec.ordinal,
+                        spec.range_start,
+                        spec.range_end,
+                        spec.range_digest,
+                        now,
                     ),
                 )
             self._enqueue_job_cursor(
@@ -1345,9 +1407,7 @@ class PostgresControlPlane:
                     or str(existing["artifact_digest"]) != artifact_digest
                     or int(existing["successful_response_count"]) != successful_response_count
                 ):
-                    raise CheckpointConflictError(
-                        f"idempotency conflict for {idempotency_key!r}"
-                    )
+                    raise CheckpointConflictError(f"idempotency conflict for {idempotency_key!r}")
                 return CheckpointReceipt(
                     receipt_id=str(existing["receipt_id"]),
                     job_key=lease.job_key,
@@ -1487,9 +1547,7 @@ class PostgresControlPlane:
                     or str(existing["artifact_digest"]) != artifact_digest
                     or int(existing["record_count"]) != record_count
                 ):
-                    raise CheckpointConflictError(
-                        f"idempotency conflict for {idempotency_key!r}"
-                    )
+                    raise CheckpointConflictError(f"idempotency conflict for {idempotency_key!r}")
                 return CheckpointReceipt(
                     receipt_id=str(existing["receipt_id"]),
                     job_key=lease.job_key,
@@ -2322,23 +2380,15 @@ class PostgresControlPlane:
         ):
             cursor.execute("SET TRANSACTION READ ONLY")
             cursor.execute("SET LOCAL statement_timeout = '5000ms'")
-            cursor.execute(
-                "SELECT state, count(*) AS count FROM m1_jobs GROUP BY state"
-            )
-            job_counts = {
-                str(row["state"]): int(row["count"])
-                for row in cursor.fetchall()
-            }
+            cursor.execute("SELECT state, count(*) AS count FROM m1_jobs GROUP BY state")
+            job_counts = {str(row["state"]): int(row["count"]) for row in cursor.fetchall()}
             cursor.execute(
                 """
                 SELECT state, count(*) AS count
                 FROM m1_jobs WHERE job_type = 'quote-batch' GROUP BY state
                 """
             )
-            quote_batch_states = {
-                str(row["state"]): int(row["count"])
-                for row in cursor.fetchall()
-            }
+            quote_batch_states = {str(row["state"]): int(row["count"]) for row in cursor.fetchall()}
             cursor.execute(
                 """
                 SELECT state, count(*) AS count
@@ -2346,8 +2396,7 @@ class PostgresControlPlane:
                 """
             )
             quote_certifier_states = {
-                str(row["state"]): int(row["count"])
-                for row in cursor.fetchall()
+                str(row["state"]): int(row["count"]) for row in cursor.fetchall()
             }
             cursor.execute(
                 """
@@ -2376,8 +2425,7 @@ class PostgresControlPlane:
                 """
             )
             structure_range_states = {
-                str(row["state"]): int(row["count"])
-                for row in cursor.fetchall()
+                str(row["state"]): int(row["count"]) for row in cursor.fetchall()
             }
             cursor.execute(
                 """
@@ -2386,8 +2434,7 @@ class PostgresControlPlane:
                 """
             )
             structure_certifier_states = {
-                str(row["state"]): int(row["count"])
-                for row in cursor.fetchall()
+                str(row["state"]): int(row["count"]) for row in cursor.fetchall()
             }
             cursor.execute(
                 """
@@ -2564,6 +2611,7 @@ class PostgresControlPlane:
             checkpoint_digest=row["checkpoint_digest"],
             committed_at=row["committed_at"],
         )
+
     @staticmethod
     def _validate_nonempty(**values: str) -> None:
         for field, value in values.items():

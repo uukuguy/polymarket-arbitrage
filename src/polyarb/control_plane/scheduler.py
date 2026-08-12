@@ -18,6 +18,7 @@ class TransactionalControlPlaneScheduler:
     def __init__(
         self,
         *,
+        structure_source_admitter: _Worker,
         structure_source_worker: _Worker,
         structure_source_materializer: _Worker,
         structure_worker: _Worker,
@@ -29,6 +30,7 @@ class TransactionalControlPlaneScheduler:
         if max_turns <= 0:
             raise ValueError("max_turns must be positive")
         self._workers = (
+            ("structure-source-admit", structure_source_admitter),
             ("structure-source", structure_source_worker),
             ("structure-source-materialize", structure_source_materializer),
             ("structure-range", structure_worker),

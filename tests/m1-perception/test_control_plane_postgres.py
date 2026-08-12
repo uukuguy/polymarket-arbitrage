@@ -258,9 +258,7 @@ def test_source_window_page_receipt_fences_cursor_and_advances_event_stream(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
-    admitted = control_plane.admit_structure_source_window(
-        window_key="source-window:one", now=now
-    )
+    admitted = control_plane.admit_structure_source_window(window_key="source-window:one", now=now)
     assert len(admitted) == 1
     assert admitted[0].stream == "events"
     assert admitted[0].ordinal == 0
@@ -294,6 +292,29 @@ def test_source_window_page_receipt_fences_cursor_and_advances_event_stream(
         "completed": False,
         "record_count": 100,
     }
+
+
+def test_due_source_window_admission_is_bucket_idempotent_and_never_overlaps(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    first = control_plane.admit_due_structure_source_window(cadence_seconds=300, now=now)
+    assert first is not None
+    assert first.window_key == "structure-source:300:6311664"
+    assert first.stream == "events"
+    assert (
+        control_plane.admit_due_structure_source_window(
+            cadence_seconds=300, now=now + timedelta(seconds=1)
+        )
+        is None
+    )
+    # Even a later cadence bucket cannot overlap the unfinished traversal.
+    assert (
+        control_plane.admit_due_structure_source_window(
+            cadence_seconds=300, now=now + timedelta(seconds=301)
+        )
+        is None
+    )
 
 
 def test_terminal_event_page_creates_first_market_page(
@@ -647,9 +668,12 @@ def test_stale_source_page_lease_cannot_advance_cursor(
         record_count=1,
         now=now + timedelta(seconds=2),
     )
-    assert control_plane.structure_source_page_spec(
-        "source-window:stale:fetch:events:1"
-    ).requested_cursor == "replacement-cursor"
+    assert (
+        control_plane.structure_source_page_spec(
+            "source-window:stale:fetch:events:1"
+        ).requested_cursor
+        == "replacement-cursor"
+    )
 
 
 def test_source_worker_takeover_after_upload_before_receipt_has_one_page_receipt(
@@ -807,6 +831,8 @@ def test_enqueue_quote_generation_is_deterministic(control_plane: PostgresContro
             ]
     finally:
         connection.close()
+
+
 def test_quote_batch_input_survives_admission_for_worker_takeover(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -870,14 +896,17 @@ def test_structure_range_receipt_is_fenced_and_idempotent(
     assert persisted is not None
     assert persisted.artifact_digest == "c" * 64
     assert persisted.record_count == 3
-    assert control_plane.record_structure_range(
-        lease,
-        range_digest=spec.range_digest,
-        artifact_key="structure-ranges/c/rows.ndjson",
-        artifact_digest="c" * 64,
-        record_count=3,
-        now=now + timedelta(seconds=1),
-    ) == receipt
+    assert (
+        control_plane.record_structure_range(
+            lease,
+            range_digest=spec.range_digest,
+            artifact_key="structure-ranges/c/rows.ndjson",
+            artifact_digest="c" * 64,
+            record_count=3,
+            now=now + timedelta(seconds=1),
+        )
+        == receipt
+    )
     replacement = control_plane.claim_job(
         worker_id="structure-b",
         job_types=("structure-normalize",),
@@ -976,13 +1005,16 @@ def test_structure_certification_requires_complete_matching_range_receipts(
             ),
         )
     ).hexdigest()
-    assert control_plane.certify_structure_generation(
-        certifier,
-        generation_key=specs[0].generation_key,
-        artifact_key=f"structure-manifests/{expected_manifest}/manifest.ndjson",
-        artifact_digest=expected_manifest,
-        now=now,
-    ) == expected_manifest
+    assert (
+        control_plane.certify_structure_generation(
+            certifier,
+            generation_key=specs[0].generation_key,
+            artifact_key=f"structure-manifests/{expected_manifest}/manifest.ndjson",
+            artifact_digest=expected_manifest,
+            now=now,
+        )
+        == expected_manifest
+    )
 
 
 def test_structure_certification_refuses_component_count_parity_mismatch(
@@ -1133,16 +1165,19 @@ def test_quote_batch_receipt_is_fenced_and_idempotent(control_plane: PostgresCon
         quoted_at=now,
         now=now,
     )
-    assert control_plane.record_quote_batch(
-        lease,
-        token_range_digest=batch.token_range_digest,
-        quote_digest="c" * 64,
-        artifact_key="quote-batches/c/batch.ndjson",
-        artifact_digest="c" * 64,
-        successful_response_count=1,
-        quoted_at=now,
-        now=now + timedelta(seconds=1),
-    ) == first
+    assert (
+        control_plane.record_quote_batch(
+            lease,
+            token_range_digest=batch.token_range_digest,
+            quote_digest="c" * 64,
+            artifact_key="quote-batches/c/batch.ndjson",
+            artifact_digest="c" * 64,
+            successful_response_count=1,
+            quoted_at=now,
+            now=now + timedelta(seconds=1),
+        )
+        == first
+    )
     replacement = control_plane.claim_job(
         worker_id="worker-b",
         job_types=("quote-batch",),
@@ -1197,16 +1232,19 @@ def test_replacement_lease_can_finish_an_already_recorded_quote_batch(
     )
     assert replacement is not None
     assert replacement.lease_epoch == 2
-    assert control_plane.record_quote_batch(
-        replacement,
-        token_range_digest=batch.token_range_digest,
-        quote_digest="c" * 64,
-        artifact_key="quote-batches/c/batch.ndjson",
-        artifact_digest="c" * 64,
-        successful_response_count=1,
-        quoted_at=now,
-        now=now + timedelta(seconds=2),
-    ) == receipt
+    assert (
+        control_plane.record_quote_batch(
+            replacement,
+            token_range_digest=batch.token_range_digest,
+            quote_digest="c" * 64,
+            artifact_key="quote-batches/c/batch.ndjson",
+            artifact_digest="c" * 64,
+            successful_response_count=1,
+            quoted_at=now,
+            now=now + timedelta(seconds=2),
+        )
+        == receipt
+    )
     control_plane.finish(replacement, state=JobState.SUCCEEDED, now=now + timedelta(seconds=3))
     prior = control_plane.quote_batch_receipt(batch.job_key)
     assert prior is not None

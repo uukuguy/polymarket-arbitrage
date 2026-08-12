@@ -408,6 +408,31 @@ class TransactionalStructureSourceWorker:
         return artifact, page.next_cursor, page.completed, len(records)
 
 
+class TransactionalStructureSourceAdmitter:
+    """Durably open one cadence bucket; never inspects local state or Gamma."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        cadence_seconds: int,
+        now: Callable[[], datetime],
+    ) -> None:
+        if isinstance(cadence_seconds, bool) or cadence_seconds <= 0:
+            raise ValueError("cadence_seconds must be positive")
+        self._control_plane = control_plane
+        self._cadence_seconds = cadence_seconds
+        self._now = now
+
+    async def run_once(self) -> StructureWorkerResult:
+        spec = self._control_plane.admit_due_structure_source_window(
+            cadence_seconds=self._cadence_seconds, now=self._now()
+        )
+        if spec is None:
+            return StructureWorkerResult(job_key=None, outcome="idle")
+        return StructureWorkerResult(job_key=spec.job_key, outcome="admitted")
+
+
 def _canonical_json(value: Mapping[str, object]) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 

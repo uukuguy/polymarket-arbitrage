@@ -8,7 +8,11 @@ import pytest
 
 from polyarb.clients.gamma_client import EventPage, MarketPage
 from polyarb.control_plane.models import JobLease, JobState, StructureSourcePageSpec
-from polyarb.control_plane.structure_source import TransactionalStructureSourceWorker
+from polyarb.control_plane.structure_source import (
+    TransactionalStructureSourceAdmitter,
+    TransactionalStructureSourceWorker,
+)
+from polyarb.control_plane.structure_worker import StructureWorkerResult
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
@@ -99,6 +103,33 @@ def _event_spec() -> StructureSourcePageSpec:
         ordinal=0,
         requested_cursor=None,
     )
+
+
+def test_source_admitter_creates_one_current_window_and_never_overlaps() -> None:
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, datetime]] = []
+
+        def admit_due_structure_source_window(self, *, cadence_seconds: int, now: datetime):
+            self.calls.append((cadence_seconds, now))
+            if len(self.calls) == 1:
+                return StructureSourcePageSpec(
+                    window_key="structure-source:123",
+                    stream="events",
+                    ordinal=0,
+                    requested_cursor=None,
+                )
+            return None
+
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    worker = TransactionalStructureSourceAdmitter(
+        control_plane=ControlPlane(), cadence_seconds=300, now=lambda: now
+    )
+
+    assert asyncio.run(worker.run_once()) == StructureWorkerResult(
+        job_key="structure-source:123:fetch:events:0", outcome="admitted"
+    )
+    assert asyncio.run(worker.run_once()) == StructureWorkerResult(job_key=None, outcome="idle")
 
 
 def test_source_worker_fetches_one_event_page_uploads_then_records_receipt() -> None:
