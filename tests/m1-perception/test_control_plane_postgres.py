@@ -10,9 +10,10 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 import pytest
 
-from polyarb.control_plane.models import JobState
+from polyarb.control_plane.models import JobState, QuoteBatchSpec
 from polyarb.control_plane.postgres import (
     CheckpointConflictError,
+    IncompleteQuoteGenerationError,
     PostgresControlPlane,
     StaleLeaseError,
 )
@@ -66,6 +67,7 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
             "m1_incidents",
             "m1_publication_pointers",
             "m1_generation_manifests",
+            "m1_quote_batch_receipts",
             "m1_checkpoint_receipts",
             "m1_job_attempts",
             "m1_jobs",
@@ -76,6 +78,206 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
 
 def _now() -> datetime:
     return datetime(2030, 1, 1, 12, tzinfo=UTC)
+
+
+def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
+    batch = QuoteBatchSpec.from_tokens(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        ordinal=2,
+        token_ids=("token-c", "token-a", "token-b", "token-a"),
+    )
+
+    assert batch.token_ids == ("token-a", "token-b", "token-c")
+    assert batch.job_key == f"quote:{'a' * 64}:batch:2"
+    assert batch.input_identity.startswith(f"quote:{'a' * 64}:{'b' * 64}:2:")
+
+
+def test_enqueue_quote_generation_is_deterministic(control_plane: PostgresControlPlane) -> None:
+    now = _now()
+    first = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        token_ids=("token-3", "token-1", "token-2", "token-1"),
+        batch_size=2,
+        now=now,
+    )
+    second = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        token_ids=("token-2", "token-3", "token-1"),
+        batch_size=2,
+        now=now,
+    )
+
+    assert first == second
+    assert [batch.token_ids for batch in first] == [("token-1", "token-2"), ("token-3",)]
+    connection = control_plane._connection_factory()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT job_key,job_type FROM m1_jobs ORDER BY job_key")
+            assert cursor.fetchall() == [
+                (f"quote:{'a' * 64}:batch:0", "quote-batch"),
+                (f"quote:{'a' * 64}:batch:1", "quote-batch"),
+                (f"quote:{'a' * 64}:certify", "quote-certify"),
+            ]
+    finally:
+        connection.close()
+
+
+def test_quote_batch_receipt_is_fenced_and_idempotent(control_plane: PostgresControlPlane) -> None:
+    now = _now()
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        token_ids=("token-1",),
+        batch_size=1,
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="worker-a", job_types=("quote-batch",), lease_seconds=30, now=now
+    )
+    assert lease is not None
+    first = control_plane.record_quote_batch(
+        lease,
+        token_range_digest=batch.token_range_digest,
+        quote_digest="c" * 64,
+        successful_response_count=1,
+        quoted_at=now,
+        now=now,
+    )
+    assert control_plane.record_quote_batch(
+        lease,
+        token_range_digest=batch.token_range_digest,
+        quote_digest="c" * 64,
+        successful_response_count=1,
+        quoted_at=now,
+        now=now + timedelta(seconds=1),
+    ) == first
+    replacement = control_plane.claim_job(
+        worker_id="worker-b",
+        job_types=("quote-batch",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=2),
+    )
+    assert replacement is not None
+    with pytest.raises(StaleLeaseError):
+        control_plane.record_quote_batch(
+            lease,
+            token_range_digest=batch.token_range_digest,
+            quote_digest="d" * 64,
+            successful_response_count=1,
+            quoted_at=now,
+            now=now + timedelta(seconds=3),
+        )
+
+
+def test_incomplete_quote_generation_cannot_switch_current_pointer(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    batches = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        token_ids=("token-1", "token-2", "token-3"),
+        batch_size=1,
+        now=now,
+    )
+    batch_lease = control_plane.claim_job(
+        worker_id="quote-worker", job_types=("quote-batch",), lease_seconds=30, now=now
+    )
+    assert batch_lease is not None
+    control_plane.record_quote_batch(
+        batch_lease,
+        token_range_digest=batch_lease.input_identity.rsplit(":", maxsplit=1)[1],
+        quote_digest="c" * 64,
+        successful_response_count=1,
+        quoted_at=now,
+        now=now,
+    )
+    certifier = control_plane.claim_job(
+        worker_id="certifier", job_types=("quote-certify",), lease_seconds=30, now=now
+    )
+    assert certifier is not None
+
+    with pytest.raises(IncompleteQuoteGenerationError):
+        control_plane.certify_quote_generation(
+            certifier,
+            generation_key=batches[0].generation_key,
+            now=now + timedelta(seconds=1),
+        )
+
+    connection = control_plane._connection_factory()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM m1_publication_pointers")
+            assert cursor.fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+def test_complete_quote_generation_certifies_and_publishes_one_pointer(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    batches = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        token_ids=("token-1", "token-2"),
+        batch_size=1,
+        now=now,
+    )
+    for ordinal, batch in enumerate(batches):
+        batch_now = now + timedelta(seconds=ordinal)
+        lease = control_plane.claim_job(
+            worker_id=f"quote-worker-{ordinal}",
+            job_types=("quote-batch",),
+            lease_seconds=30,
+            now=batch_now,
+        )
+        assert lease is not None
+        control_plane.record_quote_batch(
+            lease,
+            token_range_digest=batch.token_range_digest,
+            quote_digest=chr(ord("c") + ordinal) * 64,
+            successful_response_count=1,
+            quoted_at=batch_now,
+            now=batch_now,
+        )
+        resumed = control_plane.claim_job(
+            worker_id=f"quote-worker-{ordinal}",
+            job_types=("quote-batch",),
+            lease_seconds=30,
+            now=batch_now + timedelta(milliseconds=1),
+        )
+        assert resumed is not None
+        control_plane.finish(
+            resumed,
+            state=JobState.SUCCEEDED,
+            now=batch_now + timedelta(milliseconds=2),
+        )
+    certifier = control_plane.claim_job(
+        worker_id="certifier", job_types=("quote-certify",), lease_seconds=30, now=now
+    )
+    assert certifier is not None
+
+    artifact_digest = control_plane.certify_quote_generation(
+        certifier,
+        generation_key=batches[0].generation_key,
+        now=now + timedelta(seconds=3),
+    )
+
+    assert len(artifact_digest) == 64
+    connection = control_plane._connection_factory()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT generation_key FROM m1_publication_pointers "
+                "WHERE pointer_key='quote:current'"
+            )
+            assert cursor.fetchone() == (batches[0].generation_key,)
+    finally:
+        connection.close()
 
 
 def test_claim_reclaim_and_epoch_fencing(control_plane: PostgresControlPlane) -> None:

@@ -105,6 +105,25 @@ def upgrade() -> None:
     )
 
     op.create_table(
+        "m1_quote_batch_receipts",
+        sa.Column("job_key", sa.Text, nullable=False),
+        sa.Column("structure_receipt_digest", sa.Text, nullable=False),
+        sa.Column("universe_hash", sa.Text, nullable=False),
+        sa.Column("token_range_digest", sa.Text, nullable=False),
+        sa.Column("quote_digest", sa.Text, nullable=False),
+        sa.Column("successful_response_count", sa.BigInteger, nullable=False),
+        sa.Column("quoted_at", sa.TIMESTAMP(timezone=True), nullable=False),
+        _timestamp("committed_at"),
+        sa.PrimaryKeyConstraint("job_key", name="pk_m1_quote_batch_receipts"),
+        sa.ForeignKeyConstraint(
+            ["job_key"], ["m1_jobs.job_key"], name="fk_m1_quote_batch_receipts_job"
+        ),
+        sa.CheckConstraint(
+            "successful_response_count >= 0", name="ck_m1_quote_batch_receipts_nonnegative"
+        ),
+    )
+
+    op.create_table(
         "m1_generation_manifests",
         sa.Column("generation_key", sa.Text, nullable=False),
         sa.Column("producer_job_key", sa.Text, nullable=False),
@@ -233,6 +252,7 @@ def downgrade() -> None:
     op.drop_table("m1_incidents")
     op.drop_table("m1_publication_pointers")
     op.drop_table("m1_generation_manifests")
+    op.drop_table("m1_quote_batch_receipts")
     op.drop_table("m1_checkpoint_receipts")
     op.drop_table("m1_job_attempts")
     op.drop_table("m1_jobs")

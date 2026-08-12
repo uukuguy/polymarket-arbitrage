@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from hashlib import sha256
 
 
 class JobState(StrEnum):
@@ -16,6 +17,61 @@ class JobState(StrEnum):
     CHECKPOINTED = "checkpointed"
     SUCCEEDED = "succeeded"
     QUARANTINED = "quarantined"
+
+
+@dataclass(frozen=True, slots=True)
+class QuoteBatchSpec:
+    """One immutable, deterministic Quote token range."""
+
+    structure_receipt_digest: str
+    universe_hash: str
+    ordinal: int
+    token_ids: tuple[str, ...]
+    token_range_digest: str
+
+    @classmethod
+    def from_tokens(
+        cls,
+        *,
+        structure_receipt_digest: str,
+        universe_hash: str,
+        ordinal: int,
+        token_ids: tuple[str, ...],
+    ) -> QuoteBatchSpec:
+        for field, value in (
+            ("structure_receipt_digest", structure_receipt_digest),
+            ("universe_hash", universe_hash),
+        ):
+            if len(value) != 64:
+                raise ValueError(f"{field} must be a sha256 digest")
+        if ordinal < 0:
+            raise ValueError("ordinal must be non-negative")
+        normalized = tuple(sorted(set(token_ids)))
+        if not normalized or any(not token_id for token_id in normalized):
+            raise ValueError("token_ids must contain non-empty values")
+        token_range_digest = sha256("\n".join(normalized).encode()).hexdigest()
+        return cls(
+            structure_receipt_digest=structure_receipt_digest,
+            universe_hash=universe_hash,
+            ordinal=ordinal,
+            token_ids=normalized,
+            token_range_digest=token_range_digest,
+        )
+
+    @property
+    def generation_key(self) -> str:
+        return f"quote:{self.structure_receipt_digest}"
+
+    @property
+    def job_key(self) -> str:
+        return f"{self.generation_key}:batch:{self.ordinal}"
+
+    @property
+    def input_identity(self) -> str:
+        return (
+            f"quote:{self.structure_receipt_digest}:{self.universe_hash}:"
+            f"{self.ordinal}:{self.token_range_digest}"
+        )
 
 
 def _require_identity(value: str, field: str) -> None:

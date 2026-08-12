@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
+from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
@@ -11,7 +12,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from .models import CheckpointReceipt, JobLease, JobState
+from .models import CheckpointReceipt, JobLease, JobState, QuoteBatchSpec
 
 
 class ControlPlaneError(RuntimeError):
@@ -28,6 +29,10 @@ class JobIdentityConflict(ControlPlaneError):
 
 class CheckpointConflictError(ControlPlaneError):
     """An idempotency key was reused for a different checkpoint."""
+
+
+class IncompleteQuoteGenerationError(ControlPlaneError):
+    """A Quote certifier cannot publish until every batch has a receipt."""
 
 
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
@@ -72,6 +77,327 @@ class PostgresControlPlane:
                 raise ControlPlaneError("job insert was not durable")
             if existing["job_type"] != job_type or existing["input_identity"] != input_identity:
                 raise JobIdentityConflict(f"job key {job_key!r} names another input")
+
+    def enqueue_quote_generation(
+        self,
+        *,
+        structure_receipt_digest: str,
+        universe_hash: str,
+        token_ids: Sequence[str],
+        batch_size: int,
+        now: datetime,
+    ) -> tuple[QuoteBatchSpec, ...]:
+        """Admit deterministic Quote ranges for one immutable Structure truth."""
+        self._validate_aware(now, "now")
+        if isinstance(batch_size, bool) or batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        normalized = tuple(sorted(set(token_ids)))
+        if not normalized or any(not token_id for token_id in normalized):
+            raise ValueError("token_ids must contain non-empty values")
+        batches = tuple(
+            QuoteBatchSpec.from_tokens(
+                structure_receipt_digest=structure_receipt_digest,
+                universe_hash=universe_hash,
+                ordinal=ordinal,
+                token_ids=normalized[start : start + batch_size],
+            )
+            for ordinal, start in enumerate(range(0, len(normalized), batch_size))
+        )
+        for batch in batches:
+            self.enqueue_job(
+                job_key=batch.job_key,
+                job_type="quote-batch",
+                input_identity=batch.input_identity,
+                now=now,
+            )
+        generation_key = batches[0].generation_key
+        self.enqueue_job(
+            job_key=f"{generation_key}:certify",
+            job_type="quote-certify",
+            input_identity=f"{generation_key}:{universe_hash}",
+            now=now,
+        )
+        return batches
+
+    def record_quote_batch(
+        self,
+        lease: JobLease,
+        *,
+        token_range_digest: str,
+        quote_digest: str,
+        successful_response_count: int,
+        quoted_at: datetime,
+        now: datetime,
+    ) -> CheckpointReceipt:
+        """Commit one bounded Quote range under its current worker fence."""
+        self._validate_aware(quoted_at, "quoted_at")
+        self._validate_aware(now, "now")
+        if lease.job_type != "quote-batch":
+            raise ValueError("quote batch receipt requires a quote-batch lease")
+        for field, value in (
+            ("token_range_digest", token_range_digest),
+            ("quote_digest", quote_digest),
+        ):
+            if len(value) != 64:
+                raise ValueError(f"{field} must be a sha256 digest")
+        if isinstance(successful_response_count, bool) or successful_response_count < 0:
+            raise ValueError("successful_response_count must be non-negative")
+        structure_digest, universe_hash, ordinal, expected_range_digest = (
+            self._quote_batch_identity(lease.input_identity)
+        )
+        if token_range_digest != expected_range_digest:
+            raise CheckpointConflictError("quote batch range does not match its job identity")
+        idempotency_key = f"quote-batch:{lease.job_key}:{quote_digest}"
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT receipt_id, checkpoint_cursor, checkpoint_digest, lease_epoch, committed_at
+                FROM m1_checkpoint_receipts WHERE idempotency_key = %s
+                """,
+                (idempotency_key,),
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                if (
+                    str(existing["checkpoint_cursor"]) != ordinal
+                    or str(existing["checkpoint_digest"]) != quote_digest
+                    or int(existing["lease_epoch"]) != lease.lease_epoch
+                ):
+                    raise CheckpointConflictError(
+                        f"idempotency conflict for {idempotency_key!r}"
+                    )
+                return CheckpointReceipt(
+                    receipt_id=str(existing["receipt_id"]),
+                    job_key=lease.job_key,
+                    lease_epoch=lease.lease_epoch,
+                    idempotency_key=idempotency_key,
+                    checkpoint_cursor=ordinal,
+                    checkpoint_digest=quote_digest,
+                    committed_at=existing["committed_at"],
+                )
+            cursor.execute(
+                """
+                UPDATE m1_jobs
+                SET checkpoint_cursor = %s, checkpoint_digest = %s, state = 'checkpointed',
+                    updated_at = %s
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s AND state = 'leased'
+                """,
+                (
+                    ordinal,
+                    quote_digest,
+                    now,
+                    lease.job_key,
+                    lease.lease_owner,
+                    lease.lease_epoch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            receipt = CheckpointReceipt(
+                receipt_id=str(uuid4()),
+                job_key=lease.job_key,
+                lease_epoch=lease.lease_epoch,
+                idempotency_key=idempotency_key,
+                checkpoint_cursor=ordinal,
+                checkpoint_digest=quote_digest,
+                committed_at=now,
+            )
+            cursor.execute(
+                """
+                INSERT INTO m1_checkpoint_receipts (
+                    receipt_id, job_key, lease_epoch, idempotency_key, checkpoint_cursor,
+                    checkpoint_digest, committed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    receipt.receipt_id,
+                    receipt.job_key,
+                    receipt.lease_epoch,
+                    receipt.idempotency_key,
+                    receipt.checkpoint_cursor,
+                    receipt.checkpoint_digest,
+                    receipt.committed_at,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO m1_quote_batch_receipts (
+                    job_key, structure_receipt_digest, universe_hash, token_range_digest,
+                    quote_digest, successful_response_count, quoted_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    lease.job_key,
+                    structure_digest,
+                    universe_hash,
+                    token_range_digest,
+                    quote_digest,
+                    successful_response_count,
+                    quoted_at,
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE m1_job_attempts SET state = 'checkpointed', finished_at = %s
+                WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
+                """,
+                (now, lease.job_key, lease.lease_epoch),
+            )
+            return receipt
+
+    def certify_quote_generation(
+        self,
+        lease: JobLease,
+        *,
+        generation_key: str,
+        now: datetime,
+    ) -> str:
+        """Publish one complete Quote generation, never a partial batch set."""
+        self._validate_aware(now, "now")
+        if lease.job_type != "quote-certify" or lease.job_key != f"{generation_key}:certify":
+            raise ValueError("Quote certification requires its matching quote-certify lease")
+        try:
+            lease_generation_key, universe_hash = lease.input_identity.rsplit(":", maxsplit=1)
+        except ValueError as error:
+            raise JobIdentityConflict("quote certifier has malformed input identity") from error
+        if lease_generation_key != generation_key or not universe_hash:
+            raise JobIdentityConflict("quote certifier identity does not match its generation")
+        structure_digest = generation_key.removeprefix("quote:")
+        if len(structure_digest) != 64:
+            raise JobIdentityConflict("quote generation has malformed Structure receipt digest")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT job_key, input_identity, created_at
+                FROM m1_jobs
+                WHERE job_type = 'quote-batch' AND job_key LIKE %s
+                ORDER BY job_key
+                """,
+                (f"{generation_key}:batch:%",),
+            )
+            expected = cursor.fetchall()
+            if not expected:
+                raise IncompleteQuoteGenerationError("Quote generation has no admitted batch jobs")
+            cursor.execute(
+                """
+                SELECT job_key, structure_receipt_digest, universe_hash, token_range_digest,
+                       quote_digest, successful_response_count, quoted_at
+                FROM m1_quote_batch_receipts
+                WHERE job_key LIKE %s
+                ORDER BY job_key
+                """,
+                (f"{generation_key}:batch:%",),
+            )
+            receipts = {str(row["job_key"]): row for row in cursor.fetchall()}
+            if set(receipts) != {str(row["job_key"]) for row in expected}:
+                raise IncompleteQuoteGenerationError("Quote generation is missing batch receipts")
+            ordered_receipts: list[dict[str, object]] = []
+            for job in expected:
+                job_key = str(job["job_key"])
+                receipt = receipts[job_key]
+                _structure, _universe, _ordinal, range_digest = self._quote_batch_identity(
+                    str(job["input_identity"])
+                )
+                if (
+                    receipt["structure_receipt_digest"] != structure_digest
+                    or receipt["universe_hash"] != universe_hash
+                    or receipt["token_range_digest"] != range_digest
+                    or receipt["quoted_at"] < job["created_at"]
+                ):
+                    raise IncompleteQuoteGenerationError(
+                        "Quote generation contains an invalid or stale batch receipt"
+                    )
+                ordered_receipts.append(receipt)
+            artifact_digest = sha256(
+                "\n".join(
+                    f"{row['job_key']}:{row['token_range_digest']}:{row['quote_digest']}"
+                    for row in ordered_receipts
+                ).encode()
+            ).hexdigest()
+            record_count = sum(int(row["successful_response_count"]) for row in ordered_receipts)
+            cursor.execute(
+                """
+                UPDATE m1_jobs
+                SET state = 'succeeded', lease_owner = NULL, lease_expires_at = NULL,
+                    updated_at = %s
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s AND state = 'leased'
+                """,
+                (now, lease.job_key, lease.lease_owner, lease.lease_epoch),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            cursor.execute(
+                """
+                INSERT INTO m1_generation_manifests (
+                    generation_key, producer_job_key, input_digest, artifact_key,
+                    artifact_digest, record_count, published_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (generation_key) DO NOTHING
+                """,
+                (
+                    generation_key,
+                    lease.job_key,
+                    universe_hash,
+                    f"quote-receipts:{generation_key}",
+                    artifact_digest,
+                    record_count,
+                    now,
+                ),
+            )
+            cursor.execute(
+                "SELECT generation_key FROM m1_publication_pointers "
+                "WHERE pointer_key = 'quote:current' FOR UPDATE"
+            )
+            current = cursor.fetchone()
+            if current is None:
+                cursor.execute(
+                    """
+                    INSERT INTO m1_publication_pointers (
+                        pointer_key, generation_key, expected_generation_key,
+                        lease_epoch, published_at
+                    ) VALUES ('quote:current', %s, NULL, %s, %s)
+                    """,
+                    (generation_key, lease.lease_epoch, now),
+                )
+            elif str(current["generation_key"]) != generation_key:
+                cursor.execute(
+                    """
+                    UPDATE m1_publication_pointers
+                    SET generation_key = %s, expected_generation_key = %s,
+                        lease_epoch = %s, published_at = %s
+                    WHERE pointer_key = 'quote:current' AND generation_key = %s
+                    """,
+                    (
+                        generation_key,
+                        current["generation_key"],
+                        lease.lease_epoch,
+                        now,
+                        current["generation_key"],
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleLeaseError("Quote pointer changed during certification")
+            cursor.execute(
+                """
+                UPDATE m1_job_attempts SET state = 'succeeded', finished_at = %s
+                WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
+                """,
+                (now, lease.job_key, lease.lease_epoch),
+            )
+            return artifact_digest
+
+    @staticmethod
+    def _quote_batch_identity(input_identity: str) -> tuple[str, str, str, str]:
+        parts = input_identity.split(":")
+        if len(parts) != 5 or parts[0] != "quote" or not all(parts[1:]):
+            raise JobIdentityConflict("quote batch job has malformed input identity")
+        return parts[1], parts[2], parts[3], parts[4]
 
     def claim_job(
         self,
