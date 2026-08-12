@@ -7858,3 +7858,35 @@ takeover/execution must read the admitted R2 bundle and Postgres range only.
 `make planning-status`, then implement an R2-bundle-only Structure range
 worker and its receipt. Do not let that worker import SQLite or use a legacy
 publication id; its only source is `StructureRangeSpec.bundle_key/digest`.
+
+## SESSION 195 — 2026-08-12 (Structure transactional execution and guarded shadow admission)
+
+- [COMMITTED] `1281459` (`05.6-87`) authenticates Structure bundle reads
+  before any worker effect. `2dc7bfb` (`05.6-88`) adds canonical immutable
+  range artifacts. `51ce8f6` (`05.6-89`) atomically binds that artifact to
+  checkpoint, typed receipt, attempt state, and lease epoch in Postgres.
+- [COMMITTED] `62ac4bc` (`05.6-90`) implements the R2/Postgres-only
+  `TransactionalStructureWorker`: claim → authenticated frozen bundle →
+  stable-key range → canonical R2 PUT/HEAD → fenced receipt → finish.
+  Takeover with an existing receipt does not re-read input.  Malformed frozen
+  input is quarantined; transient dependencies retry.
+- [COMMITTED] `32d6be0` (`05.6-91`) exposes the worker through the guarded
+  `make structure-control-plane-once enable=1` operator command.  `1cf2697`
+  (`05.6-92`) adds the separately guarded, read-only
+  `make structure-control-plane-shadow-once enable=1 db_path=...`
+  `publication_id=...` exporter/admitter.  Both report `pointer_mutations=0`.
+- [VERIFY] The final focused CLI/exporter/artifact/Postgres run passed 33
+  tests, Ruff passed, Make targets dry-run, and `make planning-status` reports
+  no SUMMARY drift.
+- [BOUNDARY] No production migration, R2 object write, scheduled worker,
+  pointer mutation, or cloud soak ran.  Initial shadow admission emits one
+  full range per component only; production must introduce stable-key slicing
+  before continuous execution.  Certification, manifest parity, a reversible
+  shadow pointer gate, observability, and acceptance/chaos/soak remain.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then implement `structure-certify`: it must require every admitted range
+receipt, construct a canonical generation manifest from the frozen bundle and
+ordered artifacts, and reject missing/substituted ranges under its lease
+fence. Do not introduce a pointer mutation until the following explicit
+parity/pointer-gate slice.
