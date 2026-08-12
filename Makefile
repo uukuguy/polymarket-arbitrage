@@ -612,7 +612,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-shadow-once structure-control-plane-shadow-publish supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -684,6 +684,13 @@ structure-control-plane-shadow-publish:
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane structure-shadow-publish --enable --generation-key "$(generation_key)" --json
+
+## control-plane-tick-once: Explicitly run one bounded transactional worker tick; requires enable=1, DSN and R2 credentials. Does not schedule a loop.
+control-plane-tick-once:
+	@test "$(enable)" = "1" || (echo "usage: make control-plane-tick-once enable=1 [max_turns=4]" >&2; exit 2)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
+	uv run python -m polyarb.cli_control_plane tick-once --enable --worker-id "$(or $(worker_id),control-plane-tick-once)" --max-turns "$(or $(max_turns),4)" --json
 
 ## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots (auto-loads .env)
 supabase-reconcile:

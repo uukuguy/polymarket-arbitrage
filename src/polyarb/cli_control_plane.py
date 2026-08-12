@@ -20,6 +20,7 @@ from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
 )
+from polyarb.control_plane.scheduler import TransactionalControlPlaneScheduler
 from polyarb.control_plane.shadow import project_shadow_sources, read_shadow_sources
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
@@ -30,7 +31,10 @@ from polyarb.control_plane.structure_shadow import (
     plan_structure_ranges,
     read_legacy_structure_bundle,
 )
-from polyarb.control_plane.structure_worker import TransactionalStructureWorker
+from polyarb.control_plane.structure_worker import (
+    TransactionalStructureCertifier,
+    TransactionalStructureWorker,
+)
 from polyarb.storage.r2_sync import _build_client
 
 
@@ -85,6 +89,14 @@ def _parser() -> argparse.ArgumentParser:
     structure_shadow_publish.add_argument("--enable", action="store_true")
     structure_shadow_publish.add_argument("--generation-key", required=True)
     structure_shadow_publish.add_argument("--json", action="store_true")
+    tick_once = subcommands.add_parser(
+        "tick-once",
+        help="explicitly run one bounded transactional control-plane scheduler tick",
+    )
+    tick_once.add_argument("--enable", action="store_true")
+    tick_once.add_argument("--worker-id", default="control-plane-tick-once")
+    tick_once.add_argument("--max-turns", type=int, default=4)
+    tick_once.add_argument("--json", action="store_true")
     return parser
 
 
@@ -150,6 +162,37 @@ def _transactional_structure_worker(
     )
 
 
+def _transactional_scheduler(
+    control_plane: PostgresControlPlane,
+    *,
+    worker_id: str,
+    max_turns: int,
+) -> TransactionalControlPlaneScheduler:
+    quote_worker, quote_certifier = _transactional_quote_workers(
+        control_plane, worker_id=f"{worker_id}:quote"
+    )
+    object_client, bucket = _structure_object_client()
+    return TransactionalControlPlaneScheduler(
+        structure_worker=TransactionalStructureWorker(
+            control_plane=control_plane,
+            object_client=object_client,
+            bucket=bucket,
+            worker_id=f"{worker_id}:structure",
+            now=lambda: datetime.now(UTC),
+        ),
+        structure_certifier=TransactionalStructureCertifier(
+            control_plane=control_plane,
+            object_client=object_client,
+            bucket=bucket,
+            worker_id=f"{worker_id}:structure-certifier",
+            now=lambda: datetime.now(UTC),
+        ),
+        quote_worker=quote_worker,
+        quote_certifier=quote_certifier,
+        max_turns=max_turns,
+    )
+
+
 def _structure_object_client() -> tuple[object, str]:
     settings = Settings()
     if not settings.r2_enabled:
@@ -171,6 +214,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "structure-once",
         "structure-shadow-once",
         "structure-shadow-publish",
+        "tick-once",
     }
     if args.command in requires_enable and not args.enable:
         print(f"--enable is required for {args.command}", file=sys.stderr)
@@ -275,6 +319,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 },
                 as_json=args.json,
             )
+            return 0
+        if args.command == "tick-once":
+            if args.max_turns <= 0:
+                print("--max-turns must be positive", file=sys.stderr)
+                return 2
+            scheduler = _transactional_scheduler(
+                control_plane, worker_id=args.worker_id, max_turns=args.max_turns
+            )
+            _write(asyncio.run(scheduler.run_tick()), as_json=args.json)
             return 0
         snapshot = control_plane.operational_snapshot(
             now=datetime.now(UTC), sample_limit=args.limit

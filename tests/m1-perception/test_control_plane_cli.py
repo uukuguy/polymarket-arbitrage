@@ -89,6 +89,20 @@ def test_structure_shadow_publish_requires_explicit_enable_before_connect(
     assert "--enable is required" in capsys.readouterr().err
 
 
+def test_control_plane_tick_once_requires_enable_before_connect(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setattr(
+        cli_control_plane.psycopg,
+        "connect",
+        lambda _dsn: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert cli_control_plane.main(["tick-once", "--max-turns", "2", "--json"]) == 2
+    assert "--enable is required" in capsys.readouterr().err
+
+
 def test_quote_control_plane_once_runs_one_batch_then_certifier(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
@@ -258,6 +272,28 @@ def test_structure_shadow_publish_reports_previous_and_current_identity(
         "legacy_pointer_mutations": 0,
         "previous_generation_key": "structure:" + "b" * 64,
         "status": "ok",
+    }
+
+
+def test_control_plane_tick_once_reports_bounded_turns(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    class Scheduler:
+        async def run_tick(self):
+            return {"status": "ok", "turns": [{"worker": "structure-range", "outcome": "idle"}]}
+
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: object())
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_transactional_scheduler",
+        lambda _control_plane, *, worker_id, max_turns: Scheduler(),
+    )
+
+    assert cli_control_plane.main(["tick-once", "--enable", "--max-turns", "2", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "ok",
+        "turns": [{"outcome": "idle", "worker": "structure-range"}],
     }
 
 
