@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+import pytest
+
 from polyarb.control_plane.models import JobLease, JobState, StructureRangeSpec
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
+    StructureRangeArtifact,
     canonical_structure_bundle_bytes,
+    canonical_structure_range_bytes,
 )
 from polyarb.control_plane.structure_worker import (
+    StructureWorkerError,
     TransactionalStructureCertifier,
     TransactionalStructureWorker,
 )
@@ -160,6 +165,24 @@ def test_transactional_structure_worker_recovers_receipt_without_r2_read() -> No
 
 
 def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit() -> None:
+    bundle = _bundle()
+    spec = StructureRangeSpec.create(
+        bundle_key=bundle.key,
+        bundle_digest=bundle.sha256,
+        component="events",
+        ordinal=0,
+        range_start="",
+        range_end="",
+    )
+    range_artifact = StructureRangeArtifact.from_bytes(
+        canonical_structure_range_bytes(
+            bundle_digest=bundle.sha256,
+            component="events",
+            range_digest=spec.range_digest,
+            rows=({"id": "event-a"}, {"id": "event-b"}),
+        )
+    )
+
     class CertifierControlPlane:
         def __init__(self) -> None:
             self.finished: list[JobState] = []
@@ -181,6 +204,23 @@ def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit
             assert generation_key == "structure:" + "a" * 64
             return b'{"kind":"structure-manifest"}\n'
 
+        def structure_generation_receipts(self, generation_key: str):
+            assert generation_key == "structure:" + "a" * 64
+            return (
+                (
+                    spec,
+                    type(
+                        "Receipt",
+                        (),
+                        {
+                            "artifact_key": range_artifact.key,
+                            "artifact_digest": range_artifact.sha256,
+                            "record_count": 2,
+                        },
+                    )(),
+                ),
+            )
+
         def certify_structure_generation(self, lease: JobLease, **kwargs: object) -> str:
             self.certified = kwargs
             return str(kwargs["artifact_digest"])
@@ -194,6 +234,10 @@ def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit
 
         def put_object(self, **kwargs: object) -> None:
             self.upload = kwargs
+
+        def get_object(self, **kwargs: object) -> dict[str, object]:
+            payload = bundle.payload if kwargs["Key"] == bundle.key else range_artifact.payload
+            return {"Body": _Body(payload)}
 
         def head_object(self, **kwargs: object) -> dict[str, object]:
             return {"ContentLength": len(self.upload["Body"]), "Metadata": self.upload["Metadata"]}
@@ -214,3 +258,78 @@ def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit
     assert objects.upload["Key"] == control_plane.certified["artifact_key"]
     assert objects.upload["Metadata"]["sha256"] == control_plane.certified["artifact_digest"]
     assert control_plane.finished == []
+
+
+def test_structure_certifier_refuses_range_content_that_does_not_reassemble_bundle() -> None:
+    bundle = _bundle()
+    spec = StructureRangeSpec.create(
+        bundle_key=bundle.key,
+        bundle_digest=bundle.sha256,
+        component="events",
+        ordinal=0,
+        range_start="",
+        range_end="",
+    )
+    bad_range = StructureRangeArtifact.from_bytes(
+        canonical_structure_range_bytes(
+            bundle_digest=bundle.sha256,
+            component="events",
+            range_digest=spec.range_digest,
+            rows=({"id": "event-a"},),
+        )
+    )
+
+    class ControlPlane:
+        def claim_job(self, **kwargs: object) -> JobLease:
+            return JobLease(
+                job_key=spec.generation_key + ":certify",
+                job_type="structure-certify",
+                input_identity=spec.generation_key,
+                lease_owner="certifier-a",
+                lease_epoch=1,
+                lease_expires_at=NOW,
+                checkpoint_cursor=None,
+                checkpoint_digest=None,
+            )
+
+        def structure_generation_receipts(self, generation_key: str):
+            assert generation_key == spec.generation_key
+            return (
+                (
+                    spec,
+                    type(
+                        "Receipt",
+                        (),
+                        {
+                            "artifact_key": bad_range.key,
+                            "artifact_digest": bad_range.sha256,
+                            "record_count": 1,
+                        },
+                    )(),
+                ),
+            )
+
+        def finish(self, lease: JobLease, *, state: JobState, **kwargs: object) -> None:
+            assert state is JobState.RETRYABLE
+
+    class ObjectClient:
+        def get_object(self, **kwargs: object) -> dict[str, object]:
+            payload = bundle.payload if kwargs["Key"] == bundle.key else bad_range.payload
+            return {"Body": _Body(payload)}
+
+        def put_object(self, **kwargs: object) -> None:
+            raise AssertionError("must not write manifest after failed parity")
+
+        def head_object(self, **kwargs: object) -> dict[str, object]:
+            raise AssertionError("must not head after failed parity")
+
+    certifier = TransactionalStructureCertifier(
+        control_plane=ControlPlane(),
+        object_client=ObjectClient(),
+        bucket="structure",
+        worker_id="certifier-a",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(StructureWorkerError, match="content-parity"):
+        certifier.run_once()

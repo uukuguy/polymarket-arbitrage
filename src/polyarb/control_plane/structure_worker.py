@@ -13,8 +13,10 @@ from .structure_artifact import (
     StructureBundleError,
     StructureManifestArtifact,
     StructureRangeArtifact,
+    canonical_structure_bundle_bytes,
     canonical_structure_range_bytes,
     parse_structure_bundle_bytes,
+    parse_structure_range_bytes,
     upload_structure_manifest_artifact,
     upload_structure_range_artifact,
 )
@@ -179,6 +181,7 @@ class TransactionalStructureCertifier:
             return StructureWorkerResult(job_key=None, outcome="idle")
         generation_key = lease.job_key.removesuffix(":certify")
         try:
+            self._verify_content_parity(generation_key)
             payload = self._control_plane.structure_manifest_payload(generation_key)
             artifact = StructureManifestArtifact.from_bytes(payload)
             upload_structure_manifest_artifact(
@@ -204,9 +207,61 @@ class TransactionalStructureCertifier:
             )
             raise
 
+    def _verify_content_parity(self, generation_key: str) -> None:
+        ranges = self._control_plane.structure_generation_receipts(generation_key)
+        source_spec = ranges[0][0]
+        source_payload = _read_object_bytes(
+            self._object_client, bucket=self._bucket, key=source_spec.bundle_key
+        )
+        identity, source_components = parse_structure_bundle_bytes(
+            source_payload, expected_sha256=source_spec.bundle_digest
+        )
+        rebuilt: dict[str, list[dict[str, object]]] = {
+            component: [] for component in source_components
+        }
+        for spec, receipt in ranges:
+            if (
+                spec.bundle_key != source_spec.bundle_key
+                or spec.bundle_digest != source_spec.bundle_digest
+            ):
+                raise StructureWorkerError("structure-content-parity-mixed-source")
+            payload = _read_object_bytes(
+                self._object_client, bucket=self._bucket, key=receipt.artifact_key
+            )
+            range_identity, rows = parse_structure_range_bytes(
+                payload, expected_sha256=receipt.artifact_digest
+            )
+            if range_identity != (spec.bundle_digest, spec.component, spec.range_digest):
+                raise StructureWorkerError("structure-content-parity-range-identity")
+            if len(rows) != receipt.record_count or any(
+                not _in_range(_row_cursor(spec.component, row), spec) for row in rows
+            ):
+                raise StructureWorkerError("structure-content-parity-range-content")
+            rebuilt[spec.component].extend(rows)
+        try:
+            reassembled = canonical_structure_bundle_bytes(
+                identity=identity,
+                components={component: tuple(rows) for component, rows in rebuilt.items()},
+            )
+        except ValueError as error:
+            raise StructureWorkerError("structure-content-parity-reassembly") from error
+        if reassembled != source_payload:
+            raise StructureWorkerError("structure-content-parity-reassembly")
+
 
 def _in_range(cursor: str, spec: StructureRangeSpec) -> bool:
     return cursor >= spec.range_start and (not spec.range_end or cursor < spec.range_end)
+
+
+def _read_object_bytes(_client: _ObjectClient, *, bucket: str, key: str) -> bytes:
+    response = _client.get_object(Bucket=bucket, Key=key)
+    body = response.get("Body")
+    if body is None or not hasattr(body, "read"):
+        raise StructureWorkerError("structure-artifact-body-unavailable")
+    payload = body.read()
+    if not isinstance(payload, bytes):
+        raise StructureWorkerError("structure-artifact-body-is-not-bytes")
+    return payload
 
 
 def _row_cursor(component: str, row: Mapping[str, object]) -> str:

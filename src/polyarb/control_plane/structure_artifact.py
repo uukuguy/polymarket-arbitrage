@@ -266,6 +266,45 @@ def parse_structure_bundle_bytes(
     return identity, frozen
 
 
+def parse_structure_range_bytes(
+    payload: bytes,
+    *,
+    expected_sha256: str,
+) -> tuple[tuple[str, str, str], tuple[dict[str, object], ...]]:
+    """Authenticate and decode one canonical normalized range artifact."""
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise StructureBundleError("structure-range-digest-mismatch")
+    try:
+        lines = [json.loads(line) for line in payload.splitlines()]
+        header = lines[0]
+        if not isinstance(header, dict) or header.get("kind") != "structure-range":
+            raise ValueError("header")
+        bundle_digest = str(header["bundle_digest"])
+        component = str(header["component"])
+        range_digest = str(header["range_digest"])
+        if len(bundle_digest) != 64 or len(range_digest) != 64 or component not in _COMPONENTS:
+            raise ValueError("header")
+        rows: list[dict[str, object]] = []
+        for record in lines[1:]:
+            if not isinstance(record, dict) or set(record) != {"row"}:
+                raise ValueError("record")
+            row = record["row"]
+            if not isinstance(row, dict):
+                raise ValueError("record")
+            rows.append(row)
+        frozen = tuple(rows)
+        if canonical_structure_range_bytes(
+            bundle_digest=bundle_digest,
+            component=component,
+            range_digest=range_digest,
+            rows=frozen,
+        ) != payload:
+            raise ValueError("noncanonical")
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise StructureBundleError("structure-range-malformed") from error
+    return (bundle_digest, component, range_digest), frozen
+
+
 def upload_structure_bundle_artifact(
     client: _ObjectClient,
     *,

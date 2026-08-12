@@ -14,6 +14,7 @@ from polyarb.control_plane.structure_artifact import (
     canonical_structure_bundle_bytes,
     canonical_structure_range_bytes,
     parse_structure_bundle_bytes,
+    parse_structure_range_bytes,
     structure_bundle_artifact_key,
     upload_structure_bundle_artifact,
 )
@@ -108,6 +109,14 @@ def test_structure_range_output_is_bound_to_one_bundle_and_range() -> None:
 
     assert artifact.key == f"structure-ranges/{artifact.sha256}/rows.ndjson"
     assert payload.splitlines()[1] == b'{"row":{"market_id":"a"}}'
+    identity, rows = parse_structure_range_bytes(
+        payload,
+        expected_sha256=artifact.sha256,
+    )
+    assert identity == ("a" * 64, "markets", "b" * 64)
+    assert rows == ({"market_id": "a"}, {"market_id": "b"})
+    with pytest.raises(StructureBundleError, match="range-digest-mismatch"):
+        parse_structure_range_bytes(payload, expected_sha256="c" * 64)
 
 
 def test_structure_bundle_upload_requires_head_identity() -> None:

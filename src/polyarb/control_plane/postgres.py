@@ -481,6 +481,59 @@ class PostgresControlPlane:
             receipts=receipts,
         )
 
+    def structure_generation_receipts(
+        self, generation_key: str
+    ) -> tuple[tuple[StructureRangeSpec, StructureRangeReceipt], ...]:
+        """Return every admitted range and its durable artifact receipt for re-verification."""
+        self._validate_nonempty(generation_key=generation_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT input.job_key, input.bundle_key, input.bundle_digest, input.component,
+                       input.ordinal, input.range_start, input.range_end,
+                       receipt.range_digest, receipt.artifact_key, receipt.artifact_digest,
+                       receipt.record_count
+                FROM m1_structure_range_inputs AS input
+                LEFT JOIN m1_structure_range_receipts AS receipt ON receipt.job_key = input.job_key
+                WHERE input.generation_key = %s
+                ORDER BY input.component, input.ordinal
+                """,
+                (generation_key,),
+            )
+            rows = cursor.fetchall()
+        if not rows or any(row["artifact_digest"] is None for row in rows):
+            raise IncompleteStructureGenerationError(
+                "Structure generation is missing range receipts"
+            )
+        result: list[tuple[StructureRangeSpec, StructureRangeReceipt]] = []
+        for row in rows:
+            spec = StructureRangeSpec.create(
+                bundle_key=str(row["bundle_key"]),
+                bundle_digest=str(row["bundle_digest"]),
+                component=str(row["component"]),
+                ordinal=int(row["ordinal"]),
+                range_start=str(row["range_start"]),
+                range_end=str(row["range_end"]),
+            )
+            receipt = StructureRangeReceipt(
+                job_key=str(row["job_key"]),
+                bundle_digest=spec.bundle_digest,
+                component=spec.component,
+                range_digest=str(row["range_digest"]),
+                artifact_key=str(row["artifact_key"]),
+                artifact_digest=str(row["artifact_digest"]),
+                record_count=int(row["record_count"]),
+            )
+            if receipt.range_digest != spec.range_digest:
+                raise IncompleteStructureGenerationError(
+                    "Structure receipt range identity is invalid"
+                )
+            result.append((spec, receipt))
+        return tuple(result)
+
     @staticmethod
     def _enqueue_job_cursor(
         cursor: psycopg.Cursor[dict[str, Any]],
