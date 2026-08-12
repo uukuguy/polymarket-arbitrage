@@ -720,6 +720,90 @@ def test_transactional_quote_worker_commits_fenced_artifact_receipt(
     assert receipt.artifact_digest == objects.object["Metadata"]["sha256"]
 
 
+def test_quote_worker_takeover_after_upload_before_receipt_has_one_receipt(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """Quote retry reuses frozen batch input and creates one durable effect."""
+    now = _now()
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        legs=(_leg("token-1"),),
+        batch_size=1,
+        now=now,
+    )[0]
+
+    class MemoryR2:
+        def __init__(self) -> None:
+            self.objects: dict[str, bytes] = {}
+            self.metadata: dict[str, dict[str, object]] = {}
+            self.put_calls = 0
+
+        def put_object(self, **kwargs: object) -> None:
+            self.put_calls += 1
+            key = str(kwargs["Key"])
+            self.objects[key] = bytes(kwargs["Body"])
+            self.metadata[key] = dict(kwargs["Metadata"])
+
+        def head_object(self, **kwargs: object) -> dict[str, object]:
+            key = str(kwargs["Key"])
+            return {
+                "ContentLength": len(self.objects[key]),
+                "Metadata": self.metadata[key],
+            }
+
+    class CrashBeforeReceipt:
+        def __init__(self, delegate: PostgresControlPlane) -> None:
+            self._delegate = delegate
+            self.crash = True
+
+        def __getattr__(self, name: str):
+            return getattr(self._delegate, name)
+
+        def record_quote_batch(self, *args: object, **kwargs: object):
+            if self.crash:
+                self.crash = False
+                raise KeyboardInterrupt("simulated process death after R2 upload")
+            return self._delegate.record_quote_batch(*args, **kwargs)
+
+    objects = MemoryR2()
+    first = TransactionalQuoteBatchWorker(
+        control_plane=CrashBeforeReceipt(control_plane),  # type: ignore[arg-type]
+        reader=_OneBookReader(),
+        object_client=objects,
+        bucket="quotes",
+        worker_id="crashed-worker",
+        now=lambda: now,
+        lease_seconds=1,
+    )
+    with pytest.raises(KeyboardInterrupt, match="after R2 upload"):
+        asyncio.run(first.run_once())
+    assert control_plane.quote_batch_receipt(batch.job_key) is None
+
+    replacement = TransactionalQuoteBatchWorker(
+        control_plane=control_plane,
+        reader=_OneBookReader(),
+        object_client=objects,
+        bucket="quotes",
+        worker_id="replacement-worker",
+        now=lambda: now + timedelta(seconds=2),
+        lease_seconds=30,
+    )
+    assert asyncio.run(replacement.run_once()).outcome == "succeeded"
+    receipt = control_plane.quote_batch_receipt(batch.job_key)
+    assert receipt is not None
+    assert objects.put_calls == 2
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        count = connection.execute(
+            "SELECT count(*) FROM m1_quote_batch_receipts WHERE job_key = %s", (batch.job_key,)
+        ).fetchone()
+        pointer = connection.execute(
+            "SELECT count(*) FROM m1_publication_pointers WHERE pointer_key = 'quote:current'"
+        ).fetchone()
+    assert count == (1,)
+    assert pointer == (0,)
+
+
 def test_transactional_quote_certifier_waits_then_publishes_complete_generation(
     control_plane: PostgresControlPlane,
 ) -> None:
