@@ -59,6 +59,32 @@ class QuoteBatchReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class StructureRangeReceipt:
+    """Authenticated result of one immutable Structure component range."""
+
+    job_key: str
+    bundle_digest: str
+    component: str
+    range_digest: str
+    artifact_key: str
+    artifact_digest: str
+    record_count: int
+
+    def __post_init__(self) -> None:
+        _require_identity(self.job_key, "job_key")
+        if self.component not in {
+            "events", "event_tags", "memberships", "group_truth", "markets", "issues"
+        }:
+            raise ValueError("invalid Structure component")
+        for field in ("bundle_digest", "range_digest", "artifact_digest"):
+            if len(getattr(self, field)) != 64:
+                raise ValueError(f"{field} must be a sha256 digest")
+        _require_identity(self.artifact_key, "artifact_key")
+        if self.record_count < 0:
+            raise ValueError("record_count must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
 class StructureRangeSpec:
     """One frozen key range extracted from an immutable Structure bundle."""
 

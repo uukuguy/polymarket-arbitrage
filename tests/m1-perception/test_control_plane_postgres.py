@@ -250,6 +250,10 @@ def test_structure_range_receipt_is_fenced_and_idempotent(
         record_count=3,
         now=now,
     )
+    persisted = control_plane.structure_range_receipt(spec.job_key)
+    assert persisted is not None
+    assert persisted.artifact_digest == "c" * 64
+    assert persisted.record_count == 3
     assert control_plane.record_structure_range(
         lease,
         range_digest=spec.range_digest,

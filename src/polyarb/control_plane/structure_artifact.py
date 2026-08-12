@@ -227,5 +227,31 @@ def upload_structure_bundle_artifact(
     return artifact
 
 
+def upload_structure_range_artifact(
+    client: _ObjectClient,
+    *,
+    bucket: str,
+    artifact: StructureRangeArtifact,
+) -> StructureRangeArtifact:
+    """PUT and authenticate a normalized range before its durable receipt."""
+    if not bucket:
+        raise ValueError("bucket must be non-empty")
+    client.put_object(
+        Bucket=bucket,
+        Key=artifact.key,
+        Body=artifact.payload,
+        ContentType="application/x-ndjson",
+        Metadata={"sha256": artifact.sha256},
+    )
+    head = client.head_object(Bucket=bucket, Key=artifact.key)
+    remote_digest = str(head.get("Metadata", {}).get("sha256", ""))
+    if (
+        int(head.get("ContentLength", -1)) != len(artifact.payload)
+        or remote_digest != artifact.sha256
+    ):
+        raise StructureBundleError("structure-range-head-verification-failed")
+    return artifact
+
+
 def _canonical_json(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()

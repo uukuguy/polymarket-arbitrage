@@ -19,6 +19,7 @@ from .models import (
     QuoteBatchLeg,
     QuoteBatchReceipt,
     QuoteBatchSpec,
+    StructureRangeReceipt,
     StructureRangeSpec,
 )
 from .structure_artifact import StructureBundleArtifact, StructureBundleIdentity
@@ -385,6 +386,34 @@ class PostgresControlPlane:
             artifact_key=str(row["artifact_key"]),
             artifact_digest=str(row["artifact_digest"]),
             successful_response_count=int(row["successful_response_count"]),
+        )
+
+    def structure_range_receipt(self, job_key: str) -> StructureRangeReceipt | None:
+        """Read a prior immutable range result so takeover never reprocesses it."""
+        self._validate_nonempty(job_key=job_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT job_key, bundle_digest, component, range_digest, artifact_key,
+                       artifact_digest, record_count
+                FROM m1_structure_range_receipts WHERE job_key = %s
+                """,
+                (job_key,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return StructureRangeReceipt(
+            job_key=str(row["job_key"]),
+            bundle_digest=str(row["bundle_digest"]),
+            component=str(row["component"]),
+            range_digest=str(row["range_digest"]),
+            artifact_key=str(row["artifact_key"]),
+            artifact_digest=str(row["artifact_digest"]),
+            record_count=int(row["record_count"]),
         )
 
     @staticmethod
