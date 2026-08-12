@@ -7818,3 +7818,26 @@ then inspect the transactional-cloud-control-plane design and Structure
 publication contract before writing the Structure transaction model. Do not
 collapse the existing multi-stage Structure evidence into a token-only batch
 analogue.
+
+## SESSION 193 — 2026-08-12 (transactional Structure generation foundation)
+
+- [DESIGN/COMMITTED] `e2ce1e1` (`05.6-84`) starts the distinct Structure
+  migration plan and implements the immutable bundle contract. It seals all
+  six Structure components plus legacy publication/window/snapshot,
+  comparison-receipt, normalization-contract and counts into canonical,
+  content-addressed R2 NDJSON with PUT/HEAD authentication.
+- [COMMITTED] `904d476` (`05.6-85`) adds Postgres generation/range admission.
+  A `structure-normalize` job now retains its exact bundle key/digest,
+  component and key range; a replacement retrieves it from Postgres rather
+  than SQLite/current Structure truth.
+- [VERIFY] Structure/Quote artifact, migration and PostgreSQL control-plane
+  contracts pass 23 focused cases; Ruff and planning-status are clean.
+- [BOUNDARY] This is input authority, not yet Structure execution: no bundle
+  exporter, range output receipt, certifier, shadow pointer, worker schedule,
+  production migration or external write occurred. Legacy Structure remains
+  the only current pointer.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, begin with
+`make planning-status`, then implement the read-only legacy exporter and a
+transactional Structure range worker. The exporter alone may read SQLite;
+takeover/execution must read the admitted R2 bundle and Postgres range only.
