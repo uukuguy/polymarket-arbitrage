@@ -1174,6 +1174,59 @@ class PostgresControlPlane:
             )
             return artifact_digest
 
+    def publish_structure_shadow(self, *, generation_key: str, now: datetime) -> str:
+        """Move only the transactional shadow pointer to a certified generation."""
+        self._validate_nonempty(generation_key=generation_key)
+        self._validate_aware(now, "now")
+        if not generation_key.startswith("structure:"):
+            raise ValueError("Structure shadow pointer requires a Structure generation")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT producer_job_key FROM m1_generation_manifests
+                WHERE generation_key = %s
+                """,
+                (generation_key,),
+            )
+            manifest = cursor.fetchone()
+            if manifest is None or str(manifest["producer_job_key"]) != f"{generation_key}:certify":
+                raise IncompleteStructureGenerationError(
+                    "Structure shadow pointer requires a certified manifest"
+                )
+            cursor.execute(
+                """
+                SELECT generation_key FROM m1_publication_pointers
+                WHERE pointer_key = 'structure:current:shadow' FOR UPDATE
+                """
+            )
+            current = cursor.fetchone()
+            if current is None:
+                cursor.execute(
+                    """
+                    INSERT INTO m1_publication_pointers (
+                        pointer_key, generation_key, expected_generation_key,
+                        lease_epoch, published_at
+                    ) VALUES ('structure:current:shadow', %s, NULL, 0, %s)
+                    """,
+                    (generation_key, now),
+                )
+            elif str(current["generation_key"]) != generation_key:
+                cursor.execute(
+                    """
+                    UPDATE m1_publication_pointers
+                    SET generation_key = %s, expected_generation_key = %s,
+                        lease_epoch = lease_epoch + 1, published_at = %s
+                    WHERE pointer_key = 'structure:current:shadow' AND generation_key = %s
+                    """,
+                    (generation_key, current["generation_key"], now, current["generation_key"]),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleLeaseError("Structure shadow pointer changed during publication")
+            return generation_key
+
     @staticmethod
     def _quote_batch_identity(input_identity: str) -> tuple[str, str, str, str]:
         parts = input_identity.split(":")

@@ -428,6 +428,57 @@ def test_structure_certification_refuses_component_count_parity_mismatch(
         )
 
 
+def test_structure_shadow_pointer_requires_certified_manifest_and_preserves_legacy_truth(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", ""), ("markets", "", "")),
+        now=now,
+    )[0]
+    with pytest.raises(IncompleteStructureGenerationError):
+        control_plane.publish_structure_shadow(generation_key=spec.generation_key, now=now)
+
+    # A certifier's durable manifest is the only accepted shadow-pointer source.
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        connection.execute(
+            """
+            INSERT INTO m1_generation_manifests (
+                generation_key, producer_job_key, input_digest, artifact_key,
+                artifact_digest, record_count, published_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                spec.generation_key,
+                f"{spec.generation_key}:certify",
+                bundle.sha256,
+                "structure-manifests/a/manifest.ndjson",
+                "a" * 64,
+                2,
+                now,
+            ),
+        )
+    assert (
+        control_plane.publish_structure_shadow(generation_key=spec.generation_key, now=now)
+        == spec.generation_key
+    )
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        pointer = connection.execute(
+            """
+            SELECT generation_key, expected_generation_key
+            FROM m1_publication_pointers WHERE pointer_key = 'structure:current:shadow'
+            """
+        ).fetchone()
+        legacy = connection.execute(
+            "SELECT count(*) FROM m1_publication_pointers WHERE pointer_key = 'structure:current'"
+        ).fetchone()
+    assert pointer == (spec.generation_key, None)
+    assert legacy == (0,)
+
+
 def test_quote_batch_input_preserves_leg_identity_for_worker_takeover(
     control_plane: PostgresControlPlane,
 ) -> None:
