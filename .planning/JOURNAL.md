@@ -8192,3 +8192,28 @@ accept explicit API app, worker app and expected database names, render no
 ambiguous Fly config, reject legacy `polyarb-l1`, and generate a machine-
 readable staged checklist (preflight → migration → shadow parity → fault/soak
 → switch). It must not invoke Fly, R2 or Postgres.
+
+## SESSION 208 — 2026-08-12 (named rollout artifacts)
+
+- [COMMITTED] `caf0380` (`05.6-108`) adds the pure-local
+  `make control-plane-render-rollout enable=1 api_app=... worker_app=...
+  expected_database=... output_dir=...` path. It renders named API/worker Fly
+  configs plus a JSON staged checklist, rejects legacy `polyarb-l1`, duplicate
+  or invalid app names, missing database names, unresolved placeholders and
+  pre-existing output files. It constructs no DB/R2/Fly client. `0874728`
+  corrects only the accompanying summary verification wording.
+- [VERIFY] Renderer/CLI plus worker/scheduler/API/template focused suite: 32
+  passed; Ruff, a temporary-directory Make render, and planning status pass.
+  A concurrent Testcontainers aggregate run had incomplete container-cleanup
+  output, so it is not claimed as all-green evidence; prior focused Postgres
+  contracts remain committed and passing separately.
+- [BOUNDARY] This is still an unexecuted, explicit rollout plan. The first
+  cloud action remains a read-only named target preflight, followed by an
+  additive 009 migration only in the explicitly designated environment.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then add a machine-checkable shadow-parity evidence contract: three named
+Structure/Quote generations, source/bundle/manifest/count/universe identities,
+zero legacy-pointer mutations, and an acceptance verdict. Keep it offline and
+independent of cloud invocation; it becomes the artifact required before any
+authorized reversible pointer switch.
