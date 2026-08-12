@@ -13,7 +13,7 @@ from polyarb.clients.gamma_client import EventPage, MarketPage
 from polyarb.perception.market_truth import market_truth_mismatch_reason
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 
-from .models import JobState, StructureSourcePageSpec
+from .models import StructureSourcePageSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .structure_artifact import (
     StructureBundleArtifact,
@@ -369,11 +369,20 @@ class TransactionalStructureSourceWorker:
         except StaleLeaseError:
             raise
         except Exception as error:
-            self._control_plane.finish(
+            self._control_plane.finish_retryable_with_incident(
                 lease,
-                state=JobState.RETRYABLE,
                 next_attempt_at=self._now() + self._retry_delay,
                 error_class=type(error).__name__,
+                incident_key=f"incident:job-retry:{lease.job_key}",
+                dedupe_key=f"job-retry:{lease.job_key}",
+                component="structure-fetch",
+                summary="structure-fetch retryable failure",
+                detail={
+                    "job_key": lease.job_key,
+                    "lease_epoch": lease.lease_epoch,
+                    "error_class": type(error).__name__,
+                },
+                channels=("dashboard",),
                 now=self._now(),
             )
             raise
@@ -498,11 +507,20 @@ class TransactionalStructureSourceMaterializer:
         except StaleLeaseError:
             raise
         except Exception as error:
-            self._control_plane.finish(
+            self._control_plane.finish_retryable_with_incident(
                 lease,
-                state=JobState.RETRYABLE,
                 next_attempt_at=self._now() + self._retry_delay,
                 error_class=type(error).__name__,
+                incident_key=f"incident:job-retry:{lease.job_key}",
+                dedupe_key=f"job-retry:{lease.job_key}",
+                component="structure-materialize",
+                summary="structure-materialize retryable failure",
+                detail={
+                    "job_key": lease.job_key,
+                    "lease_epoch": lease.lease_epoch,
+                    "error_class": type(error).__name__,
+                },
+                channels=("dashboard",),
                 now=self._now(),
             )
             raise

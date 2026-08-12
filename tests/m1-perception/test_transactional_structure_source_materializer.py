@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+import pytest
+
 from polyarb.control_plane.models import JobLease, StructureSourcePageSpec
 from polyarb.control_plane.structure_source import (
     StructureSourcePageArtifact,
@@ -40,6 +42,7 @@ class FakeControlPlane:
     def __init__(self, pages: tuple[PageArtifact, ...]) -> None:
         self.pages = pages
         self.admitted: dict[str, object] | None = None
+        self.retry_incidents: list[dict[str, object]] = []
 
     def claim_job(self, **kwargs: object) -> JobLease:
         assert kwargs["job_types"] == ("structure-materialize",)
@@ -61,6 +64,9 @@ class FakeControlPlane:
     def admit_structure_source_bundle(self, lease: JobLease, **kwargs: object):
         self.admitted = kwargs
         return ()
+
+    def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
+        self.retry_incidents.append(kwargs)
 
 
 class MemoryR2:
@@ -142,3 +148,21 @@ def test_materializer_reads_only_sealed_r2_pages_then_admits_ranges() -> None:
         ("markets", "", ""),
         ("issues", "", ""),
     )
+
+
+def test_materializer_records_retry_incident_when_sealed_page_is_unavailable() -> None:
+    control_plane = FakeControlPlane((_artifact(stream="events", records=()),))
+    worker = TransactionalStructureSourceMaterializer(
+        control_plane=control_plane,
+        object_client=MemoryR2(()),
+        bucket="source-pages",
+        worker_id="materializer-a",
+        now=lambda: NOW,
+        range_max_rows=100,
+    )
+
+    with pytest.raises(KeyError):
+        asyncio.run(worker.run_once())
+
+    assert control_plane.retry_incidents[0]["component"] == "structure-materialize"
+    assert control_plane.retry_incidents[0]["detail"]["lease_epoch"] == 1

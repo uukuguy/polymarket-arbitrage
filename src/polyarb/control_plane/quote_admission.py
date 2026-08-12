@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Any, Protocol
 
-from .models import JobState, QuoteBatchLeg
+from .models import QuoteBatchLeg
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .quote_worker import QuoteBatchWorkerResult
 from .structure_artifact import parse_structure_bundle_bytes
@@ -157,11 +157,20 @@ class TransactionalQuoteAdmitter:
         except StaleLeaseError:
             raise
         except Exception as error:
-            self._control_plane.finish(
+            self._control_plane.finish_retryable_with_incident(
                 lease,
-                state=JobState.RETRYABLE,
                 next_attempt_at=self._now() + self._retry_delay,
                 error_class=type(error).__name__,
+                incident_key=f"incident:job-retry:{lease.job_key}",
+                dedupe_key=f"job-retry:{lease.job_key}",
+                component="quote-admit",
+                summary="quote-admit retryable failure",
+                detail={
+                    "job_key": lease.job_key,
+                    "lease_epoch": lease.lease_epoch,
+                    "error_class": type(error).__name__,
+                },
+                channels=("dashboard",),
                 now=self._now(),
             )
             if isinstance(error, QuoteAdmissionError):

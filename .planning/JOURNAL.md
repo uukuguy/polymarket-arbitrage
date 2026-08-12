@@ -8486,6 +8486,26 @@ suite, docs check and planning status; commit 05.6-121. Then only explicit
 non-production API app, worker app, and database identities can unlock the
 actual rollout/preflight/migration/shadow/worker-loss/24-hour evidence lane.
 
+## SESSION 223 — 2026-08-12 (transactional failure-to-alert intent)
+
+- [DISCOVERED] The control plane had incident/outbox tables and a correct
+  standalone writer, but every transactional collector failure only changed a
+  job to `retryable`. A process loss between that mutation and any later alert
+  write would create a silent continuously failing collector.
+- [IMPLEMENTED] `finish_retryable_with_incident` fences retry state, attempt
+  evidence, incident event, and dashboard outbox intent in one Postgres
+  transaction. It now backs every new Structure/Quote transactional worker
+  boundary.
+- [VERIFY] The real-Postgres atomicity contract plus 47 focused worker and
+  control-plane tests pass; Ruff and diff checks pass.
+- [BOUNDARY] This is durable alert intent, not live notification delivery or
+  a cloud acceptance claim. The named-environment gate remains unchanged.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+commit 05.6-122, then await explicit isolated non-production API app, worker
+app, and Postgres database identities before rendering rollout artifacts and
+starting preflight/migration/shadow/worker-loss/24-hour soak evidence.
+
 ## SESSION 217 — 2026-08-12 (rollout evidence contract corrected)
 
 - [DISCOVERED] The local rollout renderer still emitted a revision-009

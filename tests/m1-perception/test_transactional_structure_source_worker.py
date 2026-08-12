@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -22,6 +22,7 @@ class FakeControlPlane:
         self.spec = spec
         self.recorded: dict[str, object] | None = None
         self.finished: list[JobState] = []
+        self.retry_incidents: list[dict[str, object]] = []
 
     def claim_job(self, **kwargs: object) -> JobLease:
         assert kwargs["job_types"] == ("structure-fetch",)
@@ -47,6 +48,9 @@ class FakeControlPlane:
 
     def finish(self, lease: JobLease, *, state: JobState, **kwargs: object) -> None:
         self.finished.append(state)
+
+    def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
+        self.retry_incidents.append(kwargs)
 
 
 class FakeGamma:
@@ -177,4 +181,21 @@ def test_source_worker_marks_only_current_page_retryable_when_gamma_fails() -> N
         asyncio.run(worker.run_once())
 
     assert control_plane.recorded is None
-    assert control_plane.finished == [JobState.RETRYABLE]
+    assert control_plane.finished == []
+    assert control_plane.retry_incidents == [
+        {
+            "next_attempt_at": NOW + timedelta(seconds=15),
+            "error_class": "TimeoutError",
+            "incident_key": "incident:job-retry:source-window:one:fetch:events:0",
+            "dedupe_key": "job-retry:source-window:one:fetch:events:0",
+            "component": "structure-fetch",
+            "summary": "structure-fetch retryable failure",
+            "detail": {
+                "job_key": "source-window:one:fetch:events:0",
+                "lease_epoch": 1,
+                "error_class": "TimeoutError",
+            },
+            "channels": ("dashboard",),
+            "now": NOW,
+        }
+    ]

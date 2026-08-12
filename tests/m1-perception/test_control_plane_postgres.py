@@ -1736,6 +1736,56 @@ def test_incident_event_and_alert_outbox_are_one_idempotent_transaction(
         connection.close()
 
 
+def test_retryable_finish_creates_one_durable_incident_and_alert_intent(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """A retry cannot become invisible between job mutation and alert intent."""
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="structure:window-a:fetch:events:0",
+        job_type="structure-fetch",
+        input_identity="window-a:events:0:<start>",
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id="structure-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+
+    control_plane.finish_retryable_with_incident(
+        lease,
+        next_attempt_at=now + timedelta(seconds=15),
+        error_class="TimeoutError",
+        incident_key="incident:job-retry:structure:window-a:fetch:events:0",
+        dedupe_key="job-retry:structure:window-a:fetch:events:0",
+        component="structure-fetch",
+        summary="structure-fetch retryable failure",
+        detail={"job_key": lease.job_key, "lease_epoch": lease.lease_epoch},
+        channels=("dashboard",),
+        now=now,
+    )
+
+    connection = control_plane._connection_factory()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT state, last_error_class FROM m1_jobs WHERE job_key = %s",
+                (lease.job_key,),
+            )
+            assert cursor.fetchone() == ("retryable", "TimeoutError")
+            cursor.execute("SELECT count(*) FROM m1_incidents")
+            assert cursor.fetchone() == (1,)
+            cursor.execute("SELECT kind FROM m1_incident_events")
+            assert cursor.fetchone() == ("attempt-failed",)
+            cursor.execute("SELECT channel, state FROM m1_alert_outbox")
+            assert cursor.fetchone() == ("dashboard", "pending")
+    finally:
+        connection.close()
+
+
 def test_operational_snapshot_reads_fenced_work_and_alert_intent(
     control_plane: PostgresControlPlane,
 ) -> None:

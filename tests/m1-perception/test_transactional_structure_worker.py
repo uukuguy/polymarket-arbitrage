@@ -312,6 +312,10 @@ def test_structure_certifier_refuses_range_content_that_does_not_reassemble_bund
         def finish(self, lease: JobLease, *, state: JobState, **kwargs: object) -> None:
             assert state is JobState.RETRYABLE
 
+        def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
+            assert kwargs["component"] == "structure-certify"
+            assert kwargs["error_class"] == "StructureWorkerError"
+
     class ObjectClient:
         def get_object(self, **kwargs: object) -> dict[str, object]:
             payload = bundle.payload if kwargs["Key"] == bundle.key else bad_range.payload

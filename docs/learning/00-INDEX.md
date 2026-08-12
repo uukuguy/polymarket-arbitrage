@@ -78,6 +78,7 @@
 | 64 | [事务型云端控制面](64-事务型云端控制面.md) | at-least-once 执行与 exactly-once durable effect / Structure+Quote lease 接管 / 独立 control-api / 云端上线门 |
 | 65 | [三次影子一致性门](65-三次影子一致性门.md) | 三次 shadow evidence / source+bundle+counts+universe 对账 / pointer 零变更 / 可逆切换前 gate |
 | 66 | [事务型 Structure 源窗口](66-事务型Structure源窗口.md) | Gamma 单页事务 / opaque cursor / R2 证据与 Postgres 回执 / lease 接管 / events→markets 交接 |
+| 67 | [事务失败告警闭环](67-事务失败告警闭环.md) | retryable 为什么必须同时产生 incident/outbox / lease epoch 幂等 / 不制造告警风暴 |
 
 ## Phase 02.1 教学增量（2026-05）
 

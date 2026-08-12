@@ -41,6 +41,7 @@ class _ControlPlane:
         self.digest = digest
         self.admitted: dict[str, object] | None = None
         self.finished: list[JobState] = []
+        self.retry_incidents: list[dict[str, object]] = []
 
     def claim_job(self, **kwargs: object) -> JobLease:
         assert kwargs["job_types"] == ("quote-admit",)
@@ -64,6 +65,9 @@ class _ControlPlane:
 
     def finish(self, lease: JobLease, *, state: JobState, **kwargs: object) -> None:
         self.finished.append(state)
+
+    def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
+        self.retry_incidents.append(kwargs)
 
 
 def _bundle() -> StructureBundleArtifact:
@@ -147,4 +151,10 @@ def test_quote_admitter_retries_without_batches_when_bundle_digest_is_wrong() ->
     with pytest.raises(QuoteAdmissionError, match="digest"):
         asyncio.run(worker.run_once())
     assert control_plane.admitted is None
-    assert control_plane.finished == [JobState.RETRYABLE]
+    assert control_plane.finished == []
+    assert control_plane.retry_incidents[0]["component"] == "quote-admit"
+    assert control_plane.retry_incidents[0]["detail"] == {
+        "job_key": "structure:digest:quote-admit",
+        "lease_epoch": 1,
+        "error_class": "StructureBundleError",
+    }

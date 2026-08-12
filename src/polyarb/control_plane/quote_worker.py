@@ -103,11 +103,20 @@ class TransactionalQuoteBatchWorker:
         except StaleLeaseError:
             raise
         except Exception as error:
-            self._control_plane.finish(
+            self._control_plane.finish_retryable_with_incident(
                 lease,
-                state=JobState.RETRYABLE,
                 next_attempt_at=self._now() + self._retry_delay,
                 error_class=type(error).__name__,
+                incident_key=f"incident:job-retry:{lease.job_key}",
+                dedupe_key=f"job-retry:{lease.job_key}",
+                component="quote-batch",
+                summary="quote-batch retryable failure",
+                detail={
+                    "job_key": lease.job_key,
+                    "lease_epoch": lease.lease_epoch,
+                    "error_class": type(error).__name__,
+                },
+                channels=("dashboard",),
                 now=self._now(),
             )
             raise
@@ -189,11 +198,20 @@ class TransactionalQuoteCertifier:
         except StaleLeaseError:
             raise
         except Exception as error:
-            self._control_plane.finish(
+            self._control_plane.finish_retryable_with_incident(
                 lease,
-                state=JobState.RETRYABLE,
                 next_attempt_at=self._now() + self._retry_delay,
                 error_class=type(error).__name__,
+                incident_key=f"incident:job-retry:{lease.job_key}",
+                dedupe_key=f"job-retry:{lease.job_key}",
+                component="quote-certify",
+                summary="quote-certify retryable failure",
+                detail={
+                    "job_key": lease.job_key,
+                    "lease_epoch": lease.lease_epoch,
+                    "error_class": type(error).__name__,
+                },
+                channels=("dashboard",),
                 now=self._now(),
             )
             raise

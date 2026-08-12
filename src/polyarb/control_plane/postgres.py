@@ -2515,58 +2515,157 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            return self._record_incident_event(
+                cursor,
+                incident_key=incident_key,
+                dedupe_key=dedupe_key,
+                component=component,
+                severity=severity,
+                summary=summary,
+                kind=kind,
+                detail=detail,
+                idempotency_key=idempotency_key,
+                channels=channels,
+                now=now,
+            )
+
+    def finish_retryable_with_incident(
+        self,
+        lease: JobLease,
+        *,
+        next_attempt_at: datetime,
+        error_class: str,
+        incident_key: str,
+        dedupe_key: str,
+        component: str,
+        summary: str,
+        detail: dict[str, object],
+        channels: Sequence[str],
+        now: datetime,
+    ) -> str:
+        """Fence retry state and its durable alert intent in one transaction."""
+        self._validate_aware(now, "now")
+        self._validate_aware(next_attempt_at, "next_attempt_at")
+        self._validate_nonempty(
+            error_class=error_class,
+            incident_key=incident_key,
+            dedupe_key=dedupe_key,
+            component=component,
+            summary=summary,
+        )
+        if not channels or any(not channel.strip() for channel in channels):
+            raise ValueError("channels must contain non-empty values")
+        if len(set(channels)) != len(channels):
+            raise ValueError("channels must be unique")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
             cursor.execute(
                 """
-                INSERT INTO m1_incidents (
-                    incident_key, dedupe_key, component, severity, state, summary,
-                    opened_at, updated_at
-                ) VALUES (%s, %s, %s, %s, 'open', %s, %s, %s)
-                ON CONFLICT (dedupe_key) DO NOTHING
+                UPDATE m1_jobs
+                SET state = 'retryable', next_attempt_at = %s, last_error_class = %s,
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = %s
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+                  AND state IN ('leased', 'checkpointed')
                 """,
-                (incident_key, dedupe_key, component, severity, summary, now, now),
+                (
+                    next_attempt_at,
+                    error_class,
+                    now,
+                    lease.job_key,
+                    lease.lease_owner,
+                    lease.lease_epoch,
+                ),
             )
-            cursor.execute(
-                "SELECT incident_key FROM m1_incidents WHERE dedupe_key = %s",
-                (dedupe_key,),
-            )
-            incident = cursor.fetchone()
-            if incident is None or incident["incident_key"] != incident_key:
-                raise JobIdentityConflict(f"dedupe key {dedupe_key!r} names another incident")
-            cursor.execute(
-                "SELECT incident_event_id FROM m1_incident_events WHERE idempotency_key = %s",
-                (idempotency_key,),
-            )
-            existing = cursor.fetchone()
-            if existing is not None:
-                return str(existing["incident_event_id"])
-            event_id = str(uuid4())
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
             cursor.execute(
                 """
-                INSERT INTO m1_incident_events (
-                    incident_event_id, incident_key, kind, detail, idempotency_key, occurred_at
-                ) VALUES (%s, %s, %s, %s, %s, %s)
+                UPDATE m1_job_attempts
+                SET state = 'retryable', finished_at = %s, error_class = %s
+                WHERE job_key = %s AND lease_epoch = %s
                 """,
-                (event_id, incident_key, kind, Jsonb(detail), idempotency_key, now),
+                (now, error_class, lease.job_key, lease.lease_epoch),
             )
-            for channel in channels:
-                cursor.execute(
-                    """
-                    INSERT INTO m1_alert_outbox (
-                        outbox_id, incident_event_id, channel, payload, state,
-                        next_attempt_at, created_at
-                    ) VALUES (%s, %s, %s, %s, 'pending', %s, %s)
-                    ON CONFLICT (incident_event_id, channel) DO NOTHING
-                    """,
-                    (
-                        str(uuid4()),
-                        event_id,
-                        channel,
-                        Jsonb({"incident_key": incident_key, "kind": kind}),
-                        now,
-                        now,
-                    ),
-                )
-            return event_id
+            return self._record_incident_event(
+                cursor,
+                incident_key=incident_key,
+                dedupe_key=dedupe_key,
+                component=component,
+                severity="warning",
+                summary=summary,
+                kind="attempt-failed",
+                detail=detail,
+                idempotency_key=f"job-retry:{lease.job_key}:{lease.lease_epoch}",
+                channels=channels,
+                now=now,
+            )
+
+    @staticmethod
+    def _record_incident_event(
+        cursor: object,
+        *,
+        incident_key: str,
+        dedupe_key: str,
+        component: str,
+        severity: str,
+        summary: str,
+        kind: str,
+        detail: dict[str, object],
+        idempotency_key: str,
+        channels: Sequence[str],
+        now: datetime,
+    ) -> str:
+        cursor.execute(
+            """
+            INSERT INTO m1_incidents (
+                incident_key, dedupe_key, component, severity, state, summary,
+                opened_at, updated_at
+            ) VALUES (%s, %s, %s, %s, 'open', %s, %s, %s)
+            ON CONFLICT (dedupe_key) DO NOTHING
+            """,
+            (incident_key, dedupe_key, component, severity, summary, now, now),
+        )
+        cursor.execute("SELECT incident_key FROM m1_incidents WHERE dedupe_key = %s", (dedupe_key,))
+        incident = cursor.fetchone()
+        if incident is None or incident["incident_key"] != incident_key:
+            raise JobIdentityConflict(f"dedupe key {dedupe_key!r} names another incident")
+        cursor.execute(
+            "SELECT incident_event_id FROM m1_incident_events WHERE idempotency_key = %s",
+            (idempotency_key,),
+        )
+        existing = cursor.fetchone()
+        if existing is not None:
+            return str(existing["incident_event_id"])
+        event_id = str(uuid4())
+        cursor.execute(
+            """
+            INSERT INTO m1_incident_events (
+                incident_event_id, incident_key, kind, detail, idempotency_key, occurred_at
+            ) VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (event_id, incident_key, kind, Jsonb(detail), idempotency_key, now),
+        )
+        for channel in channels:
+            cursor.execute(
+                """
+                INSERT INTO m1_alert_outbox (
+                    outbox_id, incident_event_id, channel, payload, state,
+                    next_attempt_at, created_at
+                ) VALUES (%s, %s, %s, %s, 'pending', %s, %s)
+                ON CONFLICT (incident_event_id, channel) DO NOTHING
+                """,
+                (
+                    str(uuid4()),
+                    event_id,
+                    channel,
+                    Jsonb({"incident_key": incident_key, "kind": kind}),
+                    now,
+                    now,
+                ),
+            )
+        return event_id
 
     def operational_snapshot(
         self,

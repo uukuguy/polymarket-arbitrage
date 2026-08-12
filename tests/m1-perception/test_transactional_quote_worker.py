@@ -22,6 +22,7 @@ class FakeControlPlane:
         self.prior = prior
         self.finished: list[JobState] = []
         self.recorded: dict[str, object] | None = None
+        self.retry_incidents: list[dict[str, object]] = []
 
     def claim_job(self, **kwargs):
         return JobLease(
@@ -48,6 +49,9 @@ class FakeControlPlane:
 
     def finish(self, lease, *, state: JobState, **kwargs):
         self.finished.append(state)
+
+    def finish_retryable_with_incident(self, lease, **kwargs):
+        self.retry_incidents.append(kwargs)
 
 
 class FakeReader:
@@ -157,4 +161,5 @@ def test_transactional_worker_marks_only_its_batch_retryable_on_fetch_failure() 
         asyncio.run(worker.run_once())
 
     assert control_plane.recorded is None
-    assert control_plane.finished == [JobState.RETRYABLE]
+    assert control_plane.finished == []
+    assert control_plane.retry_incidents[0]["component"] == "quote-batch"
