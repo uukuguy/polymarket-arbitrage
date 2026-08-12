@@ -21,6 +21,7 @@ from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
 )
+from polyarb.control_plane.rollout import render_rollout_artifacts
 from polyarb.control_plane.scheduler import TransactionalControlPlaneScheduler
 from polyarb.control_plane.shadow import project_shadow_sources, read_shadow_sources
 from polyarb.control_plane.structure_artifact import (
@@ -113,6 +114,16 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--max-turns", type=int, default=4)
     serve.add_argument("--interval-seconds", type=float, default=15.0)
     serve.add_argument("--json", action="store_true")
+    render_rollout = subcommands.add_parser(
+        "render-rollout",
+        help="render local-only named control-plane rollout artifacts",
+    )
+    render_rollout.add_argument("--enable", action="store_true")
+    render_rollout.add_argument("--api-app", required=True)
+    render_rollout.add_argument("--worker-app", required=True)
+    render_rollout.add_argument("--expected-database", required=True)
+    render_rollout.add_argument("--output-dir", type=Path, required=True)
+    render_rollout.add_argument("--json", action="store_true")
     return parser
 
 
@@ -263,10 +274,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         "structure-shadow-publish",
         "tick-once",
         "serve",
+        "render-rollout",
     }
     if args.command in requires_enable and not args.enable:
         print(f"--enable is required for {args.command}", file=sys.stderr)
         return 2
+    if args.command == "render-rollout":
+        try:
+            artifacts = render_rollout_artifacts(
+                api_app=args.api_app,
+                worker_app=args.worker_app,
+                expected_database=args.expected_database,
+                output_dir=args.output_dir,
+            )
+        except (OSError, ValueError) as error:
+            print(
+                f"rollout artifact rendering unavailable: {type(error).__name__}",
+                file=sys.stderr,
+            )
+            return 1
+        _write({"status": "rendered-local-only", **artifacts}, as_json=args.json)
+        return 0
     control_plane = _control_plane_from_env()
     if control_plane is None:
         print("POLYARB_SUPABASE_DB_DSN is required", file=sys.stderr)

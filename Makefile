@@ -612,7 +612,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -649,6 +649,12 @@ control-plane-preflight:
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane preflight --expected-database "$(expected_database)" --json
+
+## control-plane-render-rollout: Render local-only isolated API/worker Fly configs and a staged checklist. Requires enable=1, api_app=, worker_app=, expected_database= and output_dir=; never contacts cloud resources.
+control-plane-render-rollout:
+	@test "$(enable)" = "1" || (echo "usage: make control-plane-render-rollout enable=1 api_app=<app> worker_app=<app> expected_database=<name> output_dir=<empty-dir>" >&2; exit 2)
+	@test -n "$(api_app)" -a -n "$(worker_app)" -a -n "$(expected_database)" -a -n "$(output_dir)" || (echo "api_app, worker_app, expected_database and output_dir are required" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane render-rollout --enable --api-app "$(api_app)" --worker-app "$(worker_app)" --expected-database "$(expected_database)" --output-dir "$(output_dir)" --json
 
 ## control-plane-api-serve: Run the independent Postgres-only control-plane HTTP read service. Requires enable=1 and DSN; no SQLite, R2 or worker starts.
 control-plane-api-serve:

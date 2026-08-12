@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 
 def test_quote_control_plane_once_requires_explicit_enable(monkeypatch, capsys) -> None:
@@ -389,6 +390,40 @@ def test_control_plane_preflight_proves_named_database_and_r2_readiness(
         "r2": {"bucket": "control-plane-artifacts", "reachable": True},
         "status": "ready-for-shadow-only",
     }
+
+
+def test_render_rollout_is_explicit_and_never_connects_to_control_plane(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_control_plane_from_env",
+        lambda: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert (
+        cli_control_plane.main(
+            [
+                "render-rollout",
+                "--enable",
+                "--api-app",
+                "polyarb-control-api-staging",
+                "--worker-app",
+                "polyarb-control-worker-staging",
+                "--expected-database",
+                "control_plane_staging",
+                "--output-dir",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "rendered-local-only"
+    assert Path(result["checklist"]).exists()
 
 
 def test_shadow_sync_requires_dsn_without_printing_it(monkeypatch, capsys, tmp_path) -> None:
