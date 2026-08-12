@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -103,6 +104,15 @@ def _parser() -> argparse.ArgumentParser:
     tick_once.add_argument("--worker-id", default="control-plane-tick-once")
     tick_once.add_argument("--max-turns", type=int, default=4)
     tick_once.add_argument("--json", action="store_true")
+    serve = subcommands.add_parser(
+        "serve",
+        help="run bounded transactional ticks until SIGINT or SIGTERM",
+    )
+    serve.add_argument("--enable", action="store_true")
+    serve.add_argument("--worker-id", default="control-plane-service")
+    serve.add_argument("--max-turns", type=int, default=4)
+    serve.add_argument("--interval-seconds", type=float, default=15.0)
+    serve.add_argument("--json", action="store_true")
     return parser
 
 
@@ -213,6 +223,37 @@ def _structure_object_client() -> tuple[object, str]:
     )
 
 
+async def _run_scheduler_service(
+    scheduler: TransactionalControlPlaneScheduler,
+    *,
+    interval_seconds: float,
+    as_json: bool,
+) -> dict[str, object]:
+    """Own signal delivery while the scheduler owns only bounded worker turns."""
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def request_stop() -> None:
+        stop_event.set()
+
+    for stop_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(stop_signal, request_stop)
+        except (NotImplementedError, RuntimeError):
+            # The service is still safely stoppable by its hosting runtime on
+            # platforms that cannot install asyncio signal handlers.
+            pass
+
+    async def emit_tick(outcome: dict[str, object]) -> None:
+        _write({"event": "tick", **outcome}, as_json=as_json)
+
+    return await scheduler.run_until_stopped(
+        stop_event=stop_event,
+        interval_seconds=interval_seconds,
+        on_tick=emit_tick,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     requires_enable = {
@@ -221,6 +262,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "structure-shadow-once",
         "structure-shadow-publish",
         "tick-once",
+        "serve",
     }
     if args.command in requires_enable and not args.enable:
         print(f"--enable is required for {args.command}", file=sys.stderr)
@@ -349,6 +391,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 control_plane, worker_id=args.worker_id, max_turns=args.max_turns
             )
             _write(asyncio.run(scheduler.run_tick()), as_json=args.json)
+            return 0
+        if args.command == "serve":
+            if args.max_turns <= 0 or args.interval_seconds <= 0:
+                print("--max-turns and --interval-seconds must be positive", file=sys.stderr)
+                return 2
+            scheduler = _transactional_scheduler(
+                control_plane, worker_id=args.worker_id, max_turns=args.max_turns
+            )
+            result = asyncio.run(
+                _run_scheduler_service(
+                    scheduler,
+                    interval_seconds=args.interval_seconds,
+                    as_json=args.json,
+                )
+            )
+            _write(result, as_json=args.json)
             return 0
         snapshot = control_plane.operational_snapshot(
             now=datetime.now(UTC), sample_limit=args.limit

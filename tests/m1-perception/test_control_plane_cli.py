@@ -103,6 +103,57 @@ def test_control_plane_tick_once_requires_enable_before_connect(monkeypatch, cap
     assert "--enable is required" in capsys.readouterr().err
 
 
+def test_control_plane_serve_requires_enable_before_connect(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setattr(
+        cli_control_plane.psycopg,
+        "connect",
+        lambda _dsn: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert cli_control_plane.main(["serve", "--interval-seconds", "15", "--json"]) == 2
+    assert "--enable is required" in capsys.readouterr().err
+
+
+def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    scheduler = object()
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: object())
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_transactional_scheduler",
+        lambda _control_plane, *, worker_id, max_turns: scheduler,
+    )
+
+    async def run_service(actual_scheduler, *, interval_seconds: float, as_json: bool):
+        assert actual_scheduler is scheduler
+        assert interval_seconds == 7.5
+        assert as_json is True
+        return {"status": "stopped", "ticks": 3}
+
+    monkeypatch.setattr(cli_control_plane, "_run_scheduler_service", run_service)
+
+    assert (
+        cli_control_plane.main(
+            [
+                "serve",
+                "--enable",
+                "--interval-seconds",
+                "7.5",
+                "--max-turns",
+                "2",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {"status": "stopped", "ticks": 3}
+
+
 def test_quote_control_plane_once_runs_one_batch_then_certifier(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 

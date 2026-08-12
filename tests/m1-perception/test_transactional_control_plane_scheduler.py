@@ -57,3 +57,38 @@ def test_bounded_tick_runs_only_configured_number_of_turns() -> None:
         {"worker": "quote-batch", "job_key": "quote-batch", "outcome": "succeeded"},
         {"worker": "quote-certify", "job_key": "quote-certify", "outcome": "certified"},
     ]
+
+
+def test_scheduler_service_emits_tick_then_stops_without_sleeping() -> None:
+    structure = _AsyncWorker("structure-range")
+    stop_event = asyncio.Event()
+    outcomes: list[dict[str, object]] = []
+    scheduler = TransactionalControlPlaneScheduler(
+        structure_worker=structure,
+        structure_certifier=_SyncWorker("structure-certify"),
+        quote_worker=_AsyncWorker("quote-batch"),
+        quote_certifier=_SyncWorker("quote-certify"),
+        max_turns=1,
+    )
+
+    async def on_tick(outcome: dict[str, object]) -> None:
+        outcomes.append(outcome)
+        stop_event.set()
+
+    assert asyncio.run(
+        scheduler.run_until_stopped(
+            stop_event=stop_event, interval_seconds=60, on_tick=on_tick
+        )
+    ) == {"status": "stopped", "ticks": 1}
+    assert outcomes == [
+        {
+            "status": "ok",
+            "turns": [
+                {
+                    "worker": "structure-range",
+                    "job_key": "structure-range",
+                    "outcome": "succeeded",
+                }
+            ],
+        }
+    ]

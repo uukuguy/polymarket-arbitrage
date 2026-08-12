@@ -612,7 +612,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -698,6 +698,13 @@ control-plane-tick-once:
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane tick-once --enable --worker-id "$(or $(worker_id),control-plane-tick-once)" --max-turns "$(or $(max_turns),4)" --json
+
+## control-plane-serve: Run bounded transactional ticks until SIGINT/SIGTERM; requires enable=1, DSN and R2 credentials. This target has no deployment wiring.
+control-plane-serve:
+	@test "$(enable)" = "1" || (echo "usage: make control-plane-serve enable=1 [interval_seconds=15] [max_turns=4]" >&2; exit 2)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
+	uv run python -m polyarb.cli_control_plane serve --enable --worker-id "$(or $(worker_id),control-plane-service)" --max-turns "$(or $(max_turns),4)" --interval-seconds "$(or $(interval_seconds),15)" --json
 
 ## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots (auto-loads .env)
 supabase-reconcile:

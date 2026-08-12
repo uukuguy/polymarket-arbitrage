@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 
@@ -58,3 +59,32 @@ class TransactionalControlPlaneScheduler:
                 )
             self._next_worker = (self._next_worker + turn_count) % len(self._workers)
             return {"status": "ok", "turns": turns}
+
+    async def run_until_stopped(
+        self,
+        *,
+        stop_event: asyncio.Event,
+        interval_seconds: float,
+        on_tick: Callable[[dict[str, object]], Awaitable[None]] | None = None,
+    ) -> dict[str, object]:
+        """Run bounded ticks at a fixed cadence until a caller-owned stop signal.
+
+        The loop owns no durable coordination; worker leases remain the only
+        cross-process ownership authority. The callback makes every completed
+        tick observable to the service wrapper without coupling it to logging.
+        """
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+        ticks = 0
+        while not stop_event.is_set():
+            outcome = await self.run_tick()
+            ticks += 1
+            if on_tick is not None:
+                await on_tick(outcome)
+            if stop_event.is_set():
+                break
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+            except TimeoutError:
+                continue
+        return {"status": "stopped", "ticks": ticks}
