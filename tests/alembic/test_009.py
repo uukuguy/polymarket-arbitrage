@@ -16,6 +16,8 @@ def test_009_chains_from_008_and_creates_control_plane_authority() -> None:
         "m1_checkpoint_receipts",
         "m1_quote_batch_inputs",
         "m1_quote_batch_receipts",
+        "m1_structure_generation_inputs",
+        "m1_structure_range_inputs",
         "m1_generation_manifests",
         "m1_publication_pointers",
         "m1_incidents",
@@ -52,6 +54,8 @@ def test_009_keeps_jobs_fenced_and_is_reversible() -> None:
         "m1_checkpoint_receipts",
         "m1_quote_batch_receipts",
         "m1_quote_batch_inputs",
+        "m1_structure_range_inputs",
+        "m1_structure_generation_inputs",
         "m1_job_attempts",
         "m1_jobs",
     ):

@@ -22,6 +22,10 @@ from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
 )
+from polyarb.control_plane.structure_artifact import (
+    StructureBundleArtifact,
+    StructureBundleIdentity,
+)
 
 
 def _docker_available() -> bool:
@@ -72,6 +76,8 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
             "m1_incidents",
             "m1_publication_pointers",
             "m1_generation_manifests",
+            "m1_structure_range_inputs",
+            "m1_structure_generation_inputs",
             "m1_quote_batch_receipts",
             "m1_quote_batch_inputs",
             "m1_checkpoint_receipts",
@@ -95,6 +101,24 @@ def _leg(token_id: str, *, suffix: str = "") -> QuoteBatchLeg:
         yes_token_id=token_id,
         event_id=f"event-{token_id}",
         membership_hash=f"membership-{suffix or token_id}",
+    )
+
+
+def _structure_identity() -> StructureBundleIdentity:
+    return StructureBundleIdentity(
+        publication_id="publication-1",
+        window_id="window-1",
+        snapshot_id=42,
+        comparison_receipt_digest="a" * 64,
+        normalization_contract_version="structure-v7",
+        component_counts={
+            "events": 1,
+            "event_tags": 0,
+            "memberships": 0,
+            "group_truth": 0,
+            "markets": 1,
+            "issues": 0,
+        },
     )
 
 
@@ -179,6 +203,27 @@ def test_quote_batch_input_survives_admission_for_worker_takeover(
     )
 
     assert control_plane.quote_batch_spec(admitted[0].job_key) == admitted[0]
+
+
+def test_structure_range_input_survives_admission_for_worker_takeover(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    artifact = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    admitted = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=artifact,
+        ranges=(("events", "", "m"), ("markets", "", "")),
+        now=now,
+    )
+
+    first = control_plane.structure_range_spec(admitted[0].job_key)
+
+    assert first.bundle_digest == artifact.sha256
+    assert first.bundle_key == artifact.key
+    assert first.component == "events"
+    assert first.range_start == ""
+    assert first.range_end == "m"
 
 
 def test_quote_batch_input_preserves_leg_identity_for_worker_takeover(

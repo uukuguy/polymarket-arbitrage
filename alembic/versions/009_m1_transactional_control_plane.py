@@ -141,6 +141,38 @@ def upgrade() -> None:
     )
 
     op.create_table(
+        "m1_structure_generation_inputs",
+        sa.Column("generation_key", sa.Text, nullable=False),
+        sa.Column("bundle_key", sa.Text, nullable=False),
+        sa.Column("bundle_digest", sa.Text, nullable=False),
+        sa.Column("identity", postgresql.JSONB, nullable=False),
+        _timestamp("admitted_at"),
+        sa.PrimaryKeyConstraint("generation_key", name="pk_m1_structure_generation_inputs"),
+        sa.UniqueConstraint("bundle_digest", name="uq_m1_structure_generation_bundle"),
+    )
+
+    op.create_table(
+        "m1_structure_range_inputs",
+        sa.Column("job_key", sa.Text, nullable=False),
+        sa.Column("generation_key", sa.Text, nullable=False),
+        sa.Column("bundle_key", sa.Text, nullable=False),
+        sa.Column("bundle_digest", sa.Text, nullable=False),
+        sa.Column("component", sa.Text, nullable=False),
+        sa.Column("ordinal", sa.BigInteger, nullable=False),
+        sa.Column("range_start", sa.Text, nullable=False),
+        sa.Column("range_end", sa.Text, nullable=False),
+        sa.Column("range_digest", sa.Text, nullable=False),
+        _timestamp("admitted_at"),
+        sa.PrimaryKeyConstraint("job_key", name="pk_m1_structure_range_inputs"),
+        sa.ForeignKeyConstraint(["job_key"], ["m1_jobs.job_key"], name="fk_m1_structure_range_job"),
+        sa.ForeignKeyConstraint(
+            ["generation_key"], ["m1_structure_generation_inputs.generation_key"],
+            name="fk_m1_structure_range_generation",
+        ),
+        sa.UniqueConstraint("generation_key", "component", "ordinal", name="uq_m1_structure_range"),
+    )
+
+    op.create_table(
         "m1_generation_manifests",
         sa.Column("generation_key", sa.Text, nullable=False),
         sa.Column("producer_job_key", sa.Text, nullable=False),
@@ -269,6 +301,8 @@ def downgrade() -> None:
     op.drop_table("m1_incidents")
     op.drop_table("m1_publication_pointers")
     op.drop_table("m1_generation_manifests")
+    op.drop_table("m1_structure_range_inputs")
+    op.drop_table("m1_structure_generation_inputs")
     op.drop_table("m1_quote_batch_receipts")
     op.drop_table("m1_quote_batch_inputs")
     op.drop_table("m1_checkpoint_receipts")

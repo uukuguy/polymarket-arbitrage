@@ -19,7 +19,9 @@ from .models import (
     QuoteBatchLeg,
     QuoteBatchReceipt,
     QuoteBatchSpec,
+    StructureRangeSpec,
 )
+from .structure_artifact import StructureBundleArtifact, StructureBundleIdentity
 
 
 class ControlPlaneError(RuntimeError):
@@ -219,6 +221,112 @@ class PostgresControlPlane:
                 now=now,
             )
         return batches
+
+    def enqueue_structure_generation(
+        self,
+        *,
+        identity: StructureBundleIdentity,
+        bundle: StructureBundleArtifact,
+        ranges: Sequence[tuple[str, str, str]],
+        now: datetime,
+    ) -> tuple[StructureRangeSpec, ...]:
+        """Admit immutable Structure ranges without reading SQLite on takeover."""
+        self._validate_aware(now, "now")
+        if not ranges:
+            raise ValueError("Structure generation requires at least one range")
+        specs = tuple(
+            StructureRangeSpec.create(
+                bundle_key=bundle.key,
+                bundle_digest=bundle.sha256,
+                component=component,
+                ordinal=ordinal,
+                range_start=range_start,
+                range_end=range_end,
+            )
+            for ordinal, (component, range_start, range_end) in enumerate(ranges)
+        )
+        if len({spec.job_key for spec in specs}) != len(specs):
+            raise ValueError("Structure ranges must have unique component/ordinal identities")
+        generation_key = specs[0].generation_key
+        identity_payload = identity.header()
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                INSERT INTO m1_structure_generation_inputs (
+                    generation_key, bundle_key, bundle_digest, identity, admitted_at
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (generation_key) DO NOTHING
+                """,
+                (generation_key, bundle.key, bundle.sha256, Jsonb(identity_payload), now),
+            )
+            cursor.execute(
+                """
+                SELECT bundle_key, bundle_digest, identity
+                FROM m1_structure_generation_inputs WHERE generation_key = %s
+                """,
+                (generation_key,),
+            )
+            persisted_generation = cursor.fetchone()
+            if persisted_generation is None or (
+                persisted_generation["bundle_key"] != bundle.key
+                or persisted_generation["bundle_digest"] != bundle.sha256
+                or persisted_generation["identity"] != identity_payload
+            ):
+                raise JobIdentityConflict(
+                    f"Structure generation {generation_key!r} names another immutable input"
+                )
+            for spec in specs:
+                self._enqueue_job_cursor(
+                    cursor,
+                    job_key=spec.job_key,
+                    job_type="structure-normalize",
+                    input_identity=spec.input_identity,
+                    now=now,
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO m1_structure_range_inputs (
+                        job_key, generation_key, bundle_key, bundle_digest, component, ordinal,
+                        range_start, range_end, range_digest, admitted_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (job_key) DO NOTHING
+                    """,
+                    (
+                        spec.job_key, generation_key, spec.bundle_key, spec.bundle_digest,
+                        spec.component, spec.ordinal, spec.range_start, spec.range_end,
+                        spec.range_digest, now,
+                    ),
+                )
+        return specs
+
+    def structure_range_spec(self, job_key: str) -> StructureRangeSpec:
+        """Load a frozen Structure range for a replacement worker."""
+        self._validate_nonempty(job_key=job_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT bundle_key, bundle_digest, component, ordinal, range_start, range_end
+                FROM m1_structure_range_inputs WHERE job_key = %s
+                """,
+                (job_key,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise ControlPlaneError(f"Structure range input is unavailable for {job_key!r}")
+        return StructureRangeSpec.create(
+            bundle_key=str(row["bundle_key"]),
+            bundle_digest=str(row["bundle_digest"]),
+            component=str(row["component"]),
+            ordinal=int(row["ordinal"]),
+            range_start=str(row["range_start"]),
+            range_end=str(row["range_end"]),
+        )
 
     def quote_batch_spec(self, job_key: str) -> QuoteBatchSpec:
         """Load the admitted immutable token range for a replacement worker."""

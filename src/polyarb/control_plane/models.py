@@ -59,6 +59,63 @@ class QuoteBatchReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class StructureRangeSpec:
+    """One frozen key range extracted from an immutable Structure bundle."""
+
+    bundle_key: str
+    bundle_digest: str
+    component: str
+    ordinal: int
+    range_start: str
+    range_end: str
+    range_digest: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        bundle_key: str,
+        bundle_digest: str,
+        component: str,
+        ordinal: int,
+        range_start: str,
+        range_end: str,
+    ) -> StructureRangeSpec:
+        if not bundle_key or component not in {
+            "events", "event_tags", "memberships", "group_truth", "markets", "issues"
+        }:
+            raise ValueError("invalid Structure range identity")
+        if len(bundle_digest) != 64 or ordinal < 0:
+            raise ValueError("invalid Structure range digest or ordinal")
+        if range_end and range_start >= range_end:
+            raise ValueError("Structure range end must follow its start")
+        range_digest = sha256(
+            f"{component}\n{range_start}\n{range_end}".encode()
+        ).hexdigest()
+        return cls(
+            bundle_key=bundle_key,
+            bundle_digest=bundle_digest,
+            component=component,
+            ordinal=ordinal,
+            range_start=range_start,
+            range_end=range_end,
+            range_digest=range_digest,
+        )
+
+    @property
+    def generation_key(self) -> str:
+        return f"structure:{self.bundle_digest}"
+
+    @property
+    def job_key(self) -> str:
+        return f"{self.generation_key}:normalize:{self.component}:{self.ordinal}"
+
+    @property
+    def input_identity(self) -> str:
+        return f"{self.generation_key}:{self.component}:{self.ordinal}:{self.range_digest}"
+
+
+@dataclass(frozen=True, slots=True)
 class QuoteBatchSpec:
     """One immutable, deterministic Quote token range."""
 
