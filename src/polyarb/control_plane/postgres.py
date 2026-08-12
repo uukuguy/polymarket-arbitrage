@@ -866,6 +866,39 @@ class PostgresControlPlane:
                 raise IncompleteStructureGenerationError(
                     "Structure generation mixes source bundles"
                 )
+            cursor.execute(
+                """
+                SELECT identity FROM m1_structure_generation_inputs
+                WHERE generation_key = %s
+                """,
+                (generation_key,),
+            )
+            generation = cursor.fetchone()
+            try:
+                component_counts = generation["identity"]["component_counts"]
+                expected_counts = {
+                    str(component): int(count) for component, count in component_counts.items()
+                }
+            except (AttributeError, KeyError, TypeError, ValueError) as error:
+                raise IncompleteStructureGenerationError(
+                    "Structure generation has malformed frozen component counts"
+                ) from error
+            actual_counts: dict[str, int] = {}
+            for receipt in ordered:
+                component = str(receipt["component"])
+                actual_counts[component] = actual_counts.get(component, 0) + int(
+                    receipt["record_count"]
+                )
+            admitted_components = {str(row["component"]) for row in expected}
+            parity_counts = {
+                component: count
+                for component, count in expected_counts.items()
+                if component in admitted_components
+            }
+            if actual_counts != parity_counts:
+                raise IncompleteStructureGenerationError(
+                    "Structure generation component-count parity failed"
+                )
             manifest_digest = sha256(
                 canonical_structure_manifest_bytes(
                     generation_key=generation_key,

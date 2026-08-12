@@ -333,7 +333,7 @@ def test_structure_certification_requires_complete_matching_range_receipts(
         range_digest=second_spec.range_digest,
         artifact_key="structure-ranges/b/rows.ndjson",
         artifact_digest="b" * 64,
-        record_count=2,
+        record_count=1,
         now=now,
     )
     control_plane.finish(second, state=JobState.SUCCEEDED, now=now)
@@ -358,7 +358,7 @@ def test_structure_certification_requires_complete_matching_range_receipts(
                     "range_digest": second_spec.range_digest,
                     "artifact_key": "structure-ranges/b/rows.ndjson",
                     "artifact_digest": "b" * 64,
-                    "record_count": 2,
+                    "record_count": 1,
                 },
             ),
         )
@@ -370,6 +370,62 @@ def test_structure_certification_requires_complete_matching_range_receipts(
         artifact_digest=expected_manifest,
         now=now,
     ) == expected_manifest
+
+
+def test_structure_certification_refuses_component_count_parity_mismatch(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    identity = StructureBundleIdentity(
+        publication_id="publication-counts",
+        window_id="window-1",
+        snapshot_id=42,
+        comparison_receipt_digest="a" * 64,
+        normalization_contract_version="structure-v7",
+        component_counts={
+            "events": 1,
+            "event_tags": 0,
+            "memberships": 0,
+            "group_truth": 0,
+            "markets": 0,
+            "issues": 0,
+        },
+    )
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=identity,
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )[0]
+    worker = control_plane.claim_job(
+        worker_id="structure-a", job_types=("structure-normalize",), lease_seconds=30, now=now
+    )
+    assert worker is not None
+    control_plane.record_structure_range(
+        worker,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/a/rows.ndjson",
+        artifact_digest="a" * 64,
+        record_count=0,
+        now=now,
+    )
+    control_plane.finish(worker, state=JobState.SUCCEEDED, now=now)
+    certifier = control_plane.claim_job(
+        worker_id="structure-certifier",
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert certifier is not None
+    with pytest.raises(IncompleteStructureGenerationError, match="component-count"):
+        control_plane.certify_structure_generation(
+            certifier,
+            generation_key=spec.generation_key,
+            artifact_key="structure-manifests/a/manifest.ndjson",
+            artifact_digest="a" * 64,
+            now=now,
+        )
 
 
 def test_quote_batch_input_preserves_leg_identity_for_worker_takeover(
