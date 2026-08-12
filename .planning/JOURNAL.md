@@ -7989,3 +7989,26 @@ slice boundaries. Persist the exact component/range plan before jobs are
 created; prove retries/takeover retain it and content parity combines all
 slices. Add Structure job/manifest/shadow status into the bounded
 control-plane operator projection before scheduling anything.
+
+## SESSION 200 — 2026-08-12 (deterministic Structure slicing)
+
+- [COMMITTED] `25d6f2f` (`05.6-99`) replaces whole-component shadow admission
+  with stable-key bounded ranges. Exporter rows are sorted by component primary
+  key, boundaries are frozen before admission using explicit `range_max_rows`
+  (default 1000), and the normal Postgres range-input records become the only
+  takeover source. Empty components retain zero-row ranges to keep the full
+  six-component contract.
+- [VERIFY] A deterministic planner test proves stable ordering/cut boundaries
+  despite source order; focused artifact/exporter/worker/Postgres/CLI/migration
+  suite: 45 passed, Ruff and planning-status green.
+- [BOUNDARY] No schedule, cloud admission, migration, R2 write or pointer
+  operation occurred. Control-plane status/health projection for Structure,
+  then controlled scheduling, fault injection, designated DB migration and
+  real continuous soak remain before M1 can be considered usable online.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then extend `operational_snapshot` / `control-plane status` with a bounded
+Structure projection: range/certifier state counts, retry age, manifest
+identity and isolated shadow pointer. It must be Postgres-only and unavailable
+on DB errors—never a SQLite fallback. Add HTTP health/read-model wiring before
+introducing any scheduler.
