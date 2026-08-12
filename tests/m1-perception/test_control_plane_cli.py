@@ -487,6 +487,42 @@ def test_shadow_parity_verifier_reads_only_local_evidence(monkeypatch, capsys, t
     assert json.loads(capsys.readouterr().out)["status"] == "PASS"
 
 
+def test_fault_soak_verifier_reads_only_local_evidence(monkeypatch, capsys, tmp_path) -> None:
+    from polyarb import cli_control_plane
+
+    evidence = {
+        "takeovers": [
+            {
+                "worker": worker,
+                "crash_boundary": "r2-upload-before-receipt",
+                "lease_reclaimed_seconds": 90,
+                "lease_reclaim_sla_seconds": 120,
+                "old_certified_truth_available": True,
+                "control_api_readable": True,
+            }
+            for worker in ("structure", "quote")
+        ],
+        "soak": {
+            "duration_seconds": 86_400,
+            "scheduler_ticks": 5_760,
+            "control_api_readable": True,
+            "manual_unlocks": 0,
+            "silent_stops": 0,
+            "permanent_degradations": 0,
+        },
+    }
+    path = tmp_path / "fault-soak.json"
+    path.write_text(json.dumps(evidence))
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_control_plane_from_env",
+        lambda: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert cli_control_plane.main(["verify-fault-soak", "--evidence", str(path), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "PASS"
+
+
 def test_shadow_sync_requires_dsn_without_printing_it(monkeypatch, capsys, tmp_path) -> None:
     from polyarb import cli_control_plane
 

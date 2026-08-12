@@ -16,6 +16,7 @@ import psycopg
 
 from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.config import Settings
+from polyarb.control_plane.fault_soak import verify_fault_soak
 from polyarb.control_plane.postgres import PostgresControlPlane
 from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
@@ -131,6 +132,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify_parity.add_argument("--evidence", type=Path, required=True)
     verify_parity.add_argument("--json", action="store_true")
+    verify_fault_soak_command = subcommands.add_parser(
+        "verify-fault-soak",
+        help="verify local cloud worker-loss and sustained-soak evidence",
+    )
+    verify_fault_soak_command.add_argument("--evidence", type=Path, required=True)
+    verify_fault_soak_command.add_argument("--json", action="store_true")
     return parser
 
 
@@ -310,6 +317,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write(verify_shadow_parity(evidence), as_json=args.json)
         except (OSError, ValueError) as error:
             print(f"shadow parity unavailable: {type(error).__name__}", file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "verify-fault-soak":
+        try:
+            evidence = json.loads(args.evidence.read_text())
+            if not isinstance(evidence, dict):
+                raise ValueError("fault/soak evidence must be an object")
+            _write(verify_fault_soak(evidence), as_json=args.json)
+        except (OSError, ValueError) as error:
+            print(f"fault/soak evidence unavailable: {type(error).__name__}", file=sys.stderr)
             return 1
         return 0
     control_plane = _control_plane_from_env()

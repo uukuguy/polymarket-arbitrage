@@ -612,7 +612,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -660,6 +660,11 @@ control-plane-render-rollout:
 control-plane-verify-shadow-parity:
 	@test -n "$(evidence)" || (echo "usage: make control-plane-verify-shadow-parity evidence=<shadow-parity.json>" >&2; exit 2)
 	@uv run python -m polyarb.cli_control_plane verify-shadow-parity --evidence "$(evidence)" --json
+
+## control-plane-verify-fault-soak: Verify local worker-loss/control-api/soak evidence. Requires evidence=<json>; never contacts cloud resources.
+control-plane-verify-fault-soak:
+	@test -n "$(evidence)" || (echo "usage: make control-plane-verify-fault-soak evidence=<fault-soak.json>" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane verify-fault-soak --evidence "$(evidence)" --json
 
 ## control-plane-api-serve: Run the independent Postgres-only control-plane HTTP read service. Requires enable=1 and DSN; no SQLite, R2 or worker starts.
 control-plane-api-serve:
