@@ -1027,6 +1027,13 @@ def test_operational_snapshot_reads_fenced_work_and_alert_intent(
         "oldest_retryable_batch_age_seconds": None,
         "current_pointer": None,
     }
+    assert snapshot["structure"] == {
+        "range_job_states": {},
+        "certifier_job_states": {},
+        "oldest_retryable_range_age_seconds": None,
+        "latest_manifest": None,
+        "shadow_pointer": None,
+    }
     assert snapshot["recent_attempts"] == [
         {
             "job_key": "structure:window-a",

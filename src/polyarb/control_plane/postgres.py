@@ -1647,6 +1647,56 @@ class PostgresControlPlane:
             quote_pointer = cursor.fetchone()
             cursor.execute(
                 """
+                SELECT state, count(*) AS count
+                FROM m1_jobs WHERE job_type = 'structure-normalize' GROUP BY state
+                """
+            )
+            structure_range_states = {
+                str(row["state"]): int(row["count"])
+                for row in cursor.fetchall()
+            }
+            cursor.execute(
+                """
+                SELECT state, count(*) AS count
+                FROM m1_jobs WHERE job_type = 'structure-certify' GROUP BY state
+                """
+            )
+            structure_certifier_states = {
+                str(row["state"]): int(row["count"])
+                for row in cursor.fetchall()
+            }
+            cursor.execute(
+                """
+                SELECT extract(epoch FROM (%s - min(created_at))) AS age_seconds
+                FROM m1_jobs
+                WHERE job_type = 'structure-normalize' AND state = 'retryable'
+                """,
+                (now,),
+            )
+            retryable_structure_age = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT generation_key, artifact_key, artifact_digest, record_count, published_at
+                FROM m1_generation_manifests
+                WHERE generation_key LIKE 'structure:%'
+                ORDER BY published_at DESC, generation_key DESC LIMIT 1
+                """
+            )
+            structure_manifest = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT pointer.generation_key, pointer.expected_generation_key,
+                       pointer.published_at, manifest.artifact_key, manifest.artifact_digest,
+                       manifest.record_count
+                FROM m1_publication_pointers AS pointer
+                JOIN m1_generation_manifests AS manifest
+                    ON manifest.generation_key = pointer.generation_key
+                WHERE pointer.pointer_key = 'structure:current:shadow'
+                """
+            )
+            structure_pointer = cursor.fetchone()
+            cursor.execute(
+                """
                 SELECT extract(epoch FROM (%s - min(created_at))) AS age_seconds
                 FROM m1_jobs WHERE state IN ('runnable', 'retryable', 'checkpointed')
                 """,
@@ -1717,6 +1767,9 @@ class PostgresControlPlane:
         quote_retry_age = (
             None if retryable_quote_age is None else retryable_quote_age["age_seconds"]
         )
+        structure_retry_age = (
+            None if retryable_structure_age is None else retryable_structure_age["age_seconds"]
+        )
         return {
             "job_counts": job_counts,
             "oldest_runnable_age_seconds": None if age is None else float(age),
@@ -1742,6 +1795,38 @@ class PostgresControlPlane:
                     }
                 ),
             },
+            "structure": {
+                "range_job_states": structure_range_states,
+                "certifier_job_states": structure_certifier_states,
+                "oldest_retryable_range_age_seconds": (
+                    None if structure_retry_age is None else float(structure_retry_age)
+                ),
+                "latest_manifest": self._manifest_snapshot(structure_manifest),
+                "shadow_pointer": (
+                    None
+                    if structure_pointer is None
+                    else {
+                        "generation_key": str(structure_pointer["generation_key"]),
+                        "expected_generation_key": structure_pointer["expected_generation_key"],
+                        "published_at": structure_pointer["published_at"].isoformat(),
+                        "artifact_key": str(structure_pointer["artifact_key"]),
+                        "artifact_digest": str(structure_pointer["artifact_digest"]),
+                        "record_count": int(structure_pointer["record_count"]),
+                    }
+                ),
+            },
+        }
+
+    @staticmethod
+    def _manifest_snapshot(row: Mapping[str, Any] | None) -> dict[str, object] | None:
+        if row is None:
+            return None
+        return {
+            "generation_key": str(row["generation_key"]),
+            "published_at": row["published_at"].isoformat(),
+            "artifact_key": str(row["artifact_key"]),
+            "artifact_digest": str(row["artifact_digest"]),
+            "record_count": int(row["record_count"]),
         }
 
     @staticmethod
@@ -1755,7 +1840,6 @@ class PostgresControlPlane:
             checkpoint_digest=row["checkpoint_digest"],
             committed_at=row["committed_at"],
         )
-
     @staticmethod
     def _validate_nonempty(**values: str) -> None:
         for field, value in values.items():
