@@ -44,6 +44,10 @@ from polyarb.routing.quote_timing import (
 
 
 class Settings(BaseSettings):
+    # Transactional control-plane apps never expose the legacy /scan endpoint.
+    # This non-secret role keeps scan-secret enforcement on the legacy daemon
+    # without distributing it to API, data-worker, or alert-worker processes.
+    runtime_role: Literal["legacy-daemon", "control-plane"] = "legacy-daemon"
     gamma_url: str = "https://gamma-api.polymarket.com"
     clob_url: str = "https://clob.polymarket.com"
 
@@ -459,7 +463,11 @@ class Settings(BaseSettings):
         the respective credentials are fully populated (Plan 03).
         """
         secret_val = self.scan_shared_secret.get_secret_value()
-        if not secret_val and os.environ.get("POLYARB_ALLOW_EMPTY_SECRET") != "1":
+        if (
+            self.runtime_role == "legacy-daemon"
+            and not secret_val
+            and os.environ.get("POLYARB_ALLOW_EMPTY_SECRET") != "1"
+        ):
             raise ValueError(
                 "POLYARB_SCAN_SHARED_SECRET must be set in production. "
                 "To run tests or local dev without a secret, set POLYARB_ALLOW_EMPTY_SECRET=1."

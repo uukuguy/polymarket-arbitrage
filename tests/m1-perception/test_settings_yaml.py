@@ -60,6 +60,25 @@ def test_load_settings_no_yaml_returns_defaults(
     assert s.liquidity_threshold_usd == 1000.0
 
 
+def test_control_plane_runtime_role_does_not_require_legacy_scan_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("POLYARB_ALLOW_EMPTY_SECRET", raising=False)
+    monkeypatch.delenv("POLYARB_SCAN_SHARED_SECRET", raising=False)
+    monkeypatch.setenv("POLYARB_RUNTIME_ROLE", "control-plane")
+
+    assert Settings().runtime_role == "control-plane"
+
+
+def test_legacy_runtime_role_still_requires_scan_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("POLYARB_ALLOW_EMPTY_SECRET", raising=False)
+    monkeypatch.delenv("POLYARB_SCAN_SHARED_SECRET", raising=False)
+    monkeypatch.setenv("POLYARB_RUNTIME_ROLE", "legacy-daemon")
+
+    with pytest.raises(Exception, match="SCAN_SHARED_SECRET"):
+        Settings()
+
+
 def test_load_settings_explicit_missing_path_uses_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

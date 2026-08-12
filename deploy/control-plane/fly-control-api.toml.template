@@ -3,6 +3,9 @@
 app = "__CONTROL_PLANE_API_APP__"
 primary_region = "ams"
 
+[env]
+POLYARB_RUNTIME_ROLE = "control-plane"
+
 [build]
 
 [processes]

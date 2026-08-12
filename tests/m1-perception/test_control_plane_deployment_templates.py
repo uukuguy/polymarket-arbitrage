@@ -12,6 +12,7 @@ def test_control_api_template_has_only_postgres_read_process_and_http_health() -
     )
 
     assert payload["app"] == "__CONTROL_PLANE_API_APP__"
+    assert payload["env"]["POLYARB_RUNTIME_ROLE"] == "control-plane"
     assert payload["processes"] == {"api": "python -m polyarb.control_plane.api"}
     assert payload["http_service"]["processes"] == ["api"]
     assert payload["http_service"]["checks"][0]["path"] == "/healthz"
@@ -25,6 +26,7 @@ def test_control_worker_template_has_only_fenced_scheduler_and_no_http_or_volume
 
     assert payload["app"] == "__CONTROL_PLANE_WORKER_APP__"
     assert payload["env"]["POLYARB_ALERT_CHANNELS"] == "dashboard,telegram"
+    assert payload["env"]["POLYARB_RUNTIME_ROLE"] == "control-plane"
     assert payload["processes"] == {
         "worker": (
             "python -m polyarb.cli_control_plane serve --enable "

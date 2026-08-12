@@ -8620,6 +8620,23 @@ named isolated non-production API/data-worker/alert-worker apps and Postgres
 authority, followed by preflight, migration, shadow, worker-loss and 24-hour
 soak evidence.
 
+## SESSION 229 — 2026-08-12 (control-plane startup role isolation)
+
+- [DISCOVERED] New API/data/alert templates correctly omit the legacy `/scan`
+  HMAC secret, but `Settings()` still rejected every process without it. That
+  made the rendered least-privilege templates unstartable.
+- [IMPLEMENTED] All control-plane templates set the non-secret
+  `POLYARB_RUNTIME_ROLE=control-plane`. Only this role skips the legacy scan
+  secret requirement; legacy-daemon retains the mandatory secret check.
+- [VERIFY] RED proved role-less startup failed. A production Docker image then
+  initialized Settings and both control-plane entrypoints without the legacy
+  secret. 119 targeted control-plane/transactional/settings tests passed.
+- [BOUNDARY] No cloud app, secret, deployment, migration or collection changed.
+
+[NEXT] Commit 05.6-129. Actual completion remains a named isolated
+non-production deployment, preflight, revision-014 migration, shadow parity,
+worker-loss circuit recovery evidence, and a continuous 24-hour soak.
+
 ## SESSION 227 — 2026-08-12 (circuit recovery acceptance contract)
 
 - [DISCOVERED] The existing fault/soak verifier accepted only old
