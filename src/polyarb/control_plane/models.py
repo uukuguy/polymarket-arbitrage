@@ -20,6 +20,25 @@ class JobState(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class QuoteBatchLeg:
+    """Frozen market identity needed to turn a token book into a Quote row."""
+
+    neg_risk_market_id: str
+    market_id: str
+    condition_id: str
+    slug: str | None
+    yes_token_id: str
+    event_id: str = ""
+    membership_hash: str = ""
+
+    def __post_init__(self) -> None:
+        for field in ("neg_risk_market_id", "market_id", "condition_id", "yes_token_id"):
+            _require_identity(getattr(self, field), field)
+        if self.slug is not None and not self.slug.strip():
+            raise ValueError("slug must be non-empty when present")
+
+
+@dataclass(frozen=True, slots=True)
 class QuoteBatchSpec:
     """One immutable, deterministic Quote token range."""
 
@@ -28,6 +47,7 @@ class QuoteBatchSpec:
     ordinal: int
     token_ids: tuple[str, ...]
     token_range_digest: str
+    legs: tuple[QuoteBatchLeg, ...] = ()
 
     @classmethod
     def from_tokens(
@@ -56,6 +76,37 @@ class QuoteBatchSpec:
             ordinal=ordinal,
             token_ids=normalized,
             token_range_digest=token_range_digest,
+        )
+
+    @classmethod
+    def from_legs(
+        cls,
+        *,
+        structure_receipt_digest: str,
+        universe_hash: str,
+        ordinal: int,
+        legs: tuple[QuoteBatchLeg, ...],
+    ) -> QuoteBatchSpec:
+        """Build a range while preserving the exact market mapping for takeover."""
+        by_token: dict[str, QuoteBatchLeg] = {}
+        for leg in legs:
+            if leg.yes_token_id in by_token:
+                raise ValueError("legs must have one unambiguous entry per yes_token_id")
+            by_token[leg.yes_token_id] = leg
+        normalized_legs = tuple(by_token[token_id] for token_id in sorted(by_token))
+        base = cls.from_tokens(
+            structure_receipt_digest=structure_receipt_digest,
+            universe_hash=universe_hash,
+            ordinal=ordinal,
+            token_ids=tuple(by_token),
+        )
+        return cls(
+            structure_receipt_digest=base.structure_receipt_digest,
+            universe_hash=base.universe_hash,
+            ordinal=base.ordinal,
+            token_ids=base.token_ids,
+            token_range_digest=base.token_range_digest,
+            legs=normalized_legs,
         )
 
     @property

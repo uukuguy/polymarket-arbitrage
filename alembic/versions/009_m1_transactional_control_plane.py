@@ -111,6 +111,7 @@ def upgrade() -> None:
         sa.Column("universe_hash", sa.Text, nullable=False),
         sa.Column("token_range_digest", sa.Text, nullable=False),
         sa.Column("token_ids", postgresql.JSONB, nullable=False),
+        sa.Column("legs", postgresql.JSONB, nullable=True),
         _timestamp("admitted_at"),
         sa.PrimaryKeyConstraint("job_key", name="pk_m1_quote_batch_inputs"),
         sa.ForeignKeyConstraint(

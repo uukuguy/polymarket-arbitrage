@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Any
@@ -12,7 +12,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from .models import CheckpointReceipt, JobLease, JobState, QuoteBatchSpec
+from .models import CheckpointReceipt, JobLease, JobState, QuoteBatchLeg, QuoteBatchSpec
 
 
 class ControlPlaneError(RuntimeError):
@@ -33,6 +33,48 @@ class CheckpointConflictError(ControlPlaneError):
 
 class IncompleteQuoteGenerationError(ControlPlaneError):
     """A Quote certifier cannot publish until every batch has a receipt."""
+
+
+def _quote_batch_leg_payload(leg: QuoteBatchLeg) -> dict[str, str | None]:
+    """Keep batch input JSON explicit and independent of routing internals."""
+    return {
+        "neg_risk_market_id": leg.neg_risk_market_id,
+        "market_id": leg.market_id,
+        "condition_id": leg.condition_id,
+        "slug": leg.slug,
+        "yes_token_id": leg.yes_token_id,
+        "event_id": leg.event_id,
+        "membership_hash": leg.membership_hash,
+    }
+
+
+def _persisted_legs(value: object) -> tuple[QuoteBatchLeg, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise JobIdentityConflict("quote batch legs must be a JSON array")
+    legs: list[QuoteBatchLeg] = []
+    for payload in value:
+        if not isinstance(payload, Mapping):
+            raise JobIdentityConflict("quote batch leg must be a JSON object")
+        try:
+            slug = payload.get("slug")
+            if slug is not None and not isinstance(slug, str):
+                raise TypeError("slug")
+            legs.append(
+                QuoteBatchLeg(
+                    neg_risk_market_id=str(payload["neg_risk_market_id"]),
+                    market_id=str(payload["market_id"]),
+                    condition_id=str(payload["condition_id"]),
+                    slug=slug,
+                    yes_token_id=str(payload["yes_token_id"]),
+                    event_id=str(payload.get("event_id", "")),
+                    membership_hash=str(payload.get("membership_hash", "")),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise JobIdentityConflict("quote batch leg is malformed") from error
+    return tuple(legs)
 
 
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
@@ -71,7 +113,8 @@ class PostgresControlPlane:
         *,
         structure_receipt_digest: str,
         universe_hash: str,
-        token_ids: Sequence[str],
+        token_ids: Sequence[str] | None = None,
+        legs: Sequence[QuoteBatchLeg] | None = None,
         batch_size: int,
         now: datetime,
     ) -> tuple[QuoteBatchSpec, ...]:
@@ -79,18 +122,36 @@ class PostgresControlPlane:
         self._validate_aware(now, "now")
         if isinstance(batch_size, bool) or batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        normalized = tuple(sorted(set(token_ids)))
-        if not normalized or any(not token_id for token_id in normalized):
-            raise ValueError("token_ids must contain non-empty values")
-        batches = tuple(
-            QuoteBatchSpec.from_tokens(
-                structure_receipt_digest=structure_receipt_digest,
-                universe_hash=universe_hash,
-                ordinal=ordinal,
-                token_ids=normalized[start : start + batch_size],
+        if (token_ids is None) == (legs is None):
+            raise ValueError("provide exactly one of token_ids or legs")
+        if legs is not None:
+            normalized_legs = tuple(sorted(legs, key=lambda leg: leg.yes_token_id))
+            if not normalized_legs:
+                raise ValueError("legs must contain at least one entry")
+            if len({leg.yes_token_id for leg in normalized_legs}) != len(normalized_legs):
+                raise ValueError("legs must have one unambiguous entry per yes_token_id")
+            batches = tuple(
+                QuoteBatchSpec.from_legs(
+                    structure_receipt_digest=structure_receipt_digest,
+                    universe_hash=universe_hash,
+                    ordinal=ordinal,
+                    legs=normalized_legs[start : start + batch_size],
+                )
+                for ordinal, start in enumerate(range(0, len(normalized_legs), batch_size))
             )
-            for ordinal, start in enumerate(range(0, len(normalized), batch_size))
-        )
+        else:
+            normalized = tuple(sorted(set(token_ids or ())))
+            if not normalized or any(not token_id for token_id in normalized):
+                raise ValueError("token_ids must contain non-empty values")
+            batches = tuple(
+                QuoteBatchSpec.from_tokens(
+                    structure_receipt_digest=structure_receipt_digest,
+                    universe_hash=universe_hash,
+                    ordinal=ordinal,
+                    token_ids=normalized[start : start + batch_size],
+                )
+                for ordinal, start in enumerate(range(0, len(normalized), batch_size))
+            )
         generation_key = batches[0].generation_key
         with (
             self._connection_factory() as connection,
@@ -108,8 +169,8 @@ class PostgresControlPlane:
                     """
                     INSERT INTO m1_quote_batch_inputs (
                         job_key, structure_receipt_digest, universe_hash,
-                        token_range_digest, token_ids, admitted_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                        token_range_digest, token_ids, legs, admitted_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (job_key) DO NOTHING
                     """,
                     (
@@ -118,12 +179,16 @@ class PostgresControlPlane:
                         batch.universe_hash,
                         batch.token_range_digest,
                         Jsonb(batch.token_ids),
+                        Jsonb([_quote_batch_leg_payload(leg) for leg in batch.legs])
+                        if batch.legs
+                        else None,
                         now,
                     ),
                 )
                 cursor.execute(
                     """
-                    SELECT structure_receipt_digest, universe_hash, token_range_digest, token_ids
+                    SELECT structure_receipt_digest, universe_hash, token_range_digest,
+                           token_ids, legs
                     FROM m1_quote_batch_inputs WHERE job_key = %s
                     """,
                     (batch.job_key,),
@@ -134,6 +199,7 @@ class PostgresControlPlane:
                     or persisted["universe_hash"] != batch.universe_hash
                     or persisted["token_range_digest"] != batch.token_range_digest
                     or tuple(persisted["token_ids"]) != batch.token_ids
+                    or _persisted_legs(persisted["legs"]) != batch.legs
                 ):
                     raise JobIdentityConflict(
                         f"quote batch {batch.job_key!r} names another immutable input"
@@ -156,7 +222,7 @@ class PostgresControlPlane:
         ):
             cursor.execute(
                 """
-                SELECT structure_receipt_digest, universe_hash, token_ids
+                SELECT structure_receipt_digest, universe_hash, token_ids, legs
                 FROM m1_quote_batch_inputs WHERE job_key = %s
                 """,
                 (job_key,),
@@ -168,11 +234,16 @@ class PostgresControlPlane:
             ordinal = int(job_key.rsplit(":", maxsplit=1)[1])
         except (IndexError, ValueError) as error:
             raise JobIdentityConflict(f"quote batch has malformed job key {job_key!r}") from error
-        return QuoteBatchSpec.from_tokens(
+        kwargs: dict[str, Any] = dict(
             structure_receipt_digest=str(row["structure_receipt_digest"]),
             universe_hash=str(row["universe_hash"]),
             ordinal=ordinal,
-            token_ids=tuple(str(token_id) for token_id in row["token_ids"]),
+        )
+        persisted_legs = _persisted_legs(row["legs"])
+        if persisted_legs:
+            return QuoteBatchSpec.from_legs(legs=persisted_legs, **kwargs)
+        return QuoteBatchSpec.from_tokens(
+            token_ids=tuple(str(token_id) for token_id in row["token_ids"]), **kwargs
         )
 
     @staticmethod

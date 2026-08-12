@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 import pytest
 
-from polyarb.control_plane.models import JobState, QuoteBatchSpec
+from polyarb.control_plane.models import JobState, QuoteBatchLeg, QuoteBatchSpec
 from polyarb.control_plane.postgres import (
     CheckpointConflictError,
     IncompleteQuoteGenerationError,
@@ -81,6 +81,18 @@ def _now() -> datetime:
     return datetime(2030, 1, 1, 12, tzinfo=UTC)
 
 
+def _leg(token_id: str, *, suffix: str = "") -> QuoteBatchLeg:
+    return QuoteBatchLeg(
+        neg_risk_market_id=f"neg-risk-{token_id}",
+        market_id=f"market-{token_id}",
+        condition_id=f"condition-{token_id}",
+        slug=f"slug-{token_id}",
+        yes_token_id=token_id,
+        event_id=f"event-{token_id}",
+        membership_hash=f"membership-{suffix or token_id}",
+    )
+
+
 def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
     batch = QuoteBatchSpec.from_tokens(
         structure_receipt_digest="a" * 64,
@@ -139,6 +151,24 @@ def test_quote_batch_input_survives_admission_for_worker_takeover(
     )
 
     assert control_plane.quote_batch_spec(admitted[0].job_key) == admitted[0]
+
+
+def test_quote_batch_input_preserves_leg_identity_for_worker_takeover(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    admitted = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        legs=(_leg("token-2"), _leg("token-1")),
+        batch_size=1,
+        now=now,
+    )
+
+    replacement_input = control_plane.quote_batch_spec(admitted[0].job_key)
+
+    assert replacement_input.legs == (_leg("token-1"),)
+    assert replacement_input.token_ids == ("token-1",)
 
 
 def test_quote_batch_receipt_is_fenced_and_idempotent(control_plane: PostgresControlPlane) -> None:
