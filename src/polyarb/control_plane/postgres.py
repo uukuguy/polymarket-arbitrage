@@ -107,7 +107,7 @@ class PostgresControlPlane:
         self._connection_factory = connection_factory
 
     def deployment_preflight(self, *, expected_database: str) -> dict[str, object]:
-        """Prove the named authority has the complete additive 011 schema.
+        """Prove the named authority has the complete additive 012 schema.
 
         This is intentionally read-only: passing it authorizes shadow-only
         operator steps, never a migration, scheduler loop, or pointer change.
@@ -120,6 +120,7 @@ class PostgresControlPlane:
             "m1_checkpoint_receipts",
             "m1_quote_batch_inputs",
             "m1_quote_batch_receipts",
+            "m1_quote_admission_inputs",
             "m1_structure_generation_inputs",
             "m1_structure_range_inputs",
             "m1_structure_range_receipts",
@@ -158,11 +159,11 @@ class PostgresControlPlane:
             )
             found = {str(row["relname"]) for row in cursor.fetchall()}
             if found != set(required_tables):
-                raise ControlPlaneError("control-plane revision 011 schema is incomplete")
+                raise ControlPlaneError("control-plane revision 012 schema is incomplete")
             return {
                 "database_name": str(identity["database_name"]),
                 "postgres_version": str(identity["postgres_version"]),
-                "revision_011_tables": len(found),
+                "revision_012_tables": len(found),
             }
 
     def enqueue_job(
@@ -921,6 +922,181 @@ class PostgresControlPlane:
                 now=now,
             )
         return batches
+
+    def quote_admission_input(self, job_key: str) -> tuple[str, str, str]:
+        """Load the immutable Structure bundle identity for one Quote-admit job."""
+        self._validate_nonempty(job_key=job_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT generation_key, bundle_key, bundle_digest
+                FROM m1_quote_admission_inputs WHERE job_key = %s
+                """,
+                (job_key,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise ControlPlaneError(f"Quote admission input is unavailable for {job_key!r}")
+        return (str(row["generation_key"]), str(row["bundle_key"]), str(row["bundle_digest"]))
+
+    def admit_quote_generation(
+        self,
+        lease: JobLease,
+        *,
+        structure_receipt_digest: str,
+        universe_hash: str,
+        legs: Sequence[QuoteBatchLeg],
+        batch_size: int,
+        now: datetime,
+    ) -> tuple[QuoteBatchSpec, ...]:
+        """Fence one Structure-derived Quote universe and all its batch work together."""
+        self._validate_aware(now, "now")
+        if lease.job_type != "quote-admit":
+            raise ValueError("Quote generation admission requires a quote-admit lease")
+        if len(structure_receipt_digest) != 64 or len(universe_hash) != 64:
+            raise ValueError("Quote admission digests must be sha256")
+        if not legs or batch_size <= 0:
+            raise ValueError("Quote admission requires legs and positive batch_size")
+        batches = self._quote_batches_from_legs(
+            structure_receipt_digest=structure_receipt_digest,
+            universe_hash=universe_hash,
+            legs=legs,
+            batch_size=batch_size,
+        )
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            generation_key, bundle_key, bundle_digest = self._quote_admission_input_cursor(
+                cursor, lease.job_key
+            )
+            if lease.input_identity != f"{generation_key}:{bundle_key}:{bundle_digest}":
+                raise JobIdentityConflict("Quote admission lease names another Structure bundle")
+            if structure_receipt_digest != bundle_digest:
+                raise CheckpointConflictError("Quote admission names another Structure bundle")
+            cursor.execute(
+                """
+                UPDATE m1_jobs
+                SET state = 'succeeded', checkpoint_cursor = 'quote-batches',
+                    checkpoint_digest = %s, lease_owner = NULL, lease_expires_at = NULL,
+                    updated_at = %s
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s AND state = 'leased'
+                """,
+                (universe_hash, now, lease.job_key, lease.lease_owner, lease.lease_epoch),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            self._enqueue_quote_generation_cursor(cursor, batches=batches, now=now)
+            cursor.execute(
+                """
+                UPDATE m1_job_attempts SET state = 'succeeded', finished_at = %s
+                WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
+                """,
+                (now, lease.job_key, lease.lease_epoch),
+            )
+        return batches
+
+    @staticmethod
+    def _quote_batches_from_legs(
+        *,
+        structure_receipt_digest: str,
+        universe_hash: str,
+        legs: Sequence[QuoteBatchLeg],
+        batch_size: int,
+    ) -> tuple[QuoteBatchSpec, ...]:
+        normalized_legs = tuple(sorted(legs, key=lambda leg: leg.yes_token_id))
+        if not normalized_legs:
+            raise ValueError("legs must contain at least one entry")
+        if len({leg.yes_token_id for leg in normalized_legs}) != len(normalized_legs):
+            raise ValueError("legs must have one unambiguous entry per yes_token_id")
+        return tuple(
+            QuoteBatchSpec.from_legs(
+                structure_receipt_digest=structure_receipt_digest,
+                universe_hash=universe_hash,
+                ordinal=ordinal,
+                legs=normalized_legs[start : start + batch_size],
+            )
+            for ordinal, start in enumerate(range(0, len(normalized_legs), batch_size))
+        )
+
+    @staticmethod
+    def _quote_admission_input_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]], job_key: str
+    ) -> tuple[str, str, str]:
+        cursor.execute(
+            """
+            SELECT generation_key, bundle_key, bundle_digest
+            FROM m1_quote_admission_inputs WHERE job_key = %s
+            """,
+            (job_key,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise ControlPlaneError(f"Quote admission input is unavailable for {job_key!r}")
+        return (str(row["generation_key"]), str(row["bundle_key"]), str(row["bundle_digest"]))
+
+    def _enqueue_quote_generation_cursor(
+        self,
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        batches: Sequence[QuoteBatchSpec],
+        now: datetime,
+    ) -> None:
+        for batch in batches:
+            self._enqueue_job_cursor(
+                cursor,
+                job_key=batch.job_key,
+                job_type="quote-batch",
+                input_identity=batch.input_identity,
+                now=now,
+            )
+            cursor.execute(
+                """
+                INSERT INTO m1_quote_batch_inputs (
+                    job_key, structure_receipt_digest, universe_hash,
+                    token_range_digest, token_ids, legs, admitted_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (job_key) DO NOTHING
+                """,
+                (
+                    batch.job_key,
+                    batch.structure_receipt_digest,
+                    batch.universe_hash,
+                    batch.token_range_digest,
+                    Jsonb(batch.token_ids),
+                    Jsonb([_quote_batch_leg_payload(leg) for leg in batch.legs]),
+                    now,
+                ),
+            )
+            cursor.execute(
+                """
+                SELECT structure_receipt_digest, universe_hash, token_range_digest,
+                       token_ids, legs FROM m1_quote_batch_inputs WHERE job_key = %s
+                """,
+                (batch.job_key,),
+            )
+            persisted = cursor.fetchone()
+            if persisted is None or (
+                persisted["structure_receipt_digest"] != batch.structure_receipt_digest
+                or persisted["universe_hash"] != batch.universe_hash
+                or persisted["token_range_digest"] != batch.token_range_digest
+                or tuple(persisted["token_ids"]) != batch.token_ids
+                or _persisted_legs(persisted["legs"]) != batch.legs
+            ):
+                raise JobIdentityConflict(
+                    f"quote batch {batch.job_key!r} names another immutable input"
+                )
+        generation_key = batches[0].generation_key
+        self._enqueue_job_cursor(
+            cursor,
+            job_key=f"{generation_key}:certify",
+            job_type="quote-certify",
+            input_identity=f"{generation_key}:{batches[0].universe_hash}",
+            now=now,
+        )
 
     def enqueue_structure_generation(
         self,
@@ -1703,7 +1879,7 @@ class PostgresControlPlane:
                 )
             cursor.execute(
                 """
-                SELECT identity FROM m1_structure_generation_inputs
+                SELECT bundle_key, identity FROM m1_structure_generation_inputs
                 WHERE generation_key = %s
                 """,
                 (generation_key,),
@@ -1718,6 +1894,7 @@ class PostgresControlPlane:
                 raise IncompleteStructureGenerationError(
                     "Structure generation has malformed frozen component counts"
                 ) from error
+            bundle_key = str(generation["bundle_key"])
             actual_counts: dict[str, int] = {}
             for receipt in ordered:
                 component = str(receipt["component"])
@@ -1801,6 +1978,38 @@ class PostgresControlPlane:
                 or int(persisted["record_count"]) != record_count
             ):
                 raise CheckpointConflictError("Structure generation manifest conflicts")
+            quote_admit_job_key = f"{generation_key}:quote-admit"
+            quote_admit_identity = f"{generation_key}:{bundle_key}:{bundle_digest}"
+            self._enqueue_job_cursor(
+                cursor,
+                job_key=quote_admit_job_key,
+                job_type="quote-admit",
+                input_identity=quote_admit_identity,
+                now=now,
+            )
+            cursor.execute(
+                """
+                INSERT INTO m1_quote_admission_inputs (
+                    job_key, generation_key, bundle_key, bundle_digest, admitted_at
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (job_key) DO NOTHING
+                """,
+                (quote_admit_job_key, generation_key, bundle_key, bundle_digest, now),
+            )
+            cursor.execute(
+                """
+                SELECT generation_key, bundle_key, bundle_digest
+                FROM m1_quote_admission_inputs WHERE job_key = %s
+                """,
+                (quote_admit_job_key,),
+            )
+            quote_admission = cursor.fetchone()
+            if quote_admission is None or (
+                str(quote_admission["generation_key"]) != generation_key
+                or str(quote_admission["bundle_key"]) != bundle_key
+                or str(quote_admission["bundle_digest"]) != bundle_digest
+            ):
+                raise CheckpointConflictError("Structure generation names conflicting Quote input")
             cursor.execute(
                 """
                 UPDATE m1_job_attempts SET state = 'succeeded', finished_at = %s

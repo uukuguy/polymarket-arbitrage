@@ -68,7 +68,7 @@ def postgres_dsn() -> Iterator[str]:
             for role in ("anon", "authenticated", "service_role"):
                 connection.execute(f"CREATE ROLE {role} NOLOGIN")
         result = subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "011"],
+            ["uv", "run", "alembic", "upgrade", "012"],
             env={**os.environ, "POLYARB_SUPABASE_DB_DSN": dsn},
             capture_output=True,
             text=True,
@@ -100,6 +100,7 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
             "m1_structure_generation_inputs",
             "m1_quote_batch_receipts",
             "m1_quote_batch_inputs",
+            "m1_quote_admission_inputs",
             "m1_checkpoint_receipts",
             "m1_job_attempts",
             "m1_jobs",
@@ -788,7 +789,7 @@ def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
     assert batch.input_identity.startswith(f"quote:{'a' * 64}:{'b' * 64}:2:")
 
 
-def test_deployment_preflight_requires_named_database_and_all_011_tables(
+def test_deployment_preflight_requires_named_database_and_all_012_tables(
     control_plane: PostgresControlPlane,
 ) -> None:
     with control_plane._connection_factory() as connection:  # noqa: SLF001
@@ -796,7 +797,7 @@ def test_deployment_preflight_requires_named_database_and_all_011_tables(
     assert database_name is not None
     result = control_plane.deployment_preflight(expected_database=str(database_name[0]))
     assert result["database_name"] == database_name[0]
-    assert result["revision_011_tables"] == 18
+    assert result["revision_012_tables"] == 19
     with pytest.raises(Exception, match="database identity mismatch"):
         control_plane.deployment_preflight(expected_database="not-the-control-plane")
 
@@ -1015,6 +1016,27 @@ def test_structure_certification_requires_complete_matching_range_receipts(
         )
         == expected_manifest
     )
+    quote_admit = control_plane.claim_job(
+        worker_id="quote-admitter",
+        job_types=("quote-admit",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert quote_admit is not None
+    assert control_plane.quote_admission_input(quote_admit.job_key) == (
+        specs[0].generation_key,
+        bundle.key,
+        bundle.sha256,
+    )
+    quote_batches = control_plane.admit_quote_generation(
+        quote_admit,
+        structure_receipt_digest=bundle.sha256,
+        universe_hash="c" * 64,
+        legs=(_leg("quote-token"),),
+        batch_size=100,
+        now=now,
+    )
+    assert control_plane.quote_batch_spec(quote_batches[0].job_key).legs == (_leg("quote-token"),)
 
 
 def test_structure_certification_refuses_component_count_parity_mismatch(

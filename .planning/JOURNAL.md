@@ -8405,6 +8405,28 @@ Render only local artifacts once two isolated non-production Fly app names and
 one named Postgres database are designated; then run the read-only preflight,
 revision-011 migration, and actual continuous shadow collection.
 
+## SESSION 219 — 2026-08-12 (Structure-to-Quote durable handoff)
+
+- [DISCOVERED] Quote batch workers were transactional, but new certified
+  Structure truth had no automatic durable downstream admission. The system
+  could therefore stop at an authenticated Structure manifest and still rely
+  on an external/manual Quote-universe handoff.
+- [IMPLEMENTED] Revision 012 adds immutable quote-admission input. The fenced
+  Structure certifier creates its manifest and `quote-admit` intent atomically.
+  The new bridge worker authenticates that R2 bundle, derives only eligible
+  active/open neg-risk YES legs, freezes a canonical universe, and fences all
+  existing Quote batch/certifier inputs into one transaction.
+- [VERIFY] Real Postgres proves certification-to-Quote-input handoff; all 77
+  focused source/Structure/Quote/control-plane contracts and Ruff pass.
+- [BOUNDARY] The bridge is not yet in the persistent scheduler or a cloud
+  environment. Preflight/migration docs must rise to 012 before any named
+  cloud preflight; no pointer or legacy mode changed.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, schedule the quote-admit
+worker between Structure certification and Quote batches, update preflight and
+rollout artifact revision to 012, then commit the scheduler slice before any
+cloud deployment work.
+
 ## SESSION 217 — 2026-08-12 (rollout evidence contract corrected)
 
 - [DISCOVERED] The local rollout renderer still emitted a revision-009
