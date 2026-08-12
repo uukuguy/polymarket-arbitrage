@@ -8093,3 +8093,29 @@ unmoved publication pointer. Then review the existing guarded migration and
 shadow commands against the production-acceptance matrix; do not start a
 persistent scheduler or perform cloud mutations without explicit designated-
 environment authorization.
+
+## SESSION 204 — 2026-08-12 (symmetric Quote crash-window proof)
+
+- [COMMITTED] `3c37b22` (`05.6-104`) adds the equivalent real-Postgres Quote
+  crash-window proof. After R2 PUT+HEAD but before the fenced receipt write,
+  simulated process loss leaves no receipt; the replacement lease holder uses
+  its admitted batch input and creates exactly one receipt. `quote:current`
+  remains absent because the generation is incomplete.
+- [VERIFY] The dedicated test passed, then the full transactional
+  Postgres/Quote/Structure/scheduler/CLI regression passed 42 tests; Ruff and
+  planning status pass. Output transport truncated the final combined run, but
+  Git confirms the guarded post-test commit completed.
+- [AUDIT] Existing command surface has a test-only guarded migration roundtrip
+  (`make control-plane-migrate-test`) plus default-off single worker/tick and
+  Structure shadow controls. It deliberately has no cloud apply or persistent
+  loop command yet: the remaining boundary is a named, authorized environment
+  and a deployment contract rather than silently repurposing the generic
+  `supabase-migrate` target.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then turn the cloud production-acceptance matrix into a concrete deployment
+contract: named environment identity, revision-009 preflight, R2/DB
+connectivity/read budget checks, no-pointer-mutation shadow steps, rollback
+criteria, worker/scheduler deployment configuration, and exact fault/soak
+commands. Keep it default-off and do not execute it until the designated cloud
+environment is explicitly confirmed.
