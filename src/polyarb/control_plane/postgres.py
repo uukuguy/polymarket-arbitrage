@@ -12,7 +12,14 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from .models import CheckpointReceipt, JobLease, JobState, QuoteBatchLeg, QuoteBatchSpec
+from .models import (
+    CheckpointReceipt,
+    JobLease,
+    JobState,
+    QuoteBatchLeg,
+    QuoteBatchReceipt,
+    QuoteBatchSpec,
+)
 
 
 class ControlPlaneError(RuntimeError):
@@ -244,6 +251,32 @@ class PostgresControlPlane:
             return QuoteBatchSpec.from_legs(legs=persisted_legs, **kwargs)
         return QuoteBatchSpec.from_tokens(
             token_ids=tuple(str(token_id) for token_id in row["token_ids"]), **kwargs
+        )
+
+    def quote_batch_receipt(self, job_key: str) -> QuoteBatchReceipt | None:
+        """Read a prior immutable receipt so a replacement avoids refetching it."""
+        self._validate_nonempty(job_key=job_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT job_key, quote_digest, artifact_key, artifact_digest,
+                       successful_response_count
+                FROM m1_quote_batch_receipts WHERE job_key = %s
+                """,
+                (job_key,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return QuoteBatchReceipt(
+            job_key=str(row["job_key"]),
+            quote_digest=str(row["quote_digest"]),
+            artifact_key=str(row["artifact_key"]),
+            artifact_digest=str(row["artifact_digest"]),
+            successful_response_count=int(row["successful_response_count"]),
         )
 
     @staticmethod
@@ -781,7 +814,8 @@ class PostgresControlPlane:
                 UPDATE m1_jobs
                 SET state = %s, next_attempt_at = %s, last_error_class = %s,
                     lease_owner = NULL, lease_expires_at = NULL, updated_at = %s
-                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s AND state = 'leased'
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+                  AND state IN ('leased', 'checkpointed')
                 """,
                 (
                     state.value,

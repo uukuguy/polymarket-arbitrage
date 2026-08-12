@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 from collections.abc import Iterator
@@ -17,6 +18,7 @@ from polyarb.control_plane.postgres import (
     PostgresControlPlane,
     StaleLeaseError,
 )
+from polyarb.control_plane.quote_worker import TransactionalQuoteBatchWorker
 
 
 def _docker_available() -> bool:
@@ -91,6 +93,31 @@ def _leg(token_id: str, *, suffix: str = "") -> QuoteBatchLeg:
         event_id=f"event-{token_id}",
         membership_hash=f"membership-{suffix or token_id}",
     )
+
+
+class _OneBookReader:
+    async def get_books(self, token_ids: list[str], *, projection: str = "full"):
+        return [
+            {
+                "asset_id": token_id,
+                "asks": [{"price": "0.41", "size": "20"}],
+            }
+            for token_id in token_ids
+        ]
+
+
+class _MemoryObjects:
+    def __init__(self) -> None:
+        self.object: dict[str, object] = {}
+
+    def put_object(self, **kwargs: object) -> None:
+        self.object = kwargs
+
+    def head_object(self, **kwargs: object) -> dict[str, object]:
+        return {
+            "ContentLength": len(self.object["Body"]),
+            "Metadata": self.object["Metadata"],
+        }
 
 
 def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
@@ -269,6 +296,40 @@ def test_replacement_lease_can_finish_an_already_recorded_quote_batch(
         now=now + timedelta(seconds=2),
     ) == receipt
     control_plane.finish(replacement, state=JobState.SUCCEEDED, now=now + timedelta(seconds=3))
+    prior = control_plane.quote_batch_receipt(batch.job_key)
+    assert prior is not None
+    assert prior.artifact_digest == "c" * 64
+    assert prior.successful_response_count == 1
+
+
+def test_transactional_quote_worker_commits_fenced_artifact_receipt(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        legs=(_leg("token-1"),),
+        batch_size=1,
+        now=now,
+    )[0]
+    objects = _MemoryObjects()
+    worker = TransactionalQuoteBatchWorker(
+        control_plane=control_plane,
+        reader=_OneBookReader(),
+        object_client=objects,
+        bucket="quotes",
+        worker_id="quote-worker",
+        now=lambda: now,
+    )
+
+    result = asyncio.run(worker.run_once())
+
+    assert result.outcome == "succeeded"
+    receipt = control_plane.quote_batch_receipt(batch.job_key)
+    assert receipt is not None
+    assert receipt.artifact_key == objects.object["Key"]
+    assert receipt.artifact_digest == objects.object["Metadata"]["sha256"]
 
 
 def test_incomplete_quote_generation_cannot_switch_current_pointer(

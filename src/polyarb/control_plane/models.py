@@ -39,6 +39,26 @@ class QuoteBatchLeg:
 
 
 @dataclass(frozen=True, slots=True)
+class QuoteBatchReceipt:
+    """Authenticated result of one immutable Quote range."""
+
+    job_key: str
+    quote_digest: str
+    artifact_key: str
+    artifact_digest: str
+    successful_response_count: int
+
+    def __post_init__(self) -> None:
+        _require_identity(self.job_key, "job_key")
+        for field in ("quote_digest", "artifact_digest"):
+            if len(getattr(self, field)) != 64:
+                raise ValueError(f"{field} must be a sha256 digest")
+        _require_identity(self.artifact_key, "artifact_key")
+        if self.successful_response_count < 0:
+            raise ValueError("successful_response_count must be non-negative")
+
+
+@dataclass(frozen=True, slots=True)
 class QuoteBatchSpec:
     """One immutable, deterministic Quote token range."""
 
