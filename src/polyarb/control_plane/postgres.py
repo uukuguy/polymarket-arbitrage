@@ -22,7 +22,11 @@ from .models import (
     StructureRangeReceipt,
     StructureRangeSpec,
 )
-from .structure_artifact import StructureBundleArtifact, StructureBundleIdentity
+from .structure_artifact import (
+    StructureBundleArtifact,
+    StructureBundleIdentity,
+    canonical_structure_manifest_bytes,
+)
 
 
 class ControlPlaneError(RuntimeError):
@@ -427,6 +431,56 @@ class PostgresControlPlane:
             record_count=int(row["record_count"]),
         )
 
+    def structure_manifest_payload(self, generation_key: str) -> bytes:
+        """Build the only manifest payload valid for a complete frozen generation."""
+        self._validate_nonempty(generation_key=generation_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT input.job_key, input.bundle_digest, input.component, input.ordinal,
+                       input.range_digest, receipt.artifact_key, receipt.artifact_digest,
+                       receipt.record_count, input.admitted_at, receipt.committed_at
+                FROM m1_structure_range_inputs AS input
+                LEFT JOIN m1_structure_range_receipts AS receipt ON receipt.job_key = input.job_key
+                WHERE input.generation_key = %s
+                ORDER BY input.component, input.ordinal
+                """,
+                (generation_key,),
+            )
+            rows = cursor.fetchall()
+        if not rows or any(row["artifact_digest"] is None for row in rows):
+            raise IncompleteStructureGenerationError(
+                "Structure generation is missing range receipts"
+            )
+        bundle_digest = str(rows[0]["bundle_digest"])
+        receipts: list[dict[str, object]] = []
+        for row in rows:
+            if (
+                str(row["bundle_digest"]) != bundle_digest
+                or str(row["component"]) != str(row["component"])
+                or row["committed_at"] < row["admitted_at"]
+            ):
+                raise IncompleteStructureGenerationError("Structure receipt identity is invalid")
+            receipts.append(
+                {
+                    "job_key": str(row["job_key"]),
+                    "component": str(row["component"]),
+                    "ordinal": int(row["ordinal"]),
+                    "range_digest": str(row["range_digest"]),
+                    "artifact_key": str(row["artifact_key"]),
+                    "artifact_digest": str(row["artifact_digest"]),
+                    "record_count": int(row["record_count"]),
+                }
+            )
+        return canonical_structure_manifest_bytes(
+            generation_key=generation_key,
+            bundle_digest=bundle_digest,
+            receipts=receipts,
+        )
+
     @staticmethod
     def _enqueue_job_cursor(
         cursor: psycopg.Cursor[dict[str, Any]],
@@ -813,11 +867,22 @@ class PostgresControlPlane:
                     "Structure generation mixes source bundles"
                 )
             manifest_digest = sha256(
-                "\n".join(
-                    f"{row['job_key']}:{row['component']}:{row['range_digest']}:"
-                    f"{row['artifact_key']}:{row['artifact_digest']}:{row['record_count']}"
-                    for row in ordered
-                ).encode()
+                canonical_structure_manifest_bytes(
+                    generation_key=generation_key,
+                    bundle_digest=bundle_digest,
+                    receipts=[
+                        {
+                            "job_key": str(receipt["job_key"]),
+                            "component": str(receipt["component"]),
+                            "ordinal": int(input_row["ordinal"]),
+                            "range_digest": str(receipt["range_digest"]),
+                            "artifact_key": str(receipt["artifact_key"]),
+                            "artifact_digest": str(receipt["artifact_digest"]),
+                            "record_count": int(receipt["record_count"]),
+                        }
+                        for input_row, receipt in zip(expected, ordered, strict=True)
+                    ],
+                )
             ).hexdigest()
             if artifact_digest != manifest_digest:
                 raise CheckpointConflictError(

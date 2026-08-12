@@ -96,6 +96,22 @@ class StructureRangeArtifact:
         return cls(payload=payload, sha256=digest, key=structure_range_artifact_key(digest))
 
 
+@dataclass(frozen=True, slots=True)
+class StructureManifestArtifact:
+    """Canonical receipt manifest for one fully normalized Structure generation."""
+
+    payload: bytes
+    sha256: str
+    key: str
+
+    @classmethod
+    def from_bytes(cls, payload: bytes) -> StructureManifestArtifact:
+        if not payload:
+            raise ValueError("Structure manifest payload must be non-empty")
+        digest = hashlib.sha256(payload).hexdigest()
+        return cls(payload=payload, sha256=digest, key=structure_manifest_artifact_key(digest))
+
+
 def canonical_structure_bundle_bytes(
     *,
     identity: StructureBundleIdentity,
@@ -156,10 +172,59 @@ def canonical_structure_range_bytes(
     return b"".join(_canonical_json(record) + b"\n" for record in records)
 
 
+def canonical_structure_manifest_bytes(
+    *,
+    generation_key: str,
+    bundle_digest: str,
+    receipts: Sequence[Mapping[str, object]],
+) -> bytes:
+    """Serialize the complete ordered receipt set that certifies one generation."""
+    if not generation_key or len(bundle_digest) != 64:
+        raise ValueError("invalid Structure manifest identity")
+    records: list[dict[str, object]] = [
+        {
+            "bundle_digest": bundle_digest,
+            "generation_key": generation_key,
+            "kind": "structure-manifest",
+        }
+    ]
+    for receipt in receipts:
+        required = {
+            "job_key",
+            "component",
+            "ordinal",
+            "range_digest",
+            "artifact_key",
+            "artifact_digest",
+            "record_count",
+        }
+        if set(receipt) != required:
+            raise ValueError("Structure manifest receipt shape is invalid")
+        identity_fields = required - {"ordinal", "record_count"}
+        if any(
+            not isinstance(receipt[key], str) or not receipt[key] for key in identity_fields
+        ):
+            raise ValueError("Structure manifest receipt identity is invalid")
+        if isinstance(receipt["ordinal"], bool) or not isinstance(receipt["ordinal"], int):
+            raise ValueError("Structure manifest ordinal is invalid")
+        if isinstance(receipt["record_count"], bool) or not isinstance(
+            receipt["record_count"], int
+        ):
+            raise ValueError("Structure manifest record count is invalid")
+        records.append(dict(receipt))
+    return b"".join(_canonical_json(record) + b"\n" for record in records)
+
+
 def structure_range_artifact_key(sha256: str) -> str:
     if len(sha256) != 64:
         raise ValueError("sha256 must be a sha256 digest")
     return f"structure-ranges/{sha256}/rows.ndjson"
+
+
+def structure_manifest_artifact_key(sha256: str) -> str:
+    if len(sha256) != 64:
+        raise ValueError("sha256 must be a sha256 digest")
+    return f"structure-manifests/{sha256}/manifest.ndjson"
 
 
 def parse_structure_bundle_bytes(
@@ -250,6 +315,32 @@ def upload_structure_range_artifact(
         or remote_digest != artifact.sha256
     ):
         raise StructureBundleError("structure-range-head-verification-failed")
+    return artifact
+
+
+def upload_structure_manifest_artifact(
+    client: _ObjectClient,
+    *,
+    bucket: str,
+    artifact: StructureManifestArtifact,
+) -> StructureManifestArtifact:
+    """PUT and authenticate a terminal manifest before its fenced certification."""
+    if not bucket:
+        raise ValueError("bucket must be non-empty")
+    client.put_object(
+        Bucket=bucket,
+        Key=artifact.key,
+        Body=artifact.payload,
+        ContentType="application/x-ndjson",
+        Metadata={"sha256": artifact.sha256},
+    )
+    head = client.head_object(Bucket=bucket, Key=artifact.key)
+    remote_digest = str(head.get("Metadata", {}).get("sha256", ""))
+    if (
+        int(head.get("ContentLength", -1)) != len(artifact.payload)
+        or remote_digest != artifact.sha256
+    ):
+        raise StructureBundleError("structure-manifest-head-verification-failed")
     return artifact
 
 

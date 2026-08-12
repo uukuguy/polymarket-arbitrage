@@ -9,7 +9,10 @@ from polyarb.control_plane.structure_artifact import (
     StructureBundleIdentity,
     canonical_structure_bundle_bytes,
 )
-from polyarb.control_plane.structure_worker import TransactionalStructureWorker
+from polyarb.control_plane.structure_worker import (
+    TransactionalStructureCertifier,
+    TransactionalStructureWorker,
+)
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
@@ -154,3 +157,60 @@ def test_transactional_structure_worker_recovers_receipt_without_r2_read() -> No
     assert result.outcome == "recovered"
     assert control_plane.recorded is None
     assert control_plane.finished == [JobState.SUCCEEDED]
+
+
+def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit() -> None:
+    class CertifierControlPlane:
+        def __init__(self) -> None:
+            self.finished: list[JobState] = []
+            self.certified: dict[str, object] | None = None
+
+        def claim_job(self, **kwargs: object) -> JobLease:
+            return JobLease(
+                job_key="structure:" + "a" * 64 + ":certify",
+                job_type="structure-certify",
+                input_identity="structure:" + "a" * 64,
+                lease_owner="certifier-a",
+                lease_epoch=1,
+                lease_expires_at=NOW,
+                checkpoint_cursor=None,
+                checkpoint_digest=None,
+            )
+
+        def structure_manifest_payload(self, generation_key: str) -> bytes:
+            assert generation_key == "structure:" + "a" * 64
+            return b'{"kind":"structure-manifest"}\n'
+
+        def certify_structure_generation(self, lease: JobLease, **kwargs: object) -> str:
+            self.certified = kwargs
+            return str(kwargs["artifact_digest"])
+
+        def finish(self, lease: JobLease, *, state: JobState, **kwargs: object) -> None:
+            self.finished.append(state)
+
+    class ObjectClient:
+        def __init__(self) -> None:
+            self.upload: dict[str, object] = {}
+
+        def put_object(self, **kwargs: object) -> None:
+            self.upload = kwargs
+
+        def head_object(self, **kwargs: object) -> dict[str, object]:
+            return {"ContentLength": len(self.upload["Body"]), "Metadata": self.upload["Metadata"]}
+
+    control_plane = CertifierControlPlane()
+    objects = ObjectClient()
+    certifier = TransactionalStructureCertifier(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="structure",
+        worker_id="certifier-a",
+        now=lambda: NOW,
+    )
+
+    result = certifier.run_once()
+
+    assert result.outcome == "certified"
+    assert objects.upload["Key"] == control_plane.certified["artifact_key"]
+    assert objects.upload["Metadata"]["sha256"] == control_plane.certified["artifact_digest"]
+    assert control_plane.finished == []

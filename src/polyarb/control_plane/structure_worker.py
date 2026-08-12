@@ -11,9 +11,11 @@ from .models import JobState, StructureRangeSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .structure_artifact import (
     StructureBundleError,
+    StructureManifestArtifact,
     StructureRangeArtifact,
     canonical_structure_range_bytes,
     parse_structure_bundle_bytes,
+    upload_structure_manifest_artifact,
     upload_structure_range_artifact,
 )
 
@@ -138,6 +140,69 @@ class TransactionalStructureWorker:
         )
         upload_structure_range_artifact(self._object_client, bucket=self._bucket, artifact=artifact)
         return artifact, len(rows)
+
+
+class TransactionalStructureCertifier:
+    """Upload one canonical manifest, then certify it under a lease fence."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        object_client: _ObjectClient,
+        bucket: str,
+        worker_id: str,
+        now: Callable[[], datetime],
+        lease_seconds: int = 30,
+        retry_delay: timedelta = timedelta(seconds=5),
+    ) -> None:
+        if not bucket or not worker_id:
+            raise ValueError("bucket and worker_id must be non-empty")
+        if lease_seconds <= 0 or retry_delay.total_seconds() <= 0:
+            raise ValueError("lease_seconds and retry_delay must be positive")
+        self._control_plane = control_plane
+        self._object_client = object_client
+        self._bucket = bucket
+        self._worker_id = worker_id
+        self._now = now
+        self._lease_seconds = lease_seconds
+        self._retry_delay = retry_delay
+
+    def run_once(self) -> StructureWorkerResult:
+        lease = self._control_plane.claim_job(
+            worker_id=self._worker_id,
+            job_types=("structure-certify",),
+            lease_seconds=self._lease_seconds,
+            now=self._now(),
+        )
+        if lease is None:
+            return StructureWorkerResult(job_key=None, outcome="idle")
+        generation_key = lease.job_key.removesuffix(":certify")
+        try:
+            payload = self._control_plane.structure_manifest_payload(generation_key)
+            artifact = StructureManifestArtifact.from_bytes(payload)
+            upload_structure_manifest_artifact(
+                self._object_client, bucket=self._bucket, artifact=artifact
+            )
+            self._control_plane.certify_structure_generation(
+                lease,
+                generation_key=generation_key,
+                artifact_key=artifact.key,
+                artifact_digest=artifact.sha256,
+                now=self._now(),
+            )
+            return StructureWorkerResult(job_key=lease.job_key, outcome="certified")
+        except StaleLeaseError:
+            raise
+        except Exception as error:
+            self._control_plane.finish(
+                lease,
+                state=JobState.RETRYABLE,
+                next_attempt_at=self._now() + self._retry_delay,
+                error_class=type(error).__name__,
+                now=self._now(),
+            )
+            raise
 
 
 def _in_range(cursor: str, spec: StructureRangeSpec) -> bool:

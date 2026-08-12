@@ -27,6 +27,7 @@ from polyarb.control_plane.quote_worker import (
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
+    canonical_structure_manifest_bytes,
 )
 
 
@@ -337,14 +338,30 @@ def test_structure_certification_requires_complete_matching_range_receipts(
     )
     control_plane.finish(second, state=JobState.SUCCEEDED, now=now)
     expected_manifest = sha256(
-        "\n".join(
-            (
-                f"{first_spec.job_key}:events:{first_spec.range_digest}:"
-                f"structure-ranges/a/rows.ndjson:{'a' * 64}:1",
-                f"{second_spec.job_key}:markets:{second_spec.range_digest}:"
-                f"structure-ranges/b/rows.ndjson:{'b' * 64}:2",
-            )
-        ).encode()
+        canonical_structure_manifest_bytes(
+            generation_key=specs[0].generation_key,
+            bundle_digest=bundle.sha256,
+            receipts=(
+                {
+                    "job_key": first_spec.job_key,
+                    "component": "events",
+                    "ordinal": 0,
+                    "range_digest": first_spec.range_digest,
+                    "artifact_key": "structure-ranges/a/rows.ndjson",
+                    "artifact_digest": "a" * 64,
+                    "record_count": 1,
+                },
+                {
+                    "job_key": second_spec.job_key,
+                    "component": "markets",
+                    "ordinal": 1,
+                    "range_digest": second_spec.range_digest,
+                    "artifact_key": "structure-ranges/b/rows.ndjson",
+                    "artifact_digest": "b" * 64,
+                    "record_count": 2,
+                },
+            ),
+        )
     ).hexdigest()
     assert control_plane.certify_structure_generation(
         certifier,
