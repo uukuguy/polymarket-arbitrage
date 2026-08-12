@@ -7725,3 +7725,69 @@ Makefile entry, then perform the additive production migration and double
 shadow sync. The live Quote 42,235-token atomic persistence boundary remains
 the P1 data-plane repair; do not classify Structure checkpoint recovery as
 complete M1 recovery.
+
+## SESSION 189 — 2026-08-12 (transactional Quote batch boundary started)
+
+- [DESIGN] Added `docs/superpowers/plans/2026-08-12-m1-transactional-quote-batches.md`.
+  It replaces the remaining one-child, 42k-token Quote persistence boundary
+  with immutable Structure-bound ranges, fenced Postgres receipts, terminal
+  certification, and a later pointer-only cutover/rollback gate.
+- [TDD] RED/GREEN established `QuoteBatchSpec`: a range normalizes token ids,
+  derives a deterministic range digest, generation key, and batch job identity.
+  `enqueue_quote_generation` creates idempotent `quote-batch` jobs plus one
+  future certifier job for the immutable universe.
+- [TDD] Added revision-009 `m1_quote_batch_receipts` and
+  `record_quote_batch`. The receipt, checkpoint, and job-attempt transition
+  commit under one current lease fence; duplicate receipt replay authenticates
+  rather than duplicates, and a stale lease cannot write a new receipt.
+- [VERIFY] Fresh focused evidence: migration contract plus real PostgreSQL 16
+  control-plane suite: 10 passed; changed-file Ruff and targeted diff check
+  passed; `make planning-status` reports zero drift.
+- [BOUNDARY] No worker, certifier, current-pointer mutation, production
+  migration, deploy, or external control-plane mutation has occurred. The
+  next TDD slice is terminal certification: require every expected range receipt
+  and freshness gate before creating a Quote generation manifest or moving a
+  durable pointer.
+
+## SESSION 190 — 2026-08-12 (transactional Quote authority slices)
+
+- [COMMITTED] `af30a63` (`05.6-76`) adds deterministic Quote generation
+  admission, fenced batch receipts, and all-or-nothing terminal certification.
+  PostgreSQL tests prove a partial range set leaves `quote:current` absent and
+  a complete authenticated set publishes exactly one durable pointer.
+- [COMMITTED] `057b210` (`05.6-77`) closes the batch-recovery gap: exact token
+  ids are now part of transactional admission in `m1_quote_batch_inputs` and
+  can be reloaded after a worker lease takeover. The batch worker must never
+  reconstruct its input from a newer Structure pointer or SQLite cache.
+- [VERIFY] The migration/control-plane contracts passed 13 PostgreSQL 16 test
+  cases with changed-file Ruff and targeted diff checks green.
+- [NEW DESIGN REQUIREMENT] A receipt digest/count cannot itself serve the new
+  opportunity feed. Before wiring a Quote worker or authorizing any pointer
+  cutover, add an immutable, authenticated Quote-batch payload artifact and
+  bind its key/digest into receipt and terminal manifest. Existing `r2_sync`
+  only uploads snapshot Parquet and is not a Quote artifact contract; do not
+  repurpose it without dedicated key/serialization/readback tests.
+
+## SESSION 191 — 2026-08-12 (transactional Quote execution path)
+
+- [COMMITTED] `6c4b374` (`05.6-78`) adds canonical immutable Quote batch R2
+  artifacts and binds their authenticated identities into receipts and terminal
+  generation evidence. `cf33c78` (`05.6-79`) persists the complete frozen leg
+  mapping, not merely token ids, so a takeover cannot rehydrate identity from
+  SQLite or a newer Structure generation.
+- [COMMITTED] `4895683` (`05.6-80`) fixes the crash window after a receipt is
+  durable but before job finish: a replacement lease authenticates the same
+  immutable receipt then terminalizes the job, while changed content conflicts.
+- [COMMITTED] `faeefec` (`05.6-81`) introduces the bounded Quote-batch worker:
+  claim → frozen input → CLOB read → canonical R2 PUT/HEAD → fenced receipt →
+  finish. `15bd1b9` (`05.6-82`) adds retry-safe terminal certification.
+- [VERIFY] Focused artifact, worker, migration, and real PostgreSQL 16 suites
+  pass 20 cases. `make planning-status` is zero drift.
+- [BOUNDARY] No production migration, R2 operation, daemon schedule, or live
+  pointer mutation occurred. Next: explicit default-off operator command and
+  observability for the worker, then shadow comparison before any reversible
+  pointer cutover.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, continue from
+`make planning-status`, then add the default-off `quote-control-plane-once`
+operator route and its tests before attempting any cloud action.
