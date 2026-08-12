@@ -8241,3 +8241,24 @@ contract. It must demand worker-replacement takeover for both Structure and
 Quote, independent control-api readability during data-worker loss, legacy
 truth availability, bounded lease-reclaim timing and an uninterrupted soak;
 it must remain offline evidence verification, not a cloud command.
+
+## SESSION 210 — 2026-08-12 (fault and soak evidence gate)
+
+- [COMMITTED] `684809d` (`05.6-110`) adds
+  `make control-plane-verify-fault-soak evidence=<json>`. It requires both
+  Structure and Quote R2-upload-before-receipt crash takeovers, reclaim inside
+  declared ≤180-second SLA, old certified truth plus independent control-api
+  readability through each loss, then a ≥24-hour uninterrupted soak with
+  scheduler ticks and zero manual unlock/silent stop/permanent degradation.
+- [VERIFY] Focused transactional worker/scheduler/CLI/API/template/rollout/
+  parity/fault suite: 41 passed; Ruff and planning status pass.
+- [BOUNDARY] The machine verifier does not inject cloud faults or invent
+  uptime; it rejects incomplete evidence. All local rollout prerequisites are
+  now represented as code, templates and fail-closed evidence gates.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`.
+Then, once the user designates a non-production cloud Postgres database and
+two new Fly app names, render the rollout artifacts, run the read-only named
+preflight, apply/roundtrip revision 009 there, and collect the three shadow
+and fault/soak evidence files. Do not infer those cloud identities from the
+legacy L1 configuration or mutate any cloud resource before designation.
