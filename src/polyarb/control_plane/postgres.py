@@ -14,6 +14,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .models import (
+    AlertDeliveryLease,
     CheckpointReceipt,
     JobLease,
     JobState,
@@ -107,7 +108,7 @@ class PostgresControlPlane:
         self._connection_factory = connection_factory
 
     def deployment_preflight(self, *, expected_database: str) -> dict[str, object]:
-        """Prove the named authority has the complete additive 012 schema.
+        """Prove the named authority has the complete additive 013 schema.
 
         This is intentionally read-only: passing it authorizes shadow-only
         operator steps, never a migration, scheduler loop, or pointer change.
@@ -159,11 +160,23 @@ class PostgresControlPlane:
             )
             found = {str(row["relname"]) for row in cursor.fetchall()}
             if found != set(required_tables):
-                raise ControlPlaneError("control-plane revision 012 schema is incomplete")
+                raise ControlPlaneError("control-plane revision 013 schema is incomplete")
+            cursor.execute(
+                """
+                SELECT attname FROM pg_catalog.pg_attribute
+                WHERE attrelid = 'public.m1_alert_outbox'::regclass
+                  AND attnum > 0 AND NOT attisdropped
+                  AND attname = ANY(%s)
+                """,
+                (["lease_owner", "lease_epoch", "lease_expires_at"],),
+            )
+            delivery_lease_columns = {str(row["attname"]) for row in cursor.fetchall()}
+            if delivery_lease_columns != {"lease_owner", "lease_epoch", "lease_expires_at"}:
+                raise ControlPlaneError("control-plane alert delivery lease schema is incomplete")
             return {
                 "database_name": str(identity["database_name"]),
                 "postgres_version": str(identity["postgres_version"]),
-                "revision_012_tables": len(found),
+                "revision_013_tables": len(found),
             }
 
     def enqueue_job(
@@ -2600,6 +2613,112 @@ class PostgresControlPlane:
                 idempotency_key=f"job-retry:{lease.job_key}:{lease.lease_epoch}",
                 channels=channels,
                 now=now,
+            )
+
+    def claim_alert_delivery(
+        self,
+        *,
+        worker_id: str,
+        lease_seconds: int,
+        now: datetime,
+    ) -> AlertDeliveryLease | None:
+        """Claim one due outbox intent; an expired alert lease is safely taken over."""
+        self._validate_nonempty(worker_id=worker_id)
+        self._validate_aware(now, "now")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        expires_at = now + timedelta(seconds=lease_seconds)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT outbox_id, incident_event_id, channel, payload, lease_epoch, attempt_count
+                FROM m1_alert_outbox
+                WHERE (state IN ('pending', 'retryable') AND next_attempt_at <= %s)
+                   OR (state = 'retryable' AND lease_expires_at <= %s)
+                ORDER BY next_attempt_at, created_at, outbox_id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+                """,
+                (now, now),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            lease_epoch = int(row["lease_epoch"]) + 1
+            attempt_number = int(row["attempt_count"]) + 1
+            cursor.execute(
+                """
+                UPDATE m1_alert_outbox
+                SET state = 'retryable', attempt_count = %s, lease_owner = %s,
+                    lease_epoch = %s, lease_expires_at = %s, next_attempt_at = %s
+                WHERE outbox_id = %s
+                """,
+                (attempt_number, worker_id, lease_epoch, expires_at, expires_at, row["outbox_id"]),
+            )
+            return AlertDeliveryLease(
+                outbox_id=str(row["outbox_id"]),
+                incident_event_id=str(row["incident_event_id"]),
+                channel=str(row["channel"]),
+                payload=dict(row["payload"]),
+                lease_owner=worker_id,
+                lease_epoch=lease_epoch,
+                lease_expires_at=expires_at,
+                attempt_number=attempt_number,
+            )
+
+    def finish_alert_delivery(
+        self,
+        lease: AlertDeliveryLease,
+        *,
+        state: str,
+        now: datetime,
+        provider_receipt: str | None = None,
+        error_class: str | None = None,
+        error_detail: dict[str, object] | None = None,
+        next_attempt_at: datetime | None = None,
+    ) -> None:
+        """Store one immutable channel receipt and release its fenced outbox lease."""
+        if state not in {"delivered", "retryable", "failed"}:
+            raise ValueError("invalid alert delivery state")
+        self._validate_aware(now, "now")
+        if next_attempt_at is not None:
+            self._validate_aware(next_attempt_at, "next_attempt_at")
+        if state == "retryable" and next_attempt_at is None:
+            raise ValueError("retryable alert delivery requires next_attempt_at")
+        if state == "delivered" and not provider_receipt:
+            raise ValueError("delivered alert requires provider_receipt")
+        with self._connection_factory() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE m1_alert_outbox
+                SET state = %s, next_attempt_at = %s, lease_owner = NULL, lease_expires_at = NULL
+                WHERE outbox_id = %s AND lease_owner = %s AND lease_epoch = %s
+                  AND state = 'retryable'
+                """,
+                (state, next_attempt_at, lease.outbox_id, lease.lease_owner, lease.lease_epoch),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"alert lease is no longer current for {lease.outbox_id}")
+            cursor.execute(
+                """
+                INSERT INTO m1_alert_deliveries (
+                    delivery_id, outbox_id, attempt_number, state, provider_receipt,
+                    error_class, error_detail, attempted_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    str(uuid4()),
+                    lease.outbox_id,
+                    lease.attempt_number,
+                    state,
+                    provider_receipt,
+                    error_class,
+                    None if error_detail is None else Jsonb(error_detail),
+                    now,
+                ),
             )
 
     @staticmethod

@@ -450,7 +450,7 @@ def test_control_plane_preflight_proves_named_database_and_r2_readiness(
             return {
                 "database_name": expected_database,
                 "postgres_version": "PostgreSQL 16.4",
-                "revision_012_tables": 19,
+                "revision_013_tables": 19,
             }
 
     class ObjectClient:
@@ -477,7 +477,7 @@ def test_control_plane_preflight_proves_named_database_and_r2_readiness(
         "control_plane": {
             "database_name": "control_plane_staging",
             "postgres_version": "PostgreSQL 16.4",
-            "revision_012_tables": 19,
+            "revision_013_tables": 19,
         },
         "r2": {"bucket": "control-plane-artifacts", "reachable": True},
         "status": "ready-for-shadow-only",
@@ -504,6 +504,8 @@ def test_render_rollout_is_explicit_and_never_connects_to_control_plane(
                 "polyarb-control-api-staging",
                 "--worker-app",
                 "polyarb-control-worker-staging",
+                "--alert-app",
+                "polyarb-control-alert-staging",
                 "--expected-database",
                 "control_plane_staging",
                 "--output-dir",

@@ -1,0 +1,14 @@
+# Render with an explicitly designated Fly app name. This alert worker has no
+# HTTP service, data-plane credentials, SQLite volume, Gamma or CLOB access.
+app = "__CONTROL_PLANE_ALERT_APP__"
+primary_region = "ams"
+
+[build]
+
+[processes]
+alert = "python -m polyarb.cli_control_plane alert-serve --enable --worker-id fly-control-plane-alert --interval-seconds 15 --json"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"
+processes = ["alert"]

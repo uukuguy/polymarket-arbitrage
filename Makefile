@@ -633,28 +633,28 @@ supabase-migrate-test:
 	uv run alembic upgrade head && \
 	uv run alembic current
 
-## control-plane-migrate-test: Test-only 012 forward→reverse→forward roundtrip; requires POLYARB_CONTROL_PLANE_TEST_DSN and exits 77 if absent.
+## control-plane-migrate-test: Test-only 013 forward→reverse→forward roundtrip; requires POLYARB_CONTROL_PLANE_TEST_DSN and exits 77 if absent.
 control-plane-migrate-test:
-	@echo ">> control-plane-migrate-test — upgrade 012 → downgrade 011 → upgrade 012"
+	@echo ">> control-plane-migrate-test — upgrade 013 → downgrade 012 → upgrade 013"
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_CONTROL_PLANE_TEST_DSN" ]; then echo "POLYARB_CONTROL_PLANE_TEST_DSN unset — skip"; exit 77; fi; \
-	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 012 && \
-	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic downgrade 011 && \
-	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 012 && \
+	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 013 && \
+	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic downgrade 012 && \
+	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 013 && \
 	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic current
 
-## control-plane-preflight: Read-only proof of the named 012 database and configured R2 bucket. This authorizes source-window shadow work, never a migration or pointer move. Requires expected_database=.
+## control-plane-preflight: Read-only proof of the named 013 database and configured R2 bucket. This authorizes source-window shadow work, never a migration or pointer move. Requires expected_database=.
 control-plane-preflight:
 	@test -n "$(expected_database)" || (echo "usage: make control-plane-preflight expected_database=<database-name>" >&2; exit 2)
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane preflight --expected-database "$(expected_database)" --json
 
-## control-plane-render-rollout: Render local-only isolated API/worker Fly configs and a staged checklist. Requires enable=1, api_app=, worker_app=, expected_database= and output_dir=; never contacts cloud resources.
+## control-plane-render-rollout: Render local-only isolated API/data-worker/alert-worker Fly configs and a staged checklist. Requires enable=1, api_app=, worker_app=, alert_app=, expected_database= and output_dir=; never contacts cloud resources.
 control-plane-render-rollout:
-	@test "$(enable)" = "1" || (echo "usage: make control-plane-render-rollout enable=1 api_app=<app> worker_app=<app> expected_database=<name> output_dir=<empty-dir>" >&2; exit 2)
-	@test -n "$(api_app)" -a -n "$(worker_app)" -a -n "$(expected_database)" -a -n "$(output_dir)" || (echo "api_app, worker_app, expected_database and output_dir are required" >&2; exit 2)
-	@uv run python -m polyarb.cli_control_plane render-rollout --enable --api-app "$(api_app)" --worker-app "$(worker_app)" --expected-database "$(expected_database)" --output-dir "$(output_dir)" --json
+	@test "$(enable)" = "1" || (echo "usage: make control-plane-render-rollout enable=1 api_app=<app> worker_app=<app> alert_app=<app> expected_database=<name> output_dir=<empty-dir>" >&2; exit 2)
+	@test -n "$(api_app)" -a -n "$(worker_app)" -a -n "$(alert_app)" -a -n "$(expected_database)" -a -n "$(output_dir)" || (echo "api_app, worker_app, alert_app, expected_database and output_dir are required" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane render-rollout --enable --api-app "$(api_app)" --worker-app "$(worker_app)" --alert-app "$(alert_app)" --expected-database "$(expected_database)" --output-dir "$(output_dir)" --json
 
 ## control-plane-verify-shadow-parity: Verify exactly three local Structure/Quote shadow evidence records. Requires evidence=<json>; never contacts cloud resources.
 control-plane-verify-shadow-parity:

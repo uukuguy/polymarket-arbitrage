@@ -20,6 +20,28 @@ class JobState(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class AlertDeliveryLease:
+    """One fenced, retryable notification intent claimed by an alert worker."""
+
+    outbox_id: str
+    incident_event_id: str
+    channel: str
+    payload: dict[str, object]
+    lease_owner: str
+    lease_epoch: int
+    lease_expires_at: datetime
+    attempt_number: int
+
+    def __post_init__(self) -> None:
+        for field in ("outbox_id", "incident_event_id", "channel", "lease_owner"):
+            _require_identity(getattr(self, field), field)
+        if self.lease_epoch <= 0 or self.attempt_number <= 0:
+            raise ValueError("lease_epoch and attempt_number must be positive")
+        if self.lease_expires_at.tzinfo is None:
+            raise ValueError("lease_expires_at must be timezone-aware")
+
+
+@dataclass(frozen=True, slots=True)
 class StructureSourcePageSpec:
     """One immutable, bounded Gamma page owned by a source window.
 

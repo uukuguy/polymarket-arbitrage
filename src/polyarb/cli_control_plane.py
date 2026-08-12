@@ -17,6 +17,7 @@ import psycopg
 from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
+from polyarb.control_plane.alert_delivery import TransactionalAlertDeliveryWorker
 from polyarb.control_plane.fault_soak import verify_fault_soak
 from polyarb.control_plane.postgres import PostgresControlPlane
 from polyarb.control_plane.quote_admission import TransactionalQuoteAdmitter
@@ -134,6 +135,13 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--max-turns", type=int, default=4)
     serve.add_argument("--interval-seconds", type=float, default=15.0)
     serve.add_argument("--json", action="store_true")
+    alert_serve = subcommands.add_parser(
+        "alert-serve", help="run the isolated transactional alert-delivery worker"
+    )
+    alert_serve.add_argument("--enable", action="store_true")
+    alert_serve.add_argument("--worker-id", default="control-plane-alert-service")
+    alert_serve.add_argument("--interval-seconds", type=float, default=15.0)
+    alert_serve.add_argument("--json", action="store_true")
     render_rollout = subcommands.add_parser(
         "render-rollout",
         help="render local-only named control-plane rollout artifacts",
@@ -141,6 +149,7 @@ def _parser() -> argparse.ArgumentParser:
     render_rollout.add_argument("--enable", action="store_true")
     render_rollout.add_argument("--api-app", required=True)
     render_rollout.add_argument("--worker-app", required=True)
+    render_rollout.add_argument("--alert-app", required=True)
     render_rollout.add_argument("--expected-database", required=True)
     render_rollout.add_argument("--output-dir", type=Path, required=True)
     render_rollout.add_argument("--json", action="store_true")
@@ -371,6 +380,34 @@ async def _run_scheduler_service(
         await scheduler.aclose()
 
 
+async def _run_alert_service(
+    worker: TransactionalAlertDeliveryWorker, *, interval_seconds: float, as_json: bool
+) -> dict[str, object]:
+    """Run alert delivery separately from all data-plane process groups."""
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for stop_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(stop_signal, stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            pass
+    turns = 0
+    while not stop_event.is_set():
+        result = await worker.run_once()
+        turns += 1
+        _write(
+            {"event": "alert-delivery", "outbox_id": result.outbox_id, "outcome": result.outcome},
+            as_json=as_json,
+        )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+        except TimeoutError:
+            continue
+    return {"status": "stopped", "turns": turns}
+
+
 async def _run_one_structure_source_window(
     control_plane: PostgresControlPlane,
     *,
@@ -402,6 +439,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "structure-shadow-publish",
         "tick-once",
         "serve",
+        "alert-serve",
         "render-rollout",
     }
     if args.command in requires_enable and not args.enable:
@@ -412,6 +450,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             artifacts = render_rollout_artifacts(
                 api_app=args.api_app,
                 worker_app=args.worker_app,
+                alert_app=args.alert_app,
                 expected_database=args.expected_database,
                 output_dir=args.output_dir,
             )
@@ -588,6 +627,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = asyncio.run(
                 _run_scheduler_service(
                     scheduler,
+                    interval_seconds=args.interval_seconds,
+                    as_json=args.json,
+                )
+            )
+            _write(result, as_json=args.json)
+            return 0
+        if args.command == "alert-serve":
+            result = asyncio.run(
+                _run_alert_service(
+                    TransactionalAlertDeliveryWorker(
+                        control_plane=control_plane,
+                        worker_id=args.worker_id,
+                        now=lambda: datetime.now(UTC),
+                    ),
                     interval_seconds=args.interval_seconds,
                     as_json=args.json,
                 )

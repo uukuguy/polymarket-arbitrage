@@ -68,7 +68,7 @@ def postgres_dsn() -> Iterator[str]:
             for role in ("anon", "authenticated", "service_role"):
                 connection.execute(f"CREATE ROLE {role} NOLOGIN")
         result = subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "012"],
+            ["uv", "run", "alembic", "upgrade", "013"],
             env={**os.environ, "POLYARB_SUPABASE_DB_DSN": dsn},
             capture_output=True,
             text=True,
@@ -789,7 +789,7 @@ def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
     assert batch.input_identity.startswith(f"quote:{'a' * 64}:{'b' * 64}:2:")
 
 
-def test_deployment_preflight_requires_named_database_and_all_012_tables(
+def test_deployment_preflight_requires_named_database_and_all_013_tables(
     control_plane: PostgresControlPlane,
 ) -> None:
     with control_plane._connection_factory() as connection:  # noqa: SLF001
@@ -797,7 +797,7 @@ def test_deployment_preflight_requires_named_database_and_all_012_tables(
     assert database_name is not None
     result = control_plane.deployment_preflight(expected_database=str(database_name[0]))
     assert result["database_name"] == database_name[0]
-    assert result["revision_012_tables"] == 19
+    assert result["revision_013_tables"] == 19
     with pytest.raises(Exception, match="database identity mismatch"):
         control_plane.deployment_preflight(expected_database="not-the-control-plane")
 
@@ -1782,6 +1782,55 @@ def test_retryable_finish_creates_one_durable_incident_and_alert_intent(
             assert cursor.fetchone() == ("attempt-failed",)
             cursor.execute("SELECT channel, state FROM m1_alert_outbox")
             assert cursor.fetchone() == ("dashboard", "pending")
+    finally:
+        connection.close()
+
+
+def test_alert_delivery_lease_records_one_receipt_and_fences_stale_worker(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.record_incident_event(
+        incident_key="incident:source-timeout",
+        dedupe_key="source-timeout",
+        component="structure-fetch",
+        severity="warning",
+        summary="source fetch timed out",
+        kind="attempt-failed",
+        detail={"job_key": "source-window:one:fetch:events:0"},
+        idempotency_key="source-timeout:1",
+        channels=("dashboard",),
+        now=now,
+    )
+
+    lease = control_plane.claim_alert_delivery(
+        worker_id="alert-worker-a", lease_seconds=30, now=now
+    )
+    assert lease is not None
+    assert lease.channel == "dashboard"
+    assert lease.attempt_number == 1
+    control_plane.finish_alert_delivery(
+        lease,
+        state="delivered",
+        provider_receipt="dashboard-visible",
+        now=now + timedelta(seconds=1),
+    )
+    assert (
+        control_plane.claim_alert_delivery(
+            worker_id="alert-worker-b", lease_seconds=30, now=now + timedelta(minutes=1)
+        )
+        is None
+    )
+
+    connection = control_plane._connection_factory()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT state, attempt_count FROM m1_alert_outbox")
+            assert cursor.fetchone() == ("delivered", 1)
+            cursor.execute(
+                "SELECT attempt_number, state, provider_receipt FROM m1_alert_deliveries"
+            )
+            assert cursor.fetchone() == (1, "delivered", "dashboard-visible")
     finally:
         connection.close()
 

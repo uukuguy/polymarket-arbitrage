@@ -21,20 +21,23 @@ def render_rollout_artifacts(
     *,
     api_app: str,
     worker_app: str,
+    alert_app: str,
     expected_database: str,
     output_dir: Path,
 ) -> dict[str, str]:
     """Render non-deployable staged rollout inputs without cloud access."""
     _validate_app("api_app", api_app)
     _validate_app("worker_app", worker_app)
-    if api_app == worker_app:
-        raise RolloutArtifactError("API and worker must use different Fly apps")
+    _validate_app("alert_app", alert_app)
+    if len({api_app, worker_app, alert_app}) != 3:
+        raise RolloutArtifactError("API, data worker and alert worker must use different Fly apps")
     if not expected_database.strip():
         raise RolloutArtifactError("expected_database must be non-empty")
     output_dir.mkdir(parents=True, exist_ok=True)
     destinations = {
         "api_config": output_dir / "fly-control-api.toml",
         "worker_config": output_dir / "fly-control-worker.toml",
+        "alert_config": output_dir / "fly-control-alert.toml",
         "checklist": output_dir / "rollout-checklist.json",
     }
     if any(path.exists() for path in destinations.values()):
@@ -45,15 +48,19 @@ def render_rollout_artifacts(
     worker_config = _render_template(
         "fly-control-worker.toml.template", "__CONTROL_PLANE_WORKER_APP__", worker_app
     )
+    alert_config = _render_template(
+        "fly-control-alert.toml.template", "__CONTROL_PLANE_ALERT_APP__", alert_app
+    )
     checklist = {
-        "artifact_version": 3,
+        "artifact_version": 5,
         "api_app": api_app,
         "worker_app": worker_app,
+        "alert_app": alert_app,
         "expected_database": expected_database,
         "steps": [
             "preflight",
-            "revision-012-migration",
-            "isolated-api-and-worker-deploy",
+            "revision-013-migration",
+            "isolated-api-data-worker-and-alert-worker-deploy",
             "three-fresh-source-window-structure-quote-shadows",
             "source-and-quote-admitter-worker-loss-and-api-readability",
             "continuous-24-hour-soak",
@@ -64,6 +71,7 @@ def render_rollout_artifacts(
     }
     destinations["api_config"].write_text(api_config)
     destinations["worker_config"].write_text(worker_config)
+    destinations["alert_config"].write_text(alert_config)
     destinations["checklist"].write_text(json.dumps(checklist, sort_keys=True, indent=2) + "\n")
     return {name: str(path) for name, path in destinations.items()}
 

@@ -8506,6 +8506,24 @@ commit 05.6-122, then await explicit isolated non-production API app, worker
 app, and Postgres database identities before rendering rollout artifacts and
 starting preflight/migration/shadow/worker-loss/24-hour soak evidence.
 
+## SESSION 224 — 2026-08-12 (transactional alert delivery)
+
+- [DISCOVERED] `m1_alert_deliveries` existed only as a schema placeholder:
+  no outbox leasing, sender worker, or receipt could ever be produced.
+- [IMPLEMENTED] Revision 013 adds fenced outbox leases. The independent alert
+  worker claims one durable intent, emits one append-only delivery receipt, and
+  releases retryable failures without coupling external delivery to collection.
+  It has its own `alert-serve` entry and Fly app, separate from the data worker.
+- [VERIFY] Real Postgres proves claim/finalize/receipt; focused migration,
+  worker and scheduler tests and Ruff pass.
+- [BOUNDARY] Only `dashboard-visible` is enabled locally. No external sender,
+  deployment, worker-loss, shadow or soak evidence has been claimed.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run full focused revision-013
+control-plane tests, docs check and planning status; commit 05.6-123. Then
+explicit isolated non-production API app, worker app, and database identities
+remain required before rendering rollout artifacts and starting live evidence.
+
 ## SESSION 217 — 2026-08-12 (rollout evidence contract corrected)
 
 - [DISCOVERED] The local rollout renderer still emitted a revision-009

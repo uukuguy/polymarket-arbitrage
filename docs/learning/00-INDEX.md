@@ -79,6 +79,7 @@
 | 65 | [三次影子一致性门](65-三次影子一致性门.md) | 三次 shadow evidence / source+bundle+counts+universe 对账 / pointer 零变更 / 可逆切换前 gate |
 | 66 | [事务型 Structure 源窗口](66-事务型Structure源窗口.md) | Gamma 单页事务 / opaque cursor / R2 证据与 Postgres 回执 / lease 接管 / events→markets 交接 |
 | 67 | [事务失败告警闭环](67-事务失败告警闭环.md) | retryable 为什么必须同时产生 incident/outbox / lease epoch 幂等 / 不制造告警风暴 |
+| 68 | [事务型告警投递](68-事务型告警投递.md) | outbox lease / append-only delivery receipt / 外部通知不阻塞采集 |
 
 ## Phase 02.1 教学增量（2026-05）
 
