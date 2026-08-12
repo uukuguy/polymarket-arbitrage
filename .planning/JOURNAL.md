@@ -7914,3 +7914,28 @@ builds a canonical manifest from admitted inputs and typed receipts, uploads
 it to R2 with HEAD verification, then calls `certify_structure_generation`.
 It must recover a durable manifest without re-upload and mark incomplete
 generations retryable. Pointer mutation remains forbidden in that slice.
+
+## SESSION 197 — 2026-08-12 (Structure manifest worker and count parity)
+
+- [COMMITTED] `fd90840` (`05.6-94`) adds the canonical, content-addressed
+  Structure manifest artifact plus `TransactionalStructureCertifier`. It
+  derives the manifest from Postgres inputs/receipts, PUT/HEAD authenticates it
+  to R2, then calls the repository certification gate. The transaction already
+  terminalizes certification, so the worker intentionally does not issue a
+  second stale-prone finish.
+- [COMMITTED] `8207b4f` (`05.6-95`) adds frozen component-count parity to the
+  certifier transaction. A receipt-complete generation that drops or invents
+  rows in any admitted component refuses before manifest publication.
+- [VERIFY] A real PostgreSQL adversarial test proves zero output cannot certify
+  a frozen count-one component. Full focused Structure/control-plane suite:
+  38 passed, Ruff and planning-status green.
+- [BOUNDARY] R2 range artifact *content* is not yet re-read and compared to
+  the sealed bundle; current gates validate identities/counts, not full row
+  reconstruction. No pointer, migration, schedule, or cloud action occurred.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then implement authenticated range-artifact parsing and a certifier content
+parity check: download each receipt artifact plus the admitted bundle, verify
+headers/digests/ranges, reassemble every component canonically, and require
+exact source-bundle equality before manifest certification. Only after that
+may work begin on the separate shadow-pointer authorization gate.
