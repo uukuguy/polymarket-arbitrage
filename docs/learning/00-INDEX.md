@@ -76,6 +76,7 @@
 | 62 | [Sealed 后立即认证](62-Sealed后立即认证.md) | sealed 不是 P1 closure / 两秒 continuation / Quote 仲裁不被绕过 |
 | 63 | [事务型 Quote 云端控制面](63-事务型Quote云端控制面.md) | batch lease / 冻结身份 / R2 receipt / terminal pointer / 默认关闭 operator 边界 |
 | 64 | [事务型云端控制面](64-事务型云端控制面.md) | at-least-once 执行与 exactly-once durable effect / Structure+Quote lease 接管 / 独立 control-api / 云端上线门 |
+| 65 | [三次影子一致性门](65-三次影子一致性门.md) | 三次 shadow evidence / source+bundle+counts+universe 对账 / pointer 零变更 / 可逆切换前 gate |
 
 ## Phase 02.1 教学增量（2026-05）
 
