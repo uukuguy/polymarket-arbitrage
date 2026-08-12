@@ -7,6 +7,7 @@ import pytest
 from polyarb.control_plane.structure_artifact import canonical_structure_bundle_bytes
 from polyarb.control_plane.structure_shadow import (
     StructureShadowRefusal,
+    plan_structure_ranges,
     read_legacy_structure_bundle,
 )
 
@@ -63,3 +64,24 @@ def test_exporter_refuses_noncurrent_or_unsealed_legacy_generation(tmp_path) -> 
 
     with pytest.raises(StructureShadowRefusal, match="not-current"):
         read_legacy_structure_bundle(path, publication_id="p")
+
+
+def test_structure_range_plan_is_deterministic_stable_key_slices() -> None:
+    components = {
+        "events": ({"id": "event-c"}, {"id": "event-a"}, {"id": "event-b"}),
+        "event_tags": (),
+        "memberships": (),
+        "group_truth": (),
+        "markets": ({"market_id": "market-a"},),
+        "issues": (),
+    }
+
+    assert plan_structure_ranges(components, max_rows=2) == (
+        ("events", "", "event-c"),
+        ("events", "event-c", ""),
+        ("event_tags", "", ""),
+        ("memberships", "", ""),
+        ("group_truth", "", ""),
+        ("markets", "", ""),
+        ("issues", "", ""),
+    )

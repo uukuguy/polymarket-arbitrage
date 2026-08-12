@@ -26,7 +26,10 @@ from polyarb.control_plane.structure_artifact import (
     canonical_structure_bundle_bytes,
     upload_structure_bundle_artifact,
 )
-from polyarb.control_plane.structure_shadow import read_legacy_structure_bundle
+from polyarb.control_plane.structure_shadow import (
+    plan_structure_ranges,
+    read_legacy_structure_bundle,
+)
 from polyarb.control_plane.structure_worker import TransactionalStructureWorker
 from polyarb.storage.r2_sync import _build_client
 
@@ -73,6 +76,7 @@ def _parser() -> argparse.ArgumentParser:
     structure_shadow_once.add_argument("--enable", action="store_true")
     structure_shadow_once.add_argument("--db-path", type=Path, required=True)
     structure_shadow_once.add_argument("--publication-id", required=True)
+    structure_shadow_once.add_argument("--range-max-rows", type=int, default=1_000)
     structure_shadow_once.add_argument("--json", action="store_true")
     structure_shadow_publish = subcommands.add_parser(
         "structure-shadow-publish",
@@ -237,7 +241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             admitted = control_plane.enqueue_structure_generation(
                 identity=identity,
                 bundle=artifact,
-                ranges=tuple((component, "", "") for component in identity.component_counts),
+                ranges=plan_structure_ranges(components, max_rows=args.range_max_rows),
                 now=datetime.now(UTC),
             )
             _write(

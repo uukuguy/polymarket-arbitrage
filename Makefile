@@ -675,7 +675,7 @@ structure-control-plane-shadow-once:
 	@test -n "$(publication_id)" || (echo "publication_id is required" >&2; exit 2)
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
-	uv run python -m polyarb.cli_control_plane structure-shadow-once --enable --db-path "$(or $(db_path),data/state.db)" --publication-id "$(publication_id)" --json
+	uv run python -m polyarb.cli_control_plane structure-shadow-once --enable --db-path "$(or $(db_path),data/state.db)" --publication-id "$(publication_id)" --range-max-rows "$(or $(range_max_rows),1000)" --json
 
 ## structure-control-plane-shadow-publish: Explicitly move the isolated Structure shadow pointer to one certified generation; requires enable=1 and generation_key. Never changes legacy current.
 structure-control-plane-shadow-publish:

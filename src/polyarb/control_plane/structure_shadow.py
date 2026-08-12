@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from .structure_artifact import StructureBundleIdentity
@@ -92,3 +93,42 @@ def _json_row(row: sqlite3.Row) -> dict[str, object]:
             raise StructureShadowRefusal("legacy-structure-binary-column-refused")
         result[str(key)] = value
     return result
+
+
+def plan_structure_ranges(
+    components: Mapping[str, Sequence[Mapping[str, object]]], *, max_rows: int
+) -> tuple[tuple[str, str, str], ...]:
+    """Freeze deterministic stable-key range boundaries before transactional admission."""
+    if max_rows <= 0:
+        raise ValueError("max_rows must be positive")
+    planned: list[tuple[str, str, str]] = []
+    for component in ("events", "event_tags", "memberships", "group_truth", "markets", "issues"):
+        rows = sorted(components[component], key=lambda row: _row_cursor(component, row))
+        if not rows:
+            planned.append((component, "", ""))
+            continue
+        cursors = [_row_cursor(component, row) for row in rows]
+        if len(set(cursors)) != len(cursors):
+            raise StructureShadowRefusal("legacy-structure-duplicate-range-key")
+        starts = [""] + cursors[max_rows::max_rows]
+        ends = cursors[max_rows::max_rows] + [""]
+        planned.extend((component, start, end) for start, end in zip(starts, ends, strict=True))
+    return tuple(planned)
+
+
+def _row_cursor(component: str, row: Mapping[str, object]) -> str:
+    fields = {
+        "events": ("id",),
+        "event_tags": ("event_id", "tag_id"),
+        "memberships": ("event_id", "market_id"),
+        "group_truth": ("neg_risk_market_id",),
+        "markets": ("market_id",),
+        "issues": ("id",),
+    }[component]
+    values = tuple(row.get(field) for field in fields)
+    if any(
+        isinstance(value, bool) or not isinstance(value, (str, int)) or str(value) == ""
+        for value in values
+    ):
+        raise StructureShadowRefusal("legacy-structure-range-key-unavailable")
+    return "\x00".join(str(value) for value in values)

@@ -277,6 +277,6 @@ def _row_cursor(component: str, row: Mapping[str, object]) -> str:
         values = tuple(row[field] for field in fields)
     except KeyError as error:
         raise StructureWorkerError(f"structure-range-cursor-unavailable:{component}") from error
-    if any(not isinstance(value, str) for value in values):
+    if any(isinstance(value, bool) or not isinstance(value, (str, int)) for value in values):
         raise StructureWorkerError(f"structure-range-cursor-invalid:{component}")
-    return "\x00".join(values)
+    return "\x00".join(str(value) for value in values)
