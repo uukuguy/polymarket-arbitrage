@@ -21,6 +21,7 @@ from polyarb.control_plane.quote_worker import (
     TransactionalQuoteCertifier,
 )
 from polyarb.control_plane.shadow import project_shadow_sources, read_shadow_sources
+from polyarb.control_plane.structure_worker import TransactionalStructureWorker
 from polyarb.storage.r2_sync import _build_client
 
 
@@ -48,6 +49,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     quote_once.add_argument("--worker-id", default="quote-operator-once")
     quote_once.add_argument("--json", action="store_true")
+    structure_once = subcommands.add_parser(
+        "structure-once",
+        help="explicitly run at most one transactional Structure normalization range",
+    )
+    structure_once.add_argument(
+        "--enable",
+        action="store_true",
+        help="required acknowledgement: this command may write to the configured control plane",
+    )
+    structure_once.add_argument("--worker-id", default="structure-operator-once")
+    structure_once.add_argument("--json", action="store_true")
     return parser
 
 
@@ -97,10 +109,33 @@ def _transactional_quote_workers(
     )
 
 
+def _transactional_structure_worker(
+    control_plane: PostgresControlPlane,
+    *,
+    worker_id: str,
+) -> TransactionalStructureWorker:
+    """Build an explicitly invoked worker; it never exports or changes pointers."""
+    settings = Settings()
+    if not settings.r2_enabled:
+        raise RuntimeError("transactional Structure requires configured R2 credentials")
+    object_client = _build_client(
+        settings.r2_endpoint,
+        settings.r2_access_key_id.get_secret_value(),
+        settings.r2_secret_access_key.get_secret_value(),
+    )
+    return TransactionalStructureWorker(
+        control_plane=control_plane,
+        object_client=object_client,
+        bucket=settings.r2_bucket,
+        worker_id=worker_id,
+        now=lambda: datetime.now(UTC),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command == "quote-once" and not args.enable:
-        print("--enable is required for quote-once", file=sys.stderr)
+    if args.command in {"quote-once", "structure-once"} and not args.enable:
+        print(f"--enable is required for {args.command}", file=sys.stderr)
         return 2
     control_plane = _control_plane_from_env()
     if control_plane is None:
@@ -140,6 +175,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "job_key": certifier_result.job_key,
                         "outcome": certifier_result.outcome,
                     },
+                },
+                as_json=args.json,
+            )
+            return 0
+        if args.command == "structure-once":
+            worker = _transactional_structure_worker(control_plane, worker_id=args.worker_id)
+            result = asyncio.run(worker.run_once())
+            _write(
+                {
+                    "status": "ok",
+                    "range": {"job_key": result.job_key, "outcome": result.outcome},
+                    "pointer_mutations": 0,
                 },
                 as_json=args.json,
             )
