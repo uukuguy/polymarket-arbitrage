@@ -125,6 +125,8 @@ def upgrade() -> None:
         sa.Column("universe_hash", sa.Text, nullable=False),
         sa.Column("token_range_digest", sa.Text, nullable=False),
         sa.Column("quote_digest", sa.Text, nullable=False),
+        sa.Column("artifact_key", sa.Text, nullable=False),
+        sa.Column("artifact_digest", sa.Text, nullable=False),
         sa.Column("successful_response_count", sa.BigInteger, nullable=False),
         sa.Column("quoted_at", sa.TIMESTAMP(timezone=True), nullable=False),
         _timestamp("committed_at"),

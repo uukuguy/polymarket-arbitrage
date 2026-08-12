@@ -210,6 +210,8 @@ class PostgresControlPlane:
         *,
         token_range_digest: str,
         quote_digest: str,
+        artifact_key: str,
+        artifact_digest: str,
         successful_response_count: int,
         quoted_at: datetime,
         now: datetime,
@@ -222,6 +224,7 @@ class PostgresControlPlane:
         for field, value in (
             ("token_range_digest", token_range_digest),
             ("quote_digest", quote_digest),
+            ("artifact_digest", artifact_digest),
         ):
             if len(value) != 64:
                 raise ValueError(f"{field} must be a sha256 digest")
@@ -311,8 +314,9 @@ class PostgresControlPlane:
                 """
                 INSERT INTO m1_quote_batch_receipts (
                     job_key, structure_receipt_digest, universe_hash, token_range_digest,
-                    quote_digest, successful_response_count, quoted_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    quote_digest, artifact_key, artifact_digest,
+                    successful_response_count, quoted_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     lease.job_key,
@@ -320,6 +324,8 @@ class PostgresControlPlane:
                     universe_hash,
                     token_range_digest,
                     quote_digest,
+                    artifact_key,
+                    artifact_digest,
                     successful_response_count,
                     quoted_at,
                 ),
@@ -372,7 +378,8 @@ class PostgresControlPlane:
             cursor.execute(
                 """
                 SELECT job_key, structure_receipt_digest, universe_hash, token_range_digest,
-                       quote_digest, successful_response_count, quoted_at
+                       quote_digest, artifact_key, artifact_digest,
+                       successful_response_count, quoted_at
                 FROM m1_quote_batch_receipts
                 WHERE job_key LIKE %s
                 ORDER BY job_key
@@ -401,7 +408,8 @@ class PostgresControlPlane:
                 ordered_receipts.append(receipt)
             artifact_digest = sha256(
                 "\n".join(
-                    f"{row['job_key']}:{row['token_range_digest']}:{row['quote_digest']}"
+                    f"{row['job_key']}:{row['token_range_digest']}:"
+                    f"{row['quote_digest']}:{row['artifact_key']}:{row['artifact_digest']}"
                     for row in ordered_receipts
                 ).encode()
             ).hexdigest()
