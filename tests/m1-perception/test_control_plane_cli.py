@@ -5,6 +5,56 @@ from __future__ import annotations
 import json
 
 
+def test_quote_control_plane_once_requires_explicit_enable(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setattr(
+        cli_control_plane.psycopg,
+        "connect",
+        lambda _dsn: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert cli_control_plane.main(["quote-once", "--json"]) == 2
+
+    captured = capsys.readouterr()
+    assert "--enable is required" in captured.err
+    assert "postgresql://" not in captured.err
+
+
+def test_quote_control_plane_once_runs_one_batch_then_certifier(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    class BatchWorker:
+        async def run_once(self):
+            return type("Result", (), {"job_key": "quote:one:batch:0", "outcome": "succeeded"})()
+
+    class Certifier:
+        def run_once(self):
+            return type("Result", (), {"job_key": "quote:one:certify", "outcome": "waiting"})()
+
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setattr(cli_control_plane.psycopg, "connect", lambda _dsn: object())
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_transactional_quote_workers",
+        lambda _control_plane, *, worker_id: (BatchWorker(), Certifier()),
+    )
+
+    assert (
+        cli_control_plane.main(
+            ["quote-once", "--enable", "--worker-id", "test-worker", "--json"]
+        )
+        == 0
+    )
+
+    assert json.loads(capsys.readouterr().out) == {
+        "batch": {"job_key": "quote:one:batch:0", "outcome": "succeeded"},
+        "certifier": {"job_key": "quote:one:certify", "outcome": "waiting"},
+        "status": "ok",
+    }
+
+
 def test_shadow_sync_requires_dsn_without_printing_it(monkeypatch, capsys, tmp_path) -> None:
     from polyarb import cli_control_plane
 

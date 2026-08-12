@@ -166,8 +166,6 @@ def test_enqueue_quote_generation_is_deterministic(control_plane: PostgresContro
             ]
     finally:
         connection.close()
-
-
 def test_quote_batch_input_survives_admission_for_worker_takeover(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -377,6 +375,11 @@ def test_transactional_quote_certifier_waits_then_publishes_complete_generation(
             assert cursor.fetchone() == (batches[0].generation_key,)
     finally:
         connection.close()
+    quote_status = control_plane.operational_snapshot(now=clock[0])["quote"]
+    assert quote_status["batch_job_states"] == {"succeeded": 2}
+    assert quote_status["certifier_job_states"] == {"succeeded": 1}
+    assert quote_status["current_pointer"] is not None
+    assert quote_status["current_pointer"]["generation_key"] == batches[0].generation_key
 
 
 def test_incomplete_quote_generation_cannot_switch_current_pointer(
@@ -720,6 +723,12 @@ def test_operational_snapshot_reads_fenced_work_and_alert_intent(
     assert snapshot["job_counts"] == {"leased": 1, "runnable": 1}
     assert snapshot["oldest_runnable_age_seconds"] == 0.0
     assert snapshot["expired_leases"] == 1
+    assert snapshot["quote"] == {
+        "batch_job_states": {"runnable": 1},
+        "certifier_job_states": {},
+        "oldest_retryable_batch_age_seconds": None,
+        "current_pointer": None,
+    }
     assert snapshot["recent_attempts"] == [
         {
             "job_key": "structure:window-a",

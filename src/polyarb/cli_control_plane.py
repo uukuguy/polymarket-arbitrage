@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -12,8 +13,15 @@ from pathlib import Path
 
 import psycopg
 
+from polyarb.clients.clob_client import ClobReaderClient
+from polyarb.config import Settings
 from polyarb.control_plane.postgres import PostgresControlPlane
+from polyarb.control_plane.quote_worker import (
+    TransactionalQuoteBatchWorker,
+    TransactionalQuoteCertifier,
+)
 from polyarb.control_plane.shadow import project_shadow_sources, read_shadow_sources
+from polyarb.storage.r2_sync import _build_client
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -29,6 +37,17 @@ def _parser() -> argparse.ArgumentParser:
     status = subcommands.add_parser("status", help="read bounded durable operator state")
     status.add_argument("--limit", type=int, default=20)
     status.add_argument("--json", action="store_true")
+    quote_once = subcommands.add_parser(
+        "quote-once",
+        help="explicitly run at most one transactional Quote batch and certification attempt",
+    )
+    quote_once.add_argument(
+        "--enable",
+        action="store_true",
+        help="required acknowledgement: this command may write to the configured control plane",
+    )
+    quote_once.add_argument("--worker-id", default="quote-operator-once")
+    quote_once.add_argument("--json", action="store_true")
     return parser
 
 
@@ -47,8 +66,42 @@ def _write(payload: dict[str, object], *, as_json: bool) -> None:
         print(f"{key}={value}")
 
 
+def _transactional_quote_workers(
+    control_plane: PostgresControlPlane,
+    *,
+    worker_id: str,
+) -> tuple[TransactionalQuoteBatchWorker, TransactionalQuoteCertifier]:
+    """Build explicitly invoked workers; nothing schedules these by default."""
+    settings = Settings()
+    if not settings.r2_enabled:
+        raise RuntimeError("transactional Quote requires configured R2 credentials")
+    object_client = _build_client(
+        settings.r2_endpoint,
+        settings.r2_access_key_id.get_secret_value(),
+        settings.r2_secret_access_key.get_secret_value(),
+    )
+    return (
+        TransactionalQuoteBatchWorker(
+            control_plane=control_plane,
+            reader=ClobReaderClient(settings),
+            object_client=object_client,
+            bucket=settings.r2_bucket,
+            worker_id=worker_id,
+            now=lambda: datetime.now(UTC),
+        ),
+        TransactionalQuoteCertifier(
+            control_plane=control_plane,
+            worker_id=f"{worker_id}:certifier",
+            now=lambda: datetime.now(UTC),
+        ),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "quote-once" and not args.enable:
+        print("--enable is required for quote-once", file=sys.stderr)
+        return 2
     control_plane = _control_plane_from_env()
     if control_plane is None:
         print("POLYARB_SUPABASE_DB_DSN is required", file=sys.stderr)
@@ -66,6 +119,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "status": "ok",
                     "projected_sources": projected,
                     "pointer_mutations": 0,
+                },
+                as_json=args.json,
+            )
+            return 0
+        if args.command == "quote-once":
+            batch_worker, certifier = _transactional_quote_workers(
+                control_plane, worker_id=args.worker_id
+            )
+            batch_result = asyncio.run(batch_worker.run_once())
+            certifier_result = certifier.run_once()
+            _write(
+                {
+                    "status": "ok",
+                    "batch": {
+                        "job_key": batch_result.job_key,
+                        "outcome": batch_result.outcome,
+                    },
+                    "certifier": {
+                        "job_key": certifier_result.job_key,
+                        "outcome": certifier_result.outcome,
+                    },
                 },
                 as_json=args.json,
             )

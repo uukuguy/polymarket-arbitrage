@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+import pytest
+
 from polyarb.control_plane.models import (
     JobLease,
     JobState,
@@ -57,6 +59,11 @@ class FakeReader:
         assert token_ids == ["token-a"]
         assert projection == "full"
         return [{"asset_id": "token-a", "asks": [{"price": "0.41", "size": "20"}]}]
+
+
+class FailingReader:
+    async def get_books(self, token_ids: list[str], *, projection: str = "full"):
+        raise TimeoutError("clob unavailable")
 
 
 class FakeObjectClient:
@@ -133,3 +140,21 @@ def test_transactional_worker_finishes_existing_receipt_without_refetch() -> Non
     assert reader.calls == 0
     assert control_plane.recorded is None
     assert control_plane.finished == [JobState.SUCCEEDED]
+
+
+def test_transactional_worker_marks_only_its_batch_retryable_on_fetch_failure() -> None:
+    control_plane = FakeControlPlane(_batch())
+    worker = TransactionalQuoteBatchWorker(
+        control_plane=control_plane,
+        reader=FailingReader(),
+        object_client=FakeObjectClient(),
+        bucket="quotes",
+        worker_id="worker-a",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(TimeoutError, match="clob unavailable"):
+        asyncio.run(worker.run_once())
+
+    assert control_plane.recorded is None
+    assert control_plane.finished == [JobState.RETRYABLE]

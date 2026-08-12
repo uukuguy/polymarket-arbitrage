@@ -954,6 +954,46 @@ class PostgresControlPlane:
             }
             cursor.execute(
                 """
+                SELECT state, count(*) AS count
+                FROM m1_jobs WHERE job_type = 'quote-batch' GROUP BY state
+                """
+            )
+            quote_batch_states = {
+                str(row["state"]): int(row["count"])
+                for row in cursor.fetchall()
+            }
+            cursor.execute(
+                """
+                SELECT state, count(*) AS count
+                FROM m1_jobs WHERE job_type = 'quote-certify' GROUP BY state
+                """
+            )
+            quote_certifier_states = {
+                str(row["state"]): int(row["count"])
+                for row in cursor.fetchall()
+            }
+            cursor.execute(
+                """
+                SELECT extract(epoch FROM (%s - min(created_at))) AS age_seconds
+                FROM m1_jobs WHERE job_type = 'quote-batch' AND state = 'retryable'
+                """,
+                (now,),
+            )
+            retryable_quote_age = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT pointer.generation_key, pointer.published_at,
+                       manifest.artifact_key, manifest.artifact_digest,
+                       manifest.record_count
+                FROM m1_publication_pointers AS pointer
+                JOIN m1_generation_manifests AS manifest
+                    ON manifest.generation_key = pointer.generation_key
+                WHERE pointer.pointer_key = 'quote:current'
+                """
+            )
+            quote_pointer = cursor.fetchone()
+            cursor.execute(
+                """
                 SELECT extract(epoch FROM (%s - min(created_at))) AS age_seconds
                 FROM m1_jobs WHERE state IN ('runnable', 'retryable', 'checkpointed')
                 """,
@@ -1021,6 +1061,9 @@ class PostgresControlPlane:
                 for row in cursor.fetchall()
             ]
         age = None if oldest is None else oldest["age_seconds"]
+        quote_retry_age = (
+            None if retryable_quote_age is None else retryable_quote_age["age_seconds"]
+        )
         return {
             "job_counts": job_counts,
             "oldest_runnable_age_seconds": None if age is None else float(age),
@@ -1028,6 +1071,24 @@ class PostgresControlPlane:
             "recent_attempts": attempts,
             "open_incidents": incidents,
             "pending_alert_outbox": outbox,
+            "quote": {
+                "batch_job_states": quote_batch_states,
+                "certifier_job_states": quote_certifier_states,
+                "oldest_retryable_batch_age_seconds": (
+                    None if quote_retry_age is None else float(quote_retry_age)
+                ),
+                "current_pointer": (
+                    None
+                    if quote_pointer is None
+                    else {
+                        "generation_key": str(quote_pointer["generation_key"]),
+                        "published_at": quote_pointer["published_at"].isoformat(),
+                        "artifact_key": str(quote_pointer["artifact_key"]),
+                        "artifact_digest": str(quote_pointer["artifact_digest"]),
+                        "record_count": int(quote_pointer["record_count"]),
+                    }
+                ),
+            },
         }
 
     @staticmethod
