@@ -1,5 +1,7 @@
 # Render with an explicitly designated Fly app name. This alert worker has no
 # HTTP service, data-plane credentials, SQLite volume, Gamma or CLOB access.
+# Configure POLYARB_TELEGRAM_BOT_TOKEN and POLYARB_TELEGRAM_CHAT_ID only on
+# this app when the named environment is ready for external delivery.
 app = "__CONTROL_PLANE_ALERT_APP__"
 primary_region = "ams"
 

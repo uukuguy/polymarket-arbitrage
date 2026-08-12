@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from polyarb.config import Settings
+
+from .alert_delivery import incident_alert_channels
 from .models import JobState, StructureRangeSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .structure_artifact import (
@@ -120,7 +123,7 @@ class TransactionalStructureWorker:
                     "lease_epoch": lease.lease_epoch,
                     "error_class": type(error).__name__,
                 },
-                channels=("dashboard",),
+                channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
             raise
@@ -220,7 +223,7 @@ class TransactionalStructureCertifier:
                     "lease_epoch": lease.lease_epoch,
                     "error_class": type(error).__name__,
                 },
-                channels=("dashboard",),
+                channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
             raise

@@ -10,9 +10,11 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from polyarb.clients.gamma_client import EventPage, MarketPage
+from polyarb.config import Settings
 from polyarb.perception.market_truth import market_truth_mismatch_reason
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 
+from .alert_delivery import incident_alert_channels
 from .models import StructureSourcePageSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .structure_artifact import (
@@ -382,7 +384,7 @@ class TransactionalStructureSourceWorker:
                     "lease_epoch": lease.lease_epoch,
                     "error_class": type(error).__name__,
                 },
-                channels=("dashboard",),
+                channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
             raise
@@ -520,7 +522,7 @@ class TransactionalStructureSourceMaterializer:
                     "lease_epoch": lease.lease_epoch,
                     "error_class": type(error).__name__,
                 },
-                channels=("dashboard",),
+                channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
             raise

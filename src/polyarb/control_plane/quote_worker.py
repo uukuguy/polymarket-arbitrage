@@ -7,9 +7,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from polyarb.config import Settings
 from polyarb.routing.neg_risk_quote_collector import BooksReader, _build_terminal_quotes
 from polyarb.routing.neg_risk_quote_store import UniverseLeg
 
+from .alert_delivery import incident_alert_channels
 from .models import JobState, QuoteBatchSpec
 from .postgres import (
     IncompleteQuoteGenerationError,
@@ -116,7 +118,7 @@ class TransactionalQuoteBatchWorker:
                     "lease_epoch": lease.lease_epoch,
                     "error_class": type(error).__name__,
                 },
-                channels=("dashboard",),
+                channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
             raise
@@ -211,7 +213,7 @@ class TransactionalQuoteCertifier:
                     "lease_epoch": lease.lease_epoch,
                     "error_class": type(error).__name__,
                 },
-                channels=("dashboard",),
+                channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
             raise

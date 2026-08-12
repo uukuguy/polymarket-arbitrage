@@ -8,6 +8,9 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Any, Protocol
 
+from polyarb.config import Settings
+
+from .alert_delivery import incident_alert_channels
 from .models import QuoteBatchLeg
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .quote_worker import QuoteBatchWorkerResult
@@ -170,7 +173,7 @@ class TransactionalQuoteAdmitter:
                     "lease_epoch": lease.lease_epoch,
                     "error_class": type(error).__name__,
                 },
-                channels=("dashboard",),
+                channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
             if isinstance(error, QuoteAdmissionError):

@@ -8524,6 +8524,20 @@ control-plane tests, docs check and planning status; commit 05.6-123. Then
 explicit isolated non-production API app, worker app, and database identities
 remain required before rendering rollout artifacts and starting live evidence.
 
+## SESSION 225 — 2026-08-12 (Telegram outbox sender)
+
+- [IMPLEMENTED] The isolated alert worker now delivers configured Telegram
+  intents. Success records only Telegram's message ID; unavailable credentials,
+  network and HTTP failures write a retryable delivery receipt without secret
+  or response-body persistence.
+- [BOUNDARY] Delivery is contract-tested locally only. The alert Fly app is the
+  sole intended holder of Telegram secrets in a named environment; no external
+  request or deployment occurred.
+
+[NEXT] Run focused alert/control-plane suite and commit 05.6-124. Then design
+scoped circuit/recovery lifecycle, followed by the unchanged named-environment
+preflight/migration/shadow/worker-loss/24-hour evidence lane.
+
 ## SESSION 217 — 2026-08-12 (rollout evidence contract corrected)
 
 - [DISCOVERED] The local rollout renderer still emitted a revision-009
