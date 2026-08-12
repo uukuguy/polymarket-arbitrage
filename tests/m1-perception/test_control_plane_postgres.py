@@ -27,8 +27,10 @@ from polyarb.control_plane.quote_worker import (
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
+    canonical_structure_bundle_bytes,
     canonical_structure_manifest_bytes,
 )
+from polyarb.control_plane.structure_worker import TransactionalStructureWorker
 
 
 def _docker_available() -> bool:
@@ -149,6 +151,93 @@ class _MemoryObjects:
             "ContentLength": len(self.object["Body"]),
             "Metadata": self.object["Metadata"],
         }
+
+
+def test_structure_worker_takeover_after_upload_before_receipt_has_one_receipt(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """A crash after deterministic R2 upload leaves only a reclaimable lease."""
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(
+        canonical_structure_bundle_bytes(
+            identity=_structure_identity(),
+            components={
+                "events": ({"id": "event-a"},),
+                "event_tags": (),
+                "memberships": (),
+                "group_truth": (),
+                "markets": ({"market_id": "market-a"},),
+                "issues": (),
+            },
+        )
+    )
+    admitted = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(), bundle=bundle, ranges=(("events", "", ""),), now=now
+    )
+
+    class MemoryR2:
+        def __init__(self) -> None:
+            self.objects = {bundle.key: bundle.payload}
+            self.metadata: dict[str, dict[str, object]] = {}
+            self.put_calls = 0
+
+        def get_object(self, **kwargs: object) -> dict[str, object]:
+            return {"Body": type("Body", (), {"read": lambda _self: self.objects[kwargs["Key"]]})()}
+
+        def put_object(self, **kwargs: object) -> None:
+            self.put_calls += 1
+            key = str(kwargs["Key"])
+            self.objects[key] = bytes(kwargs["Body"])
+            self.metadata[key] = dict(kwargs["Metadata"])
+
+        def head_object(self, **kwargs: object) -> dict[str, object]:
+            payload = self.objects[str(kwargs["Key"])]
+            return {
+                "ContentLength": len(payload),
+                "Metadata": self.metadata.get(str(kwargs["Key"]), {}),
+            }
+
+    class CrashBeforeReceipt:
+        def __init__(self, delegate: PostgresControlPlane) -> None:
+            self._delegate = delegate
+            self.crash = True
+
+        def __getattr__(self, name: str):
+            return getattr(self._delegate, name)
+
+        def record_structure_range(self, *args: object, **kwargs: object):
+            if self.crash:
+                self.crash = False
+                raise KeyboardInterrupt("simulated process death after R2 upload")
+            return self._delegate.record_structure_range(*args, **kwargs)
+
+    objects = MemoryR2()
+    crashing = CrashBeforeReceipt(control_plane)
+    first = TransactionalStructureWorker(
+        control_plane=crashing,  # type: ignore[arg-type]
+        object_client=objects,
+        bucket="structure",
+        worker_id="crashed-worker",
+        now=lambda: now,
+        lease_seconds=1,
+    )
+    with pytest.raises(KeyboardInterrupt, match="after R2 upload"):
+        asyncio.run(first.run_once())
+    assert control_plane.structure_range_receipt(admitted[0].job_key) is None
+
+    recovered = TransactionalStructureWorker(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="structure",
+        worker_id="replacement-worker",
+        now=lambda: now + timedelta(seconds=2),
+        lease_seconds=30,
+    )
+    assert asyncio.run(recovered.run_once()).outcome == "succeeded"
+    receipts = control_plane.structure_generation_receipts(admitted[0].generation_key)
+    assert len(receipts) == 1
+    assert receipts[0][0].job_key == admitted[0].job_key
+    assert objects.put_calls == 2
 
 
 def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
