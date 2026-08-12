@@ -8447,6 +8447,26 @@ artifacts from revision 011 to revision 012 and add Quote-admit evidence steps.
 Then commit, pending explicit non-production Fly app/database identities for
 real deployment, shadow comparison, worker-loss, and 24-hour soak.
 
+## SESSION 221 — 2026-08-12 (revision-012 rollout contract)
+
+- [COMMITTED] `d012606` (`05.6-119`) makes quote-admit a bounded continuous
+  worker turn between Structure certification and Quote batches; the locally
+  resumable chain is now source through Quote certification.
+- [IMPLEMENTED] The rollout renderer is artifact version 3. Its required
+  evidence matches revision 012: three fresh source-window Structure+Quote
+  shadows, source/Quote-admitter worker loss with API readability, and then
+  continuous 24-hour soak before a separately authorized reversible switch.
+- [VERIFY] Renderer, Fly-template static contract, control-plane CLI, Ruff and
+  diff checks pass. No Fly, Postgres, R2 or deployment credential was used.
+- [BOUNDARY] Code and rollout evidence contract are ready; actual online
+  acceptance remains impossible to claim until the user designates isolated
+  non-production app/database identities and the live evidence is collected.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`.
+After explicit designation of API app, worker app, and Postgres database, render
+the v3 artifacts, run named read-only preflight, then apply revision 012 and
+begin actual source-window Structure/Quote shadow collection.
+
 ## SESSION 217 — 2026-08-12 (rollout evidence contract corrected)
 
 - [DISCOVERED] The local rollout renderer still emitted a revision-009

@@ -46,16 +46,16 @@ def render_rollout_artifacts(
         "fly-control-worker.toml.template", "__CONTROL_PLANE_WORKER_APP__", worker_app
     )
     checklist = {
-        "artifact_version": 2,
+        "artifact_version": 3,
         "api_app": api_app,
         "worker_app": worker_app,
         "expected_database": expected_database,
         "steps": [
             "preflight",
-            "revision-011-migration",
+            "revision-012-migration",
             "isolated-api-and-worker-deploy",
-            "three-fresh-source-window-shadows",
-            "source-worker-loss-and-api-readability",
+            "three-fresh-source-window-structure-quote-shadows",
+            "source-and-quote-admitter-worker-loss-and-api-readability",
             "continuous-24-hour-soak",
             "authorized-reversible-switch",
         ],

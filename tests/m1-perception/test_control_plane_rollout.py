@@ -32,10 +32,10 @@ def test_rollout_renderer_writes_two_named_apps_and_staged_checklist(tmp_path: P
     assert checklist["expected_database"] == "control_plane_staging"
     assert checklist["steps"] == [
         "preflight",
-        "revision-011-migration",
+        "revision-012-migration",
         "isolated-api-and-worker-deploy",
-        "three-fresh-source-window-shadows",
-        "source-worker-loss-and-api-readability",
+        "three-fresh-source-window-structure-quote-shadows",
+        "source-and-quote-admitter-worker-loss-and-api-readability",
         "continuous-24-hour-soak",
         "authorized-reversible-switch",
     ]
