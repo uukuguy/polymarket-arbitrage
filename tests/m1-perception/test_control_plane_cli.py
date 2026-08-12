@@ -9,7 +9,9 @@ from pathlib import Path
 def test_quote_control_plane_once_requires_explicit_enable(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(
         cli_control_plane.psycopg,
         "connect",
@@ -26,7 +28,9 @@ def test_quote_control_plane_once_requires_explicit_enable(monkeypatch, capsys) 
 def test_structure_control_plane_once_requires_explicit_enable(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(
         cli_control_plane.psycopg,
         "connect",
@@ -43,7 +47,9 @@ def test_structure_control_plane_once_requires_explicit_enable(monkeypatch, caps
 def test_structure_shadow_once_requires_explicit_enable(monkeypatch, capsys, tmp_path) -> None:
     from polyarb import cli_control_plane
 
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(
         cli_control_plane.psycopg,
         "connect",
@@ -74,7 +80,9 @@ def test_structure_shadow_publish_requires_explicit_enable_before_connect(
 ) -> None:
     from polyarb import cli_control_plane
 
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(
         cli_control_plane.psycopg,
         "connect",
@@ -93,7 +101,9 @@ def test_structure_shadow_publish_requires_explicit_enable_before_connect(
 def test_control_plane_tick_once_requires_enable_before_connect(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(
         cli_control_plane.psycopg,
         "connect",
@@ -107,7 +117,9 @@ def test_control_plane_tick_once_requires_enable_before_connect(monkeypatch, cap
 def test_control_plane_serve_requires_enable_before_connect(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(
         cli_control_plane.psycopg,
         "connect",
@@ -118,11 +130,81 @@ def test_control_plane_serve_requires_enable_before_connect(monkeypatch, capsys)
     assert "--enable is required" in capsys.readouterr().err
 
 
+def test_structure_source_once_requires_enable_before_connect(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
+    monkeypatch.setattr(
+        cli_control_plane.psycopg,
+        "connect",
+        lambda _dsn: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert (
+        cli_control_plane.main(["structure-source-once", "--window-key", "window:one", "--json"])
+        == 2
+    )
+    assert "--enable is required" in capsys.readouterr().err
+
+
+def test_structure_source_once_admits_one_window_then_runs_one_source_page(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    class ControlPlane:
+        def admit_structure_source_window(self, *, window_key: str, now):
+            assert window_key == "window:one"
+            assert now.tzinfo is not None
+
+    class SourceWorker:
+        async def run_once(self):
+            return type(
+                "Result", (), {"job_key": "window:one:fetch:events:0", "outcome": "succeeded"}
+            )()
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_transactional_structure_source_worker",
+        lambda _control_plane, *, worker_id: SourceWorker(),
+    )
+
+    assert (
+        cli_control_plane.main(
+            [
+                "structure-source-once",
+                "--enable",
+                "--window-key",
+                "window:one",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "page": {"job_key": "window:one:fetch:events:0", "outcome": "succeeded"},
+        "pointer_mutations": 0,
+        "status": "ok",
+        "window_key": "window:one",
+    }
+
+
 def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
     scheduler = object()
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: object())
     monkeypatch.setattr(
         cli_control_plane,
@@ -166,7 +248,9 @@ def test_quote_control_plane_once_runs_one_batch_then_certifier(monkeypatch, cap
         def run_once(self):
             return type("Result", (), {"job_key": "quote:one:certify", "outcome": "waiting"})()
 
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(cli_control_plane.psycopg, "connect", lambda _dsn: object())
     monkeypatch.setattr(
         cli_control_plane,
@@ -175,9 +259,7 @@ def test_quote_control_plane_once_runs_one_batch_then_certifier(monkeypatch, cap
     )
 
     assert (
-        cli_control_plane.main(
-            ["quote-once", "--enable", "--worker-id", "test-worker", "--json"]
-        )
+        cli_control_plane.main(["quote-once", "--enable", "--worker-id", "test-worker", "--json"])
         == 0
     )
 
@@ -201,7 +283,9 @@ def test_structure_control_plane_once_runs_one_range_without_pointer_mutation(
                 {"job_key": "structure:one:normalize:events:0", "outcome": "succeeded"},
             )()
 
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(cli_control_plane.psycopg, "connect", lambda _dsn: object())
     monkeypatch.setattr(
         cli_control_plane,
@@ -254,7 +338,9 @@ def test_structure_shadow_once_exports_admits_without_pointer_mutation(
             assert len(kwargs["ranges"]) == 6
             return tuple(range(6))
 
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(cli_control_plane.psycopg, "connect", lambda _dsn: object())
     monkeypatch.setattr(
         cli_control_plane,
@@ -310,7 +396,9 @@ def test_structure_shadow_publish_reports_previous_and_current_identity(
             return generation_key
 
     globals_generation_key = generation_key
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
 
     assert (
@@ -334,7 +422,9 @@ def test_control_plane_tick_once_reports_bounded_turns(monkeypatch, capsys) -> N
         async def run_tick(self):
             return {"status": "ok", "turns": [{"worker": "structure-range", "outcome": "idle"}]}
 
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: object())
     monkeypatch.setattr(
         cli_control_plane,
@@ -367,7 +457,9 @@ def test_control_plane_preflight_proves_named_database_and_r2_readiness(
         def head_bucket(self, **kwargs):
             assert kwargs == {"Bucket": "control-plane-artifacts"}
 
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
     monkeypatch.setattr(
         cli_control_plane,
@@ -529,9 +621,7 @@ def test_shadow_sync_requires_dsn_without_printing_it(monkeypatch, capsys, tmp_p
     monkeypatch.delenv("POLYARB_SUPABASE_DB_DSN", raising=False)
 
     assert (
-        cli_control_plane.main(
-            ["shadow-sync", "--db-path", str(tmp_path / "state.db"), "--json"]
-        )
+        cli_control_plane.main(["shadow-sync", "--db-path", str(tmp_path / "state.db"), "--json"])
         == 2
     )
     captured = capsys.readouterr()
@@ -543,7 +633,9 @@ def test_shadow_sync_reports_idempotent_source_count(monkeypatch, capsys, tmp_pa
     from polyarb import cli_control_plane
     from polyarb.control_plane.shadow import ShadowSource
 
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
     monkeypatch.setattr(
         cli_control_plane,
         "read_shadow_sources",

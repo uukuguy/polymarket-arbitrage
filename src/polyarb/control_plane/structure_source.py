@@ -34,6 +34,8 @@ class _GammaReader(Protocol):
 
     async def fetch_active_market_page(self, cursor: str | None, limit: int) -> MarketPage: ...
 
+    async def aclose(self) -> None: ...
+
 
 class _ObjectClient(Protocol):
     def get_object(self, **kwargs: Any) -> Mapping[str, Any]: ...
@@ -173,9 +175,7 @@ def parse_structure_source_page_bytes(
                 None if header.get("requested_cursor") is None else str(header["requested_cursor"])
             ),
         )
-        next_cursor = (
-            None if header.get("next_cursor") is None else str(header["next_cursor"])
-        )
+        next_cursor = None if header.get("next_cursor") is None else str(header["next_cursor"])
         completed = header.get("completed")
         if type(completed) is not bool:
             raise ValueError("completed")
@@ -189,14 +189,17 @@ def parse_structure_source_page_bytes(
             records.append(row)
         if header.get("record_count") != len(records):
             raise ValueError("record_count")
-        if canonical_structure_source_page_bytes(
-            spec=spec,
-            records=records,
-            next_cursor=next_cursor,
-            completed=completed,
-            started_at_ms=header["started_at_ms"],
-            finished_at_ms=header["finished_at_ms"],
-        ) != payload:
+        if (
+            canonical_structure_source_page_bytes(
+                spec=spec,
+                records=records,
+                next_cursor=next_cursor,
+                completed=completed,
+                started_at_ms=header["started_at_ms"],
+                finished_at_ms=header["finished_at_ms"],
+            )
+            != payload
+        ):
             raise ValueError("noncanonical")
     except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise StructureSourceError("structure-source-page-malformed") from error
@@ -337,6 +340,10 @@ class TransactionalStructureSourceWorker:
         self._lease_seconds = lease_seconds
         self._retry_delay = retry_delay
 
+    async def aclose(self) -> None:
+        """Release the long-lived Gamma transport when an operator turn ends."""
+        await self._gamma.aclose()
+
     async def run_once(self) -> StructureWorkerResult:
         lease = self._control_plane.claim_job(
             worker_id=self._worker_id,
@@ -402,9 +409,7 @@ class TransactionalStructureSourceWorker:
 
 
 def _canonical_json(value: Mapping[str, object]) -> bytes:
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), allow_nan=False
-    ).encode()
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
 class TransactionalStructureSourceMaterializer:

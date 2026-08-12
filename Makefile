@@ -612,7 +612,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -698,6 +698,14 @@ structure-control-plane-once:
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane structure-once --enable --worker-id "$(or $(worker_id),structure-operator-once)" --json
+
+## structure-control-plane-source-once: Explicitly admit one named Gamma source window and fetch one page; requires enable=1, window_key, DSN and R2 credentials. Never reads SQLite or changes pointers.
+structure-control-plane-source-once:
+	@test "$(enable)" = "1" || (echo "usage: make structure-control-plane-source-once enable=1 window_key=<opaque-window-id> [worker_id=structure-source-operator-once]" >&2; exit 2)
+	@test -n "$(window_key)" || (echo "window_key is required" >&2; exit 2)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
+	uv run python -m polyarb.cli_control_plane structure-source-once --enable --window-key "$(window_key)" --worker-id "$(or $(worker_id),structure-source-operator-once)" --json
 
 ## structure-control-plane-shadow-once: Export/admit one current legacy Structure publication; requires enable=1, db_path, publication_id, DSN and R2. Never changes pointers.
 structure-control-plane-shadow-once:

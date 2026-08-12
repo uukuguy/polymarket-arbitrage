@@ -15,6 +15,7 @@ from pathlib import Path
 import psycopg
 
 from polyarb.clients.clob_client import ClobReaderClient
+from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
 from polyarb.control_plane.fault_soak import verify_fault_soak
 from polyarb.control_plane.postgres import PostgresControlPlane
@@ -34,6 +35,10 @@ from polyarb.control_plane.structure_artifact import (
 from polyarb.control_plane.structure_shadow import (
     plan_structure_ranges,
     read_legacy_structure_bundle,
+)
+from polyarb.control_plane.structure_source import (
+    TransactionalStructureSourceMaterializer,
+    TransactionalStructureSourceWorker,
 )
 from polyarb.control_plane.structure_worker import (
     TransactionalStructureCertifier,
@@ -83,6 +88,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     structure_once.add_argument("--worker-id", default="structure-operator-once")
     structure_once.add_argument("--json", action="store_true")
+    structure_source_once = subcommands.add_parser(
+        "structure-source-once",
+        help=(
+            "admit one named Structure source window then fetch at most its first "
+            "durable Gamma page"
+        ),
+    )
+    structure_source_once.add_argument("--enable", action="store_true")
+    structure_source_once.add_argument("--window-key", required=True)
+    structure_source_once.add_argument("--worker-id", default="structure-source-operator-once")
+    structure_source_once.add_argument("--json", action="store_true")
     structure_shadow_once = subcommands.add_parser(
         "structure-shadow-once",
         help="export and admit one current legacy Structure publication without pointer changes",
@@ -203,6 +219,39 @@ def _transactional_structure_worker(
     )
 
 
+def _transactional_structure_source_worker(
+    control_plane: PostgresControlPlane,
+    *,
+    worker_id: str,
+) -> TransactionalStructureSourceWorker:
+    """Build the sole Gamma-capable worker; API and range workers never receive it."""
+    object_client, bucket = _structure_object_client()
+    return TransactionalStructureSourceWorker(
+        control_plane=control_plane,
+        gamma=GammaClient(Settings()),
+        object_client=object_client,
+        bucket=bucket,
+        worker_id=worker_id,
+        now=lambda: datetime.now(UTC),
+    )
+
+
+def _transactional_structure_source_materializer(
+    control_plane: PostgresControlPlane,
+    *,
+    worker_id: str,
+) -> TransactionalStructureSourceMaterializer:
+    object_client, bucket = _structure_object_client()
+    return TransactionalStructureSourceMaterializer(
+        control_plane=control_plane,
+        object_client=object_client,
+        bucket=bucket,
+        worker_id=worker_id,
+        now=lambda: datetime.now(UTC),
+        range_max_rows=1_000,
+    )
+
+
 def _transactional_scheduler(
     control_plane: PostgresControlPlane,
     *,
@@ -214,6 +263,12 @@ def _transactional_scheduler(
     )
     object_client, bucket = _structure_object_client()
     return TransactionalControlPlaneScheduler(
+        structure_source_worker=_transactional_structure_source_worker(
+            control_plane, worker_id=f"{worker_id}:structure-source"
+        ),
+        structure_source_materializer=_transactional_structure_source_materializer(
+            control_plane, worker_id=f"{worker_id}:structure-materializer"
+        ),
         structure_worker=TransactionalStructureWorker(
             control_plane=control_plane,
             object_client=object_client,
@@ -272,11 +327,35 @@ async def _run_scheduler_service(
     async def emit_tick(outcome: dict[str, object]) -> None:
         _write({"event": "tick", **outcome}, as_json=as_json)
 
-    return await scheduler.run_until_stopped(
-        stop_event=stop_event,
-        interval_seconds=interval_seconds,
-        on_tick=emit_tick,
-    )
+    try:
+        return await scheduler.run_until_stopped(
+            stop_event=stop_event,
+            interval_seconds=interval_seconds,
+            on_tick=emit_tick,
+        )
+    finally:
+        await scheduler.aclose()
+
+
+async def _run_one_structure_source_window(
+    control_plane: PostgresControlPlane,
+    *,
+    window_key: str,
+    worker_id: str,
+) -> dict[str, object]:
+    """Admit one named window and close its Gamma transport in the same loop."""
+    control_plane.admit_structure_source_window(window_key=window_key, now=datetime.now(UTC))
+    worker = _transactional_structure_source_worker(control_plane, worker_id=worker_id)
+    try:
+        result = await worker.run_once()
+    finally:
+        await worker.aclose()
+    return {
+        "status": "ok",
+        "window_key": window_key,
+        "page": {"job_key": result.job_key, "outcome": result.outcome},
+        "pointer_mutations": 0,
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -284,6 +363,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     requires_enable = {
         "quote-once",
         "structure-once",
+        "structure-source-once",
         "structure-shadow-once",
         "structure-shadow-publish",
         "tick-once",
@@ -335,9 +415,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     try:
         if args.command == "preflight":
-            database = control_plane.deployment_preflight(
-                expected_database=args.expected_database
-            )
+            database = control_plane.deployment_preflight(expected_database=args.expected_database)
             object_client, bucket = _structure_object_client()
             object_client.head_bucket(Bucket=bucket)
             _write(
@@ -395,6 +473,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "range": {"job_key": result.job_key, "outcome": result.outcome},
                     "pointer_mutations": 0,
                 },
+                as_json=args.json,
+            )
+            return 0
+        if args.command == "structure-source-once":
+            _write(
+                asyncio.run(
+                    _run_one_structure_source_window(
+                        control_plane,
+                        window_key=args.window_key,
+                        worker_id=args.worker_id,
+                    )
+                ),
                 as_json=args.json,
             )
             return 0

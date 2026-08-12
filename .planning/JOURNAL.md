@@ -8380,3 +8380,27 @@ then connect the existing scheduler to the two bounded source workers under
 default-off named configuration. Prove `structure-source` and
 `structure-materialize` leases drain without SQLite reads before rendering any
 cloud rollout artifacts.
+
+## SESSION 216 — 2026-08-12 (source scheduling completed locally)
+
+- [COMMITTED] `c4ba433` (`05.6-114`) adds revision-011 immutable source-window
+  bundle receipts and atomic admission into the current Structure range graph.
+- [IMPLEMENTED] The bounded scheduler now rotates six fenced turns in order:
+  source page, source materializer, Structure range, Structure certifier,
+  Quote batch, Quote certifier. Gamma is constructed only for the source
+  worker and is closed when the service stops. `structure-source-once` is the
+  explicit idempotent source-window admission plus one-page command; the
+  scheduler cannot manufacture collection windows itself.
+- [VERIFY] Scheduler/CLI source contracts, source worker/materializer
+  regressions, Ruff, manual contract, and planning-status pass. No user-owned
+  HANDOFF/SDD edits were staged.
+- [BOUNDARY] No cloud resource or continuous service has been started. The
+  repository now has a locally verifiable, transactionally resumable source
+  chain, but it has no named non-production deployment identity or fresh
+  source-window parity/worker-loss/24-hour soak evidence.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then inspect the local rollout renderer against the source-worker entrypoint.
+Render only local artifacts once two isolated non-production Fly app names and
+one named Postgres database are designated; then run the read-only preflight,
+revision-011 migration, and actual continuous shadow collection.

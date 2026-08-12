@@ -18,6 +18,8 @@ class TransactionalControlPlaneScheduler:
     def __init__(
         self,
         *,
+        structure_source_worker: _Worker,
+        structure_source_materializer: _Worker,
         structure_worker: _Worker,
         structure_certifier: _Worker,
         quote_worker: _Worker,
@@ -27,6 +29,8 @@ class TransactionalControlPlaneScheduler:
         if max_turns <= 0:
             raise ValueError("max_turns must be positive")
         self._workers = (
+            ("structure-source", structure_source_worker),
+            ("structure-source-materialize", structure_source_materializer),
             ("structure-range", structure_worker),
             ("structure-certify", structure_certifier),
             ("quote-batch", quote_worker),
@@ -59,6 +63,20 @@ class TransactionalControlPlaneScheduler:
                 )
             self._next_worker = (self._next_worker + turn_count) % len(self._workers)
             return {"status": "ok", "turns": turns}
+
+    async def aclose(self) -> None:
+        """Close optional long-lived worker transports after a service stops."""
+        closed: set[int] = set()
+        for _name, worker in self._workers:
+            if id(worker) in closed:
+                continue
+            closed.add(id(worker))
+            closer = getattr(worker, "aclose", None)
+            if closer is None:
+                continue
+            result = closer()
+            if inspect.isawaitable(result):
+                await result
 
     async def run_until_stopped(
         self,
