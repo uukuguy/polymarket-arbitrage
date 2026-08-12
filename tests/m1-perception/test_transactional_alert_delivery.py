@@ -142,8 +142,15 @@ def test_unconfigured_telegram_preserves_outbox_for_retry() -> None:
     }
 
 
-def test_incident_alert_channels_requires_complete_telegram_configuration() -> None:
+def test_incident_alert_channels_are_non_secret_policy_not_delivery_credentials() -> None:
     assert incident_alert_channels(Settings()) == ("dashboard",)
     assert incident_alert_channels(
-        Settings(telegram_bot_token="token", telegram_chat_id="chat")
+        Settings(alert_channels="dashboard,telegram")
     ) == ("dashboard", "telegram")
+    assert incident_alert_channels(
+        Settings(
+            alert_channels="dashboard",
+            telegram_bot_token="token",
+            telegram_chat_id="chat",
+        )
+    ) == ("dashboard",)

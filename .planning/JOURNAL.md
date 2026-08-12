@@ -8600,6 +8600,26 @@ database are designated.
 commit the revision-014 local circuit work, then obtain named non-production
 cloud identities before rendering rollout artifacts or collecting live evidence.
 
+## SESSION 228 — 2026-08-12 (least-privilege alert intent policy)
+
+- [DISCOVERED] The data-worker template correctly excluded Telegram secrets,
+  but worker code used secret presence to decide whether to create Telegram
+  outbox intent. A least-privilege deployment would therefore silently omit
+  Telegram delivery work.
+- [IMPLEMENTED] `POLYARB_ALERT_CHANNELS` is now a non-secret outbox policy;
+  the worker template explicitly sets `dashboard,telegram`. Telegram token and
+  chat ID remain solely on the isolated alert worker and only gate delivery.
+- [VERIFY] Full local transactional control-plane regression: 107 passed.
+  Focused alert/template contracts, Ruff, `make docs-m1-check`, and planning
+  status passed.
+- [BOUNDARY] No Fly application, database, secret, external delivery, or
+  continuous collection was changed.
+
+[NEXT] Commit 05.6-128. Cloud completion is still gated solely on explicitly
+named isolated non-production API/data-worker/alert-worker apps and Postgres
+authority, followed by preflight, migration, shadow, worker-loss and 24-hour
+soak evidence.
+
 ## SESSION 227 — 2026-08-12 (circuit recovery acceptance contract)
 
 - [DISCOVERED] The existing fault/soak verifier accepted only old

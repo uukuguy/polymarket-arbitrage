@@ -389,6 +389,10 @@ class Settings(BaseSettings):
         description="Telegram bot token — direct fallback if Better Stack outage",
     )
     telegram_chat_id: str = Field(default="")
+    # Transactional data workers may create alert intent but must not receive
+    # Telegram credentials. This non-secret policy selects which durable
+    # outbox channels they emit; the isolated alert worker owns delivery keys.
+    alert_channels: str = Field(default="dashboard")
     # Dedup window: a paused-alert fired twice within this many seconds counts
     # as one alert (suppresses storm during flaky-network episodes).
     alert_dedupe_window_seconds: int = Field(default=300)

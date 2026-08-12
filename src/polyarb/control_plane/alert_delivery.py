@@ -26,10 +26,17 @@ class _TelegramClient(Protocol):
 
 
 def incident_alert_channels(settings: Settings) -> tuple[str, ...]:
-    """Create external alert intent only when its delivery credentials exist."""
-    if settings.telegram_bot_token.get_secret_value() and settings.telegram_chat_id:
-        return ("dashboard", "telegram")
-    return ("dashboard",)
+    """Select durable outbox channels from non-secret worker policy."""
+    channels = tuple(
+        channel.strip() for channel in settings.alert_channels.split(",") if channel.strip()
+    )
+    if not channels or len(set(channels)) != len(channels):
+        raise ValueError("alert_channels must contain unique non-empty channels")
+    if set(channels) - {"dashboard", "telegram"}:
+        raise ValueError("alert_channels supports only dashboard and telegram")
+    if "dashboard" not in channels:
+        raise ValueError("alert_channels must include dashboard")
+    return channels
 
 
 class TransactionalAlertDeliveryWorker:

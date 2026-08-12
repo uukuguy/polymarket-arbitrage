@@ -1,8 +1,13 @@
 # Render with an explicitly designated Fly app name; this template is never
 # deployed directly. This app receives transactional-writer Postgres and R2
-# secrets, but has no public HTTP service and no persistent volume.
+# secrets, but has no public HTTP service and no persistent volume. Set the
+# non-secret POLYARB_ALERT_CHANNELS=dashboard,telegram here when the isolated
+# alert app owns Telegram credentials.
 app = "__CONTROL_PLANE_WORKER_APP__"
 primary_region = "ams"
+
+[env]
+POLYARB_ALERT_CHANNELS = "dashboard,telegram"
 
 [build]
 

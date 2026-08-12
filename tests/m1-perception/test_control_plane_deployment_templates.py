@@ -24,6 +24,7 @@ def test_control_worker_template_has_only_fenced_scheduler_and_no_http_or_volume
     )
 
     assert payload["app"] == "__CONTROL_PLANE_WORKER_APP__"
+    assert payload["env"]["POLYARB_ALERT_CHANNELS"] == "dashboard,telegram"
     assert payload["processes"] == {
         "worker": (
             "python -m polyarb.cli_control_plane serve --enable "
