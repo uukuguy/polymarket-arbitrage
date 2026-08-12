@@ -1227,6 +1227,29 @@ class PostgresControlPlane:
                     raise StaleLeaseError("Structure shadow pointer changed during publication")
             return generation_key
 
+    def structure_shadow_pointer(self) -> dict[str, object] | None:
+        """Read the isolated Structure shadow pointer, never legacy current truth."""
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT generation_key, expected_generation_key, lease_epoch, published_at
+                FROM m1_publication_pointers
+                WHERE pointer_key = 'structure:current:shadow'
+                """
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "generation_key": str(row["generation_key"]),
+            "expected_generation_key": row["expected_generation_key"],
+            "lease_epoch": int(row["lease_epoch"]),
+            "published_at": row["published_at"],
+        }
+
     @staticmethod
     def _quote_batch_identity(input_identity: str) -> tuple[str, str, str, str]:
         parts = input_identity.split(":")

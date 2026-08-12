@@ -68,6 +68,27 @@ def test_structure_shadow_once_requires_explicit_enable(monkeypatch, capsys, tmp
     assert "postgresql://" not in captured.err
 
 
+def test_structure_shadow_publish_requires_explicit_enable_before_connect(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setattr(
+        cli_control_plane.psycopg,
+        "connect",
+        lambda _dsn: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert (
+        cli_control_plane.main(
+            ["structure-shadow-publish", "--generation-key", "structure:a", "--json"]
+        )
+        == 2
+    )
+    assert "--enable is required" in capsys.readouterr().err
+
+
 def test_quote_control_plane_once_runs_one_batch_then_certifier(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
@@ -205,6 +226,39 @@ def test_structure_shadow_once_exports_admits_without_pointer_mutation(
     assert result["admitted_job_count"] == 6
     assert result["pointer_mutations"] == 0
     assert result["source_identity"]["publication_id"] == "publication-1"
+
+
+def test_structure_shadow_publish_reports_previous_and_current_identity(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    generation_key = "structure:" + "a" * 64
+
+    class ControlPlane:
+        def structure_shadow_pointer(self):
+            return {"generation_key": "structure:" + "b" * 64}
+
+        def publish_structure_shadow(self, *, generation_key: str, now):
+            assert generation_key == globals_generation_key
+            return generation_key
+
+    globals_generation_key = generation_key
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control")
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+
+    assert (
+        cli_control_plane.main(
+            ["structure-shadow-publish", "--enable", "--generation-key", generation_key, "--json"]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "current_generation_key": generation_key,
+        "legacy_pointer_mutations": 0,
+        "previous_generation_key": "structure:" + "b" * 64,
+        "status": "ok",
+    }
 
 
 def test_shadow_sync_requires_dsn_without_printing_it(monkeypatch, capsys, tmp_path) -> None:

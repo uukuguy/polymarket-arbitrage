@@ -74,6 +74,13 @@ def _parser() -> argparse.ArgumentParser:
     structure_shadow_once.add_argument("--db-path", type=Path, required=True)
     structure_shadow_once.add_argument("--publication-id", required=True)
     structure_shadow_once.add_argument("--json", action="store_true")
+    structure_shadow_publish = subcommands.add_parser(
+        "structure-shadow-publish",
+        help="explicitly publish one certified Structure generation to the shadow pointer",
+    )
+    structure_shadow_publish.add_argument("--enable", action="store_true")
+    structure_shadow_publish.add_argument("--generation-key", required=True)
+    structure_shadow_publish.add_argument("--json", action="store_true")
     return parser
 
 
@@ -155,7 +162,12 @@ def _structure_object_client() -> tuple[object, str]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    requires_enable = {"quote-once", "structure-once", "structure-shadow-once"}
+    requires_enable = {
+        "quote-once",
+        "structure-once",
+        "structure-shadow-once",
+        "structure-shadow-publish",
+    }
     if args.command in requires_enable and not args.enable:
         print(f"--enable is required for {args.command}", file=sys.stderr)
         return 2
@@ -235,6 +247,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "bundle_digest": artifact.sha256,
                     "admitted_job_count": len(admitted),
                     "pointer_mutations": 0,
+                },
+                as_json=args.json,
+            )
+            return 0
+        if args.command == "structure-shadow-publish":
+            if not args.generation_key.startswith("structure:"):
+                print("--generation-key must name a Structure generation", file=sys.stderr)
+                return 2
+            before = control_plane.structure_shadow_pointer()
+            current = control_plane.publish_structure_shadow(
+                generation_key=args.generation_key,
+                now=datetime.now(UTC),
+            )
+            _write(
+                {
+                    "status": "ok",
+                    "previous_generation_key": (
+                        None if before is None else before["generation_key"]
+                    ),
+                    "current_generation_key": current,
+                    "legacy_pointer_mutations": 0,
                 },
                 as_json=args.json,
             )
