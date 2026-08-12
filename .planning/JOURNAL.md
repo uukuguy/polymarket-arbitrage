@@ -8217,3 +8217,27 @@ Structure/Quote generations, source/bundle/manifest/count/universe identities,
 zero legacy-pointer mutations, and an acceptance verdict. Keep it offline and
 independent of cloud invocation; it becomes the artifact required before any
 authorized reversible pointer switch.
+
+## SESSION 209 — 2026-08-12 (three-run shadow parity gate)
+
+- [COMMITTED] `6a421f4` (`05.6-109`) adds the local-only
+  `make control-plane-verify-shadow-parity evidence=<json>` verifier. It
+  requires exactly three unique Structure/Quote runs and compares legacy vs
+  transactional source identity, frozen bundle, all six component counts and
+  Quote universe; every run needs a valid transactional manifest and exactly
+  zero legacy-pointer mutations.
+- [COMMITTED] `b3bd610` adds learning document 65 explaining why one green
+  shadow run is not a cutover proof and how the evidence file maps to the
+  reversible-switch gate.
+- [VERIFY] Focused worker/scheduler/API/template/rollout/parity suite: 36
+  passed; Ruff, docs-m1-check and planning status pass.
+- [BOUNDARY] The verifier validates supplied evidence but never creates it.
+  The designated environment must produce three real named runs. A PASS is a
+  prerequisite to request switch authorization, not a pointer action.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then create the corresponding machine-checkable cloud fault/soak acceptance
+contract. It must demand worker-replacement takeover for both Structure and
+Quote, independent control-api readability during data-worker loss, legacy
+truth availability, bounded lease-reclaim timing and an uninterrupted soak;
+it must remain offline evidence verification, not a cloud command.
