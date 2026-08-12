@@ -15,6 +15,15 @@ def _evidence() -> dict[str, object]:
                 "lease_reclaim_sla_seconds": 120,
                 "old_certified_truth_available": True,
                 "control_api_readable": True,
+                "circuit": {
+                    "job_key": "structure:window-a:fetch:events:0",
+                    "opened_after_failures": 3,
+                    "probe_delays_seconds": [15, 30, 60],
+                    "replacement_worker": "structure-replacement-a",
+                    "recovery_event_kind": "recovered",
+                    "incident_resolved": True,
+                    "delivery_receipts": ["dashboard", "telegram"],
+                },
             },
             {
                 "worker": "quote",
@@ -23,6 +32,15 @@ def _evidence() -> dict[str, object]:
                 "lease_reclaim_sla_seconds": 120,
                 "old_certified_truth_available": True,
                 "control_api_readable": True,
+                "circuit": {
+                    "job_key": "quote:generation-a:batch:0000",
+                    "opened_after_failures": 3,
+                    "probe_delays_seconds": [15, 30, 60],
+                    "replacement_worker": "quote-replacement-a",
+                    "recovery_event_kind": "recovered",
+                    "incident_resolved": True,
+                    "delivery_receipts": ["dashboard", "telegram"],
+                },
             },
         ],
         "soak": {
@@ -32,6 +50,7 @@ def _evidence() -> dict[str, object]:
             "manual_unlocks": 0,
             "silent_stops": 0,
             "permanent_degradations": 0,
+            "circuit_recoveries": 2,
         },
     }
 
@@ -45,6 +64,7 @@ def test_fault_soak_verdict_requires_both_takeovers_and_uninterrupted_24h_soak()
         "minimum_soak_seconds": 86_400,
         "observed_soak_seconds": 86_400,
         "manual_unlocks": 0,
+        "circuit_recovery_workers": ["quote", "structure"],
     }
 
 
@@ -64,6 +84,18 @@ def test_fault_soak_verdict_requires_both_takeovers_and_uninterrupted_24h_soak()
                 {"old_certified_truth_available": False}
             ),
             "old certified truth",
+        ),
+        (
+            lambda evidence: evidence["takeovers"][0]["circuit"].update(  # type: ignore[index]
+                {"probe_delays_seconds": [15, 30, 120]}
+            ),
+            "circuit probes",
+        ),
+        (
+            lambda evidence: evidence["takeovers"][1]["circuit"].update(  # type: ignore[index]
+                {"incident_resolved": False}
+            ),
+            "incident resolved",
         ),
     ],
 )

@@ -593,6 +593,19 @@ def test_fault_soak_verifier_reads_only_local_evidence(monkeypatch, capsys, tmp_
                 "lease_reclaim_sla_seconds": 120,
                 "old_certified_truth_available": True,
                 "control_api_readable": True,
+                "circuit": {
+                    "job_key": (
+                        "structure:window-a:fetch:events:0"
+                        if worker == "structure"
+                        else "quote:generation-a:batch:0000"
+                    ),
+                    "opened_after_failures": 3,
+                    "probe_delays_seconds": [15, 30, 60],
+                    "replacement_worker": f"{worker}-replacement-a",
+                    "recovery_event_kind": "recovered",
+                    "incident_resolved": True,
+                    "delivery_receipts": ["dashboard", "telegram"],
+                },
             }
             for worker in ("structure", "quote")
         ],
@@ -603,6 +616,7 @@ def test_fault_soak_verifier_reads_only_local_evidence(monkeypatch, capsys, tmp_
             "manual_unlocks": 0,
             "silent_stops": 0,
             "permanent_degradations": 0,
+            "circuit_recoveries": 2,
         },
     }
     path = tmp_path / "fault-soak.json"

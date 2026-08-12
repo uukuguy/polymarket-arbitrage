@@ -8599,3 +8599,23 @@ database are designated.
 [NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
 commit the revision-014 local circuit work, then obtain named non-production
 cloud identities before rendering rollout artifacts or collecting live evidence.
+
+## SESSION 227 — 2026-08-12 (circuit recovery acceptance contract)
+
+- [DISCOVERED] The existing fault/soak verifier accepted only old
+  R2-upload-before-receipt takeover facts. It could therefore approve a
+  24-hour evidence file without proving revision-014 circuit recovery.
+- [IMPLEMENTED] Each Structure and Quote acceptance record now requires the
+  job-scoped circuit opening at three failures, 15/30/60-second probes,
+  replacement worker, `recovered` event, resolved incident, dashboard and
+  Telegram delivery receipts. The soak requires both recovered circuits.
+- [VERIFY] RED demonstrated the former verifier ignored this evidence. GREEN:
+  26 targeted fault/CLI tests, Ruff, `make docs-m1-check`, and
+  `make planning-status` passed.
+- [BOUNDARY] This verifier is offline and fail-closed; it does not fabricate
+  a deployment, notification, worker-loss experiment, or 24-hour soak.
+
+[NEXT] Commit 05.6-127 in `.worktrees/m1-self-healing-structure`. The only
+remaining path to actual M1 completion is named isolated non-production API,
+data-worker, alert-worker and Postgres identities, followed by preflight,
+revision-014 migration, shadow collection, fault evidence and a 24-hour soak.
