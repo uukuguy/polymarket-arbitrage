@@ -11,7 +11,11 @@ from polyarb.routing.neg_risk_quote_collector import BooksReader, _build_termina
 from polyarb.routing.neg_risk_quote_store import UniverseLeg
 
 from .models import JobState, QuoteBatchSpec
-from .postgres import PostgresControlPlane, StaleLeaseError
+from .postgres import (
+    IncompleteQuoteGenerationError,
+    PostgresControlPlane,
+    StaleLeaseError,
+)
 from .quote_artifact import (
     QuoteBatchArtifact,
     canonical_quote_batch_bytes,
@@ -136,3 +140,60 @@ class TransactionalQuoteBatchWorker:
             self._object_client, bucket=self._bucket, artifact=artifact
         )
         return artifact, successful_count
+
+
+class TransactionalQuoteCertifier:
+    """Claim at most one terminal certification; partial generations only retry."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        worker_id: str,
+        now: Callable[[], datetime],
+        lease_seconds: int = 30,
+        retry_delay: timedelta = timedelta(seconds=5),
+    ) -> None:
+        if not worker_id or lease_seconds <= 0 or retry_delay.total_seconds() <= 0:
+            raise ValueError("worker_id, lease_seconds, and retry_delay must be positive")
+        self._control_plane = control_plane
+        self._worker_id = worker_id
+        self._now = now
+        self._lease_seconds = lease_seconds
+        self._retry_delay = retry_delay
+
+    def run_once(self) -> QuoteBatchWorkerResult:
+        lease = self._control_plane.claim_job(
+            worker_id=self._worker_id,
+            job_types=("quote-certify",),
+            lease_seconds=self._lease_seconds,
+            now=self._now(),
+        )
+        if lease is None:
+            return QuoteBatchWorkerResult(job_key=None, outcome="idle")
+        generation_key = lease.job_key.removesuffix(":certify")
+        try:
+            self._control_plane.certify_quote_generation(
+                lease, generation_key=generation_key, now=self._now()
+            )
+            return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="certified")
+        except IncompleteQuoteGenerationError:
+            self._control_plane.finish(
+                lease,
+                state=JobState.RETRYABLE,
+                next_attempt_at=self._now() + self._retry_delay,
+                error_class="IncompleteQuoteGenerationError",
+                now=self._now(),
+            )
+            return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="waiting")
+        except StaleLeaseError:
+            raise
+        except Exception as error:
+            self._control_plane.finish(
+                lease,
+                state=JobState.RETRYABLE,
+                next_attempt_at=self._now() + self._retry_delay,
+                error_class=type(error).__name__,
+                now=self._now(),
+            )
+            raise

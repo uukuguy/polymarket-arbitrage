@@ -18,7 +18,10 @@ from polyarb.control_plane.postgres import (
     PostgresControlPlane,
     StaleLeaseError,
 )
-from polyarb.control_plane.quote_worker import TransactionalQuoteBatchWorker
+from polyarb.control_plane.quote_worker import (
+    TransactionalQuoteBatchWorker,
+    TransactionalQuoteCertifier,
+)
 
 
 def _docker_available() -> bool:
@@ -330,6 +333,50 @@ def test_transactional_quote_worker_commits_fenced_artifact_receipt(
     assert receipt is not None
     assert receipt.artifact_key == objects.object["Key"]
     assert receipt.artifact_digest == objects.object["Metadata"]["sha256"]
+
+
+def test_transactional_quote_certifier_waits_then_publishes_complete_generation(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    batches = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        legs=(_leg("token-1"), _leg("token-2")),
+        batch_size=1,
+        now=now,
+    )
+    clock = [now]
+    certifier = TransactionalQuoteCertifier(
+        control_plane=control_plane,
+        worker_id="certifier",
+        now=lambda: clock[0],
+    )
+    assert certifier.run_once().outcome == "waiting"
+
+    worker = TransactionalQuoteBatchWorker(
+        control_plane=control_plane,
+        reader=_OneBookReader(),
+        object_client=_MemoryObjects(),
+        bucket="quotes",
+        worker_id="quote-worker",
+        now=lambda: now,
+    )
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    clock[0] = now + timedelta(seconds=6)
+    assert certifier.run_once().outcome == "certified"
+
+    connection = control_plane._connection_factory()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT generation_key FROM m1_publication_pointers "
+                "WHERE pointer_key = 'quote:current'"
+            )
+            assert cursor.fetchone() == (batches[0].generation_key,)
+    finally:
+        connection.close()
 
 
 def test_incomplete_quote_generation_cannot_switch_current_pointer(
