@@ -8335,3 +8335,24 @@ then write the RED terminal source-window materializer contract before adding
 any bundle-generation implementation. The materializer must use only R2 page
 artifacts + Postgres source receipts, with a real Postgres proof that a missing
 or tampered page cannot enqueue Structure ranges.
+
+## SESSION 214 — 2026-08-12 (sealed-page materialization kernel)
+
+- [COMMITTED] `4774d86` is the Gamma/R2 source worker commit. It is followed
+  by a pure, SQLite-free sealed-page materialization kernel: reauthenticate
+  page bytes, prove ordinal/cursor terminal chains, call existing normalizers
+  and market-truth validation, and emit a `gamma-source-window-v1` bundle with
+  a canonical source receipt digest.
+- [VERIFY] A valid two-stream fixture creates a parseable six-component
+  bundle. Missing ordinal and byte tamper fixtures fail before any bundle is
+  returned; source artifact/worker/Postgres regression and Ruff pass.
+- [NEXT-BOUNDARY] This kernel makes the data transformation real, but it is
+  intentionally not a deployment path yet. It must be wrapped in a fenced
+  materializer job and atomically admit current range jobs so a crash cannot
+  leave a durable bundle without normalizer work or vice versa.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then add an additive materializer receipt schema and real-Postgres RED tests:
+terminal market receipt must release one `structure-materialize` job; only its
+current lease may persist a source-window bundle and enqueue the existing
+Structure range/certifier jobs.

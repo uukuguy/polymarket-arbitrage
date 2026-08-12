@@ -5,14 +5,21 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from polyarb.clients.gamma_client import EventPage, MarketPage
+from polyarb.perception.market_truth import market_truth_mismatch_reason
+from polyarb.snapshot.normalizer import normalize_events, normalize_market
 
 from .models import JobState, StructureSourcePageSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
+from .structure_artifact import (
+    StructureBundleArtifact,
+    StructureBundleIdentity,
+    canonical_structure_bundle_bytes,
+)
 from .structure_worker import StructureWorkerResult
 
 
@@ -30,6 +37,15 @@ class _ObjectClient(Protocol):
     def put_object(self, **kwargs: Any) -> Any: ...
 
     def head_object(self, **kwargs: Any) -> dict[str, Any]: ...
+
+
+type _DecodedSourcePage = tuple[
+    StructureSourcePageSpec,
+    tuple[dict[str, object], ...],
+    str | None,
+    bool,
+    str,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +146,159 @@ def upload_structure_source_page_artifact(
     ):
         raise StructureSourceError("structure-source-page-head-verification-failed")
     return artifact
+
+
+def parse_structure_source_page_bytes(
+    payload: bytes,
+    *,
+    expected_sha256: str,
+) -> tuple[StructureSourcePageSpec, tuple[dict[str, object], ...], str | None, bool]:
+    """Re-authenticate and decode a source artifact before materialization."""
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise StructureSourceError("structure-source-page-digest-mismatch")
+    try:
+        lines = [json.loads(line) for line in payload.splitlines()]
+        header = lines[0]
+        if not isinstance(header, dict) or header.get("kind") != "structure-source-page":
+            raise ValueError("header")
+        spec = StructureSourcePageSpec(
+            window_key=str(header["window_key"]),
+            stream=str(header["stream"]),
+            ordinal=int(header["ordinal"]),
+            requested_cursor=(
+                None if header.get("requested_cursor") is None else str(header["requested_cursor"])
+            ),
+        )
+        next_cursor = (
+            None if header.get("next_cursor") is None else str(header["next_cursor"])
+        )
+        completed = header.get("completed")
+        if type(completed) is not bool:
+            raise ValueError("completed")
+        records: list[dict[str, object]] = []
+        for record in lines[1:]:
+            if not isinstance(record, dict) or set(record) != {"row"}:
+                raise ValueError("record")
+            row = record["row"]
+            if not isinstance(row, dict):
+                raise ValueError("row")
+            records.append(row)
+        if header.get("record_count") != len(records):
+            raise ValueError("record_count")
+        if canonical_structure_source_page_bytes(
+            spec=spec,
+            records=records,
+            next_cursor=next_cursor,
+            completed=completed,
+            started_at_ms=header["started_at_ms"],
+            finished_at_ms=header["finished_at_ms"],
+        ) != payload:
+            raise ValueError("noncanonical")
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise StructureSourceError("structure-source-page-malformed") from error
+    return spec, tuple(records), next_cursor, completed
+
+
+def materialize_structure_source_pages(
+    pages: Sequence[tuple[StructureSourcePageSpec, StructureSourcePageArtifact]],
+) -> StructureBundleArtifact:
+    """Build a fail-closed six-component bundle using only sealed page evidence."""
+    if not pages:
+        raise StructureSourceError("source window has no pages")
+    decoded: dict[str, list[_DecodedSourcePage]] = {
+        "events": [],
+        "markets": [],
+    }
+    window_key: str | None = None
+    for external_spec, artifact in pages:
+        spec, records, next_cursor, completed = parse_structure_source_page_bytes(
+            artifact.payload, expected_sha256=artifact.sha256
+        )
+        if spec != external_spec:
+            raise StructureSourceError("source page input/header mismatch")
+        if window_key is None:
+            window_key = spec.window_key
+        elif spec.window_key != window_key:
+            raise StructureSourceError("source pages name different windows")
+        decoded[spec.stream].append((spec, records, next_cursor, completed, artifact.sha256))
+    if window_key is None:
+        raise StructureSourceError("source window identity unavailable")
+    raw_streams: dict[str, list[dict[str, object]]] = {}
+    source_receipts: list[dict[str, object]] = []
+    for stream in ("events", "markets"):
+        ordered = sorted(decoded[stream], key=lambda item: item[0].ordinal)
+        if not ordered:
+            raise StructureSourceError(f"source stream unavailable:{stream}")
+        rows: list[dict[str, object]] = []
+        for ordinal, (spec, records, next_cursor, completed, digest) in enumerate(ordered):
+            if spec.ordinal != ordinal:
+                raise StructureSourceError("source page ordinal gap")
+            if ordinal + 1 < len(ordered):
+                successor = ordered[ordinal + 1][0]
+                if completed or next_cursor != successor.requested_cursor:
+                    raise StructureSourceError("source page cursor chain is invalid")
+            elif not completed or next_cursor is not None:
+                raise StructureSourceError("source stream terminal receipt is invalid")
+            rows.extend(records)
+            source_receipts.append(
+                {"stream": stream, "ordinal": ordinal, "artifact_digest": digest}
+            )
+        raw_streams[stream] = rows
+    source_digest = hashlib.sha256(_canonical_json({"pages": source_receipts})).hexdigest()
+    try:
+        event_rows, event_tags, market_to_event, members, group_truths = normalize_events(
+            raw_streams["events"]
+        )
+        market_rows: list[dict[str, object]] = []
+        for raw in raw_streams["markets"]:
+            normalized = normalize_market(raw, market_to_event)
+            if normalized is None:
+                raise StructureSourceError("source market normalization failed")
+            market_rows.append(normalized)
+        mismatch = market_truth_mismatch_reason(members, group_truths, market_rows)
+        if mismatch is not None:
+            raise StructureSourceError(f"source market truth mismatch:{mismatch}")
+    except StructureSourceError:
+        raise
+    except Exception as error:
+        raise StructureSourceError("source page normalization failed") from error
+    components: dict[str, tuple[dict[str, object], ...]] = {
+        "events": tuple(event_rows),
+        "event_tags": tuple(event_tags),
+        "memberships": tuple(
+            {
+                "event_id": member.event_id,
+                "neg_risk_market_id": member.group_id,
+                "market_id": member.market_id,
+                "member_kind": member.member_kind,
+                "active": member.active,
+                "closed": member.closed,
+            }
+            for member in members
+        ),
+        "group_truth": tuple(
+            {
+                "event_id": truth.event_id,
+                "neg_risk_market_id": truth.group_id,
+                **asdict(truth),
+            }
+            for truth in group_truths
+        ),
+        "markets": tuple(market_rows),
+        "issues": (),
+    }
+    identity = StructureBundleIdentity(
+        publication_id=f"source-window:{window_key}",
+        window_id=window_key,
+        snapshot_id=0,
+        comparison_receipt_digest=source_digest,
+        normalization_contract_version="gamma-source-window-v1",
+        component_counts={component: len(rows) for component, rows in components.items()},
+        source_kind="gamma-source-window-v1",
+    )
+    return StructureBundleArtifact.from_bytes(
+        canonical_structure_bundle_bytes(identity=identity, components=components)
+    )
 
 
 class TransactionalStructureSourceWorker:

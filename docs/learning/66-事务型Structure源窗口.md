@@ -53,6 +53,14 @@ def input_identity(self) -> str:
 这意味着“event 页成功但 market 页尚未开始”是显式可观察状态，而不是内存里
 的一个布尔变量。
 
+## 从页证据到 Structure bundle
+
+页的“完成”不等于可以发布市场真值。materializer 只读取 R2 页对象和它们的
+Postgres receipt，先验证每个 SHA-256、window/stream/ordinal、opaque cursor 链和
+两个 terminal marker；然后复用 `normalize_events`、`normalize_market` 与
+`market_truth_mismatch_reason`。缺页、篡改、active member 缺失或 neg-risk
+关系不一致都会拒绝 bundle。它不会用 SQLite 补齐或猜测任何源事实。
+
 ## 设计取舍
 
 - 不并行 events/markets：市场页需要整个 event source contract，先后顺序比

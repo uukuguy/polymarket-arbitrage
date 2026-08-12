@@ -38,12 +38,17 @@ class StructureBundleIdentity:
     comparison_receipt_digest: str
     normalization_contract_version: str
     component_counts: Mapping[str, int]
+    source_kind: str = "legacy-publication-v1"
 
     def __post_init__(self) -> None:
         if not self.publication_id or not self.window_id or not self.normalization_contract_version:
             raise ValueError("Structure bundle identity strings must be non-empty")
-        if self.snapshot_id <= 0:
-            raise ValueError("snapshot_id must be positive")
+        if self.source_kind not in {"legacy-publication-v1", "gamma-source-window-v1"}:
+            raise ValueError("Structure bundle source_kind is invalid")
+        if self.snapshot_id < 0 or (
+            self.source_kind == "legacy-publication-v1" and self.snapshot_id <= 0
+        ):
+            raise ValueError("snapshot_id is invalid for Structure bundle source")
         if len(self.comparison_receipt_digest) != 64:
             raise ValueError("comparison_receipt_digest must be a sha256 digest")
         if set(self.component_counts) != set(_COMPONENTS):
@@ -62,6 +67,7 @@ class StructureBundleIdentity:
             "normalization_contract_version": self.normalization_contract_version,
             "publication_id": self.publication_id,
             "snapshot_id": self.snapshot_id,
+            "source_kind": self.source_kind,
             "window_id": self.window_id,
         }
 
@@ -247,6 +253,7 @@ def parse_structure_bundle_bytes(
             comparison_receipt_digest=str(header["comparison_receipt_digest"]),
             normalization_contract_version=str(header["normalization_contract_version"]),
             component_counts=header["component_counts"],
+            source_kind=str(header.get("source_kind", "legacy-publication-v1")),
         )
         components: dict[str, list[dict[str, object]]] = {
             component: [] for component in _COMPONENTS
