@@ -7,6 +7,7 @@ import os
 import subprocess
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 
 import psycopg
 import pytest
@@ -15,6 +16,7 @@ from polyarb.control_plane.models import JobState, QuoteBatchLeg, QuoteBatchSpec
 from polyarb.control_plane.postgres import (
     CheckpointConflictError,
     IncompleteQuoteGenerationError,
+    IncompleteStructureGenerationError,
     PostgresControlPlane,
     StaleLeaseError,
 )
@@ -278,6 +280,79 @@ def test_structure_range_receipt_is_fenced_and_idempotent(
             record_count=3,
             now=now + timedelta(seconds=2),
         )
+
+
+def test_structure_certification_requires_complete_matching_range_receipts(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    specs = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", "m"), ("markets", "", "")),
+        now=now,
+    )
+    first = control_plane.claim_job(
+        worker_id="structure-a", job_types=("structure-normalize",), lease_seconds=30, now=now
+    )
+    assert first is not None
+    first_spec = control_plane.structure_range_spec(first.job_key)
+    control_plane.record_structure_range(
+        first,
+        range_digest=first_spec.range_digest,
+        artifact_key="structure-ranges/a/rows.ndjson",
+        artifact_digest="a" * 64,
+        record_count=1,
+        now=now,
+    )
+    control_plane.finish(first, state=JobState.SUCCEEDED, now=now)
+    certifier = control_plane.claim_job(
+        worker_id="structure-certifier",
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert certifier is not None
+    with pytest.raises(IncompleteStructureGenerationError):
+        control_plane.certify_structure_generation(
+            certifier,
+            generation_key=specs[0].generation_key,
+            artifact_key="structure-manifests/a/manifest.ndjson",
+            artifact_digest="a" * 64,
+            now=now,
+        )
+    second = control_plane.claim_job(
+        worker_id="structure-b", job_types=("structure-normalize",), lease_seconds=30, now=now
+    )
+    assert second is not None
+    second_spec = control_plane.structure_range_spec(second.job_key)
+    control_plane.record_structure_range(
+        second,
+        range_digest=second_spec.range_digest,
+        artifact_key="structure-ranges/b/rows.ndjson",
+        artifact_digest="b" * 64,
+        record_count=2,
+        now=now,
+    )
+    control_plane.finish(second, state=JobState.SUCCEEDED, now=now)
+    expected_manifest = sha256(
+        "\n".join(
+            (
+                f"{first_spec.job_key}:events:{first_spec.range_digest}:"
+                f"structure-ranges/a/rows.ndjson:{'a' * 64}:1",
+                f"{second_spec.job_key}:markets:{second_spec.range_digest}:"
+                f"structure-ranges/b/rows.ndjson:{'b' * 64}:2",
+            )
+        ).encode()
+    ).hexdigest()
+    assert control_plane.certify_structure_generation(
+        certifier,
+        generation_key=specs[0].generation_key,
+        artifact_key=f"structure-manifests/{expected_manifest}/manifest.ndjson",
+        artifact_digest=expected_manifest,
+        now=now,
+    ) == expected_manifest
 
 
 def test_quote_batch_input_preserves_leg_identity_for_worker_takeover(

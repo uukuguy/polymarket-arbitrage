@@ -45,6 +45,10 @@ class IncompleteQuoteGenerationError(ControlPlaneError):
     """A Quote certifier cannot publish until every batch has a receipt."""
 
 
+class IncompleteStructureGenerationError(ControlPlaneError):
+    """A Structure certifier cannot prove every admitted range is present."""
+
+
 def _quote_batch_leg_payload(leg: QuoteBatchLeg) -> dict[str, str | None]:
     """Keep batch input JSON explicit and independent of routing internals."""
     return {
@@ -301,6 +305,13 @@ class PostgresControlPlane:
                         spec.range_digest, now,
                     ),
                 )
+            self._enqueue_job_cursor(
+                cursor,
+                job_key=f"{generation_key}:certify",
+                job_type="structure-certify",
+                input_identity=generation_key,
+                now=now,
+            )
         return specs
 
     def structure_range_spec(self, job_key: str) -> StructureRangeSpec:
@@ -727,6 +738,144 @@ class PostgresControlPlane:
                 (now, lease.job_key, lease.lease_epoch),
             )
             return receipt
+
+    def certify_structure_generation(
+        self,
+        lease: JobLease,
+        *,
+        generation_key: str,
+        artifact_key: str,
+        artifact_digest: str,
+        now: datetime,
+    ) -> str:
+        """Certify only a complete, identity-matching Structure generation."""
+        self._validate_aware(now, "now")
+        if (
+            lease.job_type != "structure-certify"
+            or lease.job_key != f"{generation_key}:certify"
+            or lease.input_identity != generation_key
+        ):
+            raise ValueError("Structure certification requires its matching certifier lease")
+        if not artifact_key or len(artifact_digest) != 64:
+            raise ValueError("Structure manifest artifact identity is invalid")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT job_key, bundle_digest, component, ordinal, range_digest, admitted_at
+                FROM m1_structure_range_inputs
+                WHERE generation_key = %s
+                ORDER BY component, ordinal
+                """,
+                (generation_key,),
+            )
+            expected = cursor.fetchall()
+            if not expected:
+                raise IncompleteStructureGenerationError(
+                    "Structure generation has no admitted ranges"
+                )
+            cursor.execute(
+                """
+                SELECT receipt.job_key, receipt.bundle_digest, receipt.component,
+                       receipt.range_digest, receipt.artifact_key, receipt.artifact_digest,
+                       receipt.record_count, receipt.committed_at
+                FROM m1_structure_range_receipts AS receipt
+                JOIN m1_structure_range_inputs AS input ON input.job_key = receipt.job_key
+                WHERE input.generation_key = %s
+                ORDER BY receipt.component, input.ordinal
+                """,
+                (generation_key,),
+            )
+            receipts = {str(row["job_key"]): row for row in cursor.fetchall()}
+            if set(receipts) != {str(row["job_key"]) for row in expected}:
+                raise IncompleteStructureGenerationError(
+                    "Structure generation is missing range receipts"
+                )
+            ordered: list[dict[str, Any]] = []
+            for input_row in expected:
+                job_key = str(input_row["job_key"])
+                receipt = receipts[job_key]
+                if (
+                    receipt["bundle_digest"] != input_row["bundle_digest"]
+                    or receipt["component"] != input_row["component"]
+                    or receipt["range_digest"] != input_row["range_digest"]
+                    or receipt["committed_at"] < input_row["admitted_at"]
+                ):
+                    raise IncompleteStructureGenerationError(
+                        "Structure generation contains an invalid or stale range receipt"
+                    )
+                ordered.append(receipt)
+            bundle_digest = str(expected[0]["bundle_digest"])
+            if any(str(row["bundle_digest"]) != bundle_digest for row in expected):
+                raise IncompleteStructureGenerationError(
+                    "Structure generation mixes source bundles"
+                )
+            manifest_digest = sha256(
+                "\n".join(
+                    f"{row['job_key']}:{row['component']}:{row['range_digest']}:"
+                    f"{row['artifact_key']}:{row['artifact_digest']}:{row['record_count']}"
+                    for row in ordered
+                ).encode()
+            ).hexdigest()
+            if artifact_digest != manifest_digest:
+                raise CheckpointConflictError(
+                    "Structure manifest digest does not match range receipts"
+                )
+            record_count = sum(int(row["record_count"]) for row in ordered)
+            cursor.execute(
+                """
+                UPDATE m1_jobs
+                SET state = 'succeeded', lease_owner = NULL, lease_expires_at = NULL,
+                    updated_at = %s
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s AND state = 'leased'
+                """,
+                (now, lease.job_key, lease.lease_owner, lease.lease_epoch),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            cursor.execute(
+                """
+                INSERT INTO m1_generation_manifests (
+                    generation_key, producer_job_key, input_digest, artifact_key,
+                    artifact_digest, record_count, published_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (generation_key) DO NOTHING
+                """,
+                (
+                    generation_key,
+                    lease.job_key,
+                    bundle_digest,
+                    artifact_key,
+                    artifact_digest,
+                    record_count,
+                    now,
+                ),
+            )
+            cursor.execute(
+                """
+                SELECT input_digest, artifact_key, artifact_digest, record_count
+                FROM m1_generation_manifests WHERE generation_key = %s
+                """,
+                (generation_key,),
+            )
+            persisted = cursor.fetchone()
+            if persisted is None or (
+                persisted["input_digest"] != bundle_digest
+                or persisted["artifact_key"] != artifact_key
+                or persisted["artifact_digest"] != artifact_digest
+                or int(persisted["record_count"]) != record_count
+            ):
+                raise CheckpointConflictError("Structure generation manifest conflicts")
+            cursor.execute(
+                """
+                UPDATE m1_job_attempts SET state = 'succeeded', finished_at = %s
+                WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
+                """,
+                (now, lease.job_key, lease.lease_epoch),
+            )
+            return manifest_digest
 
     def certify_quote_generation(
         self,
