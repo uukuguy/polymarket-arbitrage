@@ -24,6 +24,7 @@ from polyarb.control_plane.quote_worker import (
 from polyarb.control_plane.rollout import render_rollout_artifacts
 from polyarb.control_plane.scheduler import TransactionalControlPlaneScheduler
 from polyarb.control_plane.shadow import project_shadow_sources, read_shadow_sources
+from polyarb.control_plane.shadow_parity import verify_shadow_parity
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     canonical_structure_bundle_bytes,
@@ -124,6 +125,12 @@ def _parser() -> argparse.ArgumentParser:
     render_rollout.add_argument("--expected-database", required=True)
     render_rollout.add_argument("--output-dir", type=Path, required=True)
     render_rollout.add_argument("--json", action="store_true")
+    verify_parity = subcommands.add_parser(
+        "verify-shadow-parity",
+        help="verify three local Structure/Quote shadow-run evidence records",
+    )
+    verify_parity.add_argument("--evidence", type=Path, required=True)
+    verify_parity.add_argument("--json", action="store_true")
     return parser
 
 
@@ -294,6 +301,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1
         _write({"status": "rendered-local-only", **artifacts}, as_json=args.json)
+        return 0
+    if args.command == "verify-shadow-parity":
+        try:
+            evidence = json.loads(args.evidence.read_text())
+            if not isinstance(evidence, dict):
+                raise ValueError("shadow parity evidence must be an object")
+            _write(verify_shadow_parity(evidence), as_json=args.json)
+        except (OSError, ValueError) as error:
+            print(f"shadow parity unavailable: {type(error).__name__}", file=sys.stderr)
+            return 1
         return 0
     control_plane = _control_plane_from_env()
     if control_plane is None:

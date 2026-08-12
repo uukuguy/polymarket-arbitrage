@@ -426,6 +426,67 @@ def test_render_rollout_is_explicit_and_never_connects_to_control_plane(
     assert Path(result["checklist"]).exists()
 
 
+def test_shadow_parity_verifier_reads_only_local_evidence(monkeypatch, capsys, tmp_path) -> None:
+    from polyarb import cli_control_plane
+
+    evidence = {
+        "runs": [
+            {
+                "run_id": f"run-{index}",
+                "legacy": {
+                    "source_identity": {
+                        "publication_id": "publication-1",
+                        "window_id": "window-1",
+                        "snapshot_id": 42,
+                        "comparison_receipt_digest": "a" * 64,
+                    },
+                    "bundle_digest": "a" * 64,
+                    "component_counts": {
+                        "events": 0,
+                        "event_tags": 0,
+                        "memberships": 0,
+                        "group_truth": 0,
+                        "markets": 0,
+                        "issues": 0,
+                    },
+                    "quote_universe_hash": "a" * 64,
+                },
+                "transactional": {
+                    "source_identity": {
+                        "publication_id": "publication-1",
+                        "window_id": "window-1",
+                        "snapshot_id": 42,
+                        "comparison_receipt_digest": "a" * 64,
+                    },
+                    "bundle_digest": "a" * 64,
+                    "manifest_digest": "b" * 64,
+                    "component_counts": {
+                        "events": 0,
+                        "event_tags": 0,
+                        "memberships": 0,
+                        "group_truth": 0,
+                        "markets": 0,
+                        "issues": 0,
+                    },
+                    "quote_universe_hash": "a" * 64,
+                    "legacy_pointer_mutations": 0,
+                },
+            }
+            for index in range(3)
+        ]
+    }
+    path = tmp_path / "shadow-parity.json"
+    path.write_text(json.dumps(evidence))
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_control_plane_from_env",
+        lambda: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert cli_control_plane.main(["verify-shadow-parity", "--evidence", str(path), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "PASS"
+
+
 def test_shadow_sync_requires_dsn_without_printing_it(monkeypatch, capsys, tmp_path) -> None:
     from polyarb import cli_control_plane
 
