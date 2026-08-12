@@ -8312,3 +8312,26 @@ structure-source.md`: write the RED terminal source-window artifact parsing/
 bundle-materialization test, then derive the current six-component Structure
 bundle from sealed R2 pages without any SQLite read. Do not deploy or infer
 cloud target identities.
+
+## SESSION 213 — 2026-08-12 (source worker committed)
+
+- [COMMITTED] `4774d86` (`05.6-112`) adds the bounded Gamma-to-R2
+  `TransactionalStructureSourceWorker`. It fetches exactly one admitted page,
+  validates the returned opaque cursor, PUT+HEAD authenticates an immutable
+  NDJSON artifact, and only then commits the fenced source receipt. A Gamma
+  failure leaves the page retryable without advancing its cursor.
+- [VERIFY] Source worker unit contracts plus real PostgreSQL crash-before-
+  receipt takeover, source-window repository, Alembic 010, and existing
+  control-plane contracts: 34 passed. Ruff, diff checks and planning-status
+  pass. User-owned HANDOFF/SDD changes remain unstaged.
+- [NEXT-BOUNDARY] Source pages are now cloud-portable durable evidence, but
+  they are not yet a current Structure truth. The next work must parse all
+  sealed R2 pages in ordinal order, reject gaps/tamper, run the existing
+  normalizers and publish a six-component bundle into the already-fenced range
+  normalizer/certifier chain; no SQLite reads are permitted in that path.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, run `make planning-status`,
+then write the RED terminal source-window materializer contract before adding
+any bundle-generation implementation. The materializer must use only R2 page
+artifacts + Postgres source receipts, with a real Postgres proof that a missing
+or tampered page cannot enqueue Structure ranges.
