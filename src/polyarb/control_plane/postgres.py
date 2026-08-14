@@ -446,6 +446,7 @@ class PostgresControlPlane:
             cursor.execute(
                 """
                 SELECT input.window_key, input.stream, input.ordinal, input.requested_cursor,
+                       input.market_ids_json, input.market_ids_digest,
                        receipt.artifact_key, receipt.artifact_digest
                 FROM m1_structure_source_page_inputs AS input
                 JOIN m1_structure_source_page_receipts AS receipt
@@ -459,14 +460,7 @@ class PostgresControlPlane:
             rows = cursor.fetchall()
         return tuple(
             (
-                StructureSourcePageSpec(
-                    window_key=str(row["window_key"]),
-                    stream=str(row["stream"]),
-                    ordinal=int(row["ordinal"]),
-                    requested_cursor=(
-                        None if row["requested_cursor"] is None else str(row["requested_cursor"])
-                    ),
-                ),
+                self._structure_source_page_spec_from_row(row),
                 str(row["artifact_key"]),
                 str(row["artifact_digest"]),
             )

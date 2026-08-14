@@ -491,6 +491,14 @@ def test_only_last_scoped_market_batch_releases_materializer(
         record_count=1,
         now=now,
     )
+    persisted_pages = control_plane.structure_source_window_pages(window_key)
+    assert persisted_pages[1][0] == StructureSourcePageSpec(
+        window_key=window_key,
+        stream="markets",
+        ordinal=0,
+        requested_cursor=None,
+        market_ids=("market-a",),
+    )
     materializer = control_plane.claim_job(
         worker_id="materializer-a",
         job_types=("structure-materialize",),
