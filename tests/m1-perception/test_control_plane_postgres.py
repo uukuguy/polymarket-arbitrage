@@ -425,6 +425,82 @@ def test_terminal_event_page_atomically_admits_immutable_market_batches(
     )
 
 
+def test_only_last_scoped_market_batch_releases_materializer(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    window_key = "source-window:batch-completion"
+    control_plane.admit_structure_source_window(window_key=window_key, now=now)
+    event = control_plane.claim_job(
+        worker_id="source-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert event is not None
+    control_plane.record_structure_source_page(
+        event,
+        artifact_key="m1/structure/source/batch-completion/events-0.json",
+        artifact_digest="d" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        market_batches=(("market-a",), ("market-b",)),
+        now=now,
+    )
+
+    first = control_plane.claim_job(
+        worker_id="source-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert first is not None
+    control_plane.record_structure_source_page(
+        first,
+        artifact_key="m1/structure/source/batch-completion/markets-0.json",
+        artifact_digest="e" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        now=now,
+    )
+    assert (
+        control_plane.claim_job(
+            worker_id="materializer-a",
+            job_types=("structure-materialize",),
+            lease_seconds=30,
+            now=now,
+        )
+        is None
+    )
+
+    second = control_plane.claim_job(
+        worker_id="source-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert second is not None
+    control_plane.record_structure_source_page(
+        second,
+        artifact_key="m1/structure/source/batch-completion/markets-1.json",
+        artifact_digest="f" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        now=now,
+    )
+    materializer = control_plane.claim_job(
+        worker_id="materializer-a",
+        job_types=("structure-materialize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert materializer is not None
+    assert materializer.job_key == f"{window_key}:materialize"
+
+
 def test_terminal_market_page_releases_one_fenced_materializer_job(
     control_plane: PostgresControlPlane,
 ) -> None:

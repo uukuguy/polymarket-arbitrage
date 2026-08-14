@@ -50,6 +50,10 @@ class FakeControlPlane:
         self.recorded = kwargs
         return None
 
+    def structure_source_window_pages(self, window_key: str):
+        assert window_key == self.spec.window_key
+        return ()
+
     def finish(self, lease: JobLease, *, state: JobState, **kwargs: object) -> None:
         self.finished.append(state)
 
@@ -208,6 +212,44 @@ def test_source_worker_fetches_scoped_market_batch_by_exact_ids() -> None:
     assert control_plane.recorded is not None
     assert control_plane.recorded["next_cursor"] is None
     assert control_plane.recorded["completed"] is True
+
+
+def test_terminal_event_worker_derives_and_commits_scoped_market_batches() -> None:
+    class TerminalEventGamma(FakeGamma):
+        async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage:
+            self.event_calls.append((cursor, limit))
+            return EventPage(
+                events=(
+                    {
+                        "id": "event-a",
+                        "markets": [
+                            {"id": "market-b", "active": True, "closed": False},
+                            {"id": "market-a", "active": True, "closed": False},
+                        ],
+                    },
+                ),
+                requested_cursor=cursor,
+                next_cursor=None,
+                completed=True,
+                started_at_ms=10,
+                finished_at_ms=20,
+            )
+
+    control_plane = FakeControlPlane(_event_spec())
+    gamma = TerminalEventGamma()
+    worker = TransactionalStructureSourceWorker(
+        control_plane=control_plane,
+        gamma=gamma,
+        object_client=FakeObjectClient(),
+        bucket="source-pages",
+        worker_id="source-worker-a",
+        now=lambda: NOW,
+        market_batch_size=1,
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    assert control_plane.recorded is not None
+    assert control_plane.recorded["market_batches"] == (("market-a",), ("market-b",))
 
 
 def test_source_admitter_creates_one_current_window_and_never_overlaps() -> None:

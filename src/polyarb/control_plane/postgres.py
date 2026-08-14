@@ -678,6 +678,8 @@ class PostgresControlPlane:
                 raise JobIdentityConflict("source page lease identity does not match input")
             if normalized_market_batches is not None and spec.stream != "events":
                 raise ValueError("market batches require an event source page")
+            if spec.market_ids and (not completed or next_cursor is not None):
+                raise ValueError("scoped market batch must be terminal without a cursor")
             cursor.execute(
                 """
                 SELECT artifact_key, artifact_digest, next_cursor, completed, record_count
@@ -798,6 +800,28 @@ class PostgresControlPlane:
             if successor is not None and not scoped_market_admission:
                 self._enqueue_structure_source_page_cursor(cursor, spec=successor, now=now)
             elif completed and spec.stream == "markets":
+                if spec.market_ids:
+                    cursor.execute(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM m1_structure_source_page_inputs AS input
+                            LEFT JOIN m1_structure_source_page_receipts AS receipt
+                              ON receipt.job_key = input.job_key
+                            WHERE input.window_key = %s
+                              AND input.stream = 'markets'
+                              AND receipt.job_key IS NULL
+                        ) AS has_unfinished_batches
+                        """,
+                        (spec.window_key,),
+                    )
+                    row = cursor.fetchone()
+                    if row is None:
+                        raise CheckpointConflictError(
+                            "scoped market batch completion is unavailable"
+                        )
+                    if bool(row["has_unfinished_batches"]):
+                        return None
                 cursor.execute(
                     """
                     UPDATE m1_structure_source_windows

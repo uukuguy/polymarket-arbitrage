@@ -362,6 +362,8 @@ class TransactionalStructureSourceWorker:
         now: Callable[[], datetime],
         page_limit: int = 100,
         max_pages: int = 1_000,
+        market_batch_size: int = 25,
+        max_market_batches: int = 1_000,
         lease_seconds: int = 120,
         retry_delay: timedelta = timedelta(seconds=15),
     ) -> None:
@@ -371,6 +373,8 @@ class TransactionalStructureSourceWorker:
             raise ValueError("page_limit must be within 1..100")
         if max_pages <= 0:
             raise ValueError("max_pages must be positive")
+        if market_batch_size <= 0 or max_market_batches <= 0:
+            raise ValueError("market batch bounds must be positive")
         if lease_seconds <= 0 or retry_delay.total_seconds() <= 0:
             raise ValueError("lease_seconds and retry_delay must be positive")
         self._control_plane = control_plane
@@ -381,6 +385,8 @@ class TransactionalStructureSourceWorker:
         self._now = now
         self._page_limit = page_limit
         self._max_pages = max_pages
+        self._market_batch_size = market_batch_size
+        self._max_market_batches = max_market_batches
         self._lease_seconds = lease_seconds
         self._retry_delay = retry_delay
 
@@ -407,6 +413,9 @@ class TransactionalStructureSourceWorker:
                 )
                 return StructureWorkerResult(job_key=lease.job_key, outcome="quarantined")
             artifact, next_cursor, completed, record_count = await self._fetch_artifact(spec)
+            market_batches = None
+            if spec.stream == "events" and completed:
+                market_batches = self._market_batches_for_terminal_event(spec, artifact)
             self._control_plane.record_structure_source_page(
                 lease,
                 artifact_key=artifact.key,
@@ -414,6 +423,7 @@ class TransactionalStructureSourceWorker:
                 next_cursor=next_cursor,
                 completed=completed,
                 record_count=record_count,
+                market_batches=market_batches,
                 now=self._now(),
             )
             self._control_plane.record_job_recovery(
@@ -423,6 +433,13 @@ class TransactionalStructureSourceWorker:
                 now=self._now(),
             )
             return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
+        except StructureSourceBatchLimitError:
+            self._control_plane.quarantine_structure_source_page(
+                lease,
+                error_class="StructureSourceBatchLimitError",
+                now=self._now(),
+            )
+            return StructureWorkerResult(job_key=lease.job_key, outcome="quarantined")
         except StaleLeaseError:
             raise
         except Exception as error:
@@ -487,6 +504,41 @@ class TransactionalStructureSourceWorker:
             self._object_client, bucket=self._bucket, artifact=artifact
         )
         return artifact, page.next_cursor, page.completed, len(records)
+
+    def _market_batches_for_terminal_event(
+        self,
+        current_spec: StructureSourcePageSpec,
+        current_artifact: StructureSourcePageArtifact,
+    ) -> tuple[tuple[str, ...], ...]:
+        records: list[dict[str, object]] = []
+        pages = self._control_plane.structure_source_window_pages(current_spec.window_key)
+        for spec, artifact_key, artifact_digest in pages:
+            if spec.stream != "events":
+                continue
+            response = self._object_client.get_object(Bucket=self._bucket, Key=artifact_key)
+            body = response.get("Body")
+            if body is None or not hasattr(body, "read"):
+                raise StructureSourceError("source event artifact body is unavailable")
+            payload = body.read()
+            if not isinstance(payload, bytes):
+                raise StructureSourceError("source event artifact body is malformed")
+            parsed, page_records, _, _ = parse_structure_source_page_bytes(
+                payload, expected_sha256=artifact_digest
+            )
+            if parsed != spec:
+                raise StructureSourceError("source event artifact input mismatch")
+            records.extend(page_records)
+        parsed_current, current_records, _, _ = parse_structure_source_page_bytes(
+            current_artifact.payload, expected_sha256=current_artifact.sha256
+        )
+        if parsed_current != current_spec:
+            raise StructureSourceError("current source event artifact input mismatch")
+        records.extend(current_records)
+        return market_batches_from_event_records(
+            records,
+            batch_size=self._market_batch_size,
+            max_batches=self._max_market_batches,
+        )
 
 
 class TransactionalStructureSourceAdmitter:
