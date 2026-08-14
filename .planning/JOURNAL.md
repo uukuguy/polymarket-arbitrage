@@ -8965,3 +8965,24 @@ remaining jobs cannot compete with a fresh window.
 [NEXT] Let `5955818` seal, prove exact market batch ordinal >1,000 succeeds,
 then perform bounded in-flight restart takeover and the terminal
 materialize/range/certify/shadow chain.
+
+## SESSION 244 — 2026-08-15 (online source recovery stays in service)
+
+- [SEALED] Staging window `structure-source:300:5955818` completed its
+  211-page event stream and atomically created 6,419 exact-ID market batches.
+  The terminal receipt succeeded under a fenced takeover after the former
+  synchronous planning stall; no publication pointer was created.
+- [FIXED/DEPLOYED] `c2e7d7f` puts terminal R2 PUT/HEAD work behind a 90-second
+  `to_thread` boundary; `608a93a` limits each async scheduler turn to 105
+  seconds; `407daed` records source failures as fenced retryable incidents and
+  returns control to the source pool instead of terminating the service.
+- [LIVE] The staging worker now continues emitting `succeeded:8/8` market
+  turns beyond ordinal 1,600. A read-only count observed 904 succeeded, 5,675
+  runnable, and 51 retryable jobs; pointer count remains zero. The retryable
+  items are retained for diagnosis/reclaim, not silently dropped. Telegram and
+  production L1/L2 were untouched.
+
+[NEXT] Let `5955818` finish its bounded eight-lane market receipts, then prove
+terminal materialization, range normalization, Structure certification/shadow,
+and only then the transactional Quote chain. Continue staging-only and retain
+zero live publication pointers throughout the acceptance run.
