@@ -38,6 +38,10 @@ RUN groupadd --system --gid 10001 polyarb \
     && useradd --system --uid 10001 --gid polyarb --no-create-home polyarb
 COPY --from=builder --chown=polyarb:polyarb /app/.venv /app/.venv
 COPY --chown=polyarb:polyarb src/ /app/src/
+# Transactional control-plane migrations run inside an isolated Fly worker;
+# retain the Alembic config and immutable revision chain in that runtime image.
+COPY --chown=polyarb:polyarb alembic.ini /app/alembic.ini
+COPY --chown=polyarb:polyarb alembic/ /app/alembic/
 RUN mkdir -p /data /app/logs && chown -R polyarb:polyarb /data /app/logs
 
 # Copy crontab for Supercronic process group
