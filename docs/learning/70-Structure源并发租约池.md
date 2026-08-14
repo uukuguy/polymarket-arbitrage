@@ -76,6 +76,9 @@ outcome = f"succeeded:{succeeded}/{len(self._lanes)}"
   R2 读取卡住，worker 把本轮记为 retryable，而不是让 scheduler 永久停在一个已经
   过期的 lease 上。迟到的读取线程没有 receipt 写权限，下一 epoch 才是唯一能提交
   的 owner。
+- **两种上界不能混用**：`max_pages` 防的是 opaque cursor 无限翻页，所以只约束
+  `events`；精确 market batch 没有 cursor，改由 `max_market_batches` 约束。把前者
+  套到后者会在 ordinal 1000 错误 quarantine 一个仍合法的、例如 6,427 批的市场全集。
 
 ## 自检题
 

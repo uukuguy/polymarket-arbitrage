@@ -160,7 +160,7 @@ def _event_spec() -> StructureSourcePageSpec:
 def test_source_worker_quarantines_page_at_configured_page_limit() -> None:
     spec = StructureSourcePageSpec(
         window_key="source-window:limit",
-        stream="markets",
+        stream="events",
         ordinal=2,
         requested_cursor="opaque-cursor",
     )
@@ -184,6 +184,31 @@ def test_source_worker_quarantines_page_at_configured_page_limit() -> None:
     ]
     assert gamma.event_calls == []
     assert gamma.market_calls == []
+
+
+def test_scoped_market_batch_ordinal_is_bounded_by_market_capacity_not_cursor_pages() -> None:
+    spec = StructureSourcePageSpec(
+        window_key="source-window:scoped-capacity",
+        stream="markets",
+        ordinal=1_000,
+        requested_cursor=None,
+        market_ids=("market-a",),
+    )
+    control_plane = FakeControlPlane(spec)
+    gamma = FakeGamma()
+    worker = TransactionalStructureSourceWorker(
+        control_plane=control_plane,
+        gamma=gamma,
+        object_client=FakeObjectClient(),
+        bucket="structure",
+        worker_id="source-worker-a",
+        now=lambda: NOW,
+        max_pages=1_000,
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    assert control_plane.quarantines == []
+    assert gamma.exact_market_calls == [("market-a",)]
 
 
 def test_scoped_market_artifact_binds_the_admitted_batch_digest() -> None:

@@ -420,7 +420,10 @@ class TransactionalStructureSourceWorker:
             return StructureWorkerResult(job_key=None, outcome="idle")
         try:
             spec = self._control_plane.structure_source_page_spec(lease.job_key)
-            if spec.ordinal >= self._max_pages:
+            # Only cursor-driven event traversal needs this page ceiling.  Exact
+            # market-ID batches are independently bounded when the terminal
+            # event source admits at most ``max_market_batches`` of them.
+            if spec.stream == "events" and spec.ordinal >= self._max_pages:
                 self._control_plane.quarantine_structure_source_page(
                     lease,
                     error_class="StructureSourcePageLimitError",
