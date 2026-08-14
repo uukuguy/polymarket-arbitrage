@@ -306,7 +306,8 @@ class PostgresControlPlane:
         ):
             cursor.execute(
                 """
-                SELECT window_key, stream, ordinal, requested_cursor
+                SELECT window_key, stream, ordinal, requested_cursor,
+                       market_ids_json, market_ids_digest
                 FROM m1_structure_source_page_inputs
                 WHERE job_key = %s
                 """,
@@ -315,14 +316,7 @@ class PostgresControlPlane:
             row = cursor.fetchone()
         if row is None:
             raise ControlPlaneError(f"Structure source page is unavailable for {job_key!r}")
-        return StructureSourcePageSpec(
-            window_key=str(row["window_key"]),
-            stream=str(row["stream"]),
-            ordinal=int(row["ordinal"]),
-            requested_cursor=(
-                None if row["requested_cursor"] is None else str(row["requested_cursor"])
-            ),
-        )
+        return self._structure_source_page_spec_from_row(row)
 
     def structure_source_page_receipt(self, job_key: str) -> dict[str, object] | None:
         """Return one authenticated source-page effect, never a mutable cursor view."""
@@ -641,6 +635,7 @@ class PostgresControlPlane:
         next_cursor: str | None,
         completed: bool,
         record_count: int,
+        market_batches: tuple[tuple[str, ...], ...] | None = None,
         now: datetime,
     ) -> StructureSourcePageSpec | None:
         """Atomically record one source page and release only its legal successor.
@@ -661,6 +656,19 @@ class PostgresControlPlane:
             raise ValueError("completed source page cannot name a successor cursor")
         if not completed and (next_cursor is None or not next_cursor):
             raise ValueError("incomplete source page requires a successor cursor")
+        normalized_market_batches: tuple[tuple[str, ...], ...] | None = None
+        if market_batches is not None:
+            if not completed:
+                raise ValueError("market batches require a terminal event page")
+            normalized_market_batches = tuple(tuple(market_ids) for market_ids in market_batches)
+            for ordinal, market_ids in enumerate(normalized_market_batches):
+                StructureSourcePageSpec(
+                    window_key="validated-window",
+                    stream="markets",
+                    ordinal=ordinal,
+                    requested_cursor=None,
+                    market_ids=tuple(market_ids),
+                )
         with (
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
@@ -668,6 +676,8 @@ class PostgresControlPlane:
             spec = self._structure_source_page_spec_cursor(cursor, lease.job_key)
             if lease.input_identity != spec.input_identity:
                 raise JobIdentityConflict("source page lease identity does not match input")
+            if normalized_market_batches is not None and spec.stream != "events":
+                raise ValueError("market batches require an event source page")
             cursor.execute(
                 """
                 SELECT artifact_key, artifact_digest, next_cursor, completed, record_count
@@ -696,6 +706,10 @@ class PostgresControlPlane:
                 if persisted != expected:
                     raise CheckpointConflictError(
                         f"source page receipt conflicts for {lease.job_key!r}"
+                    )
+                if spec.stream == "events" and completed and normalized_market_batches is not None:
+                    return self._admit_scoped_market_batches_cursor(
+                        cursor, event_spec=spec, market_batches=normalized_market_batches, now=now
                     )
                 return self._source_successor_spec_cursor(
                     cursor, spec=spec, next_cursor=next_cursor, completed=completed
@@ -770,10 +784,18 @@ class PostgresControlPlane:
                 """,
                 (now, lease.job_key, lease.lease_epoch),
             )
-            successor = self._source_successor_spec_cursor(
-                cursor, spec=spec, next_cursor=next_cursor, completed=completed
+            scoped_market_admission = (
+                spec.stream == "events" and completed and normalized_market_batches is not None
             )
-            if successor is not None:
+            if scoped_market_admission:
+                successor = self._admit_scoped_market_batches_cursor(
+                    cursor, event_spec=spec, market_batches=normalized_market_batches, now=now
+                )
+            else:
+                successor = self._source_successor_spec_cursor(
+                    cursor, spec=spec, next_cursor=next_cursor, completed=completed
+                )
+            if successor is not None and not scoped_market_admission:
                 self._enqueue_structure_source_page_cursor(cursor, spec=successor, now=now)
             elif completed and spec.stream == "markets":
                 cursor.execute(
@@ -831,6 +853,46 @@ class PostgresControlPlane:
             )
         return None
 
+    def _admit_scoped_market_batches_cursor(
+        self,
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        event_spec: StructureSourcePageSpec,
+        market_batches: tuple[tuple[str, ...], ...],
+        now: datetime,
+    ) -> StructureSourcePageSpec:
+        if not market_batches:
+            raise CheckpointConflictError("terminal events produced no scoped market batches")
+        cursor.execute(
+            """
+            UPDATE m1_structure_source_windows
+            SET state = 'events-complete', updated_at = %s
+            WHERE window_key = %s AND state = 'running'
+            """,
+            (now, event_spec.window_key),
+        )
+        if cursor.rowcount != 1:
+            cursor.execute(
+                "SELECT state FROM m1_structure_source_windows WHERE window_key = %s",
+                (event_spec.window_key,),
+            )
+            row = cursor.fetchone()
+            if row is None or row["state"] != "events-complete":
+                raise CheckpointConflictError("event stream terminal transition is invalid")
+        specs = tuple(
+            StructureSourcePageSpec(
+                window_key=event_spec.window_key,
+                stream="markets",
+                ordinal=ordinal,
+                requested_cursor=None,
+                market_ids=market_ids,
+            )
+            for ordinal, market_ids in enumerate(market_batches)
+        )
+        for spec in specs:
+            self._enqueue_structure_source_page_cursor(cursor, spec=spec, now=now)
+        return specs[0]
+
     def _enqueue_structure_source_page_cursor(
         self,
         cursor: psycopg.Cursor[dict[str, Any]],
@@ -848,8 +910,9 @@ class PostgresControlPlane:
         cursor.execute(
             """
             INSERT INTO m1_structure_source_page_inputs (
-                job_key, window_key, stream, ordinal, requested_cursor, admitted_at
-            ) VALUES (%s, %s, %s, %s, %s, %s)
+                job_key, window_key, stream, ordinal, requested_cursor,
+                market_ids_json, market_ids_digest, admitted_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (job_key) DO NOTHING
             """,
             (
@@ -858,6 +921,12 @@ class PostgresControlPlane:
                 spec.stream,
                 spec.ordinal,
                 spec.requested_cursor,
+                (
+                    None
+                    if not spec.market_ids
+                    else json.dumps(spec.market_ids, separators=(",", ":"))
+                ),
+                spec.market_ids_digest,
                 now,
             ),
         )
@@ -866,12 +935,41 @@ class PostgresControlPlane:
             raise JobIdentityConflict(f"source page {spec.job_key!r} names another input")
 
     @staticmethod
+    def _structure_source_page_spec_from_row(row: Mapping[str, Any]) -> StructureSourcePageSpec:
+        raw_market_ids = row.get("market_ids_json")
+        market_ids: tuple[str, ...] = ()
+        if raw_market_ids is not None:
+            try:
+                decoded = json.loads(str(raw_market_ids))
+            except json.JSONDecodeError as error:
+                raise ControlPlaneError("source market batch is malformed") from error
+            if not isinstance(decoded, list) or not all(
+                isinstance(value, str) for value in decoded
+            ):
+                raise ControlPlaneError("source market batch is malformed")
+            market_ids = tuple(decoded)
+        spec = StructureSourcePageSpec(
+            window_key=str(row["window_key"]),
+            stream=str(row["stream"]),
+            ordinal=int(row["ordinal"]),
+            requested_cursor=(
+                None if row["requested_cursor"] is None else str(row["requested_cursor"])
+            ),
+            market_ids=market_ids,
+        )
+        persisted_digest = row.get("market_ids_digest")
+        if (None if persisted_digest is None else str(persisted_digest)) != spec.market_ids_digest:
+            raise JobIdentityConflict("source market batch digest does not match input")
+        return spec
+
+    @classmethod
     def _structure_source_page_spec_cursor(
-        cursor: psycopg.Cursor[dict[str, Any]], job_key: str
+        cls, cursor: psycopg.Cursor[dict[str, Any]], job_key: str
     ) -> StructureSourcePageSpec:
         cursor.execute(
             """
-            SELECT window_key, stream, ordinal, requested_cursor
+            SELECT window_key, stream, ordinal, requested_cursor,
+                   market_ids_json, market_ids_digest
             FROM m1_structure_source_page_inputs
             WHERE job_key = %s
             """,
@@ -880,14 +978,7 @@ class PostgresControlPlane:
         row = cursor.fetchone()
         if row is None:
             raise ControlPlaneError(f"Structure source page is unavailable for {job_key!r}")
-        return StructureSourcePageSpec(
-            window_key=str(row["window_key"]),
-            stream=str(row["stream"]),
-            ordinal=int(row["ordinal"]),
-            requested_cursor=(
-                None if row["requested_cursor"] is None else str(row["requested_cursor"])
-            ),
-        )
+        return cls._structure_source_page_spec_from_row(row)
 
     def enqueue_quote_generation(
         self,

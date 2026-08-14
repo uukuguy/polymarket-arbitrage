@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -55,6 +56,7 @@ class StructureSourcePageSpec:
     stream: str
     ordinal: int
     requested_cursor: str | None
+    market_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_identity(self.window_key, "window_key")
@@ -64,6 +66,19 @@ class StructureSourcePageSpec:
             raise ValueError("ordinal must be non-negative")
         if self.requested_cursor is not None and not self.requested_cursor:
             raise ValueError("requested_cursor must be non-empty when present")
+        if self.stream == "events" and self.market_ids:
+            raise ValueError("event source page cannot name market_ids")
+        if self.market_ids:
+            if self.stream != "markets":
+                raise ValueError("market_ids require markets stream")
+            if self.requested_cursor is not None:
+                raise ValueError("scoped market batch cannot name a cursor")
+            if tuple(sorted(self.market_ids)) != self.market_ids:
+                raise ValueError("market_ids must be sorted")
+            if len(set(self.market_ids)) != len(self.market_ids):
+                raise ValueError("market_ids must be unique")
+            for market_id in self.market_ids:
+                _require_identity(market_id, "market_id")
 
     @property
     def job_key(self) -> str:
@@ -71,10 +86,21 @@ class StructureSourcePageSpec:
 
     @property
     def input_identity(self) -> str:
+        if self.market_ids:
+            assert self.market_ids_digest is not None
+            return f"{self.window_key}:{self.stream}:{self.ordinal}:batch:{self.market_ids_digest}"
         return (
             f"{self.window_key}:{self.stream}:{self.ordinal}:"
             f"{self.requested_cursor if self.requested_cursor is not None else '<start>'}"
         )
+
+    @property
+    def market_ids_digest(self) -> str | None:
+        if not self.market_ids:
+            return None
+        return sha256(
+            json.dumps(self.market_ids, separators=(",", ":")).encode()
+        ).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

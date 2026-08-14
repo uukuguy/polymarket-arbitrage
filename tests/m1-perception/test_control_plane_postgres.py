@@ -68,7 +68,7 @@ def postgres_dsn() -> Iterator[str]:
             for role in ("anon", "authenticated", "service_role"):
                 connection.execute(f"CREATE ROLE {role} NOLOGIN")
         result = subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "014"],
+            ["uv", "run", "alembic", "upgrade", "015"],
             env={**os.environ, "POLYARB_SUPABASE_DB_DSN": dsn},
             capture_output=True,
             text=True,
@@ -381,6 +381,48 @@ def test_terminal_event_page_creates_first_market_page(
     assert market.stream == "markets"
     assert market.ordinal == 0
     assert market.requested_cursor is None
+
+
+def test_terminal_event_page_atomically_admits_immutable_market_batches(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.admit_structure_source_window(window_key="source-window:batches", now=now)
+    event = control_plane.claim_job(
+        worker_id="source-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert event is not None
+
+    first = control_plane.record_structure_source_page(
+        event,
+        artifact_key="m1/structure/source/batches/events-0.json",
+        artifact_digest="c" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        market_batches=(("market-a", "market-b"), ("market-c",)),
+        now=now,
+    )
+
+    assert first == StructureSourcePageSpec(
+        window_key="source-window:batches",
+        stream="markets",
+        ordinal=0,
+        requested_cursor=None,
+        market_ids=("market-a", "market-b"),
+    )
+    assert control_plane.structure_source_page_spec(
+        "source-window:batches:fetch:markets:1"
+    ) == StructureSourcePageSpec(
+        window_key="source-window:batches",
+        stream="markets",
+        ordinal=1,
+        requested_cursor=None,
+        market_ids=("market-c",),
+    )
 
 
 def test_terminal_market_page_releases_one_fenced_materializer_job(
