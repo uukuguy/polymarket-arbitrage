@@ -90,5 +90,16 @@ outcome = f"succeeded:{succeeded}/{len(self._lanes)}"
 
 ## FAQ 增量
 
-暂无。若你想确认线上某一条 `succeeded:x/8` 是正常依赖关系还是实际 lane 失败，
-把对应 window/job 日志贴出来；会把判读规则补在这里。
+### 为什么一个已到期的 retryable 任务还可能要等很久？
+
+“可以重试”不等于“下一轮一定会先执行”。如果 claim 查询只按初始入队时间排序，
+一个较晚失败、但已经到期的任务会排在数千个更早入队的首次任务后面。整个窗口虽
+然最终仍能完成，却会把 terminal receipt 和下游 materializer 不必要地拖住。
+
+现在 [`postgres.py`](../../src/polyarb/control_plane/postgres.py:2514) 明确将**到期的
+retryable** 排在首次 runnable 前面；同一优先级内仍按既有调度时间、更新时间和 job
+key 稳定排序。它不绕过退避，不把失败伪装成成功，也不改变八 lane 上限，只保证已经
+满足重试条件的失败不会被无限长的初始队列饿死。
+
+若你想确认线上某一条 `succeeded:x/8` 是正常依赖关系还是实际 lane 失败，把对应
+window/job 日志贴出来；会把判读规则继续补在这里。

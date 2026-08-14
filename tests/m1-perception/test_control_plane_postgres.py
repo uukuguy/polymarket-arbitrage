@@ -1990,6 +1990,48 @@ def test_retry_preserves_checkpoint_and_quarantine_stops_claims(
     )
 
 
+def test_due_retryable_job_claims_before_new_runnable_work(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="structure:retry-first",
+        job_type="structure-normalize",
+        input_identity="retry-first",
+        now=now,
+    )
+    first = control_plane.claim_job(
+        worker_id="worker-a",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert first is not None
+    control_plane.finish(
+        first,
+        state=JobState.RETRYABLE,
+        now=now + timedelta(seconds=1),
+        next_attempt_at=now + timedelta(seconds=5),
+        error_class="upstream-timeout",
+    )
+    control_plane.enqueue_job(
+        job_key="structure:new-work",
+        job_type="structure-normalize",
+        input_identity="new-work",
+        now=now + timedelta(seconds=3),
+    )
+
+    claimed = control_plane.claim_job(
+        worker_id="worker-b",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=6),
+    )
+
+    assert claimed is not None
+    assert claimed.job_key == "structure:retry-first"
+
+
 def test_incident_event_and_alert_outbox_are_one_idempotent_transaction(
     control_plane: PostgresControlPlane,
 ) -> None:

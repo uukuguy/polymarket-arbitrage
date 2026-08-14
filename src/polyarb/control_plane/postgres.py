@@ -2511,11 +2511,15 @@ class PostgresControlPlane:
                        AND (next_attempt_at IS NULL OR next_attempt_at <= %s))
                       OR (state = 'leased' AND lease_expires_at <= %s)
                   )
-                ORDER BY next_attempt_at NULLS FIRST, updated_at, job_key
+                ORDER BY
+                    CASE WHEN state = 'retryable' AND next_attempt_at <= %s THEN 0 ELSE 1 END,
+                    next_attempt_at NULLS FIRST,
+                    updated_at,
+                    job_key
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
                 """,
-                (list(job_types), now, now),
+                (list(job_types), now, now, now),
             )
             job = cursor.fetchone()
             if job is None:
