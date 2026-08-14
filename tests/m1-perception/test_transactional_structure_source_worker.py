@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from polyarb.clients.gamma_client import EventPage, MarketPage
+from polyarb.clients.gamma_client import EventPage, MarketPage, PaginationIntegrityError
 from polyarb.control_plane.models import JobLease, JobState, StructureSourcePageSpec
 from polyarb.control_plane.structure_source import (
     DEFAULT_MAX_MARKET_BATCHES,
@@ -110,6 +110,11 @@ class FakeGamma:
 class FailingGamma(FakeGamma):
     async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage:
         raise TimeoutError("Gamma unavailable")
+
+
+class ClosedExactMarketGamma(FakeGamma):
+    async def fetch_markets_by_ids(self, market_ids: tuple[str, ...]) -> tuple[dict, ...]:
+        raise PaginationIntegrityError("exact-id market response is not open")
 
 
 class FakeObjectClient:
@@ -475,3 +480,30 @@ def test_source_worker_marks_only_current_page_retryable_when_gamma_fails() -> N
             "now": NOW,
         }
     ]
+
+
+def test_source_worker_quarantines_window_when_frozen_market_becomes_inactive() -> None:
+    spec = StructureSourcePageSpec(
+        window_key="source-window:closed-member",
+        stream="markets",
+        ordinal=0,
+        requested_cursor=None,
+        market_ids=("market-a",),
+    )
+    control_plane = FakeControlPlane(spec)
+    worker = TransactionalStructureSourceWorker(
+        control_plane=control_plane,
+        gamma=ClosedExactMarketGamma(),
+        object_client=FakeObjectClient(),
+        bucket="source-pages",
+        worker_id="source-worker-a",
+        now=lambda: NOW,
+    )
+
+    assert asyncio.run(worker.run_once()) == StructureWorkerResult(
+        job_key=spec.job_key, outcome="quarantined"
+    )
+    assert control_plane.quarantines == [
+        {"error_class": "StructureSourceMemberBecameInactiveError", "now": NOW}
+    ]
+    assert control_plane.retry_incidents == []

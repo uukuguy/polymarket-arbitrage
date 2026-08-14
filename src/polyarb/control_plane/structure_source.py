@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
-from polyarb.clients.gamma_client import EventPage, MarketPage
+from polyarb.clients.gamma_client import EventPage, MarketPage, PaginationIntegrityError
 from polyarb.config import Settings
 from polyarb.perception.market_truth import market_truth_mismatch_reason
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
@@ -471,6 +471,23 @@ class TransactionalStructureSourceWorker:
         except StaleLeaseError:
             raise
         except Exception as error:
+            # A frozen market-ID set may contain a member that closes before
+            # its exact batch is fetched.  Gamma explicitly says this response
+            # is no longer open, so retrying cannot produce the same coherent
+            # source window.  Quarantine the window and let a later admission
+            # take a fresh, internally consistent scope.  Other integrity
+            # errors can still be transient upstream responses and retain the
+            # normal retry/incident path below.
+            if (
+                isinstance(error, PaginationIntegrityError)
+                and str(error) == "exact-id market response is not open"
+            ):
+                self._control_plane.quarantine_structure_source_page(
+                    lease,
+                    error_class="StructureSourceMemberBecameInactiveError",
+                    now=self._now(),
+                )
+                return StructureWorkerResult(job_key=lease.job_key, outcome="quarantined")
             self._control_plane.finish_retryable_with_incident(
                 lease,
                 error_class=type(error).__name__,

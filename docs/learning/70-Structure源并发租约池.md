@@ -103,3 +103,11 @@ key 稳定排序。它不绕过退避，不把失败伪装成成功，也不改�
 
 若你想确认线上某一条 `succeeded:x/8` 是正常依赖关系还是实际 lane 失败，把对应
 window/job 日志贴出来；会把判读规则继续补在这里。
+
+### 为什么成员关闭时要废弃整个窗口，而不是跳过那一个市场？
+
+event terminal 把一组当时开放的 market ID 冻结成一个完整性承诺。若在随后精确拉取
+时其中一个已经关闭，跳过它会产出一个“看似成功、实际缺腿”的 Structure bundle；对
+套利扫描比明确失败更危险。`exact-id market response is not open` 因而是窗口级的
+fail-closed：保留已写的 page receipt，quarantine 当前窗口，下一 cadence 再取得一组
+新的、可完整认证的成员。它与临时网络超时不同，后者仍保持 retryable。
