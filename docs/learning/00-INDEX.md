@@ -81,6 +81,7 @@
 | 67 | [事务失败告警闭环](67-事务失败告警闭环.md) | retryable 为什么必须同时产生 incident/outbox / lease epoch 幂等 / 不制造告警风暴 |
 | 68 | [事务型告警投递](68-事务型告警投递.md) | outbox lease / append-only delivery receipt / 外部通知不阻塞采集 |
 | 69 | [事务型熔断与恢复](69-事务型熔断与恢复.md) | job-scoped circuit / deterministic probe / fenced recovery / operator projection |
+| 70 | [Structure 源并发租约池](70-Structure源并发租约池.md) | event cursor 为什么串行 / market batch 如何八 lane 并发 / `succeeded:1/8` 如何判读 / 为什么并发不削弱 lease fencing |
 
 ## Phase 02.1 教学增量（2026-05）
 
