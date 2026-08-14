@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
@@ -53,6 +54,12 @@ class _ObjectClient(Protocol):
     def put_object(self, **kwargs: Any) -> Any: ...
 
     def head_object(self, **kwargs: Any) -> dict[str, Any]: ...
+
+
+class _SourceLane(Protocol):
+    async def run_once(self) -> StructureWorkerResult: ...
+
+    async def aclose(self) -> None: ...
 
 
 type _DecodedSourcePage = tuple[
@@ -541,6 +548,37 @@ class TransactionalStructureSourceWorker:
             batch_size=self._market_batch_size,
             max_batches=self._max_market_batches,
         )
+
+
+class TransactionalStructureSourcePool:
+    """Bound concurrent exact-ID source work without weakening durable leases."""
+
+    def __init__(self, *, lanes: Sequence[_SourceLane]) -> None:
+        if not lanes:
+            raise ValueError("lanes must be non-empty")
+        self._lanes = tuple(lanes)
+
+    async def run_once(self) -> StructureWorkerResult:
+        results = await asyncio.gather(
+            *(lane.run_once() for lane in self._lanes), return_exceptions=True
+        )
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            raise errors[0]
+        completed = [result for result in results if result.job_key is not None]
+        if not completed:
+            return StructureWorkerResult(job_key=None, outcome="idle")
+        keys = sorted(str(result.job_key) for result in completed)
+        succeeded = sum(result.outcome == "succeeded" for result in completed)
+        outcome = (
+            f"succeeded:{succeeded}/{len(self._lanes)}"
+            if succeeded == len(completed)
+            else f"mixed:{succeeded}/{len(completed)}"
+        )
+        return StructureWorkerResult(job_key=",".join(keys), outcome=outcome)
+
+    async def aclose(self) -> None:
+        await asyncio.gather(*(lane.aclose() for lane in self._lanes))
 
 
 class TransactionalStructureSourceAdmitter:

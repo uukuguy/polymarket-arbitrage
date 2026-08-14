@@ -12,6 +12,7 @@ from polyarb.control_plane.structure_source import (
     DEFAULT_MAX_MARKET_BATCHES,
     StructureSourcePageArtifact,
     TransactionalStructureSourceAdmitter,
+    TransactionalStructureSourcePool,
     TransactionalStructureSourceWorker,
     parse_structure_source_page_bytes,
 )
@@ -122,6 +123,28 @@ class FakeObjectClient:
             "ContentLength": len(self.upload["Body"]),
             "Metadata": self.upload["Metadata"],
         }
+
+
+class DelayedLane:
+    def __init__(self, job_key: str | None, *, failure: BaseException | None = None) -> None:
+        self.job_key = job_key
+        self.failure = failure
+        self.calls = 0
+        self.released = asyncio.Event()
+
+    async def run_once(self) -> StructureWorkerResult:
+        self.calls += 1
+        await asyncio.sleep(0)
+        self.released.set()
+        if self.failure is not None:
+            raise self.failure
+        return StructureWorkerResult(
+            job_key=self.job_key,
+            outcome="idle" if self.job_key is None else "succeeded",
+        )
+
+    async def aclose(self) -> None:
+        return None
 
 
 def _event_spec() -> StructureSourcePageSpec:
@@ -255,6 +278,25 @@ def test_terminal_event_worker_derives_and_commits_scoped_market_batches() -> No
 
 def test_default_scoped_market_capacity_remains_hard_but_covers_live_universe() -> None:
     assert DEFAULT_MAX_MARKET_BATCHES == 5_000
+
+
+def test_source_pool_aggregates_all_concurrent_lane_results() -> None:
+    lanes = (DelayedLane("market:2"), DelayedLane("market:1"), DelayedLane(None))
+
+    result = asyncio.run(TransactionalStructureSourcePool(lanes=lanes).run_once())
+
+    assert result == StructureWorkerResult(job_key="market:1,market:2", outcome="succeeded:2/3")
+    assert [lane.calls for lane in lanes] == [1, 1, 1]
+
+
+def test_source_pool_waits_for_healthy_sibling_before_propagating_lane_failure() -> None:
+    failing = DelayedLane(None, failure=TimeoutError("Gamma unavailable"))
+    healthy = DelayedLane("market:1")
+
+    with pytest.raises(TimeoutError, match="Gamma unavailable"):
+        asyncio.run(TransactionalStructureSourcePool(lanes=(failing, healthy)).run_once())
+
+    assert healthy.released.is_set()
 
 
 def test_source_admitter_creates_one_current_window_and_never_overlaps() -> None:
