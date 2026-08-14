@@ -417,6 +417,11 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
   quarantined-window source jobs cannot be claimed ahead of a fresh source
   window; durable source failures return as retryable outcomes rather than
   exiting the service. Do not touch Telegram or production L1/L2.
+- A due retryable job is claimed ahead of new runnable work. This prevents a
+  long market batch set from starving a backoff-complete source failure; the
+  job still keeps its failure class, retry timing, lease epoch, and incident
+  evidence. `m1-retry-fairness-52c0e1f` is the staging-only deployment that
+  proved 32 reclaimed second attempts while the process remained online.
 - Resume from `make planning-status`, then inspect `5955818` to prove all
   market receipts, terminal materialization, and shadow recovery.
 

@@ -8986,3 +8986,24 @@ materialize/range/certify/shadow chain.
 terminal materialization, range normalization, Structure certification/shadow,
 and only then the transactional Quote chain. Continue staging-only and retain
 zero live publication pointers throughout the acceptance run.
+
+## SESSION 245 — 2026-08-15 (due-retry fairness under a long source window)
+
+- [OBSERVED] `5955818` held due `PaginationIntegrityError` retries behind
+  thousands of older first-attempt market jobs. The old claim ordering was
+  timestamp-fair only within the initial queue, not recovery-fair: terminal
+  materialization could wait for the entire batch set even after backoff elapsed.
+- [FIXED/DEPLOYED] `52c0e1f` gives a due retryable job priority over new runnable
+  work while preserving retry backoff, fences, deterministic tie-breaks, and
+  eight-lane concurrency. The real-Postgres RED/GREEN contract, full focused
+  control-plane suite, and Ruff passed. Image `m1-retry-fairness-52c0e1f` is
+  running on the staging machine only.
+- [LIVE] 32 retryable jobs reached `attempt_count=2`, and `mixed:0/8` source
+  ticks continued into subsequent ticks rather than exiting. This proves both
+  fair reclaim and fail-soft in-service retry behavior. Publication pointer
+  count remains zero; Telegram and production L1/L2 were untouched.
+
+[NEXT] Continue observing the bounded `5955818` batch drain and recurrent
+retry behavior. Once every source receipt is terminal, prove materializer →
+range → certifier Structure shadow recovery before enabling the existing Quote
+transaction workers for acceptance.
