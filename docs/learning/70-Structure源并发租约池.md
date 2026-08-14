@@ -72,6 +72,10 @@ outcome = f"succeeded:{succeeded}/{len(self._lanes)}"
   精确 market ID 批天然可并发。
 - **所有 lane 都结束后才汇报**：`gather` 等待 sibling，调度器拿到的是一轮完整事实，
   而不是某个先返回的 lane 掩盖其他失败。
+- **terminal 证据读取有 90 秒上界**：最后一页需要读取此前所有 event artifact；若
+  R2 读取卡住，worker 把本轮记为 retryable，而不是让 scheduler 永久停在一个已经
+  过期的 lease 上。迟到的读取线程没有 receipt 写权限，下一 epoch 才是唯一能提交
+  的 owner。
 
 ## 自检题
 

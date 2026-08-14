@@ -374,6 +374,7 @@ class TransactionalStructureSourceWorker:
         market_batch_size: int = 25,
         max_market_batches: int = DEFAULT_MAX_MARKET_BATCHES,
         lease_seconds: int = 120,
+        terminal_event_timeout_seconds: float = 90,
         retry_delay: timedelta = timedelta(seconds=15),
     ) -> None:
         if not bucket or not worker_id:
@@ -384,8 +385,12 @@ class TransactionalStructureSourceWorker:
             raise ValueError("max_pages must be positive")
         if market_batch_size <= 0 or max_market_batches <= 0:
             raise ValueError("market batch bounds must be positive")
-        if lease_seconds <= 0 or retry_delay.total_seconds() <= 0:
-            raise ValueError("lease_seconds and retry_delay must be positive")
+        if (
+            lease_seconds <= 0
+            or terminal_event_timeout_seconds <= 0
+            or retry_delay.total_seconds() <= 0
+        ):
+            raise ValueError("source worker time bounds must be positive")
         self._control_plane = control_plane
         self._gamma = gamma
         self._object_client = object_client
@@ -397,6 +402,7 @@ class TransactionalStructureSourceWorker:
         self._market_batch_size = market_batch_size
         self._max_market_batches = max_market_batches
         self._lease_seconds = lease_seconds
+        self._terminal_event_timeout_seconds = terminal_event_timeout_seconds
         self._retry_delay = retry_delay
 
     async def aclose(self) -> None:
@@ -424,7 +430,14 @@ class TransactionalStructureSourceWorker:
             artifact, next_cursor, completed, record_count = await self._fetch_artifact(spec)
             market_batches = None
             if spec.stream == "events" and completed:
-                market_batches = self._market_batches_for_terminal_event(spec, artifact)
+                # This reads every prior event artifact.  It cannot block the sole
+                # scheduler turn indefinitely, or an expired lease becomes unable
+                # to reclaim itself on the next tick.  The helper is read-only; a
+                # timed-out thread has no durable authority to commit a receipt.
+                market_batches = await asyncio.wait_for(
+                    asyncio.to_thread(self._market_batches_for_terminal_event, spec, artifact),
+                    timeout=self._terminal_event_timeout_seconds,
+                )
             self._control_plane.record_structure_source_page(
                 lease,
                 artifact_key=artifact.key,

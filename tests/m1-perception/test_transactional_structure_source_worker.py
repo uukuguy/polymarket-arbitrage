@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import UTC, datetime
 
 import pytest
@@ -274,6 +275,41 @@ def test_terminal_event_worker_derives_and_commits_scoped_market_batches() -> No
     assert asyncio.run(worker.run_once()).outcome == "succeeded"
     assert control_plane.recorded is not None
     assert control_plane.recorded["market_batches"] == (("market-a",), ("market-b",))
+
+
+def test_terminal_event_batch_planning_is_bounded_and_retryable() -> None:
+    class TerminalEventGamma(FakeGamma):
+        async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage:
+            return EventPage(
+                events=({"id": "event-a", "markets": []},),
+                requested_cursor=cursor,
+                next_cursor=None,
+                completed=True,
+                started_at_ms=10,
+                finished_at_ms=20,
+            )
+
+    class SlowTerminalWorker(TransactionalStructureSourceWorker):
+        def _market_batches_for_terminal_event(self, *args: object) -> tuple[tuple[str, ...], ...]:
+            time.sleep(0.05)
+            return ()
+
+    control_plane = FakeControlPlane(_event_spec())
+    worker = SlowTerminalWorker(
+        control_plane=control_plane,
+        gamma=TerminalEventGamma(),
+        object_client=FakeObjectClient(),
+        bucket="source-pages",
+        worker_id="source-worker-a",
+        now=lambda: NOW,
+        terminal_event_timeout_seconds=0.001,
+    )
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(worker.run_once())
+
+    assert control_plane.recorded is None
+    assert control_plane.retry_incidents[0]["error_class"] == "TimeoutError"
 
 
 def test_default_scoped_market_capacity_remains_hard_but_covers_live_universe() -> None:
