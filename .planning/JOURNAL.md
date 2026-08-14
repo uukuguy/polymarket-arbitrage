@@ -8680,3 +8680,30 @@ then designate `polyarb-control-api-staging`, `polyarb-control-worker-staging`,
 and `polyarb-control-alert-staging` (or equivalent unused Fly app names), run
 the read-only preflight, and proceed through revision-014 migration, shadows,
 worker-loss circuit recovery, and the 24-hour soak.
+
+## SESSION 231 — 2026-08-15 (isolated transactional authority is live)
+
+- [DEPLOYED] Created the free-tier, isolated Supabase project
+  `polyarb-control-plane-staging` (`pnclgqrxhmulmmmjsgbk`, eu-west-2). Its
+  generated password is stored only in the local Keychain. A session-pooler
+  TLS connection reached its `postgres` database, and additive Alembic
+  revisions 001 through 014 completed; `m1_job_circuits` is present.
+- [DEPLOYED] Rendered the revision-014 rollout and created the three separate
+  Fly apps `polyarb-control-api-staging`, `polyarb-control-worker-staging`,
+  and `polyarb-control-alert-staging`. The API alone received the staging DSN;
+  release v1's `/healthz` returns `{"status":"ok","control_plane":"available"}`.
+  It has no SQLite, R2, Gamma, CLOB, or Telegram credential.
+- [BLOCKED] Existing R2 credentials deny both bucket enumeration and creation,
+  so they are bucket-scoped and must not be copied into the staging worker.
+  `wrangler whoami` has no Cloudflare login. No worker/alert process, shadow,
+  source window, pointer switch, fault injection, or Telegram delivery began.
+- [CORRECTED] Fly created two identical API machines during the first release.
+  The later duplicate `e82d1297a00608` was explicitly destroyed after both
+  instances proved healthy; the original `0805122c997518` remains the sole
+  1/1-passing, stateless API machine and `/healthz` still returns available.
+
+[NEXT] Authenticate Wrangler (`npx wrangler login`) or provide an account-level
+Cloudflare API token with R2 bucket/key creation permission. Create a new
+`polyarb-control-plane-staging` R2 bucket and worker-scoped access key, then
+set only that key plus the staging DSN on the data-worker app; run the
+read-only control-plane preflight before starting shadow collection.

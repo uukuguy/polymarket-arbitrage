@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Transactional control-plane is locally verified and ready to integrate; isolated non-production Supabase authority is not available locally, so cloud acceptance has not begun
-last_updated: "2026-08-14T00:00:00Z"
+stopped_at: Isolated Supabase revision 014 and Postgres-only Fly API are live; a separate R2 bucket and scoped worker credential are required before transactional source workers may start
+last_updated: "2026-08-15T00:00:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
