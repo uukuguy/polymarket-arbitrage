@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: A real over-limit Structure source window is now fail-closed in staging; a fresh bucket restarted from events page 0, pending a bounded source-scope design and shadow certification
-last_updated: "2026-08-15T20:34:00Z"
+stopped_at: The isolated staging worker is deliberately stopped after page-ceiling proof, pending a bounded source-scope design that can terminally materialize and certify
+last_updated: "2026-08-15T20:36:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -44,6 +44,11 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   then admitted a new fenced window from `events:0`. This is live evidence for
   fail-closed containment and recovery, not evidence that a full Structure
   shadow bundle is ready.
+- **Controlled pause:** once that recovery proof was captured, the isolated
+  staging machine was stopped. Leaving it running would repeatedly start a
+  new 1,000-page-then-quarantine window every cadence interval, consuming
+  staging resources without producing a certifiable bundle. Its database/R2
+  evidence and guarded image are retained for the scoped-source restart.
 - **Alert-delivery gate:** Telegram is no longer an M1 deployment task.
   The isolated Fly alert app remains stopped because Fly cannot persist its
   secrets and a replacement app cannot be created; do not bypass this with

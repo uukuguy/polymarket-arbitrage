@@ -8843,3 +8843,20 @@ window that can terminally materialize and certify (rather than treating the
 unbounded Gamma active-market feed as one atomic snapshot). Keep the 1,000-page
 quarantine guard deployed in staging, then resume Structure shadow parity and
 fault/soak acceptance without touching Telegram or production L1/L2.
+
+## SESSION 238 — 2026-08-15 (bounded-source redesign pause)
+
+- [PAUSED] Stopped only staging worker `48e3104c979578` after the page-ceiling
+  proof. Running it continuously would create a fresh large window every
+  cadence, repeatedly consuming R2/Postgres capacity before the same
+  quarantine point. The machine remains configured with the guarded image and
+  1024MB allocation; no source facts, pointers, credentials, Telegram, or
+  production L1/L2 state was removed or changed.
+- [NEXT DESIGN] Source admission must bind a terminally enumerable scope to
+  the window (including equivalent market-side filtering and a bounded source
+  identity) before the worker is restarted. Only then may materialization,
+  range certification, shadow parity, and fault/soak continue.
+
+[NEXT] In `.worktrees/m1-self-healing-structure`, inspect the Gamma market
+query and transactional source input schema, write the bounded source-scope
+contract and tests, then implement it behind the existing staging-only worker.
