@@ -326,6 +326,38 @@ class GammaClient:
             finished_at_ms=finished_at_ms,
         )
 
+    async def fetch_markets_by_ids(self, market_ids: tuple[str, ...]) -> tuple[dict, ...]:
+        """Fetch one immutable, exact market-ID batch for a scoped source job."""
+        if not market_ids or len(market_ids) > self.MARKET_STATE_LOOKUP_BATCH_SIZE:
+            raise PaginationIntegrityError("exact-id market batch must contain 1..25 IDs")
+        if tuple(sorted(market_ids)) != market_ids or len(set(market_ids)) != len(market_ids):
+            raise PaginationIntegrityError("exact-id market batch must be sorted and unique")
+        if any(not isinstance(market_id, str) or not market_id.strip() for market_id in market_ids):
+            raise PaginationIntegrityError("exact-id market batch has invalid identity")
+        payload = await self._get(
+            "/markets",
+            [("id", market_id) for market_id in market_ids] + [("limit", str(len(market_ids)))],
+        )
+        if not isinstance(payload, list) or not all(isinstance(market, dict) for market in payload):
+            raise PaginationIntegrityError("exact-id market response has invalid shape")
+        response_ids = [market.get("id") for market in payload]
+        if (
+            len(response_ids) != len(set(response_ids))
+            or any(not isinstance(market_id, str) for market_id in response_ids)
+            or set(response_ids) != set(market_ids)
+        ):
+            raise PaginationIntegrityError("exact-id market response identity set mismatch")
+        by_id = {str(market["id"]): market for market in payload}
+        for market_id in market_ids:
+            market = by_id[market_id]
+            if (
+                market.get("active") is not True
+                or market.get("closed") is not False
+                or market.get("archived") is True
+            ):
+                raise PaginationIntegrityError("exact-id market response is not open")
+        return tuple(by_id[market_id] for market_id in market_ids)
+
     async def fetch_market_states(
         self,
         market_ids: list[str],

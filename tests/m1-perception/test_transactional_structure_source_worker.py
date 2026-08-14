@@ -9,8 +9,10 @@ import pytest
 from polyarb.clients.gamma_client import EventPage, MarketPage
 from polyarb.control_plane.models import JobLease, JobState, StructureSourcePageSpec
 from polyarb.control_plane.structure_source import (
+    StructureSourcePageArtifact,
     TransactionalStructureSourceAdmitter,
     TransactionalStructureSourceWorker,
+    parse_structure_source_page_bytes,
 )
 from polyarb.control_plane.structure_worker import StructureWorkerResult
 
@@ -66,6 +68,7 @@ class FakeGamma:
     def __init__(self) -> None:
         self.event_calls: list[tuple[str | None, int]] = []
         self.market_calls: list[tuple[str | None, int]] = []
+        self.exact_market_calls: list[tuple[str, ...]] = []
 
     async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage:
         self.event_calls.append((cursor, limit))
@@ -87,6 +90,13 @@ class FakeGamma:
             completed=True,
             started_at_ms=30,
             finished_at_ms=40,
+        )
+
+    async def fetch_markets_by_ids(self, market_ids: tuple[str, ...]) -> tuple[dict, ...]:
+        self.exact_market_calls.append(market_ids)
+        return tuple(
+            {"id": market_id, "active": True, "closed": False, "archived": False}
+            for market_id in market_ids
         )
 
 
@@ -145,6 +155,59 @@ def test_source_worker_quarantines_page_at_configured_page_limit() -> None:
     ]
     assert gamma.event_calls == []
     assert gamma.market_calls == []
+
+
+def test_scoped_market_artifact_binds_the_admitted_batch_digest() -> None:
+    spec = StructureSourcePageSpec(
+        window_key="source-window:scoped",
+        stream="markets",
+        ordinal=0,
+        requested_cursor=None,
+        market_ids=("market-a", "market-b"),
+    )
+    artifact = StructureSourcePageArtifact.from_page(
+        spec=spec,
+        records=({"id": "market-a"}, {"id": "market-b"}),
+        next_cursor=None,
+        completed=True,
+        started_at_ms=10,
+        finished_at_ms=20,
+    )
+
+    parsed, _, _, _ = parse_structure_source_page_bytes(
+        artifact.payload, expected_sha256=artifact.sha256
+    )
+
+    assert parsed == spec
+    header = json.loads(artifact.payload.splitlines()[0])
+    assert header["market_ids_digest"] == spec.market_ids_digest
+
+
+def test_source_worker_fetches_scoped_market_batch_by_exact_ids() -> None:
+    spec = StructureSourcePageSpec(
+        window_key="source-window:scoped-fetch",
+        stream="markets",
+        ordinal=0,
+        requested_cursor=None,
+        market_ids=("market-a", "market-b"),
+    )
+    control_plane = FakeControlPlane(spec)
+    gamma = FakeGamma()
+    worker = TransactionalStructureSourceWorker(
+        control_plane=control_plane,
+        gamma=gamma,
+        object_client=FakeObjectClient(),
+        bucket="source-pages",
+        worker_id="source-worker-a",
+        now=lambda: NOW,
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    assert gamma.exact_market_calls == [("market-a", "market-b")]
+    assert gamma.market_calls == []
+    assert control_plane.recorded is not None
+    assert control_plane.recorded["next_cursor"] is None
+    assert control_plane.recorded["completed"] is True
 
 
 def test_source_admitter_creates_one_current_window_and_never_overlaps() -> None:

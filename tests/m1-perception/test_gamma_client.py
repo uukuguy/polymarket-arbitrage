@@ -25,6 +25,7 @@ from polyarb.clients.gamma_client import (
     _NonRetryableHTTPError,
 )
 from polyarb.config import Settings
+from polyarb.control_plane.structure_source import market_batches_from_event_records
 from polyarb.perception.market_truth import INVALID_EVENT_MEMBER_REASON
 from polyarb.snapshot.normalizer import normalize_events
 
@@ -68,6 +69,51 @@ def _market_page(markets: list[dict], next_cursor: str | None = None) -> dict:
 
 def _event_page(events: list[dict], next_cursor: str | None = None) -> dict:
     return {"events": events, "next_cursor": next_cursor}
+
+
+async def test_fetch_markets_by_ids_rejects_missing_or_unknown_response_ids() -> None:
+    settings = _fast_settings()
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        router.get(
+            "/markets",
+            params=[("id", "market-a"), ("id", "market-b"), ("limit", "2")],
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"id": "market-a", "active": True, "closed": False, "archived": False},
+                    {"id": "market-other", "active": True, "closed": False, "archived": False},
+                ],
+            )
+        )
+        async with GammaClient(settings) as client:
+            with pytest.raises(PaginationIntegrityError, match="exact-id.*identity set mismatch"):
+                await client.fetch_markets_by_ids(("market-a", "market-b"))
+
+
+def test_event_records_produce_sorted_bounded_market_batches() -> None:
+    batches = market_batches_from_event_records(
+        (
+            {
+                "id": "event-a",
+                "markets": [
+                    {"id": "market-c", "active": True, "closed": False},
+                    {"id": "market-a", "active": True, "closed": False},
+                ],
+            },
+            {
+                "id": "event-b",
+                "markets": [
+                    {"id": "market-b", "active": True, "closed": False},
+                    {"id": "market-c", "active": True, "closed": False},
+                ],
+            },
+        ),
+        batch_size=2,
+        max_batches=2,
+    )
+
+    assert batches == (("market-a", "market-b"), ("market-c",))
 
 
 async def test_markets_use_keyset_until_missing_next_cursor() -> None:

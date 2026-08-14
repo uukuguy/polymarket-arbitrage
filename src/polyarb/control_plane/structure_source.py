@@ -31,10 +31,16 @@ class StructureSourceError(RuntimeError):
     """A source page cannot safely become durable Structure evidence."""
 
 
+class StructureSourceBatchLimitError(StructureSourceError):
+    """A sealed event scope exceeds its configured market-batch capacity."""
+
+
 class _GammaReader(Protocol):
     async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage: ...
 
     async def fetch_active_market_page(self, cursor: str | None, limit: int) -> MarketPage: ...
+
+    async def fetch_markets_by_ids(self, market_ids: tuple[str, ...]) -> tuple[dict, ...]: ...
 
     async def aclose(self) -> None: ...
 
@@ -125,6 +131,9 @@ def canonical_structure_source_page_bytes(
         "stream": spec.stream,
         "window_key": spec.window_key,
     }
+    if spec.market_ids:
+        header["market_ids"] = list(spec.market_ids)
+        header["market_ids_digest"] = spec.market_ids_digest
     return b"".join(
         _canonical_json(record) + b"\n"
         for record in (header, *({"row": dict(row)} for row in records))
@@ -169,6 +178,11 @@ def parse_structure_source_page_bytes(
         header = lines[0]
         if not isinstance(header, dict) or header.get("kind") != "structure-source-page":
             raise ValueError("header")
+        raw_market_ids = header.get("market_ids", [])
+        if not isinstance(raw_market_ids, list) or not all(
+            isinstance(market_id, str) for market_id in raw_market_ids
+        ):
+            raise ValueError("market_ids")
         spec = StructureSourcePageSpec(
             window_key=str(header["window_key"]),
             stream=str(header["stream"]),
@@ -176,7 +190,10 @@ def parse_structure_source_page_bytes(
             requested_cursor=(
                 None if header.get("requested_cursor") is None else str(header["requested_cursor"])
             ),
+            market_ids=tuple(raw_market_ids),
         )
+        if header.get("market_ids_digest") != spec.market_ids_digest:
+            raise ValueError("market_ids_digest")
         next_cursor = None if header.get("next_cursor") is None else str(header["next_cursor"])
         completed = header.get("completed")
         if type(completed) is not bool:
@@ -206,6 +223,27 @@ def parse_structure_source_page_bytes(
     except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise StructureSourceError("structure-source-page-malformed") from error
     return spec, tuple(records), next_cursor, completed
+
+
+def market_batches_from_event_records(
+    records: Sequence[dict[str, object]], *, batch_size: int, max_batches: int
+) -> tuple[tuple[str, ...], ...]:
+    """Freeze open event members into deterministic exact-ID market batches."""
+    if batch_size <= 0 or max_batches <= 0:
+        raise ValueError("batch_size and max_batches must be positive")
+    _, _, market_to_event, _, _ = normalize_events(list(records))
+    market_ids = tuple(sorted(market_to_event))
+    if not market_ids:
+        raise StructureSourceError("sealed events contain no open market members")
+    batches = tuple(
+        market_ids[start : start + batch_size]
+        for start in range(0, len(market_ids), batch_size)
+    )
+    if len(batches) > max_batches:
+        raise StructureSourceBatchLimitError(
+            f"event-rooted market batch limit exceeded:{len(batches)}>{max_batches}"
+        )
+    return batches
 
 
 def materialize_structure_source_pages(
@@ -414,6 +452,22 @@ class TransactionalStructureSourceWorker:
                 spec.requested_cursor, self._page_limit
             )
             records = page.events
+        elif spec.market_ids:
+            started_at_ms = int(self._now().timestamp() * 1_000)
+            records = await self._gamma.fetch_markets_by_ids(spec.market_ids)
+            finished_at_ms = int(self._now().timestamp() * 1_000)
+            artifact = StructureSourcePageArtifact.from_page(
+                spec=spec,
+                records=records,
+                next_cursor=None,
+                completed=True,
+                started_at_ms=started_at_ms,
+                finished_at_ms=finished_at_ms,
+            )
+            upload_structure_source_page_artifact(
+                self._object_client, bucket=self._bucket, artifact=artifact
+            )
+            return artifact, None, True, len(records)
         else:
             page = await self._gamma.fetch_active_market_page(
                 spec.requested_cursor, self._page_limit
