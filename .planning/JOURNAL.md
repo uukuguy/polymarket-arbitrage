@@ -8860,3 +8860,24 @@ fault/soak acceptance without touching Telegram or production L1/L2.
 [NEXT] In `.worktrees/m1-self-healing-structure`, inspect the Gamma market
 query and transactional source input schema, write the bounded source-scope
 contract and tests, then implement it behind the existing staging-only worker.
+
+## SESSION 239 — 2026-08-15 (event-rooted source migration and restart)
+
+- [DEPLOYED] Staging-only revision `015` was built into image
+  `m1-event-rooted-source-e7923ce`. The first migration-only machine command
+  exposed that the runtime image lacked Alembic assets; it exited safely with
+  no scheduler. Commit `e7923ce` added only `alembic.ini` and immutable
+  revisions, after which the same isolated command logged `Running upgrade
+  014 -> 015` and exited code 0.
+- [RECOVERY] The same machine was restored to its normal 1024MB,
+  eight-turn/two-second worker command. It resumed the paused fenced event
+  cursor at ordinal 22 and committed through 27 successfully. No production
+  app, Telegram credential, L1/L2 deployment, or publication pointer changed.
+- [PENDING] The event cursor has not yet reached a terminal receipt. When it
+  does, the worker must reconstruct authenticated event artifacts, persist the
+  deterministic exact-ID batch set atomically, complete all batches, and prove
+  materialization/range/certifier shadow with zero live pointers.
+
+[NEXT] Let `structure-source:300:5955798` seal its event stream, then capture
+the exact batch count/digest and its terminal Structure shadow chain. Keep the
+worker scoped to staging and do not touch Telegram or production L1/L2.

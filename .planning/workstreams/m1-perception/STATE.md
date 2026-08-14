@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: The isolated staging worker is deliberately stopped after page-ceiling proof, pending a bounded source-scope design that can terminally materialize and certify
-last_updated: "2026-08-15T20:36:00Z"
+stopped_at: Event-rooted source revision 015 is deployed to isolated staging and is resuming the durable event cursor; terminal batch/materialization/shadow evidence remains pending
+last_updated: "2026-08-15T20:59:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -49,6 +49,13 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   new 1,000-page-then-quarantine window every cadence interval, consuming
   staging resources without producing a certifiable bundle. Its database/R2
   evidence and guarded image are retained for the scoped-source restart.
+- **Scoped-source restart:** Alembic revision `015` was applied inside the
+  isolated Fly machine using its existing secret environment, then the machine
+  was restored to its normal 1024MB eight-turn/two-second command on image
+  `m1-event-rooted-source-e7923ce`. It resumed durable event jobs through
+  ordinals 22–27 without a schema failure or pointer mutation. The event stream
+  must still seal before exact-ID market batches, materialization, and shadow
+  certification can begin.
 - **Alert-delivery gate:** Telegram is no longer an M1 deployment task.
   The isolated Fly alert app remains stopped because Fly cannot persist its
   secrets and a replacement app cannot be created; do not bypass this with
