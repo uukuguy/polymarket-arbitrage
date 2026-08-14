@@ -702,12 +702,18 @@ class TransactionalStructureSourceMaterializer:
         if lease is None:
             return StructureWorkerResult(job_key=None, outcome="idle")
         try:
-            pages = tuple(
-                (spec, self._read_page_artifact(key=key, digest=digest))
-                for spec, key, digest in self._control_plane.structure_source_window_pages(
-                    lease.input_identity
+            pages = []
+            for spec, key, digest in self._control_plane.structure_source_window_pages(
+                lease.input_identity
+            ):
+                pages.append(
+                    (
+                        spec,
+                        await asyncio.to_thread(
+                            self._read_page_artifact, key=key, digest=digest
+                        ),
+                    )
                 )
-            )
             bundle = materialize_structure_source_pages(pages)
             upload_structure_bundle_artifact(
                 self._object_client, bucket=self._bucket, artifact=bundle
