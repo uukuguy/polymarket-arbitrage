@@ -8757,3 +8757,26 @@ worker-loss circuit recovery, and 24-hour soak evidence.
 [NEXT] Scan the Telegram Web QR code in Edge (Telegram → Settings → Devices →
 Add Device). Resume at BotFather token rotation; do not reuse the prior token
 or use Fly batch-secret review for its replacement.
+
+## SESSION 234 — 2026-08-15 (return to transactional shadow-chain acceptance)
+
+- [CONTAINED] Telegram had been a working production notification path. The
+  extra token handling was an operator-induced detour while attempting to
+  provision the isolated alert worker; production L1/L2 now use the recovered
+  credential and remain healthy. Do not make further Telegram changes as part
+  of the M1 control-plane rollout.
+- [BLOCKED EXTERNALLY] The stopped staging alert app cannot persist its
+  isolated secrets through either Fly CLI staging import or its dashboard form;
+  creating a fresh replacement app also failed at Fly's account control plane.
+  It remains stopped, receives no broad credential workaround, and does not
+  change the data or publication boundary.
+- [DEPLOYED/VERIFIED] Recovery worker `48e3104c979578` is the sole active
+  transactional worker, using eight fenced turns at a two-second interval.
+  Its live source window completed all 210 Gamma event pages and atomically
+  transitioned to `events-complete`; the worker then began the dependent
+  market pages. At observation, no publication pointer existed.
+
+[NEXT] Continue the same source window through market completion, materialized
+Structure bundle/range/certifier shadow evidence, and explicit zero-live-pointer
+proof. Keep alert delivery as an isolated Fly-control-plane dependency; do not
+touch Telegram or production notification configuration unless separately needed.

@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Staging API and recovery source worker run with a rotated isolated DSN; transactional alert delivery awaits Telegram Web QR authentication so the exposed token can be rotated and safely deployed
-last_updated: "2026-08-15T18:15:00Z"
+stopped_at: Recovery worker is advancing a real transactional Structure source window (events complete; markets in progress); alert delivery remains a Fly app-control-plane issue and is no longer a Telegram task
+last_updated: "2026-08-15T19:25:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -20,16 +20,16 @@ progress:
 
 Phase: 05.6 (self-healing Structure production) — transactional control-plane foundation in progress
 
-- **Staging credential containment:** the staging Supabase password was
-  rotated after an unconfirmed Fly batch-secret review exposed its value. API
-  health is passing with the replacement DSN, and the only active source worker
-  is recovery machine `48e3104c979578`; its source-fetch ticks are succeeding
-  without a Structure or Quote pointer mutation. The original primary and its
-  Fly standby are stopped because the old release is lease-stuck.
-- **Alert-delivery gate:** do not reuse the previous Telegram bot token. The
-  user must complete the already-open Telegram Web QR login; then rotate the
-  BotFather token, update legacy L1/L2 and the isolated alert app, verify an
-  outbox receipt, and continue parity/fault/soak acceptance.
+- **Staging credential containment:** API health is passing with an isolated
+  replacement DSN, and recovery machine `48e3104c979578` is the only active
+  source worker. It completed 210 events pages, transitioned the window to
+  `events-complete`, and is traversing dependent market pages without a
+  Structure or Quote pointer mutation. The original primary and its Fly
+  standby are stopped because the old release is lease-stuck.
+- **Alert-delivery gate:** Telegram is no longer an M1 deployment task.
+  The isolated Fly alert app remains stopped because Fly cannot persist its
+  secrets and a replacement app cannot be created; do not bypass this with
+  production credentials or unencrypted machine configuration.
 
 - **Current production:** Fly L1 remains release v358. The app service check
   reports `runtime:health_read_lane=read-model-unavailable`; public `/healthz`
