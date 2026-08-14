@@ -467,6 +467,43 @@ class PostgresControlPlane:
             for row in rows
         )
 
+    def structure_source_event_pages(
+        self, window_key: str
+    ) -> tuple[tuple[StructureSourcePageSpec, str, str], ...]:
+        """Return prior receipt-authenticated event evidence during terminal sealing.
+
+        The terminal event worker calls this before it atomically changes the
+        window to ``events-complete``.  Unlike the materializer-facing full
+        page list, it therefore must not require a terminal window state.
+        """
+        self._validate_nonempty(window_key=window_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT input.window_key, input.stream, input.ordinal, input.requested_cursor,
+                       input.market_ids_json, input.market_ids_digest,
+                       receipt.artifact_key, receipt.artifact_digest
+                FROM m1_structure_source_page_inputs AS input
+                JOIN m1_structure_source_page_receipts AS receipt
+                  ON receipt.job_key = input.job_key
+                WHERE input.window_key = %s AND input.stream = 'events'
+                ORDER BY input.ordinal
+                """,
+                (window_key,),
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            (
+                self._structure_source_page_spec_from_row(row),
+                str(row["artifact_key"]),
+                str(row["artifact_digest"]),
+            )
+            for row in rows
+        )
+
     def admit_structure_source_bundle(
         self,
         lease: JobLease,

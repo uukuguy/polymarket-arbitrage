@@ -511,7 +511,7 @@ class TransactionalStructureSourceWorker:
         current_artifact: StructureSourcePageArtifact,
     ) -> tuple[tuple[str, ...], ...]:
         records: list[dict[str, object]] = []
-        pages = self._control_plane.structure_source_window_pages(current_spec.window_key)
+        pages = self._control_plane.structure_source_event_pages(current_spec.window_key)
         for spec, artifact_key, artifact_digest in pages:
             if spec.stream != "events":
                 continue

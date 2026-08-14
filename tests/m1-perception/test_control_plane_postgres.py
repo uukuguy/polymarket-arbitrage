@@ -294,6 +294,18 @@ def test_source_window_page_receipt_fences_cursor_and_advances_event_stream(
         "completed": False,
         "record_count": 100,
     }
+    assert control_plane.structure_source_event_pages("source-window:one") == (
+        (
+            StructureSourcePageSpec(
+                window_key="source-window:one",
+                stream="events",
+                ordinal=0,
+                requested_cursor=None,
+            ),
+            "m1/structure/source/window-one/events-0.json",
+            "a" * 64,
+        ),
+    )
 
 
 def test_due_source_window_admission_is_bucket_idempotent_and_never_overlaps(

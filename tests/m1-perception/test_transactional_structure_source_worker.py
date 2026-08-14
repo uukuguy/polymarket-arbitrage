@@ -50,7 +50,7 @@ class FakeControlPlane:
         self.recorded = kwargs
         return None
 
-    def structure_source_window_pages(self, window_key: str):
+    def structure_source_event_pages(self, window_key: str):
         assert window_key == self.spec.window_key
         return ()
 
