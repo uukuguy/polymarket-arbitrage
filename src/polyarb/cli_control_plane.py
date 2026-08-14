@@ -41,6 +41,7 @@ from polyarb.control_plane.structure_shadow import (
 from polyarb.control_plane.structure_source import (
     TransactionalStructureSourceAdmitter,
     TransactionalStructureSourceMaterializer,
+    TransactionalStructureSourcePool,
     TransactionalStructureSourceWorker,
 )
 from polyarb.control_plane.structure_worker import (
@@ -234,16 +235,25 @@ def _transactional_structure_source_worker(
     control_plane: PostgresControlPlane,
     *,
     worker_id: str,
-) -> TransactionalStructureSourceWorker:
-    """Build the sole Gamma-capable worker; API and range workers never receive it."""
+    lane_count: int = 8,
+) -> TransactionalStructureSourcePool:
+    """Build bounded Gamma lanes; API and range workers never receive them."""
+    if lane_count <= 0:
+        raise ValueError("lane_count must be positive")
     object_client, bucket = _structure_object_client()
-    return TransactionalStructureSourceWorker(
-        control_plane=control_plane,
-        gamma=GammaClient(Settings()),
-        object_client=object_client,
-        bucket=bucket,
-        worker_id=worker_id,
-        now=lambda: datetime.now(UTC),
+    settings = Settings()
+    return TransactionalStructureSourcePool(
+        lanes=tuple(
+            TransactionalStructureSourceWorker(
+                control_plane=control_plane,
+                gamma=GammaClient(settings),
+                object_client=object_client,
+                bucket=bucket,
+                worker_id=f"{worker_id}:{ordinal}",
+                now=lambda: datetime.now(UTC),
+            )
+            for ordinal in range(lane_count)
+        )
     )
 
 

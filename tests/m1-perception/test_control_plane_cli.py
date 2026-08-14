@@ -439,6 +439,41 @@ def test_control_plane_tick_once_reports_bounded_turns(monkeypatch, capsys) -> N
     }
 
 
+def test_structure_source_factory_builds_eight_distinct_lease_lanes(monkeypatch) -> None:
+    from polyarb import cli_control_plane
+
+    captured: list[dict[str, object]] = []
+
+    class SourceWorker:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs)
+
+    class SourcePool:
+        def __init__(self, *, lanes: tuple[SourceWorker, ...]) -> None:
+            self.lanes = lanes
+
+    object_client = object()
+    monkeypatch.setattr(cli_control_plane, "TransactionalStructureSourceWorker", SourceWorker)
+    monkeypatch.setattr(cli_control_plane, "TransactionalStructureSourcePool", SourcePool)
+    monkeypatch.setattr(cli_control_plane, "GammaClient", lambda _settings: object())
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_structure_object_client",
+        lambda: (object_client, "source-bucket"),
+    )
+
+    result = cli_control_plane._transactional_structure_source_worker(
+        object(), worker_id="control:source"
+    )
+
+    assert isinstance(result, SourcePool)
+    assert [lane["worker_id"] for lane in captured] == [
+        f"control:source:{ordinal}" for ordinal in range(8)
+    ]
+    assert {id(lane["object_client"]) for lane in captured} == {id(object_client)}
+    assert {lane["bucket"] for lane in captured} == {"source-bucket"}
+
+
 def test_control_plane_preflight_proves_named_database_and_r2_readiness(
     monkeypatch, capsys
 ) -> None:
