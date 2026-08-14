@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: A controlled staging-worker restart resumed the same real Structure window from its durable market cursor; markets remain in progress pending terminal materialization and shadow certification
-last_updated: "2026-08-15T19:42:00Z"
+stopped_at: The same real Structure source window has exceeded 79k markets; its isolated staging worker was raised to 1GB and resumed from the durable cursor, pending terminal materialization and shadow certification
+last_updated: "2026-08-15T20:16:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -31,6 +31,11 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   replacement process then committed through page 333. This is live staging
   proof that source recovery resumes from transactional cursor state rather
   than local process/SQLite state.
+- **Large-window capacity:** the active Gamma traversal grew beyond 79,000
+  market rows. Before its all-page R2 materialization, the staging-only worker
+  was increased from 512MB to 1024MB and proved cursor recovery through page
+  794 with the same image/command and no pointer mutation. Resource sizing for
+  production remains a later evidence-based decision.
 - **Alert-delivery gate:** Telegram is no longer an M1 deployment task.
   The isolated Fly alert app remains stopped because Fly cannot persist its
   secrets and a replacement app cannot be created; do not bypass this with

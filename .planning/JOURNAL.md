@@ -8797,3 +8797,21 @@ touch Telegram or production notification configuration unless separately needed
 atomically admitted materializer, R2-backed bundle, range jobs, certifier,
 shadow generation, and zero-live-pointer invariant before starting the next
 fresh window or any Quote migration work.
+
+## SESSION 236 — 2026-08-15 (large-window materialization capacity)
+
+- [OBSERVED] The real Gamma window contains 20,975 events and has exceeded
+  79,000 active markets. Every stored market cursor is unique; the sole
+  `structure-fetch` successor remains fenced, and no bundle or publication
+  pointer has been created before its terminal receipt.
+- [DEPLOYED/VERIFIED] Raised only the isolated staging worker machine
+  `48e3104c979578` from 512MB to 1024MB before its materializer consumes the
+  full R2-backed page set. The worker kept the identical image and command,
+  resumed the durable source cursor through market page 794, and left pointer
+  count at zero. This is a staging capacity preparation, not a production
+  resource or publication change.
+
+[NEXT] Let the source traversal seal, then verify the 1GB worker materializes
+the authenticated R2 pages, admits Structure ranges, certifies a shadow
+generation, and retains zero live-pointer evidence. Evaluate the observed
+large-window cardinality before setting any later production resource policy.
