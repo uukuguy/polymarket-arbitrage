@@ -337,6 +337,30 @@ def test_terminal_event_batch_planning_is_bounded_and_retryable() -> None:
     assert control_plane.retry_incidents[0]["error_class"] == "TimeoutError"
 
 
+def test_source_artifact_upload_is_bounded_and_retryable() -> None:
+    class SlowObjectClient(FakeObjectClient):
+        def put_object(self, **kwargs: object) -> None:
+            time.sleep(0.05)
+            super().put_object(**kwargs)
+
+    control_plane = FakeControlPlane(_event_spec())
+    worker = TransactionalStructureSourceWorker(
+        control_plane=control_plane,
+        gamma=FakeGamma(),
+        object_client=SlowObjectClient(),
+        bucket="source-pages",
+        worker_id="source-worker-a",
+        now=lambda: NOW,
+        object_store_timeout_seconds=0.001,
+    )
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(worker.run_once())
+
+    assert control_plane.recorded is None
+    assert control_plane.retry_incidents[0]["error_class"] == "TimeoutError"
+
+
 def test_default_scoped_market_capacity_remains_hard_but_covers_live_universe() -> None:
     assert DEFAULT_MAX_MARKET_BATCHES == 10_000
 

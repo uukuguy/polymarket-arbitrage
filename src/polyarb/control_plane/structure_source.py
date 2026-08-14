@@ -375,6 +375,7 @@ class TransactionalStructureSourceWorker:
         max_market_batches: int = DEFAULT_MAX_MARKET_BATCHES,
         lease_seconds: int = 120,
         terminal_event_timeout_seconds: float = 90,
+        object_store_timeout_seconds: float = 90,
         retry_delay: timedelta = timedelta(seconds=15),
     ) -> None:
         if not bucket or not worker_id:
@@ -388,6 +389,7 @@ class TransactionalStructureSourceWorker:
         if (
             lease_seconds <= 0
             or terminal_event_timeout_seconds <= 0
+            or object_store_timeout_seconds <= 0
             or retry_delay.total_seconds() <= 0
         ):
             raise ValueError("source worker time bounds must be positive")
@@ -403,6 +405,7 @@ class TransactionalStructureSourceWorker:
         self._max_market_batches = max_market_batches
         self._lease_seconds = lease_seconds
         self._terminal_event_timeout_seconds = terminal_event_timeout_seconds
+        self._object_store_timeout_seconds = object_store_timeout_seconds
         self._retry_delay = retry_delay
 
     async def aclose(self) -> None:
@@ -506,9 +509,7 @@ class TransactionalStructureSourceWorker:
                 started_at_ms=started_at_ms,
                 finished_at_ms=finished_at_ms,
             )
-            upload_structure_source_page_artifact(
-                self._object_client, bucket=self._bucket, artifact=artifact
-            )
+            await self._upload_artifact(artifact)
             return artifact, None, True, len(records)
         else:
             page = await self._gamma.fetch_active_market_page(
@@ -525,10 +526,20 @@ class TransactionalStructureSourceWorker:
             started_at_ms=page.started_at_ms,
             finished_at_ms=page.finished_at_ms,
         )
-        upload_structure_source_page_artifact(
-            self._object_client, bucket=self._bucket, artifact=artifact
-        )
+        await self._upload_artifact(artifact)
         return artifact, page.next_cursor, page.completed, len(records)
+
+    async def _upload_artifact(self, artifact: StructureSourcePageArtifact) -> None:
+        """Keep synchronous R2 PUT/HEAD from freezing the scheduler event loop."""
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                upload_structure_source_page_artifact,
+                self._object_client,
+                bucket=self._bucket,
+                artifact=artifact,
+            ),
+            timeout=self._object_store_timeout_seconds,
+        )
 
     def _market_batches_for_terminal_event(
         self,
