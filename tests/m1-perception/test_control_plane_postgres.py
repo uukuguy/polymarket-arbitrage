@@ -366,6 +366,47 @@ def test_source_page_limit_quarantine_releases_later_admission_bucket(
     assert successor.window_key == "structure-source:300:6311665"
 
 
+def test_source_quarantine_marks_unleased_sibling_pages_terminal(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.admit_structure_source_window(window_key="source-window:cleanup", now=now)
+    event = control_plane.claim_job(
+        worker_id="source-worker-a", job_types=("structure-fetch",), lease_seconds=30, now=now
+    )
+    assert event is not None
+    control_plane.record_structure_source_page(
+        event,
+        artifact_key="m1/structure/source/cleanup/events-0.json",
+        artifact_digest="a" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=2,
+        market_batches=(("market-a",), ("market-b",)),
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id="source-worker-b",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=1),
+    )
+    assert lease is not None
+
+    control_plane.quarantine_structure_source_page(
+        lease,
+        error_class="StructureSourceExactBatchIntegrityError",
+        now=now + timedelta(seconds=2),
+    )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state FROM m1_jobs WHERE job_key = %s",
+            ("source-window:cleanup:fetch:markets:1",),
+        )
+        assert cursor.fetchone() == ("quarantined",)
+
+
 def test_source_claim_skips_orphaned_jobs_from_a_quarantined_window(
     control_plane: PostgresControlPlane,
 ) -> None:

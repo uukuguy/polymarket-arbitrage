@@ -384,6 +384,19 @@ class PostgresControlPlane:
                 raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
             cursor.execute(
                 """
+                UPDATE m1_jobs AS sibling
+                SET state = 'quarantined', next_attempt_at = NULL, last_error_class = %s,
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = %s
+                FROM m1_structure_source_page_inputs AS sibling_input
+                WHERE sibling_input.window_key = %s
+                  AND sibling_input.job_key = sibling.job_key
+                  AND sibling.job_key <> %s
+                  AND sibling.state IN ('runnable', 'retryable', 'checkpointed')
+                """,
+                (error_class, now, page["window_key"], lease.job_key),
+            )
+            cursor.execute(
+                """
                 UPDATE m1_job_attempts
                 SET state = 'quarantined', finished_at = %s, error_class = %s
                 WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
