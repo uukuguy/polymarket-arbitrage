@@ -8656,3 +8656,27 @@ worker-loss circuit recovery evidence, and a continuous 24-hour soak.
 remaining path to actual M1 completion is named isolated non-production API,
 data-worker, alert-worker and Postgres identities, followed by preflight,
 revision-014 migration, shadow collection, fault evidence and a 24-hour soak.
+
+## SESSION 230 — 2026-08-14 (transactional-control-plane integration audit)
+
+- [VERIFIED] `main@551a3e1` is the direct ancestor of
+  `feat/m1-self-healing-structure@3deb804`; the control-plane branch has not
+  been merged yet and contains the complete transactional implementation.
+  Its local control-plane/transactional/settings suite completed successfully,
+  and `make planning-status` reports 86 plans with no drift; `make
+  docs-m1-check` also passes.
+- [VERIFIED] The existing Fly account contains only legacy `polyarb-l1` and
+  `polyarb-l2`, with no Fly Postgres cluster. The repository has no reusable
+  non-production Supabase authority or authenticated Supabase CLI. Production
+  Supabase must not be reused for this isolated acceptance lane.
+- [DECISION] Keep the branch and its worktree intact until the main worktree
+  can be fast-forwarded without disturbing its user-owned planning changes.
+  No Fly/Supabase/R2 resource, secret, migration, deployment, fault injection,
+  alert delivery, shadow collection, or pointer switch was performed.
+
+[NEXT] Preserve the branch for local integration. To begin cloud acceptance,
+provide or authenticate an isolated non-production Supabase project/database;
+then designate `polyarb-control-api-staging`, `polyarb-control-worker-staging`,
+and `polyarb-control-alert-staging` (or equivalent unused Fly app names), run
+the read-only preflight, and proceed through revision-014 migration, shadows,
+worker-loss circuit recovery, and the 24-hour soak.
