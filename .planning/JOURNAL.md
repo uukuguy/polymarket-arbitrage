@@ -8906,3 +8906,24 @@ worker scoped to staging and do not touch Telegram or production L1/L2.
 hard cap. Verify exact-ID batch receipts, terminal materialization, range
 normalization/certification, a Structure shadow generation, and zero live
 publication pointers before starting Quote migration or soak acceptance.
+
+## SESSION 241 — 2026-08-15 (bounded source throughput lanes)
+
+- [DEPLOYED/VERIFIED] Commit `e2b7ebe` introduced eight independently named
+  transactional source lanes and was deployed only to staging as
+  `m1-source-lanes-e2b7ebe`. Live event logs reported `succeeded:1/8`, proving
+  the pool is active while the opaque event cursor remains correctly serial.
+- [POSTGRES CONTRACT] Three same-time scoped market leases have distinct lane
+  owners; the materializer remains unavailable until the third/final receipt.
+  Focused source/scheduler/Postgres suite passed 52 tests.
+- [OBSERVED] Fresh window `5955808` exceeded the 5,000-batch hard limit and
+  quarantined without a bundle or pointer mutation. Commit `dcd2488` raises
+  the still-bounded limit to 10,000 batches / 250,000 market IDs and was
+  deployed as `m1-source-capacity10k-dcd2488`.
+- [RECOVERY] Current window `structure-source:300:5955812` resumed after the
+  staging image update and reached event ordinal 60 under the eight-lane
+  service. Telegram and production L1/L2 remain untouched.
+
+[NEXT] Let `5955812` seal events under the 10,000-batch cap. Query the actual
+market batch count and concurrent lease count, then prove all batch receipts,
+materialization, range/certifier shadow generation, and zero live pointers.
