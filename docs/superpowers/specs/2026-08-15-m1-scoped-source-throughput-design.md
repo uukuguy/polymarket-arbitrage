@@ -29,7 +29,7 @@ certification, and Quote stages retain one turn per scheduler cycle.
    before its receipt transaction. Receipt conflicts, lease loss, and Gamma
    failures retain existing retry/quarantine behavior.
 4. The pool is bounded at eight concurrent remote calls. It does not change
-   the 25-ID exact-request cap, 5,000-batch hard scope cap, materializer gate,
+the 25-ID exact-request cap, 10,000-batch hard scope cap, materializer gate,
    or publication-pointer policy.
 5. A terminal materializer remains runnable only after every admitted market
    batch has a receipt; parallel fetch completion order is deliberately

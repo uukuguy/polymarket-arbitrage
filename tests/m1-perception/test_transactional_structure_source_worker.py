@@ -277,7 +277,7 @@ def test_terminal_event_worker_derives_and_commits_scoped_market_batches() -> No
 
 
 def test_default_scoped_market_capacity_remains_hard_but_covers_live_universe() -> None:
-    assert DEFAULT_MAX_MARKET_BATCHES == 5_000
+    assert DEFAULT_MAX_MARKET_BATCHES == 10_000
 
 
 def test_source_pool_aggregates_all_concurrent_lane_results() -> None:

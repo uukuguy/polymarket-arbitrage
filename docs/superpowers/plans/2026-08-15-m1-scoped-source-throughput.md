@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Keep 25 IDs/request and the 5,000-batch source cap.
+- Keep 25 IDs/request and the 10,000-batch source cap.
 - Use distinct lane worker IDs; no SQLite or shared in-memory cursor.
 - A lane failure cannot cancel sibling lane work.
 - Do not change Telegram, production L1/L2, Fly machine count, or pointers.

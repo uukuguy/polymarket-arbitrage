@@ -27,7 +27,7 @@ from .structure_artifact import (
 from .structure_shadow import plan_structure_ranges
 from .structure_worker import StructureWorkerResult
 
-DEFAULT_MAX_MARKET_BATCHES = 5_000
+DEFAULT_MAX_MARKET_BATCHES = 10_000
 
 
 class StructureSourceError(RuntimeError):
