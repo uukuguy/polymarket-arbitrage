@@ -8927,3 +8927,26 @@ publication pointers before starting Quote migration or soak acceptance.
 [NEXT] Let `5955812` seal events under the 10,000-batch cap. Query the actual
 market batch count and concurrent lease count, then prove all batch receipts,
 materialization, range/certifier shadow generation, and zero live pointers.
+
+## SESSION 242 — 2026-08-15 (terminal and stream-bound recovery)
+
+- [OBSERVED] `5955812` sealed 211 event pages and atomically derived 6,427
+  exact-ID market batches. Its terminal event planner then demonstrated a real
+  synchronous R2-read stall: lease expiry alone could not recover it while the
+  serial scheduler turn was blocked.
+- [FIXED/DEPLOYED] `94f2bb5` bounds terminal event batch planning to 90 seconds;
+  timeout remains read-only and flows into fenced retryable recovery. `6d90f70`
+  separates the 1,000 opaque-cursor event ceiling from the 10,000 exact-market
+  batch ceiling. Both passed focused source/scheduler/CLI/Postgres tests and
+  were deployed only to staging.
+- [RECOVERY] The pre-fix window hit the misplaced event-page ceiling at market
+  ordinal 1,000 and was quarantined before publication. Its 6,401 remaining
+  nonterminal staging jobs were explicitly quarantined under
+  `StagingAbortedQuarantinedWindow`; 236 successful receipts remain as evidence
+  and pointer count is zero. Telegram and production L1/L2 were untouched.
+
+[NEXT] Observe the next staging source window under image
+`m1-stream-bounds-6d90f70`: confirm market ordinal >1,000 succeeds, then run
+the market-lane/restart/materializer/shadow acceptance chain. Before considering
+production, add a claim filter or cleanup rule so a quarantined source window's
+remaining jobs cannot compete with a fresh window.

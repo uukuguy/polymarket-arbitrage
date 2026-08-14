@@ -406,16 +406,16 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 ## Active Transactional Structure Override — 2026-08-15
 
 - Staging worker `polyarb-control-worker-staging` / machine
-  `48e3104c979578` now runs image `m1-source-capacity10k-dcd2488` at 1024MB.
-- Source window `structure-source:300:5955812` is the only active window.
-  It freezes Gamma events into exact-ID market batches (25 IDs each) with a
-  hard 10,000-batch ceiling and eight bounded source lanes; it must materialize
-  only after every batch receipt.
-- Prior `5955763` (unbounded market cursor), `5955798` (1,000-batch cap), and
-  `5955808` (5,000-batch cap) are intentionally quarantined, with no Structure
-  bundle or live pointer mutation. Do not touch Telegram or production L1/L2.
-- Resume from `make planning-status`, then inspect the active window state via
-  the staging control-plane worker and continue the terminal shadow chain.
+  `48e3104c979578` now runs image `m1-stream-bounds-6d90f70` at 1024MB.
+- `5955812` sealed 211 event pages into 6,427 exact-ID market batches but was
+  quarantined by the prior misplaced event-page limit at market ordinal 1,000;
+  it has zero pointer mutation. Its remaining nonterminal jobs were explicitly
+  quarantined in staging so they cannot starve the next source window.
+- The deployed worker has a 10,000 market-batch bound, eight source lanes, and
+  a 90-second terminal artifact-read bound. The 1,000-page ceiling now applies
+  only to opaque event pagination. Do not touch Telegram or production L1/L2.
+- Resume from `make planning-status`, then inspect the next staging window and
+  prove market ordinal >1,000, terminal materialization, and shadow recovery.
 
 ## Session Continuity
 
