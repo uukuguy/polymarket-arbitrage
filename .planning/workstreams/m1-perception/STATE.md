@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Isolated revision-014 Supabase, R2, API, and transactional source worker are live in shadow-only mode; alert-worker secret delivery is awaiting Fly app-state stabilization before fault/soak acceptance
-last_updated: "2026-08-15T00:00:00Z"
+stopped_at: Staging API and recovery source worker run with a rotated isolated DSN; transactional alert delivery awaits Telegram Web QR authentication so the exposed token can be rotated and safely deployed
+last_updated: "2026-08-15T18:15:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,6 +19,17 @@ progress:
 ## Current Position
 
 Phase: 05.6 (self-healing Structure production) — transactional control-plane foundation in progress
+
+- **Staging credential containment:** the staging Supabase password was
+  rotated after an unconfirmed Fly batch-secret review exposed its value. API
+  health is passing with the replacement DSN, and the only active source worker
+  is recovery machine `48e3104c979578`; its source-fetch ticks are succeeding
+  without a Structure or Quote pointer mutation. The original primary and its
+  Fly standby are stopped because the old release is lease-stuck.
+- **Alert-delivery gate:** do not reuse the previous Telegram bot token. The
+  user must complete the already-open Telegram Web QR login; then rotate the
+  BotFather token, update legacy L1/L2 and the isolated alert app, verify an
+  outbox receipt, and continue parity/fault/soak acceptance.
 
 - **Current production:** Fly L1 remains release v358. The app service check
   reports `runtime:health_read_lane=read-model-unavailable`; public `/healthz`

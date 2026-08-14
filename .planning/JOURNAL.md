@@ -8734,3 +8734,26 @@ read-only control-plane preflight before starting shadow collection.
 after its app state stabilizes; inject only staging DSN and Telegram delivery
 credentials, start the alert worker, then collect Structure shadow parity,
 worker-loss circuit recovery, and 24-hour soak evidence.
+
+## SESSION 233 — 2026-08-15 (credential containment and worker recovery)
+
+- [SECURITY] Fly's batch-secret review rendered staging credentials in clear
+  text. The import was cancelled before confirmation and the exposed staging
+  database password was immediately replaced in Supabase and the local
+  Keychain. Treat the previous Telegram token as compromised too; it has not
+  been redeployed to alert staging.
+- [DEPLOYED] The isolated API and worker secret sets now use the rotated
+  staging DSN; API `/healthz` is passing. Fly left the original non-HTTP worker
+  release holding a stale deployment lease, so its primary and standby remain
+  stopped. A cloned recovery worker `48e3104c979578` is the sole active worker
+  and resumed successful transactional source-fetch ticks. No publication
+  pointer changed.
+- [PENDING USER AUTH] Telegram Web is open in the persistent Edge profile at
+  its QR-login screen. Once user-device authentication completes, rotate the
+  BotFather token, update local credential storage and both legacy Fly apps
+  (`polyarb-l1`, `polyarb-l2`), then deploy the isolated alert worker with only
+  the rotated token/chat ID and staging DSN. Verify delivery before fault/soak.
+
+[NEXT] Scan the Telegram Web QR code in Edge (Telegram → Settings → Devices →
+Add Device). Resume at BotFather token rotation; do not reuse the prior token
+or use Fly batch-secret review for its replacement.
