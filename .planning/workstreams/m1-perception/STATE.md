@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: The same real Structure source window has exceeded 79k markets; its isolated staging worker was raised to 1GB and resumed from the durable cursor, pending terminal materialization and shadow certification
-last_updated: "2026-08-15T20:16:00Z"
+stopped_at: A real over-limit Structure source window is now fail-closed in staging; a fresh bucket restarted from events page 0, pending a bounded source-scope design and shadow certification
+last_updated: "2026-08-15T20:34:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -36,6 +36,14 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   was increased from 512MB to 1024MB and proved cursor recovery through page
   794 with the same image/command and no pointer mutation. Resource sizing for
   production remains a later evidence-based decision.
+- **Source-page ceiling:** the legacy worker continued through market ordinal
+  1036, exposing that the old assumed source cardinality was false. Commit
+  `9cbf090` was deployed only to the isolated staging worker as image
+  `m1-source-page-ceiling-9cbf090`; its first over-limit job (`markets:1037`)
+  was durably quarantined before a Gamma/R2 fetch. The next 300-second bucket
+  then admitted a new fenced window from `events:0`. This is live evidence for
+  fail-closed containment and recovery, not evidence that a full Structure
+  shadow bundle is ready.
 - **Alert-delivery gate:** Telegram is no longer an M1 deployment task.
   The isolated Fly alert app remains stopped because Fly cannot persist its
   secrets and a replacement app cannot be created; do not bypass this with

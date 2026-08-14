@@ -8815,3 +8815,31 @@ fresh window or any Quote migration work.
 the authenticated R2 pages, admits Structure ranges, certifies a shadow
 generation, and retains zero live-pointer evidence. Evaluate the observed
 large-window cardinality before setting any later production resource policy.
+
+## SESSION 237 — 2026-08-15 (source-page fail-closed acceptance)
+
+- [OBSERVED] The active Gamma market traversal did not terminate at the
+  historical 1,000-page assumption: the old staging image committed market
+  pages through ordinal 1036. This invalidates using an unbounded all-active
+  traversal as the source definition for a complete Structure shadow.
+- [DEPLOYED/VERIFIED] Commit `9cbf090` was built and pushed as
+  `m1-source-page-ceiling-9cbf090`, then applied only to staging worker
+  `48e3104c979578` using a machine image update. Its 1024MB allocation and
+  eight-turn/two-second command remained unchanged. On restart, the fenced
+  job `structure-source:300:5955763:fetch:markets:1037` returned
+  `quarantined` before Gamma/R2 access, so the oversized window could not
+  materialize or publish.
+- [RECOVERY] In the following tick, the transaction scheduler admitted the
+  distinct window `structure-source:300:5955798:fetch:events:0`, which
+  committed successfully. The ceiling therefore fails closed per window while
+  preserving later-bucket liveness.
+- [BOUNDARY] Telegram is confirmed as the existing production notification
+  path and is no longer part of this rollout. The stopped isolated alert app
+  remains outside the data-plane acceptance path; no production notification
+  credential or L1/L2 deployment changed.
+
+[NEXT] Design and implement a bounded, explicitly scoped Structure source
+window that can terminally materialize and certify (rather than treating the
+unbounded Gamma active-market feed as one atomic snapshot). Keep the 1,000-page
+quarantine guard deployed in staging, then resume Structure shadow parity and
+fault/soak acceptance without touching Telegram or production L1/L2.
