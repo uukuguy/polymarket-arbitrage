@@ -406,14 +406,15 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 ## Active Transactional Structure Override — 2026-08-15
 
 - Staging worker `polyarb-control-worker-staging` / machine
-  `48e3104c979578` now runs image `m1-stream-bounds-6d90f70` at 1024MB.
+  `48e3104c979578` now runs image `m1-claim-fence-95ae02e` at 1024MB.
 - `5955812` sealed 211 event pages into 6,427 exact-ID market batches but was
   quarantined by the prior misplaced event-page limit at market ordinal 1,000;
   it has zero pointer mutation. Its remaining nonterminal jobs were explicitly
   quarantined in staging so they cannot starve the next source window.
 - The deployed worker has a 10,000 market-batch bound, eight source lanes, and
   a 90-second terminal artifact-read bound. The 1,000-page ceiling now applies
-  only to opaque event pagination. Do not touch Telegram or production L1/L2.
+  only to opaque event pagination; quarantined-window source jobs cannot be
+  claimed ahead of a fresh source window. Do not touch Telegram or production L1/L2.
 - Resume from `make planning-status`, then inspect the next staging window and
   prove market ordinal >1,000, terminal materialization, and shadow recovery.
 

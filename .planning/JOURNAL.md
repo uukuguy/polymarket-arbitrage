@@ -8950,3 +8950,18 @@ materialization, range/certifier shadow generation, and zero live pointers.
 the market-lane/restart/materializer/shadow acceptance chain. Before considering
 production, add a claim filter or cleanup rule so a quarantined source window's
 remaining jobs cannot compete with a fresh window.
+
+## SESSION 243 — 2026-08-15 (quarantined-window claim fence)
+
+- [FIXED/DEPLOYED] Commit `95ae02e` filters source claims by the owning window
+  state: source-page jobs from quarantined windows cannot preempt a new window;
+  generic circuit/operational `structure-fetch` jobs without a source input
+  retain their prior behavior. Real PostgreSQL RED/GREEN contract and the
+  focused 76-test suite passed.
+- [LIVE] New staging window `structure-source:300:5955818` runs on
+  `m1-claim-fence-95ae02e`; event pages 0–75 succeeded and 76 is leased. No
+  publication pointer, Telegram, or production L1/L2 change occurred.
+
+[NEXT] Let `5955818` seal, prove exact market batch ordinal >1,000 succeeds,
+then perform bounded in-flight restart takeover and the terminal
+materialize/range/certify/shadow chain.
