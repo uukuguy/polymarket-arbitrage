@@ -8881,3 +8881,28 @@ contract and tests, then implement it behind the existing staging-only worker.
 [NEXT] Let `structure-source:300:5955798` seal its event stream, then capture
 the exact batch count/digest and its terminal Structure shadow chain. Keep the
 worker scoped to staging and do not touch Telegram or production L1/L2.
+
+## SESSION 240 — 2026-08-15 (event-rooted source terminal fixes)
+
+- [VERIFIED] Revision 015 resumed a durable event cursor after a controlled
+  staging worker restart: event receipts continued from ordinal 135 through
+  209 without duplicate receipts or pointer mutation.
+- [FIXED/DEPLOYED] The terminal worker initially used the materializer-only
+  complete-window reader while its own event transaction was still `running`.
+  Commit `8c4d028` adds an events-only receipt reader for terminal sealing;
+  the full materializer reader remains terminal-gated. The new staging image
+  was applied only to worker `48e3104c979578`.
+- [OBSERVED] The sealed 210-event scope exceeded the old 1,000 exact-ID
+  batches / 25,000 markets limit and was quarantined as
+  `StructureSourceBatchLimitError`, with zero bundle or publication pointer.
+  Commit `1d0027b` raises the still-hard staging source limit to 5,000 batches
+  (125,000 markets) and was deployed as `m1-source-capacity-1d0027b`.
+- [RECOVERY] The scheduler admitted fresh window
+  `structure-source:300:5955808`; it is running under the new bounded source
+  contract. Old windows `5955763` and `5955798` remain quarantined as durable
+  fail-closed evidence. Telegram and production L1/L2 were untouched.
+
+[NEXT] Let `structure-source:300:5955808` seal events under the 5,000-batch
+hard cap. Verify exact-ID batch receipts, terminal materialization, range
+normalization/certification, a Structure shadow generation, and zero live
+publication pointers before starting Quote migration or soak acceptance.

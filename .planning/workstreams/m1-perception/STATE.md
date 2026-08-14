@@ -403,6 +403,19 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
 /gsd-resume-work --ws m1-perception
 ```
 
+## Active Transactional Structure Override — 2026-08-15
+
+- Staging worker `polyarb-control-worker-staging` / machine
+  `48e3104c979578` now runs image `m1-source-capacity-1d0027b` at 1024MB.
+- Source window `structure-source:300:5955808` is the only active window.
+  It freezes Gamma events into exact-ID market batches (25 IDs each) with a
+  hard 5,000-batch ceiling; it must materialize only after every batch receipt.
+- Prior `5955763` (unbounded market cursor) and `5955798` (former 1,000-batch
+  capacity) are intentionally quarantined, with no Structure bundle or live
+  pointer mutation. Do not touch Telegram or production L1/L2.
+- Resume from `make planning-status`, then inspect the active window state via
+  the staging control-plane worker and continue the terminal shadow chain.
+
 ## Session Continuity
 
 - **Last session:** 2026-07-26 18:45 (Asia/Shanghai)
