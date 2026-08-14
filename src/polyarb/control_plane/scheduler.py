@@ -27,9 +27,10 @@ class TransactionalControlPlaneScheduler:
         quote_worker: _Worker,
         quote_certifier: _Worker,
         max_turns: int,
+        turn_timeout_seconds: float = 105,
     ) -> None:
-        if max_turns <= 0:
-            raise ValueError("max_turns must be positive")
+        if max_turns <= 0 or turn_timeout_seconds <= 0:
+            raise ValueError("scheduler bounds must be positive")
         self._workers = (
             ("structure-source-admit", structure_source_admitter),
             ("structure-source", structure_source_worker),
@@ -41,6 +42,7 @@ class TransactionalControlPlaneScheduler:
             ("quote-certify", quote_certifier),
         )
         self._max_turns = max_turns
+        self._turn_timeout_seconds = turn_timeout_seconds
         self._running = asyncio.Lock()
         self._next_worker = 0
 
@@ -57,7 +59,15 @@ class TransactionalControlPlaneScheduler:
             for name, worker in workers:
                 result = worker.run_once()
                 if inspect.isawaitable(result):
-                    result = await result
+                    try:
+                        result = await asyncio.wait_for(
+                            result, timeout=self._turn_timeout_seconds
+                        )
+                    except TimeoutError:
+                        turns.append(
+                            {"worker": name, "job_key": None, "outcome": "timed-out"}
+                        )
+                        continue
                 turns.append(
                     {
                         "worker": name,

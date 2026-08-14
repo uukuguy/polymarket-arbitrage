@@ -25,6 +25,11 @@ class _SyncWorker:
         return type("Result", (), {"job_key": self.name, "outcome": "certified"})()
 
 
+class _HangingWorker:
+    async def run_once(self):
+        await asyncio.Event().wait()
+
+
 def test_bounded_tick_runs_only_configured_number_of_turns() -> None:
     admitter = _AsyncWorker("structure-source-admit")
     source = _AsyncWorker("structure-source")
@@ -123,3 +128,28 @@ def test_scheduler_service_emits_tick_then_stops_without_sleeping() -> None:
             ],
         }
     ]
+
+
+def test_timed_out_turn_does_not_freeze_later_workers() -> None:
+    healthy = _AsyncWorker("structure-source-materialize")
+    scheduler = TransactionalControlPlaneScheduler(
+        structure_source_admitter=_HangingWorker(),
+        structure_source_worker=_AsyncWorker("structure-source"),
+        structure_source_materializer=healthy,
+        structure_worker=_AsyncWorker("structure-range"),
+        structure_certifier=_SyncWorker("structure-certify"),
+        quote_admitter=_AsyncWorker("quote-admit"),
+        quote_worker=_AsyncWorker("quote-batch"),
+        quote_certifier=_SyncWorker("quote-certify"),
+        max_turns=3,
+        turn_timeout_seconds=0.001,
+    )
+
+    result = asyncio.run(scheduler.run_tick())
+
+    assert result["turns"][0] == {
+        "worker": "structure-source-admit",
+        "job_key": None,
+        "outcome": "timed-out",
+    }
+    assert healthy.calls == 1
