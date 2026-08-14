@@ -4,7 +4,7 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Isolated Supabase revision 014 and Postgres-only Fly API are live; a separate R2 bucket and scoped worker credential are required before transactional source workers may start
+stopped_at: Isolated revision-014 Supabase, R2, API, and transactional source worker are live in shadow-only mode; alert-worker secret delivery is awaiting Fly app-state stabilization before fault/soak acceptance
 last_updated: "2026-08-15T00:00:00Z"
 progress:
   total_phases: 14

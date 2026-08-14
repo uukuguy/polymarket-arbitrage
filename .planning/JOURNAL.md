@@ -8707,3 +8707,30 @@ Cloudflare API token with R2 bucket/key creation permission. Create a new
 `polyarb-control-plane-staging` R2 bucket and worker-scoped access key, then
 set only that key plus the staging DSN on the data-worker app; run the
 read-only control-plane preflight before starting shadow collection.
+
+## SESSION 232 — 2026-08-15 (staging transactional source worker live)
+
+- [DEPLOYED] Created a new R2 User API token named
+  `polyarb-control-plane-staging-worker`, with `Object Read & Write` permission
+  scoped only to `polyarb-control-plane-staging`. Its values are stored in the
+  local Keychain, not `.env`. Direct `HeadBucket` authorization passed.
+- [VERIFY] Revision-014 preflight passed against the isolated Supabase
+  `postgres` database: 20 required transactional tables and the scoped R2
+  bucket are reachable, yielding `ready-for-shadow-only`.
+- [DEPLOYED] `polyarb-control-worker-staging` now holds only the isolated DSN
+  and scoped R2 credentials. Its sole active worker began bounded transactional
+  source windows (`admitted` then `succeeded`), with no Structure manifest,
+  shadow pointer, Quote pointer, open circuit, or pending alert outbox.
+- [BOUNDARY] No legacy production Fly app, production Supabase project, R2
+  production bucket, SQLite publication pointer, or Quote pointer changed.
+- [DISCOVERED] The separately named Fly alert app was initially deployed
+  without the DSN needed to consume its Postgres outbox and was stopped to end
+  restart churn. Fly's secret-import endpoint repeatedly returned an
+  app-not-found response while the new app was transitioning state; it needs
+  stable secret delivery (DSN plus Telegram token/chat ID only) before alert
+  recovery receipts and fault/soak acceptance can begin.
+
+[NEXT] Recheck `flyctl secrets import --stage --app polyarb-control-alert-staging`
+after its app state stabilizes; inject only staging DSN and Telegram delivery
+credentials, start the alert worker, then collect Structure shadow parity,
+worker-loss circuit recovery, and 24-hour soak evidence.
