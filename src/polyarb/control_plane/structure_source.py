@@ -26,6 +26,8 @@ from .structure_artifact import (
 from .structure_shadow import plan_structure_ranges
 from .structure_worker import StructureWorkerResult
 
+DEFAULT_MAX_MARKET_BATCHES = 5_000
+
 
 class StructureSourceError(RuntimeError):
     """A source page cannot safely become durable Structure evidence."""
@@ -363,7 +365,7 @@ class TransactionalStructureSourceWorker:
         page_limit: int = 100,
         max_pages: int = 1_000,
         market_batch_size: int = 25,
-        max_market_batches: int = 1_000,
+        max_market_batches: int = DEFAULT_MAX_MARKET_BATCHES,
         lease_seconds: int = 120,
         retry_delay: timedelta = timedelta(seconds=15),
     ) -> None:

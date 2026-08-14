@@ -9,6 +9,7 @@ import pytest
 from polyarb.clients.gamma_client import EventPage, MarketPage
 from polyarb.control_plane.models import JobLease, JobState, StructureSourcePageSpec
 from polyarb.control_plane.structure_source import (
+    DEFAULT_MAX_MARKET_BATCHES,
     StructureSourcePageArtifact,
     TransactionalStructureSourceAdmitter,
     TransactionalStructureSourceWorker,
@@ -250,6 +251,10 @@ def test_terminal_event_worker_derives_and_commits_scoped_market_batches() -> No
     assert asyncio.run(worker.run_once()).outcome == "succeeded"
     assert control_plane.recorded is not None
     assert control_plane.recorded["market_batches"] == (("market-a",), ("market-b",))
+
+
+def test_default_scoped_market_capacity_remains_hard_but_covers_live_universe() -> None:
+    assert DEFAULT_MAX_MARKET_BATCHES == 5_000
 
 
 def test_source_admitter_creates_one_current_window_and_never_overlaps() -> None:
