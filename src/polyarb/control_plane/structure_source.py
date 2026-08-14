@@ -474,17 +474,24 @@ class TransactionalStructureSourceWorker:
             # A frozen market-ID set may contain a member that closes before
             # its exact batch is fetched.  Gamma explicitly says this response
             # is no longer open, so retrying cannot produce the same coherent
-            # source window.  Quarantine the window and let a later admission
-            # take a fresh, internally consistent scope.  Other integrity
-            # errors can still be transient upstream responses and retain the
-            # normal retry/incident path below.
-            if (
-                isinstance(error, PaginationIntegrityError)
-                and str(error) == "exact-id market response is not open"
+            # source window. Quarantine immediately for that explicit state;
+            # other exact-batch integrity errors retain two retry attempts and
+            # then quarantine on the third lease. A later admission can take a
+            # fresh, internally consistent scope. Event and non-integrity
+            # failures retain the normal retry/incident path below.
+            exact_batch_integrity_failure = (
+                isinstance(error, PaginationIntegrityError) and bool(spec.market_ids)
+            )
+            if exact_batch_integrity_failure and (
+                str(error) == "exact-id market response is not open" or lease.lease_epoch >= 3
             ):
                 self._control_plane.quarantine_structure_source_page(
                     lease,
-                    error_class="StructureSourceMemberBecameInactiveError",
+                    error_class=(
+                        "StructureSourceMemberBecameInactiveError"
+                        if str(error) == "exact-id market response is not open"
+                        else "StructureSourceExactBatchIntegrityError"
+                    ),
                     now=self._now(),
                 )
                 return StructureWorkerResult(job_key=lease.job_key, outcome="quarantined")

@@ -111,3 +111,7 @@ event terminal 把一组当时开放的 market ID 冻结成一个完整性承诺
 套利扫描比明确失败更危险。`exact-id market response is not open` 因而是窗口级的
 fail-closed：保留已写的 page receipt，quarantine 当前窗口，下一 cadence 再取得一组
 新的、可完整认证的成员。它与临时网络超时不同，后者仍保持 retryable。
+
+同样地，精确 ID 的 response identity set 连续三次不一致也会 quarantine，而非每五
+分钟永久探测。一次或两次仍按退避重试，给 CDN/上游短暂不一致恢复机会；第三次说明
+这份冻结成员集已无法被证明完整。两种结果都不会发布半成品，也不会删除已收集证据。

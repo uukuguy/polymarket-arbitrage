@@ -23,8 +23,9 @@ NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
 
 class FakeControlPlane:
-    def __init__(self, spec: StructureSourcePageSpec) -> None:
+    def __init__(self, spec: StructureSourcePageSpec, *, lease_epoch: int = 1) -> None:
         self.spec = spec
+        self.lease_epoch = lease_epoch
         self.recorded: dict[str, object] | None = None
         self.finished: list[JobState] = []
         self.quarantines: list[dict[str, object]] = []
@@ -38,7 +39,7 @@ class FakeControlPlane:
             job_type="structure-fetch",
             input_identity=self.spec.input_identity,
             lease_owner="source-worker-a",
-            lease_epoch=1,
+            lease_epoch=self.lease_epoch,
             lease_expires_at=NOW,
             checkpoint_cursor=None,
             checkpoint_digest=None,
@@ -115,6 +116,11 @@ class FailingGamma(FakeGamma):
 class ClosedExactMarketGamma(FakeGamma):
     async def fetch_markets_by_ids(self, market_ids: tuple[str, ...]) -> tuple[dict, ...]:
         raise PaginationIntegrityError("exact-id market response is not open")
+
+
+class MismatchedExactMarketGamma(FakeGamma):
+    async def fetch_markets_by_ids(self, market_ids: tuple[str, ...]) -> tuple[dict, ...]:
+        raise PaginationIntegrityError("exact-id market response identity set mismatch")
 
 
 class FakeObjectClient:
@@ -505,5 +511,32 @@ def test_source_worker_quarantines_window_when_frozen_market_becomes_inactive() 
     )
     assert control_plane.quarantines == [
         {"error_class": "StructureSourceMemberBecameInactiveError", "now": NOW}
+    ]
+    assert control_plane.retry_incidents == []
+
+
+def test_source_worker_quarantines_repeated_exact_batch_integrity_failure() -> None:
+    spec = StructureSourcePageSpec(
+        window_key="source-window:identity-mismatch",
+        stream="markets",
+        ordinal=0,
+        requested_cursor=None,
+        market_ids=("market-a",),
+    )
+    control_plane = FakeControlPlane(spec, lease_epoch=3)
+    worker = TransactionalStructureSourceWorker(
+        control_plane=control_plane,
+        gamma=MismatchedExactMarketGamma(),
+        object_client=FakeObjectClient(),
+        bucket="source-pages",
+        worker_id="source-worker-a",
+        now=lambda: NOW,
+    )
+
+    assert asyncio.run(worker.run_once()) == StructureWorkerResult(
+        job_key=spec.job_key, outcome="quarantined"
+    )
+    assert control_plane.quarantines == [
+        {"error_class": "StructureSourceExactBatchIntegrityError", "now": NOW}
     ]
     assert control_plane.retry_incidents == []
