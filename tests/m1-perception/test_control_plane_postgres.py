@@ -521,6 +521,81 @@ def test_only_last_scoped_market_batch_releases_materializer(
     assert materializer.job_key == f"{window_key}:materialize"
 
 
+def test_parallel_scoped_batch_leases_release_materializer_only_after_last_receipt(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    window_key = "source-window:parallel-batches"
+    control_plane.admit_structure_source_window(window_key=window_key, now=now)
+    event = control_plane.claim_job(
+        worker_id="event-lane", job_types=("structure-fetch",), lease_seconds=30, now=now
+    )
+    assert event is not None
+    control_plane.record_structure_source_page(
+        event,
+        artifact_key="m1/structure/source/parallel/events-0.json",
+        artifact_digest="a" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        market_batches=(("market-a",), ("market-b",), ("market-c",)),
+        now=now,
+    )
+
+    leases = tuple(
+        control_plane.claim_job(
+            worker_id=f"market-lane:{ordinal}",
+            job_types=("structure-fetch",),
+            lease_seconds=30,
+            now=now,
+        )
+        for ordinal in range(3)
+    )
+    assert all(lease is not None for lease in leases)
+    source_leases = tuple(lease for lease in leases if lease is not None)
+    assert {lease.job_key for lease in source_leases} == {
+        f"{window_key}:fetch:markets:{ordinal}" for ordinal in range(3)
+    }
+    assert {lease.lease_owner for lease in source_leases} == {
+        f"market-lane:{ordinal}" for ordinal in range(3)
+    }
+
+    for ordinal, lease in enumerate(source_leases[:2]):
+        control_plane.record_structure_source_page(
+            lease,
+            artifact_key=f"m1/structure/source/parallel/markets-{ordinal}.json",
+            artifact_digest=chr(ord("b") + ordinal) * 64,
+            next_cursor=None,
+            completed=True,
+            record_count=1,
+            now=now,
+        )
+    assert (
+        control_plane.claim_job(
+            worker_id="materializer",
+            job_types=("structure-materialize",),
+            lease_seconds=30,
+            now=now,
+        )
+        is None
+    )
+
+    control_plane.record_structure_source_page(
+        source_leases[2],
+        artifact_key="m1/structure/source/parallel/markets-2.json",
+        artifact_digest="d" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        now=now,
+    )
+    materializer = control_plane.claim_job(
+        worker_id="materializer", job_types=("structure-materialize",), lease_seconds=30, now=now
+    )
+    assert materializer is not None
+    assert materializer.job_key == f"{window_key}:materialize"
+
+
 def test_terminal_market_page_releases_one_fenced_materializer_job(
     control_plane: PostgresControlPlane,
 ) -> None:
