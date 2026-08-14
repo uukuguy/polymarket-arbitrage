@@ -668,7 +668,11 @@ def test_real_source_window_materializer_turn_admits_normalizer_work(
         window_key=window_key, stream="events", ordinal=0, requested_cursor=None
     )
     market_spec = StructureSourcePageSpec(
-        window_key=window_key, stream="markets", ordinal=0, requested_cursor=None
+        window_key=window_key,
+        stream="markets",
+        ordinal=0,
+        requested_cursor=None,
+        market_ids=("market-a",),
     )
     event_artifact = StructureSourcePageArtifact.from_page(
         spec=event_spec,
@@ -751,6 +755,7 @@ def test_real_source_window_materializer_turn_admits_normalizer_work(
         next_cursor=None,
         completed=True,
         record_count=1,
+        market_batches=(("market-a",),),
         now=now,
     )
     market = control_plane.claim_job(
