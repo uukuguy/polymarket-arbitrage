@@ -350,6 +350,63 @@ class PostgresControlPlane:
             "record_count": int(row["record_count"]),
         }
 
+    def quarantine_structure_source_page(
+        self,
+        lease: JobLease,
+        *,
+        error_class: str,
+        now: datetime,
+    ) -> None:
+        """Fail-close one leased source page and release its window for a later bucket."""
+        self._validate_aware(now, "now")
+        self._validate_nonempty(error_class=error_class)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT window_key FROM m1_structure_source_page_inputs
+                WHERE job_key = %s
+                """,
+                (lease.job_key,),
+            )
+            page = cursor.fetchone()
+            if page is None:
+                raise ControlPlaneError(
+                    f"Structure source page is unavailable for {lease.job_key!r}"
+                )
+            cursor.execute(
+                """
+                UPDATE m1_jobs
+                SET state = 'quarantined', next_attempt_at = NULL, last_error_class = %s,
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = %s
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+                  AND state IN ('leased', 'checkpointed')
+                """,
+                (error_class, now, lease.job_key, lease.lease_owner, lease.lease_epoch),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            cursor.execute(
+                """
+                UPDATE m1_job_attempts
+                SET state = 'quarantined', finished_at = %s, error_class = %s
+                WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
+                """,
+                (now, error_class, lease.job_key, lease.lease_epoch),
+            )
+            cursor.execute(
+                """
+                UPDATE m1_structure_source_windows
+                SET state = 'quarantined', updated_at = %s
+                WHERE window_key = %s AND state IN ('running', 'events-complete')
+                """,
+                (now, page["window_key"]),
+            )
+            if cursor.rowcount != 1:
+                raise CheckpointConflictError("source window is no longer active")
+
     def structure_source_window_digest(self, window_key: str) -> str:
         """Return the exact ordered page-receipt digest a materializer must bind."""
         self._validate_nonempty(window_key=window_key)

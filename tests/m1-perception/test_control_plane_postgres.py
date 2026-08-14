@@ -319,6 +319,41 @@ def test_due_source_window_admission_is_bucket_idempotent_and_never_overlaps(
     )
 
 
+def test_source_page_limit_quarantine_releases_later_admission_bucket(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.admit_structure_source_window(window_key="source-window:limit", now=now)
+    lease = control_plane.claim_job(
+        worker_id="source-worker-a",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+
+    control_plane.quarantine_structure_source_page(
+        lease,
+        error_class="StructureSourcePageLimitError",
+        now=now,
+    )
+
+    assert (
+        control_plane.claim_job(
+            worker_id="source-worker-b",
+            job_types=("structure-fetch",),
+            lease_seconds=30,
+            now=now + timedelta(seconds=1),
+        )
+        is None
+    )
+    successor = control_plane.admit_due_structure_source_window(
+        cadence_seconds=300, now=now + timedelta(seconds=301)
+    )
+    assert successor is not None
+    assert successor.window_key == "structure-source:300:6311665"
+
+
 def test_terminal_event_page_creates_first_market_page(
     control_plane: PostgresControlPlane,
 ) -> None:

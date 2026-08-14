@@ -323,6 +323,7 @@ class TransactionalStructureSourceWorker:
         worker_id: str,
         now: Callable[[], datetime],
         page_limit: int = 100,
+        max_pages: int = 1_000,
         lease_seconds: int = 120,
         retry_delay: timedelta = timedelta(seconds=15),
     ) -> None:
@@ -330,6 +331,8 @@ class TransactionalStructureSourceWorker:
             raise ValueError("bucket and worker_id must be non-empty")
         if not 1 <= page_limit <= 100:
             raise ValueError("page_limit must be within 1..100")
+        if max_pages <= 0:
+            raise ValueError("max_pages must be positive")
         if lease_seconds <= 0 or retry_delay.total_seconds() <= 0:
             raise ValueError("lease_seconds and retry_delay must be positive")
         self._control_plane = control_plane
@@ -339,6 +342,7 @@ class TransactionalStructureSourceWorker:
         self._worker_id = worker_id
         self._now = now
         self._page_limit = page_limit
+        self._max_pages = max_pages
         self._lease_seconds = lease_seconds
         self._retry_delay = retry_delay
 
@@ -357,6 +361,13 @@ class TransactionalStructureSourceWorker:
             return StructureWorkerResult(job_key=None, outcome="idle")
         try:
             spec = self._control_plane.structure_source_page_spec(lease.job_key)
+            if spec.ordinal >= self._max_pages:
+                self._control_plane.quarantine_structure_source_page(
+                    lease,
+                    error_class="StructureSourcePageLimitError",
+                    now=self._now(),
+                )
+                return StructureWorkerResult(job_key=lease.job_key, outcome="quarantined")
             artifact, next_cursor, completed, record_count = await self._fetch_artifact(spec)
             self._control_plane.record_structure_source_page(
                 lease,

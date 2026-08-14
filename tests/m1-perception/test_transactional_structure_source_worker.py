@@ -22,6 +22,7 @@ class FakeControlPlane:
         self.spec = spec
         self.recorded: dict[str, object] | None = None
         self.finished: list[JobState] = []
+        self.quarantines: list[dict[str, object]] = []
         self.retry_incidents: list[dict[str, object]] = []
         self.recoveries: list[dict[str, object]] = []
 
@@ -49,6 +50,9 @@ class FakeControlPlane:
 
     def finish(self, lease: JobLease, *, state: JobState, **kwargs: object) -> None:
         self.finished.append(state)
+
+    def quarantine_structure_source_page(self, lease: JobLease, **kwargs: object) -> None:
+        self.quarantines.append(kwargs)
 
     def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
         self.retry_incidents.append(kwargs)
@@ -112,6 +116,35 @@ def _event_spec() -> StructureSourcePageSpec:
         ordinal=0,
         requested_cursor=None,
     )
+
+
+def test_source_worker_quarantines_page_at_configured_page_limit() -> None:
+    spec = StructureSourcePageSpec(
+        window_key="source-window:limit",
+        stream="markets",
+        ordinal=2,
+        requested_cursor="opaque-cursor",
+    )
+    control_plane = FakeControlPlane(spec)
+    gamma = FakeGamma()
+    worker = TransactionalStructureSourceWorker(
+        control_plane=control_plane,
+        gamma=gamma,
+        object_client=FakeObjectClient(),
+        bucket="structure",
+        worker_id="source-worker-a",
+        now=lambda: NOW,
+        max_pages=2,
+    )
+
+    assert asyncio.run(worker.run_once()) == StructureWorkerResult(
+        job_key=spec.job_key, outcome="quarantined"
+    )
+    assert control_plane.quarantines == [
+        {"error_class": "StructureSourcePageLimitError", "now": NOW}
+    ]
+    assert gamma.event_calls == []
+    assert gamma.market_calls == []
 
 
 def test_source_admitter_creates_one_current_window_and_never_overlaps() -> None:
