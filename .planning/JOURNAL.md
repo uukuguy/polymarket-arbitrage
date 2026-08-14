@@ -9007,3 +9007,26 @@ zero live publication pointers throughout the acceptance run.
 retry behavior. Once every source receipt is terminal, prove materializer →
 range → certifier Structure shadow recovery before enabling the existing Quote
 transaction workers for acceptance.
+
+## SESSION 246 — 2026-08-15 (source-scope terminal recovery)
+
+- [ROOT CAUSE] Reproducing a durable staging job through the same Gamma client
+  showed `PaginationIntegrityError: exact-id market response identity set
+  mismatch`. The frozen 25-ID batch had already failed at least four times;
+  unbounded backoff could never make its terminal source scope provably whole.
+- [FIXED/DEPLOYED] `0003d4f` quarantines an explicitly closed frozen member;
+  `3e92d64` gives other exact-batch integrity failures two retry attempts and
+  quarantines the window on the third fenced lease. Event and transport errors
+  remain retryable. Both changes passed RED/GREEN worker contracts, focused
+  control-plane suites, and Ruff; `m1-bound-integrity-3e92d64` was deployed
+  only to staging.
+- [LIVE ACCEPTANCE] Current window `5955818` transitioned to `quarantined`.
+  Its receipts remain durable and the scheduler immediately admitted fresh
+  `structure-source:300:5955836` in `running` state. Pointer count remains
+  zero. This proves failure isolation and next-window recovery without an
+  operator clearing jobs. Telegram and production L1/L2 were untouched.
+
+[NEXT] Prove the fresh `5955836` source scope reaches a complete terminal
+receipt within bounded time, then run materializer → range → certifier Structure
+shadow recovery and the transactional Quote acceptance chain. Keep all work
+staging-only with zero live publication pointers.

@@ -422,6 +422,11 @@ only four hot assets, so soak coverage must use interval-scoped SQL aggregates.
   job still keeps its failure class, retry timing, lease epoch, and incident
   evidence. `m1-retry-fairness-52c0e1f` is the staging-only deployment that
   proved 32 reclaimed second attempts while the process remained online.
+- Exact frozen market batches are fail-closed at the window boundary:
+  `m1-bound-integrity-3e92d64` allows two integrity retries, then quarantines
+  the full window on the third failure. Staging `5955818` demonstrated the
+  actual recovery chain (quarantine with preserved evidence → scheduler admits
+  fresh `5955836`), still with zero publication pointers.
 - Resume from `make planning-status`, then inspect `5955818` to prove all
   market receipts, terminal materialization, and shadow recovery.
 
