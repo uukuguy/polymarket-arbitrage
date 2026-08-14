@@ -330,8 +330,7 @@ def test_terminal_event_batch_planning_is_bounded_and_retryable() -> None:
         terminal_event_timeout_seconds=0.001,
     )
 
-    with pytest.raises(TimeoutError):
-        asyncio.run(worker.run_once())
+    assert asyncio.run(worker.run_once()).outcome == "retryable"
 
     assert control_plane.recorded is None
     assert control_plane.retry_incidents[0]["error_class"] == "TimeoutError"
@@ -354,8 +353,7 @@ def test_source_artifact_upload_is_bounded_and_retryable() -> None:
         object_store_timeout_seconds=0.001,
     )
 
-    with pytest.raises(TimeoutError):
-        asyncio.run(worker.run_once())
+    assert asyncio.run(worker.run_once()).outcome == "retryable"
 
     assert control_plane.recorded is None
     assert control_plane.retry_incidents[0]["error_class"] == "TimeoutError"
@@ -455,8 +453,9 @@ def test_source_worker_marks_only_current_page_retryable_when_gamma_fails() -> N
         now=lambda: NOW,
     )
 
-    with pytest.raises(TimeoutError, match="Gamma unavailable"):
-        asyncio.run(worker.run_once())
+    assert asyncio.run(worker.run_once()) == StructureWorkerResult(
+        job_key="source-window:one:fetch:events:0", outcome="retryable"
+    )
 
     assert control_plane.recorded is None
     assert control_plane.finished == []

@@ -486,7 +486,10 @@ class TransactionalStructureSourceWorker:
                 channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
-            raise
+            # The durable retryable receipt is the failure signal.  Re-raising
+            # would terminate the whole scheduler service and prevent sibling
+            # lanes and downstream transactional work from making progress.
+            return StructureWorkerResult(job_key=lease.job_key, outcome="retryable")
 
     async def _fetch_artifact(
         self, spec: StructureSourcePageSpec
