@@ -8780,3 +8780,20 @@ or use Fly batch-secret review for its replacement.
 Structure bundle/range/certifier shadow evidence, and explicit zero-live-pointer
 proof. Keep alert delivery as an isolated Fly-control-plane dependency; do not
 touch Telegram or production notification configuration unless separately needed.
+
+## SESSION 235 — 2026-08-15 (transactional source worker-loss recovery)
+
+- [VERIFIED] The same isolated Structure source window sealed all 210 events
+  pages and continued through 319 market pages (529 immutable successful page
+  receipts) with one runnable successor and zero publication pointers.
+- [FAULT/RECOVERY] Performed one controlled restart of the sole staging worker
+  machine `48e3104c979578`. Immediately after restart, `markets:319` was
+  runnable with no stale owner or lease. The restarted process resumed from
+  that durable checkpoint and reached `markets:333` without duplicate source
+  receipts or a pointer mutation. This proves the source collector's process
+  recovery path uses PostgreSQL job/cursor state, not process memory or SQLite.
+
+[NEXT] Let the still-open market cursor reach its terminal receipt. Verify the
+atomically admitted materializer, R2-backed bundle, range jobs, certifier,
+shadow generation, and zero-live-pointer invariant before starting the next
+fresh window or any Quote migration work.

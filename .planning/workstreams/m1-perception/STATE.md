@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Recovery worker is advancing a real transactional Structure source window (events complete; markets in progress); alert delivery remains a Fly app-control-plane issue and is no longer a Telegram task
-last_updated: "2026-08-15T19:25:00Z"
+stopped_at: A controlled staging-worker restart resumed the same real Structure window from its durable market cursor; markets remain in progress pending terminal materialization and shadow certification
+last_updated: "2026-08-15T19:42:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -26,6 +26,11 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   `events-complete`, and is traversing dependent market pages without a
   Structure or Quote pointer mutation. The original primary and its Fly
   standby are stopped because the old release is lease-stuck.
+- **Worker-loss evidence:** controlled restart of the recovery worker at
+  market page 319 left its successor runnable with no stale owner; the
+  replacement process then committed through page 333. This is live staging
+  proof that source recovery resumes from transactional cursor state rather
+  than local process/SQLite state.
 - **Alert-delivery gate:** Telegram is no longer an M1 deployment task.
   The isolated Fly alert app remains stopped because Fly cannot persist its
   secrets and a replacement app cannot be created; do not bypass this with
