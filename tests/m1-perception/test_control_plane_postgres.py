@@ -366,6 +366,46 @@ def test_source_page_limit_quarantine_releases_later_admission_bucket(
     assert successor.window_key == "structure-source:300:6311665"
 
 
+def test_source_claim_skips_orphaned_jobs_from_a_quarantined_window(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.admit_structure_source_window(window_key="source-window:orphaned", now=now)
+    event = control_plane.claim_job(
+        worker_id="source-worker-a", job_types=("structure-fetch",), lease_seconds=30, now=now
+    )
+    assert event is not None
+    control_plane.record_structure_source_page(
+        event,
+        artifact_key="m1/structure/source/orphaned/events-0.json",
+        artifact_digest="a" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        market_batches=(("market-a",),),
+        now=now,
+    )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE m1_structure_source_windows SET state = 'quarantined' WHERE window_key = %s",
+            ("source-window:orphaned",),
+        )
+    successor = control_plane.admit_due_structure_source_window(
+        cadence_seconds=300, now=now + timedelta(seconds=301)
+    )
+    assert successor is not None
+
+    claimed = control_plane.claim_job(
+        worker_id="source-worker-b",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=301),
+    )
+
+    assert claimed is not None
+    assert claimed.job_key == successor.job_key
+
+
 def test_terminal_event_page_creates_first_market_page(
     control_plane: PostgresControlPlane,
 ) -> None:

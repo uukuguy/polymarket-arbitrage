@@ -2491,6 +2491,22 @@ class PostgresControlPlane:
                 FROM m1_jobs
                 WHERE job_type = ANY(%s)
                   AND (
+                      job_type <> 'structure-fetch'
+                      OR NOT EXISTS (
+                          SELECT 1
+                          FROM m1_structure_source_page_inputs AS source_input
+                          WHERE source_input.job_key = m1_jobs.job_key
+                      )
+                      OR EXISTS (
+                          SELECT 1
+                          FROM m1_structure_source_page_inputs AS source_input
+                          JOIN m1_structure_source_windows AS source_window
+                            ON source_window.window_key = source_input.window_key
+                          WHERE source_input.job_key = m1_jobs.job_key
+                            AND source_window.state IN ('running', 'events-complete')
+                      )
+                  )
+                  AND (
                       (state IN ('runnable', 'retryable', 'checkpointed')
                        AND (next_attempt_at IS NULL OR next_attempt_at <= %s))
                       OR (state = 'leased' AND lease_expires_at <= %s)
