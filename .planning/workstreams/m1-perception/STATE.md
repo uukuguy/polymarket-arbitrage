@@ -5,7 +5,7 @@ milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
 stopped_at: staging five-role transactional collection is draining normally; both Structure and Quote R2 process-loss takeover are proven, the upgraded v2 automated soak is active, and scoped Telegram receipt remains open
-last_updated: "2026-08-15T14:51:00Z"
+last_updated: "2026-08-15T15:09:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -30,6 +30,11 @@ progress:
   rise across the window. A fresh baseline at `14:38:53Z` had 20,783 successes;
   its first independently scheduled sample at `14:49:00Z` had 21,364 with
   API available and counters at 6/74. v1 evidence is retained unchanged.
+- **Scoped alert diagnosis (2026-08-15 15:08Z):** the isolated alert app now
+  has a deployed DSN plus Telegram secrets and can claim/write its scoped
+  outbox, but the configured bot token returns Telegram `401 Unauthorized`.
+  The worker was stopped after bounded retries; replace that token before the
+  dashboard/Telegram receipt gate can close. Collection remains independent.
 
 Phase: 05.6 (self-healing Structure production) — transactional control-plane foundation in progress
 

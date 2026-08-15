@@ -9544,3 +9544,28 @@ the final fault/soak evidence.
 image and ensure it keeps its lease alive through parity. Continue the v2 24-hour automatic soak;
 the remaining separate gate is scoped Telegram delivery, still constrained by Fly secrets write
 authorization.
+
+## SESSION 272 — 2026-08-15 (scoped alert worker is connected; token diagnosis)
+
+- [FIXED/DEPLOYED-STAGING] The active Fly user identity was used rather than the stale `.env`
+  `FLY_API_TOKEN`. The current worker's DSN was piped directly into the isolated alert app and the
+  locally configured Telegram secrets were deployed; no secret values were printed. The scoped
+  machine `d8d96440c23038` then started and claimed its acceptance outbox row, proving the
+  alert-app-to-control-plane connection and fenced outbox writer.
+- [GATE/FACT] Dashboard/Telegram closure is not yet valid. The Telegram row made bounded retries
+  with `HTTPStatusError`; a read-only local `getMe` returned `401 Unauthorized` for the configured
+  `POLYARB_TELEGRAM_BOT_TOKEN`. This is an invalid/revoked token, not a Fly permission or network
+  defect. The scoped worker was stopped to prevent pointless retries. Replacing the token is the
+  sole external credential action before rerunning this exact acceptance id.
+- [LIVE] Heartbeat-image Structure generation `9bb904…be4b5` certified at epoch 116 without a
+  new expired lease, publishing a 383,262-record manifest at `15:02:24Z`; the resulting Quote
+  generation published 66,485 records at `15:06:41Z`. Control API remained `available`; counters
+  were `expired_leases=6`, `open_circuit_count=74`, and succeeded jobs rose `21,777 → 21,919`.
+- [OPS] The automatic 24-hour verdict LaunchAgent was corrected to read only
+  `staging-transactional-soak-v2.jsonl` and re-registered, so it will not certify the historical
+  v1 stream by accident.
+
+[NEXT] Keep staging collection and v2 soak running without new faults. Replace the invalid
+`POLYARB_TELEGRAM_BOT_TOKEN` in the primary workspace `.env`, deploy only that secret to
+`polyarb-control-alert-staging`, then run its same scoped `acceptance_run_id` until both durable
+dashboard and Telegram receipts exist. Continue observing a long parity run on the heartbeat image.
