@@ -1,0 +1,24 @@
+{
+  "acceptance_run_id": "staging-quote-retry-20260815T1411Z",
+  "circuit": {
+    "consecutive_failures": 3,
+    "opened": true,
+    "recovered": true
+  },
+  "evidence_type": "staging-quote-retry-circuit-recovery",
+  "incident": {
+    "event_kinds": ["attempt-failed", "attempt-failed", "circuit-opened", "recovered"],
+    "state": "resolved"
+  },
+  "job_key": "quote:599a740c910062a5676f1bbf31580770cc1b597b534aa5a4e8202cf59673f707:batch:25",
+  "outbox": {
+    "dashboard": "pending",
+    "telegram": "pending"
+  },
+  "recovery": {
+    "attempt_count": 4,
+    "lease_epoch": 4,
+    "replacement_worker": "fly-control-plane-quote-batch-2:quote-batch",
+    "state": "succeeded"
+  }
+}
