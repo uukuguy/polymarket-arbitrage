@@ -9356,3 +9356,23 @@ and start the 24-hour soak window.
 [NEXT] Design the smallest lease-fenced cloud-worker topology that drains
 Structure/Quote faster than admission, keeps every mutation transactional, and
 provides an operator-readable per-kind queue lag and next-runnable identity.
+
+## SESSION 262 — 2026-08-15 (bounded cloud-worker topology implementation)
+
+- [IMPLEMENTED] Added role-local bounded lease worker loop and split control-plane `serve` into
+  `all`, `coordinator`, `structure-range`, and `quote-batch`. Coordinator explicitly excludes both
+  dedicated pools; an extra range budget is rejected rather than silently violating isolation.
+- [IMPLEMENTED] Source admission now checks unfinished Structure-normalize and Quote-batch work
+  inside its existing advisory-lock transaction. Defaults are 2000/512 and the durable result is
+  admitted/busy/backpressured:structure/backpressured:quote.
+- [IMPLEMENTED] Postgres-only operator projection now supplies bounded `queue_health` for both
+  pools (unfinished count, oldest age, next claimable hint). All targeted regression suites, Ruff,
+  and `make planning-status` pass; commits `044726f9`, `7de41134`, `039609a9`, `183ec873`.
+- [STAGING/NOT-YET-DEPLOYED] `flyctl auth whoami` and staging read/status work, and API health is
+  200. Two write attempts using remote builder/machine update ended during builder initialization;
+  status confirms active machine `48e3104c979578` remains on the old image and command. No unsafe
+  partial rollout, pointer change, production L1/L2 change, or Telegram replay occurred.
+
+[NEXT] Diagnose and complete only the staging worker image update, preserve a normal collector
+until coordinator + Structure-range + Quote-batch machines are each live, then capture 15-minute
+queue-health drain evidence before starting Quote fault and 24-hour soak work.
