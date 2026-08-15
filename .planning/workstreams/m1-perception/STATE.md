@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: v3 downstream range drain has survived a controlled staging-worker restart; 26 of 1,016 named ranges are durably complete before certification and Quote acceptance
-last_updated: "2026-08-15T22:10:00Z"
+stopped_at: v3 downstream range drain has reached 57 of 1,016 receipts; Structure certifier now treats incomplete coverage as ordinary waiting and staging awaits its next natural circuit probe
+last_updated: "2026-08-15T22:20:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -41,6 +41,13 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   image/configuration and range receipts increased from 13 to 26 without any
   local-state restore or pointer mutation. A precise in-flight lease takeover
   remains to be captured when a longer-running downstream job is observable.
+- **Waiting classification repair:** previous certifier attempts correctly
+  rejected partial receipts but wrongly created an incident circuit. Commit
+  `ac5cca4b`, deployed as `m1-structure-wait-ac5cca4b`, mirrors Quote
+  certification: `IncompleteStructureGenerationError` is a five-second
+  fenced wait with no incident. Its first live result must wait for the prior
+  circuit's already-persisted next-probe timestamp; do not edit the database
+  to shortcut that recovery proof.
 
 - **Staging credential containment:** API health is passing with an isolated
   replacement DSN, and recovery machine `48e3104c979578` is the only active

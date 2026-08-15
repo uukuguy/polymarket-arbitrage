@@ -9085,3 +9085,22 @@ staging machine during an in-flight downstream job and prove fenced takeover.
 Quote admission and completed Quote batches. Capture a precise fenced
 takeover if an observable in-flight downstream lease lasts long enough; keep
 all work staging-only and leave Telegram/production L1/L2 untouched.
+
+## SESSION 250 — 2026-08-15 (partial Structure certification is waiting)
+
+- [ROOT CAUSE] A valid partial-generation gate
+  (`IncompleteStructureGenerationError`) was flowing through Structure
+  certifier's generic error path, incorrectly incrementing its incident
+  circuit. Quote certifier already models the equivalent condition as a
+  short, non-incident wait.
+- [FIXED/DEPLOYED] `ac5cca4b` adds that matching fenced wait path and its
+  RED/GREEN regression. It is deployed only as staging image
+  `m1-structure-wait-ac5cca4b`.
+- [LIVE] The range drain reached 57/1,016 with no pointer mutation. The prior
+  sixth certifier incident predates the image becoming eligible to claim; its
+  persisted circuit probe is due later. It will be allowed to recover
+  naturally rather than modifying staging job timestamps.
+
+[NEXT] Verify the next certifier lease returns `waiting` without a new incident,
+then finish ranges → Structure certification → Quote admission/batches and
+the remaining fenced-takeover evidence. Keep Telegram and production untouched.
