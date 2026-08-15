@@ -713,7 +713,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 2
             crash_after_r2_upload = _r2_upload_fault_callback(
                 target_job_key=args.fault_crash_after_r2_upload_job_key,
-                acknowledgement=args.fault_injection_ack,
+                acknowledgement=(
+                    args.fault_injection_ack
+                    if args.fault_crash_after_r2_upload_job_key is not None
+                    else None
+                ),
             )
             retry_fault_before_receipt = _retry_fault_callback(
                 target_job_key=args.fault_retry_job_key,
@@ -747,7 +751,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 2
             crash_after_r2_upload = _r2_upload_fault_callback(
                 target_job_key=args.fault_crash_after_r2_upload_job_key,
-                acknowledgement=args.fault_injection_ack,
+                acknowledgement=(
+                    args.fault_injection_ack
+                    if args.fault_crash_after_r2_upload_job_key is not None
+                    else None
+                ),
             )
             retry_fault_before_receipt = _retry_fault_callback(
                 target_job_key=args.fault_retry_job_key,

@@ -252,19 +252,26 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
                 "8",
                 "--structure-range-turns",
                 "8",
+                "--fault-retry-job-key",
+                "structure:one:range:0",
+                "--fault-retry-attempts",
+                "3",
+                "--fault-injection-ack",
+                "staging-retry-before-receipt",
                 "--json",
             ]
         )
         == 0
     )
     assert json.loads(capsys.readouterr().out) == {"status": "stopped", "ticks": 3}
-    assert captured == {
+    assert captured | {"retry_fault_before_receipt": None} == {
         "max_turns": 2,
         "structure_materializer_turns": 8,
         "structure_range_turns": 8,
         "retry_fault_before_receipt": None,
         "acceptance_run_id": None,
     }
+    assert callable(captured["retry_fault_before_receipt"])
 
 
 def test_r2_upload_fault_callback_requires_exact_acknowledgement_and_job_key() -> None:
