@@ -162,6 +162,51 @@ def test_materializer_budget_is_serial_and_independent_from_range_budget() -> No
     assert structure.calls == 3
 
 
+def test_role_loop_runs_only_its_named_worker_for_its_bound() -> None:
+    from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
+
+    worker = _AsyncWorker("quote-batch")
+    loop = TransactionalWorkerLoop(
+        worker_name="quote-batch", worker=worker, turns_per_tick=2
+    )
+
+    assert asyncio.run(loop.run_tick()) == {
+        "status": "ok",
+        "turns": [
+            {
+                "worker": "quote-batch",
+                "job_key": "quote-batch",
+                "outcome": "succeeded",
+            },
+            {
+                "worker": "quote-batch",
+                "job_key": "quote-batch",
+                "outcome": "succeeded",
+            },
+        ],
+    }
+    assert worker.calls == 2
+
+
+def test_role_loop_timeout_records_each_bound_turn() -> None:
+    from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
+
+    loop = TransactionalWorkerLoop(
+        worker_name="structure-range",
+        worker=_HangingWorker(),
+        turns_per_tick=2,
+        turn_timeout_seconds=0.001,
+    )
+
+    assert asyncio.run(loop.run_tick()) == {
+        "status": "ok",
+        "turns": [
+            {"worker": "structure-range", "job_key": None, "outcome": "timed-out"},
+            {"worker": "structure-range", "job_key": None, "outcome": "timed-out"},
+        ],
+    }
+
+
 def test_scheduler_service_emits_tick_then_stops_without_sleeping() -> None:
     admitter = _AsyncWorker("structure-source-admit")
     source = _AsyncWorker("structure-source")
