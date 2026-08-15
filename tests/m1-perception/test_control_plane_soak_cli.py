@@ -17,6 +17,7 @@ def test_soak_start_and_sample_are_read_only_and_need_no_dsn(
             "expired_leases": 6,
             "open_circuit_count": 74,
             "queue_health": {"quote-batch": {"unfinished": 0}},
+            "job_counts": {"succeeded": 100},
         },
     )
     monkeypatch.setattr(
@@ -60,6 +61,7 @@ def test_soak_verify_is_local_and_fail_closed(tmp_path: Path, capsys) -> None:
                     "expired_leases": 6,
                     "open_circuit_count": 74,
                     "queue_health": {},
+                    "job_counts": {"succeeded": 100 + index},
                 },
             ),
             exclusive=index == 0,
@@ -100,6 +102,7 @@ def test_soak_verify_reports_the_safe_gate_reason(tmp_path: Path, capsys) -> Non
                     "expired_leases": 6,
                     "open_circuit_count": 74,
                     "queue_health": {},
+                    "job_counts": {"succeeded": 100 + index},
                 },
             ),
             exclusive=index == 0,

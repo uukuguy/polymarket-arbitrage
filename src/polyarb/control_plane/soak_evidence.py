@@ -14,7 +14,8 @@ class SoakEvidenceError(ValueError):
     """A saved soak window cannot prove continuous healthy operation."""
 
 
-_KIND = "m1-transactional-soak-v1"
+_KIND_V1 = "m1-transactional-soak-v1"
+_KIND_V2 = "m1-transactional-soak-v2"
 
 
 def _canonical_bytes(payload: Mapping[str, object]) -> bytes:
@@ -44,8 +45,9 @@ def create_record(
         raise SoakEvidenceError("control API URL and unique machine states are required")
     if any(not machine_id or not state for machine_id, state in machine_states.items()):
         raise SoakEvidenceError("machine states must have non-empty identities")
+    succeeded = _successful_job_count(control_snapshot)
     payload: dict[str, object] = {
-        "kind": _KIND,
+        "kind": _KIND_V2,
         "observed_at": observed_at,
         "control_api_url": control_api_url,
         "machine_states": dict(sorted(machine_states.items())),
@@ -53,6 +55,7 @@ def create_record(
         "queue_health": control_snapshot.get("queue_health"),
         "expired_leases": control_snapshot.get("expired_leases"),
         "open_circuit_count": control_snapshot.get("open_circuit_count"),
+        "successful_job_count": succeeded,
     }
     return {**payload, "snapshot_sha256": sha256(_canonical_bytes(payload)).hexdigest()}
 
@@ -105,7 +108,11 @@ def verify_soak(
         if gap > max_gap_seconds:
             raise SoakEvidenceError("sample gap exceeds configured maximum")
     machine_states = baseline["machine_states"]
+    kind = baseline["kind"]
+    successful_counts: list[int] = []
     for record in validated:
+        if record["kind"] != kind:
+            raise SoakEvidenceError("soak record version changed")
         if record["control_api_url"] != baseline["control_api_url"]:
             raise SoakEvidenceError("control API identity changed")
         if record["machine_states"].keys() != machine_states.keys():
@@ -118,15 +125,26 @@ def verify_soak(
             raise SoakEvidenceError("expired lease count increased")
         if int(record["open_circuit_count"]) > int(baseline["open_circuit_count"]):
             raise SoakEvidenceError("open circuit count increased")
+        if kind == _KIND_V2:
+            successful_counts.append(int(record["successful_job_count"]))
     duration = int((times[-1] - times[0]).total_seconds())
     if duration < minimum_seconds:
         raise SoakEvidenceError("soak must cover at least 24 hours")
-    return {
+    if kind == _KIND_V2:
+        successive_counts = zip(successful_counts, successful_counts[1:])
+        if any(current < previous for previous, current in successive_counts):
+            raise SoakEvidenceError("successful job count decreased")
+        if successful_counts[-1] <= successful_counts[0]:
+            raise SoakEvidenceError("successful job count did not advance")
+    result: dict[str, int | str] = {
         "status": "PASS",
         "duration_seconds": duration,
         "scheduler_ticks": len(validated),
         "machine_count": len(machine_states),
     }
+    if kind == _KIND_V2:
+        result["successful_job_count"] = successful_counts[-1]
+    return result
 
 
 def _validated(record: Mapping[str, object]) -> dict[str, Any]:
@@ -136,7 +154,10 @@ def _validated(record: Mapping[str, object]) -> dict[str, Any]:
         "kind", "observed_at", "control_api_url", "machine_states", "control_api_status",
         "queue_health", "expired_leases", "open_circuit_count",
     }
-    if set(payload) != required or payload.get("kind") != _KIND or not isinstance(digest, str):
+    kind = payload.get("kind")
+    if kind == _KIND_V2:
+        required.add("successful_job_count")
+    if set(payload) != required or kind not in {_KIND_V1, _KIND_V2} or not isinstance(digest, str):
         raise SoakEvidenceError("soak record shape is invalid")
     if sha256(_canonical_bytes(payload)).hexdigest() != digest:
         raise SoakEvidenceError("soak record digest is invalid")
@@ -153,4 +174,20 @@ def _validated(record: Mapping[str, object]) -> dict[str, Any]:
             or payload[field] < 0
         ):
             raise SoakEvidenceError(f"{field} is invalid")
+    if kind == _KIND_V2 and (
+        isinstance(payload["successful_job_count"], bool)
+        or not isinstance(payload["successful_job_count"], int)
+        or payload["successful_job_count"] < 0
+    ):
+        raise SoakEvidenceError("successful job count is invalid")
     return payload
+
+
+def _successful_job_count(control_snapshot: Mapping[str, object]) -> int:
+    job_counts = control_snapshot.get("job_counts")
+    if not isinstance(job_counts, Mapping):
+        raise SoakEvidenceError("control API has no valid succeeded job count")
+    successful = job_counts.get("succeeded")
+    if isinstance(successful, bool) or not isinstance(successful, int) or successful < 0:
+        raise SoakEvidenceError("control API has no valid succeeded job count")
+    return successful
