@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: v3 sharded source materializer is live in isolated staging; window 5955841 has durably checkpointed through event page 119 in 30 bounded batches, while manifest/materialization/range/certification acceptance remains pending
-last_updated: "2026-08-15T21:30:00Z"
+stopped_at: v3 sharded source manifest is atomically admitted in isolated staging; all 52 page batches are preserved and 1,016 named Structure ranges are draining before certification and Quote acceptance
+last_updated: "2026-08-15T22:00:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -28,6 +28,14 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   is full manifest admission, named-range execution, certification, Quote
   admission, then an in-flight restart takeover. Telegram and production L1/L2
   remain out of scope.
+- **Manifest recovery proof:** the final v3 admission initially exercised its
+  retryable circuit because the Postgres allow-list omitted the new source kind.
+  Image `m1-sharded-admission-fbdc2f42` then naturally reclaimed the preserved
+  52 batch receipts and atomically committed bundle
+  `dcaedf577134a31291c257656f31b58ec4312d8889e2d5e854d82b846a7415fd`.
+  It enqueued 1,016 named range jobs with zero pointer mutation. Certification
+  has correctly stayed retryable until those ranges finish; it has not certified
+  a partial generation.
 
 - **Staging credential containment:** API health is passing with an isolated
   replacement DSN, and recovery machine `48e3104c979578` is the only active

@@ -9050,3 +9050,23 @@ staging-only with zero live publication pointers.
 manifest admission → named Structure ranges → certification → transactional
 Quote admission and perform an in-flight staging restart takeover. Keep
 Telegram and production L1/L2 untouched.
+
+## SESSION 248 — 2026-08-15 (v3 manifest admission recovery)
+
+- [LIVE] Window `5955841` completed all 52 four-page authenticated shard
+  batches with RSS around 39MiB and no bundle/pointer exposure before completion.
+- [FIXED/DEPLOYED] The final materializer correctly failed closed because
+  `PostgresControlPlane.admit_structure_source_bundle` had omitted the v3
+  source kind. `fbdc2f42` adds it and uses the real-Postgres atomic admission
+  contract as a regression. Staging image `m1-sharded-admission-fbdc2f42`
+  naturally reclaimed the retained job; no receipt was rewritten or deleted.
+- [RECOVERED] It atomically committed v3 bundle
+  `dcaedf577134a31291c257656f31b58ec4312d8889e2d5e854d82b846a7415fd`
+  and enqueued 1,016 named Structure range jobs. Three range receipts are
+  complete; certifier retries currently carry `IncompleteStructureGenerationError`,
+  which is the expected partial-generation gate. Publication pointers remain
+  zero. Telegram and production L1/L2 were untouched.
+
+[NEXT] Let the named range backlog drain, then verify certifier recovery,
+transactional Quote admission and batch completion. After that, restart the
+staging machine during an in-flight downstream job and prove fenced takeover.
