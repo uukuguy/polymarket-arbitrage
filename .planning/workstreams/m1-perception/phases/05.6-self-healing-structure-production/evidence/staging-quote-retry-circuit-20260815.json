@@ -12,8 +12,17 @@
   },
   "job_key": "quote:599a740c910062a5676f1bbf31580770cc1b597b534aa5a4e8202cf59673f707:batch:25",
   "outbox": {
-    "dashboard": "pending",
-    "telegram": "pending"
+    "dashboard": {
+      "outbox_id": "598085dc-f247-47c8-87c0-113ec19f00ca",
+      "provider_receipt": "dashboard-visible",
+      "state": "delivered"
+    },
+    "telegram": {
+      "outbox_id": "7a323c26-af28-467d-97d9-9b091b52d22b",
+      "provider_receipt": "telegram:7882",
+      "state": "delivered",
+      "delivered_at": "2026-08-15T15:23:02.796881+00:00"
+    }
   },
   "recovery": {
     "attempt_count": 4,

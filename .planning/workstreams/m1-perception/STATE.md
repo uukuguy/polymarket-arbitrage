@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: staging five-role transactional collection is draining normally; both Structure and Quote R2 process-loss takeover are proven, the upgraded v2 automated soak is active, and scoped Telegram receipt remains open
-last_updated: "2026-08-15T15:09:00Z"
+stopped_at: staging five-role transactional collection is draining normally; both Structure and Quote R2 process-loss takeover plus scoped dashboard/Telegram receipts are proven, and the upgraded v2 automated soak is active
+last_updated: "2026-08-15T15:24:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -35,6 +35,10 @@ progress:
   outbox, but the configured bot token returns Telegram `401 Unauthorized`.
   The worker was stopped after bounded retries; replace that token before the
   dashboard/Telegram receipt gate can close. Collection remains independent.
+- **Scoped alert acceptance (2026-08-15 15:23Z):** the app received the
+  already-working L1 Polywatch token through a non-printing Fly-to-Fly secret
+  transfer. Its exact recovery outbox now has `dashboard-visible` and
+  `telegram:7882` receipts; the scoped worker was stopped after success.
 
 Phase: 05.6 (self-healing Structure production) — transactional control-plane foundation in progress
 

@@ -9569,3 +9569,25 @@ authorization.
 `POLYARB_TELEGRAM_BOT_TOKEN` in the primary workspace `.env`, deploy only that secret to
 `polyarb-control-alert-staging`, then run its same scoped `acceptance_run_id` until both durable
 dashboard and Telegram receipts exist. Continue observing a long parity run on the heartbeat image.
+
+## SESSION 273 — 2026-08-15 (scoped dashboard and Telegram receipt accepted)
+
+- [LIVE/EVIDENCE] The L1 Polywatch logs proved its deployed Telegram token still sends successfully.
+  That token and the existing chat id were copied directly from L1 to the isolated staging alert app
+  by a non-printing Fly-to-Fly secret pipe; no credential value was read into a transcript. The exact
+  alert worker delivered the already-scoped recovery intent, then was stopped.
+- [ACCEPTED] The recovery incident now has both durable receipts: dashboard outbox
+  `598085dc-f247-47c8-87c0-113ec19f00ca` is `dashboard-visible`, and Telegram outbox
+  `7a323c26-af28-467d-97d9-9b091b52d22b` is `telegram:7882` at `15:23:02.796881Z`.
+  `staging-quote-retry-circuit-20260815.json` was updated from its former pending state using those
+  database facts only.
+- [PRODUCTION AUDIT] The old `polyarb-l1` remains a distinct, SQLite-authoritative monolith: it is
+  repeatedly timing out its 75-second snapshot child (`failure_counter=98/5`) and intermittently
+  loses health/opportunity/console responsiveness. Its DSN secret digest differs from staging; a
+  production transaction lane must therefore be separately preflighted/migrated rather than promoted
+  by relabeling staging. Local-only rollout rendering names the isolated apps
+  `polyarb-control-api`, `polyarb-control-worker`, and `polyarb-control-alert`.
+
+[NEXT] Let the v2 automatic soak reach 24 hours. Separately establish the production Supabase/R2
+preflight and additive revision 014 authority before creating the isolated production control-plane
+apps; never switch the failing SQLite L1 by sharing a staging pointer.
