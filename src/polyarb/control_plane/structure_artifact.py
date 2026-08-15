@@ -255,6 +255,47 @@ def canonical_structure_shard_manifest_bytes(
     )
 
 
+def parse_structure_shard_manifest_bytes(
+    payload: bytes, *, expected_sha256: str
+) -> tuple[StructureBundleIdentity, tuple[StructureShardReceipt, ...]]:
+    """Authenticate a v3 manifest without loading any referenced shard body."""
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise StructureBundleError("structure-shard-manifest-digest-mismatch")
+    try:
+        lines = [json.loads(line) for line in payload.splitlines()]
+        header = lines[0]
+        if not isinstance(header, dict) or header.get("kind") != "structure-shard-manifest":
+            raise ValueError("header")
+        identity_header = dict(header)
+        identity_header["kind"] = "structure-bundle"
+        identity = StructureBundleIdentity(
+            publication_id=str(identity_header["publication_id"]),
+            window_id=str(identity_header["window_id"]),
+            snapshot_id=int(identity_header["snapshot_id"]),
+            comparison_receipt_digest=str(identity_header["comparison_receipt_digest"]),
+            normalization_contract_version=str(identity_header["normalization_contract_version"]),
+            component_counts=identity_header["component_counts"],
+            source_kind=str(identity_header["source_kind"]),
+        )
+        shards = tuple(
+            StructureShardReceipt(
+                component=str(record["shard"]["component"]),
+                ordinal=int(record["shard"]["ordinal"]),
+                artifact_key=str(record["shard"]["artifact_key"]),
+                artifact_digest=str(record["shard"]["artifact_digest"]),
+                row_count=int(record["shard"]["row_count"]),
+            )
+            for record in lines[1:]
+        )
+        if not shards or (
+            canonical_structure_shard_manifest_bytes(identity=identity, shards=shards) != payload
+        ):
+            raise ValueError("noncanonical")
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise StructureBundleError("structure-shard-manifest-malformed") from error
+    return identity, shards
+
+
 def canonical_structure_shard_batch_bytes(
     *,
     window_key: str,

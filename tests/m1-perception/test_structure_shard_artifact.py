@@ -37,7 +37,10 @@ def test_structure_shard_canonicalizes_one_component_and_rejects_tampering() -> 
 
 
 def test_shard_manifest_rejects_duplicate_component_ordinals() -> None:
-    from polyarb.control_plane.structure_artifact import canonical_structure_shard_manifest_bytes
+    from polyarb.control_plane.structure_artifact import (
+        canonical_structure_shard_manifest_bytes,
+        parse_structure_shard_manifest_bytes,
+    )
 
     identity = StructureBundleIdentity(
         publication_id="source-window:source-window:1",
@@ -65,6 +68,13 @@ def test_shard_manifest_rejects_duplicate_component_ordinals() -> None:
 
     with pytest.raises(ValueError, match="duplicate shard ordinal"):
         canonical_structure_shard_manifest_bytes(identity=identity, shards=(duplicate, duplicate))
+
+    payload = canonical_structure_shard_manifest_bytes(identity=identity, shards=(duplicate,))
+    parsed_identity, parsed_shards = parse_structure_shard_manifest_bytes(
+        payload, expected_sha256=hashlib.sha256(payload).hexdigest()
+    )
+    assert parsed_identity == identity
+    assert parsed_shards == (duplicate,)
 
 
 def test_shard_batch_binds_one_source_page_interval_to_all_component_shards() -> None:
