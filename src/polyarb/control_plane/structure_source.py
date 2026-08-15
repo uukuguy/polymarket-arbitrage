@@ -275,6 +275,13 @@ def _event_embedded_market_records(
         for market in markets:
             if not isinstance(market, dict):
                 raise StructureSourceError("event embedded market is malformed")
+            # Gamma keeps closed historical children in an otherwise active
+            # event response. The v1 companion /markets stream was active
+            # only, so retaining those children would change the published
+            # market contract and can introduce partial fields (notably
+            # ``negRisk``). Match the source contract before normalization.
+            if market.get("active") is not True or market.get("closed") is not False:
+                continue
             enriched = dict(market)
             if "negRiskMarketID" not in enriched and group_id is not None:
                 enriched["negRiskMarketID"] = group_id

@@ -170,6 +170,51 @@ def test_event_embedded_market_evidence_materializes_without_a_second_market_str
     )
 
 
+def test_event_embedded_source_excludes_closed_children_from_active_market_view() -> None:
+    """Event pages can retain a closed child after its enclosing event stays open."""
+    event = _page(
+        stream="events",
+        ordinal=0,
+        records=(
+            {
+                "id": "event-a",
+                "slug": "event-a",
+                "active": True,
+                "closed": False,
+                "negRisk": False,
+                "markets": [
+                    {
+                        "id": "closed-market",
+                        "conditionId": "closed-condition",
+                        "clobTokenIds": '[]',
+                        "outcomePrices": '[]',
+                        "active": True,
+                        "closed": True,
+                    },
+                    {
+                        "id": "open-market",
+                        "conditionId": "open-condition",
+                        "clobTokenIds": '["yes", "no"]',
+                        "outcomePrices": '["0.4", "0.6"]',
+                        "active": True,
+                        "closed": False,
+                        "negRisk": False,
+                    },
+                ],
+            },
+        ),
+        completed=True,
+        next_cursor=None,
+    )
+
+    bundle = materialize_structure_source_pages((event,))
+    _identity, components = parse_structure_bundle_bytes(
+        bundle.payload, expected_sha256=bundle.sha256
+    )
+
+    assert [row["market_id"] for row in components["markets"]] == ["open-market"]
+
+
 def test_materializer_rejects_missing_or_tampered_source_page_before_bundle_exists() -> None:
     event = _page(
         stream="events",

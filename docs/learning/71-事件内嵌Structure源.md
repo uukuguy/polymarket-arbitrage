@@ -40,6 +40,9 @@ events:0 → events:1 → ... → events:terminal
 - **R2 读取有固定并发上限**：materializer 以八个 slot 同时读取封存页，但
   `gather` 保留 page-input 的原始顺序；这缩短 200+ 页窗口的物化时间，不改变
   digest、ordinal 或 lease fence。
+- **嵌套不等于可发布**：event 页也会带回已经 closed 的历史 child。v2 在展开时
+  只采用 `active=true, closed=false` 的 child，精确保持 v1 `/markets` 活跃源的
+  发布边界；closed child 仍在原始 event R2 evidence 中，因而没有被悄悄删除。
 
 ## 自检题
 
@@ -53,3 +56,8 @@ events:0 → events:1 → ... → events:terminal
 
 没有。它仍可安全处理已落库的旧 scoped market job；但新的 event-rooted 窗口不再
 产生这种 job。线上吞吐的改进来自缩短正确性边界，而不是提高无界并发数。
+
+### 为什么不是把 closed child 的 `negRisk` 补成 false？
+
+那会让一条本不属于活跃市场视图的数据穿过 truth validator，并把旧闭市状态混进
+本轮 Structure。正确边界是先按 v1 活跃源契约过滤，再对留下的市场做严格真值验证。
