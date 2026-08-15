@@ -702,7 +702,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 as_json=args.json,
             )
         except (OSError, SoakEvidenceError, ValueError) as error:
-            print(f"soak evidence unavailable: {type(error).__name__}", file=sys.stderr)
+            detail = str(error) if isinstance(error, SoakEvidenceError) else type(error).__name__
+            print(f"soak evidence unavailable: {detail}", file=sys.stderr)
             return 1
         return 0
     control_plane = _control_plane_from_env()
