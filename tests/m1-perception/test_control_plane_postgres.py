@@ -2019,6 +2019,15 @@ def test_complete_quote_generation_certifies_and_publishes_one_pointer(
                 "WHERE pointer_key='quote:current'"
             )
             assert cursor.fetchone() == (batches[0].generation_key,)
+            cursor.execute(
+                "SELECT job_type, input_identity, state FROM m1_jobs WHERE job_key=%s",
+                (f"{batches[0].generation_key}:opportunity-certify",),
+            )
+            assert cursor.fetchone() == (
+                "opportunity-certify",
+                batches[0].generation_key,
+                "runnable",
+            )
     finally:
         connection.close()
 

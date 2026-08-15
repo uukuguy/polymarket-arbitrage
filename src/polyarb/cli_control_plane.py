@@ -528,6 +528,7 @@ def _transactional_scheduler(
             control_plane=control_plane,
             object_client=object_client,
             bucket=bucket,
+            worker_id=f"{worker_id}:opportunity-certifier",
             now=lambda: datetime.now(UTC),
         ),
         max_turns=max_turns,

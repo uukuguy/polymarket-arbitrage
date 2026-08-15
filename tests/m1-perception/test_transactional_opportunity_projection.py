@@ -91,6 +91,13 @@ def test_certifier_authenticates_r2_quote_payload_before_atomic_publish() -> Non
     )
 
     class ControlPlane:
+        def claim_job(self, **kwargs):
+            self.claim = kwargs
+            return type("Lease", (), {"job_key": "quote:job:opportunity-certify"})()
+
+        def finish(self, *args, **kwargs):
+            self.finished = kwargs
+
         def current_quote_projection_inputs(self):
             receipt = QuoteBatchReceipt(
                 "job", "d" * 64, "quotes/key", hashlib.sha256(payload).hexdigest(), 2
@@ -110,13 +117,19 @@ def test_certifier_authenticates_r2_quote_payload_before_atomic_publish() -> Non
     result = TransactionalOpportunityCertifier(
         control_plane=control_plane, object_client=Client(), bucket="bucket", now=lambda: quoted_at
     ).run_once()
-    assert result.job_key == "quote:" + "a" * 64
+    assert result.job_key == "quote:job:opportunity-certify"
     assert result.outcome == "certified:" + "e" * 64
     assert control_plane.published["rows"][0]["gross_edge_bps"] == 1000.0
 
 
 def test_certifier_skips_r2_when_current_quote_is_already_projected() -> None:
     class ControlPlane:
+        def claim_job(self, **kwargs):
+            return type("Lease", (), {"job_key": "quote:job:opportunity-certify"})()
+
+        def finish(self, *args, **kwargs):
+            self.finished = kwargs
+
         def current_quote_projection_inputs(self):
             raise OpportunityProjectionCurrentError("already projected")
 

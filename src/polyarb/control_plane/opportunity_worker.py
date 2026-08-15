@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+from .models import JobState
 from .opportunity_projection import build_opportunity_rows, parse_quote_batch_bytes
 from .postgres import (
     IncompleteQuoteGenerationError,
@@ -38,24 +39,43 @@ class TransactionalOpportunityCertifier:
         control_plane: PostgresControlPlane,
         object_client: _ObjectClient,
         bucket: str,
+        worker_id: str = "opportunity-certifier",
         now: Callable[[], datetime],
+        lease_seconds: int = 120,
     ) -> None:
-        if not bucket:
-            raise ValueError("bucket must be non-empty")
+        if not bucket or not worker_id or lease_seconds <= 0:
+            raise ValueError("bucket, worker_id, and lease_seconds must be positive")
         self._control_plane = control_plane
         self._object_client = object_client
         self._bucket = bucket
+        self._worker_id = worker_id
+        self._lease_seconds = lease_seconds
         self._now = now
 
     def run_once(self) -> OpportunityCertifierResult:
+        lease = self._control_plane.claim_job(
+            worker_id=self._worker_id,
+            job_types=("opportunity-certify",),
+            lease_seconds=self._lease_seconds,
+            now=self._now(),
+        )
+        if lease is None:
+            return OpportunityCertifierResult(job_key=None, outcome="idle")
         try:
             quote_generation, structure_generation, batches = (
                 self._control_plane.current_quote_projection_inputs()
             )
         except OpportunityProjectionCurrentError:
-            return OpportunityCertifierResult(job_key=None, outcome="current")
+            self._control_plane.finish(lease, state=JobState.SUCCEEDED, now=self._now())
+            return OpportunityCertifierResult(job_key=lease.job_key, outcome="current")
         except IncompleteQuoteGenerationError:
-            return OpportunityCertifierResult(job_key=None, outcome="idle")
+            self._control_plane.finish(
+                lease,
+                state=JobState.RETRYABLE,
+                next_attempt_at=self._now() + timedelta(seconds=5),
+                now=self._now(),
+            )
+            return OpportunityCertifierResult(job_key=lease.job_key, outcome="waiting")
         all_legs = []
         all_quotes = []
         quoted_at_ms = 0
@@ -84,4 +104,5 @@ class TransactionalOpportunityCertifier:
             ),
             now=self._now(),
         )
-        return OpportunityCertifierResult(job_key=quote_generation, outcome=f"certified:{digest}")
+        self._control_plane.finish(lease, state=JobState.SUCCEEDED, now=self._now())
+        return OpportunityCertifierResult(job_key=lease.job_key, outcome=f"certified:{digest}")

@@ -2521,6 +2521,13 @@ class PostgresControlPlane:
                 )
                 if cursor.rowcount != 1:
                     raise StaleLeaseError("Quote pointer changed during certification")
+            self._enqueue_job_cursor(
+                cursor,
+                job_key=f"{generation_key}:opportunity-certify",
+                job_type="opportunity-certify",
+                input_identity=generation_key,
+                now=now,
+            )
             cursor.execute(
                 """
                 UPDATE m1_job_attempts SET state = 'succeeded', finished_at = %s
