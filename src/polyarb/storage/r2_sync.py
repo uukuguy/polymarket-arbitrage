@@ -30,7 +30,11 @@ from loguru import logger
 # max_attempts=3: initial attempt + 2 retries on transient errors (503 / 500)
 # mode='standard': exponential backoff with jitter
 # ─────────────────────────────────────────────────────────────────────────────
-_R2_RETRY_CONFIG = Config(retries={"max_attempts": 3, "mode": "standard"})
+_R2_RETRY_CONFIG = Config(
+    connect_timeout=5,
+    read_timeout=15,
+    retries={"max_attempts": 3, "mode": "standard"},
+)
 
 
 class R2UploadError(Exception):

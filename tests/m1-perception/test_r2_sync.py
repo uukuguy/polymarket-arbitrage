@@ -205,6 +205,14 @@ def test_r2_retry_config_applied(tmp_path: Path) -> None:
     assert retry_cfg.get("mode") == "standard", f"Expected mode='standard', got {retry_cfg}"
 
 
+def test_r2_client_bounds_connection_and_read_timeouts() -> None:
+    """A blackholed R2 endpoint must not indefinitely block a control-plane gate."""
+    from polyarb.storage.r2_sync import _R2_RETRY_CONFIG
+
+    assert _R2_RETRY_CONFIG.connect_timeout == 5
+    assert _R2_RETRY_CONFIG.read_timeout == 15
+
+
 # ---------------------------------------------------------------------------
 # Test: compute_r2_key rejects user input — signature is (taken_at_ms: int)
 # ---------------------------------------------------------------------------
