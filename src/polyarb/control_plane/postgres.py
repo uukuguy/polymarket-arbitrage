@@ -3514,6 +3514,18 @@ class PostgresControlPlane:
                 (now,),
             )
             oldest = cursor.fetchone()
+            queue_health = {
+                "structure-range": self._queue_health_snapshot_cursor(
+                    cursor,
+                    job_type="structure-normalize",
+                    now=now,
+                ),
+                "quote-batch": self._queue_health_snapshot_cursor(
+                    cursor,
+                    job_type="quote-batch",
+                    now=now,
+                ),
+            }
             cursor.execute(
                 """
                 SELECT count(*) AS count FROM m1_jobs
@@ -3618,6 +3630,7 @@ class PostgresControlPlane:
             "recent_attempts": attempts,
             "open_incidents": incidents,
             "pending_alert_outbox": outbox,
+            "queue_health": queue_health,
             "quote": {
                 "admission_job_states": quote_admission_states,
                 "oldest_retryable_admission_age_seconds": (
@@ -3665,6 +3678,52 @@ class PostgresControlPlane:
                     }
                 ),
             },
+        }
+
+    @staticmethod
+    def _queue_health_snapshot_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        job_type: str,
+        now: datetime,
+    ) -> dict[str, object]:
+        """Read a compact hint; workers must still acquire the fenced lease."""
+        cursor.execute(
+            """
+            SELECT count(*) AS unfinished_count,
+                   extract(epoch FROM (%s - min(created_at))) AS oldest_age_seconds
+            FROM m1_jobs
+            WHERE job_type = %s
+              AND state IN ('runnable', 'retryable', 'leased', 'checkpointed')
+            """,
+            (now, job_type),
+        )
+        aggregate = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT job_key
+            FROM m1_jobs
+            WHERE job_type = %s
+              AND (
+                  (state IN ('runnable', 'retryable', 'checkpointed')
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= %s))
+                  OR (state = 'leased' AND lease_expires_at <= %s)
+              )
+            ORDER BY
+                CASE WHEN state = 'retryable' AND next_attempt_at <= %s THEN 0 ELSE 1 END,
+                next_attempt_at NULLS FIRST,
+                updated_at,
+                job_key
+            LIMIT 1
+            """,
+            (job_type, now, now, now),
+        )
+        next_job = cursor.fetchone()
+        age = None if aggregate is None else aggregate["oldest_age_seconds"]
+        return {
+            "unfinished_count": 0 if aggregate is None else int(aggregate["unfinished_count"]),
+            "oldest_age_seconds": None if age is None else float(age),
+            "next_job_key": None if next_job is None else str(next_job["job_key"]),
         }
 
     @staticmethod

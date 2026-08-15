@@ -2682,6 +2682,39 @@ def test_operational_snapshot_reads_fenced_work_and_alert_intent(
     ]
 
 
+def test_operational_snapshot_projects_bounded_next_claimable_per_pool(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="structure:one:normalize:0",
+        job_type="structure-normalize",
+        input_identity="structure-one",
+        now=now - timedelta(seconds=90),
+    )
+    control_plane.enqueue_job(
+        job_key="quote:one:batch:0",
+        job_type="quote-batch",
+        input_identity="quote-one",
+        now=now - timedelta(seconds=30),
+    )
+
+    snapshot = control_plane.operational_snapshot(now=now)
+
+    assert snapshot["queue_health"] == {
+        "structure-range": {
+            "unfinished_count": 1,
+            "oldest_age_seconds": 90.0,
+            "next_job_key": "structure:one:normalize:0",
+        },
+        "quote-batch": {
+            "unfinished_count": 1,
+            "oldest_age_seconds": 30.0,
+            "next_job_key": "quote:one:batch:0",
+        },
+    }
+
+
 def test_operational_snapshot_reports_retry_age_for_source_and_quote_admission(
     control_plane: PostgresControlPlane,
 ) -> None:
