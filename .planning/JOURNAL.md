@@ -9176,3 +9176,26 @@ in-flight downstream lease takeover evidence. Keep all work staging-only.
 first recovered window admits a new Structure generation, drains ranges,
 certifies Structure, admits/certifies Quote, and then capture an in-flight
 downstream restart takeover. Keep staging-only.
+
+## SESSION 254 — 2026-08-15 (budgeted drain and honest restart boundary)
+
+- [LIVE] With the materializer budget active, repaired windows advanced through
+  checkpoints 75→79→91 while the leading window reached 115. They remain
+  incomplete 208-page event sources, so no new bundle or generation has been
+  claimed. Existing Structure/Quote generation `dcaedf…` remains intact.
+- [RESTARTED/STAGING] A restart was requested after observing materializer
+  `5955894` lease epoch 29 at checkpoint 79. Fly reports
+  `requested_stop=true, oom_killed=false`; the process returned and epoch 30
+  durably advanced 83→87. However epoch 29 had committed its checkpoint before
+  the stop was delivered. This is valid clean-restart recovery, **not** the
+  required active-lease/R2-upload-before-receipt takeover proof; do not reuse
+  it for the fault/soak verifier.
+- [TEACHING] Added `docs/learning/72-长事务任务的恢复与吞吐预算.md` explaining why a
+  fenced checkpoint is recovery evidence but not generation publication, and
+  why the new budgets remain serial lease turns rather than uncontrolled
+  concurrency.
+
+[NEXT] Continue staging materialization to a complete fresh manifest and
+Structure→Quote generation. Separately design a safe, explicitly bounded way
+to hit an actual R2-upload-before-receipt lease boundary for both Structure and
+Quote, then start the required 24-hour continuous soak evidence window.
