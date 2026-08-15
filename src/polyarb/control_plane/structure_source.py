@@ -282,6 +282,12 @@ def _event_embedded_market_records(
         if not isinstance(markets, list):
             continue
         group_id = event.get("negRiskMarketID")
+        is_group_less_standard_neg_risk = (
+            event.get("negRisk") is True
+            and event.get("enableNegRisk") is True
+            and event.get("negRiskAugmented") is False
+            and group_id is None
+        )
         for market in markets:
             if not isinstance(market, dict):
                 raise StructureSourceError("event embedded market is malformed")
@@ -291,6 +297,17 @@ def _event_embedded_market_records(
             # market contract and can introduce partial fields (notably
             # ``negRisk``). Match the source contract before normalization.
             if market.get("active") is not True or market.get("closed") is not False:
+                continue
+            # Gamma can explicitly call a parent standard neg-risk while
+            # omitting its group ID, and repeat that unprovable claim on an
+            # active child.  The legacy snapshot path quarantined precisely
+            # this source shape.  Keep the same fail-closed contract here:
+            # exclude the child, never infer or synthesize a group identity.
+            if (
+                is_group_less_standard_neg_risk
+                and market.get("negRisk") is True
+                and market.get("negRiskMarketID") is None
+            ):
                 continue
             enriched = dict(market)
             if "negRiskMarketID" not in enriched and group_id is not None:

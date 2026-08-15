@@ -245,6 +245,40 @@ def test_one_event_page_normalizes_to_independent_shard_components() -> None:
     assert components["markets"][0]["neg_risk"] is False
 
 
+def test_event_page_quarantines_standard_neg_risk_children_without_group_identity() -> None:
+    """Do not publish a Gamma neg-risk claim when its parent has no group proof."""
+    components = materialize_event_records_components(
+        (
+            {
+                "id": "event-group-less",
+                "slug": "event-group-less",
+                "active": True,
+                "closed": False,
+                "negRisk": True,
+                "enableNegRisk": True,
+                "negRiskAugmented": False,
+                "negRiskMarketID": None,
+                "markets": [
+                    {
+                        "id": "market-group-less",
+                        "conditionId": "condition-group-less",
+                        "clobTokenIds": '["yes", "no"]',
+                        "outcomePrices": '["0.4", "0.6"]',
+                        "active": True,
+                        "closed": False,
+                        "negRisk": True,
+                        "negRiskMarketID": None,
+                    }
+                ],
+            },
+        )
+    )
+
+    assert components["markets"] == ()
+    assert components["memberships"] == ()
+    assert components["group_truth"] == ()
+
+
 def test_one_sealed_event_page_becomes_component_shards() -> None:
     page = _page(
         stream="events",
