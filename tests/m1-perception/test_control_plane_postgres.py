@@ -2524,6 +2524,40 @@ def test_alert_delivery_lease_records_one_receipt_and_fences_stale_worker(
         connection.close()
 
 
+def test_scoped_alert_claim_never_claims_historical_outbox(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    old_event = control_plane.record_incident_event(
+        incident_key="incident:old", dedupe_key="old", component="structure-fetch",
+        severity="warning", summary="old", kind="attempt-failed", detail={},
+        idempotency_key="old:1", channels=("dashboard",), now=now,
+    )
+    scoped_event = control_plane.record_incident_event(
+        incident_key="incident:new", dedupe_key="new", component="structure-fetch",
+        severity="warning", summary="new", kind="attempt-failed", detail={},
+        idempotency_key="new:1", channels=("dashboard",), now=now,
+    )
+    connection = control_plane._connection_factory()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE m1_alert_outbox SET payload = payload || %s::jsonb "
+                "WHERE incident_event_id = %s",
+                ('{"acceptance_run_id":"run-a"}', scoped_event),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    lease = control_plane.claim_alert_delivery(
+        worker_id="alert-worker-a", lease_seconds=30, now=now, acceptance_run_id="run-a"
+    )
+    assert lease is not None
+    assert lease.incident_event_id == scoped_event
+    assert lease.incident_event_id != old_event
+
+
 def test_operational_snapshot_reads_fenced_work_and_alert_intent(
     control_plane: PostgresControlPlane,
 ) -> None:

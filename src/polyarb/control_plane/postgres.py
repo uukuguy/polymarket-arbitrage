@@ -3004,19 +3004,23 @@ class PostgresControlPlane:
         worker_id: str,
         lease_seconds: int,
         now: datetime,
+        acceptance_run_id: str | None = None,
     ) -> AlertDeliveryLease | None:
         """Claim one due outbox intent; an expired alert lease is safely taken over."""
         self._validate_nonempty(worker_id=worker_id)
         self._validate_aware(now, "now")
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
+        if acceptance_run_id is not None and not acceptance_run_id:
+            raise ValueError("acceptance_run_id must be non-empty when provided")
         expires_at = now + timedelta(seconds=lease_seconds)
         with (
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            cursor.execute(
-                """
+            if acceptance_run_id is None:
+                cursor.execute(
+                    """
                 SELECT outbox_id, incident_event_id, channel, payload, lease_epoch, attempt_count
                 FROM m1_alert_outbox
                 WHERE (state IN ('pending', 'retryable') AND next_attempt_at <= %s)
@@ -3025,8 +3029,22 @@ class PostgresControlPlane:
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
                 """,
-                (now, now),
-            )
+                    (now, now),
+                )
+            else:
+                cursor.execute(
+                    """
+                SELECT outbox_id, incident_event_id, channel, payload, lease_epoch, attempt_count
+                FROM m1_alert_outbox
+                WHERE ((state IN ('pending', 'retryable') AND next_attempt_at <= %s)
+                   OR (state = 'retryable' AND lease_expires_at <= %s))
+                  AND payload->>'acceptance_run_id' = %s
+                ORDER BY next_attempt_at, created_at, outbox_id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+                """,
+                    (now, now, acceptance_run_id),
+                )
             row = cursor.fetchone()
             if row is None:
                 return None

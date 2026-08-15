@@ -18,8 +18,10 @@ NOW = datetime(2030, 1, 1, tzinfo=UTC)
 class _ControlPlane:
     def __init__(self) -> None:
         self.finished: dict[str, object] | None = None
+        self.claim_kwargs: dict[str, object] | None = None
 
     def claim_alert_delivery(self, **kwargs: object) -> AlertDeliveryLease:
+        self.claim_kwargs = kwargs
         return AlertDeliveryLease(
             outbox_id="outbox-a",
             incident_event_id="event-a",
@@ -59,6 +61,24 @@ def test_dashboard_delivery_records_a_visible_receipt() -> None:
         "state": "delivered",
         "provider_receipt": "dashboard-visible",
         "now": NOW,
+    }
+
+
+def test_alert_worker_passes_acceptance_scope_to_claim() -> None:
+    control_plane = _ControlPlane()
+    worker = TransactionalAlertDeliveryWorker(
+        control_plane=control_plane,
+        worker_id="alert-a",
+        now=lambda: NOW,
+        acceptance_run_id="run-a",
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "delivered"
+    assert control_plane.claim_kwargs == {
+        "worker_id": "alert-a",
+        "lease_seconds": 30,
+        "now": NOW,
+        "acceptance_run_id": "run-a",
     }
 
 

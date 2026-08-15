@@ -52,6 +52,7 @@ class TransactionalAlertDeliveryWorker:
         retry_delay: timedelta = timedelta(seconds=15),
         settings: Settings | None = None,
         telegram_client: _TelegramClient | None = None,
+        acceptance_run_id: str | None = None,
     ) -> None:
         if not worker_id or lease_seconds <= 0 or retry_delay.total_seconds() <= 0:
             raise ValueError("alert delivery bounds and worker_id must be positive")
@@ -62,12 +63,16 @@ class TransactionalAlertDeliveryWorker:
         self._retry_delay = retry_delay
         self._settings = settings or Settings()
         self._telegram_client = telegram_client
+        if acceptance_run_id is not None and not acceptance_run_id:
+            raise ValueError("acceptance_run_id must be non-empty when provided")
+        self._acceptance_run_id = acceptance_run_id
 
     async def run_once(self) -> AlertDeliveryResult:
         lease = self._control_plane.claim_alert_delivery(
             worker_id=self._worker_id,
             lease_seconds=self._lease_seconds,
             now=self._now(),
+            acceptance_run_id=self._acceptance_run_id,
         )
         if lease is None:
             return AlertDeliveryResult(outbox_id=None, outcome="idle")
