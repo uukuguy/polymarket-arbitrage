@@ -510,9 +510,7 @@ class PostgresControlPlane:
             for row in rows
         )
 
-    def structure_materializer_shards(
-        self, window_key: str
-    ) -> tuple[tuple[str, str, str], ...]:
+    def structure_materializer_shards(self, window_key: str) -> tuple[tuple[str, str, str], ...]:
         """Return only fenced shard receipts for one source materializer job."""
         self._validate_nonempty(window_key=window_key)
         job_key = f"{window_key}:materialize"
@@ -537,9 +535,7 @@ class PostgresControlPlane:
             for row in rows
         )
 
-    def structure_materializer_batches(
-        self, window_key: str
-    ) -> tuple[tuple[str, str, str], ...]:
+    def structure_materializer_batches(self, window_key: str) -> tuple[tuple[str, str, str], ...]:
         """Return the ordered immutable batch receipts for v3 finalization."""
         self._validate_nonempty(window_key=window_key)
         with (
@@ -940,9 +936,7 @@ class PostgresControlPlane:
                     cursor, event_spec=spec, market_batches=normalized_market_batches, now=now
                 )
             elif embedded_event_completion:
-                self._complete_event_embedded_source_window_cursor(
-                    cursor, event_spec=spec, now=now
-                )
+                self._complete_event_embedded_source_window_cursor(cursor, event_spec=spec, now=now)
                 successor = None
             else:
                 successor = self._source_successor_spec_cursor(
@@ -3139,8 +3133,7 @@ class PostgresControlPlane:
             job = cursor.fetchone()
             if (
                 job is None
-                or str(job["state"])
-                not in {JobState.SUCCEEDED.value, "checkpointed"}
+                or str(job["state"]) not in {JobState.SUCCEEDED.value, "checkpointed"}
                 or int(job["lease_epoch"]) != lease.lease_epoch
             ):
                 raise StaleLeaseError(
@@ -3224,8 +3217,9 @@ class PostgresControlPlane:
                                 "incident_key": incident_key,
                                 "kind": "recovered",
                                 **(
-                                    {} if acceptance_run_id is None else
-                                    {"acceptance_run_id": acceptance_run_id}
+                                    {}
+                                    if acceptance_run_id is None
+                                    else {"acceptance_run_id": acceptance_run_id}
                                 ),
                             }
                         ),
@@ -3766,9 +3760,7 @@ class PostgresControlPlane:
             "quote_started_at_ms",
             "quote_quoted_at_ms",
         }
-        if any(
-            set(row) != required or not isinstance(row["group_id"], str) for row in normalized
-        ):
+        if any(set(row) != required or not isinstance(row["group_id"], str) for row in normalized):
             raise ValueError("invalid-opportunity-projection-row")
         if len({str(row["group_id"]) for row in normalized}) != len(normalized):
             raise ValueError("opportunity-projection-group-duplicate")
@@ -3798,7 +3790,8 @@ class PostgresControlPlane:
                 ([quote_generation_key, structure_generation_key],),
             )
             if {str(row["generation_key"]) for row in cursor.fetchall()} != {
-                quote_generation_key, structure_generation_key
+                quote_generation_key,
+                structure_generation_key,
             }:
                 raise IncompleteStructureGenerationError(
                     "opportunity projection requires certified generations"
@@ -3882,7 +3875,9 @@ class PostgresControlPlane:
                           admission.generation_key AS structure_generation_key
                    FROM m1_publication_pointers AS pointer
                    JOIN m1_quote_admission_inputs AS admission
-                     ON admission.job_key = pointer.generation_key || ':admit'
+                     ON admission.generation_key =
+                        'structure:' || substr(pointer.generation_key, 7)
+                    AND admission.job_key = admission.generation_key || ':quote-admit'
                    WHERE pointer.pointer_key = 'quote:current'"""
             )
             current = cursor.fetchone()

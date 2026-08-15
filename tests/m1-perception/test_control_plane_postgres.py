@@ -318,13 +318,19 @@ def test_due_source_window_admission_is_bucket_idempotent_and_never_overlaps(
     first = control_plane.admit_due_structure_source_window(cadence_seconds=300, now=now)
     assert first.state == "admitted"
     assert first.job_key == "structure-source:300:6311664:fetch:events:0"
-    assert control_plane.admit_due_structure_source_window(
-        cadence_seconds=300, now=now + timedelta(seconds=1)
-    ).state == "busy"
+    assert (
+        control_plane.admit_due_structure_source_window(
+            cadence_seconds=300, now=now + timedelta(seconds=1)
+        ).state
+        == "busy"
+    )
     # Even a later cadence bucket cannot overlap the unfinished traversal.
-    assert control_plane.admit_due_structure_source_window(
-        cadence_seconds=300, now=now + timedelta(seconds=301)
-    ).state == "busy"
+    assert (
+        control_plane.admit_due_structure_source_window(
+            cadence_seconds=300, now=now + timedelta(seconds=301)
+        ).state
+        == "busy"
+    )
 
 
 def test_source_page_limit_quarantine_releases_later_admission_bucket(
@@ -2081,6 +2087,96 @@ def test_opportunity_projection_publish_is_atomic_and_current_pointer_is_pageabl
     assert control_plane.current_opportunities(limit=1, after_group_id="")["items"] == [row]
 
 
+def test_current_quote_projection_inputs_follows_quote_to_structure_admission_contract(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    structure_generation = "structure:" + "a" * 64
+    quote_generation = "quote:" + "a" * 64
+    batch_key = f"{quote_generation}:batch:0"
+    leg_payload = psycopg.types.json.Jsonb(
+        [
+            {
+                "neg_risk_market_id": "neg-risk-token-a",
+                "market_id": "market-token-a",
+                "condition_id": "condition-token-a",
+                "slug": "slug-token-a",
+                "yes_token_id": "token-a",
+                "event_id": "event-token-a",
+                "membership_hash": "membership-token-a",
+            }
+        ]
+    )
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        connection.execute(
+            """INSERT INTO m1_structure_generation_inputs
+               (generation_key,bundle_key,bundle_digest,identity,admitted_at)
+               VALUES (%s,'bundle',%s,%s,%s)""",
+            (structure_generation, "a" * 64, psycopg.types.json.Jsonb({}), now),
+        )
+        for generation_key in (structure_generation, quote_generation):
+            job_key = f"{generation_key}:certify"
+            connection.execute(
+                """INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at)
+                   VALUES (%s,'certify',%s,'succeeded',%s,%s)""",
+                (job_key, generation_key, now, now),
+            )
+            connection.execute(
+                """INSERT INTO m1_generation_manifests
+                   (generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at)
+                   VALUES (%s,%s,%s,'artifact',%s,1,%s)""",
+                (generation_key, job_key, "b" * 64, "c" * 64, now),
+            )
+        for job_key, job_type in (
+            (f"{structure_generation}:quote-admit", "quote-admit"),
+            (batch_key, "quote-batch"),
+        ):
+            connection.execute(
+                """INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at)
+                   VALUES (%s,%s,%s,'succeeded',%s,%s)""",
+                (job_key, job_type, job_key, now, now),
+            )
+        connection.execute(
+            """INSERT INTO m1_publication_pointers
+               (pointer_key,generation_key,expected_generation_key,lease_epoch,published_at)
+               VALUES ('quote:current',%s,NULL,1,%s)""",
+            (quote_generation, now),
+        )
+        connection.execute(
+            """INSERT INTO m1_quote_admission_inputs
+               (job_key,generation_key,bundle_key,bundle_digest,admitted_at)
+               VALUES (%s,%s,'bundle',%s,%s)""",
+            (f"{structure_generation}:quote-admit", structure_generation, "b" * 64, now),
+        )
+        connection.execute(
+            """INSERT INTO m1_quote_batch_inputs
+               (job_key,structure_receipt_digest,universe_hash,token_range_digest,token_ids,legs,admitted_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                batch_key,
+                "a" * 64,
+                "b" * 64,
+                "c" * 64,
+                psycopg.types.json.Jsonb(["token-a"]),
+                leg_payload,
+                now,
+            ),
+        )
+        connection.execute(
+            """INSERT INTO m1_quote_batch_receipts
+               (job_key,structure_receipt_digest,universe_hash,token_range_digest,quote_digest,
+                artifact_key,artifact_digest,successful_response_count,quoted_at,committed_at)
+               VALUES (%s,%s,%s,%s,%s,'quotes/key',%s,1,%s,%s)""",
+            (batch_key, "a" * 64, "b" * 64, "c" * 64, "d" * 64, "e" * 64, now, now),
+        )
+
+    actual_quote, actual_structure, batches = control_plane.current_quote_projection_inputs()
+
+    assert (actual_quote, actual_structure) == (quote_generation, structure_generation)
+    assert batches[0][0] == (_leg("token-a"),)
+    assert batches[0][1].artifact_key == "quotes/key"
+
+
 def test_claim_reclaim_and_epoch_fencing(control_plane: PostgresControlPlane) -> None:
     now = _now()
     control_plane.enqueue_job(
@@ -2704,14 +2800,28 @@ def test_scoped_alert_claim_never_claims_historical_outbox(
 ) -> None:
     now = _now()
     old_event = control_plane.record_incident_event(
-        incident_key="incident:old", dedupe_key="old", component="structure-fetch",
-        severity="warning", summary="old", kind="attempt-failed", detail={},
-        idempotency_key="old:1", channels=("dashboard",), now=now,
+        incident_key="incident:old",
+        dedupe_key="old",
+        component="structure-fetch",
+        severity="warning",
+        summary="old",
+        kind="attempt-failed",
+        detail={},
+        idempotency_key="old:1",
+        channels=("dashboard",),
+        now=now,
     )
     scoped_event = control_plane.record_incident_event(
-        incident_key="incident:new", dedupe_key="new", component="structure-fetch",
-        severity="warning", summary="new", kind="attempt-failed", detail={},
-        idempotency_key="new:1", channels=("dashboard",), now=now,
+        incident_key="incident:new",
+        dedupe_key="new",
+        component="structure-fetch",
+        severity="warning",
+        summary="new",
+        kind="attempt-failed",
+        detail={},
+        idempotency_key="new:1",
+        channels=("dashboard",),
+        now=now,
     )
     connection = control_plane._connection_factory()
     try:
