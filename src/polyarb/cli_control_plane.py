@@ -12,7 +12,7 @@ import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import psycopg
 
@@ -216,6 +216,33 @@ def _parser() -> argparse.ArgumentParser:
         soak.add_argument("--machine-id", action="append", required=True)
         soak.add_argument("--fly-app", default="polyarb-control-worker-staging")
         soak.add_argument("--json", action="store_true")
+    for command, help_text in (
+        ("cloud-soak-start", "atomically record the cloud-resident soak baseline"),
+        ("cloud-soak-sample", "append one cloud-resident transactional soak observation"),
+    ):
+        cloud_soak = subcommands.add_parser(command, help=help_text)
+        cloud_soak.add_argument("--run-id", required=True)
+        cloud_soak.add_argument("--control-api-url", required=True)
+        cloud_soak.add_argument("--machine-id", action="append", required=True)
+        cloud_soak.add_argument("--fly-app", required=True)
+        cloud_soak.add_argument("--json", action="store_true")
+    cloud_soak_verify = subcommands.add_parser(
+        "cloud-soak-verify", help="fail-closed verification from cloud-resident evidence"
+    )
+    cloud_soak_verify.add_argument("--run-id", required=True)
+    cloud_soak_verify.add_argument("--minimum-seconds", type=int, default=86_400)
+    cloud_soak_verify.add_argument("--max-gap-seconds", type=int, default=900)
+    cloud_soak_verify.add_argument("--json", action="store_true")
+    cloud_soak_serve = subcommands.add_parser(
+        "cloud-soak-serve", help="run the isolated cloud-resident soak sampler"
+    )
+    cloud_soak_serve.add_argument("--enable", action="store_true")
+    cloud_soak_serve.add_argument("--run-id", required=True)
+    cloud_soak_serve.add_argument("--control-api-url", required=True)
+    cloud_soak_serve.add_argument("--machine-id", action="append", required=True)
+    cloud_soak_serve.add_argument("--fly-app", required=True)
+    cloud_soak_serve.add_argument("--interval-seconds", type=float, default=300.0)
+    cloud_soak_serve.add_argument("--json", action="store_true")
     soak_verify = subcommands.add_parser(
         "soak-verify", help="verify a local immutable transactional soak evidence file"
     )
@@ -275,6 +302,31 @@ def _read_fly_machine_states(machine_ids: Sequence[str], *, app: str) -> dict[st
     return states
 
 
+def _read_cloud_fly_machine_states(
+    machine_ids: Sequence[str], *, app: str, token: str
+) -> dict[str, str]:
+    """Read exact Fly states over HTTPS; production images intentionally lack flyctl."""
+    if not token:
+        raise SoakEvidenceError("POLYARB_FLY_API_TOKEN is required for cloud soak sampling")
+    request = Request(
+        f"https://api.machines.dev/v1/apps/{app}/machines",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with urlopen(request, timeout=10) as response:  # noqa: S310 -- fixed Fly API origin
+        payload = json.loads(response.read())
+    if not isinstance(payload, list):
+        raise SoakEvidenceError("Fly machines response must be an array")
+    listed = {
+        item.get("id"): item.get("state")
+        for item in payload
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    states = {machine_id: listed.get(machine_id) for machine_id in machine_ids}
+    if any(not isinstance(state, str) or not state for state in states.values()):
+        raise SoakEvidenceError("an exact cloud Fly machine is missing or has no state")
+    return {machine_id: str(state) for machine_id, state in states.items()}
+
+
 def _record_soak_observation(args: argparse.Namespace, *, exclusive: bool) -> dict[str, object]:
     snapshot = _read_soak_control_snapshot(args.control_api_url)
     record = create_record(
@@ -290,6 +342,63 @@ def _record_soak_observation(args: argparse.Namespace, *, exclusive: bool) -> di
         "observed_at": record["observed_at"],
         "machine_count": len(args.machine_id),
     }
+
+
+def _record_cloud_soak_observation(
+    control_plane: PostgresControlPlane, args: argparse.Namespace, *, baseline: bool
+) -> dict[str, object]:
+    record = create_record(
+        observed_at=datetime.now(UTC).isoformat(),
+        control_api_url=args.control_api_url,
+        machine_states=_read_cloud_fly_machine_states(
+            args.machine_id,
+            app=args.fly_app,
+            token=os.environ.get("POLYARB_FLY_API_TOKEN", ""),
+        ),
+        control_snapshot=_read_soak_control_snapshot(args.control_api_url),
+    )
+    if baseline:
+        control_plane.start_soak_run(run_id=args.run_id, baseline_record=record)
+    else:
+        control_plane.append_soak_observation(run_id=args.run_id, record=record)
+    return {
+        "status": "cloud-baseline-recorded" if baseline else "cloud-sample-recorded",
+        "run_id": args.run_id,
+        "observed_at": record["observed_at"],
+        "machine_count": len(args.machine_id),
+    }
+
+
+async def _run_cloud_soak_service(
+    control_plane: PostgresControlPlane,
+    args: argparse.Namespace,
+    *,
+    stop_event: asyncio.Event | None = None,
+) -> dict[str, object]:
+    """Sample at fixed cadence; a read/write failure exits and leaves a proof gap."""
+    if args.interval_seconds <= 0:
+        raise ValueError("cloud soak interval must be positive")
+    stop = stop_event or asyncio.Event()
+    if stop_event is None:
+        loop = asyncio.get_running_loop()
+        for stop_signal in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(stop_signal, stop.set)
+            except (NotImplementedError, RuntimeError):
+                pass
+    samples = 0
+    while not stop.is_set():
+        outcome = _record_cloud_soak_observation(control_plane, args, baseline=False)
+        _write(
+            {"event": "cloud-soak-sample", **outcome},
+            as_json=args.json,
+        )
+        samples += 1
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=args.interval_seconds)
+        except TimeoutError:
+            continue
+    return {"status": "stopped", "samples": samples}
 
 
 def _r2_upload_fault_callback(
@@ -647,6 +756,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "tick-once",
         "serve",
         "alert-serve",
+        "cloud-soak-serve",
         "render-rollout",
     }
     if args.command in requires_enable and not args.enable:
@@ -719,6 +829,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("POLYARB_SUPABASE_DB_DSN is required", file=sys.stderr)
         return 2
     try:
+        if args.command in {"cloud-soak-start", "cloud-soak-sample"}:
+            try:
+                _write(
+                    _record_cloud_soak_observation(
+                        control_plane,
+                        args,
+                        baseline=args.command == "cloud-soak-start",
+                    ),
+                    as_json=args.json,
+                )
+            except (OSError, SoakEvidenceError, ValueError) as error:
+                print(f"cloud soak evidence unavailable: {type(error).__name__}", file=sys.stderr)
+                return 1
+            return 0
+        if args.command == "cloud-soak-verify":
+            try:
+                _write(
+                    verify_soak(
+                        control_plane.read_soak_observations(args.run_id),
+                        minimum_seconds=args.minimum_seconds,
+                        max_gap_seconds=args.max_gap_seconds,
+                    ),
+                    as_json=args.json,
+                )
+            except (SoakEvidenceError, ValueError) as error:
+                detail = (
+                    str(error) if isinstance(error, SoakEvidenceError) else type(error).__name__
+                )
+                print(f"cloud soak evidence unavailable: {detail}", file=sys.stderr)
+                return 1
+            return 0
+        if args.command == "cloud-soak-serve":
+            try:
+                _write(
+                    asyncio.run(_run_cloud_soak_service(control_plane, args)),
+                    as_json=args.json,
+                )
+            except (OSError, SoakEvidenceError, ValueError) as error:
+                print(f"cloud soak service unavailable: {type(error).__name__}", file=sys.stderr)
+                return 1
+            return 0
         if args.command == "preflight":
             database = control_plane.deployment_preflight(expected_database=args.expected_database)
             object_client, bucket = _structure_object_client()

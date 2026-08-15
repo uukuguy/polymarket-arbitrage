@@ -18,8 +18,10 @@ structure_range_a = "python -m polyarb.cli_control_plane serve --enable --worker
 structure_range_b = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-structure-range-b --worker-role structure-range --pool-turns 2 --interval-seconds 2 --json"
 quote_batch_a = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-quote-batch-a --worker-role quote-batch --pool-turns 4 --interval-seconds 2 --json"
 quote_batch_b = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-quote-batch-b --worker-role quote-batch --pool-turns 4 --interval-seconds 2 --json"
+# Independent evidence observer: it does not claim jobs or access SQLite/R2.
+soak_sampler = "python -m polyarb.cli_control_plane cloud-soak-serve --enable --run-id formal-cloud-v1 --control-api-url https://polyarb-control-api.fly.dev/perception/control-plane --fly-app polyarb-control-worker --machine-id 3d8d0e29c7d589 --machine-id 080d3ddbe66068 --machine-id 4d895231f7d987 --machine-id 85e990c43533e8 --machine-id 86ed91bee33608 --interval-seconds 300 --json"
 
 [[vm]]
 size = "shared-cpu-1x"
 memory = "2048mb"
-processes = ["coordinator", "structure_range_a", "structure_range_b", "quote_batch_a", "quote_batch_b"]
+processes = ["coordinator", "structure_range_a", "structure_range_b", "quote_batch_a", "quote_batch_b", "soak_sampler"]
