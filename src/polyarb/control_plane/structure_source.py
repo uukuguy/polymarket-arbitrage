@@ -16,15 +16,21 @@ from polyarb.perception.market_truth import market_truth_mismatch_reason
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 
 from .alert_delivery import incident_alert_channels
-from .models import StructureSourcePageSpec
+from .models import JobLease, StructureSourcePageSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
     StructureShardArtifact,
+    StructureShardBatchArtifact,
+    StructureShardReceipt,
     canonical_structure_bundle_bytes,
+    canonical_structure_shard_batch_bytes,
     canonical_structure_shard_bytes,
+    parse_structure_shard_bytes,
     upload_structure_bundle_artifact,
+    upload_structure_shard_artifact,
+    upload_structure_shard_batch_artifact,
 )
 from .structure_shadow import plan_structure_ranges
 from .structure_worker import StructureWorkerResult
@@ -764,6 +770,7 @@ class TransactionalStructureSourceMaterializer:
         range_max_rows: int,
         lease_seconds: int = 120,
         read_concurrency: int = 8,
+        shard_page_batch_size: int = 4,
         retry_delay: timedelta = timedelta(seconds=15),
     ) -> None:
         if not bucket or not worker_id:
@@ -772,6 +779,7 @@ class TransactionalStructureSourceMaterializer:
             range_max_rows <= 0
             or lease_seconds <= 0
             or read_concurrency <= 0
+            or shard_page_batch_size <= 0
             or retry_delay.total_seconds() <= 0
         ):
             raise ValueError("materializer bounds must be positive")
@@ -783,6 +791,7 @@ class TransactionalStructureSourceMaterializer:
         self._range_max_rows = range_max_rows
         self._lease_seconds = lease_seconds
         self._read_concurrency = read_concurrency
+        self._shard_page_batch_size = shard_page_batch_size
         self._retry_delay = retry_delay
 
     async def run_once(self) -> StructureWorkerResult:
@@ -795,9 +804,12 @@ class TransactionalStructureSourceMaterializer:
         if lease is None:
             return StructureWorkerResult(job_key=None, outcome="idle")
         try:
-            pages = await self._read_source_pages(
-                self._control_plane.structure_source_window_pages(lease.input_identity)
-            )
+            source_pages = self._control_plane.structure_source_window_pages(lease.input_identity)
+            if len(source_pages) > self._shard_page_batch_size and all(
+                spec.stream == "events" for spec, _key, _digest in source_pages
+            ):
+                return await self._checkpoint_event_shard_batch(lease, source_pages)
+            pages = await self._read_source_pages(source_pages)
             bundle = materialize_structure_source_pages(pages)
             upload_structure_bundle_artifact(
                 self._object_client, bucket=self._bucket, artifact=bundle
@@ -838,6 +850,76 @@ class TransactionalStructureSourceMaterializer:
                 now=self._now(),
             )
             return StructureWorkerResult(job_key=lease.job_key, outcome="retryable")
+
+    async def _checkpoint_event_shard_batch(
+        self,
+        lease: JobLease,
+        source_pages: Sequence[tuple[StructureSourcePageSpec, str, str]],
+    ) -> StructureWorkerResult:
+        # Checkpoints use fixed-width offsets so lexical receipt order remains
+        # the durable source order. A fresh lease begins at zero.
+        checkpoint_cursor = getattr(lease, "checkpoint_cursor")
+        start = (
+            0
+            if checkpoint_cursor is None
+            else int(str(checkpoint_cursor).split(":", 1)[1]) + 1
+        )
+        selected = source_pages[start : start + self._shard_page_batch_size]
+        if not selected:
+            raise StructureSourceError("sharded source window awaits manifest finalization")
+        pages = await self._read_source_pages(selected)
+        source_digest = self._control_plane.structure_source_window_digest(lease.input_identity)
+        receipts: list[StructureShardReceipt] = []
+        for page in pages:
+            page_shards = materialize_event_page_shards(
+                page, source_digest=source_digest
+            )
+            for component, artifact in page_shards:
+                await asyncio.to_thread(
+                    upload_structure_shard_artifact,
+                    self._object_client,
+                    bucket=self._bucket,
+                    artifact=artifact,
+                )
+                receipts.append(
+                    StructureShardReceipt(
+                        component=component,
+                        ordinal=page[0].ordinal,
+                        artifact_key=artifact.key,
+                        artifact_digest=artifact.sha256,
+                        row_count=len(
+                            parse_structure_shard_bytes(
+                                artifact.payload, expected_sha256=artifact.sha256
+                            )[1]
+                        ),
+                    )
+                )
+        batch = StructureShardBatchArtifact.from_bytes(
+            canonical_structure_shard_batch_bytes(
+                window_key=lease.input_identity,
+                source_digest=source_digest,
+                start_ordinal=selected[0][0].ordinal,
+                end_ordinal=selected[-1][0].ordinal + 1,
+                shards=receipts,
+            )
+        )
+        await asyncio.to_thread(
+            upload_structure_shard_batch_artifact,
+            self._object_client,
+            bucket=self._bucket,
+            artifact=batch,
+        )
+        self._control_plane.checkpoint(
+            lease,
+            checkpoint_cursor=f"shard-batch:{selected[-1][0].ordinal:08d}",
+            checkpoint_digest=batch.sha256,
+            artifact_key=batch.key,
+            idempotency_key=(
+                f"structure-materializer:{lease.job_key}:{selected[-1][0].ordinal}:{batch.sha256}"
+            ),
+            now=self._now(),
+        )
+        return StructureWorkerResult(job_key=lease.job_key, outcome="checkpointed")
 
     async def _read_source_pages(
         self,

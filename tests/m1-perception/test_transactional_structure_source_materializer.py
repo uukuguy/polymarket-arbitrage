@@ -17,12 +17,12 @@ type PageArtifact = tuple[StructureSourcePageSpec, StructureSourcePageArtifact]
 
 
 def _artifact(
-    *, stream: str, records: tuple[dict[str, object], ...]
+    *, stream: str, records: tuple[dict[str, object], ...], ordinal: int = 0
 ) -> tuple[StructureSourcePageSpec, StructureSourcePageArtifact]:
     spec = StructureSourcePageSpec(
         window_key="source-window:materializer",
         stream=stream,
-        ordinal=0,
+        ordinal=ordinal,
         requested_cursor=None,
     )
     return (
@@ -44,6 +44,7 @@ class FakeControlPlane:
         self.admitted: dict[str, object] | None = None
         self.retry_incidents: list[dict[str, object]] = []
         self.recoveries: list[dict[str, object]] = []
+        self.checkpoints: list[dict[str, object]] = []
 
     def claim_job(self, **kwargs: object) -> JobLease:
         assert kwargs["job_types"] == ("structure-materialize",)
@@ -61,6 +62,13 @@ class FakeControlPlane:
     def structure_source_window_pages(self, window_key: str):
         assert window_key == "source-window:materializer"
         return tuple((spec, artifact.key, artifact.sha256) for spec, artifact in self.pages)
+
+    def structure_source_window_digest(self, window_key: str) -> str:
+        assert window_key == "source-window:materializer"
+        return "a" * 64
+
+    def checkpoint(self, _lease: JobLease, **kwargs: object) -> None:
+        self.checkpoints.append(kwargs)
 
     def admit_structure_source_bundle(self, lease: JobLease, **kwargs: object):
         self.admitted = kwargs
@@ -241,3 +249,52 @@ def test_materializer_records_retry_incident_when_sealed_page_is_unavailable() -
     assert control_plane.retry_incidents[0]["component"] == "structure-materialize"
     assert control_plane.retry_incidents[0]["detail"]["lease_epoch"] == 1
     assert isinstance(control_plane.retry_incidents[0]["detail"]["error_message"], str)
+
+
+def test_event_only_materializer_checkpoints_one_bounded_shard_batch() -> None:
+    pages = (
+        _artifact(
+            stream="events",
+            ordinal=0,
+            records=(
+                {
+                    "id": "event-a",
+                    "slug": "event-a",
+                    "active": True,
+                    "closed": False,
+                    "negRisk": False,
+                    "markets": [],
+                },
+            ),
+        ),
+        _artifact(
+            stream="events",
+            ordinal=1,
+            records=(
+                {
+                    "id": "event-b",
+                    "slug": "event-b",
+                    "active": True,
+                    "closed": False,
+                    "negRisk": False,
+                    "markets": [],
+                },
+            ),
+        ),
+    )
+    control_plane = FakeControlPlane(pages)
+    objects = MemoryR2(pages)
+    worker = TransactionalStructureSourceMaterializer(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="source-pages",
+        worker_id="materializer-a",
+        now=lambda: NOW,
+        range_max_rows=100,
+        shard_page_batch_size=1,
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "checkpointed"
+    assert control_plane.admitted is None
+    assert control_plane.checkpoints[0]["checkpoint_cursor"] == "shard-batch:00000000"
+    assert str(control_plane.checkpoints[0]["artifact_key"]).startswith("structure-shard-batches/")
