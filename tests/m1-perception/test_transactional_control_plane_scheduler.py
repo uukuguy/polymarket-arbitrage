@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from polyarb.control_plane.scheduler import TransactionalControlPlaneScheduler
 
 
@@ -187,6 +189,23 @@ def test_coordinator_excludes_dedicated_range_and_quote_batch_workers() -> None:
         "quote-admit",
         "quote-certify",
     ]
+
+
+def test_coordinator_rejects_extra_range_turn_budget() -> None:
+    with pytest.raises(ValueError, match="excluded"):
+        TransactionalControlPlaneScheduler(
+            structure_source_admitter=_AsyncWorker("structure-source-admit"),
+            structure_source_worker=_AsyncWorker("structure-source"),
+            structure_source_materializer=_AsyncWorker("structure-source-materialize"),
+            structure_worker=_AsyncWorker("structure-range"),
+            structure_certifier=_SyncWorker("structure-certify"),
+            quote_admitter=_AsyncWorker("quote-admit"),
+            quote_worker=_AsyncWorker("quote-batch"),
+            quote_certifier=_SyncWorker("quote-certify"),
+            max_turns=1,
+            structure_range_turns=1,
+            include_structure_range=False,
+        )
 
 
 def test_role_loop_runs_only_its_named_worker_for_its_bound() -> None:

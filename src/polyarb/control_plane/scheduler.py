@@ -40,6 +40,8 @@ class TransactionalControlPlaneScheduler:
             or turn_timeout_seconds <= 0
         ):
             raise ValueError("scheduler bounds are invalid")
+        if not include_structure_range and structure_range_turns:
+            raise ValueError("structure range turns are excluded from this scheduler role")
         workers: list[tuple[str, _Worker]] = [
             ("structure-source-admit", structure_source_admitter),
             ("structure-source", structure_source_worker),
