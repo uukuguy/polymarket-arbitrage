@@ -9450,3 +9450,22 @@ and remove any temporary secret placement.
 [NEXT] Keep sampling queue health and logs for the receipt-lease release. When coordinator naturally
 admits the next Quote generation, arm its exact next batch for the R2-before-receipt process-loss
 takeover. Telegram remains separately blocked only by Fly secrets-write authorization.
+
+## SESSION 267 — 2026-08-15 (horizontal-scale configuration boundary)
+
+- [LIVE] Receipt-lease release remains healthy: Structure unfinished continued from `2557` to
+  `2331`; Quote has no unfinished batches. The two established Structure pools have no new
+  stale-lease or exit-1 evidence.
+- [CONTAINED] Two fresh, independently identified Structure pool Machines were temporarily launched
+  to accelerate backlog drain. Both failed before claiming work with `ValidationError`, because a
+  new Machine does not inherit the existing worker Machines' `POLYARB_SCAN_SHARED_SECRET` setting.
+  Both were force-destroyed immediately; no receipt, pointer, production service, or Telegram state
+  changed.
+- [LEARNING] The topology code is horizontally safe, but repeatable cloud scaling requires a
+  deployable Machine configuration/secret contract. This is the same Fly configuration-authority
+  boundary preventing isolated alert delivery; it must be fixed through the app's secrets/template
+  write path rather than by copying sensitive values into an ad-hoc command.
+
+[NEXT] Run only the five validated live roles while queue drains. Implement the approved soak evidence
+recorder and a repeatable staging Machine configuration contract once the design approval/Fly write
+path is available; then create Quote process-loss and scoped alert evidence.
