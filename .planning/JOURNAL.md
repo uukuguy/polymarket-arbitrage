@@ -9316,6 +9316,13 @@ circuit for a Quote batch, perform its R2 process-loss takeover, and begin the
   unauthorized despite read operations succeeding. The temporary alert-app
   secrets were removed again, leaving both alert Machines stopped. No Telegram
   delivery or historical replay was attempted.
+- [AUTH DIAGNOSIS] A 20-minute, app-scoped Fly deploy token was minted only
+  for the stopped one-off worker Machine and never written or displayed. Its
+  first read still returned `Could not find App`, matching the existing
+  machine-update authorization failure. This confirms a Fly control-plane
+  authorization/path inconsistency rather than an expired local login; do not
+  broaden token scope or disturb the active collector. The token expires
+  automatically.
 - [OBSERVATION] Source windows are keeping the serial range worker busy. The
   main production-readiness concern is now measurable drain/lag under one
   lease-fenced worker, not a missing queue transaction. Keep harvesting real
