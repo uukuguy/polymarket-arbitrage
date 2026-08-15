@@ -53,6 +53,10 @@ class IncompleteQuoteGenerationError(ControlPlaneError):
     """A Quote certifier cannot publish until every batch has a receipt."""
 
 
+class OpportunityProjectionCurrentError(ControlPlaneError):
+    """The current Quote already has its complete opportunity projection."""
+
+
 class IncompleteStructureGenerationError(ControlPlaneError):
     """A Structure certifier cannot prove every admitted range is present."""
 
@@ -3872,18 +3876,23 @@ class PostgresControlPlane:
             cursor.execute("SET LOCAL statement_timeout = '5000ms'")
             cursor.execute(
                 """SELECT pointer.generation_key,
-                          admission.generation_key AS structure_generation_key
+                          admission.generation_key AS structure_generation_key,
+                          opportunity.generation_key AS opportunity_generation_key
                    FROM m1_publication_pointers AS pointer
                    JOIN m1_quote_admission_inputs AS admission
                      ON admission.generation_key =
                         'structure:' || substr(pointer.generation_key, 7)
                     AND admission.job_key = admission.generation_key || ':quote-admit'
+                   LEFT JOIN m1_opportunity_publication_pointers AS opportunity
+                     ON opportunity.pointer_key = 'opportunity:current'
                    WHERE pointer.pointer_key = 'quote:current'"""
             )
             current = cursor.fetchone()
             if current is None:
                 raise IncompleteQuoteGenerationError("current Quote generation is unavailable")
             quote_generation_key = str(current["generation_key"])
+            if str(current["opportunity_generation_key"] or "") == quote_generation_key:
+                raise OpportunityProjectionCurrentError("current Quote is already projected")
             structure_generation_key = str(current["structure_generation_key"])
             cursor.execute(
                 """SELECT input.legs, receipt.job_key, receipt.quote_digest,

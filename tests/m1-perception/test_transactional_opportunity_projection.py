@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from polyarb.control_plane.models import QuoteBatchLeg, QuoteBatchReceipt
 from polyarb.control_plane.opportunity_projection import build_opportunity_rows
 from polyarb.control_plane.opportunity_worker import TransactionalOpportunityCertifier
+from polyarb.control_plane.postgres import OpportunityProjectionCurrentError
 
 
 def test_complete_authenticated_quote_group_projects_only_positive_buy_all_edge() -> None:
@@ -15,12 +16,16 @@ def test_complete_authenticated_quote_group_projects_only_positive_buy_all_edge(
         legs=legs,
         quotes=(
             {
-                "yes_token_id": "token-a", "terminal_state": "executable",
-                "best_ask_price": 0.4, "best_ask_size": 4,
+                "yes_token_id": "token-a",
+                "terminal_state": "executable",
+                "best_ask_price": 0.4,
+                "best_ask_size": 4,
             },
             {
-                "yes_token_id": "token-b", "terminal_state": "executable",
-                "best_ask_price": 0.5, "best_ask_size": 3,
+                "yes_token_id": "token-b",
+                "terminal_state": "executable",
+                "best_ask_price": 0.5,
+                "best_ask_size": 3,
             },
         ),
         structure_observed_at_ms=1,
@@ -28,21 +33,37 @@ def test_complete_authenticated_quote_group_projects_only_positive_buy_all_edge(
         quote_quoted_at_ms=3,
     )
 
-    assert rows == ({
-        "group_id": "group-a", "event_id": "event-a", "membership_hash": "m-a",
-        "bundle_cost": 0.9, "gross_edge_bps": 1000.0, "max_bundle_size": 3.0,
-        "legs": [
-            {
-                "market_id": "market-a", "condition_id": "condition-a", "slug": "a",
-                "yes_token_id": "token-a", "ask_price": 0.4, "ask_size": 4.0,
-            },
-            {
-                "market_id": "market-b", "condition_id": "condition-b", "slug": "b",
-                "yes_token_id": "token-b", "ask_price": 0.5, "ask_size": 3.0,
-            },
-        ],
-        "structure_observed_at_ms": 1, "quote_started_at_ms": 2, "quote_quoted_at_ms": 3,
-    },)
+    assert rows == (
+        {
+            "group_id": "group-a",
+            "event_id": "event-a",
+            "membership_hash": "m-a",
+            "bundle_cost": 0.9,
+            "gross_edge_bps": 1000.0,
+            "max_bundle_size": 3.0,
+            "legs": [
+                {
+                    "market_id": "market-a",
+                    "condition_id": "condition-a",
+                    "slug": "a",
+                    "yes_token_id": "token-a",
+                    "ask_price": 0.4,
+                    "ask_size": 4.0,
+                },
+                {
+                    "market_id": "market-b",
+                    "condition_id": "condition-b",
+                    "slug": "b",
+                    "yes_token_id": "token-b",
+                    "ask_price": 0.5,
+                    "ask_size": 3.0,
+                },
+            ],
+            "structure_observed_at_ms": 1,
+            "quote_started_at_ms": 2,
+            "quote_quoted_at_ms": 3,
+        },
+    )
 
 
 def test_certifier_authenticates_r2_quote_payload_before_atomic_publish() -> None:
@@ -52,8 +73,13 @@ def test_certifier_authenticates_r2_quote_payload_before_atomic_publish() -> Non
         QuoteBatchLeg("group-a", "market-b", "condition-b", "b", "token-b", "event-a", "m-a"),
     )
     payload = (
-        b'{"structure_receipt_digest":"' + b"a" * 64 + b'","token_range_digest":"'
-        + b"b" * 64 + b'","universe_hash":"' + b"c" * 64 + b'"}\n'
+        b'{"structure_receipt_digest":"'
+        + b"a" * 64
+        + b'","token_range_digest":"'
+        + b"b" * 64
+        + b'","universe_hash":"'
+        + b"c" * 64
+        + b'"}\n'
         + (
             b'{"best_ask_price":0.4,"best_ask_size":4,'
             b'"terminal_state":"executable","yes_token_id":"token-a"}\n'
@@ -87,3 +113,22 @@ def test_certifier_authenticates_r2_quote_payload_before_atomic_publish() -> Non
     assert result.job_key == "quote:" + "a" * 64
     assert result.outcome == "certified:" + "e" * 64
     assert control_plane.published["rows"][0]["gross_edge_bps"] == 1000.0
+
+
+def test_certifier_skips_r2_when_current_quote_is_already_projected() -> None:
+    class ControlPlane:
+        def current_quote_projection_inputs(self):
+            raise OpportunityProjectionCurrentError("already projected")
+
+    class Client:
+        def get_object(self, **kwargs):
+            raise AssertionError(f"R2 must not be read: {kwargs}")
+
+    result = TransactionalOpportunityCertifier(
+        control_plane=ControlPlane(),
+        object_client=Client(),
+        bucket="bucket",
+        now=lambda: datetime(2030, 1, 1, tzinfo=UTC),
+    ).run_once()
+
+    assert result.outcome == "current"

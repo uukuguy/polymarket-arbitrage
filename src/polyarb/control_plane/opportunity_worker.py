@@ -8,7 +8,11 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from .opportunity_projection import build_opportunity_rows, parse_quote_batch_bytes
-from .postgres import IncompleteQuoteGenerationError, PostgresControlPlane
+from .postgres import (
+    IncompleteQuoteGenerationError,
+    OpportunityProjectionCurrentError,
+    PostgresControlPlane,
+)
 
 
 class _Body(Protocol):
@@ -48,6 +52,8 @@ class TransactionalOpportunityCertifier:
             quote_generation, structure_generation, batches = (
                 self._control_plane.current_quote_projection_inputs()
             )
+        except OpportunityProjectionCurrentError:
+            return OpportunityCertifierResult(job_key=None, outcome="current")
         except IncompleteQuoteGenerationError:
             return OpportunityCertifierResult(job_key=None, outcome="idle")
         all_legs = []
