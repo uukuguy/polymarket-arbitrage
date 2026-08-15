@@ -9104,3 +9104,20 @@ all work staging-only and leave Telegram/production L1/L2 untouched.
 [NEXT] Verify the next certifier lease returns `waiting` without a new incident,
 then finish ranges → Structure certification → Quote admission/batches and
 the remaining fenced-takeover evidence. Keep Telegram and production untouched.
+
+## SESSION 251 — 2026-08-15 (certifier wait confirmed; range throughput finding)
+
+- [LIVE VERIFIED] The old certifier circuit reached its natural epoch-7 probe
+  under `m1-structure-wait-ac5cca4b`. It returned to retryable waiting without
+  creating a seventh incomplete-generation incident. Range receipts reached
+  90/1,016 and publication pointers remain zero.
+- [THROUGHPUT ROOT CAUSE] `TransactionalControlPlaneScheduler.run_tick()`
+  limits work to one turn of each of its eight worker kinds. With the current
+  `--max-turns 8 --interval-seconds 2`, a healthy Structure range backlog gets
+  only one range every two seconds; no Postgres or R2 contention was observed.
+  This cannot sustain v3's page-component range cardinality.
+
+[NEXT] Obtain approval for a bounded range-specific scheduler turn budget,
+then implement it with TDD, deploy staging-only, demonstrate sustained drain,
+and continue certification → Quote → takeover acceptance. Keep Telegram and
+production untouched.

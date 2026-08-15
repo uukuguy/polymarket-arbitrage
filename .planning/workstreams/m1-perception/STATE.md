@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: v3 downstream range drain has reached 57 of 1,016 receipts; Structure certifier now treats incomplete coverage as ordinary waiting and staging awaits its next natural circuit probe
-last_updated: "2026-08-15T22:20:00Z"
+stopped_at: v3 downstream range drain has reached 90 of 1,016 receipts; certifier's natural epoch-7 probe confirmed incomplete coverage waits without creating a new incident, while scheduler range throughput is under design review
+last_updated: "2026-08-15T22:30:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -48,6 +48,12 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   fenced wait with no incident. Its first live result must wait for the prior
   circuit's already-persisted next-probe timestamp; do not edit the database
   to shortcut that recovery proof.
+- **Throughput finding:** a healthy staging drain advances one range per
+  two-second scheduler tick because `run_tick()` caps turns at the eight
+  distinct worker kinds and `max_turns=8`; it is not a Postgres/R2 lock.
+  A 1,016-range v3 generation would therefore outpace continuous source
+  cadence. Design a bounded range-specific turn budget before changing this
+  production-relevant scheduler behavior.
 
 - **Staging credential containment:** API health is passing with an isolated
   replacement DSN, and recovery machine `48e3104c979578` is the only active
