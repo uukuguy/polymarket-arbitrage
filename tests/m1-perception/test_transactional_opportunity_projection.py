@@ -81,7 +81,9 @@ def test_certifier_authenticates_r2_quote_payload_before_atomic_publish() -> Non
             return {"Body": type("Body", (), {"read": lambda self: payload})()}
 
     control_plane = ControlPlane()
-    assert TransactionalOpportunityCertifier(
+    result = TransactionalOpportunityCertifier(
         control_plane=control_plane, object_client=Client(), bucket="bucket", now=lambda: quoted_at
-    ).run_once() == "e" * 64
+    ).run_once()
+    assert result.job_key == "quote:" + "a" * 64
+    assert result.outcome == "certified:" + "e" * 64
     assert control_plane.published["rows"][0]["gross_edge_bps"] == 1000.0

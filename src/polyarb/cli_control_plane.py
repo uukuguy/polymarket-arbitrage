@@ -23,6 +23,7 @@ from polyarb.control_plane.alert_delivery import TransactionalAlertDeliveryWorke
 from polyarb.control_plane.fault_soak import verify_fault_soak
 from polyarb.control_plane.faults import IntentionalStagingRetryFault
 from polyarb.control_plane.models import JobLease
+from polyarb.control_plane.opportunity_worker import TransactionalOpportunityCertifier
 from polyarb.control_plane.postgres import PostgresControlPlane
 from polyarb.control_plane.quote_admission import TransactionalQuoteAdmitter
 from polyarb.control_plane.quote_worker import (
@@ -523,6 +524,12 @@ def _transactional_scheduler(
         ),
         quote_worker=quote_worker,
         quote_certifier=quote_certifier,
+        opportunity_certifier=TransactionalOpportunityCertifier(
+            control_plane=control_plane,
+            object_client=object_client,
+            bucket=bucket,
+            now=lambda: datetime.now(UTC),
+        ),
         max_turns=max_turns,
         structure_materializer_turns=structure_materializer_turns,
         structure_range_turns=structure_range_turns,

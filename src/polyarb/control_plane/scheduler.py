@@ -28,6 +28,7 @@ class TransactionalControlPlaneScheduler:
         quote_admitter: _Worker,
         quote_worker: _Worker,
         quote_certifier: _Worker,
+        opportunity_certifier: _Worker | None = None,
         max_turns: int,
         structure_materializer_turns: int = 0,
         structure_range_turns: int = 0,
@@ -60,6 +61,8 @@ class TransactionalControlPlaneScheduler:
         if include_quote_batch:
             workers.append(("quote-batch", quote_worker))
         workers.append(("quote-certify", quote_certifier))
+        if opportunity_certifier is not None:
+            workers.append(("opportunity-certify", opportunity_certifier))
         self._workers = tuple(workers)
         self._max_turns = max_turns
         self._structure_materializer_worker = (
