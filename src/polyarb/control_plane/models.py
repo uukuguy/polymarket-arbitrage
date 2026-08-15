@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
+from typing import Literal
 
 
 class JobState(StrEnum):
@@ -18,6 +19,20 @@ class JobState(StrEnum):
     CHECKPOINTED = "checkpointed"
     SUCCEEDED = "succeeded"
     QUARANTINED = "quarantined"
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAdmissionDecision:
+    """One fenced cadence-admission result, including deliberate backpressure."""
+
+    state: Literal["admitted", "busy", "backpressured:structure", "backpressured:quote"]
+    job_key: str | None
+
+    def __post_init__(self) -> None:
+        if self.state == "admitted" and not self.job_key:
+            raise ValueError("admitted source window requires its first job key")
+        if self.state != "admitted" and self.job_key is not None:
+            raise ValueError("non-admitted source window cannot expose a job key")
 
 
 @dataclass(frozen=True, slots=True)

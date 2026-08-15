@@ -154,6 +154,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     serve.add_argument("--max-turns", type=int, default=4)
     serve.add_argument("--pool-turns", type=int, default=1)
+    serve.add_argument("--structure-high-water", type=int, default=2_000)
+    serve.add_argument("--quote-high-water", type=int, default=512)
     serve.add_argument("--structure-materializer-turns", type=int, default=0)
     serve.add_argument("--structure-range-turns", type=int, default=0)
     serve.add_argument("--fault-crash-after-r2-upload-job-key")
@@ -356,11 +358,16 @@ def _transactional_structure_source_materializer(
 
 def _transactional_structure_source_admitter(
     control_plane: PostgresControlPlane,
+    *,
+    structure_high_water: int = 2_000,
+    quote_high_water: int = 512,
 ) -> TransactionalStructureSourceAdmitter:
     """Open cadence windows only inside the transactional worker service."""
     return TransactionalStructureSourceAdmitter(
         control_plane=control_plane,
         cadence_seconds=300,
+        structure_high_water=structure_high_water,
+        quote_high_water=quote_high_water,
         now=lambda: datetime.now(UTC),
     )
 
@@ -389,6 +396,8 @@ def _transactional_scheduler(
     max_turns: int,
     structure_materializer_turns: int,
     structure_range_turns: int,
+    structure_high_water: int = 2_000,
+    quote_high_water: int = 512,
     include_structure_range: bool = True,
     include_quote_batch: bool = True,
     crash_after_r2_upload: Callable[[JobLease], None] | None = None,
@@ -404,7 +413,11 @@ def _transactional_scheduler(
     )
     object_client, bucket = _structure_object_client()
     return TransactionalControlPlaneScheduler(
-        structure_source_admitter=_transactional_structure_source_admitter(control_plane),
+        structure_source_admitter=_transactional_structure_source_admitter(
+            control_plane,
+            structure_high_water=structure_high_water,
+            quote_high_water=quote_high_water,
+        ),
         structure_source_worker=_transactional_structure_source_worker(
             control_plane, worker_id=f"{worker_id}:structure-source"
         ),
@@ -757,13 +770,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             if (
                 args.max_turns <= 0
                 or args.pool_turns <= 0
+                or args.structure_high_water <= 0
+                or args.quote_high_water <= 0
                 or args.structure_materializer_turns < 0
                 or args.structure_range_turns < 0
                 or args.interval_seconds <= 0
             ):
                 print(
                     "--max-turns and --interval-seconds must be positive; "
-                    "--pool-turns must be positive; optional turn budgets must be non-negative",
+                    "--pool-turns and high-water bounds must be positive; "
+                    "optional turn budgets must be non-negative",
                     file=sys.stderr,
                 )
                 return 2
@@ -788,6 +804,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     max_turns=args.max_turns,
                     structure_materializer_turns=args.structure_materializer_turns,
                     structure_range_turns=args.structure_range_turns,
+                    structure_high_water=args.structure_high_water,
+                    quote_high_water=args.quote_high_water,
                     include_structure_range=args.worker_role == "all",
                     include_quote_batch=args.worker_role == "all",
                     crash_after_r2_upload=crash_after_r2_upload,
@@ -795,6 +813,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     acceptance_run_id=args.acceptance_run_id,
                 )
             elif args.worker_role == "structure-range":
+                if args.structure_high_water != 2_000 or args.quote_high_water != 512:
+                    print(
+                        "pool roles cannot configure source admission high-water bounds",
+                        file=sys.stderr,
+                    )
+                    return 2
                 scheduler = TransactionalWorkerLoop(
                     worker_name="structure-range",
                     worker=_transactional_structure_worker(
@@ -807,6 +831,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     turns_per_tick=args.pool_turns,
                 )
             else:
+                if args.structure_high_water != 2_000 or args.quote_high_water != 512:
+                    print(
+                        "pool roles cannot configure source admission high-water bounds",
+                        file=sys.stderr,
+                    )
+                    return 2
                 quote_worker, _quote_certifier = _transactional_quote_workers(
                     control_plane,
                     worker_id=f"{args.worker_id}:quote-batch",

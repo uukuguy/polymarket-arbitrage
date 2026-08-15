@@ -806,21 +806,33 @@ class TransactionalStructureSourceAdmitter:
         *,
         control_plane: PostgresControlPlane,
         cadence_seconds: int,
+        structure_high_water: int = 2_000,
+        quote_high_water: int = 512,
         now: Callable[[], datetime],
     ) -> None:
-        if isinstance(cadence_seconds, bool) or cadence_seconds <= 0:
-            raise ValueError("cadence_seconds must be positive")
+        if (
+            isinstance(cadence_seconds, bool)
+            or cadence_seconds <= 0
+            or isinstance(structure_high_water, bool)
+            or structure_high_water <= 0
+            or isinstance(quote_high_water, bool)
+            or quote_high_water <= 0
+        ):
+            raise ValueError("source admission bounds must be positive")
         self._control_plane = control_plane
         self._cadence_seconds = cadence_seconds
+        self._structure_high_water = structure_high_water
+        self._quote_high_water = quote_high_water
         self._now = now
 
     async def run_once(self) -> StructureWorkerResult:
-        spec = self._control_plane.admit_due_structure_source_window(
-            cadence_seconds=self._cadence_seconds, now=self._now()
+        decision = self._control_plane.admit_due_structure_source_window(
+            cadence_seconds=self._cadence_seconds,
+            structure_high_water=self._structure_high_water,
+            quote_high_water=self._quote_high_water,
+            now=self._now(),
         )
-        if spec is None:
-            return StructureWorkerResult(job_key=None, outcome="idle")
-        return StructureWorkerResult(job_key=spec.job_key, outcome="admitted")
+        return StructureWorkerResult(job_key=decision.job_key, outcome=decision.state)
 
 
 def _canonical_json(value: Mapping[str, object]) -> bytes:

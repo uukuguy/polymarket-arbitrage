@@ -8,7 +8,12 @@ from datetime import UTC, datetime
 import pytest
 
 from polyarb.clients.gamma_client import EventPage, MarketPage, PaginationIntegrityError
-from polyarb.control_plane.models import JobLease, JobState, StructureSourcePageSpec
+from polyarb.control_plane.models import (
+    JobLease,
+    JobState,
+    SourceAdmissionDecision,
+    StructureSourcePageSpec,
+)
 from polyarb.control_plane.structure_source import (
     DEFAULT_MAX_MARKET_BATCHES,
     StructureSourcePageArtifact,
@@ -394,16 +399,21 @@ def test_source_admitter_creates_one_current_window_and_never_overlaps() -> None
         def __init__(self) -> None:
             self.calls: list[tuple[int, datetime]] = []
 
-        def admit_due_structure_source_window(self, *, cadence_seconds: int, now: datetime):
+        def admit_due_structure_source_window(
+            self,
+            *,
+            cadence_seconds: int,
+            structure_high_water: int,
+            quote_high_water: int,
+            now: datetime,
+        ):
             self.calls.append((cadence_seconds, now))
             if len(self.calls) == 1:
-                return StructureSourcePageSpec(
-                    window_key="structure-source:123",
-                    stream="events",
-                    ordinal=0,
-                    requested_cursor=None,
+                return SourceAdmissionDecision(
+                    state="admitted",
+                    job_key="structure-source:123:fetch:events:0",
                 )
-            return None
+            return SourceAdmissionDecision(state="busy", job_key=None)
 
     now = datetime(2026, 8, 12, tzinfo=UTC)
     worker = TransactionalStructureSourceAdmitter(
@@ -413,7 +423,29 @@ def test_source_admitter_creates_one_current_window_and_never_overlaps() -> None
     assert asyncio.run(worker.run_once()) == StructureWorkerResult(
         job_key="structure-source:123:fetch:events:0", outcome="admitted"
     )
-    assert asyncio.run(worker.run_once()) == StructureWorkerResult(job_key=None, outcome="idle")
+    assert asyncio.run(worker.run_once()) == StructureWorkerResult(job_key=None, outcome="busy")
+
+
+def test_source_admitter_returns_quote_backpressure_without_claiming_gamma_work() -> None:
+    class ControlPlane:
+        def admit_due_structure_source_window(self, **_kwargs):
+            return type(
+                "Decision",
+                (),
+                {"state": "backpressured:quote", "job_key": None},
+            )()
+
+    worker = TransactionalStructureSourceAdmitter(
+        control_plane=ControlPlane(),
+        cadence_seconds=300,
+        structure_high_water=10,
+        quote_high_water=2,
+        now=lambda: NOW,
+    )
+
+    assert asyncio.run(worker.run_once()) == StructureWorkerResult(
+        job_key=None, outcome="backpressured:quote"
+    )
 
 
 def test_source_worker_fetches_one_event_page_uploads_then_records_receipt() -> None:

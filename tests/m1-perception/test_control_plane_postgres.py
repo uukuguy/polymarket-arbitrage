@@ -313,22 +313,15 @@ def test_due_source_window_admission_is_bucket_idempotent_and_never_overlaps(
 ) -> None:
     now = _now()
     first = control_plane.admit_due_structure_source_window(cadence_seconds=300, now=now)
-    assert first is not None
-    assert first.window_key == "structure-source:300:6311664"
-    assert first.stream == "events"
-    assert (
-        control_plane.admit_due_structure_source_window(
-            cadence_seconds=300, now=now + timedelta(seconds=1)
-        )
-        is None
-    )
+    assert first.state == "admitted"
+    assert first.job_key == "structure-source:300:6311664:fetch:events:0"
+    assert control_plane.admit_due_structure_source_window(
+        cadence_seconds=300, now=now + timedelta(seconds=1)
+    ).state == "busy"
     # Even a later cadence bucket cannot overlap the unfinished traversal.
-    assert (
-        control_plane.admit_due_structure_source_window(
-            cadence_seconds=300, now=now + timedelta(seconds=301)
-        )
-        is None
-    )
+    assert control_plane.admit_due_structure_source_window(
+        cadence_seconds=300, now=now + timedelta(seconds=301)
+    ).state == "busy"
 
 
 def test_source_page_limit_quarantine_releases_later_admission_bucket(
@@ -362,8 +355,8 @@ def test_source_page_limit_quarantine_releases_later_admission_bucket(
     successor = control_plane.admit_due_structure_source_window(
         cadence_seconds=300, now=now + timedelta(seconds=301)
     )
-    assert successor is not None
-    assert successor.window_key == "structure-source:300:6311665"
+    assert successor.state == "admitted"
+    assert successor.job_key == "structure-source:300:6311665:fetch:events:0"
 
 
 def test_source_quarantine_marks_unleased_sibling_pages_terminal(
@@ -434,7 +427,7 @@ def test_source_claim_skips_orphaned_jobs_from_a_quarantined_window(
     successor = control_plane.admit_due_structure_source_window(
         cadence_seconds=300, now=now + timedelta(seconds=301)
     )
-    assert successor is not None
+    assert successor.state == "admitted"
 
     claimed = control_plane.claim_job(
         worker_id="source-worker-b",
@@ -474,6 +467,28 @@ def test_terminal_event_page_creates_first_market_page(
     assert market.stream == "markets"
     assert market.ordinal == 0
     assert market.requested_cursor is None
+
+
+def test_due_source_admission_backpressures_before_window_insert_when_range_queue_is_full(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="structure:backpressure:normalize:0",
+        job_type="structure-normalize",
+        input_identity="backpressure",
+        now=now,
+    )
+
+    decision = control_plane.admit_due_structure_source_window(
+        cadence_seconds=300,
+        now=now,
+        structure_high_water=1,
+        quote_high_water=10,
+    )
+
+    assert decision.state == "backpressured:structure"
+    assert decision.job_key is None
 
 
 def test_terminal_event_page_atomically_admits_immutable_market_batches(

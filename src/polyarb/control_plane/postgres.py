@@ -21,6 +21,7 @@ from .models import (
     QuoteBatchLeg,
     QuoteBatchReceipt,
     QuoteBatchSpec,
+    SourceAdmissionDecision,
     StructureRangeReceipt,
     StructureRangeSpec,
     StructureSourcePageSpec,
@@ -243,15 +244,24 @@ class PostgresControlPlane:
         *,
         cadence_seconds: int,
         now: datetime,
-    ) -> StructureSourcePageSpec | None:
+        structure_high_water: int = 2_000,
+        quote_high_water: int = 512,
+    ) -> SourceAdmissionDecision:
         """Admit one deterministic current window unless a source traversal is active.
 
         The advisory transaction lock gives every replaceable scheduler process
         the same admission boundary. A time bucket is the durable idempotency
         key: restarts cannot create another collection in the same cadence.
         """
-        if isinstance(cadence_seconds, bool) or cadence_seconds <= 0:
-            raise ValueError("cadence_seconds must be positive")
+        if (
+            isinstance(cadence_seconds, bool)
+            or cadence_seconds <= 0
+            or isinstance(structure_high_water, bool)
+            or structure_high_water <= 0
+            or isinstance(quote_high_water, bool)
+            or quote_high_water <= 0
+        ):
+            raise ValueError("source admission bounds must be positive")
         self._validate_aware(now, "now")
         bucket = int(now.timestamp()) // cadence_seconds
         window_key = f"structure-source:{cadence_seconds}:{bucket}"
@@ -271,6 +281,26 @@ class PostgresControlPlane:
             )
             cursor.execute(
                 """
+                SELECT count(*) AS count FROM m1_jobs
+                WHERE job_type = 'structure-normalize'
+                  AND state IN ('runnable', 'retryable', 'leased', 'checkpointed')
+                """
+            )
+            structure_unfinished = cursor.fetchone()
+            if int(structure_unfinished["count"]) >= structure_high_water:
+                return SourceAdmissionDecision(state="backpressured:structure", job_key=None)
+            cursor.execute(
+                """
+                SELECT count(*) AS count FROM m1_jobs
+                WHERE job_type = 'quote-batch'
+                  AND state IN ('runnable', 'retryable', 'leased', 'checkpointed')
+                """
+            )
+            quote_unfinished = cursor.fetchone()
+            if int(quote_unfinished["count"]) >= quote_high_water:
+                return SourceAdmissionDecision(state="backpressured:quote", job_key=None)
+            cursor.execute(
+                """
                 SELECT window_key FROM m1_structure_source_windows
                 WHERE state IN ('running', 'events-complete')
                 ORDER BY admitted_at
@@ -279,13 +309,13 @@ class PostgresControlPlane:
                 """
             )
             if cursor.fetchone() is not None:
-                return None
+                return SourceAdmissionDecision(state="busy", job_key=None)
             cursor.execute(
                 "SELECT window_key FROM m1_structure_source_windows WHERE window_key = %s",
                 (window_key,),
             )
             if cursor.fetchone() is not None:
-                return None
+                return SourceAdmissionDecision(state="busy", job_key=None)
             cursor.execute(
                 """
                 INSERT INTO m1_structure_source_windows (
@@ -295,7 +325,7 @@ class PostgresControlPlane:
                 (window_key, now, now),
             )
             self._enqueue_structure_source_page_cursor(cursor, spec=first, now=now)
-        return first
+        return SourceAdmissionDecision(state="admitted", job_key=first.job_key)
 
     def structure_source_page_spec(self, job_key: str) -> StructureSourcePageSpec:
         """Load an admitted source page exactly as a replacement worker sees it."""
