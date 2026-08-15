@@ -920,7 +920,7 @@ class TransactionalStructureSourceMaterializer:
         )
         selected = source_pages[start : start + self._shard_page_batch_size]
         if not selected:
-            raise StructureSourceError("sharded source window awaits manifest finalization")
+            return await self._finalize_event_shard_manifest(lease, source_pages)
         pages = await self._read_source_pages(selected)
         source_digest = self._control_plane.structure_source_window_digest(lease.input_identity)
         receipts: list[StructureShardReceipt] = []
@@ -975,6 +975,40 @@ class TransactionalStructureSourceMaterializer:
         )
         return StructureWorkerResult(job_key=lease.job_key, outcome="checkpointed")
 
+    async def _finalize_event_shard_manifest(
+        self,
+        lease: JobLease,
+        source_pages: Sequence[tuple[StructureSourcePageSpec, str, str]],
+    ) -> StructureWorkerResult:
+        source_digest = self._control_plane.structure_source_window_digest(lease.input_identity)
+        identity, manifest, ranges = materialize_sharded_source_manifest(
+            window_key=lease.input_identity,
+            source_digest=source_digest,
+            expected_page_count=len(source_pages),
+            batches=self._control_plane.structure_materializer_batches(lease.input_identity),
+            read_batch=lambda key: self._read_object_bytes(key),
+        )
+        await asyncio.to_thread(
+            upload_structure_bundle_artifact,
+            self._object_client,
+            bucket=self._bucket,
+            artifact=manifest,
+        )
+        self._control_plane.admit_structure_source_bundle(
+            lease,
+            identity=identity,
+            bundle=manifest,
+            ranges=ranges,
+            now=self._now(),
+        )
+        self._control_plane.record_job_recovery(
+            lease,
+            component="structure-materialize",
+            channels=incident_alert_channels(Settings()),
+            now=self._now(),
+        )
+        return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
+
     async def _read_source_pages(
         self,
         source_pages: Sequence[tuple[StructureSourcePageSpec, str, str]],
@@ -998,6 +1032,10 @@ class TransactionalStructureSourceMaterializer:
         )
 
     def _read_page_artifact(self, *, key: str, digest: str) -> StructureSourcePageArtifact:
+        payload = self._read_object_bytes(key)
+        return StructureSourcePageArtifact(payload=payload, sha256=digest, key=key)
+
+    def _read_object_bytes(self, key: str) -> bytes:
         response = self._object_client.get_object(Bucket=self._bucket, Key=key)
         body = response.get("Body")
         if body is None or not hasattr(body, "read"):
@@ -1005,7 +1043,7 @@ class TransactionalStructureSourceMaterializer:
         payload = body.read()
         if not isinstance(payload, bytes):
             raise StructureSourceError("source page artifact body is not bytes")
-        return StructureSourcePageArtifact(payload=payload, sha256=digest, key=key)
+        return payload
 
 
 def parse_structure_bundle_identity(bundle: StructureBundleArtifact) -> StructureBundleIdentity:
