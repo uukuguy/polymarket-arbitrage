@@ -9334,3 +9334,25 @@ least-privilege deploy token or obtain the current alert-app DB secret by an
 approved secret-management route; then run only the named scoped alert worker.
 After that, perform Quote retry-circuit and R2-before-receipt takeover evidence
 and start the 24-hour soak window.
+
+## SESSION 261 — 2026-08-15 (production throughput gate exposed)
+
+- [LIVE/RESTORED] A Quote retry-fault run was refused before any job claim by
+  the exact acknowledgement guard, then the worker was restored to its normal
+  no-fault command. The API subsequently showed new source and Structure range
+  receipts, confirming collection resumed. The rejected run is not acceptance
+  evidence.
+- [LIVE/READ-PLANE] The independent API `/healthz` and
+  `/perception/control-plane` are readable while the worker runs. It reports
+  `9327` runnable jobs, `67` retryable jobs, `74` open circuits, and an oldest
+  runnable age of about thirteen hours. Quote has `292` succeeded and `514`
+  runnable batch jobs; Structure has `4049` runnable range jobs.
+- [DECISION] This contradicts any claim that the current single serial worker
+  is production-sustainable. Do not start a 24-hour soak or call the phase
+  production-ready while backlog is growing. The next implementation must add
+  bounded multi-worker throughput/backpressure and expose a safe operator view
+  of the next runnable Quote key; exact Quote fault work follows that repair.
+
+[NEXT] Design the smallest lease-fenced cloud-worker topology that drains
+Structure/Quote faster than admission, keeps every mutation transactional, and
+provides an operator-readable per-kind queue lag and next-runnable identity.
