@@ -14,7 +14,12 @@ from .alert_delivery import incident_alert_channels
 from .models import QuoteBatchLeg
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .quote_worker import QuoteBatchWorkerResult
-from .structure_artifact import parse_structure_bundle_bytes
+from .structure_artifact import (
+    StructureBundleError,
+    parse_structure_bundle_bytes,
+    parse_structure_shard_bytes,
+    parse_structure_shard_manifest_bytes,
+)
 
 
 class QuoteAdmissionError(RuntimeError):
@@ -29,8 +34,15 @@ def quote_legs_from_structure_components(
     components: Mapping[str, Sequence[Mapping[str, object]]],
 ) -> tuple[QuoteBatchLeg, ...]:
     """Select the exact CLOB YES legs eligible in one immutable Structure truth."""
+    return quote_legs_from_market_rows(components.get("markets", ()))
+
+
+def quote_legs_from_market_rows(
+    markets: Sequence[Mapping[str, object]], *, require_nonempty: bool = True
+) -> tuple[QuoteBatchLeg, ...]:
+    """Select Quote legs from one bounded market shard or legacy component."""
     legs: list[QuoteBatchLeg] = []
-    for market in components.get("markets", ()):
+    for market in markets:
         if (
             market.get("active") is not True
             or market.get("closed") is not False
@@ -66,7 +78,7 @@ def quote_legs_from_structure_components(
     by_token = {leg.yes_token_id: leg for leg in legs}
     if len(by_token) != len(legs):
         raise QuoteAdmissionError("Structure bundle has duplicate YES token")
-    if not by_token:
+    if require_nonempty and not by_token:
         raise QuoteAdmissionError("Structure bundle has no eligible Quote legs")
     return tuple(by_token[token] for token in sorted(by_token))
 
@@ -144,10 +156,19 @@ class TransactionalQuoteAdmitter:
                 lease.job_key
             )
             payload = self._read_bundle(bundle_key)
-            _identity, components = parse_structure_bundle_bytes(
-                payload, expected_sha256=bundle_digest
-            )
-            legs = quote_legs_from_structure_components(components)
+            try:
+                identity, components = parse_structure_bundle_bytes(
+                    payload, expected_sha256=bundle_digest
+                )
+            except StructureBundleError:
+                identity, shards = parse_structure_shard_manifest_bytes(
+                    payload, expected_sha256=bundle_digest
+                )
+                if identity.source_kind != "gamma-source-window-events-v3-sharded":
+                    raise
+                legs = self._read_v3_quote_legs(shards)
+            else:
+                legs = quote_legs_from_structure_components(components)
             self._control_plane.admit_quote_generation(
                 lease,
                 structure_receipt_digest=bundle_digest,
@@ -194,3 +215,23 @@ class TransactionalQuoteAdmitter:
         if not isinstance(payload, bytes):
             raise QuoteAdmissionError("Quote admission bundle body invalid")
         return payload
+
+    def _read_v3_quote_legs(self, shards: Sequence[object]) -> tuple[QuoteBatchLeg, ...]:
+        by_token: dict[str, QuoteBatchLeg] = {}
+        for shard in sorted(
+            (shard for shard in shards if getattr(shard, "component") == "markets"),
+            key=lambda shard: getattr(shard, "ordinal"),
+        ):
+            payload = self._read_bundle(getattr(shard, "artifact_key"))
+            header, rows = parse_structure_shard_bytes(
+                payload, expected_sha256=getattr(shard, "artifact_digest")
+            )
+            if header.component != "markets" or header.ordinal != getattr(shard, "ordinal"):
+                raise QuoteAdmissionError("Quote admission v3 shard identity invalid")
+            for leg in quote_legs_from_market_rows(rows, require_nonempty=False):
+                existing = by_token.setdefault(leg.yes_token_id, leg)
+                if existing != leg:
+                    raise QuoteAdmissionError("Structure bundle has duplicate YES token")
+        if not by_token:
+            raise QuoteAdmissionError("Structure bundle has no eligible Quote legs")
+        return tuple(by_token[token] for token in sorted(by_token))
