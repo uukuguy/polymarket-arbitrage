@@ -12,7 +12,7 @@ from polyarb.routing.neg_risk_quote_collector import BooksReader, _build_termina
 from polyarb.routing.neg_risk_quote_store import UniverseLeg
 
 from .alert_delivery import incident_alert_channels
-from .models import JobState, QuoteBatchSpec
+from .models import JobLease, JobState, QuoteBatchSpec
 from .postgres import (
     IncompleteQuoteGenerationError,
     PostgresControlPlane,
@@ -55,6 +55,7 @@ class TransactionalQuoteBatchWorker:
         now: Callable[[], datetime],
         lease_seconds: int = 120,
         retry_delay: timedelta = timedelta(seconds=15),
+        crash_after_r2_upload: Callable[[JobLease], None] | None = None,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
@@ -68,6 +69,7 @@ class TransactionalQuoteBatchWorker:
         self._now = now
         self._lease_seconds = lease_seconds
         self._retry_delay = retry_delay
+        self._crash_after_r2_upload = crash_after_r2_upload
 
     async def run_once(self) -> QuoteBatchWorkerResult:
         """Complete one recovery-safe batch; never rebuild input from SQLite."""
@@ -90,6 +92,8 @@ class TransactionalQuoteBatchWorker:
             if not batch.legs:
                 raise QuoteBatchWorkerError("quote-batch-leg-input-unavailable")
             artifact, successful_count = await self._fetch_artifact(batch)
+            if self._crash_after_r2_upload is not None:
+                self._crash_after_r2_upload(lease)
             self._control_plane.record_quote_batch(
                 lease,
                 token_range_digest=batch.token_range_digest,

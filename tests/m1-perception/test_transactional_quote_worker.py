@@ -131,6 +131,33 @@ def test_transactional_worker_uploads_then_records_and_finishes() -> None:
     assert control_plane.finished == [JobState.SUCCEEDED]
 
 
+def test_quote_fault_hook_crashes_after_verified_upload_before_receipt() -> None:
+    batch = _batch()
+    control_plane = FakeControlPlane(batch)
+    objects = FakeObjectClient()
+    observed: list[str] = []
+    worker = TransactionalQuoteBatchWorker(
+        control_plane=control_plane,
+        reader=FakeReader(),
+        object_client=objects,
+        bucket="quotes",
+        worker_id="worker-a",
+        now=lambda: NOW,
+        crash_after_r2_upload=lambda lease: (
+            observed.append(lease.job_key),
+            (_ for _ in ()).throw(KeyboardInterrupt("staging fault")),
+        )[1],
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="staging fault"):
+        asyncio.run(worker.run_once())
+
+    assert objects.object
+    assert observed == [batch.job_key]
+    assert control_plane.recorded is None
+    assert control_plane.finished == []
+
+
 def test_transactional_worker_finishes_existing_receipt_without_refetch() -> None:
     control_plane = FakeControlPlane(_batch(), prior=object())
     reader = FakeReader()

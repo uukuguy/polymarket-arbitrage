@@ -156,6 +156,32 @@ def test_transactional_structure_worker_reads_frozen_r2_range_then_records() -> 
     assert control_plane.finished == [JobState.SUCCEEDED]
 
 
+def test_structure_fault_hook_crashes_after_verified_upload_before_receipt() -> None:
+    bundle = _bundle()
+    control_plane = FakeControlPlane(_spec(bundle))
+    objects = FakeObjectClient(bundle)
+    observed: list[str] = []
+    worker = TransactionalStructureWorker(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="structure",
+        worker_id="worker-a",
+        now=lambda: NOW,
+        crash_after_r2_upload=lambda lease: (
+            observed.append(lease.job_key),
+            (_ for _ in ()).throw(KeyboardInterrupt("staging fault")),
+        )[1],
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="staging fault"):
+        asyncio.run(worker.run_once())
+
+    assert objects.upload
+    assert observed == [_spec(bundle).job_key]
+    assert control_plane.recorded is None
+    assert control_plane.finished == []
+
+
 def test_transactional_structure_worker_recovers_receipt_without_r2_read() -> None:
     bundle = _bundle()
     control_plane = FakeControlPlane(_spec(bundle), prior=object())

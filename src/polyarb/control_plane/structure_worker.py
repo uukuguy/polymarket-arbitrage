@@ -10,7 +10,7 @@ from typing import Any, Protocol
 from polyarb.config import Settings
 
 from .alert_delivery import incident_alert_channels
-from .models import JobState, StructureRangeSpec
+from .models import JobLease, JobState, StructureRangeSpec
 from .postgres import IncompleteStructureGenerationError, PostgresControlPlane, StaleLeaseError
 from .structure_artifact import (
     StructureBundleError,
@@ -63,6 +63,7 @@ class TransactionalStructureWorker:
         now: Callable[[], datetime],
         lease_seconds: int = 120,
         retry_delay: timedelta = timedelta(seconds=15),
+        crash_after_r2_upload: Callable[[JobLease], None] | None = None,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
@@ -75,6 +76,7 @@ class TransactionalStructureWorker:
         self._now = now
         self._lease_seconds = lease_seconds
         self._retry_delay = retry_delay
+        self._crash_after_r2_upload = crash_after_r2_upload
 
     async def run_once(self) -> StructureWorkerResult:
         lease = self._control_plane.claim_job(
@@ -92,6 +94,8 @@ class TransactionalStructureWorker:
         try:
             spec = self._control_plane.structure_range_spec(lease.job_key)
             artifact, record_count = self._process_range(spec)
+            if self._crash_after_r2_upload is not None:
+                self._crash_after_r2_upload(lease)
             self._control_plane.record_structure_range(
                 lease,
                 range_digest=spec.range_digest,

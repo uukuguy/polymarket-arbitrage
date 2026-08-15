@@ -8,7 +8,7 @@ import json
 import os
 import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +19,7 @@ from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
 from polyarb.control_plane.alert_delivery import TransactionalAlertDeliveryWorker
 from polyarb.control_plane.fault_soak import verify_fault_soak
+from polyarb.control_plane.models import JobLease
 from polyarb.control_plane.postgres import PostgresControlPlane
 from polyarb.control_plane.quote_admission import TransactionalQuoteAdmitter
 from polyarb.control_plane.quote_worker import (
@@ -49,6 +50,8 @@ from polyarb.control_plane.structure_worker import (
     TransactionalStructureWorker,
 )
 from polyarb.storage.r2_sync import _build_client
+
+_R2_UPLOAD_FAULT_ACK = "staging-r2-upload-before-receipt"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -128,6 +131,8 @@ def _parser() -> argparse.ArgumentParser:
     tick_once.add_argument("--max-turns", type=int, default=4)
     tick_once.add_argument("--structure-materializer-turns", type=int, default=0)
     tick_once.add_argument("--structure-range-turns", type=int, default=0)
+    tick_once.add_argument("--fault-crash-after-r2-upload-job-key")
+    tick_once.add_argument("--fault-injection-ack")
     tick_once.add_argument("--json", action="store_true")
     serve = subcommands.add_parser(
         "serve",
@@ -138,6 +143,8 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--max-turns", type=int, default=4)
     serve.add_argument("--structure-materializer-turns", type=int, default=0)
     serve.add_argument("--structure-range-turns", type=int, default=0)
+    serve.add_argument("--fault-crash-after-r2-upload-job-key")
+    serve.add_argument("--fault-injection-ack")
     serve.add_argument("--interval-seconds", type=float, default=15.0)
     serve.add_argument("--json", action="store_true")
     alert_serve = subcommands.add_parser(
@@ -188,10 +195,29 @@ def _write(payload: dict[str, object], *, as_json: bool) -> None:
         print(f"{key}={value}")
 
 
+def _r2_upload_fault_callback(
+    *, target_job_key: str | None, acknowledgement: str | None
+) -> Callable[[JobLease], None] | None:
+    """Create the explicit staging-only crash boundary for takeover acceptance."""
+    if target_job_key is None:
+        if acknowledgement is not None:
+            raise ValueError("fault acknowledgement requires a target job key")
+        return None
+    if acknowledgement != _R2_UPLOAD_FAULT_ACK:
+        raise ValueError("fault injection requires the exact staging acknowledgement")
+
+    def crash_matching_lease(lease: JobLease) -> None:
+        if lease.job_key == target_job_key:
+            raise KeyboardInterrupt("intentional staging crash after verified R2 upload")
+
+    return crash_matching_lease
+
+
 def _transactional_quote_workers(
     control_plane: PostgresControlPlane,
     *,
     worker_id: str,
+    crash_after_r2_upload: Callable[[JobLease], None] | None = None,
 ) -> tuple[TransactionalQuoteBatchWorker, TransactionalQuoteCertifier]:
     """Build explicitly invoked workers; nothing schedules these by default."""
     settings = Settings()
@@ -210,6 +236,7 @@ def _transactional_quote_workers(
             bucket=settings.r2_bucket,
             worker_id=worker_id,
             now=lambda: datetime.now(UTC),
+            crash_after_r2_upload=crash_after_r2_upload,
         ),
         TransactionalQuoteCertifier(
             control_plane=control_plane,
@@ -223,6 +250,7 @@ def _transactional_structure_worker(
     control_plane: PostgresControlPlane,
     *,
     worker_id: str,
+    crash_after_r2_upload: Callable[[JobLease], None] | None = None,
 ) -> TransactionalStructureWorker:
     """Build an explicitly invoked worker; it never exports or changes pointers."""
     object_client, bucket = _structure_object_client()
@@ -232,6 +260,7 @@ def _transactional_structure_worker(
         bucket=bucket,
         worker_id=worker_id,
         now=lambda: datetime.now(UTC),
+        crash_after_r2_upload=crash_after_r2_upload,
     )
 
 
@@ -312,9 +341,12 @@ def _transactional_scheduler(
     max_turns: int,
     structure_materializer_turns: int,
     structure_range_turns: int,
+    crash_after_r2_upload: Callable[[JobLease], None] | None = None,
 ) -> TransactionalControlPlaneScheduler:
     quote_worker, quote_certifier = _transactional_quote_workers(
-        control_plane, worker_id=f"{worker_id}:quote"
+        control_plane,
+        worker_id=f"{worker_id}:quote",
+        crash_after_r2_upload=crash_after_r2_upload,
     )
     object_client, bucket = _structure_object_client()
     return TransactionalControlPlaneScheduler(
@@ -331,6 +363,7 @@ def _transactional_scheduler(
             bucket=bucket,
             worker_id=f"{worker_id}:structure",
             now=lambda: datetime.now(UTC),
+            crash_after_r2_upload=crash_after_r2_upload,
         ),
         structure_certifier=TransactionalStructureCertifier(
             control_plane=control_plane,
@@ -637,12 +670,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 2
+            crash_after_r2_upload = _r2_upload_fault_callback(
+                target_job_key=args.fault_crash_after_r2_upload_job_key,
+                acknowledgement=args.fault_injection_ack,
+            )
             scheduler = _transactional_scheduler(
                 control_plane,
                 worker_id=args.worker_id,
                 max_turns=args.max_turns,
                 structure_materializer_turns=args.structure_materializer_turns,
                 structure_range_turns=args.structure_range_turns,
+                crash_after_r2_upload=crash_after_r2_upload,
             )
             _write(asyncio.run(scheduler.run_tick()), as_json=args.json)
             return 0
@@ -659,12 +697,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 2
+            crash_after_r2_upload = _r2_upload_fault_callback(
+                target_job_key=args.fault_crash_after_r2_upload_job_key,
+                acknowledgement=args.fault_injection_ack,
+            )
             scheduler = _transactional_scheduler(
                 control_plane,
                 worker_id=args.worker_id,
                 max_turns=args.max_turns,
                 structure_materializer_turns=args.structure_materializer_turns,
                 structure_range_turns=args.structure_range_turns,
+                crash_after_r2_upload=crash_after_r2_upload,
             )
             result = asyncio.run(
                 _run_scheduler_service(
