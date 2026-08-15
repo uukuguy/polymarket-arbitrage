@@ -68,7 +68,7 @@ def postgres_dsn() -> Iterator[str]:
             for role in ("anon", "authenticated", "service_role"):
                 connection.execute(f"CREATE ROLE {role} NOLOGIN")
         result = subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "016"],
+            ["uv", "run", "alembic", "upgrade", "017"],
             env={**os.environ, "POLYARB_SUPABASE_DB_DSN": dsn},
             capture_output=True,
             text=True,
@@ -85,6 +85,8 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
 
     with connect() as connection:
         for table in (
+            "m1_soak_observations",
+            "m1_soak_runs",
             "m1_structure_source_window_bundles",
             "m1_structure_source_page_receipts",
             "m1_structure_source_page_inputs",
@@ -111,6 +113,31 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
         ):
             connection.execute(f"TRUNCATE {table} CASCADE")
     yield PostgresControlPlane(connect)
+
+
+def test_cloud_soak_ledger_is_append_only_and_idempotent(
+    control_plane: PostgresControlPlane,
+) -> None:
+    from polyarb.control_plane.soak_evidence import create_record
+
+    first = create_record(
+        observed_at="2030-01-01T00:00:00+00:00",
+        control_api_url="https://control.example/perception/control-plane",
+        machine_states={"machine-a": "started"},
+        control_snapshot={
+            "status": "available",
+            "expired_leases": 0,
+            "open_circuit_count": 0,
+            "queue_health": {},
+            "job_counts": {"succeeded": 1},
+        },
+    )
+    control_plane.start_soak_run(run_id="formal-cloud-v1", baseline_record=first)
+    assert control_plane.read_soak_observations("formal-cloud-v1") == (first,)
+    control_plane.append_soak_observation(run_id="formal-cloud-v1", record=first)
+    control_plane.append_soak_observation(run_id="formal-cloud-v1", record=first)
+
+    assert control_plane.read_soak_observations("formal-cloud-v1") == (first,)
 
 
 def _now() -> datetime:

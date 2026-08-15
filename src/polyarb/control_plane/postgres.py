@@ -26,6 +26,7 @@ from .models import (
     StructureRangeSpec,
     StructureSourcePageSpec,
 )
+from .soak_evidence import SoakEvidenceError, _observed_at, _validated
 from .structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
@@ -59,6 +60,10 @@ class OpportunityProjectionCurrentError(ControlPlaneError):
 
 class IncompleteStructureGenerationError(ControlPlaneError):
     """A Structure certifier cannot prove every admitted range is present."""
+
+
+class SoakEvidenceConflictError(ControlPlaneError):
+    """A cloud soak run or observation conflicts with immutable evidence."""
 
 
 def _quote_batch_leg_payload(leg: QuoteBatchLeg) -> dict[str, str | None]:
@@ -111,6 +116,131 @@ class PostgresControlPlane:
 
     def __init__(self, connection_factory: ConnectionFactory) -> None:
         self._connection_factory = connection_factory
+
+    def start_soak_run(
+        self, *, run_id: str, baseline_record: Mapping[str, object]
+    ) -> None:
+        """Create one immutable cloud soak run, or prove its exact replay."""
+        if not run_id:
+            raise ValueError("run_id must be non-empty")
+        baseline = _validated(baseline_record)
+        if baseline["kind"] != "m1-transactional-soak-v2":
+            raise SoakEvidenceError("cloud soak runs require V2 evidence")
+        machine_ids = sorted(str(machine_id) for machine_id in baseline["machine_states"])
+        digest = str(baseline_record["snapshot_sha256"])
+        started_at = _observed_at(str(baseline["observed_at"]))
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                INSERT INTO m1_soak_runs (
+                    run_id, control_api_url, machine_ids, baseline_record,
+                    baseline_snapshot_sha256, started_at
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id) DO NOTHING
+                """,
+                (
+                    run_id,
+                    baseline["control_api_url"],
+                    Jsonb(machine_ids),
+                    Jsonb(dict(baseline_record)),
+                    digest,
+                    started_at,
+                ),
+            )
+            cursor.execute(
+                """
+                SELECT control_api_url, machine_ids, baseline_snapshot_sha256
+                FROM m1_soak_runs WHERE run_id = %s
+                """,
+                (run_id,),
+            )
+            persisted = cursor.fetchone()
+            if persisted is None or (
+                persisted["control_api_url"] != baseline["control_api_url"]
+                or persisted["machine_ids"] != machine_ids
+                or persisted["baseline_snapshot_sha256"] != digest
+            ):
+                raise SoakEvidenceConflictError("cloud soak run identity conflicts")
+            cursor.execute(
+                """
+                INSERT INTO m1_soak_observations (run_id, observed_at, record, snapshot_sha256)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (run_id, observed_at) DO NOTHING
+                """,
+                (run_id, started_at, Jsonb(dict(baseline_record)), digest),
+            )
+            cursor.execute(
+                """
+                SELECT snapshot_sha256 FROM m1_soak_observations
+                WHERE run_id = %s AND observed_at = %s
+                """,
+                (run_id, started_at),
+            )
+            baseline_observation = cursor.fetchone()
+            if baseline_observation is None or baseline_observation["snapshot_sha256"] != digest:
+                raise SoakEvidenceConflictError("cloud soak baseline conflicts")
+
+    def append_soak_observation(
+        self, *, run_id: str, record: Mapping[str, object]
+    ) -> None:
+        """Append one canonical observation; exact retransmission is harmless."""
+        observation = _validated(record)
+        if observation["kind"] != "m1-transactional-soak-v2":
+            raise SoakEvidenceError("cloud soak observations require V2 evidence")
+        observed_at = _observed_at(str(observation["observed_at"]))
+        digest = str(record["snapshot_sha256"])
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT control_api_url, machine_ids FROM m1_soak_runs WHERE run_id = %s
+                """,
+                (run_id,),
+            )
+            run = cursor.fetchone()
+            machine_ids = sorted(str(machine_id) for machine_id in observation["machine_states"])
+            if run is None or run["control_api_url"] != observation["control_api_url"] or run[
+                "machine_ids"
+            ] != machine_ids:
+                raise SoakEvidenceConflictError("cloud soak observation identity conflicts")
+            cursor.execute(
+                """
+                INSERT INTO m1_soak_observations (run_id, observed_at, record, snapshot_sha256)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (run_id, observed_at) DO NOTHING
+                """,
+                (run_id, observed_at, Jsonb(dict(record)), digest),
+            )
+            cursor.execute(
+                """
+                SELECT snapshot_sha256 FROM m1_soak_observations
+                WHERE run_id = %s AND observed_at = %s
+                """,
+                (run_id, observed_at),
+            )
+            persisted = cursor.fetchone()
+            if persisted is None or persisted["snapshot_sha256"] != digest:
+                raise SoakEvidenceConflictError("cloud soak observation conflicts")
+
+    def read_soak_observations(self, run_id: str) -> tuple[dict[str, object], ...]:
+        """Return immutable cloud observations in verifier order."""
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT record FROM m1_soak_observations
+                WHERE run_id = %s ORDER BY observed_at ASC
+                """,
+                (run_id,),
+            )
+            return tuple(dict(row["record"]) for row in cursor.fetchall())
 
     def deployment_preflight(self, *, expected_database: str) -> dict[str, object]:
         """Prove the named authority has the complete additive 014 schema.
