@@ -9591,3 +9591,21 @@ dashboard and Telegram receipts exist. Continue observing a long parity run on t
 [NEXT] Let the v2 automatic soak reach 24 hours. Separately establish the production Supabase/R2
 preflight and additive revision 014 authority before creating the isolated production control-plane
 apps; never switch the failing SQLite L1 by sharing a staging pointer.
+
+## SESSION 274 — 2026-08-15 (production authority audit and bounded preflight)
+
+- [FIXED] Shared R2 clients now have a 5-second connect / 15-second read budget, and the
+  control-plane psycopg factory has a 5-second connection budget. Both changes were RED→GREEN
+  tested and committed as `b93c5877` and `54de099d`; a dead authority now returns a typed
+  `ConnectionTimeout` instead of hanging a migration gate.
+- [FACT] Old L1's Supabase endpoint is a separate `aws-1` pooler and R2 bucket from transactional
+  staging's working `aws-0` authority. DNS and TCP 5432 work, but bounded preflight returns
+  `ConnectionTimeout`; moreover, the current L1 image has neither `psycopg` nor `asyncpg`, so its
+  DSN is not the active runtime authority. Do not migrate transaction state into it.
+- [FACT] The transactional control API presently exposes durable operational state, not a drop-in
+  `/arbitrage/opportunities` product feed. Replacing old L1 therefore requires a separately designed
+  durable opportunity projection after the new authority is established.
+
+[NEXT] Obtain or create a reachable production Supabase/Postgres authority and production R2 bucket,
+run bounded preflight plus additive revision 014, then deploy isolated production control API/worker/
+alert apps. Keep staging v2 soak running; do not make old SQLite L1 a migration authority.

@@ -39,6 +39,10 @@ progress:
   already-working L1 Polywatch token through a non-printing Fly-to-Fly secret
   transfer. Its exact recovery outbox now has `dashboard-visible` and
   `telegram:7882` receipts; the scoped worker was stopped after success.
+- **Production authority audit (2026-08-15 15:31Z):** old L1's separate
+  Supabase pooler fails bounded control-plane preflight and is not used by its
+  Python image. A fresh reachable Postgres/R2 authority is now the explicit
+  prerequisite for the production lane; staging cannot be relabeled as it.
 
 Phase: 05.6 (self-healing Structure production) — transactional control-plane foundation in progress
 
