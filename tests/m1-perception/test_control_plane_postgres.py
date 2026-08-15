@@ -809,7 +809,7 @@ def test_materializer_lease_atomically_records_bundle_and_admits_ranges(
         window_id=window_key,
         snapshot_id=0,
         comparison_receipt_digest=source_digest,
-        normalization_contract_version="gamma-source-window-v1",
+        normalization_contract_version="gamma-source-window-events-v3-sharded",
         component_counts={
             "events": 1,
             "event_tags": 0,
@@ -818,7 +818,7 @@ def test_materializer_lease_atomically_records_bundle_and_admits_ranges(
             "markets": 0,
             "issues": 0,
         },
-        source_kind="gamma-source-window-v1",
+        source_kind="gamma-source-window-events-v3-sharded",
     )
     bundle = StructureBundleArtifact.from_bytes(
         canonical_structure_bundle_bytes(

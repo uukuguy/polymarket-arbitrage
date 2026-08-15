@@ -586,6 +586,7 @@ class PostgresControlPlane:
         if identity.source_kind not in {
             "gamma-source-window-v1",
             "gamma-source-window-events-v2",
+            "gamma-source-window-events-v3-sharded",
         }:
             raise ValueError("source bundle identity must name a Gamma source window")
         if identity.window_id != lease.input_identity:
