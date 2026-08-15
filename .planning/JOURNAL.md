@@ -9373,6 +9373,20 @@ provides an operator-readable per-kind queue lag and next-runnable identity.
   status confirms active machine `48e3104c979578` remains on the old image and command. No unsafe
   partial rollout, pointer change, production L1/L2 change, or Telegram replay occurred.
 
-[NEXT] Diagnose and complete only the staging worker image update, preserve a normal collector
-until coordinator + Structure-range + Quote-batch machines are each live, then capture 15-minute
-queue-health drain evidence before starting Quote fault and 24-hour soak work.
+## SESSION 263 — 2026-08-15 (staging worker topology live)
+
+- [DEPLOYED/STAGING] Bypassed the unreliable remote builder with a locally built `linux/amd64`
+  image. The first direct push was ARM and Fly rejected it safely; a distinct amd64 tag was then
+  deployed to both worker and independent API apps. API health remains 200.
+- [LIVE] The old all-worker was changed only after one Structure and one Quote pool were live,
+  yielding one coordinator (`48e3104c979578`), two Structure pools (`2879110cd63738`,
+  `890e30b6d627e8`), and two Quote pools (`080e9255b1ddd8`, `81597df969de18`). Each has a distinct
+  worker ID; actual pool logs show successful fenced range and quote receipts.
+- [LIVE/EVIDENCE] Operator API shows runnable `9327 -> 8278`, Structure unfinished `3243 -> 3043`,
+  Quote unfinished `623 -> 475`; coordinator emitted `backpressured:structure`. A StaleLeaseError
+  happened only while Fly was sending termination signals to the replaced all-worker; the epoch
+  fence rejected that stale write and the new coordinator started normally.
+
+[NEXT] Continue the 15-minute staging queue-health drain window with the five live roles. If depth
+or oldest age rises in two consecutive samples, restore the known all-worker command; otherwise
+record the evidence and proceed to Quote retry/R2 takeover, then the 24-hour soak.
