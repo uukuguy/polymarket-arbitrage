@@ -9199,3 +9199,24 @@ downstream restart takeover. Keep staging-only.
 Structure→Quote generation. Separately design a safe, explicitly bounded way
 to hit an actual R2-upload-before-receipt lease boundary for both Structure and
 Quote, then start the required 24-hour continuous soak evidence window.
+
+## SESSION 255 — 2026-08-15 (prepared real takeover boundary)
+
+- [IMPLEMENTED/DEPLOYED-STAGING] `cc43eb2c` adds a default-disabled R2
+  upload-before-receipt fault boundary for Structure and Quote workers. It
+  requires both an exact job key and literal acknowledgement
+  `staging-r2-upload-before-receipt`; then, only after R2 upload/HEAD
+  succeeds and before the fenced receipt write, it raises `KeyboardInterrupt`.
+  This is genuine process loss, not a retry simulation.
+- [SAFETY] The current staging command deliberately omits both parameters, so
+  no fault is armed. When a fresh range/Quote job is runnable, the operator
+  will add the pair only for that job, wait for Fly's intentional stop, then
+  immediately restore the normal command before the existing 120-second lease
+  expires. This makes a replacement epoch and exactly-one receipt measurable.
+- [LIVE] Image `m1-r2-takeover-fault-cc43eb2c` is running on isolated machine
+  `48e3104c979578` with the normal 8/8/8 serial budgets. Production pointers,
+  production L1/L2, and Telegram configuration remain untouched.
+
+[NEXT] Finish the active event materializers into a fresh Structure generation.
+At the first named range, execute and remove the Structure exact-key fault;
+repeat for a downstream Quote batch, then start the 24-hour fault/soak window.
