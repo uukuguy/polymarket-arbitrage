@@ -202,6 +202,7 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
     from polyarb import cli_control_plane
 
     scheduler = object()
+    captured: dict[str, int] = {}
     monkeypatch.setenv(
         "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
     )
@@ -209,7 +210,13 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
     monkeypatch.setattr(
         cli_control_plane,
         "_transactional_scheduler",
-        lambda _control_plane, *, worker_id, max_turns: scheduler,
+        lambda _control_plane, *, worker_id, max_turns, structure_range_turns: (
+            captured.update(
+                max_turns=max_turns,
+                structure_range_turns=structure_range_turns,
+            )
+            or scheduler
+        ),
     )
 
     async def run_service(actual_scheduler, *, interval_seconds: float, as_json: bool):
@@ -229,12 +236,15 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
                 "7.5",
                 "--max-turns",
                 "2",
+                "--structure-range-turns",
+                "8",
                 "--json",
             ]
         )
         == 0
     )
     assert json.loads(capsys.readouterr().out) == {"status": "stopped", "ticks": 3}
+    assert captured == {"max_turns": 2, "structure_range_turns": 8}
 
 
 def test_quote_control_plane_once_runs_one_batch_then_certifier(monkeypatch, capsys) -> None:
@@ -429,7 +439,7 @@ def test_control_plane_tick_once_reports_bounded_turns(monkeypatch, capsys) -> N
     monkeypatch.setattr(
         cli_control_plane,
         "_transactional_scheduler",
-        lambda _control_plane, *, worker_id, max_turns: Scheduler(),
+        lambda _control_plane, *, worker_id, max_turns, structure_range_turns: Scheduler(),
     )
 
     assert cli_control_plane.main(["tick-once", "--enable", "--max-turns", "2", "--json"]) == 0

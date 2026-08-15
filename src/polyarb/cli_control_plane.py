@@ -126,6 +126,7 @@ def _parser() -> argparse.ArgumentParser:
     tick_once.add_argument("--enable", action="store_true")
     tick_once.add_argument("--worker-id", default="control-plane-tick-once")
     tick_once.add_argument("--max-turns", type=int, default=4)
+    tick_once.add_argument("--structure-range-turns", type=int, default=0)
     tick_once.add_argument("--json", action="store_true")
     serve = subcommands.add_parser(
         "serve",
@@ -134,6 +135,7 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--enable", action="store_true")
     serve.add_argument("--worker-id", default="control-plane-service")
     serve.add_argument("--max-turns", type=int, default=4)
+    serve.add_argument("--structure-range-turns", type=int, default=0)
     serve.add_argument("--interval-seconds", type=float, default=15.0)
     serve.add_argument("--json", action="store_true")
     alert_serve = subcommands.add_parser(
@@ -306,6 +308,7 @@ def _transactional_scheduler(
     *,
     worker_id: str,
     max_turns: int,
+    structure_range_turns: int,
 ) -> TransactionalControlPlaneScheduler:
     quote_worker, quote_certifier = _transactional_quote_workers(
         control_plane, worker_id=f"{worker_id}:quote"
@@ -339,6 +342,7 @@ def _transactional_scheduler(
         quote_worker=quote_worker,
         quote_certifier=quote_certifier,
         max_turns=max_turns,
+        structure_range_turns=structure_range_turns,
     )
 
 
@@ -619,20 +623,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if args.command == "tick-once":
-            if args.max_turns <= 0:
-                print("--max-turns must be positive", file=sys.stderr)
+            if args.max_turns <= 0 or args.structure_range_turns < 0:
+                print(
+                    "--max-turns must be positive and --structure-range-turns non-negative",
+                    file=sys.stderr,
+                )
                 return 2
             scheduler = _transactional_scheduler(
-                control_plane, worker_id=args.worker_id, max_turns=args.max_turns
+                control_plane,
+                worker_id=args.worker_id,
+                max_turns=args.max_turns,
+                structure_range_turns=args.structure_range_turns,
             )
             _write(asyncio.run(scheduler.run_tick()), as_json=args.json)
             return 0
         if args.command == "serve":
-            if args.max_turns <= 0 or args.interval_seconds <= 0:
-                print("--max-turns and --interval-seconds must be positive", file=sys.stderr)
+            if (
+                args.max_turns <= 0
+                or args.structure_range_turns < 0
+                or args.interval_seconds <= 0
+            ):
+                print(
+                    "--max-turns and --interval-seconds must be positive; "
+                    "--structure-range-turns must be non-negative",
+                    file=sys.stderr,
+                )
                 return 2
             scheduler = _transactional_scheduler(
-                control_plane, worker_id=args.worker_id, max_turns=args.max_turns
+                control_plane,
+                worker_id=args.worker_id,
+                max_turns=args.max_turns,
+                structure_range_turns=args.structure_range_turns,
             )
             result = asyncio.run(
                 _run_scheduler_service(
