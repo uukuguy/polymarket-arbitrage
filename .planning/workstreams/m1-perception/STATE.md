@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: market-perception
-current_phase: 05
+current_phase: 05.6
 status: in_progress
-stopped_at: staging Structure and Quote collection continues on the transactional worker; Structure retry circuit recovery is proven, while Quote fault evidence and the 24-hour soak remain open
-last_updated: "2026-08-15T11:46:00Z"
+stopped_at: staging five-role transactional collection is draining normally; both Structure and Quote R2 process-loss takeover are proven, while the automated 24-hour soak and scoped Telegram receipt remain open
+last_updated: "2026-08-15T14:00:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,6 +19,21 @@ progress:
 ## Current Position
 
 Phase: 05.6 (self-healing Structure production) — transactional control-plane foundation in progress
+
+- **Latest live acceptance (2026-08-15 14:00Z):** coordinator plus two Structure and two Quote
+  pools are all `started`; the independent control API is `available`. In the immediately preceding
+  thirty minutes Postgres recorded 147 successful `structure-fetch`, 1,159 successful
+  `structure-normalize`, 135 successful `quote-batch`, and a successful `quote-certify` job. This
+  is continuous durable work, not a liveness-only claim. Structure unfinished is 1,255 and falling;
+  Quote unfinished is zero.
+- **Real R2 process-loss evidence is complete for both job classes:** the new Quote proof crashed
+  `…batch:69` after R2 verification; the alternate pool finished it with `attempt_count=2`,
+  `lease_epoch=2` and exactly one receipt. The five-role topology was restored to normal commands.
+  Evidence: `phases/05.6-self-healing-structure-production/evidence/`.
+- **24-hour soak is active:** `com.polyarb.m1-transactional-soak-sampler` is a named user
+  LaunchAgent that exits after each read-only 600-second sample. Its verifier rejects a sample gap,
+  API/machine identity drift, or new expired lease/circuit relative to its baseline. It must run
+  uninterrupted before the staging readiness claim can close.
 
 - **Current staging acceptance:** machine `48e3104c979578` is 2048MB and runs
   image `m1-retry-outcome-f464d3db` with `--max-turns 8`,
