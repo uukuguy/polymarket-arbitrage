@@ -7,6 +7,8 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+from .postgres import StaleLeaseError
+
 
 class _Worker(Protocol):
     def run_once(self) -> Any: ...
@@ -39,12 +41,17 @@ class TransactionalWorkerLoop:
             return {"status": "ok", "turns": turns}
 
     async def _run_turn(self) -> dict[str, object]:
-        result = self._worker.run_once()
+        try:
+            result = self._worker.run_once()
+        except StaleLeaseError:
+            return {"worker": self._worker_name, "job_key": None, "outcome": "stale-lease"}
         if inspect.isawaitable(result):
             try:
                 result = await asyncio.wait_for(result, timeout=self._turn_timeout_seconds)
             except TimeoutError:
                 return {"worker": self._worker_name, "job_key": None, "outcome": "timed-out"}
+            except StaleLeaseError:
+                return {"worker": self._worker_name, "job_key": None, "outcome": "stale-lease"}
         return {
             "worker": self._worker_name,
             "job_key": result.job_key,

@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from polyarb.control_plane.postgres import StaleLeaseError
 from polyarb.control_plane.scheduler import TransactionalControlPlaneScheduler
 
 
@@ -30,6 +31,11 @@ class _SyncWorker:
 class _HangingWorker:
     async def run_once(self):
         await asyncio.Event().wait()
+
+
+class _StaleLeaseWorker:
+    def run_once(self):
+        raise StaleLeaseError("lease is no longer current for quote-batch:test")
 
 
 def test_bounded_tick_runs_only_configured_number_of_turns() -> None:
@@ -251,6 +257,53 @@ def test_role_loop_timeout_records_each_bound_turn() -> None:
             {"worker": "structure-range", "job_key": None, "outcome": "timed-out"},
         ],
     }
+
+
+def test_role_loop_records_stale_lease_without_stopping_its_tick() -> None:
+    from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
+
+    loop = TransactionalWorkerLoop(
+        worker_name="quote-batch", worker=_StaleLeaseWorker(), turns_per_tick=2
+    )
+
+    assert asyncio.run(loop.run_tick()) == {
+        "status": "ok",
+        "turns": [
+            {"worker": "quote-batch", "job_key": None, "outcome": "stale-lease"},
+            {"worker": "quote-batch", "job_key": None, "outcome": "stale-lease"},
+        ],
+    }
+
+
+def test_scheduler_records_stale_lease_then_runs_later_workers() -> None:
+    quote_admitter = _AsyncWorker("quote-admit")
+    scheduler = TransactionalControlPlaneScheduler(
+        structure_source_admitter=_StaleLeaseWorker(),
+        structure_source_worker=_AsyncWorker("structure-source"),
+        structure_source_materializer=_AsyncWorker("structure-source-materialize"),
+        structure_worker=_AsyncWorker("structure-range"),
+        structure_certifier=_SyncWorker("structure-certify"),
+        quote_admitter=quote_admitter,
+        quote_worker=_AsyncWorker("quote-batch"),
+        quote_certifier=_SyncWorker("quote-certify"),
+        max_turns=6,
+        include_structure_range=False,
+        include_quote_batch=False,
+    )
+
+    turns = asyncio.run(scheduler.run_tick())["turns"]
+
+    assert turns[0] == {
+        "worker": "structure-source-admit",
+        "job_key": None,
+        "outcome": "stale-lease",
+    }
+    assert turns[4] == {
+        "worker": "quote-admit",
+        "job_key": "quote-admit",
+        "outcome": "succeeded",
+    }
+    assert quote_admitter.calls == 1
 
 
 def test_scheduler_service_emits_tick_then_stops_without_sleeping() -> None:

@@ -7,6 +7,8 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+from .postgres import StaleLeaseError
+
 
 class _Worker(Protocol):
     def run_once(self) -> Any: ...
@@ -87,7 +89,11 @@ class TransactionalControlPlaneScheduler:
                 + (self._structure_range_worker,) * self._structure_range_turns
             )
             for name, worker in workers:
-                result = worker.run_once()
+                try:
+                    result = worker.run_once()
+                except StaleLeaseError:
+                    turns.append({"worker": name, "job_key": None, "outcome": "stale-lease"})
+                    continue
                 if inspect.isawaitable(result):
                     try:
                         result = await asyncio.wait_for(
@@ -97,6 +103,9 @@ class TransactionalControlPlaneScheduler:
                         turns.append(
                             {"worker": name, "job_key": None, "outcome": "timed-out"}
                         )
+                        continue
+                    except StaleLeaseError:
+                        turns.append({"worker": name, "job_key": None, "outcome": "stale-lease"})
                         continue
                 turns.append(
                     {
