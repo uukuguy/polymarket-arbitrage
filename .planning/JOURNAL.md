@@ -9430,3 +9430,23 @@ receipt gate, restore Fly write access that permits `secrets set` on `polyarb-co
 or `polyarb-control-worker-staging`, then inject only the alert runtime's DSN/scan/Telegram secrets,
 run `alert-serve` with `acceptance_run_id=m1-retry-fault-20260815-0815`, verify one scoped delivery,
 and remove any temporary secret placement.
+
+## SESSION 266 — 2026-08-15 (receipt-to-finish ownership race repaired)
+
+- [ROOT CAUSE/FIXED] `record_structure_range` and `record_quote_batch` changed a fully recorded
+  job to `checkpointed` before their same worker called `finish`. `claim_job` correctly allows
+  general checkpoint continuation, so a second pool could fence the original worker between those
+  calls. Commit `004d1fb9` leaves complete receipts `leased` until terminal finish; process-loss
+  takeover remains lease-expiry/replay based. General materializer checkpoints remain immediately
+  resumable.
+- [TESTED] Postgres control-plane suite: 52 passed; Ruff clean. New tests prove both completed
+  receipt types cannot be claimed until original lease expiry, while the existing recovery and
+  materializer continuation tests still pass.
+- [DEPLOYED/STAGING] Image `m1-receipt-lease-amd64-004d1fb9@sha256:f289a2d9…bc83` is on all five
+  live roles. The first updated Structure pool has continuous successful ticks with no stale-lease
+  outcome after rollout. Latest prior API trend also showed Quote queue at zero and Structure
+  unfinished continuing down (`3481 → 3220 → 3179`).
+
+[NEXT] Keep sampling queue health and logs for the receipt-lease release. When coordinator naturally
+admits the next Quote generation, arm its exact next batch for the R2-before-receipt process-loss
+takeover. Telegram remains separately blocked only by Fly secrets-write authorization.
