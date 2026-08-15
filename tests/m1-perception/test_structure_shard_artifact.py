@@ -68,7 +68,10 @@ def test_shard_manifest_rejects_duplicate_component_ordinals() -> None:
 
 
 def test_shard_batch_binds_one_source_page_interval_to_all_component_shards() -> None:
-    from polyarb.control_plane.structure_artifact import canonical_structure_shard_batch_bytes
+    from polyarb.control_plane.structure_artifact import (
+        canonical_structure_shard_batch_bytes,
+        parse_structure_shard_batch_bytes,
+    )
 
     shard = StructureShardReceipt(
         component="markets",
@@ -85,4 +88,10 @@ def test_shard_batch_binds_one_source_page_interval_to_all_component_shards() ->
         shards=(shard,),
     )
 
-    assert StructureShardBatchArtifact.from_bytes(payload).key.endswith("/batch.ndjson")
+    artifact = StructureShardBatchArtifact.from_bytes(payload)
+    assert artifact.key.endswith("/batch.ndjson")
+    header, shards = parse_structure_shard_batch_bytes(
+        payload, expected_sha256=artifact.sha256
+    )
+    assert header == ("source-window:1", "b" * 64, 4, 5)
+    assert shards == (shard,)

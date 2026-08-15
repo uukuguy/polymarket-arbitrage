@@ -289,6 +289,46 @@ def canonical_structure_shard_batch_bytes(
     )
 
 
+def parse_structure_shard_batch_bytes(
+    payload: bytes, *, expected_sha256: str
+) -> tuple[tuple[str, str, int, int], tuple[StructureShardReceipt, ...]]:
+    """Authenticate and decode one bounded source-page shard receipt."""
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise StructureBundleError("structure-shard-batch-digest-mismatch")
+    try:
+        lines = [json.loads(line) for line in payload.splitlines()]
+        header = lines[0]
+        if not isinstance(header, dict) or header.get("kind") != "structure-shard-batch":
+            raise ValueError("header")
+        window_key = str(header["window_key"])
+        source_digest = str(header["source_digest"])
+        start = int(header["start_ordinal"])
+        end = int(header["end_ordinal"])
+        if not window_key or len(source_digest) != 64 or start < 0 or end <= start:
+            raise ValueError("header")
+        shards = tuple(
+            StructureShardReceipt(
+                component=str(record["shard"]["component"]),
+                ordinal=int(record["shard"]["ordinal"]),
+                artifact_key=str(record["shard"]["artifact_key"]),
+                artifact_digest=str(record["shard"]["artifact_digest"]),
+                row_count=int(record["shard"]["row_count"]),
+            )
+            for record in lines[1:]
+        )
+        if not shards or canonical_structure_shard_batch_bytes(
+            window_key=window_key,
+            source_digest=source_digest,
+            start_ordinal=start,
+            end_ordinal=end,
+            shards=shards,
+        ) != payload:
+            raise ValueError("noncanonical")
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise StructureBundleError("structure-shard-batch-malformed") from error
+    return (window_key, source_digest, start, end), shards
+
+
 def structure_shard_artifact_key(sha256: str) -> str:
     if len(sha256) != 64:
         raise ValueError("sha256 must be a sha256 digest")
