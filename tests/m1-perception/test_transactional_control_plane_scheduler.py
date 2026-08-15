@@ -91,6 +91,39 @@ def test_bounded_tick_runs_only_configured_number_of_turns() -> None:
     ]
 
 
+def test_range_budget_appends_only_serial_structure_range_turns() -> None:
+    structure = _AsyncWorker("structure-range")
+    scheduler = TransactionalControlPlaneScheduler(
+        structure_source_admitter=_AsyncWorker("structure-source-admit"),
+        structure_source_worker=_AsyncWorker("structure-source"),
+        structure_source_materializer=_AsyncWorker("structure-source-materialize"),
+        structure_worker=structure,
+        structure_certifier=_SyncWorker("structure-certify"),
+        quote_admitter=_AsyncWorker("quote-admit"),
+        quote_worker=_AsyncWorker("quote-batch"),
+        quote_certifier=_SyncWorker("quote-certify"),
+        max_turns=8,
+        structure_range_turns=3,
+    )
+
+    turns = asyncio.run(scheduler.run_tick())["turns"]
+
+    assert [turn["worker"] for turn in turns] == [
+        "structure-source-admit",
+        "structure-source",
+        "structure-source-materialize",
+        "structure-range",
+        "structure-certify",
+        "quote-admit",
+        "quote-batch",
+        "quote-certify",
+        "structure-range",
+        "structure-range",
+        "structure-range",
+    ]
+    assert structure.calls == 4
+
+
 def test_scheduler_service_emits_tick_then_stops_without_sleeping() -> None:
     admitter = _AsyncWorker("structure-source-admit")
     source = _AsyncWorker("structure-source")
