@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from polyarb.control_plane.faults import IntentionalStagingRetryFault
 from polyarb.control_plane.models import JobLease, JobState, StructureRangeSpec
 from polyarb.control_plane.postgres import IncompleteStructureGenerationError
 from polyarb.control_plane.structure_artifact import (
@@ -196,13 +197,13 @@ def test_structure_retry_fault_uses_existing_retry_incident_path() -> None:
         worker_id="worker-a",
         now=lambda: NOW,
         retry_fault_before_receipt=lambda _lease: (_ for _ in ()).throw(
-            RuntimeError("intentional staging retry")
+                IntentionalStagingRetryFault("intentional staging retry")
         ),
     )
 
-    with pytest.raises(RuntimeError, match="intentional staging retry"):
-        asyncio.run(worker.run_once())
+    result = asyncio.run(worker.run_once())
 
+    assert result.outcome == "retryable"
     assert control_plane.recorded is None
     assert control_plane.retry_incidents[0]["component"] == "structure-normalize"
 

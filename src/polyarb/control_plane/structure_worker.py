@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from polyarb.config import Settings
 
 from .alert_delivery import incident_alert_channels
+from .faults import IntentionalStagingRetryFault
 from .models import JobLease, JobState, StructureRangeSpec
 from .postgres import IncompleteStructureGenerationError, PostgresControlPlane, StaleLeaseError
 from .structure_artifact import (
@@ -129,6 +130,23 @@ class TransactionalStructureWorker:
             raise
         except StaleLeaseError:
             raise
+        except IntentionalStagingRetryFault as error:
+            self._control_plane.finish_retryable_with_incident(
+                lease,
+                error_class=type(error).__name__,
+                incident_key=f"incident:job-retry:{lease.job_key}",
+                dedupe_key=f"job-retry:{lease.job_key}",
+                component="structure-normalize",
+                summary="structure-normalize retryable failure",
+                detail={
+                    "job_key": lease.job_key,
+                    "lease_epoch": lease.lease_epoch,
+                    "error_class": type(error).__name__,
+                },
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
+            return StructureWorkerResult(job_key=lease.job_key, outcome="retryable")
         except Exception as error:
             self._control_plane.finish_retryable_with_incident(
                 lease,

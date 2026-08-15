@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from polyarb.control_plane.faults import IntentionalStagingRetryFault
 from polyarb.control_plane.models import (
     JobLease,
     JobState,
@@ -168,13 +169,13 @@ def test_quote_retry_fault_uses_existing_retry_incident_path() -> None:
         worker_id="worker-a",
         now=lambda: NOW,
         retry_fault_before_receipt=lambda _lease: (_ for _ in ()).throw(
-            RuntimeError("intentional staging retry")
+                IntentionalStagingRetryFault("intentional staging retry")
         ),
     )
 
-    with pytest.raises(RuntimeError, match="intentional staging retry"):
-        asyncio.run(worker.run_once())
+    result = asyncio.run(worker.run_once())
 
+    assert result.outcome == "retryable"
     assert control_plane.recorded is None
     assert control_plane.retry_incidents[0]["component"] == "quote-batch"
 

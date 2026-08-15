@@ -12,6 +12,7 @@ from polyarb.routing.neg_risk_quote_collector import BooksReader, _build_termina
 from polyarb.routing.neg_risk_quote_store import UniverseLeg
 
 from .alert_delivery import incident_alert_channels
+from .faults import IntentionalStagingRetryFault
 from .models import JobLease, JobState, QuoteBatchSpec
 from .postgres import (
     IncompleteQuoteGenerationError,
@@ -121,6 +122,23 @@ class TransactionalQuoteBatchWorker:
             return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="succeeded")
         except StaleLeaseError:
             raise
+        except IntentionalStagingRetryFault as error:
+            self._control_plane.finish_retryable_with_incident(
+                lease,
+                error_class=type(error).__name__,
+                incident_key=f"incident:job-retry:{lease.job_key}",
+                dedupe_key=f"job-retry:{lease.job_key}",
+                component="quote-batch",
+                summary="quote-batch retryable failure",
+                detail={
+                    "job_key": lease.job_key,
+                    "lease_epoch": lease.lease_epoch,
+                    "error_class": type(error).__name__,
+                },
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
+            return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="retryable")
         except Exception as error:
             self._control_plane.finish_retryable_with_incident(
                 lease,

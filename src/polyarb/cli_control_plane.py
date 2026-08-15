@@ -19,6 +19,7 @@ from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
 from polyarb.control_plane.alert_delivery import TransactionalAlertDeliveryWorker
 from polyarb.control_plane.fault_soak import verify_fault_soak
+from polyarb.control_plane.faults import IntentionalStagingRetryFault
 from polyarb.control_plane.models import JobLease
 from polyarb.control_plane.postgres import PostgresControlPlane
 from polyarb.control_plane.quote_admission import TransactionalQuoteAdmitter
@@ -239,7 +240,7 @@ def _retry_fault_callback(
         nonlocal remaining
         if lease.job_key == target_job_key and remaining > 0:
             remaining -= 1
-            raise RuntimeError("intentional staging retry before receipt")
+            raise IntentionalStagingRetryFault("intentional staging retry before receipt")
 
     return fail_matching_lease
 
