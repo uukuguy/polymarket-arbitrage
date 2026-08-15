@@ -42,7 +42,7 @@ def test_rollout_renderer_writes_three_isolated_apps_and_staged_checklist(tmp_pa
         "three-fresh-source-window-structure-quote-shadows",
         "source-and-quote-admitter-worker-loss-circuit-probe-and-api-readability",
         "continuous-24-hour-soak",
-        "authorized-reversible-switch",
+        "one-way-formal-transactional-promotion",
     ]
     assert checklist["source_window_admission"] == "explicit-operator-command"
 

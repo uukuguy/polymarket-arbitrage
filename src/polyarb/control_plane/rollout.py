@@ -52,7 +52,7 @@ def render_rollout_artifacts(
         "fly-control-alert.toml.template", "__CONTROL_PLANE_ALERT_APP__", alert_app
     )
     checklist = {
-        "artifact_version": 5,
+        "artifact_version": 6,
         "api_app": api_app,
         "worker_app": worker_app,
         "alert_app": alert_app,
@@ -64,7 +64,7 @@ def render_rollout_artifacts(
             "three-fresh-source-window-structure-quote-shadows",
             "source-and-quote-admitter-worker-loss-circuit-probe-and-api-readability",
             "continuous-24-hour-soak",
-            "authorized-reversible-switch",
+            "one-way-formal-transactional-promotion",
         ],
         "source_window_admission": "explicit-operator-command",
         "cloud_actions_performed": False,

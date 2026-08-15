@@ -13,11 +13,13 @@ POLYARB_RUNTIME_ROLE = "control-plane"
 [build]
 
 [processes]
-coordinator = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-coordinator --worker-role coordinator --max-turns 4 --interval-seconds 15 --json"
-structure_range = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-structure-range --worker-role structure-range --pool-turns 2 --interval-seconds 2 --json"
-quote_batch = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-quote-batch --worker-role quote-batch --pool-turns 2 --interval-seconds 2 --json"
+coordinator = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-coordinator --worker-role coordinator --max-turns 8 --structure-materializer-turns 8 --interval-seconds 2 --json"
+structure_range_a = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-structure-range-a --worker-role structure-range --pool-turns 2 --interval-seconds 2 --json"
+structure_range_b = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-structure-range-b --worker-role structure-range --pool-turns 2 --interval-seconds 2 --json"
+quote_batch_a = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-quote-batch-a --worker-role quote-batch --pool-turns 4 --interval-seconds 2 --json"
+quote_batch_b = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-quote-batch-b --worker-role quote-batch --pool-turns 4 --interval-seconds 2 --json"
 
 [[vm]]
 size = "shared-cpu-1x"
-memory = "512mb"
-processes = ["coordinator", "structure_range", "quote_batch"]
+memory = "2048mb"
+processes = ["coordinator", "structure_range_a", "structure_range_b", "quote_batch_a", "quote_batch_b"]
