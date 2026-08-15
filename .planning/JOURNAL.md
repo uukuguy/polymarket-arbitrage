@@ -9504,3 +9504,24 @@ Telegram scoped delivery remains the only separate external Fly secrets-write pe
   its certification will create the next natural Quote batch. Arm that batch for the remaining
   Quote three-retry/circuit/recovery acceptance, then close the separately scoped Telegram receipt
   when Fly secrets write access exists.
+
+## SESSION 270 — 2026-08-15 (Quote retry circuit recovery proven)
+
+- [LIVE/EVIDENCE] A natural `quote:599a…f707:batch:25` was isolated and injected with exactly
+  three retry faults. Its circuit opened at failure three (`74 → 75`) and the fault pool was
+  stopped/restored to the normal command. The other Quote pool handled the half-open probe,
+  recovering it at epoch 4 (`attempt_count=4`, first three retryable, fourth succeeded) and closing
+  the circuit back to 74. Evidence is `evidence/staging-quote-retry-circuit-20260815.json` and
+  commit `bcfac8d6`.
+- [RECOVERY] The latest Quote generation then certified normally at `14:16:37Z` with 65,957
+  records. Quote unfinished returned to zero; both Quote pools and both Structure pools plus the
+  coordinator are started. A ten-minute Postgres sample saw 395 Structure normalizations and 99
+  successful Quote batches, with no new expired lease/circuit count.
+- [GATE] Both Structure and Quote now have real R2 process-loss takeover and retry/circuit/recovery
+  facts. New scoped dashboard/Telegram outbox rows are pending, not historical replay. Actual
+  Telegram delivery remains blocked only by Fly secret-write permission; 24-hour sampler continues.
+
+[NEXT] Do not inject further faults into the active soak. Let `staging-transactional-soak.jsonl`
+accumulate through the automatic verdict. When Fly secrets write access becomes available, run only
+the scoped alert deliverer against the new recovery intents, then mechanically assemble and verify
+the final fault/soak evidence.
