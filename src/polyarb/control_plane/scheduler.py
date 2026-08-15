@@ -29,6 +29,8 @@ class TransactionalControlPlaneScheduler:
         max_turns: int,
         structure_materializer_turns: int = 0,
         structure_range_turns: int = 0,
+        include_structure_range: bool = True,
+        include_quote_batch: bool = True,
         turn_timeout_seconds: float = 105,
     ) -> None:
         if (
@@ -38,16 +40,23 @@ class TransactionalControlPlaneScheduler:
             or turn_timeout_seconds <= 0
         ):
             raise ValueError("scheduler bounds are invalid")
-        self._workers = (
+        workers: list[tuple[str, _Worker]] = [
             ("structure-source-admit", structure_source_admitter),
             ("structure-source", structure_source_worker),
             ("structure-source-materialize", structure_source_materializer),
-            ("structure-range", structure_worker),
-            ("structure-certify", structure_certifier),
-            ("quote-admit", quote_admitter),
-            ("quote-batch", quote_worker),
-            ("quote-certify", quote_certifier),
+        ]
+        if include_structure_range:
+            workers.append(("structure-range", structure_worker))
+        workers.extend(
+            [
+                ("structure-certify", structure_certifier),
+                ("quote-admit", quote_admitter),
+            ]
         )
+        if include_quote_batch:
+            workers.append(("quote-batch", quote_worker))
+        workers.append(("quote-certify", quote_certifier))
+        self._workers = tuple(workers)
         self._max_turns = max_turns
         self._structure_materializer_worker = (
             "structure-source-materialize",

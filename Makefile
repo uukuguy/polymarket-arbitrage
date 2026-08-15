@@ -612,7 +612,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-alert-serve supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -736,6 +736,27 @@ control-plane-serve:
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane serve --enable --worker-id "$(or $(worker_id),control-plane-service)" --max-turns "$(or $(max_turns),4)" --interval-seconds "$(or $(interval_seconds),15)" --json
+
+## control-plane-serve-coordinator: Run admission, certification and source coordination only; dedicated pools own Structure ranges and Quote batches.
+control-plane-serve-coordinator:
+	@test "$(enable)" = "1" || (echo "usage: make control-plane-serve-coordinator enable=1 [interval_seconds=15] [max_turns=4]" >&2; exit 2)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
+	uv run python -m polyarb.cli_control_plane serve --enable --worker-id "$(or $(worker_id),control-plane-coordinator)" --worker-role coordinator --max-turns "$(or $(max_turns),4)" --interval-seconds "$(or $(interval_seconds),15)" --json
+
+## control-plane-serve-structure-range: Run only fenced Structure range jobs; scale this process group for backlog recovery.
+control-plane-serve-structure-range:
+	@test "$(enable)" = "1" || (echo "usage: make control-plane-serve-structure-range enable=1 [interval_seconds=2] [pool_turns=2]" >&2; exit 2)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
+	uv run python -m polyarb.cli_control_plane serve --enable --worker-id "$(or $(worker_id),control-plane-structure-range)" --worker-role structure-range --pool-turns "$(or $(pool_turns),2)" --interval-seconds "$(or $(interval_seconds),2)" --json
+
+## control-plane-serve-quote-batch: Run only fenced Quote batch jobs; scale this process group for backlog recovery.
+control-plane-serve-quote-batch:
+	@test "$(enable)" = "1" || (echo "usage: make control-plane-serve-quote-batch enable=1 [interval_seconds=2] [pool_turns=2]" >&2; exit 2)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
+	uv run python -m polyarb.cli_control_plane serve --enable --worker-id "$(or $(worker_id),control-plane-quote-batch)" --worker-role quote-batch --pool-turns "$(or $(pool_turns),2)" --interval-seconds "$(or $(interval_seconds),2)" --json
 
 ## control-plane-alert-serve: Deliver only one named acceptance run when acceptance_run_id= is set; requires enable=1 and never replays historical outbox rows under that scope.
 control-plane-alert-serve:

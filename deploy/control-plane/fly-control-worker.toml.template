@@ -13,9 +13,11 @@ POLYARB_RUNTIME_ROLE = "control-plane"
 [build]
 
 [processes]
-worker = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane --max-turns 4 --interval-seconds 15 --json"
+coordinator = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-coordinator --worker-role coordinator --max-turns 4 --interval-seconds 15 --json"
+structure_range = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-structure-range --worker-role structure-range --pool-turns 2 --interval-seconds 2 --json"
+quote_batch = "python -m polyarb.cli_control_plane serve --enable --worker-id fly-control-plane-quote-batch --worker-role quote-batch --pool-turns 2 --interval-seconds 2 --json"
 
 [[vm]]
 size = "shared-cpu-1x"
 memory = "512mb"
-processes = ["worker"]
+processes = ["coordinator", "structure_range", "quote_batch"]

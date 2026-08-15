@@ -216,6 +216,8 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
         max_turns,
         structure_materializer_turns,
         structure_range_turns,
+        include_structure_range,
+        include_quote_batch,
         crash_after_r2_upload,
         retry_fault_before_receipt,
         acceptance_run_id,
@@ -224,6 +226,8 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
             max_turns=max_turns,
             structure_materializer_turns=structure_materializer_turns,
             structure_range_turns=structure_range_turns,
+            include_structure_range=include_structure_range,
+            include_quote_batch=include_quote_batch,
             retry_fault_before_receipt=retry_fault_before_receipt,
             acceptance_run_id=acceptance_run_id,
         )
@@ -268,10 +272,44 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
         "max_turns": 2,
         "structure_materializer_turns": 8,
         "structure_range_turns": 8,
+        "include_structure_range": True,
+        "include_quote_batch": True,
         "retry_fault_before_receipt": None,
         "acceptance_run_id": None,
     }
     assert callable(captured["retry_fault_before_receipt"])
+
+
+def test_control_plane_serve_coordinator_excludes_dedicated_pool_workers(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    scheduler = object()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: object())
+
+    def transactional_scheduler(_control_plane, **kwargs):
+        captured.update(kwargs)
+        return scheduler
+
+    monkeypatch.setattr(cli_control_plane, "_transactional_scheduler", transactional_scheduler)
+
+    async def run_service(actual_scheduler, **_kwargs):
+        assert actual_scheduler is scheduler
+        return {"status": "stopped", "ticks": 1}
+
+    monkeypatch.setattr(cli_control_plane, "_run_scheduler_service", run_service)
+
+    assert (
+        cli_control_plane.main(
+            ["serve", "--enable", "--worker-role", "coordinator", "--json"]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {"status": "stopped", "ticks": 1}
+    assert captured["include_structure_range"] is False
+    assert captured["include_quote_batch"] is False
 
 
 def test_r2_upload_fault_callback_requires_exact_acknowledgement_and_job_key() -> None:

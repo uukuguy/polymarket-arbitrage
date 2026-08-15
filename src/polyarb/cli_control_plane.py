@@ -50,6 +50,7 @@ from polyarb.control_plane.structure_worker import (
     TransactionalStructureCertifier,
     TransactionalStructureWorker,
 )
+from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
 from polyarb.storage.r2_sync import _build_client
 
 _R2_UPLOAD_FAULT_ACK = "staging-r2-upload-before-receipt"
@@ -145,7 +146,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     serve.add_argument("--enable", action="store_true")
     serve.add_argument("--worker-id", default="control-plane-service")
+    serve.add_argument(
+        "--worker-role",
+        choices=("all", "coordinator", "structure-range", "quote-batch"),
+        default="all",
+        help="run all workers, or one independently scalable fenced worker role",
+    )
     serve.add_argument("--max-turns", type=int, default=4)
+    serve.add_argument("--pool-turns", type=int, default=1)
     serve.add_argument("--structure-materializer-turns", type=int, default=0)
     serve.add_argument("--structure-range-turns", type=int, default=0)
     serve.add_argument("--fault-crash-after-r2-upload-job-key")
@@ -287,6 +295,8 @@ def _transactional_structure_worker(
     *,
     worker_id: str,
     crash_after_r2_upload: Callable[[JobLease], None] | None = None,
+    retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
+    acceptance_run_id: str | None = None,
 ) -> TransactionalStructureWorker:
     """Build an explicitly invoked worker; it never exports or changes pointers."""
     object_client, bucket = _structure_object_client()
@@ -297,6 +307,8 @@ def _transactional_structure_worker(
         worker_id=worker_id,
         now=lambda: datetime.now(UTC),
         crash_after_r2_upload=crash_after_r2_upload,
+        retry_fault_before_receipt=retry_fault_before_receipt,
+        acceptance_run_id=acceptance_run_id,
     )
 
 
@@ -377,6 +389,8 @@ def _transactional_scheduler(
     max_turns: int,
     structure_materializer_turns: int,
     structure_range_turns: int,
+    include_structure_range: bool = True,
+    include_quote_batch: bool = True,
     crash_after_r2_upload: Callable[[JobLease], None] | None = None,
     retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
     acceptance_run_id: str | None = None,
@@ -422,6 +436,8 @@ def _transactional_scheduler(
         max_turns=max_turns,
         structure_materializer_turns=structure_materializer_turns,
         structure_range_turns=structure_range_turns,
+        include_structure_range=include_structure_range,
+        include_quote_batch=include_quote_batch,
     )
 
 
@@ -440,7 +456,7 @@ def _structure_object_client() -> tuple[object, str]:
 
 
 async def _run_scheduler_service(
-    scheduler: TransactionalControlPlaneScheduler,
+    scheduler: TransactionalControlPlaneScheduler | TransactionalWorkerLoop,
     *,
     interval_seconds: float,
     as_json: bool,
@@ -740,13 +756,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "serve":
             if (
                 args.max_turns <= 0
+                or args.pool_turns <= 0
                 or args.structure_materializer_turns < 0
                 or args.structure_range_turns < 0
                 or args.interval_seconds <= 0
             ):
                 print(
                     "--max-turns and --interval-seconds must be positive; "
-                    "optional turn budgets must be non-negative",
+                    "--pool-turns must be positive; optional turn budgets must be non-negative",
                     file=sys.stderr,
                 )
                 return 2
@@ -763,16 +780,45 @@ def main(argv: Sequence[str] | None = None) -> int:
                 attempts=args.fault_retry_attempts,
                 acknowledgement=args.fault_injection_ack,
             )
-            scheduler = _transactional_scheduler(
-                control_plane,
-                worker_id=args.worker_id,
-                max_turns=args.max_turns,
-                structure_materializer_turns=args.structure_materializer_turns,
-                structure_range_turns=args.structure_range_turns,
-                crash_after_r2_upload=crash_after_r2_upload,
-                retry_fault_before_receipt=retry_fault_before_receipt,
-                acceptance_run_id=args.acceptance_run_id,
-            )
+            if args.worker_role in {"all", "coordinator"}:
+                scheduler: TransactionalControlPlaneScheduler | TransactionalWorkerLoop
+                scheduler = _transactional_scheduler(
+                    control_plane,
+                    worker_id=args.worker_id,
+                    max_turns=args.max_turns,
+                    structure_materializer_turns=args.structure_materializer_turns,
+                    structure_range_turns=args.structure_range_turns,
+                    include_structure_range=args.worker_role == "all",
+                    include_quote_batch=args.worker_role == "all",
+                    crash_after_r2_upload=crash_after_r2_upload,
+                    retry_fault_before_receipt=retry_fault_before_receipt,
+                    acceptance_run_id=args.acceptance_run_id,
+                )
+            elif args.worker_role == "structure-range":
+                scheduler = TransactionalWorkerLoop(
+                    worker_name="structure-range",
+                    worker=_transactional_structure_worker(
+                        control_plane,
+                        worker_id=f"{args.worker_id}:structure-range",
+                        crash_after_r2_upload=crash_after_r2_upload,
+                        retry_fault_before_receipt=retry_fault_before_receipt,
+                        acceptance_run_id=args.acceptance_run_id,
+                    ),
+                    turns_per_tick=args.pool_turns,
+                )
+            else:
+                quote_worker, _quote_certifier = _transactional_quote_workers(
+                    control_plane,
+                    worker_id=f"{args.worker_id}:quote-batch",
+                    crash_after_r2_upload=crash_after_r2_upload,
+                    retry_fault_before_receipt=retry_fault_before_receipt,
+                    acceptance_run_id=args.acceptance_run_id,
+                )
+                scheduler = TransactionalWorkerLoop(
+                    worker_name="quote-batch",
+                    worker=quote_worker,
+                    turns_per_tick=args.pool_turns,
+                )
             result = asyncio.run(
                 _run_scheduler_service(
                     scheduler,

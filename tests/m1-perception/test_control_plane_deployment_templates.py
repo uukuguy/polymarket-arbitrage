@@ -19,7 +19,7 @@ def test_control_api_template_has_only_postgres_read_process_and_http_health() -
     assert "mounts" not in payload
 
 
-def test_control_worker_template_has_only_fenced_scheduler_and_no_http_or_volume() -> None:
+def test_control_worker_template_has_split_fenced_roles_and_no_http_or_volume() -> None:
     payload = tomllib.loads(
         (ROOT / "deploy/control-plane/fly-control-worker.toml.template").read_text()
     )
@@ -28,10 +28,26 @@ def test_control_worker_template_has_only_fenced_scheduler_and_no_http_or_volume
     assert payload["env"]["POLYARB_ALERT_CHANNELS"] == "dashboard,telegram"
     assert payload["env"]["POLYARB_RUNTIME_ROLE"] == "control-plane"
     assert payload["processes"] == {
-        "worker": (
+        "coordinator": (
             "python -m polyarb.cli_control_plane serve --enable "
-            "--worker-id fly-control-plane --max-turns 4 --interval-seconds 15 --json"
-        )
+            "--worker-id fly-control-plane-coordinator --worker-role coordinator "
+            "--max-turns 4 --interval-seconds 15 --json"
+        ),
+        "structure_range": (
+            "python -m polyarb.cli_control_plane serve --enable "
+            "--worker-id fly-control-plane-structure-range --worker-role structure-range "
+            "--pool-turns 2 --interval-seconds 2 --json"
+        ),
+        "quote_batch": (
+            "python -m polyarb.cli_control_plane serve --enable "
+            "--worker-id fly-control-plane-quote-batch --worker-role quote-batch "
+            "--pool-turns 2 --interval-seconds 2 --json"
+        ),
     }
+    assert payload["vm"][0]["processes"] == [
+        "coordinator",
+        "structure_range",
+        "quote_batch",
+    ]
     assert "http_service" not in payload
     assert "mounts" not in payload

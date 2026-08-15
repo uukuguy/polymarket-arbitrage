@@ -162,6 +162,33 @@ def test_materializer_budget_is_serial_and_independent_from_range_budget() -> No
     assert structure.calls == 3
 
 
+def test_coordinator_excludes_dedicated_range_and_quote_batch_workers() -> None:
+    scheduler = TransactionalControlPlaneScheduler(
+        structure_source_admitter=_AsyncWorker("structure-source-admit"),
+        structure_source_worker=_AsyncWorker("structure-source"),
+        structure_source_materializer=_AsyncWorker("structure-source-materialize"),
+        structure_worker=_AsyncWorker("structure-range"),
+        structure_certifier=_SyncWorker("structure-certify"),
+        quote_admitter=_AsyncWorker("quote-admit"),
+        quote_worker=_AsyncWorker("quote-batch"),
+        quote_certifier=_SyncWorker("quote-certify"),
+        max_turns=8,
+        include_structure_range=False,
+        include_quote_batch=False,
+    )
+
+    turns = asyncio.run(scheduler.run_tick())["turns"]
+
+    assert [turn["worker"] for turn in turns] == [
+        "structure-source-admit",
+        "structure-source",
+        "structure-source-materialize",
+        "structure-certify",
+        "quote-admit",
+        "quote-certify",
+    ]
+
+
 def test_role_loop_runs_only_its_named_worker_for_its_bound() -> None:
     from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
 
