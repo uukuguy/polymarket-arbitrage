@@ -1,0 +1,14 @@
+{
+  "acceptance_run_id": "staging-quote-r2-20260815T1345Z",
+  "artifact_digest": "1f3abd6694d536af323d01edf2fb4f3bd06a5f3319d15e34e097aa74db8ac2ec",
+  "evidence_type": "staging-r2-upload-process-loss-takeover",
+  "fault_boundary": "R2 upload completed before durable receipt",
+  "job_key": "quote:13dcaa2640636e51bf24a559615fc90a2175a1b38f9c75465c9fcd0bff469485:batch:69",
+  "receipt_count": 1,
+  "recovery": {
+    "attempt_count": 2,
+    "lease_epoch": 2,
+    "state": "succeeded",
+    "successful_response_count": 487
+  }
+}

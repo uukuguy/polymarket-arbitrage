@@ -87,6 +87,7 @@
 | 73 | [R2 回执边界与租约接管](73-R2回执边界与租约接管.md) | R2 上传不等于完成 / fenced receipt 才是发布 / 真实进程丢失后的 epoch 接管 |
 | 74 | [受控重试熔断与范围告警](74-受控重试熔断与范围告警.md) | retry circuit 与进程丢失的区别 / SQL 范围领取 / 不回放历史 Telegram outbox |
 | 75 | [事务型云端采集工作池](75-事务型云端采集工作池.md) | role-local lease worker / coordinator 与独占池 / 高水位背压 / queue health hint |
+| 76 | [真实 R2 故障接管与持续证据](76-真实R2故障接管与持续证据.md) | R2 crash boundary / lease epoch 接管 / 唯一 receipt / 24 小时 fail-closed soak |
 
 ## Phase 02.1 教学增量（2026-05）
 

@@ -265,10 +265,13 @@ def _read_fly_machine_states(machine_ids: Sequence[str], *, app: str) -> dict[st
         for item in payload
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
-    states = {machine_id: listed.get(machine_id) for machine_id in machine_ids}
-    if any(not isinstance(state, str) or not state for state in states.values()):
-        raise SoakEvidenceError("an exact Fly machine is missing or has no state")
-    return states  # type: ignore[return-value]
+    states: dict[str, str] = {}
+    for machine_id in machine_ids:
+        state = listed.get(machine_id)
+        if not isinstance(state, str) or not state:
+            raise SoakEvidenceError("an exact Fly machine is missing or has no state")
+        states[machine_id] = state
+    return states
 
 
 def _record_soak_observation(args: argparse.Namespace, *, exclusive: bool) -> dict[str, object]:
