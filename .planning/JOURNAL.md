@@ -9409,3 +9409,24 @@ record the evidence and proceed to Quote retry/R2 takeover, then the 24-hour soa
 the isolated exact-key Quote retry/R2 takeover evidence with the scoped `acceptance_run_id`, run the
 separate scoped alert deliverer for only its new Telegram outbox intent, and only then start the
 24-hour soak clock.
+
+## SESSION 265 — 2026-08-15 (scoped Telegram runtime access diagnosis)
+
+- [CONTAINED] Scoped alert delivery was launched on a fresh one-off worker with only the named
+  acceptance scope. It stopped before any delivery with `ValidationError`: the staging worker app
+  deliberately has only R2/DSN secrets, while the separate alert app has no secrets at all. No
+  historical outbox row was claimed and no Telegram message was sent.
+- [EXTERNAL BLOCKER] The current Fly login can list and update the active worker Machines, but
+  rejects the stopped temporary-machine update as `unauthorized` and rejects `flyctl secrets set`
+  for the same worker app with `Could not find App`. Therefore an isolated alert runtime cannot
+  receive its necessary Telegram/Settings configuration via the secure secrets API. This is a Fly
+  control-plane authorization inconsistency, not a Telegram receipt or SQL-scope failure.
+- [SAFETY] Machine-level environment injection is unsupported non-interactively by this `flyctl`
+  build; it was not used. Telegram values were never printed. Collection topology remains five
+  started roles on the stale-lease containment image.
+
+[NEXT] Continue timed queue-health evidence and Quote recovery/takeover work. To close the Telegram
+receipt gate, restore Fly write access that permits `secrets set` on `polyarb-control-alert-staging`
+or `polyarb-control-worker-staging`, then inject only the alert runtime's DSN/scan/Telegram secrets,
+run `alert-serve` with `acceptance_run_id=m1-retry-fault-20260815-0815`, verify one scoped delivery,
+and remove any temporary secret placement.
