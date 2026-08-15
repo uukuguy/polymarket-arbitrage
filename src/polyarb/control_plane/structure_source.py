@@ -285,6 +285,12 @@ def _event_embedded_market_records(
             enriched = dict(market)
             if "negRiskMarketID" not in enriched and group_id is not None:
                 enriched["negRiskMarketID"] = group_id
+            # Nested Gamma children omit ``negRisk`` when it is false, unlike
+            # the active /markets stream. A parent group is the only durable
+            # event-side fact that makes the default true; otherwise preserve
+            # the active-stream semantics as explicit false.
+            if "negRisk" not in enriched:
+                enriched["negRisk"] = group_id is not None
             market_records.append(enriched)
     return market_records
 

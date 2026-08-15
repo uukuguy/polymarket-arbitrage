@@ -198,7 +198,6 @@ def test_event_embedded_source_excludes_closed_children_from_active_market_view(
                         "outcomePrices": '["0.4", "0.6"]',
                         "active": True,
                         "closed": False,
-                        "negRisk": False,
                     },
                 ],
             },

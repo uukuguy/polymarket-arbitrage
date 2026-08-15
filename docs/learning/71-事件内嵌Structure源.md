@@ -43,6 +43,9 @@ events:0 → events:1 → ... → events:terminal
 - **嵌套不等于可发布**：event 页也会带回已经 closed 的历史 child。v2 在展开时
   只采用 `active=true, closed=false` 的 child，精确保持 v1 `/markets` 活跃源的
   发布边界；closed child 仍在原始 event R2 evidence 中，因而没有被悄悄删除。
+- **字段缺省也有来源语义**：Gamma 的嵌套 child 在 `negRisk=false` 时可能直接省略
+  该字段。若父 event 没有组 ID，v2 将它规范为显式 false；若父 event 有组 ID，才
+  规范为 true。显式的 child 值永不覆盖，仍由 truth validator 拦截冲突。
 
 ## 自检题
 
@@ -61,3 +64,9 @@ events:0 → events:1 → ... → events:terminal
 
 那会让一条本不属于活跃市场视图的数据穿过 truth validator，并把旧闭市状态混进
 本轮 Structure。正确边界是先按 v1 活跃源契约过滤，再对留下的市场做严格真值验证。
+
+### `negRisk` 缺失为何可以补默认值？
+
+这里不是查询新数据或猜测策略属性：默认值完全由同一份封存 event evidence 的父组
+身份决定，且只弥补 Gamma 的序列化差异，使其与旧活跃 `/markets` 源的显式布尔值
+一致。
