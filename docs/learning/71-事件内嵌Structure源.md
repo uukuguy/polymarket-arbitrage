@@ -37,6 +37,9 @@ events:0 → events:1 → ... → events:terminal
   新窗口使用显式 `gamma-source-window-events-v2` 身份。
 - **消除可变二次读取窗口**：这不是靠无限增大并发掩盖 race，而是让 Structure
   使用一条同源的 Gamma evidence 链。
+- **R2 读取有固定并发上限**：materializer 以八个 slot 同时读取封存页，但
+  `gather` 保留 page-input 的原始顺序；这缩短 200+ 页窗口的物化时间，不改变
+  digest、ordinal 或 lease fence。
 
 ## 自检题
 

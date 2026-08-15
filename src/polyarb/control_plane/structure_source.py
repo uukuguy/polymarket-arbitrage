@@ -669,11 +669,17 @@ class TransactionalStructureSourceMaterializer:
         now: Callable[[], datetime],
         range_max_rows: int,
         lease_seconds: int = 120,
+        read_concurrency: int = 8,
         retry_delay: timedelta = timedelta(seconds=15),
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
-        if range_max_rows <= 0 or lease_seconds <= 0 or retry_delay.total_seconds() <= 0:
+        if (
+            range_max_rows <= 0
+            or lease_seconds <= 0
+            or read_concurrency <= 0
+            or retry_delay.total_seconds() <= 0
+        ):
             raise ValueError("materializer bounds must be positive")
         self._control_plane = control_plane
         self._object_client = object_client
@@ -682,6 +688,7 @@ class TransactionalStructureSourceMaterializer:
         self._now = now
         self._range_max_rows = range_max_rows
         self._lease_seconds = lease_seconds
+        self._read_concurrency = read_concurrency
         self._retry_delay = retry_delay
 
     async def run_once(self) -> StructureWorkerResult:
@@ -694,18 +701,9 @@ class TransactionalStructureSourceMaterializer:
         if lease is None:
             return StructureWorkerResult(job_key=None, outcome="idle")
         try:
-            pages = []
-            for spec, key, digest in self._control_plane.structure_source_window_pages(
-                lease.input_identity
-            ):
-                pages.append(
-                    (
-                        spec,
-                        await asyncio.to_thread(
-                            self._read_page_artifact, key=key, digest=digest
-                        ),
-                    )
-                )
+            pages = await self._read_source_pages(
+                self._control_plane.structure_source_window_pages(lease.input_identity)
+            )
             bundle = materialize_structure_source_pages(pages)
             upload_structure_bundle_artifact(
                 self._object_client, bucket=self._bucket, artifact=bundle
@@ -745,6 +743,28 @@ class TransactionalStructureSourceMaterializer:
                 now=self._now(),
             )
             raise
+
+    async def _read_source_pages(
+        self,
+        source_pages: Sequence[tuple[StructureSourcePageSpec, str, str]],
+    ) -> list[tuple[StructureSourcePageSpec, StructureSourcePageArtifact]]:
+        """Read immutable page evidence concurrently without changing its order."""
+        semaphore = asyncio.Semaphore(self._read_concurrency)
+
+        async def read_one(
+            spec: StructureSourcePageSpec, key: str, digest: str
+        ) -> tuple[StructureSourcePageSpec, StructureSourcePageArtifact]:
+            async with semaphore:
+                artifact = await asyncio.to_thread(
+                    self._read_page_artifact, key=key, digest=digest
+                )
+            return spec, artifact
+
+        return list(
+            await asyncio.gather(
+                *(read_one(spec, key, digest) for spec, key, digest in source_pages)
+            )
+        )
 
     def _read_page_artifact(self, *, key: str, digest: str) -> StructureSourcePageArtifact:
         response = self._object_client.get_object(Bucket=self._bucket, Key=key)

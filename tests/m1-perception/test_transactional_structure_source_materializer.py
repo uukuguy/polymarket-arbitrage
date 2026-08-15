@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from datetime import UTC, datetime
 
 import pytest
@@ -93,6 +95,25 @@ class MemoryR2:
         return {"ContentLength": len(self.objects[key]), "Metadata": self.metadata[key]}
 
 
+class ConcurrentReadMemoryR2(MemoryR2):
+    def __init__(self, pages: tuple[PageArtifact, ...]) -> None:
+        super().__init__(pages)
+        self._lock = threading.Lock()
+        self.active_reads = 0
+        self.max_active_reads = 0
+
+    def get_object(self, **kwargs: object):
+        with self._lock:
+            self.active_reads += 1
+            self.max_active_reads = max(self.max_active_reads, self.active_reads)
+        try:
+            time.sleep(0.02)
+            return super().get_object(**kwargs)
+        finally:
+            with self._lock:
+                self.active_reads -= 1
+
+
 def test_materializer_reads_only_sealed_r2_pages_then_admits_ranges() -> None:
     pages = (
         _artifact(
@@ -153,6 +174,57 @@ def test_materializer_reads_only_sealed_r2_pages_then_admits_ranges() -> None:
         ("markets", "", ""),
         ("issues", "", ""),
     )
+
+
+def test_materializer_reads_sealed_pages_concurrently_in_stable_source_order() -> None:
+    pages = (
+        _artifact(
+            stream="events",
+            records=(
+                {
+                    "id": "event-a",
+                    "slug": "event-a",
+                    "active": True,
+                    "closed": False,
+                    "markets": [
+                        {
+                            "id": "market-a",
+                            "active": True,
+                            "closed": False,
+                            "negRiskOther": False,
+                        }
+                    ],
+                },
+            ),
+        ),
+        _artifact(
+            stream="markets",
+            records=(
+                {
+                    "id": "market-a",
+                    "conditionId": "condition-a",
+                    "clobTokenIds": '["yes-a", "no-a"]',
+                    "outcomePrices": '["0.4", "0.6"]',
+                    "active": True,
+                    "closed": False,
+                    "negRisk": False,
+                },
+            ),
+        ),
+    )
+    control_plane = FakeControlPlane(pages)
+    objects = ConcurrentReadMemoryR2(pages)
+    worker = TransactionalStructureSourceMaterializer(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="source-pages",
+        worker_id="materializer-a",
+        now=lambda: NOW,
+        range_max_rows=100,
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    assert objects.max_active_reads == 2
 
 
 def test_materializer_records_retry_incident_when_sealed_page_is_unavailable() -> None:
