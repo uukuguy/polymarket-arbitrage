@@ -275,7 +275,7 @@ def test_source_worker_fetches_scoped_market_batch_by_exact_ids() -> None:
     assert control_plane.recorded["completed"] is True
 
 
-def test_terminal_event_worker_derives_and_commits_scoped_market_batches() -> None:
+def test_terminal_event_worker_commits_event_embedded_market_completion() -> None:
     class TerminalEventGamma(FakeGamma):
         async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage:
             self.event_calls.append((cursor, limit))
@@ -305,15 +305,14 @@ def test_terminal_event_worker_derives_and_commits_scoped_market_batches() -> No
         bucket="source-pages",
         worker_id="source-worker-a",
         now=lambda: NOW,
-        market_batch_size=1,
     )
 
     assert asyncio.run(worker.run_once()).outcome == "succeeded"
     assert control_plane.recorded is not None
-    assert control_plane.recorded["market_batches"] == (("market-a",), ("market-b",))
+    assert control_plane.recorded["event_embedded_markets"] is True
 
 
-def test_terminal_event_batch_planning_is_bounded_and_retryable() -> None:
+def test_terminal_event_does_not_rebuild_a_mutable_market_batch_scope() -> None:
     class TerminalEventGamma(FakeGamma):
         async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage:
             return EventPage(
@@ -325,26 +324,23 @@ def test_terminal_event_batch_planning_is_bounded_and_retryable() -> None:
                 finished_at_ms=20,
             )
 
-    class SlowTerminalWorker(TransactionalStructureSourceWorker):
-        def _market_batches_for_terminal_event(self, *args: object) -> tuple[tuple[str, ...], ...]:
-            time.sleep(0.05)
-            return ()
+    class EventOnlyControlPlane(FakeControlPlane):
+        def structure_source_event_pages(self, window_key: str):
+            raise AssertionError("event-only source must not read prior event artifacts")
 
-    control_plane = FakeControlPlane(_event_spec())
-    worker = SlowTerminalWorker(
+    control_plane = EventOnlyControlPlane(_event_spec())
+    worker = TransactionalStructureSourceWorker(
         control_plane=control_plane,
         gamma=TerminalEventGamma(),
         object_client=FakeObjectClient(),
         bucket="source-pages",
         worker_id="source-worker-a",
         now=lambda: NOW,
-        terminal_event_timeout_seconds=0.001,
     )
 
-    assert asyncio.run(worker.run_once()).outcome == "retryable"
-
-    assert control_plane.recorded is None
-    assert control_plane.retry_incidents[0]["error_class"] == "TimeoutError"
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    assert control_plane.recorded is not None
+    assert control_plane.recorded["event_embedded_markets"] is True
 
 
 def test_source_artifact_upload_is_bounded_and_retryable() -> None:

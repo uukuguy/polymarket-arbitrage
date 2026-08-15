@@ -255,6 +255,33 @@ def market_batches_from_event_records(
     return batches
 
 
+def _event_embedded_market_records(
+    event_records: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Expand market payloads sealed inside Gamma event evidence.
+
+    Gamma's event response carries the market fields required for Structure,
+    while the neg-risk group identity belongs to the enclosing event.  Copying
+    that identity into the child record is deterministic and keeps the entire
+    Structure source inside one immutable event-page chain.  We deliberately
+    reject malformed nesting rather than inventing a second mutable lookup.
+    """
+    market_records: list[dict[str, object]] = []
+    for event in event_records:
+        markets = event.get("markets")
+        if not isinstance(markets, list):
+            continue
+        group_id = event.get("negRiskMarketID")
+        for market in markets:
+            if not isinstance(market, dict):
+                raise StructureSourceError("event embedded market is malformed")
+            enriched = dict(market)
+            if "negRiskMarketID" not in enriched and group_id is not None:
+                enriched["negRiskMarketID"] = group_id
+            market_records.append(enriched)
+    return market_records
+
+
 def materialize_structure_source_pages(
     pages: Sequence[tuple[StructureSourcePageSpec, StructureSourcePageArtifact]],
 ) -> StructureBundleArtifact:
@@ -283,6 +310,8 @@ def materialize_structure_source_pages(
     source_receipts: list[dict[str, object]] = []
     for stream in ("events", "markets"):
         ordered = sorted(decoded[stream], key=lambda item: item[0].ordinal)
+        if not ordered and stream == "markets":
+            continue
         if not ordered:
             raise StructureSourceError(f"source stream unavailable:{stream}")
         rows: list[dict[str, object]] = []
@@ -305,8 +334,11 @@ def materialize_structure_source_pages(
         event_rows, event_tags, market_to_event, members, group_truths = normalize_events(
             raw_streams["events"]
         )
+        market_source = raw_streams.get("markets")
+        if market_source is None:
+            market_source = _event_embedded_market_records(raw_streams["events"])
         market_rows: list[dict[str, object]] = []
-        for raw in raw_streams["markets"]:
+        for raw in market_source:
             normalized = normalize_market(raw, market_to_event)
             if normalized is None:
                 raise StructureSourceError("source market normalization failed")
@@ -348,9 +380,17 @@ def materialize_structure_source_pages(
         window_id=window_key,
         snapshot_id=0,
         comparison_receipt_digest=source_digest,
-        normalization_contract_version="gamma-source-window-v1",
+        normalization_contract_version=(
+            "gamma-source-window-v1"
+            if "markets" in raw_streams
+            else "gamma-source-window-events-v2"
+        ),
         component_counts={component: len(rows) for component, rows in components.items()},
-        source_kind="gamma-source-window-v1",
+        source_kind=(
+            "gamma-source-window-v1"
+            if "markets" in raw_streams
+            else "gamma-source-window-events-v2"
+        ),
     )
     return StructureBundleArtifact.from_bytes(
         canonical_structure_bundle_bytes(identity=identity, components=components)
@@ -374,7 +414,6 @@ class TransactionalStructureSourceWorker:
         market_batch_size: int = 25,
         max_market_batches: int = DEFAULT_MAX_MARKET_BATCHES,
         lease_seconds: int = 120,
-        terminal_event_timeout_seconds: float = 90,
         object_store_timeout_seconds: float = 90,
         retry_delay: timedelta = timedelta(seconds=15),
     ) -> None:
@@ -388,7 +427,6 @@ class TransactionalStructureSourceWorker:
             raise ValueError("market batch bounds must be positive")
         if (
             lease_seconds <= 0
-            or terminal_event_timeout_seconds <= 0
             or object_store_timeout_seconds <= 0
             or retry_delay.total_seconds() <= 0
         ):
@@ -404,7 +442,6 @@ class TransactionalStructureSourceWorker:
         self._market_batch_size = market_batch_size
         self._max_market_batches = max_market_batches
         self._lease_seconds = lease_seconds
-        self._terminal_event_timeout_seconds = terminal_event_timeout_seconds
         self._object_store_timeout_seconds = object_store_timeout_seconds
         self._retry_delay = retry_delay
 
@@ -434,16 +471,7 @@ class TransactionalStructureSourceWorker:
                 )
                 return StructureWorkerResult(job_key=lease.job_key, outcome="quarantined")
             artifact, next_cursor, completed, record_count = await self._fetch_artifact(spec)
-            market_batches = None
-            if spec.stream == "events" and completed:
-                # This reads every prior event artifact.  It cannot block the sole
-                # scheduler turn indefinitely, or an expired lease becomes unable
-                # to reclaim itself on the next tick.  The helper is read-only; a
-                # timed-out thread has no durable authority to commit a receipt.
-                market_batches = await asyncio.wait_for(
-                    asyncio.to_thread(self._market_batches_for_terminal_event, spec, artifact),
-                    timeout=self._terminal_event_timeout_seconds,
-                )
+            event_embedded_markets = spec.stream == "events" and completed
             self._control_plane.record_structure_source_page(
                 lease,
                 artifact_key=artifact.key,
@@ -451,7 +479,7 @@ class TransactionalStructureSourceWorker:
                 next_cursor=next_cursor,
                 completed=completed,
                 record_count=record_count,
-                market_batches=market_batches,
+                event_embedded_markets=event_embedded_markets,
                 now=self._now(),
             )
             self._control_plane.record_job_recovery(
@@ -567,42 +595,6 @@ class TransactionalStructureSourceWorker:
             ),
             timeout=self._object_store_timeout_seconds,
         )
-
-    def _market_batches_for_terminal_event(
-        self,
-        current_spec: StructureSourcePageSpec,
-        current_artifact: StructureSourcePageArtifact,
-    ) -> tuple[tuple[str, ...], ...]:
-        records: list[dict[str, object]] = []
-        pages = self._control_plane.structure_source_event_pages(current_spec.window_key)
-        for spec, artifact_key, artifact_digest in pages:
-            if spec.stream != "events":
-                continue
-            response = self._object_client.get_object(Bucket=self._bucket, Key=artifact_key)
-            body = response.get("Body")
-            if body is None or not hasattr(body, "read"):
-                raise StructureSourceError("source event artifact body is unavailable")
-            payload = body.read()
-            if not isinstance(payload, bytes):
-                raise StructureSourceError("source event artifact body is malformed")
-            parsed, page_records, _, _ = parse_structure_source_page_bytes(
-                payload, expected_sha256=artifact_digest
-            )
-            if parsed != spec:
-                raise StructureSourceError("source event artifact input mismatch")
-            records.extend(page_records)
-        parsed_current, current_records, _, _ = parse_structure_source_page_bytes(
-            current_artifact.payload, expected_sha256=current_artifact.sha256
-        )
-        if parsed_current != current_spec:
-            raise StructureSourceError("current source event artifact input mismatch")
-        records.extend(current_records)
-        return market_batches_from_event_records(
-            records,
-            batch_size=self._market_batch_size,
-            max_batches=self._max_market_batches,
-        )
-
 
 class TransactionalStructureSourcePool:
     """Bound concurrent exact-ID source work without weakening durable leases."""

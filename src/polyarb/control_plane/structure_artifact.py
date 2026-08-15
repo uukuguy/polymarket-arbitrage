@@ -43,7 +43,11 @@ class StructureBundleIdentity:
     def __post_init__(self) -> None:
         if not self.publication_id or not self.window_id or not self.normalization_contract_version:
             raise ValueError("Structure bundle identity strings must be non-empty")
-        if self.source_kind not in {"legacy-publication-v1", "gamma-source-window-v1"}:
+        if self.source_kind not in {
+            "legacy-publication-v1",
+            "gamma-source-window-v1",
+            "gamma-source-window-events-v2",
+        }:
             raise ValueError("Structure bundle source_kind is invalid")
         if self.snapshot_id < 0 or (
             self.source_kind == "legacy-publication-v1" and self.snapshot_id <= 0

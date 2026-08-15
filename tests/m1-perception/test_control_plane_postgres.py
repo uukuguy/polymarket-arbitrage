@@ -602,6 +602,38 @@ def test_only_last_scoped_market_batch_releases_materializer(
     assert materializer.job_key == f"{window_key}:materialize"
 
 
+def test_terminal_event_with_embedded_markets_releases_materializer_without_market_jobs(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    window_key = "source-window:event-embedded"
+    control_plane.admit_structure_source_window(window_key=window_key, now=now)
+    event = control_plane.claim_job(
+        worker_id="event-lane", job_types=("structure-fetch",), lease_seconds=30, now=now
+    )
+    assert event is not None
+
+    control_plane.record_structure_source_page(
+        event,
+        artifact_key="m1/structure/source/event-embedded/events-0.json",
+        artifact_digest="a" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        event_embedded_markets=True,
+        now=now,
+    )
+
+    pages = control_plane.structure_source_window_pages(window_key)
+    assert len(pages) == 1
+    assert pages[0][0].stream == "events"
+    materializer = control_plane.claim_job(
+        worker_id="materializer", job_types=("structure-materialize",), lease_seconds=30, now=now
+    )
+    assert materializer is not None
+    assert materializer.job_key == f"{window_key}:materialize"
+
+
 def test_parallel_scoped_batch_leases_release_materializer_only_after_last_receipt(
     control_plane: PostgresControlPlane,
 ) -> None:

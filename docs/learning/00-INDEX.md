@@ -82,6 +82,7 @@
 | 68 | [事务型告警投递](68-事务型告警投递.md) | outbox lease / append-only delivery receipt / 外部通知不阻塞采集 |
 | 69 | [事务型熔断与恢复](69-事务型熔断与恢复.md) | job-scoped circuit / deterministic probe / fenced recovery / operator projection |
 | 70 | [Structure 源并发租约池](70-Structure源并发租约池.md) | event cursor 为什么串行 / market batch 如何八 lane 并发 / `succeeded:1/8` 如何判读 / 为什么并发不削弱 lease fencing |
+| 71 | [事件内嵌 Structure 源](71-事件内嵌Structure源.md) | 为什么二次 market 拉取无法在线收敛 / event 页如何同源展开 market / terminal event 如何直接释放物化 |
 
 ## Phase 02.1 教学增量（2026-05）
 

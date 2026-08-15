@@ -530,7 +530,10 @@ class PostgresControlPlane:
         self._validate_aware(now, "now")
         if lease.job_type != "structure-materialize":
             raise ValueError("source bundle admission requires a structure-materialize lease")
-        if identity.source_kind != "gamma-source-window-v1":
+        if identity.source_kind not in {
+            "gamma-source-window-v1",
+            "gamma-source-window-events-v2",
+        }:
             raise ValueError("source bundle identity must name a Gamma source window")
         if identity.window_id != lease.input_identity:
             raise JobIdentityConflict("source bundle lease names another window")
@@ -680,6 +683,7 @@ class PostgresControlPlane:
         completed: bool,
         record_count: int,
         market_batches: tuple[tuple[str, ...], ...] | None = None,
+        event_embedded_markets: bool = False,
         now: datetime,
     ) -> StructureSourcePageSpec | None:
         """Atomically record one source page and release only its legal successor.
@@ -700,6 +704,10 @@ class PostgresControlPlane:
             raise ValueError("completed source page cannot name a successor cursor")
         if not completed and (next_cursor is None or not next_cursor):
             raise ValueError("incomplete source page requires a successor cursor")
+        if type(event_embedded_markets) is not bool:
+            raise TypeError("event_embedded_markets must be a bool")
+        if event_embedded_markets and market_batches is not None:
+            raise ValueError("event embedded markets cannot also name market batches")
         normalized_market_batches: tuple[tuple[str, ...], ...] | None = None
         if market_batches is not None:
             if not completed:
@@ -722,6 +730,10 @@ class PostgresControlPlane:
                 raise JobIdentityConflict("source page lease identity does not match input")
             if normalized_market_batches is not None and spec.stream != "events":
                 raise ValueError("market batches require an event source page")
+            if event_embedded_markets and (
+                spec.stream != "events" or not completed or next_cursor is not None
+            ):
+                raise ValueError("event embedded markets require a terminal event source page")
             if spec.market_ids and (not completed or next_cursor is not None):
                 raise ValueError("scoped market batch must be terminal without a cursor")
             cursor.execute(
@@ -757,6 +769,11 @@ class PostgresControlPlane:
                     return self._admit_scoped_market_batches_cursor(
                         cursor, event_spec=spec, market_batches=normalized_market_batches, now=now
                     )
+                if event_embedded_markets:
+                    self._complete_event_embedded_source_window_cursor(
+                        cursor, event_spec=spec, now=now
+                    )
+                    return None
                 return self._source_successor_spec_cursor(
                     cursor, spec=spec, next_cursor=next_cursor, completed=completed
                 )
@@ -833,10 +850,16 @@ class PostgresControlPlane:
             scoped_market_admission = (
                 spec.stream == "events" and completed and normalized_market_batches is not None
             )
+            embedded_event_completion = spec.stream == "events" and event_embedded_markets
             if scoped_market_admission:
                 successor = self._admit_scoped_market_batches_cursor(
                     cursor, event_spec=spec, market_batches=normalized_market_batches, now=now
                 )
+            elif embedded_event_completion:
+                self._complete_event_embedded_source_window_cursor(
+                    cursor, event_spec=spec, now=now
+                )
+                successor = None
             else:
                 successor = self._source_successor_spec_cursor(
                     cursor, spec=spec, next_cursor=next_cursor, completed=completed
@@ -885,6 +908,38 @@ class PostgresControlPlane:
                     now=now,
                 )
             return successor
+
+    def _complete_event_embedded_source_window_cursor(
+        self,
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        event_spec: StructureSourcePageSpec,
+        now: datetime,
+    ) -> None:
+        """Release materialization from a terminal event-only source chain."""
+        cursor.execute(
+            """
+            UPDATE m1_structure_source_windows
+            SET state = 'complete', updated_at = %s
+            WHERE window_key = %s AND state = 'running'
+            """,
+            (now, event_spec.window_key),
+        )
+        if cursor.rowcount != 1:
+            cursor.execute(
+                "SELECT state FROM m1_structure_source_windows WHERE window_key = %s",
+                (event_spec.window_key,),
+            )
+            row = cursor.fetchone()
+            if row is None or row["state"] != "complete":
+                raise CheckpointConflictError("event source terminal transition is invalid")
+        self._enqueue_job_cursor(
+            cursor,
+            job_key=f"{event_spec.window_key}:materialize",
+            job_type="structure-materialize",
+            input_identity=event_spec.window_key,
+            now=now,
+        )
 
     @staticmethod
     def _source_successor_spec_cursor(

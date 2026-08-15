@@ -101,6 +101,75 @@ def test_sealed_source_pages_materialize_current_structure_bundle_without_sqlite
     assert components["markets"][0]["event_id"] == "event-a"
 
 
+def test_event_embedded_market_evidence_materializes_without_a_second_market_stream() -> None:
+    event = _page(
+        stream="events",
+        ordinal=0,
+        records=(
+            {
+                "id": "event-a",
+                "slug": "event-a",
+                "active": True,
+                "closed": False,
+                "negRisk": True,
+                "enableNegRisk": True,
+                "negRiskAugmented": False,
+                "negRiskMarketID": "group-a",
+                "markets": [
+                    {
+                        "id": "market-a",
+                        "conditionId": "condition-a",
+                        "slug": "market-a",
+                        "question": "Question?",
+                        "clobTokenIds": '["yes-a", "no-a"]',
+                        "outcomePrices": '["0.4", "0.6"]',
+                        "active": True,
+                        "closed": False,
+                        "negRisk": True,
+                        "negRiskOther": False,
+                    }
+                ],
+            },
+        ),
+        completed=True,
+        next_cursor=None,
+    )
+
+    bundle = materialize_structure_source_pages((event,))
+
+    identity, components = parse_structure_bundle_bytes(
+        bundle.payload, expected_sha256=bundle.sha256
+    )
+    assert identity.source_kind == "gamma-source-window-events-v2"
+    assert identity.component_counts["markets"] == 1
+    assert components["markets"] == (
+        {
+            "market_id": "market-a",
+            "condition_id": "condition-a",
+            "slug": "market-a",
+            "question": "Question?",
+            "yes_token_id": "yes-a",
+            "no_token_id": "no-a",
+            "mid_price": 0.4,
+            "liquidity_usd": None,
+            "volume_usd": None,
+            "best_bid_price": None,
+            "best_bid_size": None,
+            "best_ask_price": None,
+            "best_ask_size": None,
+            "end_time_ms": None,
+            "active": True,
+            "closed": False,
+            "neg_risk": True,
+            "neg_risk_market_id": "group-a",
+            "fetched_at_ms": None,
+            "page_fetched_at_ms": None,
+            "incomplete": False,
+            "event_id": "event-a",
+        },
+    )
+
+
 def test_materializer_rejects_missing_or_tampered_source_page_before_bundle_exists() -> None:
     event = _page(
         stream="events",
