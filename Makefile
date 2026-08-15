@@ -12,7 +12,9 @@
 # `source .venv/bin/activate` needed. To bootstrap: `uv sync --extra dev`.
 
 .DEFAULT_GOAL := help
-.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunities watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-control-plane perception-opportunities perception-groups perception-incidents perception-resources queue-discovery queue-reconciliation sqlite-volume-backup sqlite-volume-restore-verify qualify-replacement-volume
+.PHONY: help test diagnose-arb-feed-prod build-market-map inspect-market-map scan-neg-risk-map watch-opportunities-status watch-opportunity-history perception-discovery-status reconcile-market-map reconciliation-status run-perception-worker perception-status perception-control-plane perception-opportunities perception-groups perception-incidents perception-resources queue-discovery queue-reconciliation sqlite-volume-backup sqlite-volume-restore-verify qualify-replacement-volume
+
+comma := ,
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta
@@ -612,7 +614,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -665,6 +667,21 @@ control-plane-verify-shadow-parity:
 control-plane-verify-fault-soak:
 	@test -n "$(evidence)" || (echo "usage: make control-plane-verify-fault-soak evidence=<fault-soak.json>" >&2; exit 2)
 	@uv run python -m polyarb.cli_control_plane verify-fault-soak --evidence "$(evidence)" --json
+
+## control-plane-soak-start: Capture the immutable staging baseline from the read-only control API and exact Fly worker machines. Requires evidence= control_api_url= and comma-separated machine_ids=; does not require DSN or mutate data plane state.
+control-plane-soak-start:
+	@test -n "$(evidence)" -a -n "$(control_api_url)" -a -n "$(machine_ids)" || (echo "usage: make control-plane-soak-start evidence=<soak.jsonl> control_api_url=<url> machine_ids=<id,id,...> [fly_app=polyarb-control-worker-staging]" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane soak-start --output "$(evidence)" --control-api-url "$(control_api_url)" --fly-app "$(or $(fly_app),polyarb-control-worker-staging)" $(foreach machine,$(subst $(comma), ,$(machine_ids)),--machine-id "$(machine)") --json
+
+## control-plane-soak-sample: Append one read-only staging soak observation to an existing evidence file. Requires evidence= control_api_url= and comma-separated machine_ids=; no job, receipt or machine mutation.
+control-plane-soak-sample:
+	@test -n "$(evidence)" -a -n "$(control_api_url)" -a -n "$(machine_ids)" || (echo "usage: make control-plane-soak-sample evidence=<soak.jsonl> control_api_url=<url> machine_ids=<id,id,...> [fly_app=polyarb-control-worker-staging]" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane soak-sample --output "$(evidence)" --control-api-url "$(control_api_url)" --fly-app "$(or $(fly_app),polyarb-control-worker-staging)" $(foreach machine,$(subst $(comma), ,$(machine_ids)),--machine-id "$(machine)") --json
+
+## control-plane-soak-verify: Fail-closed verification of a local 24-hour soak window. Requires evidence=; defaults to 900-second sample gaps and 86400 seconds minimum duration.
+control-plane-soak-verify:
+	@test -n "$(evidence)" || (echo "usage: make control-plane-soak-verify evidence=<soak.jsonl> [minimum_seconds=86400] [max_gap_seconds=900]" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane soak-verify --evidence "$(evidence)" --minimum-seconds "$(or $(minimum_seconds),86400)" --max-gap-seconds "$(or $(max_gap_seconds),900)" --json
 
 ## control-plane-api-serve: Run the independent Postgres-only control-plane HTTP read service. Requires enable=1 and DSN; no SQLite, R2 or worker starts.
 control-plane-api-serve:

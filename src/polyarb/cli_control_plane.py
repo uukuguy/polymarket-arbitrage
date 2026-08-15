@@ -7,10 +7,12 @@ import asyncio
 import json
 import os
 import signal
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.request import urlopen
 
 import psycopg
 
@@ -31,6 +33,13 @@ from polyarb.control_plane.rollout import render_rollout_artifacts
 from polyarb.control_plane.scheduler import TransactionalControlPlaneScheduler
 from polyarb.control_plane.shadow import project_shadow_sources, read_shadow_sources
 from polyarb.control_plane.shadow_parity import verify_shadow_parity
+from polyarb.control_plane.soak_evidence import (
+    SoakEvidenceError,
+    append_record,
+    create_record,
+    read_records,
+    verify_soak,
+)
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     canonical_structure_bundle_bytes,
@@ -196,6 +205,23 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify_fault_soak_command.add_argument("--evidence", type=Path, required=True)
     verify_fault_soak_command.add_argument("--json", action="store_true")
+    for command, help_text in (
+        ("soak-start", "record the immutable baseline for a read-only transactional soak window"),
+        ("soak-sample", "append one read-only transactional soak observation"),
+    ):
+        soak = subcommands.add_parser(command, help=help_text)
+        soak.add_argument("--output", type=Path, required=True)
+        soak.add_argument("--control-api-url", required=True)
+        soak.add_argument("--machine-id", action="append", required=True)
+        soak.add_argument("--fly-app", default="polyarb-control-worker-staging")
+        soak.add_argument("--json", action="store_true")
+    soak_verify = subcommands.add_parser(
+        "soak-verify", help="verify a local immutable transactional soak evidence file"
+    )
+    soak_verify.add_argument("--evidence", type=Path, required=True)
+    soak_verify.add_argument("--minimum-seconds", type=int, default=86_400)
+    soak_verify.add_argument("--max-gap-seconds", type=int, default=900)
+    soak_verify.add_argument("--json", action="store_true")
     return parser
 
 
@@ -212,6 +238,54 @@ def _write(payload: dict[str, object], *, as_json: bool) -> None:
         return
     for key, value in payload.items():
         print(f"{key}={value}")
+
+
+def _read_soak_control_snapshot(url: str) -> dict[str, object]:
+    """Read the independent control API without importing its database client."""
+    with urlopen(url, timeout=10) as response:  # noqa: S310 -- explicit operator URL
+        payload = json.loads(response.read())
+    if not isinstance(payload, dict):
+        raise SoakEvidenceError("control API response must be an object")
+    return payload
+
+
+def _read_fly_machine_states(machine_ids: Sequence[str], *, app: str) -> dict[str, str]:
+    """Read exact Fly machine state using its local CLI, with no machine mutation."""
+    result = subprocess.run(
+        ["flyctl", "machines", "list", "--app", app, "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    if not isinstance(payload, list):
+        raise SoakEvidenceError("Fly machines list must be an array")
+    listed = {
+        item.get("id"): item.get("state")
+        for item in payload
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    states = {machine_id: listed.get(machine_id) for machine_id in machine_ids}
+    if any(not isinstance(state, str) or not state for state in states.values()):
+        raise SoakEvidenceError("an exact Fly machine is missing or has no state")
+    return states  # type: ignore[return-value]
+
+
+def _record_soak_observation(args: argparse.Namespace, *, exclusive: bool) -> dict[str, object]:
+    snapshot = _read_soak_control_snapshot(args.control_api_url)
+    record = create_record(
+        observed_at=datetime.now(UTC).isoformat(),
+        control_api_url=args.control_api_url,
+        machine_states=_read_fly_machine_states(args.machine_id, app=args.fly_app),
+        control_snapshot=snapshot,
+    )
+    append_record(args.output, record, exclusive=exclusive)
+    return {
+        "status": "baseline-recorded" if exclusive else "sample-recorded",
+        "evidence": str(args.output),
+        "observed_at": record["observed_at"],
+        "machine_count": len(args.machine_id),
+    }
 
 
 def _r2_upload_fault_callback(
@@ -602,6 +676,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write(verify_fault_soak(evidence), as_json=args.json)
         except (OSError, ValueError) as error:
             print(f"fault/soak evidence unavailable: {type(error).__name__}", file=sys.stderr)
+            return 1
+        return 0
+    if args.command in {"soak-start", "soak-sample"}:
+        try:
+            _write(
+                _record_soak_observation(args, exclusive=args.command == "soak-start"),
+                as_json=args.json,
+            )
+        except (OSError, SoakEvidenceError, subprocess.SubprocessError, ValueError) as error:
+            print(f"soak evidence unavailable: {type(error).__name__}", file=sys.stderr)
+            return 1
+        return 0
+    if args.command == "soak-verify":
+        try:
+            _write(
+                verify_soak(
+                    read_records(args.evidence),
+                    minimum_seconds=args.minimum_seconds,
+                    max_gap_seconds=args.max_gap_seconds,
+                ),
+                as_json=args.json,
+            )
+        except (OSError, SoakEvidenceError, ValueError) as error:
+            print(f"soak evidence unavailable: {type(error).__name__}", file=sys.stderr)
             return 1
         return 0
     control_plane = _control_plane_from_env()
