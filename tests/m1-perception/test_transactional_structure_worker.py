@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from polyarb.control_plane.models import JobLease, JobState, StructureRangeSpec
+from polyarb.control_plane.postgres import IncompleteStructureGenerationError
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
@@ -345,6 +346,51 @@ def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit
     assert objects.upload["Key"] == control_plane.certified["artifact_key"]
     assert objects.upload["Metadata"]["sha256"] == control_plane.certified["artifact_digest"]
     assert control_plane.finished == []
+
+
+def test_structure_certifier_waits_for_missing_range_receipts_without_incident() -> None:
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.finished: list[dict[str, object]] = []
+
+        def claim_job(self, **kwargs: object) -> JobLease:
+            return JobLease(
+                job_key="structure:" + "a" * 64 + ":certify",
+                job_type="structure-certify",
+                input_identity="structure:" + "a" * 64,
+                lease_owner="certifier-a",
+                lease_epoch=1,
+                lease_expires_at=NOW,
+                checkpoint_cursor=None,
+                checkpoint_digest=None,
+            )
+
+        def structure_generation_receipts(self, generation_key: str):
+            raise IncompleteStructureGenerationError("range receipts pending")
+
+        def finish(self, lease: JobLease, **kwargs: object) -> None:
+            self.finished.append(kwargs)
+
+        def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
+            raise AssertionError("incomplete generation is ordinary waiting, not an incident")
+
+    certifier = TransactionalStructureCertifier(
+        control_plane=ControlPlane(),
+        object_client=object(),
+        bucket="structure",
+        worker_id="certifier-a",
+        now=lambda: NOW,
+    )
+
+    assert certifier.run_once().outcome == "waiting"
+    assert certifier._control_plane.finished == [
+        {
+            "state": JobState.RETRYABLE,
+            "next_attempt_at": NOW + timedelta(seconds=5),
+            "error_class": "IncompleteStructureGenerationError",
+            "now": NOW,
+        }
+    ]
 
 
 def test_structure_certifier_refuses_range_content_that_does_not_reassemble_bundle() -> None:

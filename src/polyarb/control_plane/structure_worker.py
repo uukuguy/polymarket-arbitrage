@@ -11,7 +11,7 @@ from polyarb.config import Settings
 
 from .alert_delivery import incident_alert_channels
 from .models import JobState, StructureRangeSpec
-from .postgres import PostgresControlPlane, StaleLeaseError
+from .postgres import IncompleteStructureGenerationError, PostgresControlPlane, StaleLeaseError
 from .structure_artifact import (
     StructureBundleError,
     StructureManifestArtifact,
@@ -252,6 +252,15 @@ class TransactionalStructureCertifier:
                 now=self._now(),
             )
             return StructureWorkerResult(job_key=lease.job_key, outcome="certified")
+        except IncompleteStructureGenerationError:
+            self._control_plane.finish(
+                lease,
+                state=JobState.RETRYABLE,
+                next_attempt_at=self._now() + self._retry_delay,
+                error_class="IncompleteStructureGenerationError",
+                now=self._now(),
+            )
+            return StructureWorkerResult(job_key=lease.job_key, outcome="waiting")
         except StaleLeaseError:
             raise
         except Exception as error:
