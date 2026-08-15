@@ -1965,8 +1965,7 @@ class PostgresControlPlane:
             cursor.execute(
                 """
                 UPDATE m1_jobs
-                SET checkpoint_cursor = %s, checkpoint_digest = %s, state = 'checkpointed',
-                    updated_at = %s
+                SET checkpoint_cursor = %s, checkpoint_digest = %s, updated_at = %s
                 WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s AND state = 'leased'
                 """,
                 (
@@ -2105,8 +2104,7 @@ class PostgresControlPlane:
             cursor.execute(
                 """
                 UPDATE m1_jobs
-                SET checkpoint_cursor = %s, checkpoint_digest = %s, state = 'checkpointed',
-                    updated_at = %s
+                SET checkpoint_cursor = %s, checkpoint_digest = %s, updated_at = %s
                 WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s AND state = 'leased'
                 """,
                 (

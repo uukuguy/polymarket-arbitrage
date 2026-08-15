@@ -1308,6 +1308,50 @@ def test_structure_range_receipt_is_fenced_and_idempotent(
         )
 
 
+def test_checkpointed_range_stays_with_original_lease_until_expiry(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    artifact = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=artifact,
+        ranges=(("events", "", "m"),),
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="structure-a", job_types=("structure-normalize",), lease_seconds=30, now=now
+    )
+    assert lease is not None
+    control_plane.record_structure_range(
+        lease,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/c/rows.ndjson",
+        artifact_digest="c" * 64,
+        record_count=3,
+        now=now,
+    )
+
+    assert (
+        control_plane.claim_job(
+            worker_id="structure-b",
+            job_types=("structure-normalize",),
+            lease_seconds=30,
+            now=now + timedelta(seconds=1),
+        )
+        is None
+    )
+
+    replacement = control_plane.claim_job(
+        worker_id="structure-b",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=31),
+    )
+    assert replacement is not None
+    assert replacement.lease_epoch == lease.lease_epoch + 1
+
+
 def test_structure_certification_requires_complete_matching_range_receipts(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -1556,7 +1600,7 @@ def test_quote_batch_receipt_is_fenced_and_idempotent(control_plane: PostgresCon
         now=now,
     )[0]
     lease = control_plane.claim_job(
-        worker_id="worker-a", job_types=("quote-batch",), lease_seconds=30, now=now
+        worker_id="worker-a", job_types=("quote-batch",), lease_seconds=1, now=now
     )
     assert lease is not None
     first = control_plane.record_quote_batch(
@@ -1600,6 +1644,52 @@ def test_quote_batch_receipt_is_fenced_and_idempotent(control_plane: PostgresCon
             quoted_at=now,
             now=now + timedelta(seconds=3),
         )
+
+
+def test_checkpointed_quote_batch_stays_with_original_lease_until_expiry(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        token_ids=("token-1",),
+        batch_size=1,
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="worker-a", job_types=("quote-batch",), lease_seconds=30, now=now
+    )
+    assert lease is not None
+    control_plane.record_quote_batch(
+        lease,
+        token_range_digest=batch.token_range_digest,
+        quote_digest="c" * 64,
+        artifact_key="quote-batches/c/batch.ndjson",
+        artifact_digest="c" * 64,
+        successful_response_count=1,
+        quoted_at=now,
+        now=now,
+    )
+
+    assert (
+        control_plane.claim_job(
+            worker_id="worker-b",
+            job_types=("quote-batch",),
+            lease_seconds=30,
+            now=now + timedelta(seconds=1),
+        )
+        is None
+    )
+
+    replacement = control_plane.claim_job(
+        worker_id="worker-b",
+        job_types=("quote-batch",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=31),
+    )
+    assert replacement is not None
+    assert replacement.lease_epoch == lease.lease_epoch + 1
 
 
 def test_replacement_lease_can_finish_an_already_recorded_quote_batch(
@@ -1895,17 +1985,10 @@ def test_complete_quote_generation_certifies_and_publishes_one_pointer(
             quoted_at=batch_now,
             now=batch_now,
         )
-        resumed = control_plane.claim_job(
-            worker_id=f"quote-worker-{ordinal}",
-            job_types=("quote-batch",),
-            lease_seconds=30,
-            now=batch_now + timedelta(milliseconds=1),
-        )
-        assert resumed is not None
         control_plane.finish(
-            resumed,
+            lease,
             state=JobState.SUCCEEDED,
-            now=batch_now + timedelta(milliseconds=2),
+            now=batch_now + timedelta(milliseconds=1),
         )
     certifier = control_plane.claim_job(
         worker_id="certifier", job_types=("quote-certify",), lease_seconds=30, now=now
