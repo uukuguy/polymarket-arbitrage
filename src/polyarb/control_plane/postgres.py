@@ -3737,6 +3737,136 @@ class PostgresControlPlane:
             "next_after_group_id": str(page[-1]["group_id"]) if has_more else None,
         }
 
+    def publish_opportunity_projection(
+        self,
+        *,
+        quote_generation_key: str,
+        structure_generation_key: str,
+        rows: Sequence[Mapping[str, object]],
+        now: datetime,
+    ) -> str:
+        """Atomically publish one complete, already-authenticated projection."""
+        self._validate_nonempty(
+            quote_generation_key=quote_generation_key,
+            structure_generation_key=structure_generation_key,
+        )
+        self._validate_aware(now, "now")
+        normalized = tuple(
+            sorted((dict(row) for row in rows), key=lambda row: str(row.get("group_id")))
+        )
+        required = {
+            "group_id",
+            "event_id",
+            "membership_hash",
+            "bundle_cost",
+            "gross_edge_bps",
+            "max_bundle_size",
+            "legs",
+            "structure_observed_at_ms",
+            "quote_started_at_ms",
+            "quote_quoted_at_ms",
+        }
+        if any(
+            set(row) != required or not isinstance(row["group_id"], str) for row in normalized
+        ):
+            raise ValueError("invalid-opportunity-projection-row")
+        if len({str(row["group_id"]) for row in normalized}) != len(normalized):
+            raise ValueError("opportunity-projection-group-duplicate")
+        digest = sha256(
+            "\n".join(
+                json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False)
+                for row in normalized
+            ).encode()
+        ).hexdigest()
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                "SELECT generation_key FROM m1_publication_pointers "
+                "WHERE pointer_key='quote:current' FOR UPDATE"
+            )
+            pointer = cursor.fetchone()
+            if pointer is None or str(pointer["generation_key"]) != quote_generation_key:
+                raise IncompleteQuoteGenerationError(
+                    "opportunity projection requires current certified Quote"
+                )
+            cursor.execute(
+                """SELECT generation_key FROM m1_generation_manifests
+                   WHERE generation_key = ANY(%s)
+                     AND producer_job_key = generation_key || ':certify'""",
+                ([quote_generation_key, structure_generation_key],),
+            )
+            if {str(row["generation_key"]) for row in cursor.fetchall()} != {
+                quote_generation_key, structure_generation_key
+            }:
+                raise IncompleteStructureGenerationError(
+                    "opportunity projection requires certified generations"
+                )
+            cursor.execute(
+                """INSERT INTO m1_opportunity_projections
+                   (generation_key, structure_generation_key, projection_digest,
+                    record_count, certified_at)
+                   VALUES (%s,%s,%s,%s,%s) ON CONFLICT (generation_key) DO NOTHING""",
+                (
+                    quote_generation_key,
+                    structure_generation_key,
+                    digest,
+                    len(normalized),
+                    now,
+                ),
+            )
+            cursor.execute(
+                "SELECT projection_digest, record_count FROM m1_opportunity_projections "
+                "WHERE generation_key=%s",
+                (quote_generation_key,),
+            )
+            persisted = cursor.fetchone()
+            if (
+                persisted is None
+                or str(persisted["projection_digest"]) != digest
+                or int(persisted["record_count"]) != len(normalized)
+            ):
+                raise CheckpointConflictError("opportunity projection conflicts")
+            for row in normalized:
+                cursor.execute(
+                    """INSERT INTO m1_opportunity_projection_rows
+                       (generation_key, group_id, event_id, membership_hash, bundle_cost,
+                        gross_edge_bps, max_bundle_size, legs, structure_observed_at_ms,
+                        quote_started_at_ms, quote_quoted_at_ms)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                    (
+                        quote_generation_key,
+                        str(row["group_id"]),
+                        str(row["event_id"]),
+                        str(row["membership_hash"]),
+                        row["bundle_cost"],
+                        row["gross_edge_bps"],
+                        row["max_bundle_size"],
+                        Jsonb(row["legs"]),
+                        row["structure_observed_at_ms"],
+                        row["quote_started_at_ms"],
+                        row["quote_quoted_at_ms"],
+                    ),
+                )
+            cursor.execute(
+                "SELECT count(*) AS count FROM m1_opportunity_projection_rows "
+                "WHERE generation_key=%s",
+                (quote_generation_key,),
+            )
+            if int(cursor.fetchone()["count"]) != len(normalized):
+                raise CheckpointConflictError("opportunity projection rows conflict")
+            cursor.execute(
+                """INSERT INTO m1_opportunity_publication_pointers
+                   (pointer_key, generation_key, published_at)
+                   VALUES ('opportunity:current',%s,%s)
+                   ON CONFLICT (pointer_key) DO UPDATE
+                   SET generation_key=excluded.generation_key,
+                       published_at=excluded.published_at""",
+                (quote_generation_key, now),
+            )
+        return digest
+
     @staticmethod
     def _queue_health_snapshot_cursor(
         cursor: psycopg.Cursor[dict[str, Any]],

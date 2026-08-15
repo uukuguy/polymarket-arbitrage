@@ -2017,6 +2017,70 @@ def test_complete_quote_generation_certifies_and_publishes_one_pointer(
         connection.close()
 
 
+def test_opportunity_projection_publish_is_atomic_and_current_pointer_is_pageable(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    quote_generation = "quote:" + "a" * 64
+    structure_generation = "structure:" + "b" * 64
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        for generation_key in (quote_generation, structure_generation):
+            job_key = f"{generation_key}:certify"
+            connection.execute(
+                """INSERT INTO m1_jobs(job_key,job_type,input_identity,state,created_at,updated_at)
+                   VALUES (%s,'certify',%s,'succeeded',%s,%s)""",
+                (job_key, generation_key, now, now),
+            )
+            connection.execute(
+                """INSERT INTO m1_generation_manifests
+                   (generation_key,producer_job_key,input_digest,artifact_key,artifact_digest,record_count,published_at)
+                   VALUES (%s,%s,%s,%s,%s,1,%s)""",
+                (generation_key, job_key, "c" * 64, "artifact", "d" * 64, now),
+            )
+        connection.execute(
+            """INSERT INTO m1_publication_pointers
+               (pointer_key,generation_key,expected_generation_key,lease_epoch,published_at)
+               VALUES ('quote:current',%s,NULL,1,%s)""",
+            (quote_generation, now),
+        )
+
+    row = {
+        "group_id": "group-a",
+        "event_id": "event-a",
+        "membership_hash": "membership-a",
+        "bundle_cost": 0.91,
+        "gross_edge_bps": 900.0,
+        "max_bundle_size": 4.0,
+        "legs": [{"yes_token_id": "token-a", "ask_price": 0.91, "ask_size": 4.0}],
+        "structure_observed_at_ms": 1,
+        "quote_started_at_ms": 2,
+        "quote_quoted_at_ms": 3,
+    }
+    digest = control_plane.publish_opportunity_projection(
+        quote_generation_key=quote_generation,
+        structure_generation_key=structure_generation,
+        rows=(row,),
+        now=now,
+    )
+
+    assert len(digest) == 64
+    assert control_plane.current_opportunities(limit=1, after_group_id="") == {
+        "status": "available",
+        "current_opportunity_count": 1,
+        "items": [row],
+        "limit": 1,
+        "next_after_group_id": None,
+    }
+    with pytest.raises(ValueError, match="invalid-opportunity-projection-row"):
+        control_plane.publish_opportunity_projection(
+            quote_generation_key=quote_generation,
+            structure_generation_key=structure_generation,
+            rows=({"group_id": "bad"},),
+            now=now,
+        )
+    assert control_plane.current_opportunities(limit=1, after_group_id="")["items"] == [row]
+
+
 def test_claim_reclaim_and_epoch_fencing(control_plane: PostgresControlPlane) -> None:
     now = _now()
     control_plane.enqueue_job(
