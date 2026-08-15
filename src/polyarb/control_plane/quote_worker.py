@@ -56,6 +56,7 @@ class TransactionalQuoteBatchWorker:
         lease_seconds: int = 120,
         retry_delay: timedelta = timedelta(seconds=15),
         crash_after_r2_upload: Callable[[JobLease], None] | None = None,
+        retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
@@ -70,6 +71,7 @@ class TransactionalQuoteBatchWorker:
         self._lease_seconds = lease_seconds
         self._retry_delay = retry_delay
         self._crash_after_r2_upload = crash_after_r2_upload
+        self._retry_fault_before_receipt = retry_fault_before_receipt
 
     async def run_once(self) -> QuoteBatchWorkerResult:
         """Complete one recovery-safe batch; never rebuild input from SQLite."""
@@ -94,6 +96,8 @@ class TransactionalQuoteBatchWorker:
             artifact, successful_count = await self._fetch_artifact(batch)
             if self._crash_after_r2_upload is not None:
                 self._crash_after_r2_upload(lease)
+            if self._retry_fault_before_receipt is not None:
+                self._retry_fault_before_receipt(lease)
             self._control_plane.record_quote_batch(
                 lease,
                 token_range_digest=batch.token_range_digest,

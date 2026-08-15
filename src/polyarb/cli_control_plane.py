@@ -52,6 +52,7 @@ from polyarb.control_plane.structure_worker import (
 from polyarb.storage.r2_sync import _build_client
 
 _R2_UPLOAD_FAULT_ACK = "staging-r2-upload-before-receipt"
+_RETRY_FAULT_ACK = "staging-retry-before-receipt"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -132,6 +133,8 @@ def _parser() -> argparse.ArgumentParser:
     tick_once.add_argument("--structure-materializer-turns", type=int, default=0)
     tick_once.add_argument("--structure-range-turns", type=int, default=0)
     tick_once.add_argument("--fault-crash-after-r2-upload-job-key")
+    tick_once.add_argument("--fault-retry-job-key")
+    tick_once.add_argument("--fault-retry-attempts", type=int)
     tick_once.add_argument("--fault-injection-ack")
     tick_once.add_argument("--json", action="store_true")
     serve = subcommands.add_parser(
@@ -144,6 +147,8 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--structure-materializer-turns", type=int, default=0)
     serve.add_argument("--structure-range-turns", type=int, default=0)
     serve.add_argument("--fault-crash-after-r2-upload-job-key")
+    serve.add_argument("--fault-retry-job-key")
+    serve.add_argument("--fault-retry-attempts", type=int)
     serve.add_argument("--fault-injection-ack")
     serve.add_argument("--interval-seconds", type=float, default=15.0)
     serve.add_argument("--json", action="store_true")
@@ -213,11 +218,35 @@ def _r2_upload_fault_callback(
     return crash_matching_lease
 
 
+def _retry_fault_callback(
+    *, target_job_key: str | None, attempts: int | None, acknowledgement: str | None
+) -> Callable[[JobLease], None] | None:
+    """Create one exact, finite staging retry boundary before durable receipt."""
+    if target_job_key is None and attempts is None:
+        if acknowledgement == _RETRY_FAULT_ACK:
+            raise ValueError("retry fault acknowledgement requires a target job key and attempts")
+        return None
+    if target_job_key is None or attempts is None or attempts <= 0:
+        raise ValueError("retry fault target and attempts must be positive and paired")
+    if acknowledgement != _RETRY_FAULT_ACK:
+        raise ValueError("retry fault injection requires the exact staging acknowledgement")
+    remaining = attempts
+
+    def fail_matching_lease(lease: JobLease) -> None:
+        nonlocal remaining
+        if lease.job_key == target_job_key and remaining > 0:
+            remaining -= 1
+            raise RuntimeError("intentional staging retry before receipt")
+
+    return fail_matching_lease
+
+
 def _transactional_quote_workers(
     control_plane: PostgresControlPlane,
     *,
     worker_id: str,
     crash_after_r2_upload: Callable[[JobLease], None] | None = None,
+    retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
 ) -> tuple[TransactionalQuoteBatchWorker, TransactionalQuoteCertifier]:
     """Build explicitly invoked workers; nothing schedules these by default."""
     settings = Settings()
@@ -237,6 +266,7 @@ def _transactional_quote_workers(
             worker_id=worker_id,
             now=lambda: datetime.now(UTC),
             crash_after_r2_upload=crash_after_r2_upload,
+            retry_fault_before_receipt=retry_fault_before_receipt,
         ),
         TransactionalQuoteCertifier(
             control_plane=control_plane,
@@ -342,11 +372,13 @@ def _transactional_scheduler(
     structure_materializer_turns: int,
     structure_range_turns: int,
     crash_after_r2_upload: Callable[[JobLease], None] | None = None,
+    retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
 ) -> TransactionalControlPlaneScheduler:
     quote_worker, quote_certifier = _transactional_quote_workers(
         control_plane,
         worker_id=f"{worker_id}:quote",
         crash_after_r2_upload=crash_after_r2_upload,
+        retry_fault_before_receipt=retry_fault_before_receipt,
     )
     object_client, bucket = _structure_object_client()
     return TransactionalControlPlaneScheduler(
@@ -364,6 +396,7 @@ def _transactional_scheduler(
             worker_id=f"{worker_id}:structure",
             now=lambda: datetime.now(UTC),
             crash_after_r2_upload=crash_after_r2_upload,
+            retry_fault_before_receipt=retry_fault_before_receipt,
         ),
         structure_certifier=TransactionalStructureCertifier(
             control_plane=control_plane,
@@ -674,6 +707,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 target_job_key=args.fault_crash_after_r2_upload_job_key,
                 acknowledgement=args.fault_injection_ack,
             )
+            retry_fault_before_receipt = _retry_fault_callback(
+                target_job_key=args.fault_retry_job_key,
+                attempts=args.fault_retry_attempts,
+                acknowledgement=args.fault_injection_ack,
+            )
             scheduler = _transactional_scheduler(
                 control_plane,
                 worker_id=args.worker_id,
@@ -681,6 +719,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 structure_materializer_turns=args.structure_materializer_turns,
                 structure_range_turns=args.structure_range_turns,
                 crash_after_r2_upload=crash_after_r2_upload,
+                retry_fault_before_receipt=retry_fault_before_receipt,
             )
             _write(asyncio.run(scheduler.run_tick()), as_json=args.json)
             return 0
@@ -701,6 +740,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 target_job_key=args.fault_crash_after_r2_upload_job_key,
                 acknowledgement=args.fault_injection_ack,
             )
+            retry_fault_before_receipt = _retry_fault_callback(
+                target_job_key=args.fault_retry_job_key,
+                attempts=args.fault_retry_attempts,
+                acknowledgement=args.fault_injection_ack,
+            )
             scheduler = _transactional_scheduler(
                 control_plane,
                 worker_id=args.worker_id,
@@ -708,6 +752,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 structure_materializer_turns=args.structure_materializer_turns,
                 structure_range_turns=args.structure_range_turns,
                 crash_after_r2_upload=crash_after_r2_upload,
+                retry_fault_before_receipt=retry_fault_before_receipt,
             )
             result = asyncio.run(
                 _run_scheduler_service(

@@ -89,6 +89,7 @@ class FakeControlPlane:
         self.finished: list[JobState] = []
         self.recorded: dict[str, object] | None = None
         self.recoveries: list[dict[str, object]] = []
+        self.retry_incidents: list[dict[str, object]] = []
 
     def claim_job(self, **kwargs: object) -> JobLease:
         return JobLease(
@@ -119,6 +120,9 @@ class FakeControlPlane:
     def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
         self.recoveries.append(kwargs)
         return False
+
+    def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
+        self.retry_incidents.append(kwargs)
 
 
 def _spec(bundle: StructureBundleArtifact) -> StructureRangeSpec:
@@ -180,6 +184,27 @@ def test_structure_fault_hook_crashes_after_verified_upload_before_receipt() -> 
     assert observed == [_spec(bundle).job_key]
     assert control_plane.recorded is None
     assert control_plane.finished == []
+
+
+def test_structure_retry_fault_uses_existing_retry_incident_path() -> None:
+    bundle = _bundle()
+    control_plane = FakeControlPlane(_spec(bundle))
+    worker = TransactionalStructureWorker(
+        control_plane=control_plane,
+        object_client=FakeObjectClient(bundle),
+        bucket="structure",
+        worker_id="worker-a",
+        now=lambda: NOW,
+        retry_fault_before_receipt=lambda _lease: (_ for _ in ()).throw(
+            RuntimeError("intentional staging retry")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="intentional staging retry"):
+        asyncio.run(worker.run_once())
+
+    assert control_plane.recorded is None
+    assert control_plane.retry_incidents[0]["component"] == "structure-normalize"
 
 
 def test_transactional_structure_worker_recovers_receipt_without_r2_read() -> None:

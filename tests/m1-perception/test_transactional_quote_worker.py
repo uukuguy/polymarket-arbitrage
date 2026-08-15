@@ -158,6 +158,27 @@ def test_quote_fault_hook_crashes_after_verified_upload_before_receipt() -> None
     assert control_plane.finished == []
 
 
+def test_quote_retry_fault_uses_existing_retry_incident_path() -> None:
+    control_plane = FakeControlPlane(_batch())
+    worker = TransactionalQuoteBatchWorker(
+        control_plane=control_plane,
+        reader=FakeReader(),
+        object_client=FakeObjectClient(),
+        bucket="quotes",
+        worker_id="worker-a",
+        now=lambda: NOW,
+        retry_fault_before_receipt=lambda _lease: (_ for _ in ()).throw(
+            RuntimeError("intentional staging retry")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="intentional staging retry"):
+        asyncio.run(worker.run_once())
+
+    assert control_plane.recorded is None
+    assert control_plane.retry_incidents[0]["component"] == "quote-batch"
+
+
 def test_transactional_worker_finishes_existing_receipt_without_refetch() -> None:
     control_plane = FakeControlPlane(_batch(), prior=object())
     reader = FakeReader()

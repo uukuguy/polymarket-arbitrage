@@ -204,7 +204,7 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
     from polyarb import cli_control_plane
 
     scheduler = object()
-    captured: dict[str, int] = {}
+    captured: dict[str, object] = {}
     monkeypatch.setenv(
         "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
     )
@@ -217,11 +217,13 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
         structure_materializer_turns,
         structure_range_turns,
         crash_after_r2_upload,
+        retry_fault_before_receipt,
     ):
         captured.update(
             max_turns=max_turns,
             structure_materializer_turns=structure_materializer_turns,
             structure_range_turns=structure_range_turns,
+            retry_fault_before_receipt=retry_fault_before_receipt,
         )
         return scheduler
 
@@ -258,6 +260,7 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
         "max_turns": 2,
         "structure_materializer_turns": 8,
         "structure_range_turns": 8,
+        "retry_fault_before_receipt": None,
     }
 
 
@@ -282,6 +285,34 @@ def test_r2_upload_fault_callback_requires_exact_acknowledgement_and_job_key() -
     callback(type("Lease", (), {"job_key": "structure:other:range:0"})())
     with pytest.raises(KeyboardInterrupt, match="verified R2 upload"):
         callback(type("Lease", (), {"job_key": "structure:one:range:0"})())
+
+
+def test_retry_fault_callback_requires_bounded_exact_staging_configuration() -> None:
+    from polyarb import cli_control_plane
+
+    with pytest.raises(ValueError, match="exact staging acknowledgement"):
+        cli_control_plane._retry_fault_callback(
+            target_job_key="structure:one:range:0", attempts=3, acknowledgement=None
+        )
+    with pytest.raises(ValueError, match="attempts must be positive"):
+        cli_control_plane._retry_fault_callback(
+            target_job_key="structure:one:range:0",
+            attempts=0,
+            acknowledgement="staging-retry-before-receipt",
+        )
+
+    callback = cli_control_plane._retry_fault_callback(
+        target_job_key="structure:one:range:0",
+        attempts=2,
+        acknowledgement="staging-retry-before-receipt",
+    )
+    assert callback is not None
+    callback(type("Lease", (), {"job_key": "structure:other:range:0"})())
+    with pytest.raises(RuntimeError, match="intentional staging retry"):
+        callback(type("Lease", (), {"job_key": "structure:one:range:0"})())
+    with pytest.raises(RuntimeError, match="intentional staging retry"):
+        callback(type("Lease", (), {"job_key": "structure:one:range:0"})())
+    callback(type("Lease", (), {"job_key": "structure:one:range:0"})())
 
 
 def test_quote_control_plane_once_runs_one_batch_then_certifier(monkeypatch, capsys) -> None:
@@ -481,6 +512,7 @@ def test_control_plane_tick_once_reports_bounded_turns(monkeypatch, capsys) -> N
         structure_materializer_turns,
         structure_range_turns,
         crash_after_r2_upload,
+        retry_fault_before_receipt,
     ):
         return Scheduler()
 

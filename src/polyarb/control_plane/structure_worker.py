@@ -64,6 +64,7 @@ class TransactionalStructureWorker:
         lease_seconds: int = 120,
         retry_delay: timedelta = timedelta(seconds=15),
         crash_after_r2_upload: Callable[[JobLease], None] | None = None,
+        retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
@@ -77,6 +78,7 @@ class TransactionalStructureWorker:
         self._lease_seconds = lease_seconds
         self._retry_delay = retry_delay
         self._crash_after_r2_upload = crash_after_r2_upload
+        self._retry_fault_before_receipt = retry_fault_before_receipt
 
     async def run_once(self) -> StructureWorkerResult:
         lease = self._control_plane.claim_job(
@@ -96,6 +98,8 @@ class TransactionalStructureWorker:
             artifact, record_count = self._process_range(spec)
             if self._crash_after_r2_upload is not None:
                 self._crash_after_r2_upload(lease)
+            if self._retry_fault_before_receipt is not None:
+                self._retry_fault_before_receipt(lease)
             self._control_plane.record_structure_range(
                 lease,
                 range_digest=spec.range_digest,
