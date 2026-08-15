@@ -3060,11 +3060,13 @@ class PostgresControlPlane:
         channels: Sequence[str],
         now: datetime,
     ) -> bool:
-        """Close a failed job's circuit only after its terminal success is durable.
+        """Close a failed job's circuit after durable forward progress.
 
         The prior retry and this recovery are independently committed because a
-        worker can crash between them.  The terminal job state plus lease epoch
-        fences that second transition, and the recovery event has an immutable
+        worker can crash between them.  A terminal success or a durable
+        checkpoint under the same lease epoch fences that second transition;
+        checkpoint recovery matters for bounded workers whose full job spans
+        many independently durable turns.  The recovery event has an immutable
         epoch key so replay stays harmless.
         """
         self._validate_aware(now, "now")
@@ -3088,10 +3090,13 @@ class PostgresControlPlane:
             job = cursor.fetchone()
             if (
                 job is None
-                or str(job["state"]) != JobState.SUCCEEDED.value
+                or str(job["state"])
+                not in {JobState.SUCCEEDED.value, "checkpointed"}
                 or int(job["lease_epoch"]) != lease.lease_epoch
             ):
-                raise StaleLeaseError(f"terminal success is no longer current for {lease.job_key}")
+                raise StaleLeaseError(
+                    f"durable recovery state is no longer current for {lease.job_key}"
+                )
             cursor.execute(
                 """
                 SELECT consecutive_failures FROM m1_job_circuits

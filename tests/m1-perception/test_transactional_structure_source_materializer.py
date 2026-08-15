@@ -298,3 +298,4 @@ def test_event_only_materializer_checkpoints_one_bounded_shard_batch() -> None:
     assert control_plane.admitted is None
     assert control_plane.checkpoints[0]["checkpoint_cursor"] == "shard-batch:00000000"
     assert str(control_plane.checkpoints[0]["artifact_key"]).startswith("structure-shard-batches/")
+    assert control_plane.recoveries[0]["component"] == "structure-materialize"

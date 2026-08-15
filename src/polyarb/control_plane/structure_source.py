@@ -990,6 +990,12 @@ class TransactionalStructureSourceMaterializer:
             ),
             now=self._now(),
         )
+        self._control_plane.record_job_recovery(
+            lease,
+            component="structure-materialize",
+            channels=incident_alert_channels(Settings()),
+            now=self._now(),
+        )
         return StructureWorkerResult(job_key=lease.job_key, outcome="checkpointed")
 
     async def _finalize_event_shard_manifest(

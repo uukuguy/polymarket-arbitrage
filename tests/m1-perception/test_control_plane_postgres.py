@@ -2409,6 +2409,72 @@ def test_successful_terminal_job_closes_circuit_and_resolves_retry_incident(
         connection.close()
 
 
+def test_checkpointed_job_closes_circuit_and_resolves_retry_incident(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    job_key = "structure:window-a:materialize:checkpoint-recovery"
+    control_plane.enqueue_job(
+        job_key=job_key,
+        job_type="structure-materialize",
+        input_identity="window-a:materialize",
+        now=now,
+    )
+    failed = control_plane.claim_job(
+        worker_id="worker-failure", job_types=("structure-materialize",), lease_seconds=30, now=now
+    )
+    assert failed is not None
+    control_plane.finish_retryable_with_incident(
+        failed,
+        error_class="StructureSourceError",
+        incident_key=f"incident:job-retry:{job_key}",
+        dedupe_key=f"job-retry:{job_key}",
+        component="structure-materialize",
+        summary="structure-materialize retryable failure",
+        detail={"job_key": job_key},
+        channels=("dashboard",),
+        now=now,
+    )
+    recovered = control_plane.claim_job(
+        worker_id="worker-recovery",
+        job_types=("structure-materialize",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=15),
+    )
+    assert recovered is not None
+    control_plane.checkpoint(
+        recovered,
+        checkpoint_cursor="shard-batch:00000003",
+        checkpoint_digest="a" * 64,
+        idempotency_key=f"checkpoint:{job_key}:1",
+        now=now + timedelta(seconds=16),
+    )
+    assert control_plane.record_job_recovery(
+        recovered,
+        component="structure-materialize",
+        channels=("dashboard",),
+        now=now + timedelta(seconds=16),
+    )
+
+    connection = control_plane._connection_factory()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT consecutive_failures, state, next_probe_at "
+                "FROM m1_job_circuits WHERE job_key = %s",
+                (job_key,),
+            )
+            assert cursor.fetchone() == (0, "closed", None)
+            cursor.execute("SELECT state, resolved_at IS NOT NULL FROM m1_incidents")
+            assert cursor.fetchone() == ("resolved", True)
+            cursor.execute(
+                "SELECT kind FROM m1_incident_events ORDER BY occurred_at, incident_event_id"
+            )
+            assert [row[0] for row in cursor.fetchall()] == ["attempt-failed", "recovered"]
+    finally:
+        connection.close()
+
+
 def test_alert_delivery_lease_records_one_receipt_and_fences_stale_worker(
     control_plane: PostgresControlPlane,
 ) -> None:
