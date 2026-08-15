@@ -8,6 +8,32 @@ from pathlib import Path
 import pytest
 
 
+def test_control_plane_connection_factory_bounds_postgres_connect_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead Postgres authority must not indefinitely stall a control-plane turn."""
+    from polyarb import cli_control_plane
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
+    monkeypatch.setattr(
+        cli_control_plane.psycopg,
+        "connect",
+        lambda dsn, **kwargs: captured.update(dsn=dsn, kwargs=kwargs) or object(),
+    )
+
+    control_plane = cli_control_plane._control_plane_from_env()
+
+    assert control_plane is not None
+    assert control_plane._connection_factory() is not None
+    assert captured == {
+        "dsn": "postgresql://operator:secret@example.test/control",
+        "kwargs": {"connect_timeout": 5},
+    }
+
+
 def test_quote_control_plane_once_requires_explicit_enable(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 

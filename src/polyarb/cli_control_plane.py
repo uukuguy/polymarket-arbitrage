@@ -229,7 +229,7 @@ def _control_plane_from_env() -> PostgresControlPlane | None:
     dsn = os.environ.get("POLYARB_SUPABASE_DB_DSN", "").strip()
     if not dsn:
         return None
-    return PostgresControlPlane(lambda: psycopg.connect(dsn))
+    return PostgresControlPlane(lambda: psycopg.connect(dsn, connect_timeout=5))
 
 
 def _write(payload: dict[str, object], *, as_json: bool) -> None:
