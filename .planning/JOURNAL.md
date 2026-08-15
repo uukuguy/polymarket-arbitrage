@@ -9469,3 +9469,23 @@ takeover. Telegram remains separately blocked only by Fly secrets-write authoriz
 [NEXT] Run only the five validated live roles while queue drains. Implement the approved soak evidence
 recorder and a repeatable staging Machine configuration contract once the design approval/Fly write
 path is available; then create Quote process-loss and scoped alert evidence.
+
+## SESSION 268 — 2026-08-15 (Quote R2 takeover and continuous soak started)
+
+- [FIXED] Commits `9fcf5d24` and `454bf4e5` add fail-closed JSONL soak evidence plus no-DSN
+  control-plane CLI/Make targets. It reads the independent API and exact Fly machines only; new
+  expired leases/circuits, machine identity changes, API unavailability, or a >900s gap reject the
+  window. Commit `eb973195` records test coverage and the teaching model; `e7081109` installs the
+  named 600s user LaunchAgent sampler with no long-running collection process.
+- [LIVE/EVIDENCE] Exact Quote R2 process-loss was successfully run against batch `…9485:69`:
+  crash after verified R2 upload, lease expiry, then alternate Quote worker recovery. Read-only DB
+  evidence is `state=succeeded`, `attempt_count=2`, `lease_epoch=2`, receipt count exactly one,
+  487 successful responses. Both Quote pools were restored to normal commands; all five roles are
+  `started`, Quote unfinished is zero, API is available, expired leases/circuits are back at 6/74.
+- [CONTINUING] Evidence baseline and post-recovery samples are at
+  `phases/05.6-self-healing-structure-production/evidence/staging-transactional-soak.jsonl`.
+  LaunchAgent `com.polyarb.m1-transactional-soak-sampler` appends every 600 seconds and exits.
+
+[NEXT] Let the automated 24-hour staging soak run without additional injected faults; then run
+`make control-plane-soak-verify evidence=.planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/evidence/staging-transactional-soak.jsonl`.
+Telegram scoped delivery remains the only separate external Fly secrets-write permission gap.
