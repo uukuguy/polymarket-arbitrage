@@ -9270,3 +9270,31 @@ proof, restore the normal command, then start the continuous soak window.
 hook plus scoped alert delivery that only releases this acceptance run's new
 outbox intents (never historical backlog). Then perform Structure and Quote
 circuit evidence, the Quote R2 takeover, and the 24h soak.
+
+## SESSION 259 — 2026-08-15 (retry circuit and self-restart repair)
+
+- [IMPLEMENTED] `9490e926` scopes recovery outbox payloads and alert claims by
+  `acceptance_run_id`; `bcd0350d` fixes shared acknowledgement validation;
+  `f464d3db` makes an intentional staging retry return a durable `retryable`
+  outcome rather than exiting the scheduler. Focused CLI/Structure/Quote/
+  alert/Postgres suite: 91 passed; Ruff and `make planning-status` pass.
+- [LIVE/STAGING] Image `m1-retry-outcome-f464d3db@sha256:618a23…a30b6` runs on
+  machine `48e3104c979578` with no fault flags and acceptance scope
+  `m1-retry-fault-20260815-0815`. Production pointers, L1/L2, and Telegram
+  configuration remain untouched.
+- [FAULT/EVIDENCE] Exact unreceipted Structure target
+  `structure:35f489…:normalize:event_tags:60` reached durable retry state and
+  circuit-open evidence (`attempt_count=4`, `lease_epoch=4`, three consecutive
+  retry failures, `state=open`). The extra first epoch was an intentional
+  operator stop while eliminating target-selection race, not a receipt.
+- [LEARNING] A normal fault exception caused Fly's restart policy to reset the
+  in-memory bounded callback; do not use process exit for finite retry-fault
+  acceptance. `IntentionalStagingRetryFault` is now the explicit path that
+  persists retryable state while keeping the scheduler alive.
+
+[NEXT] Verify that the open Structure circuit probes successfully under the
+normal command and creates a scoped recovery outbox row. Start one scoped
+alert worker on a separate staging machine and prove exactly that new Telegram
+delivery (never historical backlog). Then repeat the repaired bounded retry
+circuit for a Quote batch, perform its R2 process-loss takeover, and begin the
+24-hour continuous soak window.
