@@ -86,6 +86,10 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   `51bdef…bea3` (425 rows). The normal 8/16/8 command is restored. This proves
   fenced takeover and exactly-once receipt, not avoidance of an idempotent R2
   overwrite on retry. Quote-batch proof and continuous soak remain open.
+- **Current drain configuration:** staging now runs 8 base / 8 materializer /
+  32 Structure-range serial turns to keep source collection moving while this
+  1,014-range generation drains. This is a staging capacity rebalance, not a
+  concurrency or production change. Quote admission remains the next gate.
 
 - **Staging credential containment:** API health is passing with an isolated
   replacement DSN, and recovery machine `48e3104c979578` is the only active

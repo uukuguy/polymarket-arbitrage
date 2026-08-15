@@ -9238,3 +9238,18 @@ repeat for a downstream Quote batch, then start the 24-hour fault/soak window.
 [NEXT] Keep normal staging at 8/16/8. Drive this fresh Structure generation
 through certification and Quote admission, repeat the bounded exact-key fault
 for one Quote batch, then begin the 24-hour continuous soak evidence window.
+
+## SESSION 257 — 2026-08-15 (Structure drain budget rebalance)
+
+- [LIVE/STAGING] The new `c20e9bf…b656` generation remained healthy after the
+  real takeover. Its 8/16/8 serial budget made range drain unnecessarily slow
+  because materializer turns lengthened each scheduler cycle. The running
+  command is now 8 base / 8 materializer / 32 range turns, still one fenced
+  lease at a time and with no production mutation.
+- [LIVE] Range receipts advanced from 63 to 150 while source materialization
+  remained active; there are no failed range jobs. Quote has not yet been
+  admitted, so the Quote R2 boundary has deliberately not been armed.
+
+[NEXT] Let `structure:c20e9bf…` finish its 1,014 ranges and certify. At the
+first new Quote batch, capture the exact-key R2-before-receipt loss/reclaim
+proof, restore the normal command, then start the continuous soak window.
