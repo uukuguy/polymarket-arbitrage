@@ -27,10 +27,16 @@ class TransactionalControlPlaneScheduler:
         quote_worker: _Worker,
         quote_certifier: _Worker,
         max_turns: int,
+        structure_materializer_turns: int = 0,
         structure_range_turns: int = 0,
         turn_timeout_seconds: float = 105,
     ) -> None:
-        if max_turns <= 0 or structure_range_turns < 0 or turn_timeout_seconds <= 0:
+        if (
+            max_turns <= 0
+            or structure_materializer_turns < 0
+            or structure_range_turns < 0
+            or turn_timeout_seconds <= 0
+        ):
             raise ValueError("scheduler bounds are invalid")
         self._workers = (
             ("structure-source-admit", structure_source_admitter),
@@ -43,6 +49,11 @@ class TransactionalControlPlaneScheduler:
             ("quote-certify", quote_certifier),
         )
         self._max_turns = max_turns
+        self._structure_materializer_worker = (
+            "structure-source-materialize",
+            structure_source_materializer,
+        )
+        self._structure_materializer_turns = structure_materializer_turns
         self._structure_range_worker = ("structure-range", structure_worker)
         self._structure_range_turns = structure_range_turns
         self._turn_timeout_seconds = turn_timeout_seconds
@@ -59,7 +70,11 @@ class TransactionalControlPlaneScheduler:
                 self._workers[(self._next_worker + offset) % len(self._workers)]
                 for offset in range(turn_count)
             )
-            workers = base_workers + (self._structure_range_worker,) * self._structure_range_turns
+            workers = (
+                base_workers
+                + (self._structure_materializer_worker,) * self._structure_materializer_turns
+                + (self._structure_range_worker,) * self._structure_range_turns
+            )
             for name, worker in workers:
                 result = worker.run_once()
                 if inspect.isawaitable(result):

@@ -124,6 +124,44 @@ def test_range_budget_appends_only_serial_structure_range_turns() -> None:
     assert structure.calls == 4
 
 
+def test_materializer_budget_is_serial_and_independent_from_range_budget() -> None:
+    materializer = _AsyncWorker("structure-source-materialize")
+    structure = _AsyncWorker("structure-range")
+    scheduler = TransactionalControlPlaneScheduler(
+        structure_source_admitter=_AsyncWorker("structure-source-admit"),
+        structure_source_worker=_AsyncWorker("structure-source"),
+        structure_source_materializer=materializer,
+        structure_worker=structure,
+        structure_certifier=_SyncWorker("structure-certify"),
+        quote_admitter=_AsyncWorker("quote-admit"),
+        quote_worker=_AsyncWorker("quote-batch"),
+        quote_certifier=_SyncWorker("quote-certify"),
+        max_turns=8,
+        structure_materializer_turns=3,
+        structure_range_turns=2,
+    )
+
+    turns = asyncio.run(scheduler.run_tick())["turns"]
+
+    assert [turn["worker"] for turn in turns] == [
+        "structure-source-admit",
+        "structure-source",
+        "structure-source-materialize",
+        "structure-range",
+        "structure-certify",
+        "quote-admit",
+        "quote-batch",
+        "quote-certify",
+        "structure-source-materialize",
+        "structure-source-materialize",
+        "structure-source-materialize",
+        "structure-range",
+        "structure-range",
+    ]
+    assert materializer.calls == 4
+    assert structure.calls == 3
+
+
 def test_scheduler_service_emits_tick_then_stops_without_sleeping() -> None:
     admitter = _AsyncWorker("structure-source-admit")
     source = _AsyncWorker("structure-source")
