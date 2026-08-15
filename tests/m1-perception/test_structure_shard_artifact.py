@@ -13,6 +13,7 @@ from polyarb.control_plane.structure_artifact import (
     canonical_structure_shard_bytes,
     parse_structure_shard_bytes,
 )
+from polyarb.control_plane.structure_shadow import plan_shard_structure_ranges
 
 
 def test_structure_shard_canonicalizes_one_component_and_rejects_tampering() -> None:
@@ -105,3 +106,27 @@ def test_shard_batch_binds_one_source_page_interval_to_all_component_shards() ->
     )
     assert header == ("source-window:1", "b" * 64, 4, 5)
     assert shards == (shard,)
+
+
+def test_shard_ranges_name_exactly_one_component_ordinal() -> None:
+    shards = (
+        StructureShardReceipt(
+            component="markets",
+            ordinal=1,
+            artifact_key="structure-shards/a/rows.ndjson",
+            artifact_digest="a" * 64,
+            row_count=1,
+        ),
+        StructureShardReceipt(
+            component="events",
+            ordinal=0,
+            artifact_key="structure-shards/b/rows.ndjson",
+            artifact_digest="b" * 64,
+            row_count=1,
+        ),
+    )
+
+    assert plan_shard_structure_ranges(shards) == (
+        ("events", "shard:00000000", "shard:00000001"),
+        ("markets", "shard:00000001", "shard:00000002"),
+    )

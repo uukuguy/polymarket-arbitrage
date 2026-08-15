@@ -7,7 +7,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from .structure_artifact import StructureBundleIdentity
+from .structure_artifact import StructureBundleIdentity, StructureShardReceipt
 
 
 class StructureShadowRefusal(RuntimeError):
@@ -114,6 +114,25 @@ def plan_structure_ranges(
         ends = cursors[max_rows::max_rows] + [""]
         planned.extend((component, start, end) for start, end in zip(starts, ends, strict=True))
     return tuple(planned)
+
+
+def plan_shard_structure_ranges(
+    shards: Sequence[StructureShardReceipt],
+) -> tuple[tuple[str, str, str], ...]:
+    """Freeze one range per authenticated v3 component shard."""
+    ordered = tuple(sorted(shards, key=lambda shard: (shard.component, shard.ordinal)))
+    if not ordered:
+        raise ValueError("sharded Structure generation requires at least one shard")
+    if len({(shard.component, shard.ordinal) for shard in ordered}) != len(ordered):
+        raise StructureShadowRefusal("duplicate-shard-range")
+    return tuple(
+        (
+            shard.component,
+            f"shard:{shard.ordinal:08d}",
+            f"shard:{shard.ordinal + 1:08d}",
+        )
+        for shard in ordered
+    )
 
 
 def _row_cursor(component: str, row: Mapping[str, object]) -> str:
