@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: staging five-role transactional collection is draining normally; both Structure and Quote R2 process-loss takeover are proven, while the automated 24-hour soak and scoped Telegram receipt remain open
-last_updated: "2026-08-15T14:00:00Z"
+stopped_at: staging five-role transactional collection is draining normally; both Structure and Quote R2 process-loss takeover are proven, the upgraded v2 automated soak is active, and scoped Telegram receipt remains open
+last_updated: "2026-08-15T14:51:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -17,6 +17,19 @@ progress:
 # M1 Perception — Current State
 
 ## Current Position
+
+- **Latest live repair (2026-08-15 14:49Z):** a finished 1,000-range Structure
+  certification was observed holding an expired 30-second epoch during its
+  eight-minute R2 parity rebuild. Commit `9a491285` adds a same-owner/epoch
+  heartbeat every lease-third between R2 parity segments; only the coordinator
+  was rolled to image `m1-cert-heartbeat-amd64-9a491285`. The old epoch 114
+  completed safely, expired leases returned to 6, and all five machines are
+  started. The next full natural certification is the long-running live proof.
+- **Strengthened 24-hour soak:** commit `3e940b54` creates immutable v2
+  evidence that additionally requires the cumulative succeeded-job count to
+  rise across the window. A fresh baseline at `14:38:53Z` had 20,783 successes;
+  its first independently scheduled sample at `14:49:00Z` had 21,364 with
+  API available and counters at 6/74. v1 evidence is retained unchanged.
 
 Phase: 05.6 (self-healing Structure production) — transactional control-plane foundation in progress
 

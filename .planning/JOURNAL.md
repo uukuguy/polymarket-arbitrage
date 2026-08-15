@@ -9525,3 +9525,22 @@ Telegram scoped delivery remains the only separate external Fly secrets-write pe
 accumulate through the automatic verdict. When Fly secrets write access becomes available, run only
 the scoped alert deliverer against the new recovery intents, then mechanically assemble and verify
 the final fault/soak evidence.
+
+## SESSION 271 — 2026-08-15 (v2 forward-progress soak and Structure certifier keepalive)
+
+- [FIXED/DEPLOYED-STAGING] The original soak checked machine/API/circuit/lease health but could
+  not prove durable work. Commit `3e940b54` introduces self-authenticated v2 observations with a
+  cumulative succeeded-job count, requiring monotonic and strictly forward progress. The v2
+  baseline at `14:38:53Z` was 20,783; its first non-RunAtLoad automatic sample at `14:49:00Z`
+  reached 21,364, with API available and counters 6/74. The historic v1 stream was not edited.
+- [ROOT CAUSE/FIXED/DEPLOYED-STAGING] A complete 1,000-range Structure generation spent eight
+  minutes rebuilding R2 content parity under one 30-second certifier lease. It became the seventh
+  expired lease while still running. Commit `9a491285` renews the existing owner/epoch every lease
+  third between parity segments; only coordinator `48e3104c979578` was updated to image
+  `m1-cert-heartbeat-amd64-9a491285@sha256:ce97b28e…b9126`. The old epoch 114 completed safely;
+  expired leases returned to 6. All five roles remain started.
+
+[NEXT] Do not inject faults. Observe a natural large Structure certification on the heartbeat
+image and ensure it keeps its lease alive through parity. Continue the v2 24-hour automatic soak;
+the remaining separate gate is scoped Telegram delivery, still constrained by Fly secrets write
+authorization.
