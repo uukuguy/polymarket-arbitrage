@@ -2045,6 +2045,50 @@ def test_materializer_shard_checkpoints_are_ordered_and_fenced(
         )
 
 
+def test_materializer_batch_receipts_are_ordered_by_checkpoint_cursor(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="source-window:2:materialize",
+        job_type="structure-materialize",
+        input_identity="source-window:2",
+        now=now,
+    )
+    first = control_plane.claim_job(
+        worker_id="worker-a", job_types=("structure-materialize",), lease_seconds=30, now=now
+    )
+    assert first is not None
+    control_plane.checkpoint(
+        first,
+        checkpoint_cursor="shard-batch:00000000",
+        checkpoint_digest="a" * 64,
+        artifact_key="structure-shard-batches/a/batch.ndjson",
+        idempotency_key="batch:0",
+        now=now + timedelta(seconds=1),
+    )
+    second = control_plane.claim_job(
+        worker_id="worker-b",
+        job_types=("structure-materialize",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=2),
+    )
+    assert second is not None
+    control_plane.checkpoint(
+        second,
+        checkpoint_cursor="shard-batch:00000004",
+        checkpoint_digest="b" * 64,
+        artifact_key="structure-shard-batches/b/batch.ndjson",
+        idempotency_key="batch:4",
+        now=now + timedelta(seconds=3),
+    )
+
+    assert control_plane.structure_materializer_batches("source-window:2") == (
+        ("shard-batch:00000000", "a" * 64, "structure-shard-batches/a/batch.ndjson"),
+        ("shard-batch:00000004", "b" * 64, "structure-shard-batches/b/batch.ndjson"),
+    )
+
+
 def test_retry_preserves_checkpoint_and_quarantine_stops_claims(
     control_plane: PostgresControlPlane,
 ) -> None:

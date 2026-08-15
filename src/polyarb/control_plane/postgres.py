@@ -507,6 +507,32 @@ class PostgresControlPlane:
             for row in rows
         )
 
+    def structure_materializer_batches(
+        self, window_key: str
+    ) -> tuple[tuple[str, str, str], ...]:
+        """Return the ordered immutable batch receipts for v3 finalization."""
+        self._validate_nonempty(window_key=window_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT checkpoint_cursor, checkpoint_digest, artifact_key
+                FROM m1_checkpoint_receipts
+                WHERE job_key = %s
+                  AND checkpoint_cursor LIKE 'shard-batch:%%'
+                  AND artifact_key IS NOT NULL
+                ORDER BY checkpoint_cursor
+                """,
+                (f"{window_key}:materialize",),
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            (str(row["checkpoint_cursor"]), str(row["checkpoint_digest"]), str(row["artifact_key"]))
+            for row in rows
+        )
+
     def structure_source_event_pages(
         self, window_key: str
     ) -> tuple[tuple[StructureSourcePageSpec, str, str], ...]:
