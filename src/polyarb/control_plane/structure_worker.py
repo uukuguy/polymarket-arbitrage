@@ -278,9 +278,18 @@ class TransactionalStructureCertifier:
         source_payload = _read_object_bytes(
             self._object_client, bucket=self._bucket, key=source_spec.bundle_key
         )
-        identity, source_components = parse_structure_bundle_bytes(
-            source_payload, expected_sha256=source_spec.bundle_digest
-        )
+        try:
+            identity, source_components = parse_structure_bundle_bytes(
+                source_payload, expected_sha256=source_spec.bundle_digest
+            )
+        except StructureBundleError:
+            identity, shards = parse_structure_shard_manifest_bytes(
+                source_payload, expected_sha256=source_spec.bundle_digest
+            )
+            if identity.source_kind != "gamma-source-window-events-v3-sharded":
+                raise
+            self._verify_v3_content_parity(ranges, shards)
+            return
         rebuilt: dict[str, list[dict[str, object]]] = {
             component: [] for component in source_components
         }
@@ -312,6 +321,32 @@ class TransactionalStructureCertifier:
             raise StructureWorkerError("structure-content-parity-reassembly") from error
         if reassembled != source_payload:
             raise StructureWorkerError("structure-content-parity-reassembly")
+
+    def _verify_v3_content_parity(
+        self,
+        ranges: list[tuple[StructureRangeSpec, object]],
+        shards: tuple[StructureShardReceipt, ...],
+    ) -> None:
+        by_identity = {(shard.component, shard.ordinal): shard for shard in shards}
+        for spec, receipt in ranges:
+            ordinal = int(spec.range_start.removeprefix("shard:"))
+            shard = by_identity.get((spec.component, ordinal))
+            if shard is None or spec.range_end != f"shard:{ordinal + 1:08d}":
+                raise StructureWorkerError("structure-v3-content-parity-range-identity")
+            source_payload = _read_object_bytes(
+                self._object_client, bucket=self._bucket, key=shard.artifact_key
+            )
+            _header, expected_rows = parse_structure_shard_bytes(
+                source_payload, expected_sha256=shard.artifact_digest
+            )
+            payload = _read_object_bytes(
+                self._object_client, bucket=self._bucket, key=getattr(receipt, "artifact_key")
+            )
+            _range_identity, actual_rows = parse_structure_range_bytes(
+                payload, expected_sha256=getattr(receipt, "artifact_digest")
+            )
+            if actual_rows != expected_rows or len(actual_rows) != getattr(receipt, "record_count"):
+                raise StructureWorkerError("structure-v3-content-parity-range-content")
 
 
 def _in_range(cursor: str, spec: StructureRangeSpec) -> bool:
