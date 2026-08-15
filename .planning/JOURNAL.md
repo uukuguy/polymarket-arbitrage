@@ -9030,3 +9030,23 @@ transaction workers for acceptance.
 receipt within bounded time, then run materializer → range → certifier Structure
 shadow recovery and the transactional Quote acceptance chain. Keep all work
 staging-only with zero live publication pointers.
+
+## SESSION 247 — 2026-08-15 (bounded v3 Structure shards live in staging)
+
+- [DEPLOYED/STAGING] Image `m1-sharded-transactional-b6fb0adc` replaced the
+  monolithic materializer only on staging machine `48e3104c979578`. Window
+  `structure-source:300:5955841` checkpoints four event pages per fenced,
+  authenticated batch receipt rather than retaining an entire 208-page source
+  window in memory.
+- [LIVE] The worker has durably reached `shard-batch:00000119` (30 batches,
+  120 pages) while process RSS remains roughly 39MiB. `m1_structure_source_window_bundles`
+  and publication pointers are still zero, as required before final all-shard
+  manifest admission.
+- [FIXED] `2b3f3c91` rejects every duplicate YES token across v3 market shards,
+  even identical rows; the focused Quote-admission regression and Ruff passed.
+  This commit is local until the ongoing staging source acceptance finishes.
+
+[NEXT] Observe `5955841` through all 52 shard batches, then prove fenced
+manifest admission → named Structure ranges → certification → transactional
+Quote admission and perform an in-flight staging restart takeover. Keep
+Telegram and production L1/L2 untouched.

@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: Event-rooted source revision 015 is deployed to isolated staging and is resuming the durable event cursor; terminal batch/materialization/shadow evidence remains pending
-last_updated: "2026-08-15T20:59:00Z"
+stopped_at: v3 sharded source materializer is live in isolated staging; window 5955841 has durably checkpointed through event page 119 in 30 bounded batches, while manifest/materialization/range/certification acceptance remains pending
+last_updated: "2026-08-15T21:30:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,6 +19,15 @@ progress:
 ## Current Position
 
 Phase: 05.6 (self-healing Structure production) — transactional control-plane foundation in progress
+
+- **Current staging acceptance:** image `m1-sharded-transactional-b6fb0adc`
+  runs only on machine `48e3104c979578` at 2048MB. Source window `5955841`
+  uses authenticated four-page event-component shard batches; observed progress
+  reached checkpoint `shard-batch:00000119` (30 durable batches) with process
+  RSS about 39MiB and zero Structure/Quote publication pointers. The next gate
+  is full manifest admission, named-range execution, certification, Quote
+  admission, then an in-flight restart takeover. Telegram and production L1/L2
+  remain out of scope.
 
 - **Staging credential containment:** API health is passing with an isolated
   replacement DSN, and recovery machine `48e3104c979578` is the only active
