@@ -27,12 +27,14 @@ from .structure_artifact import (
     canonical_structure_bundle_bytes,
     canonical_structure_shard_batch_bytes,
     canonical_structure_shard_bytes,
+    canonical_structure_shard_manifest_bytes,
+    parse_structure_shard_batch_bytes,
     parse_structure_shard_bytes,
     upload_structure_bundle_artifact,
     upload_structure_shard_artifact,
     upload_structure_shard_batch_artifact,
 )
-from .structure_shadow import plan_structure_ranges
+from .structure_shadow import plan_shard_structure_ranges, plan_structure_ranges
 from .structure_worker import StructureWorkerResult
 
 DEFAULT_MAX_MARKET_BATCHES = 10_000
@@ -380,6 +382,58 @@ def materialize_event_page_shards(
         for component, rows in components.items()
         if rows
     )
+
+
+def materialize_sharded_source_manifest(
+    *,
+    window_key: str,
+    source_digest: str,
+    expected_page_count: int,
+    batches: Sequence[tuple[str, str, str]],
+    read_batch: Callable[[str], bytes],
+) -> tuple[StructureBundleIdentity, StructureBundleArtifact, tuple[tuple[str, str, str], ...]]:
+    """Build v3 admission input only from fenced, authenticated batch receipts."""
+    if not window_key or len(source_digest) != 64 or expected_page_count <= 0:
+        raise ValueError("invalid sharded source manifest identity")
+    next_ordinal = 0
+    shards: list[StructureShardReceipt] = []
+    for checkpoint_cursor, digest, key in batches:
+        if not checkpoint_cursor.startswith("shard-batch:"):
+            raise StructureSourceError("materializer checkpoint cursor is invalid")
+        header, batch_shards = parse_structure_shard_batch_bytes(
+            read_batch(key), expected_sha256=digest
+        )
+        batch_window, batch_source_digest, start, end = header
+        if (
+            batch_window != window_key
+            or batch_source_digest != source_digest
+            or start != next_ordinal
+            or end > expected_page_count
+        ):
+            raise StructureSourceError("materializer batch receipt chain is invalid")
+        next_ordinal = end
+        shards.extend(batch_shards)
+    if next_ordinal != expected_page_count or not shards:
+        raise StructureSourceError("materializer batch receipts are incomplete")
+    if len({(shard.component, shard.ordinal) for shard in shards}) != len(shards):
+        raise StructureSourceError("materializer shards conflict")
+    components = ("events", "event_tags", "memberships", "group_truth", "markets", "issues")
+    counts = {component: 0 for component in components}
+    for shard in shards:
+        counts[shard.component] += shard.row_count
+    identity = StructureBundleIdentity(
+        publication_id=f"source-window:{window_key}",
+        window_id=window_key,
+        snapshot_id=0,
+        comparison_receipt_digest=source_digest,
+        normalization_contract_version="gamma-source-window-events-v3-sharded",
+        component_counts=counts,
+        source_kind="gamma-source-window-events-v3-sharded",
+    )
+    manifest = StructureBundleArtifact.from_bytes(
+        canonical_structure_shard_manifest_bytes(identity=identity, shards=shards)
+    )
+    return identity, manifest, plan_shard_structure_ranges(shards)
 
 
 def materialize_structure_source_pages(

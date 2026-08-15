@@ -11,6 +11,7 @@ from polyarb.control_plane.structure_source import (
     StructureSourcePageArtifact,
     materialize_event_page_shards,
     materialize_event_records_components,
+    materialize_sharded_source_manifest,
     materialize_structure_source_pages,
 )
 
@@ -277,6 +278,43 @@ def test_one_sealed_event_page_becomes_component_shards() -> None:
         ("events", shards[0][1].key),
         ("markets", shards[1][1].key),
     ]
+
+
+def test_authenticated_batch_receipts_become_a_v3_manifest() -> None:
+    from polyarb.control_plane.structure_artifact import (
+        StructureShardBatchArtifact,
+        StructureShardReceipt,
+        canonical_structure_shard_batch_bytes,
+    )
+
+    shard = StructureShardReceipt(
+        component="events",
+        ordinal=0,
+        artifact_key="structure-shards/a/rows.ndjson",
+        artifact_digest="a" * 64,
+        row_count=1,
+    )
+    batch = StructureShardBatchArtifact.from_bytes(
+        canonical_structure_shard_batch_bytes(
+            window_key="source-window:bundle",
+            source_digest="b" * 64,
+            start_ordinal=0,
+            end_ordinal=1,
+            shards=(shard,),
+        )
+    )
+    identity, manifest, ranges = materialize_sharded_source_manifest(
+        window_key="source-window:bundle",
+        source_digest="b" * 64,
+        expected_page_count=1,
+        batches=(("shard-batch:00000000", batch.sha256, batch.key),),
+        read_batch=lambda key: batch.payload if key == batch.key else b"",
+    )
+
+    assert identity.source_kind == "gamma-source-window-events-v3-sharded"
+    assert identity.component_counts["events"] == 1
+    assert manifest.key.startswith("structure-bundles/")
+    assert ranges == (("events", "shard:00000000", "shard:00000001"),)
 
 
 def test_materializer_rejects_missing_or_tampered_source_page_before_bundle_exists() -> None:
