@@ -312,6 +312,19 @@ hypotheses:
     formal post-promotion evidence
   cost_h: 24.0
   ranking: 1.0
-  status: pending
+  status: confirmed
   created_at: '2026-08-15T17:00:00Z'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 13
+    run: 20260815-171703-h-012
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
