@@ -141,6 +141,22 @@ class StructureShardHeader:
     ordinal: int
 
 
+@dataclass(frozen=True, slots=True)
+class StructureShardArtifact:
+    """Content-addressed bounded source component evidence."""
+
+    payload: bytes
+    sha256: str
+    key: str
+
+    @classmethod
+    def from_bytes(cls, payload: bytes) -> StructureShardArtifact:
+        if not payload:
+            raise ValueError("Structure shard payload must be non-empty")
+        digest = hashlib.sha256(payload).hexdigest()
+        return cls(payload=payload, sha256=digest, key=structure_shard_artifact_key(digest))
+
+
 def canonical_structure_shard_bytes(
     *,
     window_key: str,
@@ -221,6 +237,12 @@ def canonical_structure_shard_manifest_bytes(
         _canonical_json(record) + b"\n"
         for record in (header, *({"shard": shard.record()} for shard in ordered))
     )
+
+
+def structure_shard_artifact_key(sha256: str) -> str:
+    if len(sha256) != 64:
+        raise ValueError("sha256 must be a sha256 digest")
+    return f"structure-shards/{sha256}/rows.ndjson"
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,6 +478,32 @@ def upload_structure_bundle_artifact(
         or remote_digest != artifact.sha256
     ):
         raise StructureBundleError("structure-bundle-head-verification-failed")
+    return artifact
+
+
+def upload_structure_shard_artifact(
+    client: _ObjectClient,
+    *,
+    bucket: str,
+    artifact: StructureShardArtifact,
+) -> StructureShardArtifact:
+    """PUT and authenticate one bounded shard before its checkpoint receipt."""
+    if not bucket:
+        raise ValueError("bucket must be non-empty")
+    client.put_object(
+        Bucket=bucket,
+        Key=artifact.key,
+        Body=artifact.payload,
+        ContentType="application/x-ndjson",
+        Metadata={"sha256": artifact.sha256},
+    )
+    head = client.head_object(Bucket=bucket, Key=artifact.key)
+    remote_digest = str(head.get("Metadata", {}).get("sha256", ""))
+    if (
+        int(head.get("ContentLength", -1)) != len(artifact.payload)
+        or remote_digest != artifact.sha256
+    ):
+        raise StructureBundleError("structure-shard-head-verification-failed")
     return artifact
 
 

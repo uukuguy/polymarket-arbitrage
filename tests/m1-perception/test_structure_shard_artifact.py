@@ -7,6 +7,7 @@ import pytest
 from polyarb.control_plane.structure_artifact import (
     StructureBundleError,
     StructureBundleIdentity,
+    StructureShardArtifact,
     StructureShardReceipt,
     canonical_structure_shard_bytes,
     parse_structure_shard_bytes,
@@ -31,6 +32,7 @@ def test_structure_shard_canonicalizes_one_component_and_rejects_tampering() -> 
     assert rows == ({"market_id": "a"}, {"market_id": "b"})
     with pytest.raises(StructureBundleError, match="digest-mismatch"):
         parse_structure_shard_bytes(payload, expected_sha256="b" * 64)
+    assert StructureShardArtifact.from_bytes(payload).key.endswith("/rows.ndjson")
 
 
 def test_shard_manifest_rejects_duplicate_component_ordinals() -> None:
