@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: staging v3 source materializers are recovering through the Gamma group-less neg-risk anomaly; both bounded range and materializer budgets are deployed and the recovery circuit count is declining from durable checkpoints
-last_updated: "2026-08-15T06:01:38Z"
+stopped_at: fresh v3 Structure generation is draining after a real staging R2-upload-before-receipt crash and fenced epoch-2 recovery proved exactly-one receipt
+last_updated: "2026-08-15T06:30:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -78,6 +78,14 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   R2 upload before receipt. The deployed command omits both arguments until a
   fresh staging range/Quote job is ready; its normal 8/8/8 serial budgets are
   otherwise unchanged.
+- **Real R2 takeover proof:** fresh bundle `c20e9bf…b656` admitted a new
+  Structure generation. The exact-key staging hook crashed range
+  `event_tags:115` after R2 verification and before receipt; Fly reports
+  `exit_code=130, requested_stop=false`. Epoch 1 left no receipt; after lease
+  expiry epoch 2 committed exactly one receipt for content-addressed artifact
+  `51bdef…bea3` (425 rows). The normal 8/16/8 command is restored. This proves
+  fenced takeover and exactly-once receipt, not avoidance of an idempotent R2
+  overwrite on retry. Quote-batch proof and continuous soak remain open.
 
 - **Staging credential containment:** API health is passing with an isolated
   replacement DSN, and recovery machine `48e3104c979578` is the only active

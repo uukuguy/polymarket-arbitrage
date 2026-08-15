@@ -9220,3 +9220,21 @@ Quote, then start the required 24-hour continuous soak evidence window.
 [NEXT] Finish the active event materializers into a fresh Structure generation.
 At the first named range, execute and remove the Structure exact-key fault;
 repeat for a downstream Quote batch, then start the 24-hour fault/soak window.
+
+## SESSION 256 — 2026-08-15 (real Structure R2 boundary takeover)
+
+- [LIVE/STAGING] Fresh source window `structure-source:300:5955899` sealed bundle
+  `c20e9bf666799aecb122ae04b72bb88a28ab0a489f72b47d5d2db308810bb656`.
+  Its transactionally admitted Structure generation produced named range jobs.
+- [FAULT/RECOVERED] The explicitly acknowledged exact-job hook targeted
+  `...:normalize:event_tags:115`. Fly recorded an intentional unrequested
+  `exit_code=130`; epoch 1 had no receipt. The normal command was restored
+  immediately. After the 120-second lease expired, epoch 2 succeeded with
+  exactly one receipt (`51bdef…bea3`, 425 records). The content-addressed R2
+  artifact identity stayed the same across the lost attempt and recovery; R2
+  may receive an idempotent overwrite, so do not claim that the retry skips
+  upload. Production pointers, L1/L2, and Telegram were untouched.
+
+[NEXT] Keep normal staging at 8/16/8. Drive this fresh Structure generation
+through certification and Quote admission, repeat the bounded exact-key fault
+for one Quote batch, then begin the 24-hour continuous soak evidence window.
