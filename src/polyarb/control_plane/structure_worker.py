@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from time import monotonic
 from typing import Any, Protocol
 
 from polyarb.config import Settings
@@ -237,6 +238,7 @@ class TransactionalStructureCertifier:
         now: Callable[[], datetime],
         lease_seconds: int = 30,
         retry_delay: timedelta = timedelta(seconds=5),
+        monotonic_clock: Callable[[], float] = monotonic,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
@@ -249,6 +251,8 @@ class TransactionalStructureCertifier:
         self._now = now
         self._lease_seconds = lease_seconds
         self._retry_delay = retry_delay
+        self._monotonic_clock = monotonic_clock
+        self._heartbeat_interval_seconds = max(0.1, lease_seconds / 3)
 
     def run_once(self) -> StructureWorkerResult:
         lease = self._control_plane.claim_job(
@@ -260,22 +264,39 @@ class TransactionalStructureCertifier:
         if lease is None:
             return StructureWorkerResult(job_key=None, outcome="idle")
         generation_key = lease.job_key.removesuffix(":certify")
+        active_lease = lease
+        last_heartbeat = self._monotonic_clock()
+
+        def heartbeat_if_due() -> None:
+            nonlocal active_lease, last_heartbeat
+            current_monotonic = self._monotonic_clock()
+            if current_monotonic - last_heartbeat < self._heartbeat_interval_seconds:
+                return
+            active_lease = self._control_plane.heartbeat(
+                active_lease,
+                now=self._now(),
+                lease_seconds=self._lease_seconds,
+            )
+            last_heartbeat = current_monotonic
+
         try:
-            self._verify_content_parity(generation_key)
+            self._verify_content_parity(generation_key, heartbeat=heartbeat_if_due)
+            heartbeat_if_due()
             payload = self._control_plane.structure_manifest_payload(generation_key)
             artifact = StructureManifestArtifact.from_bytes(payload)
+            heartbeat_if_due()
             upload_structure_manifest_artifact(
                 self._object_client, bucket=self._bucket, artifact=artifact
             )
             self._control_plane.certify_structure_generation(
-                lease,
+                active_lease,
                 generation_key=generation_key,
                 artifact_key=artifact.key,
                 artifact_digest=artifact.sha256,
                 now=self._now(),
             )
             self._control_plane.record_job_recovery(
-                lease,
+                active_lease,
                 component="structure-certify",
                 channels=incident_alert_channels(Settings()),
                 now=self._now(),
@@ -310,9 +331,10 @@ class TransactionalStructureCertifier:
             )
             raise
 
-    def _verify_content_parity(self, generation_key: str) -> None:
+    def _verify_content_parity(self, generation_key: str, *, heartbeat: Callable[[], None]) -> None:
         ranges = self._control_plane.structure_generation_receipts(generation_key)
         source_spec = ranges[0][0]
+        heartbeat()
         source_payload = _read_object_bytes(
             self._object_client, bucket=self._bucket, key=source_spec.bundle_key
         )
@@ -326,12 +348,13 @@ class TransactionalStructureCertifier:
             )
             if identity.source_kind != "gamma-source-window-events-v3-sharded":
                 raise
-            self._verify_v3_content_parity(ranges, shards)
+            self._verify_v3_content_parity(ranges, shards, heartbeat=heartbeat)
             return
         rebuilt: dict[str, list[dict[str, object]]] = {
             component: [] for component in source_components
         }
         for spec, receipt in ranges:
+            heartbeat()
             if (
                 spec.bundle_key != source_spec.bundle_key
                 or spec.bundle_digest != source_spec.bundle_digest
@@ -364,9 +387,12 @@ class TransactionalStructureCertifier:
         self,
         ranges: list[tuple[StructureRangeSpec, object]],
         shards: tuple[StructureShardReceipt, ...],
+        *,
+        heartbeat: Callable[[], None],
     ) -> None:
         by_identity = {(shard.component, shard.ordinal): shard for shard in shards}
         for spec, receipt in ranges:
+            heartbeat()
             ordinal = int(spec.range_start.removeprefix("shard:"))
             shard = by_identity.get((spec.component, ordinal))
             if shard is None or spec.range_end != f"shard:{ordinal + 1:08d}":
@@ -377,6 +403,7 @@ class TransactionalStructureCertifier:
             _header, expected_rows = parse_structure_shard_bytes(
                 source_payload, expected_sha256=shard.artifact_digest
             )
+            heartbeat()
             payload = _read_object_bytes(
                 self._object_client, bucket=self._bucket, key=getattr(receipt, "artifact_key")
             )

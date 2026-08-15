@@ -299,7 +299,7 @@ def test_structure_worker_reads_only_named_v3_shard() -> None:
     assert objects.read_keys == [manifest.key, shard.key]
 
 
-def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit() -> None:
+def test_structure_certifier_heartbeats_during_parity_before_fenced_commit() -> None:
     bundle = _bundle()
     spec = StructureRangeSpec.create(
         bundle_key=bundle.key,
@@ -322,7 +322,9 @@ def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit
         def __init__(self) -> None:
             self.finished: list[JobState] = []
             self.certified: dict[str, object] | None = None
+            self.certified_lease: JobLease | None = None
             self.recoveries: list[dict[str, object]] = []
+            self.heartbeats: list[dict[str, object]] = []
 
         def claim_job(self, **kwargs: object) -> JobLease:
             return JobLease(
@@ -358,8 +360,22 @@ def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit
             )
 
         def certify_structure_generation(self, lease: JobLease, **kwargs: object) -> str:
+            self.certified_lease = lease
             self.certified = kwargs
             return str(kwargs["artifact_digest"])
+
+        def heartbeat(self, lease: JobLease, **kwargs: object) -> JobLease:
+            self.heartbeats.append(kwargs)
+            return JobLease(
+                job_key=lease.job_key,
+                job_type=lease.job_type,
+                input_identity=lease.input_identity,
+                lease_owner=lease.lease_owner,
+                lease_epoch=lease.lease_epoch,
+                lease_expires_at=kwargs["now"] + timedelta(seconds=kwargs["lease_seconds"]),
+                checkpoint_cursor=lease.checkpoint_cursor,
+                checkpoint_digest=lease.checkpoint_digest,
+            )
 
         def finish(self, lease: JobLease, *, state: JobState, **kwargs: object) -> None:
             self.finished.append(state)
@@ -384,12 +400,14 @@ def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit
 
     control_plane = CertifierControlPlane()
     objects = ObjectClient()
+    clock_values = iter((0.0, 11.0))
     certifier = TransactionalStructureCertifier(
         control_plane=control_plane,
         object_client=objects,
         bucket="structure",
         worker_id="certifier-a",
         now=lambda: NOW,
+        monotonic_clock=lambda: next(clock_values, 11.0),
     )
 
     result = certifier.run_once()
@@ -397,6 +415,9 @@ def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit
     assert result.outcome == "certified"
     assert objects.upload["Key"] == control_plane.certified["artifact_key"]
     assert objects.upload["Metadata"]["sha256"] == control_plane.certified["artifact_digest"]
+    assert control_plane.heartbeats == [{"now": NOW, "lease_seconds": 30}]
+    assert control_plane.certified_lease is not None
+    assert control_plane.certified_lease.lease_expires_at == NOW + timedelta(seconds=30)
     assert control_plane.finished == []
 
 
