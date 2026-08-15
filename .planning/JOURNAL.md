@@ -9298,3 +9298,32 @@ alert worker on a separate staging machine and prove exactly that new Telegram
 delivery (never historical backlog). Then repeat the repaired bounded retry
 circuit for a Quote batch, perform its R2 process-loss takeover, and begin the
 24-hour continuous soak window.
+
+## SESSION 260 — 2026-08-15 (scoped alert configuration boundary and continued collection)
+
+- [LIVE/STAGING] The normal worker remains healthy on `48e3104c979578`.
+  Structure source/range work and Quote batches continue to commit successful
+  fenced turns on image `m1-retry-outcome-f464d3db`; no production pointer or
+  L1/L2 machine was modified.
+- [RECOVERED] The controlled Structure retry circuit completed its normal
+  half-open probe and closed. It produced exactly two recovery outbox intents
+  under `m1-retry-fault-20260815-0815` (dashboard and Telegram), while the
+  scoped claim predicate continued to exclude the historical pending backlog.
+- [BLOCKED/CONTAINED] The separate alert app was tested only with the named
+  scope. Its local backup DB credentials fail closed with `OperationalError`.
+  The current worker-app DB secret is intentionally not exported; Fly's
+  stopped one-off worker Machine update API rejects the operation as
+  unauthorized despite read operations succeeding. The temporary alert-app
+  secrets were removed again, leaving both alert Machines stopped. No Telegram
+  delivery or historical replay was attempted.
+- [OBSERVATION] Source windows are keeping the serial range worker busy. The
+  main production-readiness concern is now measurable drain/lag under one
+  lease-fenced worker, not a missing queue transaction. Keep harvesting real
+  scheduler evidence while the Quote circuit/R2 proof is prepared.
+
+[NEXT] Keep the normal staging worker running and capture bounded queue/drain
+metrics. Resolve the Fly worker-Machine write authorization through a fresh
+least-privilege deploy token or obtain the current alert-app DB secret by an
+approved secret-management route; then run only the named scoped alert worker.
+After that, perform Quote retry-circuit and R2-before-receipt takeover evidence
+and start the 24-hour soak window.

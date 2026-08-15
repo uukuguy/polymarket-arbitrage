@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: fresh v3 Structure generation is draining after a real staging R2-upload-before-receipt crash and fenced epoch-2 recovery proved exactly-one receipt
-last_updated: "2026-08-15T06:30:00Z"
+stopped_at: staging Structure and Quote collection continues on the transactional worker; Structure retry circuit recovery is proven, while Quote fault evidence and the 24-hour soak remain open
+last_updated: "2026-08-15T11:46:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -21,10 +21,10 @@ progress:
 Phase: 05.6 (self-healing Structure production) — transactional control-plane foundation in progress
 
 - **Current staging acceptance:** machine `48e3104c979578` is 2048MB and runs
-  image `m1-materializer-budget-9c013ae9` with `--max-turns 8`,
-  `--structure-materializer-turns 8`, `--structure-range-turns 8`, and a
+  image `m1-retry-outcome-f464d3db` with `--max-turns 8`,
+  `--structure-materializer-turns 8`, `--structure-range-turns 32`, and a
   two-second interval. The extra turns are serial and lease-fenced; this is
-  staging-only, and Telegram and production L1/L2 remain out of scope.
+  staging-only, and production L1/L2 remain out of scope.
 - **Recovered source anomaly:** Gamma event `497034` was a real active standard
   neg-risk event with `negRiskMarketID=null`; child market `2290078` repeated
   `negRisk=true` without a group. v3 had omitted the established snapshot
@@ -127,10 +127,17 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   ordinals 22–27 without a schema failure or pointer mutation. The event stream
   must still seal before exact-ID market batches, materialization, and shadow
   certification can begin.
-- **Alert-delivery gate:** Telegram is no longer an M1 deployment task.
-  The isolated Fly alert app remains stopped because Fly cannot persist its
-  secrets and a replacement app cannot be created; do not bypass this with
-  production credentials or unencrypted machine configuration.
+- **Retry-circuit recovery evidence:** controlled Structure retry injection
+  reached three failures and an open circuit, then the restored normal worker
+  completed its half-open probe and closed the circuit. Recovery created two
+  acceptance-scoped outbox intents (dashboard and Telegram) without selecting
+  the 1,670 historical pending messages. The finite-fault implementation
+  returns a durable retryable outcome instead of restarting the scheduler.
+- **Alert-delivery gate:** the isolated alert app has no current DB credential.
+  Local historical DSNs fail connection tests, while the worker app's current
+  DSN remains correctly contained in Fly. Fly's worker-machine write endpoint
+  currently rejects the stopped one-off machine as unauthorized, so do not
+  bypass the boundary by copying secrets or bulk-replaying outbox rows.
 
 - **Current production:** Fly L1 remains release v358. The app service check
   reports `runtime:health_read_lane=read-model-unavailable`; public `/healthz`
