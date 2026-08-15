@@ -10,8 +10,12 @@ from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
     StructureRangeArtifact,
+    StructureShardArtifact,
+    StructureShardReceipt,
     canonical_structure_bundle_bytes,
     canonical_structure_range_bytes,
+    canonical_structure_shard_bytes,
+    canonical_structure_shard_manifest_bytes,
 )
 from polyarb.control_plane.structure_worker import (
     StructureWorkerError,
@@ -167,6 +171,79 @@ def test_transactional_structure_worker_recovers_receipt_without_r2_read() -> No
     assert result.outcome == "recovered"
     assert control_plane.recorded is None
     assert control_plane.finished == [JobState.SUCCEEDED]
+
+
+def test_structure_worker_reads_only_named_v3_shard() -> None:
+    identity = StructureBundleIdentity(
+        publication_id="source-window:window-v3",
+        window_id="window-v3",
+        snapshot_id=0,
+        comparison_receipt_digest="a" * 64,
+        normalization_contract_version="gamma-source-window-events-v3-sharded",
+        component_counts={
+            "events": 1,
+            "event_tags": 0,
+            "memberships": 0,
+            "group_truth": 0,
+            "markets": 0,
+            "issues": 0,
+        },
+        source_kind="gamma-source-window-events-v3-sharded",
+    )
+    shard = StructureShardArtifact.from_bytes(
+        canonical_structure_shard_bytes(
+            window_key="window-v3",
+            source_digest="a" * 64,
+            component="events",
+            ordinal=0,
+            rows=({"id": "event-a"},),
+        )
+    )
+    manifest = StructureBundleArtifact.from_bytes(
+        canonical_structure_shard_manifest_bytes(
+            identity=identity,
+            shards=(
+                StructureShardReceipt(
+                    component="events",
+                    ordinal=0,
+                    artifact_key=shard.key,
+                    artifact_digest=shard.sha256,
+                    row_count=1,
+                ),
+            ),
+        )
+    )
+    spec = StructureRangeSpec.create(
+        bundle_key=manifest.key,
+        bundle_digest=manifest.sha256,
+        component="events",
+        ordinal=0,
+        range_start="shard:00000000",
+        range_end="shard:00000001",
+    )
+
+    class Objects(FakeObjectClient):
+        def __init__(self) -> None:
+            self.bundle = manifest
+            self.upload = {}
+            self.read_keys: list[str] = []
+
+        def get_object(self, **kwargs: object) -> dict[str, object]:
+            key = str(kwargs["Key"])
+            self.read_keys.append(key)
+            return {"Body": _Body({manifest.key: manifest.payload, shard.key: shard.payload}[key])}
+
+    objects = Objects()
+    worker = TransactionalStructureWorker(
+        control_plane=FakeControlPlane(spec),
+        object_client=objects,
+        bucket="structure",
+        worker_id="worker-a",
+        now=lambda: NOW,
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    assert objects.read_keys == [manifest.key, shard.key]
 
 
 def test_transactional_structure_certifier_uploads_manifest_before_fenced_commit() -> None:

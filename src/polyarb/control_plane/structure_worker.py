@@ -16,10 +16,13 @@ from .structure_artifact import (
     StructureBundleError,
     StructureManifestArtifact,
     StructureRangeArtifact,
+    StructureShardReceipt,
     canonical_structure_bundle_bytes,
     canonical_structure_range_bytes,
     parse_structure_bundle_bytes,
     parse_structure_range_bytes,
+    parse_structure_shard_bytes,
+    parse_structure_shard_manifest_bytes,
     upload_structure_manifest_artifact,
     upload_structure_range_artifact,
 )
@@ -141,14 +144,23 @@ class TransactionalStructureWorker:
         payload = body.read()
         if not isinstance(payload, bytes):
             raise StructureWorkerError("structure-bundle-body-is-not-bytes")
-        _identity, components = parse_structure_bundle_bytes(
-            payload, expected_sha256=spec.bundle_digest
-        )
-        rows = tuple(
-            row
-            for row in components[spec.component]
-            if _in_range(_row_cursor(spec.component, row), spec)
-        )
+        try:
+            identity, components = parse_structure_bundle_bytes(
+                payload, expected_sha256=spec.bundle_digest
+            )
+        except StructureBundleError:
+            identity, shards = parse_structure_shard_manifest_bytes(
+                payload, expected_sha256=spec.bundle_digest
+            )
+            if identity.source_kind != "gamma-source-window-events-v3-sharded":
+                raise
+            rows = self._read_v3_shard_range(spec, shards)
+        else:
+            rows = tuple(
+                row
+                for row in components[spec.component]
+                if _in_range(_row_cursor(spec.component, row), spec)
+            )
         artifact = StructureRangeArtifact.from_bytes(
             canonical_structure_range_bytes(
                 bundle_digest=spec.bundle_digest,
@@ -159,6 +171,28 @@ class TransactionalStructureWorker:
         )
         upload_structure_range_artifact(self._object_client, bucket=self._bucket, artifact=artifact)
         return artifact, len(rows)
+
+    def _read_v3_shard_range(
+        self, spec: StructureRangeSpec, shards: tuple[StructureShardReceipt, ...]
+    ) -> tuple[dict[str, object], ...]:
+        selected = [
+            shard
+            for shard in shards
+            if shard.component == spec.component
+            and spec.range_start <= f"shard:{shard.ordinal:08d}" < spec.range_end
+        ]
+        if len(selected) != 1:
+            raise StructureWorkerError("structure-v3-range-shard-selection-invalid")
+        shard = selected[0]
+        payload = _read_object_bytes(
+            self._object_client, bucket=self._bucket, key=shard.artifact_key
+        )
+        header, rows = parse_structure_shard_bytes(
+            payload, expected_sha256=shard.artifact_digest
+        )
+        if header.component != spec.component or header.ordinal != shard.ordinal:
+            raise StructureWorkerError("structure-v3-range-shard-identity-invalid")
+        return rows
 
 
 class TransactionalStructureCertifier:
