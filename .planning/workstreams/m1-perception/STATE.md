@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: v3 sharded source manifest is atomically admitted in isolated staging; all 52 page batches are preserved and 1,016 named Structure ranges are draining before certification and Quote acceptance
-last_updated: "2026-08-15T22:00:00Z"
+stopped_at: v3 downstream range drain has survived a controlled staging-worker restart; 26 of 1,016 named ranges are durably complete before certification and Quote acceptance
+last_updated: "2026-08-15T22:10:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -36,6 +36,11 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   It enqueued 1,016 named range jobs with zero pointer mutation. Certification
   has correctly stayed retryable until those ranges finish; it has not certified
   a partial generation.
+- **Restart proof:** staging worker `48e3104c979578` received a controlled
+  requested restart (Fly reports `oom_killed=false`). It returned on the same
+  image/configuration and range receipts increased from 13 to 26 without any
+  local-state restore or pointer mutation. A precise in-flight lease takeover
+  remains to be captured when a longer-running downstream job is observable.
 
 - **Staging credential containment:** API health is passing with an isolated
   replacement DSN, and recovery machine `48e3104c979578` is the only active

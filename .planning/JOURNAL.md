@@ -9070,3 +9070,18 @@ Telegram and production L1/L2 untouched.
 [NEXT] Let the named range backlog drain, then verify certifier recovery,
 transactional Quote admission and batch completion. After that, restart the
 staging machine during an in-flight downstream job and prove fenced takeover.
+
+## SESSION 249 — 2026-08-15 (staging restart recovery during v3 drain)
+
+- [RESTARTED/STAGING] Machine `48e3104c979578` was intentionally restarted
+  while the v3 range generation was draining. Fly records a requested stop
+  with `oom_killed=false`, then the same
+  `m1-sharded-admission-fbdc2f42` image and 2048MB configuration returned.
+- [RECOVERED] The durable receipt count advanced from 13 to 26 after restart;
+  990 named ranges remain runnable and the certifier remains safely retryable
+  rather than accepting partial coverage. No publication pointer was created.
+
+[NEXT] Continue the 1,016-range drain to certifier recovery, transactional
+Quote admission and completed Quote batches. Capture a precise fenced
+takeover if an observable in-flight downstream lease lasts long enough; keep
+all work staging-only and leave Telegram/production L1/L2 untouched.
