@@ -295,6 +295,54 @@ def _event_embedded_market_records(
     return market_records
 
 
+def materialize_event_records_components(
+    event_records: Sequence[dict[str, object]],
+) -> dict[str, tuple[dict[str, object], ...]]:
+    """Normalize one sealed event-page batch into independent v3 shard rows."""
+    try:
+        event_rows, event_tags, market_to_event, members, group_truths = normalize_events(
+            list(event_records)
+        )
+        market_rows: list[dict[str, object]] = []
+        for raw in _event_embedded_market_records(event_records):
+            normalized = normalize_market(raw, market_to_event)
+            if normalized is None:
+                raise StructureSourceError("source market normalization failed")
+            market_rows.append(normalized)
+        mismatch = market_truth_mismatch_reason(members, group_truths, market_rows)
+        if mismatch is not None:
+            raise StructureSourceError(f"source market truth mismatch:{mismatch}")
+    except StructureSourceError:
+        raise
+    except Exception as error:
+        raise StructureSourceError("source page normalization failed") from error
+    return {
+        "events": tuple(event_rows),
+        "event_tags": tuple(event_tags),
+        "memberships": tuple(
+            {
+                "event_id": member.event_id,
+                "neg_risk_market_id": member.group_id,
+                "market_id": member.market_id,
+                "member_kind": member.member_kind,
+                "active": member.active,
+                "closed": member.closed,
+            }
+            for member in members
+        ),
+        "group_truth": tuple(
+            {
+                "event_id": truth.event_id,
+                "neg_risk_market_id": truth.group_id,
+                **asdict(truth),
+            }
+            for truth in group_truths
+        ),
+        "markets": tuple(market_rows),
+        "issues": (),
+    }
+
+
 def materialize_structure_source_pages(
     pages: Sequence[tuple[StructureSourcePageSpec, StructureSourcePageArtifact]],
 ) -> StructureBundleArtifact:
@@ -343,51 +391,51 @@ def materialize_structure_source_pages(
             )
         raw_streams[stream] = rows
     source_digest = hashlib.sha256(_canonical_json({"pages": source_receipts})).hexdigest()
-    try:
-        event_rows, event_tags, market_to_event, members, group_truths = normalize_events(
-            raw_streams["events"]
-        )
-        market_source = raw_streams.get("markets")
-        if market_source is None:
-            market_source = _event_embedded_market_records(raw_streams["events"])
-        market_rows: list[dict[str, object]] = []
-        for raw in market_source:
-            normalized = normalize_market(raw, market_to_event)
-            if normalized is None:
-                raise StructureSourceError("source market normalization failed")
-            market_rows.append(normalized)
-        mismatch = market_truth_mismatch_reason(members, group_truths, market_rows)
-        if mismatch is not None:
-            raise StructureSourceError(f"source market truth mismatch:{mismatch}")
-    except StructureSourceError:
-        raise
-    except Exception as error:
-        raise StructureSourceError("source page normalization failed") from error
-    components: dict[str, tuple[dict[str, object], ...]] = {
-        "events": tuple(event_rows),
-        "event_tags": tuple(event_tags),
-        "memberships": tuple(
-            {
-                "event_id": member.event_id,
-                "neg_risk_market_id": member.group_id,
-                "market_id": member.market_id,
-                "member_kind": member.member_kind,
-                "active": member.active,
-                "closed": member.closed,
-            }
-            for member in members
-        ),
-        "group_truth": tuple(
-            {
-                "event_id": truth.event_id,
-                "neg_risk_market_id": truth.group_id,
-                **asdict(truth),
-            }
-            for truth in group_truths
-        ),
-        "markets": tuple(market_rows),
-        "issues": (),
-    }
+    if "markets" not in raw_streams:
+        components = materialize_event_records_components(raw_streams["events"])
+    else:
+        try:
+            event_rows, event_tags, market_to_event, members, group_truths = normalize_events(
+                raw_streams["events"]
+            )
+            market_rows = []
+            for raw in raw_streams["markets"]:
+                normalized = normalize_market(raw, market_to_event)
+                if normalized is None:
+                    raise StructureSourceError("source market normalization failed")
+                market_rows.append(normalized)
+            mismatch = market_truth_mismatch_reason(members, group_truths, market_rows)
+            if mismatch is not None:
+                raise StructureSourceError(f"source market truth mismatch:{mismatch}")
+        except StructureSourceError:
+            raise
+        except Exception as error:
+            raise StructureSourceError("source page normalization failed") from error
+        components = {
+            "events": tuple(event_rows),
+            "event_tags": tuple(event_tags),
+            "memberships": tuple(
+                {
+                    "event_id": member.event_id,
+                    "neg_risk_market_id": member.group_id,
+                    "market_id": member.market_id,
+                    "member_kind": member.member_kind,
+                    "active": member.active,
+                    "closed": member.closed,
+                }
+                for member in members
+            ),
+            "group_truth": tuple(
+                {
+                    "event_id": truth.event_id,
+                    "neg_risk_market_id": truth.group_id,
+                    **asdict(truth),
+                }
+                for truth in group_truths
+            ),
+            "markets": tuple(market_rows),
+            "issues": (),
+        }
     identity = StructureBundleIdentity(
         publication_id=f"source-window:{window_key}",
         window_id=window_key,

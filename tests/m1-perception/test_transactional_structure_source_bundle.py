@@ -9,6 +9,7 @@ from polyarb.control_plane.structure_artifact import parse_structure_bundle_byte
 from polyarb.control_plane.structure_source import (
     StructureSourceError,
     StructureSourcePageArtifact,
+    materialize_event_records_components,
     materialize_structure_source_pages,
 )
 
@@ -212,6 +213,34 @@ def test_event_embedded_source_excludes_closed_children_from_active_market_view(
     )
 
     assert [row["market_id"] for row in components["markets"]] == ["open-market"]
+
+
+def test_one_event_page_normalizes_to_independent_shard_components() -> None:
+    components = materialize_event_records_components(
+        (
+            {
+                "id": "event-a",
+                "slug": "event-a",
+                "active": True,
+                "closed": False,
+                "negRisk": False,
+                "markets": [
+                    {
+                        "id": "market-a",
+                        "conditionId": "condition-a",
+                        "clobTokenIds": '["yes-a", "no-a"]',
+                        "outcomePrices": '["0.4", "0.6"]',
+                        "active": True,
+                        "closed": False,
+                    }
+                ],
+            },
+        )
+    )
+
+    assert components["events"][0]["id"] == "event-a"
+    assert components["markets"][0]["market_id"] == "market-a"
+    assert components["markets"][0]["neg_risk"] is False
 
 
 def test_materializer_rejects_missing_or_tampered_source_page_before_bundle_exists() -> None:
