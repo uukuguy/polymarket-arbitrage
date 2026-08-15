@@ -9489,3 +9489,18 @@ path is available; then create Quote process-loss and scoped alert evidence.
 [NEXT] Let the automated 24-hour staging soak run without additional injected faults; then run
 `make control-plane-soak-verify evidence=.planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/evidence/staging-transactional-soak.jsonl`.
 Telegram scoped delivery remains the only separate external Fly secrets-write permission gap.
+
+## SESSION 269 — 2026-08-15 (continuous sampler independently proven)
+
+- [LIVE/EVIDENCE] The user LaunchAgent sampler was allowed to reach its scheduled interval rather
+  than being treated as valid merely because it was installed. Its third run exited 0 and appended
+  observation six at `14:09:28Z`, 607 seconds after the prior `13:59:21Z` observation: inside the
+  900-second hard gap. API stayed `available`, five exact workers stayed `started`, and the baseline
+  counters remained `expired_leases=6`, `open_circuit_count=74`.
+- [GATE] `control-plane-soak-verify` correctly fails only with `soak must cover at least 24 hours`.
+  Commit `cb847323` makes that expected incomplete-window state operator-readable; it does not
+  relax the verifier. Commit `97136b22` has also scheduled the non-running 24-hour verdict task.
+- [NEXT WORK] The current natural Structure generation still has 961 range jobs after 70 successes;
+  its certification will create the next natural Quote batch. Arm that batch for the remaining
+  Quote three-retry/circuit/recovery acceptance, then close the separately scoped Telegram receipt
+  when Fly secrets write access exists.
