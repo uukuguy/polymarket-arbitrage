@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: v3 downstream range drain has reached 90 of 1,016 receipts; certifier's natural epoch-7 probe confirmed incomplete coverage waits without creating a new incident, while scheduler range throughput is under design review
-last_updated: "2026-08-15T22:30:00Z"
+stopped_at: staging v3 source materializers are recovering through a Gamma group-less neg-risk anomaly; range budget eight is deployed and the first repaired window advanced from shard-batch 19 to 27
+last_updated: "2026-08-15T05:22:40Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -20,14 +20,22 @@ progress:
 
 Phase: 05.6 (self-healing Structure production) — transactional control-plane foundation in progress
 
-- **Current staging acceptance:** image `m1-sharded-transactional-b6fb0adc`
-  runs only on machine `48e3104c979578` at 2048MB. Source window `5955841`
-  uses authenticated four-page event-component shard batches; observed progress
-  reached checkpoint `shard-batch:00000119` (30 durable batches) with process
-  RSS about 39MiB and zero Structure/Quote publication pointers. The next gate
-  is full manifest admission, named-range execution, certification, Quote
-  admission, then an in-flight restart takeover. Telegram and production L1/L2
-  remain out of scope.
+- **Current staging acceptance:** machine `48e3104c979578` is 2048MB and runs
+  image `m1-group-less-1757a406` with `--max-turns 8`,
+  `--structure-range-turns 8`, and a two-second interval. It is staging-only;
+  Telegram and production L1/L2 remain out of scope.
+- **Recovered source anomaly:** Gamma event `497034` was a real active standard
+  neg-risk event with `negRiskMarketID=null`; child market `2290078` repeated
+  `negRisk=true` without a group. v3 had omitted the established snapshot
+  quarantine rule, so every source window stopped at page 20. Commit
+  `1757a406` excludes only that unprovable child shape without inferring a
+  group or weakening the truth validator. After deployment window `5955894`
+  advanced from `shard-batch:00000019` to `00000027`; no new bundle or
+  publication was created by that incomplete window.
+- **Prior v3 chain completed:** source window `5955841` completed, certified
+  Structure generation `structure:dcaedf…`, and admitted/certified its Quote
+  generation. `quote:current` is the isolated staging transactional pointer;
+  no production pointer was mutated.
 - **Manifest recovery proof:** the final v3 admission initially exercised its
   retryable circuit because the Postgres allow-list omitted the new source kind.
   Image `m1-sharded-admission-fbdc2f42` then naturally reclaimed the preserved
@@ -48,12 +56,10 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   fenced wait with no incident. Its first live result must wait for the prior
   circuit's already-persisted next-probe timestamp; do not edit the database
   to shortcut that recovery proof.
-- **Throughput finding:** a healthy staging drain advances one range per
-  two-second scheduler tick because `run_tick()` caps turns at the eight
-  distinct worker kinds and `max_turns=8`; it is not a Postgres/R2 lock.
-  A 1,016-range v3 generation would therefore outpace continuous source
-  cadence. Design a bounded range-specific turn budget before changing this
-  production-relevant scheduler behavior.
+- **Throughput repair:** `8ba1ea0d`/`d7324952` add the bounded default-zero
+  Structure range turn budget. Staging runs budget eight: each tick retains
+  the original eight workers, then performs at most eight extra serial,
+  leased Structure-range turns. This is not a concurrency increase.
 
 - **Staging credential containment:** API health is passing with an isolated
   replacement DSN, and recovery machine `48e3104c979578` is the only active

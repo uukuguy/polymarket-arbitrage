@@ -9121,3 +9121,31 @@ the remaining fenced-takeover evidence. Keep Telegram and production untouched.
 then implement it with TDD, deploy staging-only, demonstrate sustained drain,
 and continue certification → Quote → takeover acceptance. Keep Telegram and
 production untouched.
+
+## SESSION 252 — 2026-08-15 (range budget and source-anomaly recovery)
+
+- [DEPLOYED/STAGING] `8ba1ea0d` / `d7324952` add a default-zero bounded
+  `--structure-range-turns` budget. The sole staging worker now runs eight
+  base turns plus at most eight extra serial Structure-range turns per tick;
+  this is lease-bounded throughput, not new concurrency.
+- [ROOT CAUSE] Continuous source windows were all retrying at page 20 because
+  Gamma event `497034` claims standard neg-risk but has no
+  `negRiskMarketID`; child `2290078` repeats `negRisk=true` with no group.
+  The v3 event-only source path had omitted the legacy quarantine for that
+  exact unprovable source shape.
+- [FIXED/DEPLOYED] `1757a406` restores the fail-closed quarantine in v3:
+  only such child claims are excluded; no group is invented and all other
+  market-truth disagreements still fail. The RED/GREEN v3 page regression,
+  focused workers/scheduler tests, Ruff, and scoped diff check pass.
+- [LIVE VERIFIED] After the staging image switch, previously stuck window
+  `5955894` moved from durable checkpoint `shard-batch:00000019` to
+  `00000023` and then `00000027`. Its job is `checkpointed` (not retryable);
+  the retained `last_error_class` and open circuit are historical until the
+  materializer reaches terminal success. No new bundle/pointer was created
+  from this incomplete window. Earlier `5955841` has already completed the
+  Structure→Quote staging chain; its `quote:current` pointer is staging-only.
+  Telegram and production L1/L2 were untouched.
+
+[NEXT] Let repaired source materializers complete and certify a fresh v3
+generation, while observing the range-budget drain. Then capture the remaining
+in-flight downstream lease takeover evidence. Keep all work staging-only.
