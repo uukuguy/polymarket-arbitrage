@@ -3678,6 +3678,65 @@ class PostgresControlPlane:
             },
         }
 
+    def current_opportunities(self, *, limit: int, after_group_id: str) -> dict[str, object]:
+        """Read one complete, atomically published opportunity projection."""
+        if not 1 <= limit <= 500 or len(after_group_id) > 256 or "\x00" in after_group_id:
+            raise ValueError("invalid-opportunity-page")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
+            cursor.execute(
+                """
+                SELECT projection.generation_key, projection.record_count
+                FROM m1_opportunity_publication_pointers AS pointer
+                JOIN m1_opportunity_projections AS projection
+                  ON projection.generation_key = pointer.generation_key
+                WHERE pointer.pointer_key = 'opportunity:current'
+                """
+            )
+            projection = cursor.fetchone()
+            if projection is None:
+                raise ControlPlaneError("opportunity-projection-unavailable")
+            generation_key = str(projection["generation_key"])
+            cursor.execute(
+                """
+                SELECT group_id, event_id, membership_hash, bundle_cost,
+                       gross_edge_bps, max_bundle_size, legs,
+                       structure_observed_at_ms, quote_started_at_ms, quote_quoted_at_ms
+                FROM m1_opportunity_projection_rows
+                WHERE generation_key = %s AND group_id > %s
+                ORDER BY group_id LIMIT %s
+                """,
+                (generation_key, after_group_id, limit + 1),
+            )
+            rows = cursor.fetchall()
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        return {
+            "status": "available",
+            "current_opportunity_count": int(projection["record_count"]),
+            "items": [
+                {
+                    "group_id": str(row["group_id"]),
+                    "event_id": str(row["event_id"]),
+                    "membership_hash": str(row["membership_hash"]),
+                    "bundle_cost": float(row["bundle_cost"]),
+                    "gross_edge_bps": float(row["gross_edge_bps"]),
+                    "max_bundle_size": float(row["max_bundle_size"]),
+                    "legs": row["legs"],
+                    "structure_observed_at_ms": int(row["structure_observed_at_ms"]),
+                    "quote_started_at_ms": int(row["quote_started_at_ms"]),
+                    "quote_quoted_at_ms": int(row["quote_quoted_at_ms"]),
+                }
+                for row in page
+            ],
+            "limit": limit,
+            "next_after_group_id": str(page[-1]["group_id"]) if has_more else None,
+        }
+
     @staticmethod
     def _queue_health_snapshot_cursor(
         cursor: psycopg.Cursor[dict[str, Any]],

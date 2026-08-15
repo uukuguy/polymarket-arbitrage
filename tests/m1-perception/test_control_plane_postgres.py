@@ -68,7 +68,7 @@ def postgres_dsn() -> Iterator[str]:
             for role in ("anon", "authenticated", "service_role"):
                 connection.execute(f"CREATE ROLE {role} NOLOGIN")
         result = subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "015"],
+            ["uv", "run", "alembic", "upgrade", "016"],
             env={**os.environ, "POLYARB_SUPABASE_DB_DSN": dsn},
             capture_output=True,
             text=True,
@@ -93,6 +93,9 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
             "m1_alert_outbox",
             "m1_incident_events",
             "m1_incidents",
+            "m1_opportunity_publication_pointers",
+            "m1_opportunity_projection_rows",
+            "m1_opportunity_projections",
             "m1_publication_pointers",
             "m1_generation_manifests",
             "m1_structure_range_receipts",
