@@ -218,12 +218,14 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
         structure_range_turns,
         crash_after_r2_upload,
         retry_fault_before_receipt,
+        acceptance_run_id,
     ):
         captured.update(
             max_turns=max_turns,
             structure_materializer_turns=structure_materializer_turns,
             structure_range_turns=structure_range_turns,
             retry_fault_before_receipt=retry_fault_before_receipt,
+            acceptance_run_id=acceptance_run_id,
         )
         return scheduler
 
@@ -261,6 +263,7 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
         "structure_materializer_turns": 8,
         "structure_range_turns": 8,
         "retry_fault_before_receipt": None,
+        "acceptance_run_id": None,
     }
 
 
@@ -513,6 +516,7 @@ def test_control_plane_tick_once_reports_bounded_turns(monkeypatch, capsys) -> N
         structure_range_turns,
         crash_after_r2_upload,
         retry_fault_before_receipt,
+        acceptance_run_id,
     ):
         return Scheduler()
 
@@ -523,6 +527,40 @@ def test_control_plane_tick_once_reports_bounded_turns(monkeypatch, capsys) -> N
         "status": "ok",
         "turns": [{"outcome": "idle", "worker": "structure-range"}],
     }
+
+
+def test_alert_serve_forwards_acceptance_run_scope(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: object())
+
+    class AlertWorker:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(cli_control_plane, "TransactionalAlertDeliveryWorker", AlertWorker)
+
+    async def run_alert_service(worker, *, interval_seconds: float, as_json: bool):
+        assert isinstance(worker, AlertWorker)
+        assert interval_seconds == 7.5
+        assert as_json is True
+        return {"status": "stopped", "turns": 1}
+
+    monkeypatch.setattr(cli_control_plane, "_run_alert_service", run_alert_service)
+    assert (
+        cli_control_plane.main(
+            [
+                "alert-serve", "--enable", "--interval-seconds", "7.5",
+                "--acceptance-run-id", "run-a", "--json",
+            ]
+        )
+        == 0
+    )
+    assert captured["acceptance_run_id"] == "run-a"
 
 
 def test_structure_source_factory_builds_eight_distinct_lease_lanes(monkeypatch) -> None:

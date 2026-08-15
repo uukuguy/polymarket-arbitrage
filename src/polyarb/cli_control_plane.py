@@ -135,6 +135,7 @@ def _parser() -> argparse.ArgumentParser:
     tick_once.add_argument("--fault-crash-after-r2-upload-job-key")
     tick_once.add_argument("--fault-retry-job-key")
     tick_once.add_argument("--fault-retry-attempts", type=int)
+    tick_once.add_argument("--acceptance-run-id")
     tick_once.add_argument("--fault-injection-ack")
     tick_once.add_argument("--json", action="store_true")
     serve = subcommands.add_parser(
@@ -149,6 +150,7 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--fault-crash-after-r2-upload-job-key")
     serve.add_argument("--fault-retry-job-key")
     serve.add_argument("--fault-retry-attempts", type=int)
+    serve.add_argument("--acceptance-run-id")
     serve.add_argument("--fault-injection-ack")
     serve.add_argument("--interval-seconds", type=float, default=15.0)
     serve.add_argument("--json", action="store_true")
@@ -158,6 +160,7 @@ def _parser() -> argparse.ArgumentParser:
     alert_serve.add_argument("--enable", action="store_true")
     alert_serve.add_argument("--worker-id", default="control-plane-alert-service")
     alert_serve.add_argument("--interval-seconds", type=float, default=15.0)
+    alert_serve.add_argument("--acceptance-run-id")
     alert_serve.add_argument("--json", action="store_true")
     render_rollout = subcommands.add_parser(
         "render-rollout",
@@ -247,6 +250,7 @@ def _transactional_quote_workers(
     worker_id: str,
     crash_after_r2_upload: Callable[[JobLease], None] | None = None,
     retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
+    acceptance_run_id: str | None = None,
 ) -> tuple[TransactionalQuoteBatchWorker, TransactionalQuoteCertifier]:
     """Build explicitly invoked workers; nothing schedules these by default."""
     settings = Settings()
@@ -267,6 +271,7 @@ def _transactional_quote_workers(
             now=lambda: datetime.now(UTC),
             crash_after_r2_upload=crash_after_r2_upload,
             retry_fault_before_receipt=retry_fault_before_receipt,
+            acceptance_run_id=acceptance_run_id,
         ),
         TransactionalQuoteCertifier(
             control_plane=control_plane,
@@ -373,12 +378,14 @@ def _transactional_scheduler(
     structure_range_turns: int,
     crash_after_r2_upload: Callable[[JobLease], None] | None = None,
     retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
+    acceptance_run_id: str | None = None,
 ) -> TransactionalControlPlaneScheduler:
     quote_worker, quote_certifier = _transactional_quote_workers(
         control_plane,
         worker_id=f"{worker_id}:quote",
         crash_after_r2_upload=crash_after_r2_upload,
         retry_fault_before_receipt=retry_fault_before_receipt,
+        acceptance_run_id=acceptance_run_id,
     )
     object_client, bucket = _structure_object_client()
     return TransactionalControlPlaneScheduler(
@@ -397,6 +404,7 @@ def _transactional_scheduler(
             now=lambda: datetime.now(UTC),
             crash_after_r2_upload=crash_after_r2_upload,
             retry_fault_before_receipt=retry_fault_before_receipt,
+            acceptance_run_id=acceptance_run_id,
         ),
         structure_certifier=TransactionalStructureCertifier(
             control_plane=control_plane,
@@ -720,6 +728,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 structure_range_turns=args.structure_range_turns,
                 crash_after_r2_upload=crash_after_r2_upload,
                 retry_fault_before_receipt=retry_fault_before_receipt,
+                acceptance_run_id=args.acceptance_run_id,
             )
             _write(asyncio.run(scheduler.run_tick()), as_json=args.json)
             return 0
@@ -753,6 +762,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 structure_range_turns=args.structure_range_turns,
                 crash_after_r2_upload=crash_after_r2_upload,
                 retry_fault_before_receipt=retry_fault_before_receipt,
+                acceptance_run_id=args.acceptance_run_id,
             )
             result = asyncio.run(
                 _run_scheduler_service(
@@ -770,6 +780,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         control_plane=control_plane,
                         worker_id=args.worker_id,
                         now=lambda: datetime.now(UTC),
+                        acceptance_run_id=args.acceptance_run_id,
                     ),
                     interval_seconds=args.interval_seconds,
                     as_json=args.json,

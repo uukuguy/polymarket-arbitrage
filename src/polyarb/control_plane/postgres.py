@@ -3077,6 +3077,7 @@ class PostgresControlPlane:
         component: str,
         channels: Sequence[str],
         now: datetime,
+        acceptance_run_id: str | None = None,
     ) -> bool:
         """Close a failed job's circuit after durable forward progress.
 
@@ -3093,6 +3094,8 @@ class PostgresControlPlane:
             raise ValueError("channels must contain non-empty values")
         if len(set(channels)) != len(channels):
             raise ValueError("channels must be unique")
+        if acceptance_run_id is not None and not acceptance_run_id:
+            raise ValueError("acceptance_run_id must be non-empty when provided")
         dedupe_key = f"job-retry:{lease.job_key}"
         with (
             self._connection_factory() as connection,
@@ -3188,7 +3191,16 @@ class PostgresControlPlane:
                         str(uuid4()),
                         event_id,
                         channel,
-                        Jsonb({"incident_key": incident_key, "kind": "recovered"}),
+                        Jsonb(
+                            {
+                                "incident_key": incident_key,
+                                "kind": "recovered",
+                                **(
+                                    {} if acceptance_run_id is None else
+                                    {"acceptance_run_id": acceptance_run_id}
+                                ),
+                            }
+                        ),
                         now,
                         now,
                     ),

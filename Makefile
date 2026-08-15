@@ -612,7 +612,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-alert-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -736,6 +736,13 @@ control-plane-serve:
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane serve --enable --worker-id "$(or $(worker_id),control-plane-service)" --max-turns "$(or $(max_turns),4)" --interval-seconds "$(or $(interval_seconds),15)" --json
+
+## control-plane-alert-serve: Deliver only one named acceptance run when acceptance_run_id= is set; requires enable=1 and never replays historical outbox rows under that scope.
+control-plane-alert-serve:
+	@test "$(enable)" = "1" -a -n "$(acceptance_run_id)" || (echo "usage: make control-plane-alert-serve enable=1 acceptance_run_id=<run-id> [interval_seconds=15]" >&2; exit 2)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
+	uv run python -m polyarb.cli_control_plane alert-serve --enable --worker-id "$(or $(worker_id),control-plane-alert-service)" --acceptance-run-id "$(acceptance_run_id)" --interval-seconds "$(or $(interval_seconds),15)" --json
 
 ## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots (auto-loads .env)
 supabase-reconcile:

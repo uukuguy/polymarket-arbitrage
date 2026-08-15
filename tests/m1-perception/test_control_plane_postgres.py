@@ -2388,6 +2388,7 @@ def test_successful_terminal_job_closes_circuit_and_resolves_retry_incident(
         component="structure-fetch",
         channels=("dashboard",),
         now=now + timedelta(seconds=16),
+        acceptance_run_id="staging-retry-fault-20260815",
     )
 
     connection = control_plane._connection_factory()
@@ -2405,6 +2406,15 @@ def test_successful_terminal_job_closes_circuit_and_resolves_retry_incident(
                 "SELECT kind FROM m1_incident_events ORDER BY occurred_at, incident_event_id"
             )
             assert [row[0] for row in cursor.fetchall()] == ["attempt-failed", "recovered"]
+            cursor.execute(
+                "SELECT outbox.payload->>'acceptance_run_id' "
+                "FROM m1_alert_outbox AS outbox "
+                "JOIN m1_incident_events AS event "
+                "ON event.incident_event_id = outbox.incident_event_id "
+                "WHERE event.idempotency_key = %s",
+                (f"job-recovery:{job_key}:{recovered.lease_epoch}",),
+            )
+            assert cursor.fetchone() == ("staging-retry-fault-20260815",)
     finally:
         connection.close()
 

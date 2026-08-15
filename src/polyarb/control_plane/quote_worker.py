@@ -57,6 +57,7 @@ class TransactionalQuoteBatchWorker:
         retry_delay: timedelta = timedelta(seconds=15),
         crash_after_r2_upload: Callable[[JobLease], None] | None = None,
         retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
+        acceptance_run_id: str | None = None,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
@@ -72,6 +73,7 @@ class TransactionalQuoteBatchWorker:
         self._retry_delay = retry_delay
         self._crash_after_r2_upload = crash_after_r2_upload
         self._retry_fault_before_receipt = retry_fault_before_receipt
+        self._acceptance_run_id = acceptance_run_id
 
     async def run_once(self) -> QuoteBatchWorkerResult:
         """Complete one recovery-safe batch; never rebuild input from SQLite."""
@@ -114,6 +116,7 @@ class TransactionalQuoteBatchWorker:
                 component="quote-batch",
                 channels=incident_alert_channels(Settings()),
                 now=self._now(),
+                acceptance_run_id=self._acceptance_run_id,
             )
             return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="succeeded")
         except StaleLeaseError:

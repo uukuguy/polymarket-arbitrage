@@ -65,6 +65,7 @@ class TransactionalStructureWorker:
         retry_delay: timedelta = timedelta(seconds=15),
         crash_after_r2_upload: Callable[[JobLease], None] | None = None,
         retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
+        acceptance_run_id: str | None = None,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
@@ -79,6 +80,7 @@ class TransactionalStructureWorker:
         self._retry_delay = retry_delay
         self._crash_after_r2_upload = crash_after_r2_upload
         self._retry_fault_before_receipt = retry_fault_before_receipt
+        self._acceptance_run_id = acceptance_run_id
 
     async def run_once(self) -> StructureWorkerResult:
         lease = self._control_plane.claim_job(
@@ -114,6 +116,7 @@ class TransactionalStructureWorker:
                 component="structure-normalize",
                 channels=incident_alert_channels(Settings()),
                 now=self._now(),
+                acceptance_run_id=self._acceptance_run_id,
             )
             return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
         except (StructureBundleError, StructureWorkerError):

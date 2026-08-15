@@ -85,6 +85,7 @@
 | 71 | [事件内嵌 Structure 源](71-事件内嵌Structure源.md) | 为什么二次 market 拉取无法在线收敛 / event 页如何同源展开 market / terminal event 如何直接释放物化 |
 | 72 | [长事务任务的恢复与吞吐预算](72-长事务任务的恢复与吞吐预算.md) | checkpoint 为什么是恢复证据 / 健康与发布为何分离 / 串行 lease budget 为什么不是无约束并发 |
 | 73 | [R2 回执边界与租约接管](73-R2回执边界与租约接管.md) | R2 上传不等于完成 / fenced receipt 才是发布 / 真实进程丢失后的 epoch 接管 |
+| 74 | [受控重试熔断与范围告警](74-受控重试熔断与范围告警.md) | retry circuit 与进程丢失的区别 / SQL 范围领取 / 不回放历史 Telegram outbox |
 
 ## Phase 02.1 教学增量（2026-05）
 
