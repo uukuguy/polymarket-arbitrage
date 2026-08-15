@@ -27,12 +27,42 @@ async def control_plane_healthz(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "control_plane": "available"})
 
 
+async def current_opportunities(request: Request) -> JSONResponse:
+    """Serve only the certified transactional opportunity projection.
+
+    This intentionally has no SQLite fallback: absence of a Postgres projection
+    is an unavailable authority, not evidence of zero opportunities.
+    """
+    control_plane = getattr(request.app.state, "control_plane", None)
+    if control_plane is None or not hasattr(control_plane, "current_opportunities"):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "opportunity-projection-unavailable"},
+            status_code=503,
+        )
+    try:
+        limit = int(request.query_params.get("limit", "50"))
+        after_group_id = request.query_params.get("after_group_id", "")
+        if not 1 <= limit <= 500 or len(after_group_id) > 256 or "\x00" in after_group_id:
+            raise ValueError("invalid-opportunity-page")
+        return JSONResponse(
+            control_plane.current_opportunities(limit=limit, after_group_id=after_group_id)
+        )
+    except ValueError:
+        return JSONResponse({"error": "invalid opportunity page"}, status_code=400)
+    except Exception:
+        return JSONResponse(
+            {"status": "unavailable", "reason": "opportunity-projection-unavailable"},
+            status_code=503,
+        )
+
+
 def create_control_plane_app(*, control_plane: Any | None) -> Starlette:
     """Create an HTTP app with no SQLite, scheduler, or data-worker dependency."""
     app = Starlette(
         routes=[
             Route("/healthz", control_plane_healthz, methods=["GET"]),
             Route("/perception/control-plane", control_plane_status, methods=["GET"]),
+            Route("/perception/opportunities", current_opportunities, methods=["GET"]),
         ]
     )
     app.state.control_plane = control_plane
