@@ -2000,6 +2000,51 @@ def test_checkpoint_is_idempotent_and_fenced(control_plane: PostgresControlPlane
         )
 
 
+def test_materializer_shard_checkpoints_are_ordered_and_fenced(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="source-window:1:materialize",
+        job_type="structure-materialize",
+        input_identity="source-window:1",
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id="worker-a", job_types=("structure-materialize",), lease_seconds=30, now=now
+    )
+    assert lease is not None
+    control_plane.checkpoint(
+        lease,
+        checkpoint_cursor="shard:00000001",
+        checkpoint_digest="a" * 64,
+        artifact_key="structure-shards/a/rows.ndjson",
+        idempotency_key="structure-materializer:source-window:1:1:a",
+        now=now + timedelta(seconds=1),
+    )
+
+    assert control_plane.structure_materializer_shards("source-window:1") == (
+        ("shard:00000001", "a" * 64, "structure-shards/a/rows.ndjson"),
+    )
+    resumed = control_plane.claim_job(
+        worker_id="worker-b",
+        job_types=("structure-materialize",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=2),
+    )
+    assert resumed is not None
+    assert resumed.checkpoint_cursor == "shard:00000001"
+    with pytest.raises(StaleLeaseError):
+        control_plane.checkpoint(
+            lease,
+            checkpoint_cursor="shard:00000002",
+            checkpoint_digest="b" * 64,
+            artifact_key="structure-shards/b/rows.ndjson",
+            idempotency_key="structure-materializer:source-window:1:2:b",
+            now=now + timedelta(seconds=3),
+        )
+
+
 def test_retry_preserves_checkpoint_and_quarantine_stops_claims(
     control_plane: PostgresControlPlane,
 ) -> None:
