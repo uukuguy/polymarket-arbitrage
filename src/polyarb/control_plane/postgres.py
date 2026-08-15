@@ -3867,6 +3867,59 @@ class PostgresControlPlane:
             )
         return digest
 
+    def current_quote_projection_inputs(
+        self,
+    ) -> tuple[str, str, tuple[tuple[tuple[QuoteBatchLeg, ...], QuoteBatchReceipt, datetime], ...]]:
+        """Load one current certified Quote generation and its immutable batch inputs."""
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
+            cursor.execute(
+                """SELECT pointer.generation_key,
+                          admission.generation_key AS structure_generation_key
+                   FROM m1_publication_pointers AS pointer
+                   JOIN m1_quote_admission_inputs AS admission
+                     ON admission.job_key = pointer.generation_key || ':admit'
+                   WHERE pointer.pointer_key = 'quote:current'"""
+            )
+            current = cursor.fetchone()
+            if current is None:
+                raise IncompleteQuoteGenerationError("current Quote generation is unavailable")
+            quote_generation_key = str(current["generation_key"])
+            structure_generation_key = str(current["structure_generation_key"])
+            cursor.execute(
+                """SELECT input.legs, receipt.job_key, receipt.quote_digest,
+                          receipt.artifact_key, receipt.artifact_digest,
+                          receipt.successful_response_count, receipt.quoted_at
+                   FROM m1_quote_batch_inputs AS input
+                   JOIN m1_quote_batch_receipts AS receipt ON receipt.job_key = input.job_key
+                   WHERE input.job_key LIKE %s ORDER BY input.job_key""",
+                (f"{quote_generation_key}:batch:%",),
+            )
+            rows = cursor.fetchall()
+        if not rows:
+            raise IncompleteQuoteGenerationError("current Quote generation has no batch receipts")
+        batches = tuple(
+            (
+                _persisted_legs(row["legs"]),
+                QuoteBatchReceipt(
+                    job_key=str(row["job_key"]),
+                    quote_digest=str(row["quote_digest"]),
+                    artifact_key=str(row["artifact_key"]),
+                    artifact_digest=str(row["artifact_digest"]),
+                    successful_response_count=int(row["successful_response_count"]),
+                ),
+                row["quoted_at"],
+            )
+            for row in rows
+        )
+        if any(not legs for legs, _receipt, _quoted_at in batches):
+            raise IncompleteQuoteGenerationError("current Quote generation lacks frozen legs")
+        return quote_generation_key, structure_generation_key, batches
+
     @staticmethod
     def _queue_health_snapshot_cursor(
         cursor: psycopg.Cursor[dict[str, Any]],
