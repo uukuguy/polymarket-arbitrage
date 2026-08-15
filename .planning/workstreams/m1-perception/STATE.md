@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05
 status: in_progress
-stopped_at: staging v3 source materializers are recovering through a Gamma group-less neg-risk anomaly; range budget eight is deployed and the first repaired window advanced from shard-batch 19 to 27
-last_updated: "2026-08-15T05:22:40Z"
+stopped_at: staging v3 source materializers are recovering through the Gamma group-less neg-risk anomaly; both bounded range and materializer budgets are deployed and the recovery circuit count is declining from durable checkpoints
+last_updated: "2026-08-15T05:47:00Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -21,9 +21,10 @@ progress:
 Phase: 05.6 (self-healing Structure production) — transactional control-plane foundation in progress
 
 - **Current staging acceptance:** machine `48e3104c979578` is 2048MB and runs
-  image `m1-group-less-1757a406` with `--max-turns 8`,
-  `--structure-range-turns 8`, and a two-second interval. It is staging-only;
-  Telegram and production L1/L2 remain out of scope.
+  image `m1-materializer-budget-9c013ae9` with `--max-turns 8`,
+  `--structure-materializer-turns 8`, `--structure-range-turns 8`, and a
+  two-second interval. The extra turns are serial and lease-fenced; this is
+  staging-only, and Telegram and production L1/L2 remain out of scope.
 - **Recovered source anomaly:** Gamma event `497034` was a real active standard
   neg-risk event with `negRiskMarketID=null`; child market `2290078` repeated
   `negRisk=true` without a group. v3 had omitted the established snapshot
@@ -60,6 +61,13 @@ Phase: 05.6 (self-healing Structure production) — transactional control-plane 
   Structure range turn budget. Staging runs budget eight: each tick retains
   the original eight workers, then performs at most eight extra serial,
   leased Structure-range turns. This is not a concurrency increase.
+- **Materializer recovery and throughput repair:** `4eac577f` makes a current
+  lease's durable checkpoint sufficient to resolve its old retry circuit and
+  incident, then `9c013ae9` adds eight default-zero-compatible serial
+  materializer turns. Immediately after deployment source materializers moved
+  from 59/67 to 71/75 shard-page checkpoints, while open circuits declined
+  from 82 to 74 through newly recorded recovery events. No job state, receipt,
+  or pointer was manually changed.
 
 - **Staging credential containment:** API health is passing with an isolated
   replacement DSN, and recovery machine `48e3104c979578` is the only active

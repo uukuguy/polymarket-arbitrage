@@ -9149,3 +9149,30 @@ production untouched.
 [NEXT] Let repaired source materializers complete and certify a fresh v3
 generation, while observing the range-budget drain. Then capture the remaining
 in-flight downstream lease takeover evidence. Keep all work staging-only.
+
+## SESSION 253 — 2026-08-15 (long-job recovery health and materializer capacity)
+
+- [FIXED/DEPLOYED] `4eac577f` makes a current fenced durable checkpoint valid
+  recovery evidence for a long transactional job. v3 materializers now resolve
+  their old retry circuit/incident on their first healthy shard-batch checkpoint
+  rather than holding a false operational alarm until an entire 208-page window
+  terminates. The real-Postgres regression proves checkpoint state, current
+  lease epoch, circuit closure, incident resolution, and one recovery event.
+- [LIVE] After deployment, previously recovered source materializers continued
+  at checkpoints 55/59/83 and then open circuits fell from 82 to 74 with five
+  new durable recovery events. No circuit or incident was manually cleared.
+- [THROUGHPUT ROOT CAUSE/FIXED] Each 208-page source window requires 52
+  four-page materializer batches but arrives every five minutes; a single base
+  materializer turn left the queue permanently behind. `9c013ae9` adds the
+  bounded default-zero `--structure-materializer-turns` budget, using only
+  serial existing lease claims. Staging now runs eight base, eight materializer,
+  and eight range turns per scheduler cycle.
+- [LIVE] The new image is active on `48e3104c979578`; shortly after its switch
+  materializer checkpoints advanced from 59/67 to 71/75. No new bundle is yet
+  expected before a full 52-batch source window completes; no production
+  pointer, production L1/L2, or Telegram configuration was changed.
+
+[NEXT] Measure sustained post-budget materializer completion and prove the
+first recovered window admits a new Structure generation, drains ranges,
+certifies Structure, admits/certifies Quote, and then capture an in-flight
+downstream restart takeover. Keep staging-only.
