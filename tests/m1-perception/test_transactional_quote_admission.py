@@ -13,7 +13,10 @@ from polyarb.control_plane.quote_admission import (
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
+    StructureShardArtifact,
+    StructureShardReceipt,
     canonical_structure_bundle_bytes,
+    canonical_structure_shard_bytes,
 )
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
@@ -34,6 +37,15 @@ class _Objects:
     def get_object(self, **kwargs: object) -> dict[str, object]:
         assert kwargs == {"Bucket": "artifacts", "Key": "bundles/current.ndjson"}
         return {"Body": _Body(self._payload)}
+
+
+class _ObjectMap:
+    def __init__(self, payloads: dict[str, bytes]) -> None:
+        self._payloads = payloads
+
+    def get_object(self, **kwargs: object) -> dict[str, object]:
+        assert kwargs["Bucket"] == "artifacts"
+        return {"Body": _Body(self._payloads[str(kwargs["Key"])])}
 
 
 class _ControlPlane:
@@ -163,3 +175,44 @@ def test_quote_admitter_retries_without_batches_when_bundle_digest_is_wrong() ->
         "lease_epoch": 1,
         "error_class": "StructureBundleError",
     }
+
+
+def test_v3_quote_admission_rejects_even_identical_duplicate_yes_tokens() -> None:
+    market = {
+        "market_id": "market-active",
+        "condition_id": "condition-active",
+        "slug": "active-market",
+        "yes_token_id": "yes-active",
+        "event_id": "event-a",
+        "active": True,
+        "closed": False,
+        "neg_risk": True,
+        "neg_risk_market_id": "neg-risk-a",
+    }
+    first = StructureShardArtifact.from_bytes(
+        canonical_structure_shard_bytes(
+            window_key="window-v3", source_digest="a" * 64, component="markets", ordinal=0,
+            rows=(market,),
+        )
+    )
+    second = StructureShardArtifact.from_bytes(
+        canonical_structure_shard_bytes(
+            window_key="window-v3", source_digest="a" * 64, component="markets", ordinal=1,
+            rows=(market,),
+        )
+    )
+    worker = TransactionalQuoteAdmitter(
+        control_plane=object(),
+        object_client=_ObjectMap(
+            {first.key: first.payload, second.key: second.payload}
+        ),
+        bucket="artifacts", worker_id="quote-admitter", now=lambda: NOW, batch_size=100,
+    )
+
+    with pytest.raises(QuoteAdmissionError, match="duplicate YES token"):
+        worker._read_v3_quote_legs(
+            (
+                StructureShardReceipt("markets", 0, first.key, first.sha256, 1),
+                StructureShardReceipt("markets", 1, second.key, second.sha256, 1),
+            )
+        )

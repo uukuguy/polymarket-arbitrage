@@ -229,9 +229,9 @@ class TransactionalQuoteAdmitter:
             if header.component != "markets" or header.ordinal != getattr(shard, "ordinal"):
                 raise QuoteAdmissionError("Quote admission v3 shard identity invalid")
             for leg in quote_legs_from_market_rows(rows, require_nonempty=False):
-                existing = by_token.setdefault(leg.yes_token_id, leg)
-                if existing != leg:
+                if leg.yes_token_id in by_token:
                     raise QuoteAdmissionError("Structure bundle has duplicate YES token")
+                by_token[leg.yes_token_id] = leg
         if not by_token:
             raise QuoteAdmissionError("Structure bundle has no eligible Quote legs")
         return tuple(by_token[token] for token in sorted(by_token))
