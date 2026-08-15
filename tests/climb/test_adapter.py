@@ -91,6 +91,15 @@ def test_tracked_state_is_resumable_and_best_effort() -> None:
     assert "target_value:" in target
 
 
+def test_tracked_state_registers_one_way_transactional_promotion() -> None:
+    hypotheses = yaml.safe_load((STATE_DIR / "hypotheses.yaml").read_text())
+    by_id = {item["id"]: item for item in hypotheses["hypotheses"]}
+
+    assert by_id["H-012"]["status"] == "pending"
+    assert by_id["H-012"]["parent_paradigm"] == "transactional-production-promotion"
+    assert "polyarb-l1" not in by_id["H-012"]["description"]
+
+
 def test_run_artifacts_are_gitignored() -> None:
     gitignore = (ROOT / ".gitignore").read_text()
     assert "runs/climb/" in gitignore.splitlines()

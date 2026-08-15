@@ -5,7 +5,7 @@
 ## Session
 
 - Last cycle: 12
-- Next action: rank next pending hypothesis
+- Next action: run H-012 local promotion gates
 
 ## In flight
 
@@ -19,6 +19,7 @@
 - **H-009** [confirmed]: An explicit producer cadence and freshness SLA can turn a classified stale opportunity feed into an operationally consumable M2 input without treating stale data as a valid zero-opportunity result
 - **H-010** [confirmed]: A bounded liquid mid-market L2 seed plus durable Yes/No token-pair projection can make the strict five-market L3 gate reachable without relaxing spread or depth thresholds
 - **H-011** [confirmed]: A durable, bounded Structure synchronization window that checkpoints Gamma cursors and stages verified pages can recover across timeout and restart without publishing a partial market universe or permanently pausing collection.
+- **H-012** [pending]: Promote the existing transactional control plane in place as the only formal M1 runtime, then require a fresh post-promotion 24-hour collection and recovery soak rather than retaining a legacy fallback service.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts

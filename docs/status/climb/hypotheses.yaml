@@ -303,3 +303,15 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all bounded local gates passed
+- id: H-012
+  description: Promote the existing transactional control plane in place as the only
+    formal M1 runtime, then require a fresh post-promotion 24-hour collection and
+    recovery soak rather than retaining a legacy fallback service.
+  parent_paradigm: transactional-production-promotion
+  expected_lift: Establish one continuously operating transactional M1 runtime with
+    formal post-promotion evidence
+  cost_h: 24.0
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-15T17:00:00Z'
+  results: []
