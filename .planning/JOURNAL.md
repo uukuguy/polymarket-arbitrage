@@ -9390,3 +9390,22 @@ provides an operator-readable per-kind queue lag and next-runnable identity.
 [NEXT] Continue the 15-minute staging queue-health drain window with the five live roles. If depth
 or oldest age rises in two consecutive samples, restore the known all-worker command; otherwise
 record the evidence and proceed to Quote retry/R2 takeover, then the 24-hour soak.
+
+## SESSION 264 — 2026-08-15 (lease stale signal containment)
+
+- [FIXED/DEPLOYED-STAGING] Normal lease fencing was repeatedly surfacing as `StaleLeaseError` from
+  independent Structure/Quote pools and escaping the service top-level, causing Fly exit-1 restart
+  loops. Commit `4a8233f1` treats it only as the observable `stale-lease` turn outcome in both
+  bounded run-loop types. It does not weaken any Postgres fence or convert a stale write to success.
+- [LIVE/EVIDENCE] Image `m1-stale-lease-amd64-4a8233f1@sha256:5ffe41a3…51f8` is now on coordinator
+  `48e3104c979578`, Structure pools `2879110cd63738`/`890e30b6d627e8`, and Quote pools
+  `080e9255b1ddd8`/`81597df969de18`. Both Structure pools logged a `stale-lease` turn followed by
+  successful fenced receipts without process exit. All five are started.
+- [HEALTH] Independent API `/healthz` is 200; `/perception/control-plane` remains available.
+  Snapshot at 13:00Z: Structure unfinished `3481` (oldest 23285s), Quote unfinished `43`
+  (oldest 859s). This is recovery/backlog work, not yet a 24h readiness verdict.
+
+[NEXT] Keep the five-role staging topology running and take timed queue-health samples. Then execute
+the isolated exact-key Quote retry/R2 takeover evidence with the scoped `acceptance_run_id`, run the
+separate scoped alert deliverer for only its new Telegram outbox intent, and only then start the
+24-hour soak clock.
