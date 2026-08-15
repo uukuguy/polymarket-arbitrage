@@ -161,6 +161,30 @@ def test_checkpointed_structure_recovery_profile_uses_bounded_local_gates() -> N
     }
 
 
+def test_transactional_production_promotion_profile_uses_only_local_proof_gates() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "transactional-production-promotion"}
+    )
+
+    flattened = [argument for command in commands.values() for argument in command]
+
+    assert commands["planning"] == ["make", "planning-status"]
+    for required in (
+        "tests/m1-perception/test_control_plane_postgres.py",
+        "tests/m1-perception/test_control_plane_rollout.py",
+        "tests/m1-perception/test_control_plane_shadow.py",
+    ):
+        assert required in flattened
+    assert not {
+        argument.lower()
+        for argument in flattened
+        if any(
+            forbidden in argument.lower()
+            for forbidden in ("flyctl", "deploy", "migrate", "http://", "https://")
+        )
+    }
+
+
 def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:
     assert eval_local.gate_commands_for({"paradigm": "repository"}) == GATE_COMMANDS
     assert eval_local.gate_commands_for({"paradigm": "unknown"}) == GATE_COMMANDS

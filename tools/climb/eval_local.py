@@ -230,6 +230,42 @@ CHECKPOINTED_STRUCTURE_RECOVERY_GATE_COMMANDS = {
         "-q",
     ],
 }
+TRANSACTIONAL_PRODUCTION_PROMOTION_GATE_COMMANDS = {
+    "planning": ["make", "planning-status"],
+    "unit": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_postgres.py",
+        "-q",
+    ],
+    "integration": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_rollout.py",
+        "tests/m1-perception/test_control_plane_shadow.py",
+        "-q",
+    ],
+    "cli": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_cli.py",
+        "-k",
+        "render_rollout or preflight",
+        "-q",
+    ],
+    "restart": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_structure_generation_publication.py",
+        "-k",
+        "expired_read_budget or preserves_prior_checkpoint",
+        "-q",
+    ],
+}
 
 
 def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]:
@@ -243,6 +279,8 @@ def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]
         commands = L3_PREREQUISITE_CHAIN_TRUTH_GATE_COMMANDS
     elif manifest.get("paradigm") == "checkpointed-structure-recovery":
         commands = CHECKPOINTED_STRUCTURE_RECOVERY_GATE_COMMANDS
+    elif manifest.get("paradigm") == "transactional-production-promotion":
+        commands = TRANSACTIONAL_PRODUCTION_PROMOTION_GATE_COMMANDS
     else:
         commands = GATE_COMMANDS
     return {name: list(command) for name, command in commands.items()}
