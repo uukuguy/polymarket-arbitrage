@@ -8,6 +8,7 @@ from polyarb.control_plane.structure_artifact import (
     StructureBundleError,
     StructureBundleIdentity,
     StructureShardArtifact,
+    StructureShardBatchArtifact,
     StructureShardReceipt,
     canonical_structure_shard_bytes,
     parse_structure_shard_bytes,
@@ -64,3 +65,24 @@ def test_shard_manifest_rejects_duplicate_component_ordinals() -> None:
 
     with pytest.raises(ValueError, match="duplicate shard ordinal"):
         canonical_structure_shard_manifest_bytes(identity=identity, shards=(duplicate, duplicate))
+
+
+def test_shard_batch_binds_one_source_page_interval_to_all_component_shards() -> None:
+    from polyarb.control_plane.structure_artifact import canonical_structure_shard_batch_bytes
+
+    shard = StructureShardReceipt(
+        component="markets",
+        ordinal=4,
+        artifact_key="structure-shards/a/rows.ndjson",
+        artifact_digest="a" * 64,
+        row_count=1,
+    )
+    payload = canonical_structure_shard_batch_bytes(
+        window_key="source-window:1",
+        source_digest="b" * 64,
+        start_ordinal=4,
+        end_ordinal=5,
+        shards=(shard,),
+    )
+
+    assert StructureShardBatchArtifact.from_bytes(payload).key.endswith("/batch.ndjson")

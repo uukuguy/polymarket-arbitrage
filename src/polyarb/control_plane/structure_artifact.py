@@ -157,6 +157,22 @@ class StructureShardArtifact:
         return cls(payload=payload, sha256=digest, key=structure_shard_artifact_key(digest))
 
 
+@dataclass(frozen=True, slots=True)
+class StructureShardBatchArtifact:
+    """A content-addressed receipt for all shards made from one page interval."""
+
+    payload: bytes
+    sha256: str
+    key: str
+
+    @classmethod
+    def from_bytes(cls, payload: bytes) -> StructureShardBatchArtifact:
+        if not payload:
+            raise ValueError("Structure shard batch payload must be non-empty")
+        digest = hashlib.sha256(payload).hexdigest()
+        return cls(payload=payload, sha256=digest, key=structure_shard_batch_artifact_key(digest))
+
+
 def canonical_structure_shard_bytes(
     *,
     window_key: str,
@@ -239,10 +255,50 @@ def canonical_structure_shard_manifest_bytes(
     )
 
 
+def canonical_structure_shard_batch_bytes(
+    *,
+    window_key: str,
+    source_digest: str,
+    start_ordinal: int,
+    end_ordinal: int,
+    shards: Sequence[StructureShardReceipt],
+) -> bytes:
+    """Commit all component shards derived from one bounded source-page batch."""
+    if (
+        not window_key
+        or len(source_digest) != 64
+        or start_ordinal < 0
+        or end_ordinal <= start_ordinal
+    ):
+        raise ValueError("invalid shard batch identity")
+    ordered = tuple(sorted(shards, key=lambda shard: (shard.component, shard.ordinal)))
+    if not ordered:
+        raise ValueError("shard batch must not be empty")
+    if len({(shard.component, shard.ordinal) for shard in ordered}) != len(ordered):
+        raise ValueError("duplicate shard ordinal")
+    header = {
+        "end_ordinal": end_ordinal,
+        "kind": "structure-shard-batch",
+        "source_digest": source_digest,
+        "start_ordinal": start_ordinal,
+        "window_key": window_key,
+    }
+    return b"".join(
+        _canonical_json(record) + b"\n"
+        for record in (header, *({"shard": shard.record()} for shard in ordered))
+    )
+
+
 def structure_shard_artifact_key(sha256: str) -> str:
     if len(sha256) != 64:
         raise ValueError("sha256 must be a sha256 digest")
     return f"structure-shards/{sha256}/rows.ndjson"
+
+
+def structure_shard_batch_artifact_key(sha256: str) -> str:
+    if len(sha256) != 64:
+        raise ValueError("sha256 must be a sha256 digest")
+    return f"structure-shard-batches/{sha256}/batch.ndjson"
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,6 +560,32 @@ def upload_structure_shard_artifact(
         or remote_digest != artifact.sha256
     ):
         raise StructureBundleError("structure-shard-head-verification-failed")
+    return artifact
+
+
+def upload_structure_shard_batch_artifact(
+    client: _ObjectClient,
+    *,
+    bucket: str,
+    artifact: StructureShardBatchArtifact,
+) -> StructureShardBatchArtifact:
+    """PUT and authenticate a shard-batch receipt before its fenced checkpoint."""
+    if not bucket:
+        raise ValueError("bucket must be non-empty")
+    client.put_object(
+        Bucket=bucket,
+        Key=artifact.key,
+        Body=artifact.payload,
+        ContentType="application/x-ndjson",
+        Metadata={"sha256": artifact.sha256},
+    )
+    head = client.head_object(Bucket=bucket, Key=artifact.key)
+    remote_digest = str(head.get("Metadata", {}).get("sha256", ""))
+    if (
+        int(head.get("ContentLength", -1)) != len(artifact.payload)
+        or remote_digest != artifact.sha256
+    ):
+        raise StructureBundleError("structure-shard-batch-head-verification-failed")
     return artifact
 
 
