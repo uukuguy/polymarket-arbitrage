@@ -9253,3 +9253,20 @@ for one Quote batch, then begin the 24-hour continuous soak evidence window.
 [NEXT] Let `structure:c20e9bf…` finish its 1,014 ranges and certify. At the
 first new Quote batch, capture the exact-key R2-before-receipt loss/reclaim
 proof, restore the normal command, then start the continuous soak window.
+
+## SESSION 258 — 2026-08-15 (fault-soak evidence boundary discovered)
+
+- [LIVE] The balanced staging drain continued from 150 to 387 successful
+  ranges with zero retryable/quarantined ranges. The incomplete Structure
+  certifier is correctly retryable, not an incident.
+- [GAP] `verify_fault_soak` additionally requires each worker's real
+  3-failure 15/30/60 circuit recovery and dashboard+Telegram delivery
+  receipts. The intentional process-loss hook cannot produce that circuit by
+  design. The staging `m1_alert_outbox` has 1,670 pending historical messages
+  and no deliveries; blindly starting `alert-serve` would bulk-send them to
+  Telegram. Do not do this.
+
+[NEXT/BLOCKED-DECISION] Approve a default-off, exact-job staging retry-fault
+hook plus scoped alert delivery that only releases this acceptance run's new
+outbox intents (never historical backlog). Then perform Structure and Quote
+circuit evidence, the Quote R2 takeover, and the 24h soak.
