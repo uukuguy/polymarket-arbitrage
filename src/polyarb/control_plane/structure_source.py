@@ -738,11 +738,12 @@ class TransactionalStructureSourceMaterializer:
                     "job_key": lease.job_key,
                     "lease_epoch": lease.lease_epoch,
                     "error_class": type(error).__name__,
+                    "error_message": str(error)[:200],
                 },
                 channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
-            raise
+            return StructureWorkerResult(job_key=lease.job_key, outcome="retryable")
 
     async def _read_source_pages(
         self,

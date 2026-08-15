@@ -5,8 +5,6 @@ import threading
 import time
 from datetime import UTC, datetime
 
-import pytest
-
 from polyarb.control_plane.models import JobLease, StructureSourcePageSpec
 from polyarb.control_plane.structure_source import (
     StructureSourcePageArtifact,
@@ -238,8 +236,8 @@ def test_materializer_records_retry_incident_when_sealed_page_is_unavailable() -
         range_max_rows=100,
     )
 
-    with pytest.raises(KeyError):
-        asyncio.run(worker.run_once())
+    assert asyncio.run(worker.run_once()).outcome == "retryable"
 
     assert control_plane.retry_incidents[0]["component"] == "structure-materialize"
     assert control_plane.retry_incidents[0]["detail"]["lease_epoch"] == 1
+    assert isinstance(control_plane.retry_incidents[0]["detail"]["error_message"], str)
