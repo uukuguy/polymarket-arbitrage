@@ -21,7 +21,9 @@ from .postgres import PostgresControlPlane, StaleLeaseError
 from .structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
+    StructureShardArtifact,
     canonical_structure_bundle_bytes,
+    canonical_structure_shard_bytes,
     upload_structure_bundle_artifact,
 )
 from .structure_shadow import plan_structure_ranges
@@ -341,6 +343,37 @@ def materialize_event_records_components(
         "markets": tuple(market_rows),
         "issues": (),
     }
+
+
+def materialize_event_page_shards(
+    page: tuple[StructureSourcePageSpec, StructureSourcePageArtifact], *, source_digest: str
+) -> tuple[tuple[str, StructureShardArtifact], ...]:
+    """Turn one sealed terminal event page into bounded component artifacts."""
+    spec, artifact = page
+    if spec.stream != "events" or len(source_digest) != 64:
+        raise ValueError("event page shards require a source digest and event spec")
+    parsed_spec, records, _next_cursor, _completed = parse_structure_source_page_bytes(
+        artifact.payload, expected_sha256=artifact.sha256
+    )
+    if parsed_spec != spec:
+        raise StructureSourceError("source page input/header mismatch")
+    components = materialize_event_records_components(records)
+    return tuple(
+        (
+            component,
+            StructureShardArtifact.from_bytes(
+                canonical_structure_shard_bytes(
+                    window_key=spec.window_key,
+                    source_digest=source_digest,
+                    component=component,
+                    ordinal=spec.ordinal,
+                    rows=rows,
+                )
+            ),
+        )
+        for component, rows in components.items()
+        if rows
+    )
 
 
 def materialize_structure_source_pages(

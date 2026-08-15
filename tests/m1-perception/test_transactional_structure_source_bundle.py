@@ -9,6 +9,7 @@ from polyarb.control_plane.structure_artifact import parse_structure_bundle_byte
 from polyarb.control_plane.structure_source import (
     StructureSourceError,
     StructureSourcePageArtifact,
+    materialize_event_page_shards,
     materialize_event_records_components,
     materialize_structure_source_pages,
 )
@@ -241,6 +242,41 @@ def test_one_event_page_normalizes_to_independent_shard_components() -> None:
     assert components["events"][0]["id"] == "event-a"
     assert components["markets"][0]["market_id"] == "market-a"
     assert components["markets"][0]["neg_risk"] is False
+
+
+def test_one_sealed_event_page_becomes_component_shards() -> None:
+    page = _page(
+        stream="events",
+        ordinal=0,
+        records=(
+            {
+                "id": "event-a",
+                "slug": "event-a",
+                "active": True,
+                "closed": False,
+                "negRisk": False,
+                "markets": [
+                    {
+                        "id": "market-a",
+                        "conditionId": "condition-a",
+                        "clobTokenIds": '["yes-a", "no-a"]',
+                        "outcomePrices": '["0.4", "0.6"]',
+                        "active": True,
+                        "closed": False,
+                    }
+                ],
+            },
+        ),
+        completed=True,
+        next_cursor=None,
+    )
+
+    shards = materialize_event_page_shards(page, source_digest="a" * 64)
+
+    assert [(component, artifact.key) for component, artifact in shards] == [
+        ("events", shards[0][1].key),
+        ("markets", shards[1][1].key),
+    ]
 
 
 def test_materializer_rejects_missing_or_tampered_source_page_before_bundle_exists() -> None:
