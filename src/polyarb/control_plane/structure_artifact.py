@@ -47,6 +47,7 @@ class StructureBundleIdentity:
             "legacy-publication-v1",
             "gamma-source-window-v1",
             "gamma-source-window-events-v2",
+            "gamma-source-window-events-v3-sharded",
         }:
             raise ValueError("Structure bundle source_kind is invalid")
         if self.snapshot_id < 0 or (
@@ -104,6 +105,122 @@ class StructureRangeArtifact:
             raise ValueError("Structure range payload must be non-empty")
         digest = hashlib.sha256(payload).hexdigest()
         return cls(payload=payload, sha256=digest, key=structure_range_artifact_key(digest))
+
+
+@dataclass(frozen=True, slots=True)
+class StructureShardReceipt:
+    """One authenticated bounded component shard named by a manifest."""
+
+    component: str
+    ordinal: int
+    artifact_key: str
+    artifact_digest: str
+    row_count: int
+
+    def __post_init__(self) -> None:
+        if self.component not in _COMPONENTS or self.ordinal < 0 or self.row_count < 0:
+            raise ValueError("invalid shard receipt")
+        if not self.artifact_key or len(self.artifact_digest) != 64:
+            raise ValueError("invalid shard receipt")
+
+    def record(self) -> dict[str, object]:
+        return {
+            "artifact_digest": self.artifact_digest,
+            "artifact_key": self.artifact_key,
+            "component": self.component,
+            "ordinal": self.ordinal,
+            "row_count": self.row_count,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class StructureShardHeader:
+    window_key: str
+    source_digest: str
+    component: str
+    ordinal: int
+
+
+def canonical_structure_shard_bytes(
+    *,
+    window_key: str,
+    source_digest: str,
+    component: str,
+    ordinal: int,
+    rows: Sequence[Mapping[str, object]],
+) -> bytes:
+    """Serialize one bounded canonical component slice for a source window."""
+    if not window_key or len(source_digest) != 64 or component not in _COMPONENTS or ordinal < 0:
+        raise ValueError("invalid Structure shard identity")
+    encoded_rows = sorted(_canonical_json(row) for row in rows)
+    if len(set(encoded_rows)) != len(encoded_rows):
+        raise ValueError("duplicate canonical record in shard")
+    header = {
+        "component": component,
+        "kind": "structure-shard",
+        "ordinal": ordinal,
+        "source_digest": source_digest,
+        "window_key": window_key,
+    }
+    return b"".join(
+        [_canonical_json(header) + b"\n", *[b'{"row":' + row + b"}\n" for row in encoded_rows]]
+    )
+
+
+def parse_structure_shard_bytes(
+    payload: bytes, *, expected_sha256: str
+) -> tuple[StructureShardHeader, tuple[dict[str, object], ...]]:
+    """Authenticate one component shard without consulting mutable state."""
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise StructureBundleError("structure-shard-digest-mismatch")
+    try:
+        lines = [json.loads(line) for line in payload.splitlines()]
+        raw_header = lines[0]
+        if not isinstance(raw_header, dict) or raw_header.get("kind") != "structure-shard":
+            raise ValueError("header")
+        header = StructureShardHeader(
+            window_key=str(raw_header["window_key"]),
+            source_digest=str(raw_header["source_digest"]),
+            component=str(raw_header["component"]),
+            ordinal=int(raw_header["ordinal"]),
+        )
+        if (
+            not header.window_key
+            or len(header.source_digest) != 64
+            or header.component not in _COMPONENTS
+            or header.ordinal < 0
+        ):
+            raise ValueError("header")
+        rows = tuple(record["row"] for record in lines[1:])
+        if any(not isinstance(row, dict) for row in rows):
+            raise ValueError("record")
+        if canonical_structure_shard_bytes(
+            window_key=header.window_key,
+            source_digest=header.source_digest,
+            component=header.component,
+            ordinal=header.ordinal,
+            rows=rows,
+        ) != payload:
+            raise ValueError("noncanonical")
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise StructureBundleError("structure-shard-malformed") from error
+    return header, rows
+
+
+def canonical_structure_shard_manifest_bytes(
+    *, identity: StructureBundleIdentity, shards: Sequence[StructureShardReceipt]
+) -> bytes:
+    """Commit the exact ordered shard receipt set for a sharded generation."""
+    if identity.source_kind != "gamma-source-window-events-v3-sharded":
+        raise ValueError("shard manifest requires v3 sharded identity")
+    ordered = tuple(sorted(shards, key=lambda shard: (shard.component, shard.ordinal)))
+    if len({(shard.component, shard.ordinal) for shard in ordered}) != len(ordered):
+        raise ValueError("duplicate shard ordinal")
+    header = {**identity.header(), "kind": "structure-shard-manifest"}
+    return b"".join(
+        _canonical_json(record) + b"\n"
+        for record in (header, *({"shard": shard.record()} for shard in ordered))
+    )
 
 
 @dataclass(frozen=True, slots=True)
