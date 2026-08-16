@@ -2,7 +2,10 @@
 # Source: docs.astral.sh/uv/guides/integration/docker/ (verified 2026-05-12)
 
 # ───── Builder stage ─────────────────────────────────────────────────
-FROM python:3.12-slim-bookworm AS builder
+# The formal Fly control-plane Machines are linux/amd64.  Pinning both stages
+# prevents an Apple-Silicon local build or a heterogeneous remote builder from
+# publishing an arm64 image that Fly cannot roll onto those Machines.
+FROM --platform=linux/amd64 python:3.12-slim-bookworm AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.5.0 /uv /uvx /bin/
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -21,7 +24,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-editable
 
 # ───── Runtime stage ─────────────────────────────────────────────────
-FROM python:3.12-slim-bookworm AS runtime
+FROM --platform=linux/amd64 python:3.12-slim-bookworm AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         tzdata \
