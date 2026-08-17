@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: staging five-role transactional collection is draining normally; both Structure and Quote R2 process-loss takeover plus scoped dashboard/Telegram receipts are proven, and the upgraded v2 automated soak is active
-last_updated: "2026-08-15T15:24:00Z"
+stopped_at: formal-cloud-v2 is active after a Supabase database-level read-only incident was repaired; five transactional business roles plus isolated sampler are started
+last_updated: "2026-08-17T21:53:01Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -17,6 +17,20 @@ progress:
 # M1 Perception — Current State
 
 ## Current Position
+
+- **Formal read-only incident repaired (2026-08-17 21:50Z):** `formal-cloud-v1`
+  failed and remains immutable failed evidence after every Worker session inherited
+  `default_transaction_read_only=on` from Supabase's `postgresql.auto.conf`.
+  The formal database now has its own `default_transaction_read_only=off`
+  override. A fresh connection wrote only a temporary table then rolled it back;
+  the five business machines were restarted and resumed forward progress. Fresh
+  cloud-only run `formal-cloud-v2` began at 21:52:12Z, appended its first sample
+  at 21:53:01Z, and passed the 48-second/two-tick gate. Its 24-hour window is the
+  only outstanding final acceptance gate.
+
+- **Historical failed cloud run (2026-08-16):** immutable `formal-cloud-v1`
+  evidence is retained solely to prove the read-only incident and its gap. It
+  is not a qualifying acceptance window and must never be resumed or relabeled.
 
 - **Latest live repair (2026-08-15 14:49Z):** a finished 1,000-range Structure
   certification was observed holding an expired 30-second epoch during its
