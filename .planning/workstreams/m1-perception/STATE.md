@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: all pre-production Fly control-plane apps were removed after they were proven to carry a deleted staging Supabase DSN; the only formal Supabase project is restarting and no business collector is running
-last_updated: "2026-08-18T03:28:59Z"
+stopped_at: formal cloud acceptance is running; do not declare completion before its immutable 24-hour verifier passes
+last_updated: "2026-08-18T14:36:30Z"
 progress:
   total_phases: 14
   completed_phases: 13
   total_plans: 72
-  completed_plans: 71
+  completed_plans: 72
   percent: 99
 ---
 
@@ -18,23 +18,23 @@ progress:
 
 ## Current Position
 
-- **Authority blocked after restart (2026-08-18):** the only remaining
-  Supabase project is `polyarb` (`zoqsmjeejfkrokwttjbx`). Its restart completed
-  but the project is still `Unhealthy`: both formal pooler addresses time out
-  under an 8-second bound and its Data API returns HTTP 503. No 24-hour
-  acceptance run exists or is running. This cannot be corrected by starting
-  collectors, and no capacity upgrade or destructive database reset has been
-  performed.
+- **Formal authority live (2026-08-18):** the sole M1 authority is Supabase
+  project `polyarb` (`lgykffpcsebewvobkbdm`), migrations through `017`, and
+  bucket `polyarb-control-plane`. It is not a rename or fallback to any old
+  SQLite, staging tenant, or L1 resource.
 
-- **Pre-production control plane removed (2026-08-18):** the former
-  `polyarb-control-api`, `polyarb-control-worker`, and
-  `polyarb-control-alert` all inherited the same DSN for a deleted staging
-  project (`pnclgqrxhmulmmmjsgbk`). The API probe returned that exact missing
-  tenant; the worker held six stopped machines and pending stale secrets.
-  They were deleted together, including all associated machines. The remaining
-  Fly application is `polyarb-l2`, which is outside this reset. Monitoring will
-  be redeployed from the single authoritative configuration only after the
-  formal database passes a bounded probe.
+- **Minimal transactional runtime live:** `polyarb-control-api` (one 256MB
+  read-only Machine), `polyarb-control-worker-m1` (three 1GB fenced roles),
+  `polyarb-control-alert` (one 256MB database-independent watchdog), and
+  `polyarb-control-evidence` (one 256MB append-only sampler) are running.
+  The public control API is available; worker leases/circuits are observable.
+
+- **Monitoring and acceptance:** watchdog checks the API, all exact worker
+  IDs, sampler state, and fresh Fly process restart counters every 30 seconds.
+  A controlled sampler process-loss/recovery path was proven. Immutable
+  `m1-formal-20260818T143000Z` evidence began at 14:30:13Z, passed its early
+  345-second continuity/progress gate, and remains the only active 24-hour
+  acceptance run.
 
 - **Formal read-only incident repaired (2026-08-17 21:50Z):** `formal-cloud-v1`
   failed and remains immutable failed evidence after every Worker session inherited
