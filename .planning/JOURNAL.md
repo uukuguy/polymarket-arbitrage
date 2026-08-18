@@ -9761,3 +9761,33 @@ yet. First keep observing live worker progress and watchdog heartbeats, then
 exercise one deliberate, bounded failure/recovery alert path and record the
 result. Rotate/revoke one-hour bootstrap credential after confirming no
 remaining app depends on it.
+
+## SESSION 283 — 2026-08-18 (independent evidence runtime and restart-loop finding)
+
+- [RESOLVED] The Fly secrets blocker is closed for the formal apps. The same
+  organization deploy token stages encrypted secrets for the independent
+  `polyarb-control-evidence` app; no paid plan or additional Supabase project
+  was needed. A new 256MB evidence Machine `830152f7274378` is started with
+  its own database role, which can only read/append soak evidence and cannot
+  read `m1_jobs`.
+- [MONITORING] The alert Machine is now on image
+  `m1-multi-watchdog-0eb8d860`; its 30-second gate checks the control API,
+  all three worker Machines, and the evidence Machine. The live one-shot
+  Makefile verifier returns `healthy` for all four Machines.
+- [ROOT CAUSE / REPAIRED] The first evidence entrypoint incorrectly combined
+  immutable baseline creation with `exec`; a restart then retried the baseline
+  and exited with `SoakEvidenceConflictError`. The immutable baseline was
+  already safely recorded. The running entrypoint is now append-only
+  `cloud-soak-serve`, which recorded its first cloud sample successfully.
+- [GAP FOUND] Fly reports a restart-looping process as Machine `started`.
+  The previous 30-second Machine-state-only watchdog therefore did not page
+  during that short loop. Do not call the 24-hour acceptance clock started:
+  next patch must make the watchdog observe new non-requested exit/restart
+  events (or an equivalent process-liveness signal), then prove that path by
+  a bounded sampler failure/recovery test. The preliminary soak verifier also
+  correctly refuses success until successful job count advances between
+  records.
+
+[NEXT] Implement and test restart-event monitoring for exact Fly Machines;
+prove a sampler failure is paged and recovery is reported; only then begin the
+24-hour cloud acceptance window.
