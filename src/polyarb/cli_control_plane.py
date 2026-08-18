@@ -215,6 +215,9 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="perform one credential-free notification-free runtime check and exit",
     )
+    watchdog_serve.add_argument(
+        "--soak-run-id", help="require fresh sampler evidence from this exact formal run"
+    )
     watchdog_serve.add_argument("--interval-seconds", type=float, default=30.0)
     watchdog_serve.add_argument("--json", action="store_true")
     render_rollout = subcommands.add_parser(
@@ -610,7 +613,9 @@ async def _run_runtime_watchdog_service(
     stop_event = asyncio.Event()
     restart_gate = RestartEventGate()
     progress_gate = ProgressGate(max_stall=timedelta(minutes=5))
-    soak_evidence_gate = SoakEvidenceGate(max_age=timedelta(minutes=15))
+    soak_evidence_gate = SoakEvidenceGate(
+        max_age=timedelta(minutes=15), expected_run_id=args.soak_run_id
+    )
     loop = asyncio.get_running_loop()
     for stop_signal in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -1084,7 +1089,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not os.environ.get("POLYARB_FLY_API_TOKEN", "").strip():
                 raise ValueError("watchdog requires POLYARB_FLY_API_TOKEN")
             if args.watchdog_once:
-                observation = _read_runtime_watchdog_observation(args)
+                observation = _read_runtime_watchdog_observation(
+                    args,
+                    restart_gate=RestartEventGate(),
+                    progress_gate=ProgressGate(max_stall=timedelta(minutes=5)),
+                    soak_evidence_gate=SoakEvidenceGate(
+                        max_age=timedelta(minutes=15), expected_run_id=args.soak_run_id
+                    ),
+                )
                 _write(
                     {
                         "status": "healthy" if observation.healthy else "unhealthy",

@@ -81,6 +81,27 @@ def test_watchdog_pages_when_latest_cloud_evidence_sample_is_stale() -> None:
     assert observation.failures == ("evidence:sample-stale:901s",)
 
 
+def test_watchdog_rejects_a_fresh_sample_from_the_wrong_formal_run() -> None:
+    from polyarb.control_plane.watchdog import RuntimeObservation, SoakEvidenceGate
+
+    gate = SoakEvidenceGate(
+        max_age=timedelta(minutes=15), expected_run_id="m1-formal-required"
+    )
+    observation = gate.apply(
+        RuntimeObservation(healthy=True, failures=()),
+        {
+            "soak_evidence": {
+                "latest_run_id": "m1-formal-other",
+                "latest_observed_at": "2026-08-18T14:15:00+00:00",
+            }
+        },
+        now=datetime(2026, 8, 18, 14, 15, 1, tzinfo=UTC),
+    )
+
+    assert observation.healthy is False
+    assert observation.failures == ("evidence:unexpected-run:m1-formal-other",)
+
+
 def test_watchdog_message_is_actionable_without_leaking_secrets() -> None:
     from polyarb.control_plane.watchdog import RuntimeObservation, render_alert
 

@@ -108,10 +108,13 @@ class ProgressGate:
 class SoakEvidenceGate:
     """Fail closed when the independent sampler stops appending evidence."""
 
-    def __init__(self, *, max_age: timedelta) -> None:
+    def __init__(self, *, max_age: timedelta, expected_run_id: str | None = None) -> None:
         if max_age.total_seconds() <= 0:
             raise ValueError("max_age must be positive")
+        if expected_run_id is not None and not expected_run_id:
+            raise ValueError("expected_run_id must be non-empty when provided")
         self._max_age = max_age
+        self._expected_run_id = expected_run_id
 
     def apply(
         self,
@@ -123,7 +126,14 @@ class SoakEvidenceGate:
         if control_api_payload is None:
             return observation
         evidence = control_api_payload.get("soak_evidence")
+        run_id = evidence.get("latest_run_id") if isinstance(evidence, Mapping) else None
         observed_at = evidence.get("latest_observed_at") if isinstance(evidence, Mapping) else None
+        if self._expected_run_id is not None and run_id != self._expected_run_id:
+            observed = run_id if isinstance(run_id, str) and run_id else "missing"
+            return RuntimeObservation(
+                healthy=False,
+                failures=(*observation.failures, f"evidence:unexpected-run:{observed}"),
+            )
         if not isinstance(observed_at, str):
             return RuntimeObservation(
                 healthy=False,
