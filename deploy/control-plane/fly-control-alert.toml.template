@@ -13,7 +13,7 @@ POLYARB_RUNTIME_ROLE = "control-plane"
 [build]
 
 [processes]
-watchdog = '''/bin/sh -ec 'exec python -m polyarb.cli_control_plane watchdog-serve --enable --control-api-url "$POLYARB_CONTROL_API_URL" --fly-app "$POLYARB_WORKER_APP" --machine-id "$POLYARB_COORDINATOR_MACHINE_ID" --machine-id "$POLYARB_STRUCTURE_RANGE_MACHINE_ID" --machine-id "$POLYARB_QUOTE_BATCH_MACHINE_ID" --secondary-fly-app "$POLYARB_EVIDENCE_APP" --secondary-machine-id "$POLYARB_EVIDENCE_MACHINE_ID" --secondary-target "$POLYARB_RUNTIME_EVENT_WRITER_APP/$POLYARB_RUNTIME_EVENT_WRITER_MACHINE_ID" --soak-run-id "$POLYARB_EVIDENCE_SOAK_RUN_ID" --interval-seconds 30 --json' '''
+watchdog = '''/bin/sh -ec 'exec python -m polyarb.cli_control_plane watchdog-serve --enable --control-api-url "$POLYARB_CONTROL_API_URL" --fly-app "$POLYARB_WORKER_APP" --machine-id "$POLYARB_COORDINATOR_MACHINE_ID" --machine-id "$POLYARB_STRUCTURE_RANGE_MACHINE_ID" --machine-id "$POLYARB_QUOTE_BATCH_MACHINE_ID" --secondary-fly-app "$POLYARB_EVIDENCE_APP" --secondary-machine-id "$POLYARB_EVIDENCE_MACHINE_ID" --secondary-target "$POLYARB_RUNTIME_EVENT_WRITER_APP/$POLYARB_RUNTIME_EVENT_WRITER_MACHINE_ID" --soak-run-id "$POLYARB_WATCHDOG_SOAK_RUN_ID_V1" --interval-seconds 30 --json' '''
 
 [[restart]]
 policy = "always"
