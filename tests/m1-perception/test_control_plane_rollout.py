@@ -34,6 +34,7 @@ def test_rollout_renderer_writes_three_isolated_apps_and_staged_checklist(tmp_pa
         'app = "polyarb-control-alert-staging"' in (tmp_path / "fly-control-alert.toml").read_text()
     )
     worker_config = (tmp_path / "fly-control-worker.toml").read_text()
+    alert_config = (tmp_path / "fly-control-alert.toml").read_text()
     assert "soak_sampler" not in worker_config
     assert "structure_range_a" not in worker_config
     assert "structure_range_b" not in worker_config
@@ -43,6 +44,15 @@ def test_rollout_renderer_writes_three_isolated_apps_and_staged_checklist(tmp_pa
     assert "structure_range =" in worker_config
     assert "quote_batch =" in worker_config
     assert 'memory = "1024mb"' in worker_config
+    for stale_machine_id in (
+        "3d8d0e29c7d589",
+        "080d3ddbe66068",
+        "4d895231f7d987",
+        "85e990c43533e8",
+        "86ed91bee33608",
+    ):
+        assert stale_machine_id not in worker_config
+        assert stale_machine_id not in alert_config
     checklist = json.loads((tmp_path / "rollout-checklist.json").read_text())
     assert checklist["expected_database"] == "control_plane_staging"
     assert checklist["steps"] == [
