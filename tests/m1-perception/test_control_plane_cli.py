@@ -640,6 +640,32 @@ def test_alert_serve_forwards_acceptance_run_scope(monkeypatch, capsys) -> None:
     assert captured["acceptance_run_id"] == "run-a"
 
 
+def test_watchdog_requires_explicit_enable_before_any_database_connect(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_control_plane_from_env",
+        lambda: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert (
+        cli_control_plane.main(
+            [
+                "watchdog-serve",
+                "--control-api-url",
+                "https://control.example/perception/control-plane",
+                "--fly-app",
+                "polyarb-control-worker",
+                "--machine-id",
+                "machine-a",
+            ]
+        )
+        == 2
+    )
+    assert "--enable is required" in capsys.readouterr().err
+
+
 def test_structure_source_factory_builds_eight_distinct_lease_lanes(monkeypatch) -> None:
     from polyarb import cli_control_plane
 

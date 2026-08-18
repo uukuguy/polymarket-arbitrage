@@ -90,6 +90,7 @@
 | 76 | [真实 R2 故障接管与持续证据](76-真实R2故障接管与持续证据.md) | R2 crash boundary / lease epoch 接管 / 唯一 receipt / 24 小时 fail-closed soak |
 | 77 | [长认证租约心跳](77-长认证租约心跳.md) | 短 lease + same-epoch heartbeat / R2 parity / stale fence / 最终提交 |
 | 78 | [云端持续验收证据](78-云端持续验收证据.md) | 独立 sampler / Postgres append-only ledger / 900 秒缺口 / 24 小时 fail-closed 验收 |
+| 79 | [独立运行看门狗](79-独立运行看门狗.md) | 为什么验收器不能替代告警器 / API+五机 fail-closed 状态 / 30 秒心跳与 transition-only Telegram |
 
 ## Phase 02.1 教学增量（2026-05）
 

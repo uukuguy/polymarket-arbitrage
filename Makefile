@@ -614,7 +614,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-api-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -781,6 +781,13 @@ control-plane-alert-serve:
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane alert-serve --enable --worker-id "$(or $(worker_id),control-plane-alert-service)" --acceptance-run-id "$(acceptance_run_id)" --interval-seconds "$(or $(interval_seconds),15)" --json
+
+## control-plane-watchdog-serve: Independently page Telegram when the formal API or exact business Machines fail; needs Fly status token, never a Postgres DSN.
+control-plane-watchdog-serve:
+	@test "$(enable)" = "1" || (echo "usage: make control-plane-watchdog-serve enable=1 [interval_seconds=30]" >&2; exit 2)
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$POLYARB_FLY_API_TOKEN" ]; then echo "ERROR: POLYARB_FLY_API_TOKEN is required" >&2; exit 2; fi; \
+	uv run python -m polyarb.cli_control_plane watchdog-serve --enable --control-api-url "$(or $(control_api_url),https://polyarb-control-api.fly.dev/perception/control-plane)" --fly-app "$(or $(fly_app),polyarb-control-worker)" --machine-id 3d8d0e29c7d589 --machine-id 080d3ddbe66068 --machine-id 4d895231f7d987 --machine-id 85e990c43533e8 --machine-id 86ed91bee33608 --interval-seconds "$(or $(interval_seconds),30)" --json
 
 ## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots (auto-loads .env)
 supabase-reconcile:

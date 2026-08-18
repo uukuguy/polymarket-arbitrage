@@ -9651,3 +9651,28 @@ inside a formal Worker Machine. Do not revive any local sampler or legacy SQLite
 [NEXT] Keep `formal-cloud-v2` cloud-only sampling uninterrupted for 24 hours from
 2026-08-17T21:52:12Z. At the end, run the strict 86,400-second verifier in the coordinator. The
 previous v1 run remains immutable failed evidence; do not reuse it.
+
+## SESSION 279 — 2026-08-18 (independent formal runtime watchdog)
+
+- [REJECTED] `formal-cloud-v2` is not an active acceptance run. Supabase
+  returned `FATAL: database system is in recovery mode`; the control API timed
+  out, all five business Machines stopped, and the sampler stopped. No business
+  Machine was restarted.
+- [DELIVERED] `polyarb-control-alert` now runs a database-independent watchdog:
+  public control API + five exact Fly Machine reads every 30 seconds, direct
+  Telegram only on unhealthy/healthy transitions, JSON heartbeat on every
+  completed check, and no automatic business-machine mutation.
+- [LIVE] After deployment image `deployment-01M09C5V5ZR6K15FH1PGYWCHAE`, the
+  watchdog emitted consecutive heartbeats at 02:47:47Z, 02:48:19Z, and
+  02:48:59Z. Each correctly classified the real API timeout and all five
+  stopped Machines. The primary is started; its standby is stopped by design;
+  both use the `always` restart policy.
+- [OPERATIONS] The Fly configuration uses valid `[[restart]]` syntax. Earlier
+  interrupted duplicate deployment commands were terminated; no deploy/push
+  processes remain. The watchdog's Fly organization token is code-path
+  read-only (`GET /machines`) but is documented honestly as an organization
+  credential, not mislabeled platform-level read-only.
+
+[NEXT] Diagnose the formal Supabase recovery-mode outage using bounded,
+credential-contained evidence. Keep the watchdog running; only after it proves
+one healthy recovery transition may a brand-new 24-hour acceptance window start.

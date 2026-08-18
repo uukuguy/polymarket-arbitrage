@@ -60,6 +60,7 @@ from polyarb.control_plane.structure_worker import (
     TransactionalStructureCertifier,
     TransactionalStructureWorker,
 )
+from polyarb.control_plane.watchdog import RuntimeObservation, assess_runtime, run_watchdog_service
 from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
 from polyarb.storage.r2_sync import _build_client
 
@@ -183,6 +184,16 @@ def _parser() -> argparse.ArgumentParser:
     alert_serve.add_argument("--interval-seconds", type=float, default=15.0)
     alert_serve.add_argument("--acceptance-run-id")
     alert_serve.add_argument("--json", action="store_true")
+    watchdog_serve = subcommands.add_parser(
+        "watchdog-serve",
+        help="run the database-independent runtime watchdog and direct Telegram pager",
+    )
+    watchdog_serve.add_argument("--enable", action="store_true")
+    watchdog_serve.add_argument("--control-api-url", required=True)
+    watchdog_serve.add_argument("--fly-app", required=True)
+    watchdog_serve.add_argument("--machine-id", action="append", required=True)
+    watchdog_serve.add_argument("--interval-seconds", type=float, default=30.0)
+    watchdog_serve.add_argument("--json", action="store_true")
     render_rollout = subcommands.add_parser(
         "render-rollout",
         help="render local-only named control-plane rollout artifacts",
@@ -399,6 +410,86 @@ async def _run_cloud_soak_service(
         except TimeoutError:
             continue
     return {"status": "stopped", "samples": samples}
+
+
+def _read_runtime_watchdog_observation(args: argparse.Namespace):
+    """Classify independently bounded API and Fly reads without touching Postgres."""
+    control_api_payload: dict[str, object] | None = None
+    control_api_error: BaseException | None = None
+    machine_states: dict[str, str] = {}
+    machine_error: BaseException | None = None
+    try:
+        control_api_payload = _read_soak_control_snapshot(args.control_api_url)
+    except (OSError, SoakEvidenceError, ValueError) as error:
+        control_api_error = error
+    try:
+        machine_states = _read_cloud_fly_machine_states(
+            args.machine_id,
+            app=args.fly_app,
+            token=os.environ.get("POLYARB_FLY_API_TOKEN", ""),
+        )
+    except (OSError, SoakEvidenceError, ValueError) as error:
+        machine_error = error
+    return assess_runtime(
+        machine_states=machine_states,
+        expected_machine_ids=args.machine_id,
+        control_api_payload=control_api_payload,
+        control_api_error=control_api_error,
+        machine_error=machine_error,
+    )
+
+
+async def _send_runtime_watchdog_telegram(settings: Settings, text: str) -> None:
+    """Deliver an operational page directly, with no outbox or database dependency."""
+    token = settings.telegram_bot_token.get_secret_value()
+    chat_id = settings.telegram_chat_id
+    if not token or not chat_id:
+        raise ValueError("watchdog requires Telegram credentials")
+
+    def post() -> None:
+        payload = json.dumps({"chat_id": chat_id, "text": text}).encode()
+        request = Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=5) as response:  # noqa: S310 -- fixed Telegram endpoint
+            response_payload = json.loads(response.read())
+        if not isinstance(response_payload, dict) or response_payload.get("ok") is not True:
+            raise OSError("Telegram rejected watchdog page")
+
+    await asyncio.to_thread(post)
+
+
+async def _run_runtime_watchdog_service(
+    args: argparse.Namespace, settings: Settings
+) -> dict[str, object]:
+    """Keep monitoring independent from the transactional data and alert workers."""
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for stop_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(stop_signal, stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            pass
+    async def write_heartbeat(observation: RuntimeObservation) -> None:
+        _write(
+            {
+                "event": "runtime-watchdog-check",
+                "healthy": observation.healthy,
+                "failures": list(observation.failures),
+            },
+            as_json=args.json,
+        )
+
+    return await run_watchdog_service(
+        observe=lambda: _read_runtime_watchdog_observation(args),
+        send=lambda text: _send_runtime_watchdog_telegram(settings, text),
+        on_check=write_heartbeat,
+        interval_seconds=args.interval_seconds,
+        stop_event=stop_event,
+    )
 
 
 def _r2_upload_fault_callback(
@@ -757,6 +848,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "serve",
         "alert-serve",
         "cloud-soak-serve",
+        "watchdog-serve",
         "render-rollout",
     }
     if args.command in requires_enable and not args.enable:
@@ -824,6 +916,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"soak evidence unavailable: {detail}", file=sys.stderr)
             return 1
         return 0
+    if args.command == "watchdog-serve":
+        try:
+            settings = Settings()
+            if not os.environ.get("POLYARB_FLY_API_TOKEN", "").strip():
+                raise ValueError("watchdog requires POLYARB_FLY_API_TOKEN")
+            result = asyncio.run(_run_runtime_watchdog_service(args, settings))
+            _write(result, as_json=args.json)
+            return 0
+        except (OSError, RuntimeError, ValueError) as error:
+            print(f"runtime watchdog unavailable: {type(error).__name__}", file=sys.stderr)
+            return 1
     control_plane = _control_plane_from_env()
     if control_plane is None:
         print("POLYARB_SUPABASE_DB_DSN is required", file=sys.stderr)

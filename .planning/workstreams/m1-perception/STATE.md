@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: formal-cloud-v2 is active after a Supabase database-level read-only incident was repaired; five transactional business roles plus isolated sampler are started
-last_updated: "2026-08-17T21:53:01Z"
+stopped_at: formal-cloud-v2 is invalid after formal Supabase entered recovery mode; five transactional business roles and sampler are stopped while an independent watchdog is actively paging and logging the outage
+last_updated: "2026-08-18T02:48:59Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -17,6 +17,17 @@ progress:
 # M1 Perception — Current State
 
 ## Current Position
+
+- **Formal runtime incident under observation (2026-08-18):** `formal-cloud-v2`
+  is invalid after Supabase reported `database system is in recovery mode`.
+  Its control API now times out and all five business Machines are stopped;
+  do not restart them until the database authority is diagnosed and repaired.
+  The new independent `polyarb-control-alert` watchdog probes the API and the
+  exact five Machine IDs every 30 seconds, writes a JSON heartbeat every probe,
+  sends direct Telegram pages only on incident/recovery transitions, and has
+  `always` restart policy on both primary and standby. Its code neither opens
+  Postgres nor mutates business Machines. The 24-hour timer is paused, not
+  waiting silently.
 
 - **Formal read-only incident repaired (2026-08-17 21:50Z):** `formal-cloud-v1`
   failed and remains immutable failed evidence after every Worker session inherited
