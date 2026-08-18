@@ -34,6 +34,21 @@ def test_watchdog_requires_available_control_api_and_all_expected_machines_start
     assert observation.failures == ()
 
 
+def test_watchdog_pages_once_for_a_new_non_requested_machine_restart() -> None:
+    from polyarb.control_plane.watchdog import RestartEventGate, RuntimeObservation
+
+    gate = RestartEventGate()
+    healthy = RuntimeObservation(healthy=True, failures=())
+
+    assert gate.apply(healthy, {"evidence/sampler": 4}) == healthy
+
+    restarted = gate.apply(healthy, {"evidence/sampler": 5})
+
+    assert restarted.healthy is False
+    assert restarted.failures == ("machine:evidence/sampler:restart-count:4->5",)
+    assert gate.apply(healthy, {"evidence/sampler": 5}) == healthy
+
+
 def test_watchdog_message_is_actionable_without_leaking_secrets() -> None:
     from polyarb.control_plane.watchdog import RuntimeObservation, render_alert
 

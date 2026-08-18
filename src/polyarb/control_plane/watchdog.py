@@ -15,6 +15,36 @@ class RuntimeObservation:
     failures: tuple[str, ...]
 
 
+class RestartEventGate:
+    """Turn fresh Fly restart-counter changes into one observable incident.
+
+    A Machine can have state ``started`` while Fly is repeatedly restarting its
+    main process.  The first read establishes the current counter as a baseline;
+    each later increase is unhealthy for one watchdog tick, then a normal next
+    tick produces the regular recovery transition.
+    """
+
+    def __init__(self) -> None:
+        self._previous_counts: dict[str, int] | None = None
+
+    def apply(
+        self, observation: RuntimeObservation, restart_counts: Mapping[str, int]
+    ) -> RuntimeObservation:
+        current = dict(restart_counts)
+        if self._previous_counts is None:
+            self._previous_counts = current
+            return observation
+        failures = list(observation.failures)
+        for machine_id, current_count in current.items():
+            previous_count = self._previous_counts.get(machine_id, current_count)
+            if current_count > previous_count:
+                failures.append(
+                    f"machine:{machine_id}:restart-count:{previous_count}->{current_count}"
+                )
+        self._previous_counts = current
+        return RuntimeObservation(healthy=not failures, failures=tuple(failures))
+
+
 def assess_runtime(
     *,
     machine_states: Mapping[str, str],

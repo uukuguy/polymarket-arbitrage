@@ -60,7 +60,12 @@ from polyarb.control_plane.structure_worker import (
     TransactionalStructureCertifier,
     TransactionalStructureWorker,
 )
-from polyarb.control_plane.watchdog import RuntimeObservation, assess_runtime, run_watchdog_service
+from polyarb.control_plane.watchdog import (
+    RestartEventGate,
+    RuntimeObservation,
+    assess_runtime,
+    run_watchdog_service,
+)
 from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
 from polyarb.storage.r2_sync import _build_client
 
@@ -348,6 +353,38 @@ def _read_cloud_fly_machine_states(
     return {machine_id: str(state) for machine_id, state in states.items()}
 
 
+def _read_cloud_fly_machine_restart_counts(
+    machine_ids: Sequence[str], *, app: str, token: str
+) -> dict[str, int]:
+    """Read exact Fly restart counters; a ``started`` Machine may still be looping."""
+    if not token:
+        raise SoakEvidenceError("POLYARB_FLY_API_TOKEN is required for watchdog event reads")
+    counts: dict[str, int] = {}
+    for machine_id in machine_ids:
+        request = Request(
+            f"https://api.machines.dev/v1/apps/{app}/machines/{machine_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urlopen(request, timeout=10) as response:  # noqa: S310 -- fixed Fly API origin
+            payload = json.loads(response.read())
+        if not isinstance(payload, dict) or payload.get("id") != machine_id:
+            raise SoakEvidenceError("an exact cloud Fly machine event record is missing")
+        events = payload.get("events")
+        if not isinstance(events, list):
+            raise SoakEvidenceError("cloud Fly machine events must be an array")
+        counts[machine_id] = max(
+            (
+                restart_count
+                for event in events
+                if isinstance(event, dict)
+                and isinstance(event.get("request"), dict)
+                and isinstance((restart_count := event["request"].get("restart_count")), int)
+            ),
+            default=0,
+        )
+    return counts
+
+
 def _record_soak_observation(args: argparse.Namespace, *, exclusive: bool) -> dict[str, object]:
     snapshot = _read_soak_control_snapshot(args.control_api_url)
     record = create_record(
@@ -422,11 +459,14 @@ async def _run_cloud_soak_service(
     return {"status": "stopped", "samples": samples}
 
 
-def _read_runtime_watchdog_observation(args: argparse.Namespace):
+def _read_runtime_watchdog_observation(
+    args: argparse.Namespace, *, restart_gate: RestartEventGate | None = None
+) -> RuntimeObservation:
     """Classify independently bounded API and Fly reads without touching Postgres."""
     control_api_payload: dict[str, object] | None = None
     control_api_error: BaseException | None = None
     machine_states: dict[str, str] = {}
+    restart_counts: dict[str, int] = {}
     machine_error: BaseException | None = None
     try:
         control_api_payload = _read_soak_control_snapshot(args.control_api_url)
@@ -445,22 +485,28 @@ def _read_runtime_watchdog_observation(args: argparse.Namespace):
             target_states.append((args.secondary_fly_app, secondary_ids))
         expected_machine_ids: list[str] = []
         for app, machine_ids in target_states:
-            for machine_id, state in _read_cloud_fly_machine_states(
+            states = _read_cloud_fly_machine_states(machine_ids, app=app, token=token)
+            restarts = _read_cloud_fly_machine_restart_counts(
                 machine_ids, app=app, token=token
-            ).items():
+            )
+            for machine_id, state in states.items():
                 qualified_id = f"{app}/{machine_id}"
                 machine_states[qualified_id] = state
+                restart_counts[qualified_id] = restarts[machine_id]
                 expected_machine_ids.append(qualified_id)
     except (OSError, SoakEvidenceError, ValueError) as error:
         machine_error = error
         expected_machine_ids = []
-    return assess_runtime(
+    observation = assess_runtime(
         machine_states=machine_states,
         expected_machine_ids=expected_machine_ids if machine_error is None else (),
         control_api_payload=control_api_payload,
         control_api_error=control_api_error,
         machine_error=machine_error,
     )
+    if restart_gate is None:
+        return observation
+    return restart_gate.apply(observation, restart_counts)
 
 
 async def _send_runtime_watchdog_telegram(settings: Settings, text: str) -> None:
@@ -491,6 +537,7 @@ async def _run_runtime_watchdog_service(
 ) -> dict[str, object]:
     """Keep monitoring independent from the transactional data and alert workers."""
     stop_event = asyncio.Event()
+    restart_gate = RestartEventGate()
     loop = asyncio.get_running_loop()
     for stop_signal in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -508,7 +555,7 @@ async def _run_runtime_watchdog_service(
         )
 
     return await run_watchdog_service(
-        observe=lambda: _read_runtime_watchdog_observation(args),
+        observe=lambda: _read_runtime_watchdog_observation(args, restart_gate=restart_gate),
         send=lambda text: _send_runtime_watchdog_telegram(settings, text),
         on_check=write_heartbeat,
         interval_seconds=args.interval_seconds,

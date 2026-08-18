@@ -700,6 +700,11 @@ def test_watchdog_observes_a_secondary_app_with_qualified_machine_identity(monke
         return {machine_id: "started" for machine_id in machine_ids}
 
     monkeypatch.setattr(cli_control_plane, "_read_cloud_fly_machine_states", read_states)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_read_cloud_fly_machine_restart_counts",
+        lambda machine_ids, **_kwargs: {machine_id: 0 for machine_id in machine_ids},
+    )
     monkeypatch.setenv("POLYARB_FLY_API_TOKEN", "status-token")
 
     observation = cli_control_plane._read_runtime_watchdog_observation(args)
