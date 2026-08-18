@@ -1,7 +1,7 @@
 export type RuntimeEvent = {
   kind: "detected" | "recovered";
   occurred_at: string;
-  detail: { failures: string[] };
+  detail: { failures: string[]; source?: string };
 };
 
 export type ControlPlaneRead =
@@ -21,7 +21,10 @@ function validEvent(value: unknown): value is RuntimeEvent {
   return (
     (event.kind === "detected" || event.kind === "recovered") &&
     typeof event.occurred_at === "string" &&
-    !!detail && Array.isArray(detail.failures) && detail.failures.every((item) => typeof item === "string")
+    !!detail &&
+    Array.isArray(detail.failures) &&
+    detail.failures.every((item) => typeof item === "string") &&
+    (detail.source === undefined || typeof detail.source === "string")
   );
 }
 

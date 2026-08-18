@@ -22,6 +22,6 @@ export default async function ControlPlanePage() {
       {evidence ? <><p>Latest sample: {evidence.latest_observed_at}</p><p style={{ color: "#aaa" }}>Run: {evidence.latest_run_id}</p></> : <p style={{ color: "#fecaca" }}>No cloud evidence sample is present. This is an operational failure, not a healthy empty state.</p>}
     </section>
     <h2>Runtime incident and recovery ledger</h2>
-    {view.runtime_watchdog.recent_events.length === 0 ? <p>No watchdog transitions recorded yet.</p> : <ol>{view.runtime_watchdog.recent_events.map((event, index) => <li key={`${event.occurred_at}-${index}`} style={{ marginBottom: 10 }}><strong style={{ color: event.kind === "detected" ? "#fecaca" : "#bbf7d0" }}>{event.kind}</strong> · {event.occurred_at}<br /><span style={{ color: "#aaa" }}>{event.detail.failures.length ? event.detail.failures.join("; ") : "control API and monitored machines healthy"}</span></li>)}</ol>}
+    {view.runtime_watchdog.recent_events.length === 0 ? <p>No watchdog transitions recorded yet.</p> : <ol>{view.runtime_watchdog.recent_events.map((event, index) => <li key={`${event.occurred_at}-${index}`} style={{ marginBottom: 10 }}><strong style={{ color: event.kind === "detected" ? "#fecaca" : "#bbf7d0" }}>{event.kind}</strong> · {event.occurred_at}<br /><span style={{ color: "#aaa" }}>Observed by: {event.detail.source ?? "legacy-runtime-watchdog"}</span><br /><span style={{ color: "#aaa" }}>{event.detail.failures.length ? event.detail.failures.join("; ") : "control API and monitored machines healthy"}</span></li>)}</ol>}
   </main>;
 }
