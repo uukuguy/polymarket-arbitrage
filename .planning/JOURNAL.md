@@ -10008,3 +10008,25 @@ fresh evidence and the default 24-hour cloud verifier before the final audit.
 
 [NEXT] Keep `m1-formal-20260818T1820Z` undisturbed and use only read-only
 verifiers until the full 24-hour gate and final audit can close M1.
+
+## SESSION 296 — 2026-08-19 (formal-run-bound evidence watchdog)
+
+- [ROOT CAUSE / REPAIRED] The watchdog formerly accepted freshness from the
+  globally latest evidence record. A later, unrelated run could therefore mask
+  a stopped qualifying run. `SoakEvidenceGate` now fails closed on an
+  unexpected `latest_run_id`; both the long-running pager and `--watchdog-once`
+  use the same restart, progress and exact-run freshness gates.
+- [LIVE] Alert Machine `d891e941a41dd8` now runs image
+  `m1-watchdog-formal-run-0aef68c3` with dedicated versioned run-id variable
+  `POLYARB_WATCHDOG_SOAK_RUN_ID_V2`. It is started; a one-shot exact-run gate
+  returned healthy. The independent sampler is also on a dedicated V5 run-id
+  variable.
+- [NEW QUALIFICATION] Because the monitoring topology changed, the prior run
+  is immutable history only. New sole run `m1-formal-20260818T1907Z` was
+  atomically baselined at `19:06:55Z`, and the independent sampler appended at
+  `19:07:35Z`. The external supervisor correctly opened an alert-Machine-stop
+  incident during the bounded rollout; its cron recovery observation is being
+  awaited before treating the new run as healthy.
+
+[NEXT] Verify external-supervisor recovery, then maintain the new run without
+topology changes until its default 24-hour verifier and final audit pass.

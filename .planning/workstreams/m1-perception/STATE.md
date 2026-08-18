@@ -5,7 +5,7 @@ milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
 stopped_at: final cloud acceptance is collecting immutable evidence; do not change the topology or declare completion before its 24-hour verifier passes
-last_updated: "2026-08-19T02:59:00+08:00"
+last_updated: "2026-08-19T03:08:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -55,12 +55,12 @@ progress:
 
 ## Formal Acceptance
 
-- **Only qualifying run:** `m1-formal-20260818T1820Z`.
-- **Baseline:** `2026-08-18T18:26:28.554663Z`; the independent sampler's first
-  append-only sample followed immediately and the short verifier passed at 34
-  seconds with two ticks and successful jobs reaching `2499`.
+- **Only qualifying run:** `m1-formal-20260818T1907Z`.
+- **Baseline:** `2026-08-18T19:06:55.069051Z`; the independent sampler's first
+  append-only sample followed at `19:07:35Z` after the watchdog had been
+  bound to this exact run.
 - **Hard completion gate:** `make control-plane-cloud-soak-verify
-  run_id=m1-formal-20260818T1820Z` must pass its default 86,400-second,
+  run_id=m1-formal-20260818T1907Z` must pass its default 86,400-second,
   900-second-gap fail-closed policy. Earlier runs are immutable audit history
   only and are not qualifying evidence.
 
@@ -76,7 +76,7 @@ progress:
 
 ## Resume
 
-1. Read-only verify `m1-formal-20260818T1820Z` periodically; do not restart or
+1. Read-only verify `m1-formal-20260818T1907Z` periodically; do not restart or
    reconfigure a qualifying target during its 24-hour no-gap window.
 2. If an alert opens, diagnose the smallest failing boundary from the API,
    source-aware Dashboard ledger and exact Machine state; repair it, then start
