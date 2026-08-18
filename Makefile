@@ -614,7 +614,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-start control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -688,6 +688,12 @@ control-plane-cloud-soak-verify:
 	@test -n "$(run_id)" || (echo "usage: POLYARB_SUPABASE_DB_DSN=<scoped-dsn> make control-plane-cloud-soak-verify run_id=<run-id> [minimum_seconds=86400] [max_gap_seconds=900]" >&2; exit 2)
 	@test -n "$$POLYARB_SUPABASE_DB_DSN" || (echo "ERROR: explicitly export POLYARB_SUPABASE_DB_DSN before verification" >&2; exit 2)
 	@uv run python -m polyarb.cli_control_plane cloud-soak-verify --run-id "$(run_id)" --minimum-seconds "$(or $(minimum_seconds),86400)" --max-gap-seconds "$(or $(max_gap_seconds),900)" --json
+
+## control-plane-cloud-soak-start: Atomically create a new formal cloud-soak baseline; requires run_id=, explicit scoped DSN and Fly read token.
+control-plane-cloud-soak-start:
+	@test -n "$(run_id)" || (echo "usage: POLYARB_SUPABASE_DB_DSN=<scoped-dsn> POLYARB_FLY_API_TOKEN=<read-token> make control-plane-cloud-soak-start run_id=<run-id>" >&2; exit 2)
+	@test -n "$$POLYARB_SUPABASE_DB_DSN" -a -n "$$POLYARB_FLY_API_TOKEN" || (echo "ERROR: explicitly export scoped DSN and Fly read token" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane cloud-soak-start --run-id "$(run_id)" --control-api-url "https://polyarb-control-api.fly.dev" --fly-app "polyarb-control-worker-m1" --machine-id "e82d1220b2d138" --machine-id "683e46ea500dd8" --machine-id "4d895231f66748" --json
 
 ## control-plane-api-serve: Run the independent Postgres-only control-plane HTTP read service. Requires enable=1 and DSN; no SQLite, R2 or worker starts.
 control-plane-api-serve:
