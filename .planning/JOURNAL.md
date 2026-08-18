@@ -9929,3 +9929,20 @@ formal acceptance baseline.
 [NEXT] Keep the current topology unchanged and use the read-only cloud verifier
 for `m1-formal-20260818T1820Z`; after its 24-hour PASS, perform the final
 requirement-by-requirement topology/document audit before marking M1 complete.
+
+## SESSION 291 — 2026-08-19 (cloud Dashboard exposes monitor provenance)
+
+- [LIVE] The production dashboard ledger now visibly renders `Observed by:`
+  alongside every transition's timestamp and bounded failure list. Vercel
+  production deployment `dpl_28qrQKP5NHPG9qzqh9UdECBL7iJS` is Ready and the
+  canonical `/control-plane` HTML contains both `Observed by:` and
+  `cloudflare-watchdog-supervisor` from the controlled fault proof.
+- [DEPLOY HYGIENE] Added root `.vercelignore` because Vercel already has
+  `dashboard/` as its Root Directory. It sends only dashboard source rather
+  than local `.venv`, data and worktrees; deployment input fell from 248MB to
+  110KB. This is a deployment-boundary change only, not a collector topology
+  change, so the current formal evidence remains valid.
+
+[NEXT] Keep the formal topology unchanged. Verify
+`m1-formal-20260818T1820Z` read-only until its default 24-hour evidence gate
+passes, then perform the final requirement audit.

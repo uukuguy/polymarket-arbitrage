@@ -44,7 +44,9 @@ progress:
   Telegram and writer credentials. Its public route is disabled. A real
   scheduled healthy observation was stored at `2026-08-18T18:07:14Z`; the
   controlled alert-Machine stop/start proof recorded source-specific Dashboard
-  events `detected` at `18:16:14Z` and `recovered` at `18:18:14Z`.
+  events `detected` at `18:16:14Z` and `recovered` at `18:18:14Z`. Production
+  Dashboard entries visibly show `Observed by: <source>`, timestamp and bounded
+  failure list (Vercel deployment `dpl_28qrQKP5NHPG9qzqh9UdECBL7iJS`).
 
 - **Credential/runtime invariant:** Fly detached Machines retain duplicate
   same-name environment values on update. Runtime commands therefore map only

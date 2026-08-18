@@ -1,0 +1,10 @@
+# Vercel is configured with dashboard/ as its Root Directory.  Upload only
+# that source tree: local environments, data and worktrees are not dashboard
+# build inputs and can otherwise dominate the deployment archive.
+/*
+!/.vercelignore
+!/dashboard
+!/dashboard/**
+/dashboard/.next
+/dashboard/node_modules
+/dashboard/.vercel
