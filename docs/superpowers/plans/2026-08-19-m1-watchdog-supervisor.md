@@ -40,7 +40,7 @@
 - [ ] Write Node tests for `observeAlertMachine`, `transitionKey`, and `runScheduled`: unchanged started state is quiet; stopped and restart-increased states create one detected event; recovery creates one recovered event; repeated scheduled time creates the identical 64-character key.
 - [ ] Run `node --test monitoring/watchdog-supervisor/test/index.test.mjs`; expect missing implementation failure.
 - [ ] Implement dependency-free functions using `fetch`, `crypto.subtle.digest`, and a KV binding named `WATCHDOG_STATE`. Require the exact Fly Machine ID returned by the API; a fetch/JSON/KV error must normalize to a bounded failure code. POST the existing writer envelope with `source="cloudflare-watchdog-supervisor"`; direct Telegram is sent on the same transition.
-- [ ] Configure `compatibility_date: "2026-08-19"`, `triggers.crons: ["* * * * *"]`, `workers_dev: false`, and only non-secret identity/URL vars. Define secret names only in README comments, never in config.
+- [ ] Configure `compatibility_date: "2026-08-18"` (the latest date accepted by the Cloudflare control plane at deployment), `triggers.crons: ["* * * * *"]`, `workers_dev: false`, and only non-secret identity/URL vars. Define secret names only in README comments, never in config.
 - [ ] Run Node tests and `npx --yes wrangler deploy --dry-run --config monitoring/watchdog-supervisor/wrangler.jsonc`; expect PASS.
 - [ ] Commit only the isolated Worker package and tests.
 

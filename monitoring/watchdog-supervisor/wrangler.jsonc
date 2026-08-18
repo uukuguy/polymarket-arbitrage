@@ -1,11 +1,11 @@
 {
   "name": "polyarb-control-watchdog-supervisor",
   "main": "src/index.js",
-  "compatibility_date": "2026-08-19",
+  "compatibility_date": "2026-08-18",
   "workers_dev": false,
   "triggers": { "crons": ["* * * * *"] },
   "kv_namespaces": [
-    { "binding": "WATCHDOG_STATE", "id": "__PROVISIONED_KV_NAMESPACE_ID__" }
+    { "binding": "WATCHDOG_STATE", "id": "e78344e0d6f246578b5eeccb41034525" }
   ],
   "vars": {
     "FLY_ALERT_APP": "polyarb-control-alert",

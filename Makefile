@@ -614,7 +614,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -808,6 +808,14 @@ control-plane-watchdog-verify:
 	@test -z "$(secondary_fly_app)" -a -z "$(secondary_machine_ids)" -o -n "$(secondary_fly_app)" -a -n "$(secondary_machine_ids)" || (echo "secondary_fly_app and secondary_machine_ids must be supplied together" >&2; exit 2)
 	@test -n "$$POLYARB_FLY_API_TOKEN" || (echo "ERROR: POLYARB_FLY_API_TOKEN must be explicitly exported" >&2; exit 2)
 	uv run python -m polyarb.cli_control_plane watchdog-serve --enable --watchdog-once --control-api-url "$(control_api_url)" --fly-app "$(fly_app)" $(foreach machine,$(subst $(comma), ,$(machine_ids)),--machine-id "$(machine)") $(if $(secondary_fly_app),--secondary-fly-app "$(secondary_fly_app)" $(foreach machine,$(subst $(comma), ,$(secondary_machine_ids)),--secondary-machine-id "$(machine)")) $(foreach target,$(subst $(comma), ,$(secondary_targets)),--secondary-target "$(target)") --json
+
+## control-plane-watchdog-supervisor-deploy: Deploy the external Cloudflare Cron supervisor. Credentials are provisioned once as Wrangler secrets, never Make variables.
+control-plane-watchdog-supervisor-deploy:
+	@npx --yes wrangler deploy --config monitoring/watchdog-supervisor/wrangler.jsonc
+
+## control-plane-watchdog-supervisor-verify: Read-only list of deployed external-supervisor versions and Cron configuration; it cannot reveal supervisor secrets.
+control-plane-watchdog-supervisor-verify:
+	@npx --yes wrangler deployments list --config monitoring/watchdog-supervisor/wrangler.jsonc
 
 ## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots (auto-loads .env)
 supabase-reconcile:
