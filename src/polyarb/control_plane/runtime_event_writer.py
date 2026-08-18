@@ -35,13 +35,15 @@ async def append_runtime_event(request: Request) -> JSONResponse:
         payload = await request.json()
         kind = payload["kind"]
         failures = payload["failures"]
+        source = payload.get("source", "independent-runtime-watchdog")
         occurred_at = datetime.fromisoformat(payload["occurred_at"]).astimezone(UTC)
         key = request.headers["idempotency-key"]
-        if kind not in {"detected", "recovered"} or not isinstance(failures, list):
+        if kind not in {"detected", "recovered"} or not isinstance(failures, list) or not isinstance(source, str):
             raise ValueError
         if (
             len(failures) > 20
             or any(not isinstance(value, str) or not _FAILURE_CODE.fullmatch(value) for value in failures)
+            or not _FAILURE_CODE.fullmatch(source)
             or not re.fullmatch(r"[0-9a-f]{64}", key)
         ):
             raise ValueError
@@ -72,7 +74,7 @@ async def append_runtime_event(request: Request) -> JSONResponse:
             cursor.execute("UPDATE m1_incidents SET state='resolved', resolved_at=%s, updated_at=%s WHERE incident_key=%s", (occurred_at, occurred_at, incident_key))
         event_id = str(uuid4())
         cursor.execute("""INSERT INTO m1_incident_events (incident_event_id,incident_key,kind,detail,idempotency_key,occurred_at)
-            VALUES (%s,%s,%s,%s,%s,%s)""", (event_id, incident_key, kind, psycopg.types.json.Jsonb({"failures": failures, "source": "independent-runtime-watchdog"}), f"runtime:{key}", occurred_at))
+            VALUES (%s,%s,%s,%s,%s,%s)""", (event_id, incident_key, kind, psycopg.types.json.Jsonb({"failures": failures, "source": source}), f"runtime:{key}", occurred_at))
     return JSONResponse({"status": "recorded", "incident_key": incident_key, "incident_event_id": event_id}, status_code=201)
 
 

@@ -28,7 +28,18 @@ def test_writer_rejects_unauthenticated_and_unbounded_event_detail(monkeypatch) 
                 "occurred_at": "2026-08-18T15:00:00+00:00",
             },
         )
+        invalid_source = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "b" * 64},
+            json={
+                "kind": "detected",
+                "failures": ["machine:alert:stopped"],
+                "source": "contains a space",
+                "occurred_at": "2026-08-18T15:00:00+00:00",
+            },
+        )
     assert invalid.status_code == 400
+    assert invalid_source.status_code == 400
 
 
 def test_writer_returns_existing_receipt_for_an_idempotent_retry(monkeypatch) -> None:
@@ -75,10 +86,13 @@ def test_writer_records_detected_event_against_conflict_returned_incident(monkey
     class Cursor:
         def __init__(self) -> None:
             self.calls: list[str] = []
+            self.parameters: list[object] = []
 
         def __enter__(self): return self
         def __exit__(self, *_args): return None
-        def execute(self, sql, _params=()): self.calls.append(sql)
+        def execute(self, sql, params=()):
+            self.calls.append(sql)
+            self.parameters.append(params)
         def fetchone(self):
             if len(self.calls) == 1:
                 return None
@@ -87,6 +101,7 @@ def test_writer_records_detected_event_against_conflict_returned_incident(monkey
             return {"incident_key": "persisted-incident"}
 
     cursor = Cursor()
+    monkeypatch.setattr(runtime_event_writer.psycopg.types.json, "Jsonb", lambda value: value)
 
     class Connection:
         def __enter__(self): return self
@@ -107,12 +122,17 @@ def test_writer_records_detected_event_against_conflict_returned_incident(monkey
             json={
                 "kind": "detected",
                 "failures": ["control-api:timeout"],
+                "source": "cloudflare-watchdog-supervisor",
                 "occurred_at": "2026-08-18T15:00:00+00:00",
             },
         )
     assert response.status_code == 201
     assert response.json()["incident_key"] == "persisted-incident"
     assert "RETURNING incident_key" in cursor.calls[2]
+    assert cursor.parameters[-1][3] == {
+        "failures": ["control-api:timeout"],
+        "source": "cloudflare-watchdog-supervisor",
+    }
 
 
 def test_writer_accepts_initial_recovery_as_noop(monkeypatch) -> None:
