@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 
 def test_watchdog_classifies_database_backed_api_timeout_and_stopped_machine() -> None:
@@ -47,6 +48,23 @@ def test_watchdog_pages_once_for_a_new_non_requested_machine_restart() -> None:
     assert restarted.healthy is False
     assert restarted.failures == ("machine:evidence/sampler:restart-count:4->5",)
     assert gate.apply(healthy, {"evidence/sampler": 5}) == healthy
+
+
+def test_watchdog_pages_when_runnable_work_stops_making_durable_progress() -> None:
+    from polyarb.control_plane.watchdog import ProgressGate, RuntimeObservation
+
+    gate = ProgressGate(max_stall=timedelta(minutes=5))
+    healthy = RuntimeObservation(healthy=True, failures=())
+    started = datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
+    pending = {"job_counts": {"runnable": 2, "leased": 1, "succeeded": 100}}
+
+    assert gate.apply(healthy, pending, now=started) == healthy
+    assert gate.apply(healthy, pending, now=started + timedelta(minutes=4)) == healthy
+
+    stalled = gate.apply(healthy, pending, now=started + timedelta(minutes=5, seconds=1))
+
+    assert stalled.healthy is False
+    assert stalled.failures == ("control-api:job-progress-stalled:301s",)
 
 
 def test_watchdog_message_is_actionable_without_leaking_secrets() -> None:

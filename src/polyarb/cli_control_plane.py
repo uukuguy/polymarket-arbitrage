@@ -10,7 +10,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -61,6 +61,7 @@ from polyarb.control_plane.structure_worker import (
     TransactionalStructureWorker,
 )
 from polyarb.control_plane.watchdog import (
+    ProgressGate,
     RestartEventGate,
     RuntimeObservation,
     assess_runtime,
@@ -460,7 +461,10 @@ async def _run_cloud_soak_service(
 
 
 def _read_runtime_watchdog_observation(
-    args: argparse.Namespace, *, restart_gate: RestartEventGate | None = None
+    args: argparse.Namespace,
+    *,
+    restart_gate: RestartEventGate | None = None,
+    progress_gate: ProgressGate | None = None,
 ) -> RuntimeObservation:
     """Classify independently bounded API and Fly reads without touching Postgres."""
     control_api_payload: dict[str, object] | None = None
@@ -505,8 +509,16 @@ def _read_runtime_watchdog_observation(
         machine_error=machine_error,
     )
     if restart_gate is None:
-        return observation
-    return restart_gate.apply(observation, restart_counts)
+        restart_observation = observation
+    else:
+        restart_observation = restart_gate.apply(observation, restart_counts)
+    if progress_gate is None:
+        return restart_observation
+    return progress_gate.apply(
+        restart_observation,
+        control_api_payload,
+        now=datetime.now(UTC),
+    )
 
 
 async def _send_runtime_watchdog_telegram(settings: Settings, text: str) -> None:
@@ -538,6 +550,7 @@ async def _run_runtime_watchdog_service(
     """Keep monitoring independent from the transactional data and alert workers."""
     stop_event = asyncio.Event()
     restart_gate = RestartEventGate()
+    progress_gate = ProgressGate(max_stall=timedelta(minutes=5))
     loop = asyncio.get_running_loop()
     for stop_signal in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -555,7 +568,11 @@ async def _run_runtime_watchdog_service(
         )
 
     return await run_watchdog_service(
-        observe=lambda: _read_runtime_watchdog_observation(args, restart_gate=restart_gate),
+        observe=lambda: _read_runtime_watchdog_observation(
+            args,
+            restart_gate=restart_gate,
+            progress_gate=progress_gate,
+        ),
         send=lambda text: _send_runtime_watchdog_telegram(settings, text),
         on_check=write_heartbeat,
         interval_seconds=args.interval_seconds,

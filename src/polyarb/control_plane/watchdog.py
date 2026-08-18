@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,65 @@ class RestartEventGate:
                 )
         self._previous_counts = current
         return RuntimeObservation(healthy=not failures, failures=tuple(failures))
+
+
+class ProgressGate:
+    """Page when durable work is pending but successful-job progress stalls."""
+
+    def __init__(self, *, max_stall: timedelta) -> None:
+        if max_stall.total_seconds() <= 0:
+            raise ValueError("max_stall must be positive")
+        self._max_stall = max_stall
+        self._last_succeeded: int | None = None
+        self._last_progress_at: datetime | None = None
+        self._was_pending = False
+
+    def apply(
+        self,
+        observation: RuntimeObservation,
+        control_api_payload: Mapping[str, object] | None,
+        *,
+        now: datetime,
+    ) -> RuntimeObservation:
+        if control_api_payload is None:
+            return observation
+        job_counts = control_api_payload.get("job_counts")
+        if not isinstance(job_counts, Mapping):
+            return RuntimeObservation(
+                healthy=False,
+                failures=(*observation.failures, "control-api:invalid-job-counts"),
+            )
+        succeeded = job_counts.get("succeeded")
+        runnable = job_counts.get("runnable", 0)
+        leased = job_counts.get("leased", 0)
+        counts = (succeeded, runnable, leased)
+        if not all(isinstance(value, int) and value >= 0 for value in counts):
+            return RuntimeObservation(
+                healthy=False,
+                failures=(*observation.failures, "control-api:invalid-job-counts"),
+            )
+        pending = runnable + leased > 0
+        started_pending_work = pending and not self._was_pending
+        if (
+            self._last_succeeded is None
+            or succeeded > self._last_succeeded
+            or started_pending_work
+        ):
+            self._last_succeeded = succeeded
+            self._last_progress_at = now
+        self._was_pending = pending
+        if not pending or self._last_progress_at is None:
+            return observation
+        elapsed = now - self._last_progress_at
+        if elapsed <= self._max_stall:
+            return observation
+        return RuntimeObservation(
+            healthy=False,
+            failures=(
+                *observation.failures,
+                f"control-api:job-progress-stalled:{int(elapsed.total_seconds())}s",
+            ),
+        )
 
 
 def assess_runtime(
