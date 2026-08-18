@@ -60,7 +60,7 @@ progress:
   append-only sample followed immediately and the short verifier passed at 34
   seconds with two ticks and successful jobs reaching `2499`.
 - **Hard completion gate:** `make control-plane-cloud-soak-verify
-  run_id=m1-formal-20260818T1733Z` must pass its default 86,400-second,
+  run_id=m1-formal-20260818T1820Z` must pass its default 86,400-second,
   900-second-gap fail-closed policy. Earlier runs are immutable audit history
   only and are not qualifying evidence.
 

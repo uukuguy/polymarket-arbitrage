@@ -9975,3 +9975,22 @@ M1.
 
 [NEXT] Continue read-only qualification of `m1-formal-20260818T1820Z`; do not
 use an old topology test or an earlier soak run as final evidence.
+
+## SESSION 294 — 2026-08-19 (runtime Dashboard diagnostic context)
+
+- [IMPLEMENTED] The read-only control-plane projection now joins each runtime
+  incident with its durable event detail. Active incidents expose incident key,
+  severity, source, first-detected time, summary and bounded affected checks;
+  every detected/recovered history row carries the same identity and summary.
+- [LIVE] API Machine `d8d0e27a734158` is on
+  `m1-runtime-dashboard-diagnostics-32e3794c` and passing its health check.
+  Vercel deployment `dpl_3jY26rMSCD6HKNN9QJTqQTvEHvdB` is Ready on the
+  canonical Dashboard. Its rendered production HTML proves severity, observer,
+  detected/recovered lifecycle, incident identity and affected checks are
+  visible for the prior controlled alert-Machine incident.
+- [SAFETY] This changed only the read API and dashboard. The independent
+  sampler continued to append formal-run evidence after the API rollout; no
+  new deliberate fault is injected during the qualifying window.
+
+[NEXT] Resume read-only qualification of `m1-formal-20260818T1820Z`; verify
+fresh evidence and the default 24-hour cloud verifier before the final audit.
