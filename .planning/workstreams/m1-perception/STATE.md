@@ -18,10 +18,13 @@ progress:
 
 ## Current Position
 
-- **Authority reset in progress (2026-08-18):** the only remaining Supabase
-  project is `polyarb` (`zoqsmjeejfkrokwttjbx`). It is in a provider-initiated
-  restart after reporting unhealthy/recovery behavior. No 24-hour acceptance
-  run exists or is running.
+- **Authority blocked after restart (2026-08-18):** the only remaining
+  Supabase project is `polyarb` (`zoqsmjeejfkrokwttjbx`). Its restart completed
+  but the project is still `Unhealthy`: both formal pooler addresses time out
+  under an 8-second bound and its Data API returns HTTP 503. No 24-hour
+  acceptance run exists or is running. This cannot be corrected by starting
+  collectors, and no capacity upgrade or destructive database reset has been
+  performed.
 
 - **Pre-production control plane removed (2026-08-18):** the former
   `polyarb-control-api`, `polyarb-control-worker`, and

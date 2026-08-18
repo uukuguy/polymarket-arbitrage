@@ -9699,3 +9699,11 @@ one healthy recovery transition may a brand-new 24-hour acceptance window start.
   probes (not blind time-window polling). When `polyarb` accepts a fresh
   connection, create one clean minimum control plane using only the authoritative
   project configuration, then prove monitoring before any collector starts.
+
+- [POST-RESTART RESULT] The project restart completed but did not recover the
+  authority: dashboard status is still `Unhealthy`, both `aws-1-eu-west-2`
+  pooler IPs time out under `connect_timeout=8`, and the authenticated Data API
+  returns HTTP 503 in 2.33 seconds. The dashboard shows RAM 64% after restart;
+  it also carries a generic compute-upgrade recommendation, but this evidence
+  does not prove a paid capacity tier is required. No upgrade, reset, or new
+  project has been initiated.
