@@ -42,6 +42,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           <a href="/perception" style={{ color: "#9ec5fe" }}>
             /perception
           </a>
+          <a href="/control-plane" style={{ color: "#9ec5fe" }}>
+            /control-plane
+          </a>
         </nav>
         {children}
       </body>

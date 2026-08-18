@@ -8,7 +8,20 @@ from starlette.testclient import TestClient
 class _AvailableControlPlane:
     def operational_snapshot(self, *, now, sample_limit: int) -> dict[str, object]:
         assert sample_limit in {1, 20}
-        return {"job_counts": {"runnable": 1}, "open_incidents": []}
+        return {
+            "job_counts": {"runnable": 1},
+            "open_incidents": [],
+            "runtime_watchdog": {
+                "current": None,
+                "recent_events": [
+                    {
+                        "kind": "recovered",
+                        "occurred_at": "2026-08-18T15:00:00+00:00",
+                        "detail": {"failures": []},
+                    }
+                ],
+            },
+        }
 
     def current_opportunities(self, *, limit: int, after_group_id: str) -> dict[str, object]:
         assert limit == 1
@@ -37,6 +50,16 @@ def test_standalone_control_api_is_readable_without_legacy_daemon_dependencies()
         "status": "available",
         "job_counts": {"runnable": 1},
         "open_incidents": [],
+        "runtime_watchdog": {
+            "current": None,
+            "recent_events": [
+                {
+                    "kind": "recovered",
+                    "occurred_at": "2026-08-18T15:00:00+00:00",
+                    "detail": {"failures": []},
+                }
+            ],
+        },
     }
     assert opportunities.status_code == 200
     assert opportunities.json()["items"] == [{"group_id": "g-1", "gross_edge_bps": 120.0}]
