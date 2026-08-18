@@ -9994,3 +9994,17 @@ use an old topology test or an earlier soak run as final evidence.
 
 [NEXT] Resume read-only qualification of `m1-formal-20260818T1820Z`; verify
 fresh evidence and the default 24-hour cloud verifier before the final audit.
+
+## SESSION 295 — 2026-08-19 (post-dashboard formal liveness proof)
+
+- [READ-ONLY CHECK] After the API/Dashboard release, immutable formal evidence
+  passed its bounded verifier at 1,841 seconds with eight scheduler ticks,
+  three expected workers and successful jobs advancing to 2,866. The exact
+  watchdog gate also returned `healthy` with no failures across the workers,
+  sampler and ledger writer. The latest cloud sample was `18:57:10Z`.
+- [DISCIPLINE] The required default verifier remains 86,400 seconds; this is
+  liveness evidence, not final acceptance. No collector, sampler, watchdog or
+  credentials were changed after this check.
+
+[NEXT] Keep `m1-formal-20260818T1820Z` undisturbed and use only read-only
+verifiers until the full 24-hour gate and final audit can close M1.
