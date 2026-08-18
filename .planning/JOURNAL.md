@@ -7,6 +7,14 @@
 > 每次会话结尾：Claude 主动追加本次进展
 > 格式：`[TYPE] 内容`，TYPE ∈ {SESSION, DECISION, LEARNING, BLOCKER, NEXT, NOTE}
 
+## 2026-08-18 — runtime watchdog dashboard ledger
+
+- [SESSION] User required cloud dashboard evidence for every independent watchdog failure/recovery in addition to Telegram.
+- [DECISION] Preserve watchdog's no-Postgres/R2 boundary: private authenticated writer app owns the scoped incident-ledger write role; the existing control API remains read-only.
+- [DECISION] The new authenticated dashboard route is `/control-plane`, which fail-closes when its control-plane read model is unavailable and renders active incident plus bounded detected/recovered ledger.
+- [LEARNING] The current immutable 24-hour acceptance window must not be disturbed by a control API or watchdog topology deployment; complete code/contract work first and deploy after that window passes.
+- [NEXT] Continue with writer-role provisioning, deploy the API/writer/dashboard in a new acceptance topology, then prove one controlled sampler process-loss/recovery creates matching Telegram and dashboard evidence.
+
 ---
 
 ## 2026-04-28
