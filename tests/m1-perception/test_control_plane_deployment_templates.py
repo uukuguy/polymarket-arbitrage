@@ -82,16 +82,18 @@ def test_control_alert_template_is_a_database_independent_runtime_watchdog() -> 
     )
 
     assert payload["app"] == "__CONTROL_PLANE_ALERT_APP__"
-    assert payload["processes"] == {
-        "watchdog": (
-            "python -m polyarb.cli_control_plane watchdog-serve --enable "
-            "--control-api-url https://polyarb-control-api.fly.dev/perception/control-plane "
-            "--fly-app polyarb-control-worker "
-            "--machine-id 3d8d0e29c7d589 --machine-id 080d3ddbe66068 "
-            "--machine-id 4d895231f7d987 --machine-id 85e990c43533e8 "
-            "--machine-id 86ed91bee33608 --interval-seconds 30 --json"
-        )
-    }
+    watchdog = payload["processes"]["watchdog"]
+    assert '"$POLYARB_CONTROL_API_URL"' in watchdog
+    assert '"$POLYARB_COORDINATOR_MACHINE_ID"' in watchdog
+    assert '"$POLYARB_STRUCTURE_RANGE_MACHINE_ID"' in watchdog
+    assert '"$POLYARB_QUOTE_BATCH_MACHINE_ID"' in watchdog
+    assert '"$POLYARB_EVIDENCE_APP"' in watchdog
+    assert '"$POLYARB_EVIDENCE_MACHINE_ID"' in watchdog
+    assert (
+        '--secondary-target '
+        '"$POLYARB_RUNTIME_EVENT_WRITER_APP/$POLYARB_RUNTIME_EVENT_WRITER_MACHINE_ID"'
+        in watchdog
+    )
     assert payload["vm"][0]["processes"] == ["watchdog"]
     assert payload["restart"] == [{"policy": "always"}]
     assert "http_service" not in payload

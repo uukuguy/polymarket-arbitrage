@@ -7,13 +7,13 @@ primary_region = "ams"
 
 [env]
 POLYARB_RUNTIME_ROLE = "control-plane"
-# These identities are set only after Fly creates the three worker machines.
+# These identities are set only after Fly creates the worker and support machines.
 # They are non-secret deployment facts, never historical template literals.
 
 [build]
 
 [processes]
-watchdog = '''/bin/sh -ec 'exec python -m polyarb.cli_control_plane watchdog-serve --enable --control-api-url "$POLYARB_CONTROL_API_URL" --fly-app "$POLYARB_WORKER_APP" --machine-id "$POLYARB_COORDINATOR_MACHINE_ID" --machine-id "$POLYARB_STRUCTURE_RANGE_MACHINE_ID" --machine-id "$POLYARB_QUOTE_BATCH_MACHINE_ID" --secondary-fly-app "$POLYARB_EVIDENCE_APP" --secondary-machine-id "$POLYARB_EVIDENCE_MACHINE_ID" --interval-seconds 30 --json' '''
+watchdog = '''/bin/sh -ec 'exec python -m polyarb.cli_control_plane watchdog-serve --enable --control-api-url "$POLYARB_CONTROL_API_URL" --fly-app "$POLYARB_WORKER_APP" --machine-id "$POLYARB_COORDINATOR_MACHINE_ID" --machine-id "$POLYARB_STRUCTURE_RANGE_MACHINE_ID" --machine-id "$POLYARB_QUOTE_BATCH_MACHINE_ID" --secondary-fly-app "$POLYARB_EVIDENCE_APP" --secondary-machine-id "$POLYARB_EVIDENCE_MACHINE_ID" --secondary-target "$POLYARB_RUNTIME_EVENT_WRITER_APP/$POLYARB_RUNTIME_EVENT_WRITER_MACHINE_ID" --interval-seconds 30 --json' '''
 
 [[restart]]
 policy = "always"
