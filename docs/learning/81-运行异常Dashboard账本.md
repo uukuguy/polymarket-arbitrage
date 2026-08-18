@@ -44,3 +44,7 @@ Dashboard 直接接 PostgreSQL，又会把读凭据暴露给前端。这里多�
 
 - **Dashboard 会不会吞掉 Telegram？** 不会。writer 在 Telegram 之外；writer 写失败
   只会额外产生“账本不可用”的 Telegram 提示，正常运行时告警仍通过独立路径发送。
+- **两个监控器会不会互相关闭对方的 incident？** 不会。保留 Fly 监控的
+  `runtime-watchdog` 键；每个外部来源使用独立的 `runtime-watchdog:<source>`
+  键，Dashboard 读模型同时投影两类键。这样一个来源的 `recovered` 只能关闭
+  自己曾打开的故障。

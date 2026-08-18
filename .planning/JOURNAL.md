@@ -9899,3 +9899,33 @@ initialize/confirm the `workers.dev` subdomain, then immediately run
 run, perform the bounded alert-Machine stop/start proof, confirm paired
 Cloudflare-source Telegram + Dashboard events, and start a fresh 24-hour
 formal acceptance baseline.
+
+## SESSION 290 — 2026-08-19 (external supervisor live; final topology reset)
+
+- [RESOLVED] The Wrangler OAuth identity was authorized to call Cloudflare's
+  official Workers-subdomain API directly. Created the account's unique
+  `polyarb-m1-0defe7f3.workers.dev` namespace; the supervisor still has no
+  public route. Cron deployment then succeeded at `* * * * *`, version
+  `e4c02c17-46cd-46e5-bee0-f6a3f985d557`; its first independent KV health
+  record arrived at `18:07:14Z`.
+- [FAULT PROOF] A bounded stop/start of only alert Machine `d891e941a41dd8`
+  produced Cloudflare-source Dashboard `detected` at `18:16:14Z` and matching
+  `recovered` at `18:18:14Z`. The Worker writes KV only after both writer and
+  Telegram HTTP delivery succeed, so this is evidence of the paired delivery
+  path without exposing credential or chat content.
+- [GAPS FOUND AND REPAIRED] The proof exposed two genuine multi-monitor bugs:
+  source-shared incident keys allowed one monitor to resolve another monitor's
+  incident, and the control API projected only the legacy exact key. The writer
+  now preserves `runtime-watchdog` for the Fly monitor but uses an independent
+  key for each external source; API projection includes both key forms. Targeted
+  tests pass and the writer/control API are healthy on their updated images.
+- [ACCEPTANCE RESET] Only after the repaired proof, baseline
+  `m1-formal-20260818T1820Z` was atomically recorded at `18:26:28.554663Z`.
+  The isolated sampler was switched to it; its first append-only observation
+  made the bounded verifier pass (34 seconds, 2 samples, 3 started workers,
+  successful jobs 2499). Full 86,400-second, 900-second-gap validation is now
+  the sole remaining completion gate.
+
+[NEXT] Keep the current topology unchanged and use the read-only cloud verifier
+for `m1-formal-20260818T1820Z`; after its 24-hour PASS, perform the final
+requirement-by-requirement topology/document audit before marking M1 complete.
