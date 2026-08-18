@@ -9791,3 +9791,25 @@ remaining app depends on it.
 [NEXT] Implement and test restart-event monitoring for exact Fly Machines;
 prove a sampler failure is paged and recovery is reported; only then begin the
 24-hour cloud acceptance window.
+
+## SESSION 284 — 2026-08-18 (process-liveness monitoring proven; clean acceptance started)
+
+- [FIX] Added `RestartEventGate`: the independent watchdog reads exact Fly
+  Machine event records as well as state. Its first restart counts are only a
+  baseline; a later count increase produces one fail-closed incident heartbeat
+  and a following stable check produces recovery. Unit/CLI/Make contracts pass.
+- [LIVE PROOF] Deployed alert image `m1-restart-watchdog-67d10896`. A controlled
+  SIGTERM of evidence sampler PID 642 made Fly restart it. The watchdog recorded
+  `machine:polyarb-control-evidence/830152f7274378:restart-count:0->1` at
+  14:29:04Z and returned healthy at 14:29:35Z. The sampler restarted and
+  appended its next evidence sample; this validates the previously missing
+  running-process, not just Machine-state, alert path.
+- [ACCEPTANCE] A fresh cloud-resident baseline `m1-formal-20260818T143000Z` was
+  recorded at 14:30:13Z after that proof. The evidence Machine was switched to
+  append-only sampling for this run at five-minute cadence. The provisional
+  verifier correctly remains fail-closed until there are at least two records
+  with forward successful-job progress; no 24-hour success is claimed yet.
+
+[NEXT] Observe the new run's first advancing sample and bounded verifier, keep
+watchdog/API/worker/sampler checks live, then continue normal collection for the
+full 24-hour no-gap evidence window before final M1 completion audit.
