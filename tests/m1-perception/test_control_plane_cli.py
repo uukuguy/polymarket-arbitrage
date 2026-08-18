@@ -666,6 +666,51 @@ def test_watchdog_requires_explicit_enable_before_any_database_connect(monkeypat
     assert "--enable is required" in capsys.readouterr().err
 
 
+def test_watchdog_observes_a_secondary_app_with_qualified_machine_identity(monkeypatch) -> None:
+    """An independent sampler is a first-class monitored runtime node."""
+    from polyarb import cli_control_plane
+
+    parser = cli_control_plane._parser()
+    args = parser.parse_args(
+        [
+            "watchdog-serve",
+            "--enable",
+            "--control-api-url",
+            "https://control.example/perception/control-plane",
+            "--fly-app",
+            "polyarb-control-worker-m1",
+            "--machine-id",
+            "worker-a",
+            "--secondary-fly-app",
+            "polyarb-control-evidence",
+            "--secondary-machine-id",
+            "sampler-a",
+        ]
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_read_soak_control_snapshot",
+        lambda _url: {"status": "available"},
+    )
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def read_states(machine_ids, *, app: str, token: str):
+        assert token == "status-token"
+        calls.append((app, tuple(machine_ids)))
+        return {machine_id: "started" for machine_id in machine_ids}
+
+    monkeypatch.setattr(cli_control_plane, "_read_cloud_fly_machine_states", read_states)
+    monkeypatch.setenv("POLYARB_FLY_API_TOKEN", "status-token")
+
+    observation = cli_control_plane._read_runtime_watchdog_observation(args)
+
+    assert observation.healthy is True
+    assert calls == [
+        ("polyarb-control-worker-m1", ("worker-a",)),
+        ("polyarb-control-evidence", ("sampler-a",)),
+    ]
+
+
 def test_structure_source_factory_builds_eight_distinct_lease_lanes(monkeypatch) -> None:
     from polyarb import cli_control_plane
 

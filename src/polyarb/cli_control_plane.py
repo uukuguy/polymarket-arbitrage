@@ -193,6 +193,11 @@ def _parser() -> argparse.ArgumentParser:
     watchdog_serve.add_argument("--fly-app", required=True)
     watchdog_serve.add_argument("--machine-id", action="append", required=True)
     watchdog_serve.add_argument(
+        "--secondary-fly-app",
+        help="optional independent app whose exact Machines are part of the same runtime gate",
+    )
+    watchdog_serve.add_argument("--secondary-machine-id", action="append")
+    watchdog_serve.add_argument(
         "--watchdog-once",
         action="store_true",
         help="perform one credential-free notification-free runtime check and exit",
@@ -428,16 +433,30 @@ def _read_runtime_watchdog_observation(args: argparse.Namespace):
     except (OSError, SoakEvidenceError, ValueError) as error:
         control_api_error = error
     try:
-        machine_states = _read_cloud_fly_machine_states(
-            args.machine_id,
-            app=args.fly_app,
-            token=os.environ.get("POLYARB_FLY_API_TOKEN", ""),
-        )
+        secondary_ids = args.secondary_machine_id or []
+        if bool(args.secondary_fly_app) != bool(secondary_ids):
+            raise ValueError(
+                "secondary watchdog target requires both --secondary-fly-app and "
+                "at least one --secondary-machine-id"
+            )
+        token = os.environ.get("POLYARB_FLY_API_TOKEN", "")
+        target_states: list[tuple[str, Sequence[str]]] = [(args.fly_app, args.machine_id)]
+        if args.secondary_fly_app:
+            target_states.append((args.secondary_fly_app, secondary_ids))
+        expected_machine_ids: list[str] = []
+        for app, machine_ids in target_states:
+            for machine_id, state in _read_cloud_fly_machine_states(
+                machine_ids, app=app, token=token
+            ).items():
+                qualified_id = f"{app}/{machine_id}"
+                machine_states[qualified_id] = state
+                expected_machine_ids.append(qualified_id)
     except (OSError, SoakEvidenceError, ValueError) as error:
         machine_error = error
+        expected_machine_ids = []
     return assess_runtime(
         machine_states=machine_states,
-        expected_machine_ids=args.machine_id,
+        expected_machine_ids=expected_machine_ids if machine_error is None else (),
         control_api_payload=control_api_payload,
         control_api_error=control_api_error,
         machine_error=machine_error,

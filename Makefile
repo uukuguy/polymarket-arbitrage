@@ -782,19 +782,21 @@ control-plane-alert-serve:
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane alert-serve --enable --worker-id "$(or $(worker_id),control-plane-alert-service)" --acceptance-run-id "$(acceptance_run_id)" --interval-seconds "$(or $(interval_seconds),15)" --json
 
-## control-plane-watchdog-serve: Independently page Telegram when the formal API or exact business Machines fail; needs Fly status token, never a Postgres DSN.
+## control-plane-watchdog-serve: Independently page Telegram when the formal API or exact business Machines fail; optional secondary_fly_app/machine_ids extend the same independent gate.
 control-plane-watchdog-serve:
 	@test "$(enable)" = "1" || (echo "usage: make control-plane-watchdog-serve enable=1 [interval_seconds=30]" >&2; exit 2)
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_FLY_API_TOKEN" ]; then echo "ERROR: POLYARB_FLY_API_TOKEN is required" >&2; exit 2; fi; \
-	@test -n "$(control_api_url)" -a -n "$(fly_app)" -a -n "$(machine_ids)" || (echo "usage: make control-plane-watchdog-serve enable=1 control_api_url=<url> fly_app=<app> machine_ids=<id,id,id> [interval_seconds=30]" >&2; exit 2)
-	uv run python -m polyarb.cli_control_plane watchdog-serve --enable --control-api-url "$(control_api_url)" --fly-app "$(fly_app)" $(foreach machine,$(subst $(comma), ,$(machine_ids)),--machine-id "$(machine)") --interval-seconds "$(or $(interval_seconds),30)" --json
+	@test -n "$(control_api_url)" -a -n "$(fly_app)" -a -n "$(machine_ids)" || (echo "usage: make control-plane-watchdog-serve enable=1 control_api_url=<url> fly_app=<app> machine_ids=<id,id,id> [secondary_fly_app=<app> secondary_machine_ids=<id>] [interval_seconds=30]" >&2; exit 2)
+	@test -z "$(secondary_fly_app)" -a -z "$(secondary_machine_ids)" -o -n "$(secondary_fly_app)" -a -n "$(secondary_machine_ids)" || (echo "secondary_fly_app and secondary_machine_ids must be supplied together" >&2; exit 2)
+	uv run python -m polyarb.cli_control_plane watchdog-serve --enable --control-api-url "$(control_api_url)" --fly-app "$(fly_app)" $(foreach machine,$(subst $(comma), ,$(machine_ids)),--machine-id "$(machine)") $(if $(secondary_fly_app),--secondary-fly-app "$(secondary_fly_app)" $(foreach machine,$(subst $(comma), ,$(secondary_machine_ids)),--secondary-machine-id "$(machine)")) --interval-seconds "$(or $(interval_seconds),30)" --json
 
-## control-plane-watchdog-verify: One read-only API-plus-exact-Machine gate. Requires explicit live identities and a Fly status token already in the shell; sends no Telegram and never deploys or migrates.
+## control-plane-watchdog-verify: One read-only API-plus-exact-Machine gate, optionally including a secondary app. Requires explicit live identities and a Fly status token already in the shell; sends no Telegram and never deploys or migrates.
 control-plane-watchdog-verify:
-	@test -n "$(control_api_url)" -a -n "$(fly_app)" -a -n "$(machine_ids)" || (echo "usage: make control-plane-watchdog-verify control_api_url=<url> fly_app=<app> machine_ids=<id,id,id>" >&2; exit 2)
+	@test -n "$(control_api_url)" -a -n "$(fly_app)" -a -n "$(machine_ids)" || (echo "usage: make control-plane-watchdog-verify control_api_url=<url> fly_app=<app> machine_ids=<id,id,id> [secondary_fly_app=<app> secondary_machine_ids=<id>]" >&2; exit 2)
+	@test -z "$(secondary_fly_app)" -a -z "$(secondary_machine_ids)" -o -n "$(secondary_fly_app)" -a -n "$(secondary_machine_ids)" || (echo "secondary_fly_app and secondary_machine_ids must be supplied together" >&2; exit 2)
 	@test -n "$$POLYARB_FLY_API_TOKEN" || (echo "ERROR: POLYARB_FLY_API_TOKEN must be explicitly exported" >&2; exit 2)
-	uv run python -m polyarb.cli_control_plane watchdog-serve --enable --watchdog-once --control-api-url "$(control_api_url)" --fly-app "$(fly_app)" $(foreach machine,$(subst $(comma), ,$(machine_ids)),--machine-id "$(machine)") --json
+	uv run python -m polyarb.cli_control_plane watchdog-serve --enable --watchdog-once --control-api-url "$(control_api_url)" --fly-app "$(fly_app)" $(foreach machine,$(subst $(comma), ,$(machine_ids)),--machine-id "$(machine)") $(if $(secondary_fly_app),--secondary-fly-app "$(secondary_fly_app)" $(foreach machine,$(subst $(comma), ,$(secondary_machine_ids)),--secondary-machine-id "$(machine)")) --json
 
 ## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots (auto-loads .env)
 supabase-reconcile:
