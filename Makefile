@@ -802,12 +802,12 @@ control-plane-watchdog-serve:
 	@test -z "$(secondary_fly_app)" -a -z "$(secondary_machine_ids)" -o -n "$(secondary_fly_app)" -a -n "$(secondary_machine_ids)" || (echo "secondary_fly_app and secondary_machine_ids must be supplied together" >&2; exit 2)
 	uv run python -m polyarb.cli_control_plane watchdog-serve --enable --control-api-url "$(control_api_url)" --fly-app "$(fly_app)" $(foreach machine,$(subst $(comma), ,$(machine_ids)),--machine-id "$(machine)") $(if $(secondary_fly_app),--secondary-fly-app "$(secondary_fly_app)" $(foreach machine,$(subst $(comma), ,$(secondary_machine_ids)),--secondary-machine-id "$(machine)")) $(foreach target,$(subst $(comma), ,$(secondary_targets)),--secondary-target "$(target)") --interval-seconds "$(or $(interval_seconds),30)" --json
 
-## control-plane-watchdog-verify: One read-only API-plus-exact-Machine gate, optionally including a secondary app. Requires explicit live identities and a Fly status token already in the shell; sends no Telegram and never deploys or migrates.
+## control-plane-watchdog-verify: One read-only API-plus-exact-Machine gate; optional secondary_targets=<app>/<machine>,... cover isolated support apps without Telegram or deployment side effects.
 control-plane-watchdog-verify:
 	@test -n "$(control_api_url)" -a -n "$(fly_app)" -a -n "$(machine_ids)" || (echo "usage: make control-plane-watchdog-verify control_api_url=<url> fly_app=<app> machine_ids=<id,id,id> [secondary_fly_app=<app> secondary_machine_ids=<id>]" >&2; exit 2)
 	@test -z "$(secondary_fly_app)" -a -z "$(secondary_machine_ids)" -o -n "$(secondary_fly_app)" -a -n "$(secondary_machine_ids)" || (echo "secondary_fly_app and secondary_machine_ids must be supplied together" >&2; exit 2)
 	@test -n "$$POLYARB_FLY_API_TOKEN" || (echo "ERROR: POLYARB_FLY_API_TOKEN must be explicitly exported" >&2; exit 2)
-	uv run python -m polyarb.cli_control_plane watchdog-serve --enable --watchdog-once --control-api-url "$(control_api_url)" --fly-app "$(fly_app)" $(foreach machine,$(subst $(comma), ,$(machine_ids)),--machine-id "$(machine)") $(if $(secondary_fly_app),--secondary-fly-app "$(secondary_fly_app)" $(foreach machine,$(subst $(comma), ,$(secondary_machine_ids)),--secondary-machine-id "$(machine)")) --json
+	uv run python -m polyarb.cli_control_plane watchdog-serve --enable --watchdog-once --control-api-url "$(control_api_url)" --fly-app "$(fly_app)" $(foreach machine,$(subst $(comma), ,$(machine_ids)),--machine-id "$(machine)") $(if $(secondary_fly_app),--secondary-fly-app "$(secondary_fly_app)" $(foreach machine,$(subst $(comma), ,$(secondary_machine_ids)),--secondary-machine-id "$(machine)")) $(foreach target,$(subst $(comma), ,$(secondary_targets)),--secondary-target "$(target)") --json
 
 ## supabase-reconcile: Compare SQLite vs Supabase and push any missing snapshots (auto-loads .env)
 supabase-reconcile:
