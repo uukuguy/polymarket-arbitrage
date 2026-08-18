@@ -12,9 +12,19 @@ class _AvailableControlPlane:
             "job_counts": {"runnable": 1},
             "open_incidents": [],
             "runtime_watchdog": {
-                "current": None,
+                "current": {
+                    "incident_key": "runtime-watchdog-a",
+                    "severity": "critical",
+                    "summary": "runtime target unavailable",
+                    "opened_at": "2026-08-18T15:00:00+00:00",
+                    "source": "independent-runtime-watchdog",
+                    "failures": ["machine:worker-a:stopped"],
+                },
                 "recent_events": [
                     {
+                        "incident_key": "runtime-watchdog-a",
+                        "severity": "critical",
+                        "summary": "runtime target unavailable",
                         "kind": "recovered",
                         "occurred_at": "2026-08-18T15:00:00+00:00",
                         "detail": {"failures": []},
@@ -51,9 +61,19 @@ def test_standalone_control_api_is_readable_without_legacy_daemon_dependencies()
         "job_counts": {"runnable": 1},
         "open_incidents": [],
         "runtime_watchdog": {
-            "current": None,
+            "current": {
+                "incident_key": "runtime-watchdog-a",
+                "severity": "critical",
+                "summary": "runtime target unavailable",
+                "opened_at": "2026-08-18T15:00:00+00:00",
+                "source": "independent-runtime-watchdog",
+                "failures": ["machine:worker-a:stopped"],
+            },
             "recent_events": [
                 {
+                    "incident_key": "runtime-watchdog-a",
+                    "severity": "critical",
+                    "summary": "runtime target unavailable",
                     "kind": "recovered",
                     "occurred_at": "2026-08-18T15:00:00+00:00",
                     "detail": {"failures": []},

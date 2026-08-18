@@ -3004,11 +3004,18 @@ def test_operational_snapshot_projects_external_runtime_watchdog_source(
 
     assert runtime_watchdog == {
         "current": {
+            "incident_key": "external-watchdog-a",
+            "severity": "critical",
             "summary": "External watchdog found alert unavailable",
             "opened_at": "2026-08-18T00:00:00+00:00",
+            "source": "cloudflare-watchdog-supervisor",
+            "failures": ["machine:alert:stopped"],
         },
         "recent_events": [
             {
+                "incident_key": "external-watchdog-a",
+                "severity": "critical",
+                "summary": "External watchdog found alert unavailable",
                 "kind": "detected",
                 "occurred_at": "2026-08-18T00:00:00+00:00",
                 "detail": {
