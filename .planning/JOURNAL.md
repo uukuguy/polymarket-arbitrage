@@ -9676,3 +9676,26 @@ previous v1 run remains immutable failed evidence; do not reuse it.
 [NEXT] Diagnose the formal Supabase recovery-mode outage using bounded,
 credential-contained evidence. Keep the watchdog running; only after it proves
 one healthy recovery transition may a brand-new 24-hour acceptance window start.
+
+## SESSION 280 — 2026-08-18 (single-authority control-plane reset)
+
+- [CORRECTED] There has not yet been a formal M1 production acceptance run.
+  The labels `formal-cloud-v1/v2` described pre-production debugging evidence,
+  not a previously usable production service. Neither can be resumed or used as
+  a rollback boundary.
+- [ROOT CAUSE] The remaining control API probe did not reach `polyarb`: it
+  returned `tenant/user postgres.pnclgqrxhmulmmmjsgbk not found`. The API,
+  worker, and watchdog all shared the same stale DSN digest for that deleted
+  staging tenant. This explained the apparent database outage, false watchdog
+  chain, and six stopped worker machines.
+- [CLEANUP] The duplicate Supabase staging project was permanently removed.
+  The formal `polyarb` project was then restarted through the provider UI; it
+  reports `Restarting` and remains unavailable while recovery completes.
+  The stale Fly API, worker, and watchdog apps were permanently removed with
+  their associated machines. Fly now contains only the unrelated `polyarb-l2`
+  app plus its builder. No M1 collection, acceptance sampling, or bogus 24-hour
+  timer is running.
+- [NEXT] Wait only for the provider restart state to settle while doing bounded
+  probes (not blind time-window polling). When `polyarb` accepts a fresh
+  connection, create one clean minimum control plane using only the authoritative
+  project configuration, then prove monitoring before any collector starts.

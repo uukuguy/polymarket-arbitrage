@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: formal-cloud-v2 is invalid after formal Supabase entered recovery mode; five transactional business roles and sampler are stopped while an independent watchdog is actively paging and logging the outage
-last_updated: "2026-08-18T02:48:59Z"
+stopped_at: all pre-production Fly control-plane apps were removed after they were proven to carry a deleted staging Supabase DSN; the only formal Supabase project is restarting and no business collector is running
+last_updated: "2026-08-18T03:28:59Z"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -18,16 +18,20 @@ progress:
 
 ## Current Position
 
-- **Formal runtime incident under observation (2026-08-18):** `formal-cloud-v2`
-  is invalid after Supabase reported `database system is in recovery mode`.
-  Its control API now times out and all five business Machines are stopped;
-  do not restart them until the database authority is diagnosed and repaired.
-  The new independent `polyarb-control-alert` watchdog probes the API and the
-  exact five Machine IDs every 30 seconds, writes a JSON heartbeat every probe,
-  sends direct Telegram pages only on incident/recovery transitions, and has
-  `always` restart policy on both primary and standby. Its code neither opens
-  Postgres nor mutates business Machines. The 24-hour timer is paused, not
-  waiting silently.
+- **Authority reset in progress (2026-08-18):** the only remaining Supabase
+  project is `polyarb` (`zoqsmjeejfkrokwttjbx`). It is in a provider-initiated
+  restart after reporting unhealthy/recovery behavior. No 24-hour acceptance
+  run exists or is running.
+
+- **Pre-production control plane removed (2026-08-18):** the former
+  `polyarb-control-api`, `polyarb-control-worker`, and
+  `polyarb-control-alert` all inherited the same DSN for a deleted staging
+  project (`pnclgqrxhmulmmmjsgbk`). The API probe returned that exact missing
+  tenant; the worker held six stopped machines and pending stale secrets.
+  They were deleted together, including all associated machines. The remaining
+  Fly application is `polyarb-l2`, which is outside this reset. Monitoring will
+  be redeployed from the single authoritative configuration only after the
+  formal database passes a bounded probe.
 
 - **Formal read-only incident repaired (2026-08-17 21:50Z):** `formal-cloud-v1`
   failed and remains immutable failed evidence after every Worker session inherited
