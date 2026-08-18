@@ -22,6 +22,7 @@ def render_rollout_artifacts(
     api_app: str,
     worker_app: str,
     alert_app: str,
+    runtime_event_writer_app: str,
     expected_database: str,
     output_dir: Path,
 ) -> dict[str, str]:
@@ -29,8 +30,11 @@ def render_rollout_artifacts(
     _validate_app("api_app", api_app)
     _validate_app("worker_app", worker_app)
     _validate_app("alert_app", alert_app)
-    if len({api_app, worker_app, alert_app}) != 3:
-        raise RolloutArtifactError("API, data worker and alert worker must use different Fly apps")
+    _validate_app("runtime_event_writer_app", runtime_event_writer_app)
+    if len({api_app, worker_app, alert_app, runtime_event_writer_app}) != 4:
+        raise RolloutArtifactError(
+            "API, data worker, alert worker and runtime writer must use different Fly apps"
+        )
     if not expected_database.strip():
         raise RolloutArtifactError("expected_database must be non-empty")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -38,6 +42,7 @@ def render_rollout_artifacts(
         "api_config": output_dir / "fly-control-api.toml",
         "worker_config": output_dir / "fly-control-worker.toml",
         "alert_config": output_dir / "fly-control-alert.toml",
+        "runtime_event_writer_config": output_dir / "fly-runtime-event-writer.toml",
         "checklist": output_dir / "rollout-checklist.json",
     }
     if any(path.exists() for path in destinations.values()):
@@ -51,16 +56,22 @@ def render_rollout_artifacts(
     alert_config = _render_template(
         "fly-control-alert.toml.template", "__CONTROL_PLANE_ALERT_APP__", alert_app
     )
+    runtime_event_writer_config = _render_template(
+        "fly-runtime-event-writer.toml.template",
+        "__RUNTIME_EVENT_WRITER_APP__",
+        runtime_event_writer_app,
+    )
     checklist = {
-        "artifact_version": 6,
+        "artifact_version": 7,
         "api_app": api_app,
         "worker_app": worker_app,
         "alert_app": alert_app,
+        "runtime_event_writer_app": runtime_event_writer_app,
         "expected_database": expected_database,
         "steps": [
             "preflight",
             "revision-014-migration",
-            "isolated-api-data-worker-and-alert-worker-deploy",
+            "isolated-api-data-worker-alert-worker-and-runtime-event-writer-deploy",
             "three-fresh-source-window-structure-quote-shadows",
             "source-and-quote-admitter-worker-loss-circuit-probe-and-api-readability",
             "continuous-24-hour-soak",
@@ -72,6 +83,7 @@ def render_rollout_artifacts(
     destinations["api_config"].write_text(api_config)
     destinations["worker_config"].write_text(worker_config)
     destinations["alert_config"].write_text(alert_config)
+    destinations["runtime_event_writer_config"].write_text(runtime_event_writer_config)
     destinations["checklist"].write_text(json.dumps(checklist, sort_keys=True, indent=2) + "\n")
     return {name: str(path) for name, path in destinations.items()}
 

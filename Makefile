@@ -652,11 +652,11 @@ control-plane-preflight:
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane preflight --expected-database "$(expected_database)" --json
 
-## control-plane-render-rollout: Render local-only isolated API/data-worker/alert-worker Fly configs and a staged checklist. Requires enable=1, api_app=, worker_app=, alert_app=, expected_database= and output_dir=; never contacts cloud resources.
+## control-plane-render-rollout: Render local-only isolated API/data-worker/alert/writer Fly configs and checklist. Requires named apps; never contacts cloud resources.
 control-plane-render-rollout:
-	@test "$(enable)" = "1" || (echo "usage: make control-plane-render-rollout enable=1 api_app=<app> worker_app=<app> alert_app=<app> expected_database=<name> output_dir=<empty-dir>" >&2; exit 2)
-	@test -n "$(api_app)" -a -n "$(worker_app)" -a -n "$(alert_app)" -a -n "$(expected_database)" -a -n "$(output_dir)" || (echo "api_app, worker_app, alert_app, expected_database and output_dir are required" >&2; exit 2)
-	@uv run python -m polyarb.cli_control_plane render-rollout --enable --api-app "$(api_app)" --worker-app "$(worker_app)" --alert-app "$(alert_app)" --expected-database "$(expected_database)" --output-dir "$(output_dir)" --json
+	@test "$(enable)" = "1" || (echo "usage: make control-plane-render-rollout enable=1 api_app=<app> worker_app=<app> alert_app=<app> runtime_event_writer_app=<app> expected_database=<name> output_dir=<empty-dir>" >&2; exit 2)
+	@test -n "$(api_app)" -a -n "$(worker_app)" -a -n "$(alert_app)" -a -n "$(runtime_event_writer_app)" -a -n "$(expected_database)" -a -n "$(output_dir)" || (echo "all app identities, expected_database and output_dir are required" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane render-rollout --enable --api-app "$(api_app)" --worker-app "$(worker_app)" --alert-app "$(alert_app)" --runtime-event-writer-app "$(runtime_event_writer_app)" --expected-database "$(expected_database)" --output-dir "$(output_dir)" --json
 
 ## control-plane-verify-shadow-parity: Verify exactly three local Structure/Quote shadow evidence records. Requires evidence=<json>; never contacts cloud resources.
 control-plane-verify-shadow-parity:

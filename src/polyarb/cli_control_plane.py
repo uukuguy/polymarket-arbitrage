@@ -219,6 +219,7 @@ def _parser() -> argparse.ArgumentParser:
     render_rollout.add_argument("--api-app", required=True)
     render_rollout.add_argument("--worker-app", required=True)
     render_rollout.add_argument("--alert-app", required=True)
+    render_rollout.add_argument("--runtime-event-writer-app", required=True)
     render_rollout.add_argument("--expected-database", required=True)
     render_rollout.add_argument("--output-dir", type=Path, required=True)
     render_rollout.add_argument("--json", action="store_true")
@@ -1001,6 +1002,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 api_app=args.api_app,
                 worker_app=args.worker_app,
                 alert_app=args.alert_app,
+                runtime_event_writer_app=args.runtime_event_writer_app,
                 expected_database=args.expected_database,
                 output_dir=args.output_dir,
             )

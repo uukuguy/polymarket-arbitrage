@@ -8,13 +8,14 @@ from pathlib import Path
 import pytest
 
 
-def test_rollout_renderer_writes_three_isolated_apps_and_staged_checklist(tmp_path: Path) -> None:
+def test_rollout_renderer_writes_four_isolated_apps_and_staged_checklist(tmp_path: Path) -> None:
     from polyarb.control_plane.rollout import render_rollout_artifacts
 
     rendered = render_rollout_artifacts(
         api_app="polyarb-control-api-staging",
         worker_app="polyarb-control-worker-staging",
         alert_app="polyarb-control-alert-staging",
+        runtime_event_writer_app="polyarb-control-runtime-event-writer-staging",
         expected_database="control_plane_staging",
         output_dir=tmp_path,
     )
@@ -23,6 +24,7 @@ def test_rollout_renderer_writes_three_isolated_apps_and_staged_checklist(tmp_pa
         "api_config": str(tmp_path / "fly-control-api.toml"),
         "worker_config": str(tmp_path / "fly-control-worker.toml"),
         "alert_config": str(tmp_path / "fly-control-alert.toml"),
+        "runtime_event_writer_config": str(tmp_path / "fly-runtime-event-writer.toml"),
         "checklist": str(tmp_path / "rollout-checklist.json"),
     }
     assert 'app = "polyarb-control-api-staging"' in (tmp_path / "fly-control-api.toml").read_text()
@@ -33,6 +35,9 @@ def test_rollout_renderer_writes_three_isolated_apps_and_staged_checklist(tmp_pa
     assert (
         'app = "polyarb-control-alert-staging"' in (tmp_path / "fly-control-alert.toml").read_text()
     )
+    assert 'app = "polyarb-control-runtime-event-writer-staging"' in (
+        tmp_path / "fly-runtime-event-writer.toml"
+    ).read_text()
     worker_config = (tmp_path / "fly-control-worker.toml").read_text()
     api_config = (tmp_path / "fly-control-api.toml").read_text()
     alert_config = (tmp_path / "fly-control-alert.toml").read_text()
@@ -61,7 +66,7 @@ def test_rollout_renderer_writes_three_isolated_apps_and_staged_checklist(tmp_pa
     assert checklist["steps"] == [
         "preflight",
         "revision-014-migration",
-        "isolated-api-data-worker-and-alert-worker-deploy",
+        "isolated-api-data-worker-alert-worker-and-runtime-event-writer-deploy",
         "three-fresh-source-window-structure-quote-shadows",
         "source-and-quote-admitter-worker-loss-circuit-probe-and-api-readability",
         "continuous-24-hour-soak",
@@ -71,15 +76,16 @@ def test_rollout_renderer_writes_three_isolated_apps_and_staged_checklist(tmp_pa
 
 
 @pytest.mark.parametrize(
-    "api_app,worker_app,alert_app",
+    "api_app,worker_app,alert_app,runtime_event_writer_app",
     [
-        ("polyarb-l1", "worker", "alert"),
-        ("api", "polyarb-l1", "alert"),
-        ("api", "worker", "polyarb-l1"),
+        ("polyarb-l1", "worker", "alert", "writer"),
+        ("api", "polyarb-l1", "alert", "writer"),
+        ("api", "worker", "polyarb-l1", "writer"),
+        ("api", "worker", "alert", "polyarb-l1"),
     ],
 )
 def test_rollout_renderer_rejects_legacy_app_reuse(
-    tmp_path: Path, api_app: str, worker_app: str, alert_app: str
+    tmp_path: Path, api_app: str, worker_app: str, alert_app: str, runtime_event_writer_app: str
 ) -> None:
     from polyarb.control_plane.rollout import RolloutArtifactError, render_rollout_artifacts
 
@@ -88,6 +94,7 @@ def test_rollout_renderer_rejects_legacy_app_reuse(
             api_app=api_app,
             worker_app=worker_app,
             alert_app=alert_app,
+            runtime_event_writer_app=runtime_event_writer_app,
             expected_database="control_plane_staging",
             output_dir=tmp_path,
         )

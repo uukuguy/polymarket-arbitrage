@@ -818,6 +818,8 @@ def test_render_rollout_is_explicit_and_never_connects_to_control_plane(
                 "polyarb-control-worker-staging",
                 "--alert-app",
                 "polyarb-control-alert-staging",
+                "--runtime-event-writer-app",
+                "polyarb-control-runtime-event-writer-staging",
                 "--expected-database",
                 "control_plane_staging",
                 "--output-dir",
