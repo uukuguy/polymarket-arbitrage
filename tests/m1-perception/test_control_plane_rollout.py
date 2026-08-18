@@ -34,7 +34,10 @@ def test_rollout_renderer_writes_three_isolated_apps_and_staged_checklist(tmp_pa
         'app = "polyarb-control-alert-staging"' in (tmp_path / "fly-control-alert.toml").read_text()
     )
     worker_config = (tmp_path / "fly-control-worker.toml").read_text()
+    api_config = (tmp_path / "fly-control-api.toml").read_text()
     alert_config = (tmp_path / "fly-control-alert.toml").read_text()
+    assert 'memory = "256mb"' in api_config
+    assert "min_machines_running = 0" in api_config
     assert "soak_sampler" not in worker_config
     assert "structure_range_a" not in worker_config
     assert "structure_range_b" not in worker_config
