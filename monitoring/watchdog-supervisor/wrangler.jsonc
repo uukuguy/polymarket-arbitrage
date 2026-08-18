@@ -1,0 +1,16 @@
+{
+  "name": "polyarb-control-watchdog-supervisor",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-19",
+  "workers_dev": false,
+  "triggers": { "crons": ["* * * * *"] },
+  "kv_namespaces": [
+    { "binding": "WATCHDOG_STATE", "id": "__PROVISIONED_KV_NAMESPACE_ID__" }
+  ],
+  "vars": {
+    "FLY_ALERT_APP": "polyarb-control-alert",
+    "FLY_ALERT_MACHINE_ID": "d891e941a41dd8",
+    "RUNTIME_EVENT_WRITER_URL": "https://polyarb-control-runtime-event-writer.fly.dev",
+    "RUNTIME_EVENT_SOURCE": "cloudflare-watchdog-supervisor"
+  }
+}
