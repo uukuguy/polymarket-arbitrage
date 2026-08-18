@@ -9813,3 +9813,11 @@ prove a sampler failure is paged and recovery is reported; only then begin the
 [NEXT] Observe the new run's first advancing sample and bounded verifier, keep
 watchdog/API/worker/sampler checks live, then continue normal collection for the
 full 24-hour no-gap evidence window before final M1 completion audit.
+
+- [EARLY ACCEPTANCE PASS] At 14:36:30Z the same cloud-resident verifier passed
+  its short proof for `m1-formal-20260818T143000Z`: 345 seconds, three scheduler
+  evidence records, no gap over 900 seconds, all three exact workers started,
+  and successful job count advanced to 224. The records were written at
+  14:30:13Z (baseline), 14:30:57Z, and 14:35:58Z. This is only an early
+  liveness/continuity gate; the 24-hour criterion remains active and must not
+  be claimed until the full minimum duration is independently verified.
