@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -14,6 +15,8 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+
+_FAILURE_CODE = re.compile(r"^[a-z0-9:/._-]{1,256}$")
 
 
 def _authorized(request: Request) -> bool:
@@ -36,8 +39,11 @@ async def append_runtime_event(request: Request) -> JSONResponse:
         key = request.headers["idempotency-key"]
         if kind not in {"detected", "recovered"} or not isinstance(failures, list):
             raise ValueError
-        failures = [str(value)[:256] for value in failures][:20]
-        if any(not value for value in failures) or len(key) != 64:
+        if (
+            len(failures) > 20
+            or any(not isinstance(value, str) or not _FAILURE_CODE.fullmatch(value) for value in failures)
+            or not re.fullmatch(r"[0-9a-f]{64}", key)
+        ):
             raise ValueError
     except (KeyError, TypeError, ValueError):
         return JSONResponse({"error": "invalid-runtime-event"}, status_code=400)
