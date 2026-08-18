@@ -763,6 +763,59 @@ def test_watchdog_observation_applies_cloud_evidence_freshness_gate(monkeypatch)
     assert observation.failures[0].startswith("evidence:sample-stale:")
 
 
+def test_watchdog_observation_checks_additional_cross_app_targets(monkeypatch) -> None:
+    from polyarb import cli_control_plane
+
+    args = cli_control_plane._parser().parse_args(
+        [
+            "watchdog-serve",
+            "--enable",
+            "--control-api-url",
+            "https://control.example/perception/control-plane",
+            "--fly-app",
+            "polyarb-control-worker-m1",
+            "--machine-id",
+            "worker-a",
+            "--secondary-fly-app",
+            "polyarb-control-evidence",
+            "--secondary-machine-id",
+            "sampler-a",
+            "--secondary-target",
+            "polyarb-control-runtime-event-writer/writer-a",
+        ]
+    )
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_read_soak_control_snapshot",
+        lambda _url: {
+            "status": "available",
+            "job_counts": {"succeeded": 1, "runnable": 0, "leased": 0},
+        },
+    )
+
+    def read_states(machine_ids, *, app, **_kwargs):
+        calls.append((app, tuple(machine_ids)))
+        return {machine_id: "started" for machine_id in machine_ids}
+
+    monkeypatch.setattr(cli_control_plane, "_read_cloud_fly_machine_states", read_states)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_read_cloud_fly_machine_restart_counts",
+        lambda machine_ids, **_kwargs: {machine_id: 0 for machine_id in machine_ids},
+    )
+    monkeypatch.setenv("POLYARB_FLY_API_TOKEN", "status-token")
+
+    observation = cli_control_plane._read_runtime_watchdog_observation(args)
+
+    assert observation.healthy is True
+    assert calls == [
+        ("polyarb-control-worker-m1", ("worker-a",)),
+        ("polyarb-control-evidence", ("sampler-a",)),
+        ("polyarb-control-runtime-event-writer", ("writer-a",)),
+    ]
+
+
 def test_structure_source_factory_builds_eight_distinct_lease_lanes(monkeypatch) -> None:
     from polyarb import cli_control_plane
 

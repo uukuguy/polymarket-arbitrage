@@ -206,6 +206,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     watchdog_serve.add_argument("--secondary-machine-id", action="append")
     watchdog_serve.add_argument(
+        "--secondary-target",
+        action="append",
+        help="additional exact Fly target in <app>/<machine-id> form; repeatable",
+    )
+    watchdog_serve.add_argument(
         "--watchdog-once",
         action="store_true",
         help="perform one credential-free notification-free runtime check and exit",
@@ -491,6 +496,15 @@ def _read_runtime_watchdog_observation(
         target_states: list[tuple[str, Sequence[str]]] = [(args.fly_app, args.machine_id)]
         if args.secondary_fly_app:
             target_states.append((args.secondary_fly_app, secondary_ids))
+        additional_targets: dict[str, list[str]] = {}
+        for target in args.secondary_target or []:
+            app, separator, machine_id = target.partition("/")
+            if not separator or not app or not machine_id or "/" in machine_id:
+                raise ValueError(
+                    "secondary watchdog target must use <app>/<machine-id> form"
+                )
+            additional_targets.setdefault(app, []).append(machine_id)
+        target_states.extend(additional_targets.items())
         expected_machine_ids: list[str] = []
         for app, machine_ids in target_states:
             states = _read_cloud_fly_machine_states(machine_ids, app=app, token=token)
