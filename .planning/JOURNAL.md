@@ -9,6 +9,9 @@
 
 ## 2026-08-19 — formal runtime recovery, IPv4 pooler, and evidence dashboard
 
+- [SESSION / READ-ONLY VERIFICATION] The sole active run `m1-formal-20260818T1655Z` passed the cloud-resident fail-closed verifier at 1,530 seconds: seven immutable samples, three exact started worker identities, no counter regression, and 1,762 successful jobs. The independent exact-Machine watchdog gate also passed for all three workers, the evidence sampler, and the isolated runtime-ledger writer.
+- [LEARNING] `cloud-soak-verify` deliberately rejects `minimum_seconds=0` as an invalid non-positive bound. A local 0-second probe therefore reports the shared “at least two records and positive bounds” error even when evidence exists. Use a positive bounded threshold (for example `minimum_seconds=1` for an immediate integrity check); retain the 86,400-second default for formal acceptance.
+- [TOPOLOGY / FINAL WINDOW] The running watchdog was rolled to the tested `m1-watchdog-writer-8458893d` image and now continuously includes `polyarb-control-runtime-event-writer/28654e35a73d08` as an exact secondary target, alongside the evidence sampler. The earlier `m1-formal-20260818T1655Z` run remains immutable pre-final-topology evidence and was deliberately not relabeled. New sole formal run `m1-formal-20260818T1733Z` atomically recorded its baseline at `2026-08-18T17:33:25Z`; the restarted independent sampler appended its first sample at `17:33:51Z`. API, all exact targets, the one-shot watchdog gate, and zero expired leases/open circuits were verified after the rollout.
 - [ROOT CAUSE / REPAIRED] Fly worker Machines cannot use Supabase's direct IPv6 database endpoint reliably. The current project's free IPv4 Session Pooler is `aws-0-eu-west-2.pooler.supabase.com:5432`; the restricted `m1_control_worker.lgykffpcsebewvobkbdm` login was verified before deployment. Worker and evidence runtime commands now map dedicated versioned DSN variables to that pooler rather than inheriting stale direct-connection values.
 - [ROOT CAUSE / REPAIRED] Detached Fly Machine updates retain duplicate same-name environment values. Runtime credential rotation therefore uses fresh versioned variables and explicit entrypoint mapping, rather than assuming an in-place secret overwrite.
 - [SECURITY] A newly minted cross-app observer token was verified from the evidence Machine with a real Machines API HTTP 200 call; the exposed predecessor was revoked. No token values are retained here.
@@ -21,7 +24,7 @@
 - [VERIFIED] The read-only Makefile watchdog gate exercised all three transactional workers, the evidence sampler, and the isolated ledger writer in one exact identity check with no failures.
 - [DASHBOARD] Production deployment `polymarket-arbitrage-ebon.vercel.app` now renders the **Immutable cloud evidence** card. Its production HTML and API data were checked against run `m1-formal-20260818T1655Z`; the active incident count is zero.
 
-[NEXT] Let `m1-formal-20260818T1655Z` collect continuous independent samples while periodically checking durable evidence freshness, job progress, worker identity, and watchdog recovery semantics. Do not claim 24-hour acceptance until the fail-closed verifier passes that full window.
+[NEXT] Let `m1-formal-20260818T1733Z` collect continuous independent samples while periodically checking durable evidence freshness, job progress, all exact target identities (including the ledger writer), and watchdog recovery semantics. Do not claim 24-hour acceptance until the fail-closed verifier passes that full window.
 
 ## 2026-08-19 — evidence sampler configuration repair and dashboard proof
 

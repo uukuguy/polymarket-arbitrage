@@ -5,7 +5,7 @@ milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
 stopped_at: formal cloud acceptance is running; do not declare completion before its immutable 24-hour verifier passes
-last_updated: "2026-08-19T01:03:00+08:00"
+last_updated: "2026-08-19T01:34:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -30,12 +30,14 @@ progress:
   The public control API is available; worker leases/circuits are observable.
 
 - **Monitoring and acceptance:** watchdog checks the API, all exact worker
-  IDs, sampler state, and fresh Fly process restart counters every 30 seconds.
+  IDs, sampler state, the isolated Dashboard ledger writer, and fresh Fly
+  process restart counters every 30 seconds.
   Both detected and recovered transitions are durably visible in the dashboard
   ledger as well as sent through the alert path. Earlier evidence runs remain
   immutable audit history only. The sole active 24-hour acceptance run is
-  `m1-formal-20260818T1655Z`, baseline `2026-08-18T16:55:40Z`; its first
-  independent sample was recorded at `16:56:04Z`. It must not be called
+  `m1-formal-20260818T1733Z`, baseline `2026-08-18T17:33:25Z`; its first
+  independent sample was recorded at `17:33:51Z` after the final watchdog
+  topology was live. It must not be called
   complete before the full fail-closed 24-hour verifier passes.
 
 - **Latest runtime repair (2026-08-19 00:54Z):** Fly cannot use the
