@@ -122,7 +122,7 @@ def test_soak_verifier_rejects_tampered_or_unhealthy_records(records, reason: st
 def test_soak_verifier_rejects_short_or_gapped_window() -> None:
     from polyarb.control_plane.soak_evidence import SoakEvidenceError, verify_soak
 
-    with pytest.raises(SoakEvidenceError, match="24 hours"):
+    with pytest.raises(SoakEvidenceError, match="86400 seconds"):
         verify_soak(
             [_record("2030-01-01T00:00:00+00:00"), _record("2030-01-01T23:59:59+00:00")],
             max_gap_seconds=90_000,

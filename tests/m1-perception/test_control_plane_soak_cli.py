@@ -110,7 +110,7 @@ def test_soak_verify_reports_the_safe_gate_reason(tmp_path: Path, capsys) -> Non
         )
 
     assert cli_control_plane.main(["soak-verify", "--evidence", str(evidence), "--json"]) == 1
-    assert "soak must cover at least 24 hours" in capsys.readouterr().err
+    assert "soak must cover at least 86400 seconds" in capsys.readouterr().err
 
 
 def test_cloud_soak_commands_persist_only_canonical_remote_observations(

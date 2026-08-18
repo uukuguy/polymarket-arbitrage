@@ -129,7 +129,9 @@ def verify_soak(
             successful_counts.append(int(record["successful_job_count"]))
     duration = int((times[-1] - times[0]).total_seconds())
     if duration < minimum_seconds:
-        raise SoakEvidenceError("soak must cover at least 24 hours")
+        raise SoakEvidenceError(
+            f"soak must cover at least {minimum_seconds} seconds"
+        )
     if kind == _KIND_V2:
         successive_counts = zip(successful_counts, successful_counts[1:])
         if any(current < previous for previous, current in successive_counts):
