@@ -9707,3 +9707,27 @@ one healthy recovery transition may a brand-new 24-hour acceptance window start.
   it also carries a generic compute-upgrade recommendation, but this evidence
   does not prove a paid capacity tier is required. No upgrade, reset, or new
   project has been initiated.
+
+## SESSION 281 — 2026-08-18 (clean formal authority and monitoring-first rollout)
+
+- [AUTHORITY] Recreated the sole formal Supabase authority as project
+  `polyarb` (`lgykffpcsebewvobkbdm`), applied migrations through `017`, and
+  created the bucket-scoped `polyarb-control-plane` R2 authority. Direct
+  preflight is `ready-for-shadow-only`; the R2 check is reachable.
+- [CONTAINMENT] Created independent API-read and transactional-worker database
+  identities in the macOS Keychain. The L2 runtime uses its own restricted
+  evidence role. No migration-admin credential is intended for a long-lived
+  M1 app.
+- [MONITORING] `polyarb-control-api` is deployed as one 256MB machine; external
+  `/healthz` and `/perception/control-plane` are `available`. The rollout
+  templates and Makefile now have no historical Machine IDs. A one-shot,
+  notification-free `make control-plane-watchdog-verify` requires the live API,
+  app, and exact Machine IDs before any soak can begin.
+- [FLY BLOCKER] Fly's `secrets set` and `secrets import --stage` both return
+  `appcompact ... Could not find App` for freshly deployed non-HTTP worker apps,
+  even though `flyctl status` reports deployed and `machines list` resolves
+  them. Worker apps were deliberately deployed without a DB DSN and stop
+  fail-closed; no collector or soak is running. Do not use plaintext `--env`
+  as a workaround. Next: use the official direct Fly secrets mutation/API path
+  to inject encrypted worker credentials, then deploy the independent alert
+  app, record exact IDs, and run the watchdog gate.
