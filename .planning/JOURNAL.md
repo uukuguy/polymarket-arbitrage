@@ -13,6 +13,9 @@
 - [DECISION] Preserve watchdog's no-Postgres/R2 boundary: private authenticated writer app owns the scoped incident-ledger write role; the existing control API remains read-only.
 - [DECISION] The new authenticated dashboard route is `/control-plane`, which fail-closes when its control-plane read model is unavailable and renders active incident plus bounded detected/recovered ledger.
 - [LEARNING] The current immutable 24-hour acceptance window must not be disturbed by a control API or watchdog topology deployment; complete code/contract work first and deploy after that window passes.
+- [SESSION] Hardened the writer's conflict path so incident events bind to the canonical returned incident key; initial healthy state is a durable no-op. Added Dashboard source configuration and learning note `81-运行异常Dashboard账本.md`; focused tests, typecheck, and planning-status pass.
+- [SESSION] Created the formal Fly application `polyarb-control-runtime-event-writer`; it has no Machine or secrets yet, therefore consumes no instance resources.
+- [BLOCKER] Existing `m1_control_worker` cannot create database roles. Supabase SQL Editor accepts accessibility writes but has not reliably replaced editor contents; an attempted SQL execution was syntax-invalid and did not create the role. Supabase service JWT cannot authenticate to the Management API (401), so it is not an escalation path.
 - [NEXT] Continue with writer-role provisioning, deploy the API/writer/dashboard in a new acceptance topology, then prove one controlled sampler process-loss/recovery creates matching Telegram and dashboard evidence.
 
 ---
