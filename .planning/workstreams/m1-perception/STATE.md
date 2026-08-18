@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: final cloud acceptance is collecting immutable evidence; do not change the topology or declare completion before its 24-hour verifier passes
-last_updated: "2026-08-19T01:41:00+08:00"
+stopped_at: external watchdog supervisor is provisioned but its Cloudflare Cron trigger needs the account's one-time workers.dev subdomain initialization; final acceptance is intentionally reset only after the production fault/recovery proof
+last_updated: "2026-08-19T02:05:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -38,6 +38,14 @@ progress:
   ledger. The production dashboard exposes current evidence and that ledger at
   `/control-plane`.
 
+- **Independent monitor-of-monitor:** source-aware dashboard events and the
+  dependency-free Cloudflare Worker package are committed. Its dedicated KV
+  namespace and least-privilege secrets are provisioned, but Cloudflare rejects
+  Cron registration until this account initializes a `workers.dev` subdomain.
+  The public Worker route is disabled. Do not claim this boundary live, or
+  restart the final acceptance clock, before a real scheduled healthy run and
+  one controlled alert stop/recovery prove paired Telegram and Dashboard events.
+
 - **Credential/runtime invariant:** Fly detached Machines retain duplicate
   same-name environment values on update. Runtime commands therefore map only
   dedicated versioned variables; all database runtime roles use the Supabase
@@ -63,15 +71,16 @@ progress:
 | Transactional authority and fenced jobs | migrations, API, workers, lease/receipt contracts | complete |
 | Structure/Quote cloud worker migration | three independent fixed-role workers and advancing durable successes | complete |
 | Process-loss recovery | fenced R2-before-receipt takeover evidence for both job classes | complete |
-| Immediate fault visibility | independent watchdog, Telegram, Dashboard incident/recovery ledger | complete |
-| Continuous final-topology acceptance | cloud evidence verifier | in progress: full 24 hours required |
+| Immediate fault visibility | Fly watchdog, Telegram, Dashboard incident/recovery ledger; external watchdog supervisor awaits one Cloudflare account initialization | in progress |
+| Continuous final-topology acceptance | cloud evidence verifier | paused pending new baseline after external-supervisor proof |
 
 ## Resume
 
-1. Use the read-only cloud verifier and exact watchdog gate; do not restart or
-   reconfigure any acceptance target while the run is active.
-2. If an alert opens, diagnose from API, Machine state, and dashboard ledger;
-   repair the smallest failing boundary, then start a fresh uniquely named
-   formal run rather than relabeling prior evidence.
-3. After the 24-hour verifier passes, perform the final topology/document audit
-   and only then mark Phase 05.6 and the M1 goal complete.
+1. Initialize the Cloudflare account's `workers.dev` subdomain once, then run
+   `make control-plane-watchdog-supervisor-deploy` and prove its scheduled
+   healthy observation.
+2. Stop/start only the alert Machine once; require the external source's
+   Telegram and Dashboard `detected`/`recovered` pair, then begin a new formal
+   cloud-soak baseline.
+3. After that run's 24-hour verifier passes, perform the final topology/document
+   audit and only then mark Phase 05.6 and the M1 goal complete.

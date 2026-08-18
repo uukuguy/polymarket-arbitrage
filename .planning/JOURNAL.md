@@ -9802,6 +9802,34 @@ exercise one deliberate, bounded failure/recovery alert path and record the
 result. Rotate/revoke one-hour bootstrap credential after confirming no
 remaining app depends on it.
 
+## SESSION 289 — 2026-08-19 (Dashboard-complete monitor-of-monitor boundary)
+
+- [IMPLEMENTED] The private runtime event writer now accepts a bounded optional
+  `source` and persists it in the incident event detail. Existing Fly watchdog
+  events retain their original default source; a new independent observer will
+  be rendered as `cloudflare-watchdog-supervisor` in the dashboard ledger.
+- [IMPLEMENTED] Added a dependency-free Cloudflare Cron Worker with exact alert
+  Machine identity checks, Fly start-event liveness detection, transition-only
+  Telegram/writer fanout, deterministic SHA-256 writer idempotency, and a
+  dedicated KV transition cache. It has no database, R2, market, scheduler, or
+  wallet credential. Node and targeted Python contracts pass.
+- [PROVISIONED] The dedicated KV namespace and four least-privilege Worker
+  secrets have been created. The writer image was updated and its `/healthz`
+  check is healthy.
+- [BLOCKED EXTERNALLY] Cloudflare uploaded the Worker but rejected the Cron
+  schedule with API error `10063`: this account has never initialized a
+  `workers.dev` subdomain. This is a one-time account UI initialization, not a
+  project, organization, database, Fly, R2, or code fault. The in-app browser
+  runtime had no available browser binding, so it cannot perform that account
+  UI click in this session.
+
+[NEXT] Open the Cloudflare Workers landing page once while signed in to
+initialize/confirm the `workers.dev` subdomain, then immediately run
+`make control-plane-watchdog-supervisor-deploy`, tail one scheduled healthy
+run, perform the bounded alert-Machine stop/start proof, confirm paired
+Cloudflare-source Telegram + Dashboard events, and start a fresh 24-hour
+formal acceptance baseline.
+
 ## SESSION 283 — 2026-08-18 (independent evidence runtime and restart-loop finding)
 
 - [RESOLVED] The Fly secrets blocker is closed for the formal apps. The same
