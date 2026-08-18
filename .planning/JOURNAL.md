@@ -9963,3 +9963,15 @@ passes, then perform the final requirement audit.
 baseline, execute the two read-only commands in `05.6-FINAL-AUDIT.md`; only a
 default-bound cloud verifier PASS plus a healthy source-aware Dashboard closes
 M1.
+
+## SESSION 293 — 2026-08-19 (formal topology test drift removed)
+
+- [REPAIRED] The last red deployment-template test asserted a superseded
+  five-role worker plus in-process soak sampler. The formal production design is
+  intentionally three fixed transactional worker roles, with evidence sampling
+  and alerting isolated into their own apps. The test now asserts that actual
+  boundary; template plus rollout tests pass. No deployed machine, command,
+  credential, schedule or formal evidence was changed.
+
+[NEXT] Continue read-only qualification of `m1-formal-20260818T1820Z`; do not
+use an old topology test or an earlier soak run as final evidence.
