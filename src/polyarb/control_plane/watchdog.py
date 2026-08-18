@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +102,46 @@ class ProgressGate:
                 *observation.failures,
                 f"control-api:job-progress-stalled:{int(elapsed.total_seconds())}s",
             ),
+        )
+
+
+class SoakEvidenceGate:
+    """Fail closed when the independent sampler stops appending evidence."""
+
+    def __init__(self, *, max_age: timedelta) -> None:
+        if max_age.total_seconds() <= 0:
+            raise ValueError("max_age must be positive")
+        self._max_age = max_age
+
+    def apply(
+        self,
+        observation: RuntimeObservation,
+        control_api_payload: Mapping[str, object] | None,
+        *,
+        now: datetime,
+    ) -> RuntimeObservation:
+        if control_api_payload is None:
+            return observation
+        evidence = control_api_payload.get("soak_evidence")
+        observed_at = evidence.get("latest_observed_at") if isinstance(evidence, Mapping) else None
+        if not isinstance(observed_at, str):
+            return RuntimeObservation(
+                healthy=False,
+                failures=(*observation.failures, "control-api:invalid-soak-evidence"),
+            )
+        try:
+            timestamp = datetime.fromisoformat(observed_at).astimezone(UTC)
+        except ValueError:
+            return RuntimeObservation(
+                healthy=False,
+                failures=(*observation.failures, "control-api:invalid-soak-evidence"),
+            )
+        age = now.astimezone(UTC) - timestamp
+        if age <= self._max_age:
+            return observation
+        return RuntimeObservation(
+            healthy=False,
+            failures=(*observation.failures, f"evidence:sample-stale:{int(age.total_seconds())}s"),
         )
 
 

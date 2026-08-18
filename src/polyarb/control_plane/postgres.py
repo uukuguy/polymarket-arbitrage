@@ -3762,6 +3762,13 @@ class PostgresControlPlane:
                 }
                 for row in cursor.fetchall()
             ]
+            cursor.execute(
+                """
+                SELECT run_id, observed_at FROM m1_soak_observations
+                ORDER BY observed_at DESC, run_id DESC LIMIT 1
+                """
+            )
+            latest_soak_observation = cursor.fetchone()
         age = None if oldest is None else oldest["age_seconds"]
         quote_retry_age = (
             None if retryable_quote_age is None else retryable_quote_age["age_seconds"]
@@ -3798,6 +3805,14 @@ class PostgresControlPlane:
                 ),
                 "recent_events": runtime_events,
             },
+            "soak_evidence": (
+                None
+                if latest_soak_observation is None
+                else {
+                    "latest_run_id": str(latest_soak_observation["run_id"]),
+                    "latest_observed_at": latest_soak_observation["observed_at"].isoformat(),
+                }
+            ),
             "pending_alert_outbox": outbox,
             "queue_health": queue_health,
             "quote": {

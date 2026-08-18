@@ -67,6 +67,20 @@ def test_watchdog_pages_when_runnable_work_stops_making_durable_progress() -> No
     assert stalled.failures == ("control-api:job-progress-stalled:301s",)
 
 
+def test_watchdog_pages_when_latest_cloud_evidence_sample_is_stale() -> None:
+    from polyarb.control_plane.watchdog import RuntimeObservation, SoakEvidenceGate
+
+    gate = SoakEvidenceGate(max_age=timedelta(minutes=15))
+    observation = gate.apply(
+        RuntimeObservation(healthy=True, failures=()),
+        {"soak_evidence": {"latest_observed_at": "2026-08-18T14:00:00+00:00"}},
+        now=datetime(2026, 8, 18, 14, 15, 1, tzinfo=UTC),
+    )
+
+    assert observation.healthy is False
+    assert observation.failures == ("evidence:sample-stale:901s",)
+
+
 def test_watchdog_message_is_actionable_without_leaking_secrets() -> None:
     from polyarb.control_plane.watchdog import RuntimeObservation, render_alert
 

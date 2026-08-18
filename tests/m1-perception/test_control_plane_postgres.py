@@ -138,6 +138,10 @@ def test_cloud_soak_ledger_is_append_only_and_idempotent(
     control_plane.append_soak_observation(run_id="formal-cloud-v1", record=first)
 
     assert control_plane.read_soak_observations("formal-cloud-v1") == (first,)
+    assert control_plane.operational_snapshot(now=_now())["soak_evidence"] == {
+        "latest_run_id": "formal-cloud-v1",
+        "latest_observed_at": "2030-01-01T00:00:00+00:00",
+    }
 
 
 def _now() -> datetime:

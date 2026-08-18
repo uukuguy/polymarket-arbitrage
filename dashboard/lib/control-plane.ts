@@ -11,6 +11,7 @@ export type ControlPlaneRead =
       job_counts: Record<string, number>;
       open_incidents: Array<{ incident_key: string; component: string; severity: string; summary: string }>;
       runtime_watchdog: { current: { summary: string; opened_at?: string } | null; recent_events: RuntimeEvent[] };
+      soak_evidence: { latest_run_id: string; latest_observed_at: string } | null;
     };
 
 function validEvent(value: unknown): value is RuntimeEvent {
@@ -33,7 +34,13 @@ export async function readControlPlane(): Promise<ControlPlaneRead> {
     const data = payload as Record<string, unknown>;
     const runtime = data.runtime_watchdog as Record<string, unknown> | undefined;
     const recent = runtime?.recent_events;
-    if (data.status !== "available" || !runtime || !Array.isArray(recent) || !recent.every(validEvent)) {
+    const evidence = data.soak_evidence;
+    const validEvidence = evidence === null || (
+      typeof evidence === "object" && evidence !== null &&
+      typeof (evidence as Record<string, unknown>).latest_run_id === "string" &&
+      typeof (evidence as Record<string, unknown>).latest_observed_at === "string"
+    );
+    if (data.status !== "available" || !runtime || !Array.isArray(recent) || !recent.every(validEvent) || !validEvidence) {
       throw new Error("invalid control-plane read model");
     }
     return data as ControlPlaneRead;
