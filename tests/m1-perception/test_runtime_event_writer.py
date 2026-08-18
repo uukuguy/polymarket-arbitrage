@@ -65,3 +65,83 @@ def test_writer_returns_existing_receipt_for_an_idempotent_retry(monkeypatch) ->
         )
     assert response.status_code == 201
     assert response.json() == {"status": "duplicate", "incident_event_id": "event-existing"}
+
+
+def test_writer_records_detected_event_against_conflict_returned_incident(monkeypatch) -> None:
+    """The unique incident row, not a locally generated UUID, owns the event."""
+    monkeypatch.setenv("POLYARB_RUNTIME_EVENT_WRITER_TOKEN", "test-token")
+    from polyarb.control_plane import runtime_event_writer
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, sql, _params=()): self.calls.append(sql)
+        def fetchone(self):
+            if len(self.calls) == 1:
+                return None
+            if len(self.calls) == 2:
+                return None
+            return {"incident_key": "persisted-incident"}
+
+    cursor = Cursor()
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def cursor(self, **_kwargs): return cursor
+
+    monkeypatch.setattr(runtime_event_writer.psycopg, "connect", lambda _dsn: Connection())
+    app = Starlette(
+        routes=[
+            Route("/runtime-events", runtime_event_writer.append_runtime_event, methods=["POST"])
+        ]
+    )
+    app.state.dsn = "postgresql://not-used"
+    with TestClient(app) as client:
+        response = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "b" * 64},
+            json={
+                "kind": "detected",
+                "failures": ["control-api:timeout"],
+                "occurred_at": "2026-08-18T15:00:00+00:00",
+            },
+        )
+    assert response.status_code == 201
+    assert response.json()["incident_key"] == "persisted-incident"
+    assert "RETURNING incident_key" in cursor.calls[2]
+
+
+def test_writer_accepts_initial_recovery_as_noop(monkeypatch) -> None:
+    monkeypatch.setenv("POLYARB_RUNTIME_EVENT_WRITER_TOKEN", "test-token")
+    from polyarb.control_plane import runtime_event_writer
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, _sql, _params=()): return None
+        def fetchone(self): return None
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def cursor(self, **_kwargs): return Cursor()
+
+    monkeypatch.setattr(runtime_event_writer.psycopg, "connect", lambda _dsn: Connection())
+    app = Starlette(
+        routes=[
+            Route("/runtime-events", runtime_event_writer.append_runtime_event, methods=["POST"])
+        ]
+    )
+    app.state.dsn = "postgresql://not-used"
+    with TestClient(app) as client:
+        response = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "c" * 64},
+            json={"kind": "recovered", "failures": [], "occurred_at": "2026-08-18T15:00:00+00:00"},
+        )
+    assert response.status_code == 201
+    assert response.json() == {"status": "noop"}

@@ -55,15 +55,20 @@ async def append_runtime_event(request: Request) -> JSONResponse:
             return JSONResponse({"status": "duplicate", "incident_event_id": existing["incident_event_id"]}, status_code=201)
         cursor.execute("SELECT incident_key FROM m1_incidents WHERE dedupe_key='runtime-watchdog' FOR UPDATE")
         row = cursor.fetchone()
-        incident_key = str(row["incident_key"]) if row else str(uuid4())
         if kind == "detected":
             cursor.execute("""INSERT INTO m1_incidents (incident_key,dedupe_key,component,severity,state,summary,opened_at,updated_at)
                 VALUES (%s,'runtime-watchdog','runtime-watchdog','critical','open','Independent M1 runtime watchdog detected an unhealthy state',%s,%s)
                 ON CONFLICT (dedupe_key) DO UPDATE SET state='open', severity='critical', summary=EXCLUDED.summary, updated_at=EXCLUDED.updated_at
-            """, (incident_key, occurred_at, occurred_at))
+                RETURNING incident_key
+            """, (str(uuid4()), occurred_at, occurred_at))
+            incident_key = str(cursor.fetchone()["incident_key"])
         else:
             if row is None:
-                return JSONResponse({"error": "no-open-runtime-incident"}, status_code=409)
+                # A watchdog's first healthy observation has no preceding
+                # incident.  It is a valid no-op, rather than a false writer
+                # failure that would page Telegram.
+                return JSONResponse({"status": "noop"}, status_code=201)
+            incident_key = str(row["incident_key"])
             cursor.execute("UPDATE m1_incidents SET state='resolved', resolved_at=%s, updated_at=%s WHERE incident_key=%s", (occurred_at, occurred_at, incident_key))
         event_id = str(uuid4())
         cursor.execute("""INSERT INTO m1_incident_events (incident_event_id,incident_key,kind,detail,idempotency_key,occurred_at)
