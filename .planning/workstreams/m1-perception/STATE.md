@@ -5,7 +5,7 @@ milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
 stopped_at: formal cloud acceptance is running; do not declare completion before its immutable 24-hour verifier passes
-last_updated: "2026-08-19T00:16:00+08:00"
+last_updated: "2026-08-19T01:03:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -34,9 +34,19 @@ progress:
   Both detected and recovered transitions are durably visible in the dashboard
   ledger as well as sent through the alert path. Earlier evidence runs remain
   immutable audit history only. The sole active 24-hour acceptance run is
-  `m1-formal-20260818T160635Z`, baseline `2026-08-18T16:11:53Z`; it has a
-  durable first append and early valid verifier pass, but must not be called
-  complete before the full 24-hour fail-closed verifier passes.
+  `m1-formal-20260818T1655Z`, baseline `2026-08-18T16:55:40Z`; its first
+  independent sample was recorded at `16:56:04Z`. It must not be called
+  complete before the full fail-closed 24-hour verifier passes.
+
+- **Latest runtime repair (2026-08-19 00:54Z):** Fly cannot use the
+  Supabase direct IPv6 endpoint reliably. The dedicated worker role now uses
+  the formal project's IPv4 Session Pooler with a project-qualified login.
+  Versioned Machine environment variables plus explicit command mapping are
+  required because duplicate same-name Machine values are retained by the
+  detached-Machine API. All three workers resumed durable job progress and
+  expired leases returned to zero. The evidence sampler and independent
+  watchdog are healthy; production Dashboard now renders the immutable
+  evidence run/timestamp card and the durable incident ledger.
 
 - **Formal read-only incident repaired (2026-08-17 21:50Z):** `formal-cloud-v1`
   failed and remains immutable failed evidence after every Worker session inherited

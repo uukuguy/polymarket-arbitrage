@@ -7,6 +7,17 @@
 > 每次会话结尾：Claude 主动追加本次进展
 > 格式：`[TYPE] 内容`，TYPE ∈ {SESSION, DECISION, LEARNING, BLOCKER, NEXT, NOTE}
 
+## 2026-08-19 — formal runtime recovery, IPv4 pooler, and evidence dashboard
+
+- [ROOT CAUSE / REPAIRED] Fly worker Machines cannot use Supabase's direct IPv6 database endpoint reliably. The current project's free IPv4 Session Pooler is `aws-0-eu-west-2.pooler.supabase.com:5432`; the restricted `m1_control_worker.lgykffpcsebewvobkbdm` login was verified before deployment. Worker and evidence runtime commands now map dedicated versioned DSN variables to that pooler rather than inheriting stale direct-connection values.
+- [ROOT CAUSE / REPAIRED] Detached Fly Machine updates retain duplicate same-name environment values. Runtime credential rotation therefore uses fresh versioned variables and explicit entrypoint mapping, rather than assuming an in-place secret overwrite.
+- [SECURITY] A newly minted cross-app observer token was verified from the evidence Machine with a real Machines API HTTP 200 call; the exposed predecessor was revoked. No token values are retained here.
+- [RUNTIME] All three transaction workers recovered: durable succeeded jobs advanced from 1,453 to 1,467 during recovery and expired leases returned to zero. New immutable acceptance run `m1-formal-20260818T1655Z` recorded its baseline at `2026-08-18T16:55:40Z` and first independent cloud sample at `16:56:04Z`.
+- [MONITORING] The independent watchdog recorded the temporary worker/sampler failures and then emitted consecutive healthy checks. The control API now exposes the latest immutable sample (`soak_evidence`) and stale samples fail the watchdog gate.
+- [DASHBOARD] Production deployment `polymarket-arbitrage-ebon.vercel.app` now renders the **Immutable cloud evidence** card. Its production HTML and API data were checked against run `m1-formal-20260818T1655Z`; the active incident count is zero.
+
+[NEXT] Let `m1-formal-20260818T1655Z` collect continuous independent samples while periodically checking durable evidence freshness, job progress, worker identity, and watchdog recovery semantics. Do not claim 24-hour acceptance until the fail-closed verifier passes that full window.
+
 ## 2026-08-19 — evidence sampler configuration repair and dashboard proof
 
 - [SESSION] Formal evidence sampler configuration drift was found before final acceptance: the Fly app is a detached Machine with no release, so app-level staged secrets do not replace the Machine's injected runtime values.
