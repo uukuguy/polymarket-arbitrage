@@ -3721,7 +3721,10 @@ class PostgresControlPlane:
             cursor.execute(
                 """
                 SELECT summary, opened_at FROM m1_incidents
-                WHERE dedupe_key = 'runtime-watchdog' AND state <> 'resolved'
+                WHERE (dedupe_key = 'runtime-watchdog'
+                       OR dedupe_key LIKE 'runtime-watchdog:' || chr(37))
+                  AND state <> 'resolved'
+                ORDER BY updated_at DESC, incident_key DESC LIMIT 1
                 """
             )
             runtime_current = cursor.fetchone()
@@ -3731,6 +3734,7 @@ class PostgresControlPlane:
                 FROM m1_incident_events e
                 JOIN m1_incidents i ON i.incident_key = e.incident_key
                 WHERE i.dedupe_key = 'runtime-watchdog'
+                   OR i.dedupe_key LIKE 'runtime-watchdog:' || chr(37)
                 ORDER BY e.occurred_at DESC, e.incident_event_id DESC LIMIT %s
                 """,
                 (sample_limit,),

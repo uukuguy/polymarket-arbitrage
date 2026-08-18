@@ -2982,6 +2982,44 @@ def test_operational_snapshot_reads_fenced_work_and_alert_intent(
     ]
 
 
+def test_operational_snapshot_projects_external_runtime_watchdog_source(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """Dashboard must not hide an open external monitor incident."""
+    now = datetime(2026, 8, 18, tzinfo=UTC)
+    control_plane.record_incident_event(
+        incident_key="external-watchdog-a",
+        dedupe_key="runtime-watchdog:cloudflare-watchdog-supervisor",
+        component="runtime-watchdog",
+        severity="critical",
+        summary="External watchdog found alert unavailable",
+        kind="detected",
+        detail={"source": "cloudflare-watchdog-supervisor", "failures": ["machine:alert:stopped"]},
+        idempotency_key="external-watchdog-a:detected",
+        channels=("telegram",),
+        now=now,
+    )
+
+    runtime_watchdog = control_plane.operational_snapshot(now=now)["runtime_watchdog"]
+
+    assert runtime_watchdog == {
+        "current": {
+            "summary": "External watchdog found alert unavailable",
+            "opened_at": "2026-08-18T00:00:00+00:00",
+        },
+        "recent_events": [
+            {
+                "kind": "detected",
+                "occurred_at": "2026-08-18T00:00:00+00:00",
+                "detail": {
+                    "source": "cloudflare-watchdog-supervisor",
+                    "failures": ["machine:alert:stopped"],
+                },
+            }
+        ],
+    }
+
+
 def test_operational_snapshot_projects_bounded_next_claimable_per_pool(
     control_plane: PostgresControlPlane,
 ) -> None:
