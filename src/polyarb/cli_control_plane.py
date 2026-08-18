@@ -192,6 +192,11 @@ def _parser() -> argparse.ArgumentParser:
     watchdog_serve.add_argument("--control-api-url", required=True)
     watchdog_serve.add_argument("--fly-app", required=True)
     watchdog_serve.add_argument("--machine-id", action="append", required=True)
+    watchdog_serve.add_argument(
+        "--watchdog-once",
+        action="store_true",
+        help="perform one credential-free notification-free runtime check and exit",
+    )
     watchdog_serve.add_argument("--interval-seconds", type=float, default=30.0)
     watchdog_serve.add_argument("--json", action="store_true")
     render_rollout = subcommands.add_parser(
@@ -918,9 +923,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "watchdog-serve":
         try:
-            settings = Settings()
             if not os.environ.get("POLYARB_FLY_API_TOKEN", "").strip():
                 raise ValueError("watchdog requires POLYARB_FLY_API_TOKEN")
+            if args.watchdog_once:
+                observation = _read_runtime_watchdog_observation(args)
+                _write(
+                    {
+                        "status": "healthy" if observation.healthy else "unhealthy",
+                        "failures": list(observation.failures),
+                    },
+                    as_json=args.json,
+                )
+                return 0 if observation.healthy else 1
+            settings = Settings()
             result = asyncio.run(_run_runtime_watchdog_service(args, settings))
             _write(result, as_json=args.json)
             return 0
