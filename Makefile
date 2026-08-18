@@ -693,7 +693,7 @@ control-plane-cloud-soak-verify:
 control-plane-cloud-soak-start:
 	@test -n "$(run_id)" || (echo "usage: POLYARB_SUPABASE_DB_DSN=<scoped-dsn> POLYARB_FLY_API_TOKEN=<read-token> make control-plane-cloud-soak-start run_id=<run-id>" >&2; exit 2)
 	@test -n "$$POLYARB_SUPABASE_DB_DSN" -a -n "$$POLYARB_FLY_API_TOKEN" || (echo "ERROR: explicitly export scoped DSN and Fly read token" >&2; exit 2)
-	@uv run python -m polyarb.cli_control_plane cloud-soak-start --run-id "$(run_id)" --control-api-url "https://polyarb-control-api.fly.dev" --fly-app "polyarb-control-worker-m1" --machine-id "e82d1220b2d138" --machine-id "683e46ea500dd8" --machine-id "4d895231f66748" --json
+	@uv run python -m polyarb.cli_control_plane cloud-soak-start --run-id "$(run_id)" --control-api-url "https://polyarb-control-api.fly.dev/perception/control-plane" --fly-app "polyarb-control-worker-m1" --machine-id "e82d1220b2d138" --machine-id "683e46ea500dd8" --machine-id "4d895231f66748" --json
 
 ## control-plane-api-serve: Run the independent Postgres-only control-plane HTTP read service. Requires enable=1 and DSN; no SQLite, R2 or worker starts.
 control-plane-api-serve:
