@@ -9731,3 +9731,33 @@ one healthy recovery transition may a brand-new 24-hour acceptance window start.
   as a workaround. Next: use the official direct Fly secrets mutation/API path
   to inject encrypted worker credentials, then deploy the independent alert
   app, record exact IDs, and run the watchdog gate.
+
+## SESSION 282 — 2026-08-18 (Fly token-domain repair and live M1 start)
+
+- [ROOT CAUSE] The existing `flyctl auth` user token could manage Machines but
+  could not access Fly's current secret-vault domain for newly created Apps.
+  This produced the misleading `appcompact ... Could not find App` response.
+  A scoped organization deploy token can access that vault; this is an
+  authorization-domain mismatch, not an app-name, capacity, Supabase, or R2
+  failure.
+- [LIVE] `polyarb-control-worker-m1` now has exactly three started 1GB
+  Machines: coordinator `e82d1220b2d138`, structure-range `683e46ea500dd8`,
+  and quote-batch `4d895231f66748`. Their five encrypted worker inputs were
+  staged before Machine creation. The coordinator has successfully completed
+  structure-source jobs; the public control API reports runnable/succeeded
+  work, zero expired leases, zero open circuits, and empty quote/range queues.
+- [MONITORING] `polyarb-control-alert` runs one 256MB independent watchdog
+  Machine `d8d5dd0a424e68`. It checks the public control API plus those exact
+  three IDs every 30 seconds. Consecutive cloud heartbeats are healthy. The
+  local one-shot Makefile verifier also returns healthy.
+- [ROOT CAUSE / REPAIRED] The Telegram token in `.env` is revoked (official
+  `sendMessage` returned HTTP 401); the current Keychain credential delivers
+  successfully. Alert Vault was rotated to that Keychain credential and the
+  watchdog was recreated. Its Fly runtime token is a 30-day Keychain-backed
+  organization credential, not the earlier one-hour bootstrap token.
+
+[NEXT] Treat the collector as live but do not begin a 24-hour acceptance clock
+yet. First keep observing live worker progress and watchdog heartbeats, then
+exercise one deliberate, bounded failure/recovery alert path and record the
+result. Rotate/revoke one-hour bootstrap credential after confirming no
+remaining app depends on it.
