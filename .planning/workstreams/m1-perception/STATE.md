@@ -5,7 +5,7 @@ milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
 stopped_at: formal cloud acceptance is running; do not declare completion before its immutable 24-hour verifier passes
-last_updated: "2026-08-18T14:36:30Z"
+last_updated: "2026-08-19T00:16:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -31,10 +31,12 @@ progress:
 
 - **Monitoring and acceptance:** watchdog checks the API, all exact worker
   IDs, sampler state, and fresh Fly process restart counters every 30 seconds.
-  A controlled sampler process-loss/recovery path was proven. Immutable
-  `m1-formal-20260818T143000Z` evidence began at 14:30:13Z, passed its early
-  345-second continuity/progress gate, and remains the only active 24-hour
-  acceptance run.
+  Both detected and recovered transitions are durably visible in the dashboard
+  ledger as well as sent through the alert path. Earlier evidence runs remain
+  immutable audit history only. The sole active 24-hour acceptance run is
+  `m1-formal-20260818T160635Z`, baseline `2026-08-18T16:11:53Z`; it has a
+  durable first append and early valid verifier pass, but must not be called
+  complete before the full 24-hour fail-closed verifier passes.
 
 - **Formal read-only incident repaired (2026-08-17 21:50Z):** `formal-cloud-v1`
   failed and remains immutable failed evidence after every Worker session inherited

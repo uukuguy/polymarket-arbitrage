@@ -7,6 +7,16 @@
 > 每次会话结尾：Claude 主动追加本次进展
 > 格式：`[TYPE] 内容`，TYPE ∈ {SESSION, DECISION, LEARNING, BLOCKER, NEXT, NOTE}
 
+## 2026-08-19 — evidence sampler configuration repair and dashboard proof
+
+- [SESSION] Formal evidence sampler configuration drift was found before final acceptance: the Fly app is a detached Machine with no release, so app-level staged secrets do not replace the Machine's injected runtime values.
+- [ROOT CAUSE / REPAIRED] Repeated updates of same-name Machine environment variables retained old `POLYARB_FLY_API_TOKEN` and `POLYARB_SOAK_RUN_ID`, causing Fly Machines API 403s and a mismatched immutable run. The sampler now receives a 30-day cross-app observer token and run ID through dedicated variables mapped only by its entrypoint; both were proved from inside the Machine before sampling resumed.
+- [MONITORING] The independent watchdog detected the sampler replacement/restart loop and the Dashboard ledger recorded explicit `detected` events (`created`, `restart-count`) followed by `recovered`. The current control-plane API shows no open incident and exposes those bounded records in `runtime_watchdog.recent_events`.
+- [ACCEPTANCE] Historical runs `m1-formal-20260818T143000Z` and `m1-formal-20260818T160105Z` remain immutable audit evidence only. The sole qualifying run is `m1-formal-20260818T160635Z`, with immutable baseline at `2026-08-18T16:11:53Z` and first append at `16:14:12Z`. Its valid bounded verifier passed (two samples, 139 seconds, successful jobs advancing); this is not a 24-hour completion claim.
+- [CLEANUP] Revoked the two unused diagnostic Fly tokens; only the required cross-app observer token remains for this sampler.
+
+[NEXT] Preserve this topology unchanged, periodically verify sampler/API/watchdog continuity from the durable ledger, then run the fail-closed 24-hour verifier for `m1-formal-20260818T160635Z` after its full window.
+
 ## 2026-08-18 — runtime watchdog dashboard ledger
 
 - [SESSION] User required cloud dashboard evidence for every independent watchdog failure/recovery in addition to Telegram.
