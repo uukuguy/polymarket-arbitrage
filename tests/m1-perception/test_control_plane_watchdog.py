@@ -157,3 +157,42 @@ def test_watchdog_service_emits_a_heartbeat_for_every_completed_check() -> None:
 
     assert result == {"status": "stopped", "checks": 2, "alerts": 1}
     assert [heartbeat.healthy for heartbeat in heartbeats] == [False, False]
+
+
+def test_watchdog_persists_each_state_transition_before_telegram() -> None:
+    from polyarb.control_plane.watchdog import RuntimeObservation, run_watchdog_service
+
+    observations = iter(
+        (
+            RuntimeObservation(healthy=False, failures=("machine:evidence/restart",)),
+            RuntimeObservation(healthy=True, failures=()),
+        )
+    )
+    delivered: list[str] = []
+    persisted: list[tuple[bool, tuple[str, ...]]] = []
+    stop = asyncio.Event()
+
+    async def persist(observation: RuntimeObservation, *, recovered: bool) -> None:
+        persisted.append((recovered, observation.failures))
+
+    async def send(text: str) -> None:
+        assert persisted
+        delivered.append(text)
+
+    async def wait(_seconds: float) -> None:
+        if len(delivered) == 2:
+            stop.set()
+
+    result = asyncio.run(
+        run_watchdog_service(
+            observe=lambda: next(observations),
+            send=send,
+            persist_transition=persist,
+            interval_seconds=30,
+            stop_event=stop,
+            wait=wait,
+        )
+    )
+
+    assert result == {"status": "stopped", "checks": 2, "alerts": 2}
+    assert persisted == [(False, ("machine:evidence/restart",)), (True, ())]

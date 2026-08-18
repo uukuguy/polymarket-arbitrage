@@ -140,6 +140,7 @@ async def run_watchdog_service(
     *,
     observe: Callable[[], RuntimeObservation],
     send: Callable[[str], Awaitable[None]],
+    persist_transition: Callable[..., Awaitable[None]] | None = None,
     on_check: Callable[[RuntimeObservation], Awaitable[None]] | None = None,
     interval_seconds: float,
     stop_event: asyncio.Event,
@@ -165,6 +166,8 @@ async def run_watchdog_service(
         if on_check is not None:
             await on_check(observation)
         if previous_healthy is None or observation.healthy != previous_healthy:
+            if persist_transition is not None:
+                await persist_transition(observation, recovered=observation.healthy)
             await send(render_alert(observation, recovered=observation.healthy))
             alerts += 1
         previous_healthy = observation.healthy

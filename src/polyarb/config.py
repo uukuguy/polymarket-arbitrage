@@ -393,6 +393,10 @@ class Settings(BaseSettings):
         description="Telegram bot token — direct fallback if Better Stack outage",
     )
     telegram_chat_id: str = Field(default="")
+    # The independent watchdog may submit a bounded transition envelope here,
+    # but never receives a database/R2 credential.
+    runtime_event_writer_url: str = Field(default="")
+    runtime_event_writer_token: SecretStr = Field(default=SecretStr(""))
     # Transactional data workers may create alert intent but must not receive
     # Telegram credentials. This non-secret policy selects which durable
     # outbox channels they emit; the isolated alert worker owns delivery keys.
