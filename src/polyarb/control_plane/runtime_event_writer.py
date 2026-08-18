@@ -49,20 +49,25 @@ async def append_runtime_event(request: Request) -> JSONResponse:
             raise ValueError
     except (KeyError, TypeError, ValueError):
         return JSONResponse({"error": "invalid-runtime-event"}, status_code=400)
+    incident_dedupe_key = (
+        "runtime-watchdog"
+        if source == "independent-runtime-watchdog"
+        else f"runtime-watchdog:{source}"
+    )
     dsn = request.app.state.dsn
     with psycopg.connect(dsn) as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute("SELECT incident_event_id FROM m1_incident_events WHERE idempotency_key=%s", (f"runtime:{key}",))
         existing = cursor.fetchone()
         if existing is not None:
             return JSONResponse({"status": "duplicate", "incident_event_id": existing["incident_event_id"]}, status_code=201)
-        cursor.execute("SELECT incident_key FROM m1_incidents WHERE dedupe_key='runtime-watchdog' FOR UPDATE")
+        cursor.execute("SELECT incident_key FROM m1_incidents WHERE dedupe_key=%s FOR UPDATE", (incident_dedupe_key,))
         row = cursor.fetchone()
         if kind == "detected":
             cursor.execute("""INSERT INTO m1_incidents (incident_key,dedupe_key,component,severity,state,summary,opened_at,updated_at)
-                VALUES (%s,'runtime-watchdog','runtime-watchdog','critical','open','Independent M1 runtime watchdog detected an unhealthy state',%s,%s)
+                VALUES (%s,%s,'runtime-watchdog','critical','open','Independent M1 runtime watchdog detected an unhealthy state',%s,%s)
                 ON CONFLICT (dedupe_key) DO UPDATE SET state='open', severity='critical', summary=EXCLUDED.summary, updated_at=EXCLUDED.updated_at
                 RETURNING incident_key
-            """, (str(uuid4()), occurred_at, occurred_at))
+            """, (str(uuid4()), incident_dedupe_key, occurred_at, occurred_at))
             incident_key = str(cursor.fetchone()["incident_key"])
         else:
             if row is None:

@@ -47,15 +47,19 @@ def test_writer_returns_existing_receipt_for_an_idempotent_retry(monkeypatch) ->
     from polyarb.control_plane import runtime_event_writer
 
     class Cursor:
+        def __init__(self) -> None:
+            self.parameters: list[object] = []
         def __enter__(self): return self
         def __exit__(self, *_args): return None
-        def execute(self, _sql, _params=()): return None
+        def execute(self, _sql, params=()): self.parameters.append(params)
         def fetchone(self): return {"incident_event_id": "event-existing"}
+
+    cursor = Cursor()
 
     class Connection:
         def __enter__(self): return self
         def __exit__(self, *_args): return None
-        def cursor(self, **_kwargs): return Cursor()
+        def cursor(self, **_kwargs): return cursor
 
     monkeypatch.setattr(runtime_event_writer.psycopg, "connect", lambda _dsn: Connection())
     app = Starlette(
@@ -76,6 +80,7 @@ def test_writer_returns_existing_receipt_for_an_idempotent_retry(monkeypatch) ->
         )
     assert response.status_code == 201
     assert response.json() == {"status": "duplicate", "incident_event_id": "event-existing"}
+    assert cursor.parameters[0] == ("runtime:" + "a" * 64,)
 
 
 def test_writer_records_detected_event_against_conflict_returned_incident(monkeypatch) -> None:
@@ -128,6 +133,7 @@ def test_writer_records_detected_event_against_conflict_returned_incident(monkey
         )
     assert response.status_code == 201
     assert response.json()["incident_key"] == "persisted-incident"
+    assert cursor.parameters[1] == ("runtime-watchdog:cloudflare-watchdog-supervisor",)
     assert "RETURNING incident_key" in cursor.calls[2]
     assert cursor.parameters[-1][3] == {
         "failures": ["control-api:timeout"],
