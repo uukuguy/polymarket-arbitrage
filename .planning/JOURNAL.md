@@ -9821,3 +9821,13 @@ full 24-hour no-gap evidence window before final M1 completion audit.
   14:30:13Z (baseline), 14:30:57Z, and 14:35:58Z. This is only an early
   liveness/continuity gate; the 24-hour criterion remains active and must not
   be claimed until the full minimum duration is independently verified.
+
+- [MONITORING HARDENING] Source materialization completed naturally: its 218
+  page window checkpointed through page 203 and then committed, advancing
+  durable successes from 224 to 239 while enqueuing 1,049 fenced Structure
+  range jobs. The certifier's `IncompleteStructureGenerationError` is its
+  intended retryable wait for those receipts, not an incident circuit. Alert
+  image `m1-progress-watchdog-aa314c07` now additionally pages if any
+  runnable/leased work has no succeeded-job advance for five minutes; a normal
+  empty queue remains healthy. It booted and emitted a healthy 14:43:58Z
+  heartbeat.
