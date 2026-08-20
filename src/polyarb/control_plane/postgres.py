@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
 from uuid import uuid4
@@ -15,6 +15,7 @@ from psycopg.types.json import Jsonb
 
 from .models import (
     AlertDeliveryLease,
+    CloudUsageDecision,
     CheckpointReceipt,
     JobLease,
     JobState,
@@ -64,7 +65,6 @@ class IncompleteStructureGenerationError(ControlPlaneError):
 
 class SoakEvidenceConflictError(ControlPlaneError):
     """A cloud soak run or observation conflicts with immutable evidence."""
-
 
 def _quote_batch_leg_payload(leg: QuoteBatchLeg) -> dict[str, str | None]:
     """Keep batch input JSON explicit and independent of routing internals."""
@@ -3566,6 +3566,45 @@ class PostgresControlPlane:
                 ),
             )
         return event_id
+
+    def record_cloud_usage(
+        self, *, source: str, operation: str, bytes_received: int, item_count: int,
+        artifact_key: str, artifact_digest: str, daily_budget_bytes: int, now: datetime,
+    ) -> CloudUsageDecision:
+        self._validate_nonempty(source=source, operation=operation, artifact_key=artifact_key)
+        self._validate_aware(now, "now")
+        if bytes_received < 0 or item_count < 0 or daily_budget_bytes <= 0 or len(artifact_digest) != 64:
+            raise ValueError("invalid cloud usage observation")
+        observation_id = str(uuid4())
+        budget_day = now.astimezone(UTC).date()
+        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"m1-cloud-egress:{budget_day}",))
+            cursor.execute(
+                """INSERT INTO m1_cloud_usage_observations
+                   (observation_id,observed_at,budget_day,source,operation,bytes_received,item_count,artifact_key,artifact_digest)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (observation_id, now, budget_day, source, operation, bytes_received, item_count, artifact_key, artifact_digest),
+            )
+            cursor.execute("SELECT COALESCE(sum(bytes_received),0) AS used FROM m1_cloud_usage_observations WHERE budget_day=%s", (budget_day,))
+            used = int(cursor.fetchone()["used"])
+            ratio = used * 100 // daily_budget_bytes
+            threshold = 90 if ratio >= 90 else 75 if ratio >= 75 else 50 if ratio >= 50 else 0
+            if threshold:
+                dedupe_key = f"cloud-egress:{threshold}:{budget_day.isoformat()}"
+                self._record_incident_event(
+                    cursor,
+                    incident_key=f"{dedupe_key}:{source}",
+                    dedupe_key=dedupe_key,
+                    component="cloud-egress",
+                    severity="critical" if threshold == 90 else "warning",
+                    summary=f"M1 cloud egress reached {threshold}% of its daily budget",
+                    kind="detected",
+                    detail={"used_bytes": used, "daily_budget_bytes": daily_budget_bytes, "threshold_percent": threshold, "observation_id": observation_id},
+                    idempotency_key=f"{dedupe_key}:{observation_id}",
+                    channels=("dashboard", "telegram"),
+                    now=now,
+                )
+        return CloudUsageDecision(threshold < 90, used, threshold, observation_id)
 
     def operational_snapshot(
         self,

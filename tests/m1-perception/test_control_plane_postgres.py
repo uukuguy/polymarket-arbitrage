@@ -87,6 +87,7 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
         for table in (
             "m1_soak_observations",
             "m1_soak_runs",
+            "m1_cloud_usage_observations",
             "m1_structure_source_window_bundles",
             "m1_structure_source_page_receipts",
             "m1_structure_source_page_inputs",
@@ -113,6 +114,27 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
         ):
             connection.execute(f"TRUNCATE {table} CASCADE")
     yield PostgresControlPlane(connect)
+
+
+def test_cloud_usage_budget_refuses_ninety_percent_without_an_artifact_bypass(
+    control_plane: PostgresControlPlane,
+) -> None:
+    decision = control_plane.record_cloud_usage(
+        source="gamma",
+        operation="structure-page",
+        bytes_received=90,
+        item_count=1,
+        artifact_key="structure-inputs/a.json",
+        artifact_digest="a" * 64,
+        daily_budget_bytes=100,
+        now=_now(),
+    )
+    assert decision.allowed is False
+    assert decision.used_bytes == 90
+    assert decision.threshold_percent == 90
+    snapshot = control_plane.operational_snapshot(now=_now())
+    assert snapshot["open_incidents"][0]["component"] == "cloud-egress"
+    assert {row["channel"] for row in snapshot["pending_alert_outbox"]} == {"dashboard", "telegram"}
 
 
 def test_cloud_soak_ledger_is_append_only_and_idempotent(

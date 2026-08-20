@@ -37,6 +37,14 @@ class SourceAdmissionDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class CloudUsageDecision:
+    allowed: bool
+    used_bytes: int
+    threshold_percent: int
+    observation_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class AlertDeliveryLease:
     """One fenced, retryable notification intent claimed by an alert worker."""
 
