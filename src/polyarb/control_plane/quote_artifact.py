@@ -7,6 +7,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .models import QuoteBatchLeg, QuoteBatchSpec
+
 
 class QuoteArtifactError(RuntimeError):
     """A Quote batch artifact cannot be safely published or verified."""
@@ -32,6 +34,21 @@ class QuoteBatchArtifact:
             raise ValueError("quote batch artifact payload must be non-empty")
         digest = hashlib.sha256(payload).hexdigest()
         return cls(payload=payload, sha256=digest, key=quote_batch_artifact_key(digest))
+
+
+@dataclass(frozen=True, slots=True)
+class QuoteBatchInputArtifact:
+    """One canonical, content-addressed immutable Quote work input."""
+
+    payload: bytes
+    sha256: str
+    key: str
+
+    @classmethod
+    def from_spec(cls, spec: QuoteBatchSpec) -> QuoteBatchInputArtifact:
+        payload = canonical_quote_batch_input_bytes(spec)
+        digest = hashlib.sha256(payload).hexdigest()
+        return cls(payload=payload, sha256=digest, key=quote_batch_input_artifact_key(digest))
 
 
 def canonical_quote_batch_bytes(
@@ -74,6 +91,78 @@ def quote_batch_artifact_key(sha256: str) -> str:
     if len(sha256) != 64:
         raise ValueError("sha256 must be a sha256 digest")
     return f"quote-batches/{sha256}/batch.ndjson"
+
+
+def canonical_quote_batch_input_bytes(spec: QuoteBatchSpec) -> bytes:
+    """Serialize one fenced Quote work input without relying on Postgres JSONB."""
+    if not spec.legs:
+        raise ValueError("quote batch input artifact requires legs")
+    header = {
+        "ordinal": spec.ordinal,
+        "structure_receipt_digest": spec.structure_receipt_digest,
+        "token_range_digest": spec.token_range_digest,
+        "universe_hash": spec.universe_hash,
+    }
+    legs = (
+        {
+            "condition_id": leg.condition_id,
+            "event_id": leg.event_id,
+            "market_id": leg.market_id,
+            "membership_hash": leg.membership_hash,
+            "neg_risk_market_id": leg.neg_risk_market_id,
+            "slug": leg.slug,
+            "yes_token_id": leg.yes_token_id,
+        }
+        for leg in spec.legs
+    )
+    return b"".join(
+        json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\n"
+        for record in (header, *legs)
+    )
+
+
+def quote_batch_input_artifact_key(sha256: str) -> str:
+    """Return the only permitted content-addressed Quote-input key."""
+    if len(sha256) != 64:
+        raise ValueError("sha256 must be a sha256 digest")
+    return f"quote-inputs/{sha256}/batch.ndjson"
+
+
+def parse_quote_batch_input_bytes(
+    payload: bytes, *, expected_sha256: str
+) -> QuoteBatchSpec:
+    """Authenticate and parse one canonical immutable Quote work input."""
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise QuoteArtifactError("quote-batch-input-artifact-digest-mismatch")
+    try:
+        records = [json.loads(line) for line in payload.splitlines() if line]
+        header, *leg_rows = records
+        if not isinstance(header, dict) or not leg_rows:
+            raise ValueError
+        legs = tuple(
+            QuoteBatchLeg(
+                neg_risk_market_id=str(row["neg_risk_market_id"]),
+                market_id=str(row["market_id"]),
+                condition_id=str(row["condition_id"]),
+                slug=row.get("slug"),
+                yes_token_id=str(row["yes_token_id"]),
+                event_id=str(row.get("event_id", "")),
+                membership_hash=str(row.get("membership_hash", "")),
+            )
+            for row in leg_rows
+            if isinstance(row, dict)
+        )
+        spec = QuoteBatchSpec.from_legs(
+            structure_receipt_digest=str(header["structure_receipt_digest"]),
+            universe_hash=str(header["universe_hash"]),
+            ordinal=int(header["ordinal"]),
+            legs=legs,
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise QuoteArtifactError("quote-batch-input-artifact-invalid") from error
+    if spec.token_range_digest != header.get("token_range_digest"):
+        raise QuoteArtifactError("quote-batch-input-artifact-identity-mismatch")
+    return spec
 
 
 def upload_quote_batch_artifact(
