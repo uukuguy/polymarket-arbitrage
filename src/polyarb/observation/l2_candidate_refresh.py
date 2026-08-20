@@ -85,6 +85,10 @@ _last_known_markets_rows: list[dict] | None = None
 _last_fetch_success_at_s: float | None = None
 
 
+class LegacyL2CloudSourceRetiredError(RuntimeError):
+    """The retired L2 daemon may not consume cloud market snapshots."""
+
+
 def _record_fetch_success() -> None:
     """Mark a successful Supabase fetch — drives /health sub-check freshness."""
     global _last_fetch_success_at_s
@@ -399,6 +403,8 @@ async def on_snapshot_complete(
         runtime_dsn = settings.l2_runtime_db_dsn.get_secret_value()
     except AttributeError:
         pass
+    if runtime_dsn or (supabase_url and service_key):
+        raise LegacyL2CloudSourceRetiredError("legacy-l2-cloud-source-retired")
     if runtime_dsn:
         try:
             direct_rows = await L3EvidenceStore(

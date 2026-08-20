@@ -454,6 +454,28 @@ def test_candidate_set_cap_500(settings_with_db, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cloud_configured_candidate_refresh_is_retired_before_client_creation(
+    settings_with_db, monkeypatch
+):
+    """Retired L2 must not download a Supabase market snapshot again."""
+    import polyarb.observation.l2_candidate_refresh as mod
+    from pydantic import SecretStr
+
+    settings, _ = settings_with_db
+    settings.supabase_url = "https://example.invalid"
+    settings.supabase_service_key = SecretStr("test-service-key")
+    fake_ws = MagicMock()
+
+    client_factory = MagicMock()
+    monkeypatch.setattr(mod, "create_client", client_factory)
+
+    with pytest.raises(mod.LegacyL2CloudSourceRetiredError, match="legacy-l2-cloud-source-retired"):
+        await mod.on_snapshot_complete({"snapshot_id": 1}, ws_consumer=fake_ws, settings=settings)
+
+    client_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_refresh_debounce_60s(settings_with_db, monkeypatch, tmp_path):
     """Two calls within 60s → second is no-op; third after 61s triggers."""
     import polyarb.observation.l2_candidate_refresh as mod
@@ -953,6 +975,7 @@ async def test_refresh_required_convergence_failure_returns_false(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="legacy L2 cloud reader retired")
 async def test_maintenance_debounce_is_anchored_only_to_full_success(monkeypatch):
     """A failed attempt must not suppress the next caught-up maintenance fetch."""
     from pydantic import SecretStr
@@ -985,6 +1008,7 @@ async def test_maintenance_debounce_is_anchored_only_to_full_success(monkeypatch
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="legacy L2 cloud reader retired")
 async def test_maintenance_live_fetch_failure_rejects_cached_rows(monkeypatch):
     from pydantic import SecretStr
 
@@ -1020,6 +1044,7 @@ async def test_maintenance_live_fetch_failure_rejects_cached_rows(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="legacy L2 cloud reader retired")
 async def test_empty_live_projection_fails_closed_without_collapsing_candidates(monkeypatch):
     """A successful HTTP response with zero rows is not a valid market universe."""
     from pydantic import SecretStr
@@ -1194,6 +1219,7 @@ def test_compute_candidates_fallback_to_db_path_when_no_rows(settings_with_db, t
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="legacy L2 cloud reader retired")
 async def test_supabase_fetch_fail_uses_last_known(tmp_path):
     """on_snapshot_complete with create_client raising → no exception, fail-soft."""
     import polyarb.observation.l2_candidate_refresh as mod
@@ -1221,6 +1247,7 @@ async def test_supabase_fetch_fail_uses_last_known(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="legacy L2 cloud reader retired")
 async def test_supabase_fetch_fail_cold_start_uses_runtime_database(tmp_path):
     """A REST outage must not strand a fresh L2 process on bootstrap assets."""
     from pydantic import SecretStr
@@ -1266,6 +1293,7 @@ def test_cap_500_with_supabase_rows(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="legacy L2 cloud reader retired")
 async def test_on_snapshot_complete_records_fetch_success_on_supabase_call(tmp_path):
     """Successful supabase fetch updates _last_fetch_success_at_s (chain-truth)."""
     import polyarb.observation.l2_candidate_refresh as mod
@@ -1292,6 +1320,7 @@ async def test_on_snapshot_complete_records_fetch_success_on_supabase_call(tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="legacy L2 cloud reader retired")
 async def test_supabase_fetch_does_not_block_event_loop(tmp_path):
     import polyarb.observation.l2_candidate_refresh as mod
 
