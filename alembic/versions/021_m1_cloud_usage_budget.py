@@ -24,6 +24,7 @@ def upgrade() -> None:
         sa.Column("source", sa.Text, nullable=False),
         sa.Column("operation", sa.Text, nullable=False),
         sa.Column("bytes_received", sa.BigInteger, nullable=False),
+        sa.Column("daily_budget_bytes", sa.BigInteger, nullable=False),
         sa.Column("item_count", sa.Integer, nullable=False),
         sa.Column("artifact_key", sa.Text, nullable=False),
         sa.Column("artifact_digest", sa.Text, nullable=False),

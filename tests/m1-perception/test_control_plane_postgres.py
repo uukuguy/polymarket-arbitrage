@@ -135,6 +135,9 @@ def test_cloud_usage_budget_refuses_ninety_percent_without_an_artifact_bypass(
     snapshot = control_plane.operational_snapshot(now=_now())
     assert snapshot["open_incidents"][0]["component"] == "cloud-egress"
     assert {row["channel"] for row in snapshot["pending_alert_outbox"]} == {"dashboard", "telegram"}
+    assert snapshot["cloud_usage"]["used_bytes"] == 90
+    assert snapshot["cloud_usage"]["daily_budget_bytes"] == 100
+    assert snapshot["cloud_usage"]["latest_observation"]["artifact_digest"] == "a" * 64
 
 
 def test_cloud_soak_ledger_is_append_only_and_idempotent(

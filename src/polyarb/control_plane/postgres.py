@@ -3581,9 +3581,9 @@ class PostgresControlPlane:
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"m1-cloud-egress:{budget_day}",))
             cursor.execute(
                 """INSERT INTO m1_cloud_usage_observations
-                   (observation_id,observed_at,budget_day,source,operation,bytes_received,item_count,artifact_key,artifact_digest)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (observation_id, now, budget_day, source, operation, bytes_received, item_count, artifact_key, artifact_digest),
+                   (observation_id,observed_at,budget_day,source,operation,bytes_received,daily_budget_bytes,item_count,artifact_key,artifact_digest)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (observation_id, now, budget_day, source, operation, bytes_received, daily_budget_bytes, item_count, artifact_key, artifact_digest),
             )
             cursor.execute("SELECT COALESCE(sum(bytes_received),0) AS used FROM m1_cloud_usage_observations WHERE budget_day=%s", (budget_day,))
             used = int(cursor.fetchone()["used"])
@@ -3901,6 +3901,22 @@ class PostgresControlPlane:
                 """
             )
             latest_soak_observation = cursor.fetchone()
+            budget_day = now.astimezone(UTC).date()
+            cursor.execute(
+                """SELECT COALESCE(sum(bytes_received),0) AS used_bytes,
+                          max(daily_budget_bytes) AS daily_budget_bytes
+                   FROM m1_cloud_usage_observations WHERE budget_day = %s""",
+                (budget_day,),
+            )
+            cloud_usage = cursor.fetchone()
+            cursor.execute(
+                """SELECT observation_id, source, operation, bytes_received, item_count,
+                          artifact_key, artifact_digest, observed_at
+                   FROM m1_cloud_usage_observations WHERE budget_day = %s
+                   ORDER BY observed_at DESC, observation_id DESC LIMIT 1""",
+                (budget_day,),
+            )
+            latest_cloud_usage = cursor.fetchone()
         age = None if oldest is None else oldest["age_seconds"]
         quote_retry_age = (
             None if retryable_quote_age is None else retryable_quote_age["age_seconds"]
@@ -3950,6 +3966,28 @@ class PostgresControlPlane:
                 }
             ),
             "pending_alert_outbox": outbox,
+            "cloud_usage": {
+                "budget_day": budget_day.isoformat(),
+                "used_bytes": int(cloud_usage["used_bytes"]),
+                "daily_budget_bytes": (
+                    None if cloud_usage["daily_budget_bytes"] is None else int(cloud_usage["daily_budget_bytes"])
+                ),
+                "threshold_percent": (
+                    0 if cloud_usage["daily_budget_bytes"] is None else min(100, int(cloud_usage["used_bytes"]) * 100 // int(cloud_usage["daily_budget_bytes"]))
+                ),
+                "latest_observation": (
+                    None if latest_cloud_usage is None else {
+                        "observation_id": str(latest_cloud_usage["observation_id"]),
+                        "source": str(latest_cloud_usage["source"]),
+                        "operation": str(latest_cloud_usage["operation"]),
+                        "bytes_received": int(latest_cloud_usage["bytes_received"]),
+                        "item_count": int(latest_cloud_usage["item_count"]),
+                        "artifact_key": str(latest_cloud_usage["artifact_key"]),
+                        "artifact_digest": str(latest_cloud_usage["artifact_digest"]),
+                        "observed_at": latest_cloud_usage["observed_at"].isoformat(),
+                    }
+                ),
+            },
             "queue_health": queue_health,
             "quote": {
                 "admission_job_states": quote_admission_states,
