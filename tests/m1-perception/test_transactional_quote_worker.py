@@ -12,6 +12,7 @@ from polyarb.control_plane.models import (
     QuoteBatchLeg,
     QuoteBatchSpec,
 )
+from polyarb.control_plane.quote_artifact import QuoteBatchInputArtifact
 from polyarb.control_plane.quote_worker import TransactionalQuoteBatchWorker
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
@@ -89,6 +90,9 @@ class FakeObjectClient:
             "Metadata": self.object["Metadata"],
         }
 
+    def get_object(self, **kwargs):
+        return {"Body": type("Body", (), {"read": lambda _self: self.object["Body"]})()}
+
 
 def _batch() -> QuoteBatchSpec:
     return QuoteBatchSpec.from_legs(
@@ -130,6 +134,31 @@ def test_transactional_worker_uploads_then_records_and_finishes() -> None:
     assert control_plane.recorded["artifact_key"] == objects.object["Key"]
     assert control_plane.recorded["artifact_digest"] == objects.object["Metadata"]["sha256"]
     assert control_plane.finished == [JobState.SUCCEEDED]
+
+
+def test_transactional_worker_reads_fenced_r2_input_when_reference_is_present() -> None:
+    batch = _batch()
+    artifact = QuoteBatchInputArtifact.from_spec(batch)
+    control_plane = FakeControlPlane(batch)
+    control_plane.quote_batch_input_reference = lambda job_key: (  # type: ignore[attr-defined]
+        artifact.key,
+        artifact.sha256,
+        len(batch.legs),
+    )
+    reader = FakeReader()
+    objects = FakeObjectClient()
+    objects.object = {"Body": artifact.payload, "Metadata": {"sha256": artifact.sha256}}
+    worker = TransactionalQuoteBatchWorker(
+        control_plane=control_plane,
+        reader=reader,
+        object_client=objects,
+        bucket="quotes",
+        worker_id="worker-a",
+        now=lambda: NOW,
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    assert reader.calls == 1
 
 
 def test_quote_fault_hook_crashes_after_verified_upload_before_receipt() -> None:

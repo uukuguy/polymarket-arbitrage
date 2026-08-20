@@ -305,9 +305,7 @@ class TransactionalStructureCertifier:
         except IncompleteStructureGenerationError:
             self._control_plane.finish(
                 lease,
-                state=JobState.RETRYABLE,
-                next_attempt_at=self._now() + self._retry_delay,
-                error_class="IncompleteStructureGenerationError",
+                state=JobState.WAITING,
                 now=self._now(),
             )
             return StructureWorkerResult(job_key=lease.job_key, outcome="waiting")

@@ -16,6 +16,7 @@ class JobState(StrEnum):
     RUNNABLE = "runnable"
     LEASED = "leased"
     RETRYABLE = "retryable"
+    WAITING = "waiting"
     CHECKPOINTED = "checkpointed"
     SUCCEEDED = "succeeded"
     QUARANTINED = "quarantined"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -20,8 +20,10 @@ from .postgres import (
     StaleLeaseError,
 )
 from .quote_artifact import (
+    QuoteArtifactError,
     QuoteBatchArtifact,
     canonical_quote_batch_bytes,
+    parse_quote_batch_input_bytes,
     upload_quote_batch_artifact,
 )
 
@@ -31,6 +33,8 @@ class QuoteBatchWorkerError(RuntimeError):
 
 
 class _ObjectClient(Protocol):
+    def get_object(self, **kwargs: Any) -> Mapping[str, Any]: ...
+
     def put_object(self, **kwargs: Any) -> Any: ...
 
     def head_object(self, **kwargs: Any) -> dict[str, Any]: ...
@@ -93,7 +97,7 @@ class TransactionalQuoteBatchWorker:
             return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="recovered")
 
         try:
-            batch = self._control_plane.quote_batch_spec(lease.job_key)
+            batch = self._batch_input(lease.job_key)
             if not batch.legs:
                 raise QuoteBatchWorkerError("quote-batch-leg-input-unavailable")
             artifact, successful_count = await self._fetch_artifact(batch)
@@ -122,6 +126,7 @@ class TransactionalQuoteBatchWorker:
             return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="succeeded")
         except StaleLeaseError:
             raise
+
         except IntentionalStagingRetryFault as error:
             self._control_plane.finish_retryable_with_incident(
                 lease,
@@ -156,6 +161,28 @@ class TransactionalQuoteBatchWorker:
                 now=self._now(),
             )
             raise
+
+    def _batch_input(self, job_key: str) -> QuoteBatchSpec:
+        """Prefer the immutable R2 input; retain legacy rows during the staged migration."""
+        reference_reader = getattr(self._control_plane, "quote_batch_input_reference", None)
+        reference = reference_reader(job_key) if callable(reference_reader) else None
+        if reference is None:
+            return self._control_plane.quote_batch_spec(job_key)
+        key, digest, leg_count = reference
+        response = self._object_client.get_object(Bucket=self._bucket, Key=key)
+        body = response.get("Body")
+        if body is None or not hasattr(body, "read"):
+            raise QuoteBatchWorkerError("quote-batch-input-artifact-body-unavailable")
+        payload = body.read()
+        if not isinstance(payload, bytes):
+            raise QuoteBatchWorkerError("quote-batch-input-artifact-body-invalid")
+        try:
+            batch = parse_quote_batch_input_bytes(payload, expected_sha256=digest)
+        except QuoteArtifactError as error:
+            raise QuoteBatchWorkerError("quote-batch-input-artifact-invalid") from error
+        if batch.job_key != job_key or len(batch.legs) != leg_count:
+            raise QuoteBatchWorkerError("quote-batch-input-artifact-identity-mismatch")
+        return batch
 
     async def _fetch_artifact(self, batch: QuoteBatchSpec) -> tuple[QuoteBatchArtifact, int]:
         books = await self._reader.get_books(list(batch.token_ids), projection="full")

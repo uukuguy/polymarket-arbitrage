@@ -458,9 +458,7 @@ def test_structure_certifier_waits_for_missing_range_receipts_without_incident()
     assert certifier.run_once().outcome == "waiting"
     assert certifier._control_plane.finished == [
         {
-            "state": JobState.RETRYABLE,
-            "next_attempt_at": NOW + timedelta(seconds=5),
-            "error_class": "IncompleteStructureGenerationError",
+            "state": JobState.WAITING,
             "now": NOW,
         }
     ]

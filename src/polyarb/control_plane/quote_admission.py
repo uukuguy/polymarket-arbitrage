@@ -11,8 +11,9 @@ from typing import Any, Protocol
 from polyarb.config import Settings
 
 from .alert_delivery import incident_alert_channels
-from .models import QuoteBatchLeg
+from .models import QuoteBatchLeg, QuoteBatchSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
+from .quote_artifact import QuoteBatchInputArtifact, upload_quote_batch_artifact
 from .quote_worker import QuoteBatchWorkerResult
 from .structure_artifact import (
     StructureBundleError,
@@ -28,6 +29,10 @@ class QuoteAdmissionError(RuntimeError):
 
 class _ObjectClient(Protocol):
     def get_object(self, **kwargs: Any) -> Mapping[str, Any]: ...
+
+    def put_object(self, **kwargs: Any) -> Any: ...
+
+    def head_object(self, **kwargs: Any) -> Mapping[str, Any]: ...
 
 
 def quote_legs_from_structure_components(
@@ -102,6 +107,30 @@ def canonical_quote_universe_hash(legs: Sequence[QuoteBatchLeg]) -> str:
     return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def quote_batches_from_legs(
+    *,
+    structure_receipt_digest: str,
+    universe_hash: str,
+    legs: Sequence[QuoteBatchLeg],
+    batch_size: int,
+) -> tuple[QuoteBatchSpec, ...]:
+    """Build the exact deterministic batches before their R2 inputs are published."""
+    normalized = tuple(sorted(legs, key=lambda leg: leg.yes_token_id))
+    if not normalized or batch_size <= 0:
+        raise QuoteAdmissionError("Quote batch inputs must be non-empty and bounded")
+    if len({leg.yes_token_id for leg in normalized}) != len(normalized):
+        raise QuoteAdmissionError("Quote batch inputs have duplicate YES token")
+    return tuple(
+        QuoteBatchSpec.from_legs(
+            structure_receipt_digest=structure_receipt_digest,
+            universe_hash=universe_hash,
+            ordinal=ordinal,
+            legs=normalized[start : start + batch_size],
+        )
+        for ordinal, start in enumerate(range(0, len(normalized), batch_size))
+    )
+
+
 def _membership_hash(market: Mapping[str, object]) -> str:
     return sha256(
         json.dumps(
@@ -169,12 +198,28 @@ class TransactionalQuoteAdmitter:
                 legs = self._read_v3_quote_legs(shards)
             else:
                 legs = quote_legs_from_structure_components(components)
+            universe_hash = canonical_quote_universe_hash(legs)
+            batches = quote_batches_from_legs(
+                structure_receipt_digest=bundle_digest,
+                universe_hash=universe_hash,
+                legs=legs,
+                batch_size=self._batch_size,
+            )
+            input_artifacts = tuple(QuoteBatchInputArtifact.from_spec(batch) for batch in batches)
+            for artifact in input_artifacts:
+                upload_quote_batch_artifact(
+                    self._object_client, bucket=self._bucket, artifact=artifact
+                )
             self._control_plane.admit_quote_generation(
                 lease,
                 structure_receipt_digest=bundle_digest,
-                universe_hash=canonical_quote_universe_hash(legs),
+                universe_hash=universe_hash,
                 legs=legs,
                 batch_size=self._batch_size,
+                input_artifacts={
+                    batch.job_key: (artifact.key, artifact.sha256, len(batch.legs))
+                    for batch, artifact in zip(batches, input_artifacts, strict=True)
+                },
                 now=self._now(),
             )
             self._control_plane.record_job_recovery(

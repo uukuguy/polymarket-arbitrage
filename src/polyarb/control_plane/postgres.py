@@ -1447,6 +1447,7 @@ class PostgresControlPlane:
         universe_hash: str,
         legs: Sequence[QuoteBatchLeg],
         batch_size: int,
+        input_artifacts: Mapping[str, tuple[str, str, int]],
         now: datetime,
     ) -> tuple[QuoteBatchSpec, ...]:
         """Fence one Structure-derived Quote universe and all its batch work together."""
@@ -1457,12 +1458,14 @@ class PostgresControlPlane:
             raise ValueError("Quote admission digests must be sha256")
         if not legs or batch_size <= 0:
             raise ValueError("Quote admission requires legs and positive batch_size")
-        batches = self._quote_batches_from_legs(
+        batches = self.quote_batches_from_legs(
             structure_receipt_digest=structure_receipt_digest,
             universe_hash=universe_hash,
             legs=legs,
             batch_size=batch_size,
         )
+        if set(input_artifacts) != {batch.job_key for batch in batches}:
+            raise JobIdentityConflict("Quote admission requires one R2 input reference per batch")
         with (
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
@@ -1486,7 +1489,9 @@ class PostgresControlPlane:
             )
             if cursor.rowcount != 1:
                 raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
-            self._enqueue_quote_generation_cursor(cursor, batches=batches, now=now)
+            self._enqueue_quote_generation_cursor(
+                cursor, batches=batches, input_artifacts=input_artifacts, now=now
+            )
             cursor.execute(
                 """
                 UPDATE m1_job_attempts SET state = 'succeeded', finished_at = %s
@@ -1497,7 +1502,7 @@ class PostgresControlPlane:
         return batches
 
     @staticmethod
-    def _quote_batches_from_legs(
+    def quote_batches_from_legs(
         *,
         structure_receipt_digest: str,
         universe_hash: str,
@@ -1540,9 +1545,23 @@ class PostgresControlPlane:
         cursor: psycopg.Cursor[dict[str, Any]],
         *,
         batches: Sequence[QuoteBatchSpec],
+        input_artifacts: Mapping[str, tuple[str, str, int]] | None = None,
         now: datetime,
     ) -> None:
         for batch in batches:
+            artifact = (input_artifacts or {}).get(batch.job_key)
+            if artifact is None:
+                raise JobIdentityConflict(
+                    f"quote batch {batch.job_key!r} requires an R2 input artifact reference"
+                )
+            if (
+                artifact[0] != f"quote-inputs/{artifact[1]}/batch.ndjson"
+                or len(artifact[1]) != 64
+                or artifact[2] != len(batch.legs)
+            ):
+                raise JobIdentityConflict(
+                    f"quote batch {batch.job_key!r} has an invalid input artifact reference"
+                )
             self._enqueue_job_cursor(
                 cursor,
                 job_key=batch.job_key,
@@ -1554,8 +1573,9 @@ class PostgresControlPlane:
                 """
                 INSERT INTO m1_quote_batch_inputs (
                     job_key, structure_receipt_digest, universe_hash,
-                    token_range_digest, token_ids, legs, admitted_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    token_range_digest, token_ids, legs, input_artifact_key,
+                    input_artifact_digest, leg_count, admitted_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (job_key) DO NOTHING
                 """,
                 (
@@ -1563,15 +1583,21 @@ class PostgresControlPlane:
                     batch.structure_receipt_digest,
                     batch.universe_hash,
                     batch.token_range_digest,
-                    Jsonb(batch.token_ids),
-                    Jsonb([_quote_batch_leg_payload(leg) for leg in batch.legs]),
+                    None if artifact else Jsonb(batch.token_ids),
+                    None
+                    if artifact
+                    else Jsonb([_quote_batch_leg_payload(leg) for leg in batch.legs]),
+                    artifact[0],
+                    artifact[1],
+                    artifact[2],
                     now,
                 ),
             )
             cursor.execute(
                 """
                 SELECT structure_receipt_digest, universe_hash, token_range_digest,
-                       token_ids, legs FROM m1_quote_batch_inputs WHERE job_key = %s
+                       token_ids, legs, input_artifact_key, input_artifact_digest, leg_count
+                FROM m1_quote_batch_inputs WHERE job_key = %s
                 """,
                 (batch.job_key,),
             )
@@ -1580,8 +1606,13 @@ class PostgresControlPlane:
                 persisted["structure_receipt_digest"] != batch.structure_receipt_digest
                 or persisted["universe_hash"] != batch.universe_hash
                 or persisted["token_range_digest"] != batch.token_range_digest
-                or tuple(persisted["token_ids"]) != batch.token_ids
-                or _persisted_legs(persisted["legs"]) != batch.legs
+                or persisted["token_ids"] is not None
+                or persisted["legs"] is not None
+                or (
+                    persisted["input_artifact_key"] != artifact[0]
+                    or persisted["input_artifact_digest"] != artifact[1]
+                    or persisted["leg_count"] != artifact[2]
+                )
             ):
                 raise JobIdentityConflict(
                     f"quote batch {batch.job_key!r} names another immutable input"
@@ -1835,6 +1866,43 @@ class PostgresControlPlane:
         return QuoteBatchSpec.from_tokens(
             token_ids=tuple(str(token_id) for token_id in row["token_ids"]), **kwargs
         )
+
+    def quote_batch_input_reference(self, job_key: str) -> tuple[str, str, int] | None:
+        """Return the authenticated R2 input reference, when the batch has been migrated."""
+        self._validate_nonempty(job_key=job_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT input_artifact_key, input_artifact_digest, leg_count
+                FROM m1_quote_batch_inputs WHERE job_key = %s
+                """,
+                (job_key,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise ControlPlaneError(f"quote batch input is unavailable for {job_key!r}")
+        values = (
+            row["input_artifact_key"],
+            row["input_artifact_digest"],
+            row["leg_count"],
+        )
+        if values == (None, None, None):
+            return None
+        key, digest, leg_count = values
+        if (
+            not isinstance(key, str)
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or not isinstance(leg_count, int)
+            or leg_count <= 0
+        ):
+            raise JobIdentityConflict(f"quote batch {job_key!r} has a malformed R2 input reference")
+        if key != f"quote-inputs/{digest}/batch.ndjson":
+            raise JobIdentityConflict(f"quote batch {job_key!r} has a mismatched R2 input key")
+        return key, digest, leg_count
 
     def quote_batch_receipt(self, job_key: str) -> QuoteBatchReceipt | None:
         """Read a prior immutable receipt so a replacement avoids refetching it."""
@@ -2296,6 +2364,18 @@ class PostgresControlPlane:
                 WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
                 """,
                 (now, lease.job_key, lease.lease_epoch),
+            )
+            cursor.execute(
+                """
+                UPDATE m1_jobs SET state = 'runnable', next_attempt_at = %s,
+                    last_error_class = NULL, updated_at = %s
+                WHERE job_key = %s AND state = 'waiting'
+                  AND (SELECT count(*) FROM m1_structure_range_receipts AS receipt
+                       JOIN m1_structure_range_inputs AS input ON input.job_key = receipt.job_key
+                       WHERE input.generation_key = %s)
+                    = (SELECT count(*) FROM m1_structure_range_inputs WHERE generation_key = %s)
+                """,
+                (now, now, f"{spec.generation_key}:certify", spec.generation_key, spec.generation_key),
             )
             return receipt
 
@@ -2967,8 +3047,8 @@ class PostgresControlPlane:
         next_attempt_at: datetime | None = None,
         error_class: str | None = None,
     ) -> None:
-        if state not in {JobState.RETRYABLE, JobState.SUCCEEDED, JobState.QUARANTINED}:
-            raise ValueError("finish only accepts retryable, succeeded, or quarantined")
+        if state not in {JobState.RETRYABLE, JobState.WAITING, JobState.SUCCEEDED, JobState.QUARANTINED}:
+            raise ValueError("finish only accepts retryable, waiting, succeeded, or quarantined")
         self._validate_aware(now, "now")
         if next_attempt_at is not None:
             self._validate_aware(next_attempt_at, "next_attempt_at")
@@ -4100,7 +4180,8 @@ class PostgresControlPlane:
                 raise OpportunityProjectionCurrentError("current Quote is already projected")
             structure_generation_key = str(current["structure_generation_key"])
             cursor.execute(
-                """SELECT input.legs, receipt.job_key, receipt.quote_digest,
+                """SELECT input.legs, input.input_artifact_key, input.input_artifact_digest,
+                          input.leg_count, receipt.job_key, receipt.quote_digest,
                           receipt.artifact_key, receipt.artifact_digest,
                           receipt.successful_response_count, receipt.quoted_at
                    FROM m1_quote_batch_inputs AS input
@@ -4125,8 +4206,11 @@ class PostgresControlPlane:
             )
             for row in rows
         )
-        if any(not legs for legs, _receipt, _quoted_at in batches):
-            raise IncompleteQuoteGenerationError("current Quote generation lacks frozen legs")
+        if any(
+            not legs and not row["input_artifact_digest"]
+            for row, (legs, _receipt, _quoted_at) in zip(rows, batches, strict=True)
+        ):
+            raise IncompleteQuoteGenerationError("current Quote generation lacks frozen input")
         return quote_generation_key, structure_generation_key, batches
 
     @staticmethod

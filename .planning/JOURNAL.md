@@ -10030,3 +10030,27 @@ verifiers until the full 24-hour gate and final audit can close M1.
 
 [NEXT] Verify external-supervisor recovery, then maintain the new run without
 topology changes until its default 24-hour verifier and final audit pass.
+
+## SESSION 297 — 2026-08-20 (M1 capacity reset and R2 input authority)
+
+- [MAINTENANCE] Stopped all M1 worker Machines and the obsolete `polyarb-l2`
+  Machine, then removed invalid pre-production M1 runtime rows. The control API
+  reports an empty job-count map. Using the M1 worker database role outside the
+  Studio transaction wrapper, `VACUUM (FULL, ANALYZE)` reduced the former 359 MB
+  `m1_quote_batch_inputs` relation and the other accumulated M1 relations to
+  small empty-table footprints. This deliberately resets the old non-qualifying
+  run; it is not production evidence.
+- [IMPLEMENTED] Quote admission now canonicalizes each frozen batch input into
+  an R2 content-addressed artifact, PUT+HEAD verifies it before its Postgres
+  reference is admitted, and records its key/digest/leg-count in staged compact
+  columns. Quote execution and opportunity projection prefer those R2 inputs
+  and authenticate digest plus batch identity; legacy JSONB remains only as a
+  transition reader until the destructive column migration.
+- [VERIFIED] Quote admission/artifact/worker/opportunity tests and the real
+  Postgres control-plane suite pass against Alembic `head`. `make
+  planning-status` is clean.
+
+[NEXT] Complete the compact-input migration: require R2 references for all new
+admissions, remove the legacy JSONB write/read path in a dedicated migration,
+deploy the repaired M1 topology, then begin one fresh formal cloud acceptance
+run with watchdog and Dashboard evidence.

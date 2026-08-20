@@ -33,10 +33,21 @@ class _Body:
 class _Objects:
     def __init__(self, payload: bytes) -> None:
         self._payload = payload
+        self.puts: list[dict[str, object]] = []
 
     def get_object(self, **kwargs: object) -> dict[str, object]:
         assert kwargs == {"Bucket": "artifacts", "Key": "bundles/current.ndjson"}
         return {"Body": _Body(self._payload)}
+
+    def put_object(self, **kwargs: object) -> None:
+        self.puts.append(kwargs)
+
+    def head_object(self, **kwargs: object) -> dict[str, object]:
+        matching = next(item for item in self.puts if item["Key"] == kwargs["Key"])
+        return {
+            "ContentLength": len(matching["Body"]),
+            "Metadata": {"sha256": matching["Metadata"]["sha256"]},
+        }
 
 
 class _ObjectMap:
@@ -135,9 +146,10 @@ def _bundle() -> StructureBundleArtifact:
 def test_quote_admitter_derives_active_neg_risk_legs_from_authenticated_bundle() -> None:
     bundle = _bundle()
     control_plane = _ControlPlane(bundle.sha256)
+    objects = _Objects(bundle.payload)
     worker = TransactionalQuoteAdmitter(
         control_plane=control_plane,
-        object_client=_Objects(bundle.payload),
+        object_client=objects,
         bucket="artifacts",
         worker_id="quote-admitter",
         now=lambda: NOW,
@@ -150,15 +162,19 @@ def test_quote_admitter_derives_active_neg_risk_legs_from_authenticated_bundle()
     assert len(legs) == 1
     assert legs[0].yes_token_id == "yes-active"
     assert control_plane.admitted["structure_receipt_digest"] == bundle.sha256
+    assert control_plane.admitted["input_artifacts"]
+    assert len(objects.puts) == 1
+    assert str(objects.puts[0]["Key"]).startswith("quote-inputs/")
     assert control_plane.finished == []
 
 
 def test_quote_admitter_retries_without_batches_when_bundle_digest_is_wrong() -> None:
     bundle = _bundle()
     control_plane = _ControlPlane("b" * 64)
+    objects = _Objects(bundle.payload)
     worker = TransactionalQuoteAdmitter(
         control_plane=control_plane,
-        object_client=_Objects(bundle.payload),
+        object_client=objects,
         bucket="artifacts",
         worker_id="quote-admitter",
         now=lambda: NOW,
@@ -175,6 +191,7 @@ def test_quote_admitter_retries_without_batches_when_bundle_digest_is_wrong() ->
         "lease_epoch": 1,
         "error_class": "StructureBundleError",
     }
+    assert objects.puts == []
 
 
 def test_v3_quote_admission_rejects_even_identical_duplicate_yes_tokens() -> None:

@@ -68,7 +68,7 @@ def postgres_dsn() -> Iterator[str]:
             for role in ("anon", "authenticated", "service_role"):
                 connection.execute(f"CREATE ROLE {role} NOLOGIN")
         result = subprocess.run(
-            ["uv", "run", "alembic", "upgrade", "017"],
+            ["uv", "run", "alembic", "upgrade", "head"],
             env={**os.environ, "POLYARB_SUPABASE_DB_DSN": dsn},
             capture_output=True,
             text=True,
@@ -1432,6 +1432,7 @@ def test_structure_certification_requires_complete_matching_range_receipts(
             artifact_digest="a" * 64,
             now=now,
         )
+    control_plane.finish(certifier, state=JobState.WAITING, now=now)
     second = control_plane.claim_job(
         worker_id="structure-b", job_types=("structure-normalize",), lease_seconds=30, now=now
     )
@@ -1446,6 +1447,14 @@ def test_structure_certification_requires_complete_matching_range_receipts(
         now=now,
     )
     control_plane.finish(second, state=JobState.SUCCEEDED, now=now)
+    awakened = control_plane.claim_job(
+        worker_id="structure-certifier-awakened",
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert awakened is not None
+    assert awakened.job_key == certifier.job_key
     expected_manifest = sha256(
         canonical_structure_manifest_bytes(
             generation_key=specs[0].generation_key,
@@ -1474,7 +1483,7 @@ def test_structure_certification_requires_complete_matching_range_receipts(
     ).hexdigest()
     assert (
         control_plane.certify_structure_generation(
-            certifier,
+            awakened,
             generation_key=specs[0].generation_key,
             artifact_key=f"structure-manifests/{expected_manifest}/manifest.ndjson",
             artifact_digest=expected_manifest,
@@ -1494,15 +1503,32 @@ def test_structure_certification_requires_complete_matching_range_receipts(
         bundle.key,
         bundle.sha256,
     )
+    prepared_batches = control_plane.quote_batches_from_legs(
+        structure_receipt_digest=bundle.sha256,
+        universe_hash="c" * 64,
+        legs=(_leg("quote-token"),),
+        batch_size=100,
+    )
     quote_batches = control_plane.admit_quote_generation(
         quote_admit,
         structure_receipt_digest=bundle.sha256,
         universe_hash="c" * 64,
         legs=(_leg("quote-token"),),
         batch_size=100,
+        input_artifacts={
+            prepared_batches[0].job_key: (
+                f"quote-inputs/{'d' * 64}/batch.ndjson",
+                "d" * 64,
+                1,
+            )
+        },
         now=now,
     )
-    assert control_plane.quote_batch_spec(quote_batches[0].job_key).legs == (_leg("quote-token"),)
+    assert control_plane.quote_batch_input_reference(quote_batches[0].job_key) == (
+        f"quote-inputs/{'d' * 64}/batch.ndjson",
+        "d" * 64,
+        1,
+    )
 
 
 def test_structure_certification_refuses_component_count_parity_mismatch(

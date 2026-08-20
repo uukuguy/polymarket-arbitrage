@@ -14,6 +14,7 @@ from .postgres import (
     OpportunityProjectionCurrentError,
     PostgresControlPlane,
 )
+from .quote_artifact import QuoteArtifactError, parse_quote_batch_input_bytes
 
 
 class _Body(Protocol):
@@ -80,6 +81,28 @@ class TransactionalOpportunityCertifier:
         all_quotes = []
         quoted_at_ms = 0
         for legs, receipt, quoted_at in batches:
+            reference_reader = getattr(self._control_plane, "quote_batch_input_reference", None)
+            reference = (
+                reference_reader(receipt.job_key) if callable(reference_reader) else None
+            )
+            if reference is not None:
+                input_key, input_digest, leg_count = reference
+                input_response = self._object_client.get_object(Bucket=self._bucket, Key=input_key)
+                input_body = input_response.get("Body")
+                if input_body is None or not hasattr(input_body, "read"):
+                    raise ValueError("quote-input-artifact-body-unavailable")
+                input_payload = input_body.read()
+                if not isinstance(input_payload, bytes):
+                    raise ValueError("quote-input-artifact-body-is-not-bytes")
+                try:
+                    parsed_input = parse_quote_batch_input_bytes(
+                        input_payload, expected_sha256=input_digest
+                    )
+                except QuoteArtifactError as error:
+                    raise ValueError("quote-input-artifact-invalid") from error
+                if parsed_input.job_key != receipt.job_key or len(parsed_input.legs) != leg_count:
+                    raise ValueError("quote-input-artifact-identity-mismatch")
+                legs = parsed_input.legs
             response = self._object_client.get_object(Bucket=self._bucket, Key=receipt.artifact_key)
             body = response.get("Body")
             if body is None or not hasattr(body, "read"):

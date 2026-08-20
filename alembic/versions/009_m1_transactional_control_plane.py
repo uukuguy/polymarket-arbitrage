@@ -51,7 +51,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("job_key", name="pk_m1_jobs"),
         sa.UniqueConstraint("job_type", "input_identity", name="uq_m1_jobs_identity"),
         sa.CheckConstraint(
-            "state IN ('runnable', 'leased', 'retryable', 'checkpointed', "
+            "state IN ('runnable', 'leased', 'retryable', 'waiting', 'checkpointed', "
             "'succeeded', 'quarantined')",
             name="ck_m1_jobs_state",
         ),
@@ -80,7 +80,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["job_key"], ["m1_jobs.job_key"], name="fk_m1_attempts_job"),
         sa.UniqueConstraint("job_key", "lease_epoch", name="uq_m1_attempts_job_epoch"),
         sa.CheckConstraint(
-            "state IN ('running', 'checkpointed', 'succeeded', 'retryable', 'quarantined')",
+            "state IN ('running', 'checkpointed', 'succeeded', 'retryable', 'waiting', 'quarantined')",
             name="ck_m1_job_attempts_state",
         ),
     )

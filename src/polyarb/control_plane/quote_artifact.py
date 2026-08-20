@@ -169,8 +169,8 @@ def upload_quote_batch_artifact(
     client: _ObjectClient,
     *,
     bucket: str,
-    artifact: QuoteBatchArtifact,
-) -> QuoteBatchArtifact:
+    artifact: QuoteBatchArtifact | QuoteBatchInputArtifact,
+) -> QuoteBatchArtifact | QuoteBatchInputArtifact:
     """Put and HEAD-verify a payload before its control-plane receipt may exist."""
     if not bucket:
         raise ValueError("bucket must be non-empty")

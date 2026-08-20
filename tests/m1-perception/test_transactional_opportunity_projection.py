@@ -1,10 +1,11 @@
 import hashlib
 from datetime import UTC, datetime
 
-from polyarb.control_plane.models import QuoteBatchLeg, QuoteBatchReceipt
+from polyarb.control_plane.models import QuoteBatchLeg, QuoteBatchReceipt, QuoteBatchSpec
 from polyarb.control_plane.opportunity_projection import build_opportunity_rows
 from polyarb.control_plane.opportunity_worker import TransactionalOpportunityCertifier
 from polyarb.control_plane.postgres import OpportunityProjectionCurrentError
+from polyarb.control_plane.quote_artifact import QuoteBatchInputArtifact
 
 
 def test_complete_authenticated_quote_group_projects_only_positive_buy_all_edge() -> None:
@@ -145,3 +146,68 @@ def test_certifier_skips_r2_when_current_quote_is_already_projected() -> None:
     ).run_once()
 
     assert result.outcome == "current"
+
+
+def test_certifier_uses_fenced_r2_input_when_postgres_legs_are_compacted() -> None:
+    quoted_at = datetime(2030, 1, 1, tzinfo=UTC)
+    legs = (
+        QuoteBatchLeg("group-a", "market-a", "condition-a", "a", "token-a", "event-a", "m-a"),
+        QuoteBatchLeg("group-a", "market-b", "condition-b", "b", "token-b", "event-a", "m-a"),
+    )
+    batch = QuoteBatchSpec.from_legs(
+        structure_receipt_digest="a" * 64,
+        universe_hash="c" * 64,
+        ordinal=0,
+        legs=legs,
+    )
+    input_artifact = QuoteBatchInputArtifact.from_spec(batch)
+    quote_payload = (
+        b'{"structure_receipt_digest":"' + b"a" * 64
+        + b'","token_range_digest":"' + batch.token_range_digest.encode()
+        + b'","universe_hash":"' + b"c" * 64 + b'"}\n'
+        + (
+            b'{"best_ask_price":0.4,"best_ask_size":4,'
+            b'"terminal_state":"executable","yes_token_id":"token-a"}\n'
+        )
+        + (
+            b'{"best_ask_price":0.5,"best_ask_size":3,'
+            b'"terminal_state":"executable","yes_token_id":"token-b"}\n'
+        )
+    )
+
+    class ControlPlane:
+        def claim_job(self, **kwargs):
+            return type("Lease", (), {"job_key": "quote:job:opportunity-certify"})()
+
+        def current_quote_projection_inputs(self):
+            receipt = QuoteBatchReceipt(
+                batch.job_key,
+                "d" * 64,
+                "quotes/key",
+                hashlib.sha256(quote_payload).hexdigest(),
+                2,
+            )
+            return "quote:" + "a" * 64, "structure:" + "b" * 64, (((), receipt, quoted_at),)
+
+        def quote_batch_input_reference(self, job_key):
+            assert job_key == batch.job_key
+            return input_artifact.key, input_artifact.sha256, len(batch.legs)
+
+        def publish_opportunity_projection(self, **kwargs):
+            self.published = kwargs
+            return "e" * 64
+
+        def finish(self, *args, **kwargs):
+            pass
+
+    class Client:
+        def get_object(self, **kwargs):
+            payloads = {input_artifact.key: input_artifact.payload, "quotes/key": quote_payload}
+            return {"Body": type("Body", (), {"read": lambda self: payloads[kwargs["Key"]]})()}
+
+    control_plane = ControlPlane()
+    TransactionalOpportunityCertifier(
+        control_plane=control_plane, object_client=Client(), bucket="bucket", now=lambda: quoted_at
+    ).run_once()
+
+    assert control_plane.published["rows"][0]["gross_edge_bps"] == 1000.0

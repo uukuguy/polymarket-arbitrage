@@ -34,9 +34,9 @@ def test_control_worker_template_has_three_fixed_transactional_roles() -> None:
             "--max-turns 8 --structure-materializer-turns 8 --interval-seconds 2 --json"
         ),
         "structure_range": (
-            "python -m polyarb.cli_control_plane serve --enable "
-            "--worker-id fly-control-plane-structure-range --worker-role structure-range "
-            "--pool-turns 1 --interval-seconds 5 --json"
+            "/bin/sh -ec 'exec python -m polyarb.cli_control_plane serve --enable "
+            "--worker-id \"fly-control-plane-structure-range:${FLY_MACHINE_ID:?}\" "
+            "--worker-role structure-range --pool-turns 2 --interval-seconds 2 --json'"
         ),
         "quote_batch": (
             "python -m polyarb.cli_control_plane serve --enable "
@@ -50,6 +50,24 @@ def test_control_worker_template_has_three_fixed_transactional_roles() -> None:
         "quote_batch",
     ]
     assert payload["vm"][0]["memory"] == "1024mb"
+    assert "http_service" not in payload
+    assert "mounts" not in payload
+
+
+def test_alert_delivery_template_isolated_from_runtime_watchdog() -> None:
+    payload = tomllib.loads(
+        (ROOT / "deploy/control-plane/fly-control-alert-delivery.toml.template").read_text()
+    )
+
+    assert payload["app"] == "__CONTROL_PLANE_ALERT_DELIVERY_APP__"
+    assert payload["processes"] == {
+        "delivery": (
+            "python -m polyarb.cli_control_plane alert-serve --enable "
+            "--worker-id fly-control-plane-alert-delivery "
+            "--interval-seconds 5 --json"
+        )
+    }
+    assert payload["restart"] == [{"policy": "always"}]
     assert "http_service" not in payload
     assert "mounts" not in payload
 

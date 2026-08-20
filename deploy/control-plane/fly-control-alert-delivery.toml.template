@@ -1,0 +1,22 @@
+# Private transactional notification consumer.  This service is deliberately
+# separate from the database-independent runtime watchdog: it receives the
+# scoped outbox DSN and Telegram credentials, but no R2, Gamma, CLOB or Fly
+# observer token.
+app = "__CONTROL_PLANE_ALERT_DELIVERY_APP__"
+primary_region = "ams"
+
+[env]
+POLYARB_RUNTIME_ROLE = "control-plane"
+
+[build]
+
+[processes]
+delivery = "python -m polyarb.cli_control_plane alert-serve --enable --worker-id fly-control-plane-alert-delivery --interval-seconds 5 --json"
+
+[[restart]]
+policy = "always"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"
+processes = ["delivery"]
