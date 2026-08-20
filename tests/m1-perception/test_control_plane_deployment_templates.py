@@ -27,14 +27,23 @@ def test_control_worker_template_has_three_fixed_transactional_roles() -> None:
     assert payload["app"] == "__CONTROL_PLANE_WORKER_APP__"
     assert payload["env"]["POLYARB_ALERT_CHANNELS"] == "dashboard,telegram"
     assert payload["env"]["POLYARB_RUNTIME_ROLE"] == "control-plane"
-    processes = payload["processes"]
-    assert set(processes) == {"coordinator", "structure_range", "quote_batch"}
-    for command in processes.values():
-        assert 'export POLYARB_SUPABASE_DB_DSN="${POLYARB_SUPABASE_DB_DSN_V4:?}"' in command
-        assert "exec python -m polyarb.cli_control_plane serve --enable" in command
-    assert '"fly-control-plane-structure-range:${FLY_MACHINE_ID:?}"' in processes[
-        "structure_range"
-    ]
+    assert payload["processes"] == {
+        "coordinator": (
+            "python -m polyarb.cli_control_plane serve --enable "
+            "--worker-id fly-control-plane-coordinator --worker-role coordinator "
+            "--max-turns 8 --structure-materializer-turns 8 --interval-seconds 2 --json"
+        ),
+        "structure_range": (
+            "/bin/sh -ec 'exec python -m polyarb.cli_control_plane serve --enable "
+            "--worker-id \"fly-control-plane-structure-range:${FLY_MACHINE_ID:?}\" "
+            "--worker-role structure-range --pool-turns 2 --interval-seconds 2 --json'"
+        ),
+        "quote_batch": (
+            "python -m polyarb.cli_control_plane serve --enable "
+            "--worker-id fly-control-plane-quote-batch --worker-role quote-batch "
+            "--pool-turns 1 --interval-seconds 5 --json"
+        ),
+    }
     assert payload["vm"][0]["processes"] == [
         "coordinator",
         "structure_range",
