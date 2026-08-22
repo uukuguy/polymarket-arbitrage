@@ -779,6 +779,7 @@ def _transactional_structure_source_worker(
                 bucket=bucket,
                 worker_id=f"{worker_id}:{ordinal}",
                 now=lambda: datetime.now(UTC),
+                daily_egress_budget_bytes=settings.m1_daily_egress_budget_bytes,
             )
             for ordinal in range(lane_count)
         )

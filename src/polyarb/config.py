@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     clob_url: str = "https://clob.polymarket.com"
 
     gamma_rate_per_10s: int = 280
+    # Formal M1 collection stops before the Supabase Free-plan egress ceiling.
+    # Override only through a reviewed deployment environment variable.
+    m1_daily_egress_budget_bytes: int = Field(default=3_500_000_000, gt=0)
     clob_batch_rate_per_10s: int = 450
     clob_batch_size: int = 500
     # A full M1 quote universe has tens of thousands of tokens.  CLOB accepts
