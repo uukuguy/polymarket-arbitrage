@@ -587,6 +587,7 @@ class TransactionalStructureSourceWorker:
         lease_seconds: int = 120,
         object_store_timeout_seconds: float = 90,
         retry_delay: timedelta = timedelta(seconds=15),
+        daily_egress_budget_bytes: int = 3_500_000_000,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
@@ -600,6 +601,7 @@ class TransactionalStructureSourceWorker:
             lease_seconds <= 0
             or object_store_timeout_seconds <= 0
             or retry_delay.total_seconds() <= 0
+            or daily_egress_budget_bytes <= 0
         ):
             raise ValueError("source worker time bounds must be positive")
         self._control_plane = control_plane
@@ -615,6 +617,7 @@ class TransactionalStructureSourceWorker:
         self._lease_seconds = lease_seconds
         self._object_store_timeout_seconds = object_store_timeout_seconds
         self._retry_delay = retry_delay
+        self._daily_egress_budget_bytes = daily_egress_budget_bytes
 
     async def aclose(self) -> None:
         """Release the long-lived Gamma transport when an operator turn ends."""
@@ -642,6 +645,14 @@ class TransactionalStructureSourceWorker:
                 )
                 return StructureWorkerResult(job_key=lease.job_key, outcome="quarantined")
             artifact, next_cursor, completed, record_count = await self._fetch_artifact(spec)
+            decision = self._control_plane.record_cloud_usage(
+                source="gamma", operation=f"structure-{spec.stream}-page",
+                bytes_received=len(artifact.payload), item_count=record_count,
+                artifact_key=artifact.key, artifact_digest=artifact.sha256,
+                daily_budget_bytes=self._daily_egress_budget_bytes, now=self._now(),
+            )
+            if not decision.allowed:
+                raise StructureSourceError("cloud-egress-budget-exhausted")
             event_embedded_markets = spec.stream == "events" and completed
             self._control_plane.record_structure_source_page(
                 lease,

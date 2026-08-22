@@ -12,6 +12,7 @@ from polyarb.control_plane.models import (
     JobLease,
     JobState,
     SourceAdmissionDecision,
+    CloudUsageDecision,
     StructureSourcePageSpec,
 )
 from polyarb.control_plane.structure_source import (
@@ -36,6 +37,7 @@ class FakeControlPlane:
         self.quarantines: list[dict[str, object]] = []
         self.retry_incidents: list[dict[str, object]] = []
         self.recoveries: list[dict[str, object]] = []
+        self.usage_decision = CloudUsageDecision(True, 0, 0, "usage-1")
 
     def claim_job(self, **kwargs: object) -> JobLease:
         assert kwargs["job_types"] == ("structure-fetch",)
@@ -58,6 +60,10 @@ class FakeControlPlane:
         assert lease.job_key == self.spec.job_key
         self.recorded = kwargs
         return None
+
+    def record_cloud_usage(self, **kwargs: object) -> CloudUsageDecision:
+        self.cloud_usage = kwargs
+        return self.usage_decision
 
     def structure_source_event_pages(self, window_key: str):
         assert window_key == self.spec.window_key
@@ -225,6 +231,18 @@ def test_scoped_market_batch_ordinal_is_bounded_by_market_capacity_not_cursor_pa
     assert asyncio.run(worker.run_once()).outcome == "succeeded"
     assert control_plane.quarantines == []
     assert gamma.exact_market_calls == [("market-a",)]
+
+
+def test_source_worker_refuses_receipt_when_cloud_budget_is_exhausted() -> None:
+    spec = _event_spec()
+    control_plane = FakeControlPlane(spec)
+    control_plane.usage_decision = CloudUsageDecision(False, 90, 90, "usage-1")
+    worker = TransactionalStructureSourceWorker(
+        control_plane=control_plane, gamma=FakeGamma(), object_client=FakeObjectClient(),
+        bucket="structure", worker_id="source-worker-a", now=lambda: NOW,
+    )
+    assert asyncio.run(worker.run_once()).outcome == "retryable"
+    assert control_plane.recorded is None
 
 
 def test_scoped_market_artifact_binds_the_admitted_batch_digest() -> None:
