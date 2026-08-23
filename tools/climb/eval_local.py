@@ -266,6 +266,13 @@ TRANSACTIONAL_PRODUCTION_PROMOTION_GATE_COMMANDS = {
         "-q",
     ],
 }
+BUDGETED_TRANSACTIONAL_CLOUD_INPUT_GATE_COMMANDS = {
+    "planning": ["make", "control-plane-egress-preflight"],
+    "unit": ["uv", "run", "pytest", "tests/m1-perception/test_transactional_structure_source_worker.py", "-q"],
+    "integration": ["uv", "run", "pytest", "tests/m1-perception/test_control_plane_postgres.py", "-q"],
+    "cli": ["uv", "run", "pytest", "tests/m1-perception/test_control_plane_cli.py", "tests/m1-perception/test_control_plane_watchdog.py", "-q"],
+    "restart": ["uv", "run", "pytest", "tests/m1-perception/test_control_plane_watchdog.py", "-q"],
+}
 
 
 def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]:
@@ -281,6 +288,8 @@ def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]
         commands = CHECKPOINTED_STRUCTURE_RECOVERY_GATE_COMMANDS
     elif manifest.get("paradigm") == "transactional-production-promotion":
         commands = TRANSACTIONAL_PRODUCTION_PROMOTION_GATE_COMMANDS
+    elif manifest.get("paradigm") == "budgeted-transactional-cloud-input":
+        commands = BUDGETED_TRANSACTIONAL_CLOUD_INPUT_GATE_COMMANDS
     else:
         commands = GATE_COMMANDS
     return {name: list(command) for name, command in commands.items()}

@@ -328,3 +328,28 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-013
+  description: A metered R2-authoritative Structure input gate with a durable daily
+    egress budget, Dashboard evidence, and independent stale-observation paging prevents
+    unbounded cloud transfer from silently becoming M1 production input.
+  parent_paradigm: budgeted-transactional-cloud-input
+  expected_lift: Prevent unbudgeted or over-budget cloud input from entering formal
+    M1 receipts
+  cost_h: 4.0
+  ranking: 1.0
+  status: confirmed
+  created_at: '2026-08-23T00:00:00+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 14
+    run: 20260823-115009-h-013
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
