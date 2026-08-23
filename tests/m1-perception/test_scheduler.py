@@ -4254,17 +4254,23 @@ async def test_successful_tick_defers_retention_while_quote_pipeline_active(
     purge = MagicMock(return_value=(0, []))
     store.purge_old_snapshots = purge  # type: ignore[method-assign]
     runtime = QuoteWorkerRuntime()
-    runtime.mark_pipeline_started()
+    runtime.mark_started()
     scheduler = SnapshotScheduler(
         settings=daemon_settings_for_test,
         sqlite_store=store,
         quote_worker_runtime=runtime,
     )
-    scheduler._run_snapshot = AsyncMock(return_value=_FakeResult(SnapshotStatus.OK))
+
+    async def run_snapshot() -> _FakeResult:
+        runtime.mark_pipeline_started()
+        return _FakeResult(SnapshotStatus.OK)
+
+    scheduler._run_snapshot = AsyncMock(side_effect=run_snapshot)
 
     with patch("polyarb.daemon.alerts.send_heartbeat_ok", new=AsyncMock()):
-        await scheduler._tick()
+        await asyncio.wait_for(scheduler._tick(), timeout=1)
 
+    scheduler._run_snapshot.assert_awaited_once()
     purge.assert_not_called()
 
 
