@@ -24,6 +24,7 @@ export type ControlPlaneRead =
       open_incidents: Array<{ incident_key: string; component: string; severity: string; summary: string }>;
       runtime_watchdog: { current: ActiveRuntimeIncident | null; recent_events: RuntimeEvent[] };
       soak_evidence: { latest_run_id: string; latest_observed_at: string } | null;
+      cloud_usage: { budget_day: string; used_bytes: number; daily_budget_bytes: number | null; threshold_percent: number; latest_observation: { source: string; operation: string; bytes_received: number; observed_at: string } | null };
     };
 
 function validEvent(value: unknown): value is RuntimeEvent {
@@ -68,12 +69,13 @@ export async function readControlPlane(): Promise<ControlPlaneRead> {
     const recent = runtime?.recent_events;
     const current = runtime?.current;
     const evidence = data.soak_evidence;
+    const usage = data.cloud_usage as Record<string, unknown> | undefined;
     const validEvidence = evidence === null || (
       typeof evidence === "object" && evidence !== null &&
       typeof (evidence as Record<string, unknown>).latest_run_id === "string" &&
       typeof (evidence as Record<string, unknown>).latest_observed_at === "string"
     );
-    if (data.status !== "available" || !runtime || !Array.isArray(recent) || !recent.every(validEvent) || (current !== null && !validActiveIncident(current)) || !validEvidence) {
+    if (data.status !== "available" || !runtime || !usage || typeof usage.used_bytes !== "number" || typeof usage.threshold_percent !== "number" || !Array.isArray(recent) || !recent.every(validEvent) || (current !== null && !validActiveIncident(current)) || !validEvidence) {
       throw new Error("invalid control-plane read model");
     }
     return data as ControlPlaneRead;
