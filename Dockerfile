@@ -19,9 +19,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --locked --no-install-project --no-editable
 COPY pyproject.toml uv.lock README.md ./
-COPY src/ ./src/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-editable
 
 # ───── Runtime stage ─────────────────────────────────────────────────
 FROM --platform=linux/amd64 python:3.12-slim-bookworm AS runtime
