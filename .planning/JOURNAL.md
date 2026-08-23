@@ -10054,3 +10054,35 @@ topology changes until its default 24-hour verifier and final audit pass.
 admissions, remove the legacy JSONB write/read path in a dedicated migration,
 deploy the repaired M1 topology, then begin one fresh formal cloud acceptance
 run with watchdog and Dashboard evidence.
+
+## SESSION 298 — 2026-08-23 (M1 production reconstitution and monitored formal run)
+
+- [ROOT CAUSE / REPAIRED] The previously configured Supabase endpoint no longer
+  existed. The sole current `polyarb` database was migrated through Alembic
+  revision `021`; the API, runtime-event writer and worker were aligned to the
+  current database credential without resetting it again.
+- [DEPLOYMENT] The three fixed transactional worker Machines were updated to a
+  layered runtime image, then started only after the API and writer health
+  checks passed. Source changes now leave the dependency layer cacheable across
+  subsequent releases.
+- [ROOT CAUSE / REPAIRED] The detached evidence Machine was carrying stale
+  versioned runtime variables and then attempted to append to a run that had no
+  baseline. Database, Fly Machines read API and control API were independently
+  tested from the Machine. A new dedicated 30-day read-only token, current
+  pooler DSN mapping, explicit baseline, and sampler command restored its
+  append-only service. No credentials are recorded here.
+- [MONITORING] The watchdog was rebound to the new exact run ID. Revoking the
+  former observer token deliberately surfaced a Cloudflare-supervisor 401 in
+  the Dashboard ledger; the supervisor now has its own replacement read-only
+  secret. The ledger recorded both `detected` and `recovered`, and currently
+  has no open incident or pending alert outbox.
+- [ACCEPTANCE] Sole qualifying run `m1-formal-20260823T1335Z` was baselined at
+  `2026-08-23T13:41:00Z`. Its sampler wrote at `13:41:37Z` and `13:46:38Z`.
+  The short fail-closed verifier passed at 338 seconds with three evidence
+  ticks, three exact workers, advancing successful jobs, no expired lease and
+  no open circuit. This resets the 24-hour clock; it is not final acceptance.
+
+[NEXT] Do not alter the qualifying worker, sampler, watchdog, writer or
+supervisor topology. Periodically use the read-only cloud-soak verifier and
+Dashboard API for `m1-formal-20260823T1335Z`; after the default 86,400-second
+gate passes, run the final audit and only then close M1.

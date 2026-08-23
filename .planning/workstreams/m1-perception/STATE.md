@@ -5,7 +5,7 @@ milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
 stopped_at: final cloud acceptance is collecting immutable evidence; do not change the topology or declare completion before its 24-hour verifier passes
-last_updated: "2026-08-19T03:08:00+08:00"
+last_updated: "2026-08-23T21:47:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,12 +19,12 @@ progress:
 ## Current Position
 
 - **Sole authority:** Supabase project `polyarb` (`lgykffpcsebewvobkbdm`),
-  Alembic migrations through `017`, and R2 bucket `polyarb-control-plane`.
+  Alembic migrations through `021`, and R2 bucket `polyarb-control-plane`.
   The runtime's durable job, receipt, lease, pointer, evidence, and incident
   facts live there.
 
 - **Transactional collection:** `polyarb-control-worker-m1` has three fixed,
-  started 1GB roles: coordinator `e82d1220b2d138`, Structure range worker
+  started 1GB roles on the current layered runtime image: coordinator `e82d1220b2d138`, Structure range worker
   `683e46ea500dd8`, and Quote batch worker `4d895231f66748`. Fenced Postgres
   leases and idempotent receipts make process replacement safe; Structure and
   Quote are not competing for a local SQLite writer.
@@ -52,15 +52,20 @@ progress:
   same-name environment values on update. Runtime commands therefore map only
   dedicated versioned variables; all database runtime roles use the Supabase
   IPv4 Session Pooler, not the unreachable direct IPv6 database endpoint.
+  The evidence sampler and Cloudflare supervisor each have separate short-lived
+  Fly read-only credentials; neither shares a worker credential.
 
 ## Formal Acceptance
 
-- **Only qualifying run:** `m1-formal-20260818T1907Z`.
-- **Baseline:** `2026-08-18T19:06:55.069051Z`; the independent sampler's first
-  append-only sample followed at `19:07:35Z` after the watchdog had been
-  bound to this exact run.
+- **Only qualifying run:** `m1-formal-20260823T1335Z`.
+- **Baseline:** `2026-08-23T13:41:00.721027Z`; the independent sampler's first
+  append-only sample followed at `13:41:37Z` after all three workers were
+  started, and the second arrived at `13:46:38Z`.
+- **Early bounded proof:** the fail-closed verifier passed at 338 seconds with
+  three persisted ticks, all three expected workers, and advancing successful
+  work. This is liveness evidence only, not 24-hour acceptance.
 - **Hard completion gate:** `make control-plane-cloud-soak-verify
-  run_id=m1-formal-20260818T1907Z` must pass its default 86,400-second,
+  run_id=m1-formal-20260823T1335Z` must pass its default 86,400-second,
   900-second-gap fail-closed policy. Earlier runs are immutable audit history
   only and are not qualifying evidence.
 
@@ -76,7 +81,7 @@ progress:
 
 ## Resume
 
-1. Read-only verify `m1-formal-20260818T1907Z` periodically; do not restart or
+1. Read-only verify `m1-formal-20260823T1335Z` periodically; do not restart or
    reconfigure a qualifying target during its 24-hour no-gap window.
 2. If an alert opens, diagnose the smallest failing boundary from the API,
    source-aware Dashboard ledger and exact Machine state; repair it, then start
