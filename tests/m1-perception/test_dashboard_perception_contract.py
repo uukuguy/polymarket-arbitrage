@@ -314,13 +314,14 @@ def test_overview_labels_bounded_group_counts_and_filters_verified_incidents() -
 
 def test_overview_has_prominent_p1_quote_incident_panel() -> None:
     overview = _source("dashboard/app/perception/page.tsx")
+    normalized_overview = " ".join(overview.split())
 
     assert "P1 quote feed incident" in overview
     assert "p1QuoteIncidents" in overview
     assert "Automatic action:" in overview
     assert "Next action:" in overview
     assert "P1 failure:" in overview
-    assert "next automatic retry" in overview
+    assert "next automatic retry" in normalized_overview
 
 
 def test_overview_has_prominent_p1_capacity_incident_panel() -> None:
