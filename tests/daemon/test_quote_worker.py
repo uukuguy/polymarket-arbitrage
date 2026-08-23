@@ -18,6 +18,7 @@ os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
 from polyarb.config import Settings
 from polyarb.routing.neg_risk_quote_collector import QuoteCollectionResult
 from polyarb.routing.neg_risk_quote_store import NegRiskQuoteStore
+from polyarb.storage.sqlite_store import SQLiteStore
 
 
 @dataclass
@@ -1188,6 +1189,7 @@ async def test_isolated_collection_hard_timeout_kills_child_and_releases_run(tmp
     async def spawn(*_args, **_kwargs):
         return process
 
+    SQLiteStore(db_path).init_schema()
     started = time.monotonic()
     with pytest.raises(QuoteCollectionSubprocessError, match="subprocess-timeout") as captured:
         await collect_quotes_in_subprocess(
