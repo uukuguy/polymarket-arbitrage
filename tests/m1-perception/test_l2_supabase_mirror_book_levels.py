@@ -7,7 +7,7 @@ Stays RED until Task 2 lands:
 
 Contract (verbatim from `push_top_of_book` envelope + the chain-truth anchor):
 - happy path returns True; failure returns False (never raises)
-- Narrow projection drops extra fields before .insert()
+- Narrow projection drops extra fields before .upsert()
 - 1000-row chunk size matches _CHUNK_SIZE
 - On SUCCESS only: l3_promote._last_book_levels_write_at_s = time.time()
 - On FAILURE: anchor remains untouched (chain-truth — failure path is pure)
@@ -95,21 +95,6 @@ def test_push_book_levels_happy_path_returns_true() -> None:
     table_calls = [c.args[0] for c in sb_mock.table.call_args_list]
     assert "l2_book_levels" in table_calls
 
-    # Inspect the insert call payload — should have 5 rows
-    # (sb_mock.table returns a fresh MagicMock per call, but they share
-    # side_effect; we grab the last tbl by replaying.)
-    # Easier: count insert calls across all returned tbls via side_effect.
-    _insert_calls = []
-    for call in sb_mock.table.call_args_list:
-        # Walk the chain: every table() call returned a tbl whose insert(...)
-        # was called with the chunk. We re-invoke side_effect to get the
-        # corresponding tbl is not deterministic; instead patch differently
-        # below in the chunk test. Here we rely on overall call count.
-        pass
-
-    # Loose assertion: at least one insert was made (chunked path)
-    # — strong row-count assertion is in test_push_book_levels_chunks_at_1000.
-
 
 def test_push_book_levels_failure_returns_false_no_raise() -> None:
     from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
@@ -123,16 +108,15 @@ def test_push_book_levels_failure_returns_false_no_raise() -> None:
 
 
 def test_push_book_levels_chunks_at_1000() -> None:
-    """2500 rows → exactly 3 .insert calls (1000 + 1000 + 500)."""
+    """2500 rows → exactly 3 .upsert calls (1000 + 1000 + 500)."""
     from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
 
-    # Use one shared insert-mock so we can count chunk invocations
-    insert_mock = MagicMock()
-    insert_mock.execute.return_value = MagicMock(data=[])
+    # Use one shared upsert builder so we can count chunk invocations.
+    upsert_builder_mock = MagicMock()
+    upsert_builder_mock.execute.return_value = MagicMock(data=[])
 
     tbl_mock = MagicMock()
-    tbl_mock.insert.return_value = insert_mock
-    tbl_mock.upsert.return_value = insert_mock
+    tbl_mock.upsert.return_value = upsert_builder_mock
 
     sb_mock = MagicMock()
     sb_mock.table.return_value = tbl_mock
@@ -142,19 +126,25 @@ def test_push_book_levels_chunks_at_1000() -> None:
         result = mirror.push_book_levels(_book_rows(2500))
 
     assert result is True
-    assert tbl_mock.insert.call_count == 3
-    chunk_sizes = [len(call.args[0]) for call in tbl_mock.insert.call_args_list]
-    assert chunk_sizes == [1000, 1000, 500], f"expected chunks 1000+1000+500 but got {chunk_sizes}"
+    assert tbl_mock.upsert.call_count == 3
+    chunk_sizes = [len(call.args[0]) for call in tbl_mock.upsert.call_args_list]
+    assert chunk_sizes == [1000, 1000, 500], (
+        f"expected chunks 1000+1000+500 but got {chunk_sizes}"
+    )
+    conflict_targets = [
+        call.kwargs.get("on_conflict") for call in tbl_mock.upsert.call_args_list
+    ]
+    assert conflict_targets == ["asset_id,ts,side,level"] * 3
 
 
 def test_push_book_levels_narrow_projection() -> None:
     """Extra keys outside `_NARROW_BOOK_LEVELS_COLUMNS` must be stripped."""
     from polyarb.storage.l2_supabase_mirror import L2SupabaseMirror
 
-    insert_mock = MagicMock()
-    insert_mock.execute.return_value = MagicMock(data=[])
+    upsert_builder_mock = MagicMock()
+    upsert_builder_mock.execute.return_value = MagicMock(data=[])
     tbl_mock = MagicMock()
-    tbl_mock.insert.return_value = insert_mock
+    tbl_mock.upsert.return_value = upsert_builder_mock
     sb_mock = MagicMock()
     sb_mock.table.return_value = tbl_mock
 
@@ -175,7 +165,11 @@ def test_push_book_levels_narrow_projection() -> None:
         mirror = L2SupabaseMirror(url="https://x.supabase.co", service_key="key")
         assert mirror.push_book_levels(polluted) is True
 
-    sent_chunk = tbl_mock.insert.call_args.args[0]
+    assert (
+        tbl_mock.upsert.call_args.kwargs.get("on_conflict")
+        == "asset_id,ts,side,level"
+    )
+    sent_chunk = tbl_mock.upsert.call_args.args[0]
     assert len(sent_chunk) == 1
     sent_row = sent_chunk[0]
     assert "extra_field" not in sent_row
