@@ -62,6 +62,7 @@ from polyarb.control_plane.structure_worker import (
     TransactionalStructureWorker,
 )
 from polyarb.control_plane.watchdog import (
+    CloudUsageGate,
     ProgressGate,
     RestartEventGate,
     RuntimeObservation,
@@ -477,6 +478,7 @@ def _read_runtime_watchdog_observation(
     restart_gate: RestartEventGate | None = None,
     progress_gate: ProgressGate | None = None,
     soak_evidence_gate: SoakEvidenceGate | None = None,
+    cloud_usage_gate: CloudUsageGate | None = None,
 ) -> RuntimeObservation:
     """Classify independently bounded API and Fly reads without touching Postgres."""
     control_api_payload: dict[str, object] | None = None
@@ -539,9 +541,8 @@ def _read_runtime_watchdog_observation(
         if progress_gate is None
         else progress_gate.apply(restart_observation, control_api_payload, now=now)
     )
-    if soak_evidence_gate is None:
-        return progress_observation
-    return soak_evidence_gate.apply(progress_observation, control_api_payload, now=now)
+    evidence_observation = progress_observation if soak_evidence_gate is None else soak_evidence_gate.apply(progress_observation, control_api_payload, now=now)
+    return evidence_observation if cloud_usage_gate is None else cloud_usage_gate.apply(evidence_observation, control_api_payload, now=now)
 
 
 async def _send_runtime_watchdog_telegram(settings: Settings, text: str) -> None:
@@ -616,6 +617,7 @@ async def _run_runtime_watchdog_service(
     soak_evidence_gate = SoakEvidenceGate(
         max_age=timedelta(minutes=15), expected_run_id=args.soak_run_id
     )
+    cloud_usage_gate = CloudUsageGate(max_age=timedelta(minutes=15))
     loop = asyncio.get_running_loop()
     for stop_signal in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -650,6 +652,7 @@ async def _run_runtime_watchdog_service(
             restart_gate=restart_gate,
             progress_gate=progress_gate,
             soak_evidence_gate=soak_evidence_gate,
+            cloud_usage_gate=cloud_usage_gate,
         ),
         send=lambda text: _send_runtime_watchdog_telegram(settings, text),
         persist_transition=persist_transition,

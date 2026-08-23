@@ -155,6 +155,31 @@ class SoakEvidenceGate:
         )
 
 
+class CloudUsageGate:
+    """Fail closed when active work has no recent metered cloud-input fact."""
+
+    def __init__(self, *, max_age: timedelta) -> None:
+        self._max_age = max_age
+
+    def apply(self, observation: RuntimeObservation, payload: Mapping[str, object] | None, *, now: datetime) -> RuntimeObservation:
+        if payload is None:
+            return observation
+        counts = payload.get("job_counts")
+        active = isinstance(counts, Mapping) and any(int(counts.get(key, 0)) > 0 for key in ("runnable", "leased", "succeeded"))
+        if not active:
+            return observation
+        usage = payload.get("cloud_usage")
+        latest = usage.get("latest_observation") if isinstance(usage, Mapping) else None
+        observed_at = latest.get("observed_at") if isinstance(latest, Mapping) else None
+        if not isinstance(observed_at, str):
+            return RuntimeObservation(False, (*observation.failures, "cloud-usage:observation-missing"))
+        try:
+            age = now.astimezone(UTC) - datetime.fromisoformat(observed_at).astimezone(UTC)
+        except ValueError:
+            return RuntimeObservation(False, (*observation.failures, "cloud-usage:observation-invalid"))
+        return observation if age <= self._max_age else RuntimeObservation(False, (*observation.failures, f"cloud-usage:observation-stale:{int(age.total_seconds())}s"))
+
+
 def assess_runtime(
     *,
     machine_states: Mapping[str, str],

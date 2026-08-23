@@ -81,6 +81,18 @@ def test_watchdog_pages_when_latest_cloud_evidence_sample_is_stale() -> None:
     assert observation.failures == ("evidence:sample-stale:901s",)
 
 
+def test_watchdog_rejects_active_collection_without_fresh_cloud_usage() -> None:
+    from polyarb.control_plane.watchdog import CloudUsageGate, RuntimeObservation
+
+    gate = CloudUsageGate(max_age=timedelta(minutes=15))
+    now = datetime(2026, 8, 18, 14, 15, 1, tzinfo=UTC)
+    missing = gate.apply(RuntimeObservation(True, ()), {"job_counts": {"succeeded": 1}, "cloud_usage": {}}, now=now)
+    stale = gate.apply(RuntimeObservation(True, ()), {"job_counts": {"succeeded": 1}, "cloud_usage": {"latest_observation": {"observed_at": "2026-08-18T14:00:00+00:00"}}}, now=now)
+
+    assert missing.failures == ("cloud-usage:observation-missing",)
+    assert stale.failures == ("cloud-usage:observation-stale:901s",)
+
+
 def test_watchdog_rejects_a_fresh_sample_from_the_wrong_formal_run() -> None:
     from polyarb.control_plane.watchdog import RuntimeObservation, SoakEvidenceGate
 
