@@ -75,6 +75,7 @@ async def test_quote_supervisor_reserves_time_for_certification_after_child_coll
         opportunity_producer_supervisor_enabled=False,
         neg_risk_quote_supervisor_enabled=True,
         neg_risk_quote_worker_enabled=True,
+        neg_risk_quote_interval_s=60,
         neg_risk_quote_supervisor_timeout_s=210,
         opportunity_first_watcher_enabled=False,
         opportunity_discovery_enabled=False,
@@ -92,7 +93,7 @@ async def test_quote_supervisor_reserves_time_for_certification_after_child_coll
         SimpleNamespace(db_path=tmp_path / "state.db"),
         asyncio.Event(),
     )
-    await asyncio.gather(*tasks)
+    await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
 
     assert len(specs) == 1
     assert specs[0].component == "quote"
