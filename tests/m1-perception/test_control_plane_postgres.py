@@ -1236,7 +1236,7 @@ def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
     assert batch.input_identity.startswith(f"quote:{'a' * 64}:{'b' * 64}:2:")
 
 
-def test_deployment_preflight_requires_named_database_and_all_014_tables(
+def test_deployment_preflight_requires_named_database_and_all_021_tables(
     control_plane: PostgresControlPlane,
 ) -> None:
     with control_plane._connection_factory() as connection:  # noqa: SLF001
@@ -1244,7 +1244,7 @@ def test_deployment_preflight_requires_named_database_and_all_014_tables(
     assert database_name is not None
     result = control_plane.deployment_preflight(expected_database=str(database_name[0]))
     assert result["database_name"] == database_name[0]
-    assert result["revision_014_tables"] == 20
+    assert result["revision_021_tables"] == 21
     with pytest.raises(Exception, match="database identity mismatch"):
         control_plane.deployment_preflight(expected_database="not-the-control-plane")
 

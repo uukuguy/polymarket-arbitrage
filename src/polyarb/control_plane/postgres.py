@@ -243,7 +243,7 @@ class PostgresControlPlane:
             return tuple(dict(row["record"]) for row in cursor.fetchall())
 
     def deployment_preflight(self, *, expected_database: str) -> dict[str, object]:
-        """Prove the named authority has the complete additive 014 schema.
+        """Prove the named authority has the complete additive 021 schema.
 
         This is intentionally read-only: passing it authorizes shadow-only
         operator steps, never a migration, scheduler loop, or pointer change.
@@ -271,6 +271,7 @@ class PostgresControlPlane:
             "m1_structure_source_page_inputs",
             "m1_structure_source_page_receipts",
             "m1_structure_source_window_bundles",
+            "m1_cloud_usage_observations",
         )
         with (
             self._connection_factory() as connection,
@@ -296,7 +297,7 @@ class PostgresControlPlane:
             )
             found = {str(row["relname"]) for row in cursor.fetchall()}
             if found != set(required_tables):
-                raise ControlPlaneError("control-plane revision 014 schema is incomplete")
+                raise ControlPlaneError("control-plane revision 021 schema is incomplete")
             cursor.execute(
                 """
                 SELECT attname FROM pg_catalog.pg_attribute
@@ -312,7 +313,7 @@ class PostgresControlPlane:
             return {
                 "database_name": str(identity["database_name"]),
                 "postgres_version": str(identity["postgres_version"]),
-                "revision_014_tables": len(found),
+                "revision_021_tables": len(found),
             }
 
     def enqueue_job(
