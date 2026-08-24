@@ -2169,7 +2169,7 @@ class PostgresControlPlane:
         """Complete a receipt-backed Structure terminal effect exactly once."""
         cursor.execute(
             """
-            SELECT state, lease_owner, lease_epoch
+            SELECT state, lease_owner, lease_epoch, checkpoint_cursor, checkpoint_digest
             FROM m1_jobs
             WHERE job_key = %s
             FOR UPDATE
@@ -2180,8 +2180,100 @@ class PostgresControlPlane:
         if job is None:
             raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
         if str(job["state"]) == "succeeded":
-            # The business truth is already terminal.  A replay must not need
-            # the old lease or attempt another fenced mutation.
+            if (
+                int(job["lease_epoch"]) != lease.lease_epoch
+                or str(job["checkpoint_cursor"]) != checkpoint_cursor
+                or str(job["checkpoint_digest"]) != checkpoint_digest
+            ):
+                raise CheckpointConflictError(
+                    f"succeeded Structure job has conflicting durable checkpoint: {lease.job_key}"
+                )
+            cursor.execute(
+                """
+                SELECT attempt_id, lease_epoch, worker_id, state
+                FROM m1_job_attempts
+                WHERE job_key = %s AND lease_epoch = %s
+                FOR UPDATE
+                """,
+                (lease.job_key, lease.lease_epoch),
+            )
+            attempt = cursor.fetchone()
+            if (
+                attempt is None
+                or str(attempt["state"]) != "succeeded"
+                or int(attempt["lease_epoch"]) != lease.lease_epoch
+                or str(attempt["worker_id"]) != lease.lease_owner
+            ):
+                raise StaleLeaseError(
+                    f"durable attempt is no longer current for {lease.job_key}"
+                )
+            cursor.execute(
+                """
+                SELECT attempt_id, lease_epoch, worker_id, progress_sequence,
+                       progress_current, progress_total
+                FROM m1_job_runtime_state
+                WHERE job_key = %s
+                FOR UPDATE
+                """,
+                (lease.job_key,),
+            )
+            runtime_state = cursor.fetchone()
+            if (
+                runtime_state is None
+                or str(runtime_state["attempt_id"]) != str(attempt["attempt_id"])
+                or int(runtime_state["lease_epoch"]) != lease.lease_epoch
+                or str(runtime_state["worker_id"]) != lease.lease_owner
+            ):
+                raise StaleLeaseError(
+                    f"runtime attempt is no longer current for {lease.job_key}"
+                )
+            cursor.execute(
+                """
+                SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
+                FROM m1_job_runtime_events
+                WHERE attempt_id = %s
+                """,
+                (attempt["attempt_id"],),
+            )
+            sequence_row = cursor.fetchone()
+            if sequence_row is None:
+                raise ControlPlaneError("runtime event sequence query returned no row")
+            progress_sequence = int(runtime_state["progress_sequence"])
+            progress = (
+                None
+                if progress_sequence == 0
+                else RuntimeProgress(
+                    sequence=progress_sequence,
+                    current=int(runtime_state["progress_current"]),
+                    total=(
+                        None
+                        if runtime_state["progress_total"] is None
+                        else int(runtime_state["progress_total"])
+                    ),
+                    stage=stage,
+                )
+            )
+            PostgresControlPlane._append_structure_recovery_event_cursor(
+                cursor,
+                event=RuntimeEvent(
+                    job_key=lease.job_key,
+                    attempt_id=str(attempt["attempt_id"]),
+                    lease_epoch=lease.lease_epoch,
+                    worker_id=lease.lease_owner,
+                    event_sequence=int(sequence_row["next_sequence"]),
+                    kind=RuntimeEventKind.SUCCEEDED,
+                    stage=stage,
+                    progress=progress,
+                    detail={
+                        "component": component,
+                        "data_product": data_product,
+                        "qualification_impact": "qualified",
+                        "result_code": "ok",
+                    },
+                    occurred_at=now,
+                    idempotency_key=f"runtime:{attempt['attempt_id']}:succeeded",
+                ),
+            )
             return True
         if (
             str(job["state"]) != "leased"
@@ -2227,6 +2319,122 @@ class PostgresControlPlane:
             (now, lease.job_key, lease.lease_epoch),
         )
         return False
+
+    @staticmethod
+    def _append_structure_recovery_event_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]], *, event: RuntimeEvent
+    ) -> RuntimeEvent:
+        """Repair one proven terminal event without manufacturing a live lease.
+
+        The caller has already locked and matched the succeeded job, durable
+        attempt, and runtime projection.  This path only appends to the
+        immutable event table; it never changes ``m1_jobs`` to make the normal
+        live-fence append helper accept a historical terminal row.
+        """
+        cursor.execute(
+            """
+            SELECT job_key, attempt_id, lease_epoch, worker_id, event_sequence,
+                   kind, stage, progress_sequence, progress_current, progress_total,
+                   detail, idempotency_key
+            FROM m1_job_runtime_events
+            WHERE idempotency_key = %s
+            FOR UPDATE
+            """,
+            (event.idempotency_key,),
+        )
+        existing = cursor.fetchone()
+        if existing is not None:
+            expected_progress_sequence = (
+                None if event.progress is None else event.progress.sequence
+            )
+            expected_progress_current = None if event.progress is None else event.progress.current
+            expected_progress_total = None if event.progress is None else event.progress.total
+            if (
+                str(existing["job_key"]) != event.job_key
+                or str(existing["attempt_id"]) != event.attempt_id
+                or int(existing["lease_epoch"]) != event.lease_epoch
+                or str(existing["worker_id"]) != event.worker_id
+                or int(existing["event_sequence"]) < 1
+                or str(existing["kind"]) != event.kind.value
+                or str(existing["stage"]) != event.stage
+                or (
+                    None
+                    if existing["progress_sequence"] is None
+                    else int(existing["progress_sequence"])
+                )
+                != expected_progress_sequence
+                or (
+                    None
+                    if existing["progress_current"] is None
+                    else int(existing["progress_current"])
+                )
+                != expected_progress_current
+                or (
+                    None
+                    if existing["progress_total"] is None
+                    else int(existing["progress_total"])
+                )
+                != expected_progress_total
+                or dict(existing["detail"]) != dict(event.detail)
+                or str(existing["idempotency_key"]) != event.idempotency_key
+            ):
+                raise RuntimeEventConflictError(
+                    f"runtime success event conflicts: {event.idempotency_key!r}"
+                )
+            return event
+
+        cursor.execute(
+            """
+            SELECT event_id
+            FROM m1_job_runtime_events
+            WHERE job_key = %s AND attempt_id = %s AND lease_epoch = %s
+              AND worker_id = %s AND kind = %s
+            FOR UPDATE
+            """,
+            (
+                event.job_key,
+                event.attempt_id,
+                event.lease_epoch,
+                event.worker_id,
+                event.kind.value,
+            ),
+        )
+        if cursor.fetchone() is not None:
+            raise RuntimeEventConflictError(
+                f"runtime success event already exists for {event.attempt_id!r}"
+            )
+        progress_sequence = None if event.progress is None else event.progress.sequence
+        progress_current = None if event.progress is None else event.progress.current
+        progress_total = None if event.progress is None else event.progress.total
+        cursor.execute(
+            """
+            INSERT INTO m1_job_runtime_events (
+                event_id, job_key, attempt_id, lease_epoch, worker_id,
+                event_sequence, kind, stage, progress_sequence, progress_current,
+                progress_total, detail, occurred_at, idempotency_key
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                str(uuid4()),
+                event.job_key,
+                event.attempt_id,
+                event.lease_epoch,
+                event.worker_id,
+                event.event_sequence,
+                event.kind.value,
+                event.stage,
+                progress_sequence,
+                progress_current,
+                progress_total,
+                Jsonb(dict(event.detail)),
+                event.occurred_at,
+                event.idempotency_key,
+            ),
+        )
+        # The normal helper is now an idempotency-only validator because the
+        # row exists.  Keeping this call gives injected append failures the
+        # same all-or-nothing rollback boundary as live terminal commits.
+        return append_runtime_event_cursor(cursor, event)
 
     @staticmethod
     def _append_quote_admission_success_cursor(
