@@ -550,15 +550,20 @@ async def test_reconciliation_stall_opens_incident_without_killing_child(
         )
     )
 
-    await asyncio.sleep(0.09)
-
-    incident = store.open_incidents()[0]
-    assert incident.kind == "child-stalled"
-    assert incident.state == "recovering"
-    assert store.producer_receipts("reconciliation") == ()
-
-    stop.set()
-    await task
+    try:
+        stall_deadline = time.monotonic() + 5
+        open_incidents = await asyncio.to_thread(store.open_incidents)
+        while not open_incidents and time.monotonic() < stall_deadline:
+            await asyncio.sleep(0.02)
+            open_incidents = await asyncio.to_thread(store.open_incidents)
+        assert open_incidents != ()
+        incident = open_incidents[0]
+        assert incident.kind == "child-stalled"
+        assert incident.state == "recovering"
+        assert store.producer_receipts("reconciliation") == ()
+    finally:
+        stop.set()
+        await task
     assert store.producer_receipts("reconciliation")[0].outcome == "cancelled"
 
 
