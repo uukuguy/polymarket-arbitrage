@@ -185,6 +185,85 @@ def test_transactional_production_promotion_profile_uses_only_local_proof_gates(
     }
 
 
+def test_event_driven_runtime_self_healing_profile_uses_local_runtime_gates() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "event-driven-runtime-self-healing"}
+    )
+
+    assert commands == {
+        "planning": ["make", "planning-status"],
+        "unit": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_runtime_models.py",
+            "tests/m1-perception/test_transactional_runtime_coverage.py::test_runtime_registry_has_exact_eight_job_types_with_meaningful_stage_names",
+            "tests/m1-perception/test_transactional_runtime_coverage.py::test_runtime_coverage_gate_uses_real_terminal_boundaries_and_fails_closed",
+            "tests/m1-perception/test_transactional_runtime_coverage.py::test_runtime_reporter_rejects_secret_like_detail_keys_before_persistence",
+            "tests/m1-perception/test_transactional_runtime_coverage.py::test_runtime_reporter_rejects_unbounded_detail_before_persistence",
+            "-q",
+        ],
+        "integration": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_transactional_runtime_coverage.py",
+            "-q",
+        ],
+        "cli": [
+            "uv",
+            "run",
+            "ruff",
+            "check",
+            "src/polyarb/control_plane",
+            "tests/m1-perception",
+        ],
+        "restart": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_long_runtime_keeps_lease_live_for_207_simulated_seconds",
+            "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_stale_heartbeat_drains_blocking_read_before_return",
+            "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_external_cancellation_drains_blocking_read_before_return",
+            "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_blocking_recovery_reports_pending_after_terminal_success",
+            "tests/m1-perception/test_transactional_quote_worker.py::test_quote_batch_stale_heartbeat_cancels_owner_and_drains_reader",
+            "tests/m1-perception/test_transactional_quote_worker.py::test_quote_batch_scheduler_cancellation_drains_reader_without_late_receipt",
+            "tests/m1-perception/test_transactional_quote_worker.py::test_quote_certifier_scheduler_cancellation_drains_terminal_thread",
+            "tests/m1-perception/test_transactional_opportunity_projection.py::test_opportunity_scheduler_cancellation_drains_db_call_without_late_publish",
+            "-q",
+        ],
+    }
+
+    flattened = [argument for command in commands.values() for argument in command]
+    for required in (
+        "test_transactional_runtime_coverage.py",
+        "test_runtime_reporter_rejects_secret_like_detail_keys_before_persistence",
+        "test_runtime_reporter_rejects_unbounded_detail_before_persistence",
+        "test_quote_admitter_long_runtime_keeps_lease_live_for_207_simulated_seconds",
+        "test_quote_batch_stale_heartbeat_cancels_owner_and_drains_reader",
+        "test_quote_batch_scheduler_cancellation_drains_reader_without_late_receipt",
+        "test_quote_certifier_scheduler_cancellation_drains_terminal_thread",
+        "test_opportunity_scheduler_cancellation_drains_db_call_without_late_publish",
+    ):
+        assert any(required in argument for argument in flattened)
+    assert not {
+        argument.lower()
+        for argument in flattened
+        if any(
+            forbidden in argument.lower()
+            for forbidden in (
+                "flyctl",
+                "deploy",
+                "migrate",
+                "http://",
+                "https://",
+                "production",
+                "dsn",
+            )
+        )
+    }
+
+
 def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:
     assert eval_local.gate_commands_for({"paradigm": "repository"}) == GATE_COMMANDS
     assert eval_local.gate_commands_for({"paradigm": "unknown"}) == GATE_COMMANDS

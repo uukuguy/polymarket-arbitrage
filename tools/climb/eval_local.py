@@ -268,10 +268,78 @@ TRANSACTIONAL_PRODUCTION_PROMOTION_GATE_COMMANDS = {
 }
 BUDGETED_TRANSACTIONAL_CLOUD_INPUT_GATE_COMMANDS = {
     "planning": ["make", "control-plane-egress-preflight"],
-    "unit": ["uv", "run", "pytest", "tests/m1-perception/test_transactional_structure_source_worker.py", "-q"],
-    "integration": ["uv", "run", "pytest", "tests/m1-perception/test_control_plane_postgres.py", "-q"],
-    "cli": ["uv", "run", "pytest", "tests/m1-perception/test_control_plane_cli.py", "tests/m1-perception/test_control_plane_watchdog.py", "-q"],
-    "restart": ["uv", "run", "pytest", "tests/m1-perception/test_control_plane_watchdog.py", "-q"],
+    "unit": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_transactional_structure_source_worker.py",
+        "-q",
+    ],
+    "integration": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_postgres.py",
+        "-q",
+    ],
+    "cli": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_cli.py",
+        "tests/m1-perception/test_control_plane_watchdog.py",
+        "-q",
+    ],
+    "restart": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_watchdog.py",
+        "-q",
+    ],
+}
+EVENT_DRIVEN_RUNTIME_SELF_HEALING_GATE_COMMANDS = {
+    "planning": ["make", "planning-status"],
+    "unit": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_runtime_models.py",
+        "tests/m1-perception/test_transactional_runtime_coverage.py::test_runtime_registry_has_exact_eight_job_types_with_meaningful_stage_names",
+        "tests/m1-perception/test_transactional_runtime_coverage.py::test_runtime_coverage_gate_uses_real_terminal_boundaries_and_fails_closed",
+        "tests/m1-perception/test_transactional_runtime_coverage.py::test_runtime_reporter_rejects_secret_like_detail_keys_before_persistence",
+        "tests/m1-perception/test_transactional_runtime_coverage.py::test_runtime_reporter_rejects_unbounded_detail_before_persistence",
+        "-q",
+    ],
+    "integration": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_transactional_runtime_coverage.py",
+        "-q",
+    ],
+    "cli": [
+        "uv",
+        "run",
+        "ruff",
+        "check",
+        "src/polyarb/control_plane",
+        "tests/m1-perception",
+    ],
+    "restart": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_long_runtime_keeps_lease_live_for_207_simulated_seconds",
+        "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_stale_heartbeat_drains_blocking_read_before_return",
+        "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_external_cancellation_drains_blocking_read_before_return",
+        "tests/m1-perception/test_transactional_quote_admission.py::test_quote_admitter_blocking_recovery_reports_pending_after_terminal_success",
+        "tests/m1-perception/test_transactional_quote_worker.py::test_quote_batch_stale_heartbeat_cancels_owner_and_drains_reader",
+        "tests/m1-perception/test_transactional_quote_worker.py::test_quote_batch_scheduler_cancellation_drains_reader_without_late_receipt",
+        "tests/m1-perception/test_transactional_quote_worker.py::test_quote_certifier_scheduler_cancellation_drains_terminal_thread",
+        "tests/m1-perception/test_transactional_opportunity_projection.py::test_opportunity_scheduler_cancellation_drains_db_call_without_late_publish",
+        "-q",
+    ],
 }
 
 
@@ -290,6 +358,8 @@ def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]
         commands = TRANSACTIONAL_PRODUCTION_PROMOTION_GATE_COMMANDS
     elif manifest.get("paradigm") == "budgeted-transactional-cloud-input":
         commands = BUDGETED_TRANSACTIONAL_CLOUD_INPUT_GATE_COMMANDS
+    elif manifest.get("paradigm") == "event-driven-runtime-self-healing":
+        commands = EVENT_DRIVEN_RUNTIME_SELF_HEALING_GATE_COMMANDS
     else:
         commands = GATE_COMMANDS
     return {name: list(command) for name, command in commands.items()}
