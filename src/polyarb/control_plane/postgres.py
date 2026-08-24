@@ -1905,6 +1905,9 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
+            cursor.execute("SET LOCAL lock_timeout = '1000ms'")
             cursor.execute(
                 """
                 SELECT generation_key, bundle_key, bundle_digest
@@ -3511,6 +3514,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             cursor.execute(
                 """
                 SELECT attempt_id FROM m1_job_runtime_state

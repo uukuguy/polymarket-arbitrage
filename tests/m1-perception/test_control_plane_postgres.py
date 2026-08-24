@@ -232,6 +232,51 @@ def test_read_soak_observations_uses_bounded_read_only_transaction() -> None:
     ]
 
 
+def test_quote_admission_input_uses_bounded_read_only_transaction() -> None:
+    commands: list[str] = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, query: object, params: object = None) -> None:
+            commands.append(" ".join(str(query).split()))
+            if "FROM m1_quote_admission_inputs" in str(query):
+                assert params == ("generation:quote-admit",)
+
+        def fetchone(self):
+            return {
+                "generation_key": "generation-1",
+                "bundle_key": "bundles/current.ndjson",
+                "bundle_digest": "a" * 64,
+            }
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def cursor(self, **kwargs: object):
+            assert kwargs == {"row_factory": dict_row}
+            return Cursor()
+
+    factory = cast(Callable[[], psycopg.Connection[Any]], lambda: Connection())
+    result = PostgresControlPlane(factory).quote_admission_input("generation:quote-admit")
+
+    assert result == ("generation-1", "bundles/current.ndjson", "a" * 64)
+    assert commands[:4] == [
+        "SET TRANSACTION READ ONLY",
+        "SET LOCAL statement_timeout = '5000ms'",
+        "SET LOCAL lock_timeout = '1000ms'",
+        "SELECT generation_key, bundle_key, bundle_digest FROM m1_quote_admission_inputs WHERE job_key = %s",
+    ]
+
+
 def _now() -> datetime:
     return datetime(2030, 1, 1, 12, tzinfo=UTC)
 
@@ -3354,6 +3399,172 @@ def test_runtime_heartbeat_updates_liveness_without_progress(
         assert row[2] == 0
         assert row[3] == now + timedelta(seconds=35)
         assert row[4] > row[0]
+
+
+def test_runtime_heartbeat_sets_fenced_timeouts_before_first_query(monkeypatch) -> None:
+    now = _now()
+    lease = JobLease(
+        job_key="runtime:heartbeat-contract",
+        job_type="structure-normalize",
+        input_identity="runtime-heartbeat-contract",
+        lease_owner="runtime-worker",
+        lease_epoch=1,
+        lease_expires_at=now + timedelta(seconds=30),
+        checkpoint_cursor=None,
+        checkpoint_digest=None,
+    )
+    commands: list[str] = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, query: object, params: object = None) -> None:
+            as_string = getattr(query, "as_string", None)
+            rendered = str(as_string(None) if callable(as_string) else query)
+            commands.append(" ".join(rendered.split()))
+
+        def fetchone(self):
+            return {"attempt_id": "attempt-1"}
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def cursor(self, **kwargs: object):
+            assert kwargs == {"row_factory": dict_row}
+            return Cursor()
+
+    monkeypatch.setattr(
+        postgres_module,
+        "update_runtime_heartbeat_cursor",
+        lambda *args, **kwargs: {"lease_deadline_at": now + timedelta(seconds=31)},
+    )
+    factory = cast(Callable[[], psycopg.Connection[Any]], lambda: Connection())
+    renewed = PostgresControlPlane(factory).heartbeat_runtime_attempt(
+        lease, now=now + timedelta(seconds=1), lease_seconds=30
+    )
+
+    assert renewed.lease_expires_at == now + timedelta(seconds=31)
+    assert commands[:3] == [
+        "SET LOCAL statement_timeout = '5000ms'",
+        "SET LOCAL lock_timeout = '1000ms'",
+        "SELECT attempt_id FROM m1_job_runtime_state WHERE job_key = %s AND lease_epoch = %s AND worker_id = %s",
+    ]
+
+
+def test_runtime_heartbeat_lock_timeout_rolls_back_liveness(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="runtime:heartbeat-lock-timeout",
+        job_type="structure-normalize",
+        input_identity="runtime-heartbeat-lock-timeout",
+        now=now,
+    )
+    blocker = control_plane._connection_factory()
+    try:
+        with blocker.cursor() as cursor:
+            cursor.execute(
+                "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE",
+                (lease.job_key,),
+            )
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            control_plane.heartbeat_runtime_attempt(
+                lease, now=now, lease_seconds=30
+            )
+        assert time.monotonic() - started < 3
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT lease_expires_at FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (now + timedelta(seconds=30),)
+        cursor.execute(
+            "SELECT last_heartbeat_at, lease_deadline_at, heartbeat_deadline_at "
+            "FROM m1_job_runtime_state WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        state = cursor.fetchone()
+        assert state is not None
+        assert state[0] == now
+        assert state[1] == now + timedelta(seconds=30)
+        assert state[2] == now + timedelta(seconds=10)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (1,)
+
+
+def test_runtime_heartbeat_statement_timeout_rolls_back_liveness(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="runtime:heartbeat-statement-timeout",
+        job_type="structure-normalize",
+        input_identity="runtime-heartbeat-statement-timeout",
+        now=now,
+        lease_seconds=2,
+    )
+    function_name = "m1_test_heartbeat_timeout_fn"
+    trigger_name = "m1_test_heartbeat_timeout_trigger"
+    _install_sleep_trigger(
+        control_plane,
+        function_name=function_name,
+        trigger_name=trigger_name,
+        table_name="m1_jobs",
+        when_clause="NEW.lease_expires_at IS DISTINCT FROM OLD.lease_expires_at",
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            control_plane.heartbeat_runtime_attempt(lease, now=now, lease_seconds=30)
+        assert time.monotonic() - started < 3
+    finally:
+        _remove_sleep_trigger(
+            control_plane,
+            function_name=function_name,
+            trigger_name=trigger_name,
+            table_name="m1_jobs",
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT lease_expires_at FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (now + timedelta(seconds=2),)
+        cursor.execute(
+            "SELECT last_heartbeat_at, lease_deadline_at, heartbeat_deadline_at "
+            "FROM m1_job_runtime_state WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        state = cursor.fetchone()
+        assert state is not None
+        assert state[0] == now
+        assert state[1] == now + timedelta(seconds=2)
+        assert state[2] == now + timedelta(seconds=1)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (1,)
 
 
 def test_runtime_expired_lease_rejects_heartbeat_and_progress_without_mutation(
