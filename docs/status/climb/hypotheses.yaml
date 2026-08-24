@@ -353,3 +353,28 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-014
+  description: Task-local runtime evidence for every transactional M1 job makes failures
+    immediately visible and recoverable, while periodic watchdogs remain a backstop
+    instead of the primary detector.
+  parent_paradigm: event-driven-runtime-self-healing
+  expected_lift: Close the silent permanent-failure gap with one start, meaningful
+    progress, and one atomic terminal fact for all eight production job types
+  cost_h: 4.0
+  ranking: 1.0
+  status: confirmed
+  created_at: '2026-08-25T00:00:00+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 15
+    run: 20260824-222226-h-014
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed

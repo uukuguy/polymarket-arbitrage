@@ -4,7 +4,7 @@
 
 ## Session
 
-- Last cycle: 14
+- Last cycle: 15
 - Next action: rank next pending hypothesis
 
 ## In flight
@@ -21,6 +21,7 @@
 - **H-011** [confirmed]: A durable, bounded Structure synchronization window that checkpoints Gamma cursors and stages verified pages can recover across timeout and restart without publishing a partial market universe or permanently pausing collection.
 - **H-012** [confirmed]: Promote the existing transactional control plane in place as the only formal M1 runtime, then require a fresh post-promotion 24-hour collection and recovery soak rather than retaining a legacy fallback service.
 - **H-013** [confirmed]: A metered R2-authoritative Structure input gate with a durable daily egress budget, Dashboard evidence, and independent stale-observation paging prevents unbounded cloud transfer from silently becoming M1 production input.
+- **H-014** [confirmed]: Task-local runtime evidence for every transactional M1 job makes failures immediately visible and recoverable, while periodic watchdogs remain a backstop instead of the primary detector.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
@@ -43,3 +44,4 @@
 - 20260811-184042-h-009: 100.0 (confirmed)
 - 20260815-171703-h-012: 100.0 (confirmed)
 - 20260823-115009-h-013: 100.0 (confirmed)
+- 20260824-222226-h-014: 100.0 (confirmed)

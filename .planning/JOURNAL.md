@@ -10086,3 +10086,46 @@ run with watchdog and Dashboard evidence.
 supervisor topology. Periodically use the read-only cloud-soak verifier and
 Dashboard API for `m1-formal-20260823T1335Z`; after the default 86,400-second
 gate passes, run the final audit and only then close M1.
+
+## SESSION 299 — 2026-08-24 (event-driven task-local self-healing)
+
+- [ROOT CAUSE] Replay identified the first breaking observation at
+  `2026-08-23T16:22:21Z` (`lease.expired`): the failure was knowable at task
+  time, not only after a 24-hour verifier.
+- [IMPLEMENTED] Plan 05.6-201 added fenced runtime evidence and read-only
+  replay. Plan 05.6-202 Tasks 1-4 instrument Structure, Quote admission,
+  Quote batch/certifier and opportunity tasks with progress, heartbeat,
+  atomic terminal/retry/incident facts, cancellation drain and historical
+  half-completion repair.
+- [RELIABILITY] Connect, statement and lock waits are bounded. A committed
+  result cannot later be reported as a timeout; recovery failure is explicit
+  `recovery-pending`.
+- [VERIFIED] Independent reviews for Tasks 1-4 ended with zero findings;
+  `make planning-status` remains clean.
+
+[NEXT] From `$gsd-resume-work --ws m1-perception`, execute Plan 02 Task 5:
+the eight-job cross-contract gate, `05.6-202-SUMMARY.md`, teaching update and
+final whole-branch review. Do not restart a 24-hour qualification run.
+
+## SESSION 300 — 2026-08-25 (Plan 02 closure and climb H-014 confirmation)
+
+- [IMPLEMENTED] Plan `05.6-202` now closes all eight transactional job
+  lifecycles with a real cross-job Postgres gate. Each fixture claims a job,
+  records its closed stage chain, and completes through the job-specific
+  Structure/Quote/opportunity terminal boundary rather than a private event
+  helper.
+- [HARDENED] Runtime progress detail is bounded before secret-like key
+  inspection; Docker/Testcontainers absence fails the transactional gate instead
+  of silently skipping it. Independent Task 5 review approved with no blocking
+  findings.
+- [CLIMB] H-014 `event-driven-runtime-self-healing` completed cycle 15 at
+  100/100: planning, unit, eight-job integration, Ruff, and 207-second
+  long-runtime/cancellation/recovery gates all passed. The push artifact is
+  local-only; no production deployment, mutation, or external submission ran.
+- [LEARNING] Added `docs/learning/84-任务局部事实与事件驱动自愈.md`: task
+  evidence is primary, heartbeat proves lease liveness only, and watchdogs
+  detect missing facts as a backstop.
+
+[NEXT] Continue climb with H-015 / Plan `05.6-203`: implement Task 1's pure
+deadline reconciler decision table, then fenced recovery storage/execution.
+Do not restart a 24-hour qualification run.

@@ -1590,3 +1590,32 @@ success is not user receipt/read evidence.
   `negRiskOther=false`. This is safe ordinary-event evidence, but changing v3
   would rewrite its terminal receipt semantics. v4 binds the exact predicate to
   a new comparison identity and leaves every v3 receipt immutable.
+
+### §2.26 Task-local evidence is primary; watchdogs are a backstop (2026-08-24)
+
+- A transactional task already knows whether heartbeat, progress, receipt and
+  terminal commit succeeded. Those results must atomically update runtime,
+  job/attempt, incident and alert-outbox truth instead of waiting for sampling.
+- Cancellation does not stop `asyncio.to_thread`; blocking work must be
+  shielded and drained while preserving cancellation. A bounded terminal
+  commit's durable result wins over a scheduler timeout.
+- A heartbeat renewal racing stop must update the in-memory lease before the
+  stop check, or the worker can reject its own commit with an obsolete lease.
+- Historical receipts missing terminal evidence require narrow durable proof,
+  append-only idempotency and full rollback; business truth alone is not a
+  complete runtime lifecycle.
+
+### §2.27 A cross-job lifecycle gate must traverse real terminal boundaries (2026-08-25)
+
+- A fixture that claims a real job but directly calls the private runtime-event
+  helper proves only that the event table accepts rows. It can stay green while
+  a Quote receipt, Structure manifest, or opportunity pointer stops committing
+  its terminal fact atomically.
+- The coverage gate must therefore build each job type's minimum durable
+  prerequisites and invoke its public specialized completion method. Assertions
+  then bind exactly one start, its registered progress chain, and exactly one
+  terminal event to the same job key.
+- Test infrastructure is part of the fail-closed contract. If the Postgres
+  authority needed for transactional proof is unavailable, skipping converts an
+  unevaluated invariant into a false pass; the operator must receive an
+  actionable gate failure instead.
