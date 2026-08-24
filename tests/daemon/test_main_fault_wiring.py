@@ -123,3 +123,22 @@ def test_capacity_worker_builds_without_opportunity_supervisor(tmp_path) -> None
     )
 
     assert worker is not None
+
+
+def test_daemon_control_plane_connection_has_bounded_connect_timeout(monkeypatch) -> None:
+    import polyarb.daemon.main as daemon_main
+
+    calls: list[tuple[str, dict[str, object]]] = []
+    sentinel = object()
+
+    def connect(dsn: str, **kwargs: object) -> object:
+        calls.append((dsn, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(daemon_main.psycopg, "connect", connect)
+    control_plane = daemon_main._build_daemon_control_plane("postgresql://control-plane")
+
+    assert control_plane is not None
+    assert control_plane._connection_factory() is sentinel
+    assert calls == [("postgresql://control-plane", {"connect_timeout": 5})]
+    assert daemon_main._build_daemon_control_plane("   ") is None

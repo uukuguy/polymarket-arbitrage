@@ -342,6 +342,19 @@ class _BlockingTerminalControlPlane(_ControlPlane):
         super().admit_quote_generation(lease, **kwargs)
 
 
+class _BlockingRecoveryControlPlane(_ControlPlane):
+    def __init__(self, digest: str) -> None:
+        super().__init__(digest)
+        self.recovery_started = threading.Event()
+        self.release_recovery = threading.Event()
+
+    def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
+        self.recovery_started.set()
+        if not self.release_recovery.wait(timeout=2):
+            raise RuntimeError("blocking recovery was not released")
+        raise RuntimeError("recovery probe failed after terminal admission")
+
+
 class _IdleWorker:
     def run_once(self) -> QuoteBatchWorkerResult:
         return QuoteBatchWorkerResult(job_key=None, outcome="idle")
@@ -641,6 +654,51 @@ def test_quote_admitter_terminal_commit_wins_scheduler_timeout() -> None:
     turns = cast(list[dict[str, object]], result["turns"])
     quote_turn = next(turn for turn in turns if turn["worker"] == "quote-admit")
     assert quote_turn["outcome"] == "admitted"
+
+
+def test_quote_admitter_blocking_recovery_reports_pending_after_terminal_success() -> None:
+    bundle = _bundle()
+    control_plane = _BlockingRecoveryControlPlane(bundle.sha256)
+    objects = _Objects(bundle.payload)
+    worker = TransactionalQuoteAdmitter(
+        control_plane=cast(Any, control_plane),
+        object_client=objects,
+        bucket="artifacts",
+        worker_id="quote-admitter",
+        now=lambda: NOW,
+        batch_size=100,
+    )
+    idle = _IdleWorker()
+    scheduler = TransactionalControlPlaneScheduler(
+        structure_source_admitter=idle,
+        structure_source_worker=idle,
+        structure_source_materializer=idle,
+        structure_worker=idle,
+        structure_certifier=idle,
+        quote_admitter=worker,
+        quote_worker=idle,
+        quote_certifier=idle,
+        max_turns=6,
+        include_quote_batch=False,
+        turn_timeout_seconds=0.05,
+    )
+
+    async def exercise() -> dict[str, object]:
+        tick = asyncio.create_task(scheduler.run_tick())
+        await asyncio.wait_for(
+            asyncio.to_thread(control_plane.recovery_started.wait, 1), timeout=1
+        )
+        await asyncio.sleep(0.08)
+        assert not tick.done(), "scheduler must drain the bounded recovery call"
+        control_plane.release_recovery.set()
+        return await asyncio.wait_for(tick, timeout=1)
+
+    result = asyncio.run(exercise())
+
+    assert control_plane.admitted is not None
+    turns = cast(list[dict[str, object]], result["turns"])
+    quote_turn = next(turn for turn in turns if turn["worker"] == "quote-admit")
+    assert quote_turn["outcome"] == "admitted:recovery-pending"
 
 
 def test_quote_admitter_terminal_commit_consumes_repeated_cancellation() -> None:

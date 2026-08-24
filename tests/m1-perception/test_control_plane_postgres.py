@@ -292,6 +292,126 @@ def _seed_quote_admission_job(
     return lease, bundle_digest, batches
 
 
+def _seed_claimed_job(
+    control_plane: PostgresControlPlane,
+    *,
+    job_key: str,
+    job_type: str,
+    input_identity: str,
+    now: datetime,
+    lease_seconds: int = 30,
+) -> JobLease:
+    control_plane.enqueue_job(
+        job_key=job_key,
+        job_type=job_type,
+        input_identity=input_identity,
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id=f"worker:{job_key}",
+        job_types=(job_type,),
+        lease_seconds=lease_seconds,
+        now=now,
+    )
+    assert lease is not None
+    return lease
+
+
+def _seed_succeeded_recovery_job(
+    control_plane: PostgresControlPlane,
+    *,
+    job_key: str,
+    job_type: str,
+    now: datetime,
+    recovery_lease_seconds: int = 30,
+) -> JobLease:
+    failed = _seed_claimed_job(
+        control_plane,
+        job_key=job_key,
+        job_type=job_type,
+        input_identity=f"{job_key}:input",
+        now=now,
+    )
+    control_plane.finish_retryable_with_incident(
+        failed,
+        error_class="TimeoutError",
+        incident_key=f"incident:job-retry:{job_key}",
+        dedupe_key=f"job-retry:{job_key}",
+        component=job_type,
+        summary=f"{job_type} retryable failure",
+        detail={"job_key": job_key},
+        channels=("dashboard",),
+        now=now,
+    )
+    recovered = control_plane.claim_job(
+        worker_id=f"recovery:{job_key}",
+        job_types=(job_type,),
+        lease_seconds=recovery_lease_seconds,
+        now=now + timedelta(seconds=15),
+    )
+    assert recovered is not None
+    control_plane.finish(recovered, state=JobState.SUCCEEDED, now=now + timedelta(seconds=16))
+    return recovered
+
+
+def _install_sleep_trigger(
+    control_plane: PostgresControlPlane,
+    *,
+    function_name: str,
+    trigger_name: str,
+    table_name: str,
+    when_clause: str,
+) -> None:
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            sql.SQL(
+                """
+            CREATE OR REPLACE FUNCTION {function_name}() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                PERFORM pg_sleep(10);
+                RETURN NEW;
+            END;
+            $$
+            """
+            ).format(function_name=sql.Identifier(function_name))
+        )
+        connection.execute(
+            sql.SQL(
+                """
+            CREATE TRIGGER {trigger_name}
+            BEFORE UPDATE ON {table_name}
+            FOR EACH ROW
+            WHEN ({when_clause})
+            EXECUTE FUNCTION {function_name}()
+            """
+            ).format(
+                trigger_name=sql.Identifier(trigger_name),
+                table_name=sql.Identifier(table_name),
+                when_clause=sql.SQL(when_clause),
+                function_name=sql.Identifier(function_name),
+            )
+        )
+
+
+def _remove_sleep_trigger(
+    control_plane: PostgresControlPlane,
+    *,
+    function_name: str,
+    trigger_name: str,
+    table_name: str,
+) -> None:
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            sql.SQL("DROP TRIGGER IF EXISTS {} ON {}").format(
+                sql.Identifier(trigger_name), sql.Identifier(table_name)
+            )
+        )
+        connection.execute(
+            sql.SQL("DROP FUNCTION IF EXISTS {}()").format(sql.Identifier(function_name))
+        )
+
+
 def _structure_identity() -> StructureBundleIdentity:
     return StructureBundleIdentity(
         publication_id="publication-1",
@@ -3090,6 +3210,114 @@ def test_runtime_progress_is_fenced_monotonic_and_idempotent(
         assert cursor.fetchone() == (2,)
 
 
+def test_runtime_progress_lock_timeout_rolls_back_state_and_event(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="runtime:progress-lock-timeout",
+        job_type="structure-normalize",
+        input_identity="runtime-progress-lock-timeout",
+        now=now,
+    )
+    blocker = control_plane._connection_factory()
+    try:
+        with blocker.cursor() as cursor:
+            cursor.execute(
+                "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE",
+                (lease.job_key,),
+            )
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            control_plane.record_runtime_progress(
+                lease,
+                progress=RuntimeProgress(sequence=1, current=1, total=1, stage="upload"),
+                now=now,
+                idempotency_key="runtime:progress-lock-timeout:1",
+            )
+        assert time.monotonic() - started < 3
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT progress_sequence, progress_current FROM m1_job_runtime_state "
+            "WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (0, 0)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (1,)
+
+
+def test_runtime_progress_statement_timeout_rolls_back_state_and_event(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="runtime:progress-statement-timeout",
+        job_type="structure-normalize",
+        input_identity="runtime-progress-statement-timeout",
+        now=now,
+        lease_seconds=2,
+    )
+    function_name = "m1_test_progress_timeout_fn"
+    trigger_name = "m1_test_progress_timeout_trigger"
+    _install_sleep_trigger(
+        control_plane,
+        function_name=function_name,
+        trigger_name=trigger_name,
+        table_name="m1_job_runtime_state",
+        when_clause="NEW.progress_sequence > OLD.progress_sequence",
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            control_plane.record_runtime_progress(
+                lease,
+                progress=RuntimeProgress(sequence=1, current=1, total=1, stage="upload"),
+                now=now,
+                idempotency_key="runtime:progress-statement-timeout:1",
+            )
+        assert time.monotonic() - started < 3
+    finally:
+        _remove_sleep_trigger(
+            control_plane,
+            function_name=function_name,
+            trigger_name=trigger_name,
+            table_name="m1_job_runtime_state",
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT progress_sequence, progress_current FROM m1_job_runtime_state "
+            "WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (0, 0)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (1,)
+
+
 def test_runtime_heartbeat_updates_liveness_without_progress(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -3881,6 +4109,128 @@ def test_retryable_finish_creates_one_durable_incident_and_alert_intent(
         connection.close()
 
 
+def test_retryable_finish_lock_timeout_rolls_back_job_circuit_incident_and_alert(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="retry:lock-timeout",
+        job_type="structure-fetch",
+        input_identity="retry-lock-timeout",
+        now=now,
+    )
+    blocker = control_plane._connection_factory()
+    try:
+        with blocker.cursor() as cursor:
+            cursor.execute(
+                "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE",
+                (lease.job_key,),
+            )
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            control_plane.finish_retryable_with_incident(
+                lease,
+                error_class="TimeoutError",
+                incident_key="incident:retry:lock-timeout",
+                dedupe_key="job-retry:retry:lock-timeout",
+                component="structure-fetch",
+                summary="retry lock timeout",
+                detail={"job_key": lease.job_key},
+                channels=("dashboard",),
+                now=now,
+            )
+        assert time.monotonic() - started < 3
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state, last_error_class FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == ("leased", None)
+        cursor.execute(
+            "SELECT state FROM m1_job_attempts WHERE job_key = %s AND lease_epoch = %s",
+            (lease.job_key, lease.lease_epoch),
+        )
+        assert cursor.fetchone() == ("running",)
+        cursor.execute("SELECT count(*) FROM m1_job_circuits")
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT count(*) FROM m1_incidents")
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT count(*) FROM m1_incident_events")
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT count(*) FROM m1_alert_outbox")
+        assert cursor.fetchone() == (0,)
+
+
+def test_retryable_finish_statement_timeout_rolls_back_job_circuit_incident_and_alert(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="retry:statement-timeout",
+        job_type="structure-fetch",
+        input_identity="retry-statement-timeout",
+        now=now,
+        lease_seconds=2,
+    )
+    function_name = "m1_test_retry_timeout_fn"
+    trigger_name = "m1_test_retry_timeout_trigger"
+    _install_sleep_trigger(
+        control_plane,
+        function_name=function_name,
+        trigger_name=trigger_name,
+        table_name="m1_jobs",
+        when_clause="OLD.state = 'leased' AND NEW.state = 'retryable'",
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            control_plane.finish_retryable_with_incident(
+                lease,
+                error_class="TimeoutError",
+                incident_key="incident:retry:statement-timeout",
+                dedupe_key="job-retry:retry:statement-timeout",
+                component="structure-fetch",
+                summary="retry statement timeout",
+                detail={"job_key": lease.job_key},
+                channels=("dashboard",),
+                now=now,
+            )
+        assert time.monotonic() - started < 3
+    finally:
+        _remove_sleep_trigger(
+            control_plane,
+            function_name=function_name,
+            trigger_name=trigger_name,
+            table_name="m1_jobs",
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state, last_error_class FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == ("leased", None)
+        cursor.execute(
+            "SELECT state FROM m1_job_attempts WHERE job_key = %s AND lease_epoch = %s",
+            (lease.job_key, lease.lease_epoch),
+        )
+        assert cursor.fetchone() == ("running",)
+        cursor.execute("SELECT count(*) FROM m1_job_circuits")
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT count(*) FROM m1_incidents")
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT count(*) FROM m1_incident_events")
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT count(*) FROM m1_alert_outbox")
+        assert cursor.fetchone() == (0,)
+
+
 def test_retry_circuit_opens_on_third_failure_with_bounded_probe_delay(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -4015,6 +4365,118 @@ def test_successful_terminal_job_closes_circuit_and_resolves_retry_incident(
             assert cursor.fetchone() == ("staging-retry-fault-20260815",)
     finally:
         connection.close()
+
+
+def test_job_recovery_lock_timeout_rolls_back_circuit_incident_event_and_alert(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_succeeded_recovery_job(
+        control_plane,
+        job_key="recovery:lock-timeout",
+        job_type="structure-fetch",
+        now=now,
+    )
+    blocker = control_plane._connection_factory()
+    try:
+        with blocker.cursor() as cursor:
+            cursor.execute(
+                "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE",
+                (lease.job_key,),
+            )
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            control_plane.record_job_recovery(
+                lease,
+                component="structure-fetch",
+                channels=("dashboard",),
+                now=now + timedelta(seconds=16),
+            )
+        assert time.monotonic() - started < 3
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == ("succeeded",)
+        cursor.execute(
+            "SELECT consecutive_failures, state FROM m1_job_circuits WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (1, "closed")
+        cursor.execute(
+            "SELECT state, resolved_at IS NOT NULL FROM m1_incidents WHERE dedupe_key = %s",
+            (f"job-retry:{lease.job_key}",),
+        )
+        assert cursor.fetchone() == ("open", False)
+        cursor.execute("SELECT kind FROM m1_incident_events")
+        assert cursor.fetchone() == ("attempt-failed",)
+        cursor.execute("SELECT count(*) FROM m1_alert_outbox")
+        assert cursor.fetchone() == (1,)
+
+
+def test_job_recovery_statement_timeout_rolls_back_circuit_incident_event_and_alert(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_succeeded_recovery_job(
+        control_plane,
+        job_key="recovery:statement-timeout",
+        job_type="structure-fetch",
+        now=now,
+        recovery_lease_seconds=4,
+    )
+    function_name = "m1_test_recovery_timeout_fn"
+    trigger_name = "m1_test_recovery_timeout_trigger"
+    _install_sleep_trigger(
+        control_plane,
+        function_name=function_name,
+        trigger_name=trigger_name,
+        table_name="m1_incidents",
+        when_clause="OLD.state = 'open' AND NEW.state = 'resolved'",
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            control_plane.record_job_recovery(
+                lease,
+                component="structure-fetch",
+                channels=("dashboard",),
+                now=now + timedelta(seconds=16),
+            )
+        assert time.monotonic() - started < 4
+    finally:
+        _remove_sleep_trigger(
+            control_plane,
+            function_name=function_name,
+            trigger_name=trigger_name,
+            table_name="m1_incidents",
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == ("succeeded",)
+        cursor.execute(
+            "SELECT consecutive_failures, state FROM m1_job_circuits WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (1, "closed")
+        cursor.execute(
+            "SELECT state, resolved_at IS NOT NULL FROM m1_incidents WHERE dedupe_key = %s",
+            (f"job-retry:{lease.job_key}",),
+        )
+        assert cursor.fetchone() == ("open", False)
+        cursor.execute("SELECT kind FROM m1_incident_events")
+        assert cursor.fetchone() == ("attempt-failed",)
+        cursor.execute("SELECT count(*) FROM m1_alert_outbox")
+        assert cursor.fetchone() == (1,)
 
 
 def test_checkpointed_job_closes_circuit_and_resolves_retry_incident(

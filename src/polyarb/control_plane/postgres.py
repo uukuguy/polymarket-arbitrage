@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 import psycopg
+from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -128,6 +129,31 @@ def _persisted_legs(value: object) -> tuple[QuoteBatchLeg, ...]:
 
 
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
+
+_FENCED_MAX_STATEMENT_TIMEOUT_MS = 5_000
+_FENCED_MAX_LOCK_TIMEOUT_MS = 1_000
+
+
+def _set_fenced_transaction_timeouts(
+    cursor: psycopg.Cursor[Any], *, lease: JobLease, now: datetime
+) -> tuple[int, int]:
+    """Bound one fenced transaction below the lease's remaining lifetime."""
+    remaining_ms = int((lease.lease_expires_at - now).total_seconds() * 1000)
+    if remaining_ms <= 1:
+        raise StaleLeaseError(
+            f"fenced transaction has no safe terminal budget for {lease.job_key}"
+        )
+    statement_timeout_ms = min(_FENCED_MAX_STATEMENT_TIMEOUT_MS, remaining_ms - 1)
+    lock_timeout_ms = min(_FENCED_MAX_LOCK_TIMEOUT_MS, statement_timeout_ms)
+    cursor.execute(
+        sql.SQL("SET LOCAL statement_timeout = {}").format(
+            sql.Literal(f"{statement_timeout_ms}ms")
+        )
+    )
+    cursor.execute(
+        sql.SQL("SET LOCAL lock_timeout = {}").format(sql.Literal(f"{lock_timeout_ms}ms"))
+    )
+    return statement_timeout_ms, lock_timeout_ms
 
 _RUNTIME_COLUMNS: dict[str, dict[str, tuple[str, bool, str | None]]] = {
     "m1_job_runtime_state": {
@@ -1906,13 +1932,6 @@ class PostgresControlPlane:
         self._validate_aware(now, "now")
         if lease.job_type != "quote-admit":
             raise ValueError("Quote generation admission requires a quote-admit lease")
-        remaining_ms = int((lease.lease_expires_at - now).total_seconds() * 1000)
-        if remaining_ms <= 1:
-            raise StaleLeaseError(
-                f"quote admission has no safe terminal budget for {lease.job_key}"
-            )
-        statement_timeout_ms = min(5000, remaining_ms - 1)
-        lock_timeout_ms = min(1000, statement_timeout_ms)
         if len(structure_receipt_digest) != 64 or len(universe_hash) != 64:
             raise ValueError("Quote admission digests must be sha256")
         if not legs or batch_size <= 0:
@@ -1930,10 +1949,8 @@ class PostgresControlPlane:
             connection.cursor(row_factory=dict_row) as cursor,
         ):
             # Keep every terminal lock and statement bounded below the live
-            # lease.  The integer budget is derived before opening the
-            # transaction, and SET LOCAL makes both limits rollback-scoped.
-            cursor.execute(f"SET LOCAL statement_timeout = '{statement_timeout_ms}ms'")
-            cursor.execute(f"SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")
+            # lease.  SET LOCAL makes both limits rollback-scoped.
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             generation_key, bundle_key, bundle_digest = self._quote_admission_input_cursor(
                 cursor, lease.job_key
             )
@@ -3548,6 +3565,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             cursor.execute(
                 """
                 SELECT attempt_id FROM m1_job_attempts
@@ -3800,6 +3818,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             cursor.execute(
                 """
                 SELECT consecutive_failures, state, opened_at
@@ -3983,6 +4002,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             cursor.execute(
                 """
                 SELECT state, lease_epoch FROM m1_jobs

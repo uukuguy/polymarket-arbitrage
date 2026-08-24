@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -28,6 +29,9 @@ from .structure_artifact import (
 
 class QuoteAdmissionError(RuntimeError):
     """A certified Structure bundle cannot safely freeze Quote work."""
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def _drain_thread_task(task: asyncio.Task[Any]) -> Any:
@@ -358,13 +362,28 @@ class TransactionalQuoteAdmitter:
         # Recovery is post-terminal finalization.  Treat it as part of the
         # same point-of-no-return envelope so a scheduler cancellation cannot
         # report timeout after admission has already committed.
-        await _terminal_to_thread(
-            self._control_plane.record_job_recovery,
-            runtime.current_lease,
-            component="quote-admit",
-            channels=incident_alert_channels(Settings()),
-            now=self._now(),
-        )
+        try:
+            await _terminal_to_thread(
+                self._control_plane.record_job_recovery,
+                runtime.current_lease,
+                component="quote-admit",
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
+        except Exception as error:
+            # Admission is already durable and cannot be reported as failed.
+            # Recovery has its own bounded transaction budget; surface the
+            # pending state to the scheduler and leave the retryable incident
+            # for the recovery/reconciliation path to observe.
+            _LOGGER.warning(
+                "quote admission committed; recovery pending job_key=%s error_class=%s",
+                runtime.current_lease.job_key,
+                type(error).__name__,
+            )
+            return QuoteBatchWorkerResult(
+                job_key=runtime.current_lease.job_key,
+                outcome="admitted:recovery-pending",
+            )
         return QuoteBatchWorkerResult(job_key=runtime.current_lease.job_key, outcome="admitted")
 
     async def _progress(

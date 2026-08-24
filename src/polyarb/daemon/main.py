@@ -93,6 +93,14 @@ from polyarb.routing.quote_timing import bounded_quote_supervisor_timeout_s
 from polyarb.storage.sqlite_store import SQLiteStore
 
 
+def _build_daemon_control_plane(control_plane_dsn: str) -> PostgresControlPlane | None:
+    """Build the optional Postgres plane with a bounded connection attempt."""
+    dsn = control_plane_dsn.strip()
+    if not dsn:
+        return None
+    return PostgresControlPlane(lambda: psycopg.connect(dsn, connect_timeout=5))
+
+
 def _build_daemon_fault_runtime(
     settings,
     *,
@@ -758,12 +766,8 @@ async def main() -> int:
         producer_lock,
         quote_worker_runtime=quote_worker.runtime if quote_worker is not None else None,
     )
-    control_plane_dsn = settings.supabase_db_dsn.get_secret_value().strip()
-    control_plane = (
-        PostgresControlPlane(lambda: psycopg.connect(control_plane_dsn))
-        if control_plane_dsn
-        else None
-    )
+    control_plane_dsn = settings.supabase_db_dsn.get_secret_value()
+    control_plane = _build_daemon_control_plane(control_plane_dsn)
     app = create_app(
         scheduler=scheduler,
         sqlite_store=sqlite_store,
