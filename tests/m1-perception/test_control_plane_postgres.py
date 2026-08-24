@@ -7,6 +7,7 @@ import os
 import subprocess
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any, LiteralString, cast
@@ -38,6 +39,14 @@ from polyarb.control_plane.postgres import (
 from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
+)
+from polyarb.control_plane.recovery_models import RecoveryActionType, RecoveryDecision
+from polyarb.control_plane.recovery_store import (
+    RecoveryActionConflict,
+    claim_action,
+    claim_controller,
+    finish_action,
+    schedule_action,
 )
 from polyarb.control_plane.runtime_models import RuntimeEvent, RuntimeEventKind, RuntimeProgress
 from polyarb.control_plane.runtime_store import (
@@ -104,6 +113,8 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
             "m1_soak_observations",
             "m1_soak_runs",
             "m1_cloud_usage_observations",
+            "m1_recovery_actions",
+            "m1_runtime_controller_leases",
             "m1_job_runtime_events",
             "m1_job_runtime_state",
             "m1_structure_source_window_bundles",
@@ -364,6 +375,24 @@ def _seed_claimed_job(
     )
     assert lease is not None
     return lease
+
+
+def _runtime_attempt_id(control_plane: PostgresControlPlane, job_key: str) -> str:
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT attempt_id FROM m1_job_runtime_state WHERE job_key = %s", (job_key,))
+        row = cursor.fetchone()
+        assert row is not None
+        return str(row[0])
+
+
+def _recovery_decision(now: datetime) -> RecoveryDecision:
+    return RecoveryDecision(
+        action=RecoveryActionType.RECLAIM_JOB,
+        reason_code="job.lease-expired",
+        incident_severity="critical",
+        qualification_breaking=True,
+        next_check_at=now + timedelta(seconds=30),
+    )
 
 
 def _seed_succeeded_recovery_job(
@@ -4350,6 +4379,423 @@ def test_runtime_event_replay_is_exact_and_conflicts_are_rejected(
                     idempotency_key=event.idempotency_key,
                 ),
             )
+
+
+def test_controller_claims_are_monotonic_and_only_latest_schedules_recovery_action(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-action:controller-fence",
+        job_type="structure-normalize",
+        input_identity="recovery-action:controller-fence",
+        now=now,
+        lease_seconds=30,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = tuple(
+            pool.map(
+                lambda owner: claim_controller(
+                    control_plane._connection_factory,
+                    controller_id="m1-runtime-reconciler",
+                    owner_id=owner,
+                    lease_seconds=30,
+                    now=now,
+                ),
+                ("controller-a", "controller-b"),
+            )
+        )
+
+    epochs = sorted(claim.lease_epoch for claim in claims)
+    assert epochs == [1, 2]
+    stale_controller = min(claims, key=lambda claim: claim.lease_epoch)
+    current_controller = max(claims, key=lambda claim: claim.lease_epoch)
+
+    stale = schedule_action(
+        control_plane._connection_factory,
+        controller=stale_controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=60,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=1),
+    )
+    assert stale.state == "completed"
+    assert stale.result_code == "stale-noop"
+
+    scheduled = schedule_action(
+        control_plane._connection_factory,
+        controller=current_controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=60,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=2),
+    )
+    assert scheduled.state == "pending"
+    assert scheduled.result_code is None
+    assert scheduled.expected_controller_epoch == current_controller.lease_epoch
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT state, result_code, expected_controller_epoch
+            FROM m1_recovery_actions
+            WHERE target_id = %s
+            ORDER BY requested_at, action_id
+            """,
+            (lease.job_key,),
+        )
+        assert cursor.fetchall() == [
+            ("completed", "stale-noop", stale_controller.lease_epoch),
+            ("pending", None, current_controller.lease_epoch),
+        ]
+        cursor.execute(
+            "SELECT recovery_state FROM m1_job_runtime_state WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == ("recovering",)
+        cursor.execute(
+            "SELECT kind FROM m1_job_runtime_events WHERE job_key = %s ORDER BY event_sequence",
+            (lease.job_key,),
+        )
+        assert [row[0] for row in cursor.fetchall()] == [
+            RuntimeEventKind.STARTED.value,
+            RuntimeEventKind.RECOVERY_STARTED.value,
+        ]
+        cursor.execute("SELECT kind FROM m1_incident_events ORDER BY occurred_at")
+        assert [row[0] for row in cursor.fetchall()] == ["recovery-started"]
+        cursor.execute("SELECT channel, state FROM m1_alert_outbox")
+        assert cursor.fetchone() == ("dashboard", "pending")
+
+
+def test_recovery_action_schedule_is_idempotent_and_conflicting_replay_fails_closed(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-action:idempotent",
+        job_type="structure-normalize",
+        input_identity="recovery-action:idempotent",
+        now=now,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="controller-idempotent",
+        lease_seconds=30,
+        now=now,
+    )
+
+    first = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=2,
+        cooldown_seconds=60,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=1),
+        detail={"job_key": lease.job_key, "bounded": True},
+    )
+    replay = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=2,
+        cooldown_seconds=60,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=1),
+        detail={"job_key": lease.job_key, "bounded": True},
+    )
+    assert replay == first
+
+    with pytest.raises(RecoveryActionConflict, match="idempotency"):
+        schedule_action(
+            control_plane._connection_factory,
+            controller=controller,
+            decision=_recovery_decision(now),
+            incident_key=f"incident:{lease.job_key}",
+            component="structure-normalize",
+            target_type="job",
+            target_id=lease.job_key,
+            expected_attempt_id=attempt_id,
+            expected_lease_epoch=lease.lease_epoch,
+            recovery_budget_remaining=2,
+            cooldown_seconds=90,
+            channels=("dashboard",),
+            now=now + timedelta(seconds=1),
+            detail={"job_key": lease.job_key, "bounded": False},
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM m1_recovery_actions")
+        assert cursor.fetchone() == (1,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
+            (lease.job_key, RuntimeEventKind.RECOVERY_STARTED.value),
+        )
+        assert cursor.fetchone() == (1,)
+
+
+def test_recovery_action_stale_attempt_lease_is_completed_noop_without_mutation(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-action:stale-attempt",
+        job_type="structure-normalize",
+        input_identity="recovery-action:stale-attempt",
+        now=now,
+        lease_seconds=3,
+    )
+    old_attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    current_lease = control_plane.claim_job(
+        worker_id="worker:recovery-action:stale-attempt:current",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=4),
+    )
+    assert current_lease is not None
+    current_attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="controller-stale-attempt",
+        lease_seconds=30,
+        now=now,
+    )
+
+    stale = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=old_attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=60,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=5),
+    )
+
+    assert stale.state == "completed"
+    assert stale.result_code == "stale-noop"
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT attempt_id, lease_epoch, recovery_state "
+            "FROM m1_job_runtime_state WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (current_attempt_id, current_lease.lease_epoch, "active")
+        cursor.execute("SELECT count(*) FROM m1_incident_events")
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT count(*) FROM m1_alert_outbox")
+        assert cursor.fetchone() == (0,)
+
+
+def test_recovery_action_single_active_target_claim_and_finish_are_fenced(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-action:claim-finish",
+        job_type="structure-normalize",
+        input_identity="recovery-action:claim-finish",
+        now=now,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="controller-claim",
+        lease_seconds=30,
+        now=now,
+    )
+    scheduled = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=60,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=1),
+    )
+    duplicate = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=60,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=1),
+    )
+    assert duplicate == scheduled
+
+    claim = claim_action(
+        control_plane._connection_factory,
+        worker_id="action-worker",
+        controller=controller,
+        lease_seconds=30,
+        now=now + timedelta(seconds=2),
+    )
+    assert claim is not None
+    assert claim.state == "running"
+    assert claim.worker_id == "action-worker"
+    assert claim.worker_epoch == 1
+    assert (
+        claim_action(
+            control_plane._connection_factory,
+            worker_id="another-worker",
+            controller=controller,
+            lease_seconds=30,
+            now=now + timedelta(seconds=3),
+        )
+        is None
+    )
+
+    stale_finish = finish_action(
+        control_plane._connection_factory,
+        action_id=claim.action_id,
+        worker_id="another-worker",
+        worker_epoch=claim.worker_epoch,
+        result_code="succeeded",
+        now=now + timedelta(seconds=4),
+    )
+    assert stale_finish.state == "running"
+    assert stale_finish.result_code is None
+
+    finished = finish_action(
+        control_plane._connection_factory,
+        action_id=claim.action_id,
+        worker_id=claim.worker_id,
+        worker_epoch=claim.worker_epoch,
+        result_code="disabled-action",
+        now=now + timedelta(seconds=5),
+        detail={"postcondition": "not executed in tests"},
+    )
+    assert finished.state == "completed"
+    assert finished.result_code == "disabled-action"
+
+
+def test_recovery_action_statement_timeout_rolls_back_action_event_incident_and_alert(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-action:statement-timeout",
+        job_type="structure-normalize",
+        input_identity="recovery-action:statement-timeout",
+        now=now,
+        lease_seconds=4,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="controller-timeout",
+        lease_seconds=30,
+        now=now,
+    )
+    function_name = "m1_test_recovery_action_timeout_fn"
+    trigger_name = "m1_test_recovery_action_timeout_trigger"
+    _install_sleep_trigger(
+        control_plane,
+        function_name=function_name,
+        trigger_name=trigger_name,
+        table_name="m1_job_runtime_state",
+        when_clause="NEW.recovery_state = 'recovering'",
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            schedule_action(
+                control_plane._connection_factory,
+                controller=controller,
+                decision=_recovery_decision(now),
+                incident_key=f"incident:{lease.job_key}",
+                component="structure-normalize",
+                target_type="job",
+                target_id=lease.job_key,
+                expected_attempt_id=attempt_id,
+                expected_lease_epoch=lease.lease_epoch,
+                recovery_budget_remaining=1,
+                cooldown_seconds=60,
+                channels=("dashboard",),
+                now=now + timedelta(seconds=1),
+            )
+        assert time.monotonic() - started < 3
+    finally:
+        _remove_sleep_trigger(
+            control_plane,
+            function_name=function_name,
+            trigger_name=trigger_name,
+            table_name="m1_job_runtime_state",
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM m1_recovery_actions")
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT recovery_state FROM m1_job_runtime_state WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == ("active",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (1,)
+        cursor.execute("SELECT count(*) FROM m1_incidents")
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT count(*) FROM m1_alert_outbox")
+        assert cursor.fetchone() == (0,)
 
 
 def test_checkpoint_is_idempotent_and_fenced(control_plane: PostgresControlPlane) -> None:
