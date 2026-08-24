@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
@@ -21,6 +20,14 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .recovery_models import RecoveryActionType, RecoveryDecision
+from .recovery_records import (
+    _ACTION_COLUMNS,
+    BudgetState,
+    RecoveryActionRecord,
+    RuntimeControllerLease,
+    RuntimeFence,
+    action_from_row,
+)
 from .runtime_models import RuntimeEventKind
 
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
@@ -30,12 +37,6 @@ _RECOVERY_LOCK_TIMEOUT_MS = 1_000
 _CLOSED_RESULT_CODES = frozenset(
     {"succeeded", "failed", "stale-noop", "disabled-action"}
 )
-_ACTION_COLUMNS = (
-    "action_id, controller_id, controller_owner_id, incident_key, target_type, target_id, "
-    "action_type, expected_controller_epoch, expected_attempt_id, expected_lease_epoch, "
-    "requested_at, started_at, finished_at, state, result_code, next_allowed_at, "
-    "worker_id, worker_epoch, worker_lease_expires_at, detail, idempotency_key"
-)
 
 
 class RecoveryStoreError(RuntimeError):
@@ -44,54 +45,6 @@ class RecoveryStoreError(RuntimeError):
 
 class RecoveryActionConflict(RecoveryStoreError):
     """An idempotency key or active target was reused for conflicting content."""
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeControllerLease:
-    controller_id: str
-    owner_id: str
-    lease_epoch: int
-    lease_expires_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class RecoveryActionRecord:
-    action_id: str
-    controller_id: str
-    controller_owner_id: str
-    incident_key: str | None
-    target_type: str
-    target_id: str
-    action_type: str
-    expected_controller_epoch: int
-    expected_attempt_id: str
-    expected_lease_epoch: int
-    requested_at: datetime
-    started_at: datetime | None
-    finished_at: datetime | None
-    state: str
-    result_code: str | None
-    next_allowed_at: datetime
-    worker_id: str | None
-    worker_epoch: int
-    worker_lease_expires_at: datetime | None
-    detail: dict[str, object]
-    idempotency_key: str
-
-
-@dataclass(frozen=True, slots=True)
-class _RuntimeFence:
-    attempt_id: str
-    lease_epoch: int
-    worker_id: str
-    stage: str
-
-
-@dataclass(frozen=True, slots=True)
-class _BudgetState:
-    max_actions: int
-    remaining_actions: int
-    last_next_allowed_at: datetime | None
 
 
 def _require_aware(value: datetime, field_name: str) -> datetime:
@@ -143,49 +96,6 @@ def _set_recovery_timeouts(cursor: psycopg.Cursor[Any]) -> None:
     )
 
 
-def _row_value(row: object, name: str, position: int) -> Any:
-    if isinstance(row, Mapping):
-        return row[name]
-    return row[position]  # type: ignore[index]
-
-
-def _optional_aware(row: object, name: str, position: int) -> datetime | None:
-    value = _row_value(row, name, position)
-    return None if value is None else _require_aware(value, name)
-
-
-def _action_from_row(row: object) -> RecoveryActionRecord:
-    incident_key = _row_value(row, "incident_key", 3)
-    result_code = _row_value(row, "result_code", 14)
-    worker_id = _row_value(row, "worker_id", 16)
-    return RecoveryActionRecord(
-        action_id=str(_row_value(row, "action_id", 0)),
-        controller_id=str(_row_value(row, "controller_id", 1)),
-        controller_owner_id=str(_row_value(row, "controller_owner_id", 2)),
-        incident_key=None if incident_key is None else str(incident_key),
-        target_type=str(_row_value(row, "target_type", 4)),
-        target_id=str(_row_value(row, "target_id", 5)),
-        action_type=str(_row_value(row, "action_type", 6)),
-        expected_controller_epoch=int(_row_value(row, "expected_controller_epoch", 7)),
-        expected_attempt_id=str(_row_value(row, "expected_attempt_id", 8)),
-        expected_lease_epoch=int(_row_value(row, "expected_lease_epoch", 9)),
-        requested_at=_require_aware(_row_value(row, "requested_at", 10), "requested_at"),
-        started_at=_optional_aware(row, "started_at", 11),
-        finished_at=_optional_aware(row, "finished_at", 12),
-        state=str(_row_value(row, "state", 13)),
-        result_code=None if result_code is None else str(result_code),
-        next_allowed_at=_require_aware(
-            _row_value(row, "next_allowed_at", 15),
-            "next_allowed_at",
-        ),
-        worker_id=None if worker_id is None else str(worker_id),
-        worker_epoch=int(_row_value(row, "worker_epoch", 17)),
-        worker_lease_expires_at=_optional_aware(row, "worker_lease_expires_at", 18),
-        detail=dict(_row_value(row, "detail", 19)),  # type: ignore[arg-type]
-        idempotency_key=str(_row_value(row, "idempotency_key", 20)),
-    )
-
-
 def _fetch_action_by_idempotency(
     cursor: psycopg.Cursor[Any],
     idempotency_key: str,
@@ -198,7 +108,7 @@ def _fetch_action_by_idempotency(
         (idempotency_key,),
     )
     row = cursor.fetchone()
-    return None if row is None else _action_from_row(row)
+    return None if row is None else action_from_row(row)
 
 
 def _fetch_action_by_id(
@@ -213,7 +123,7 @@ def _fetch_action_by_id(
         (action_id,),
     )
     row = cursor.fetchone()
-    return None if row is None else _action_from_row(row)
+    return None if row is None else action_from_row(row)
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +208,7 @@ def _lock_target_budget(
     target_id: str,
     initial_budget: int,
     now: datetime,
-) -> _BudgetState:
+) -> BudgetState:
     cursor.execute(
         """
         INSERT INTO m1_recovery_target_budgets (
@@ -329,7 +239,7 @@ def _lock_target_budget(
     row = cursor.fetchone()
     if row is None:
         raise RecoveryStoreError("recovery budget row is missing")
-    return _BudgetState(
+    return BudgetState(
         max_actions=int(row["max_actions"]),
         remaining_actions=int(row["remaining_actions"]),
         last_next_allowed_at=(
@@ -374,25 +284,52 @@ def _consume_budget_and_cooldown(
 def _canonical_idempotency(
     *,
     controller: RuntimeControllerLease,
-    incident_key: str,
     target_type: str,
     target_id: str,
-    action_type: RecoveryActionType,
     expected_attempt_id: str,
     expected_lease_epoch: int,
 ) -> str:
     payload = {
-        "action_type": action_type.value,
         "controller_id": controller.controller_id,
         "controller_epoch": controller.lease_epoch,
         "expected_attempt_id": expected_attempt_id,
         "expected_lease_epoch": expected_lease_epoch,
-        "incident_key": incident_key,
         "target_id": target_id,
         "target_type": target_type,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return f"recovery-action:{sha256(encoded).hexdigest()}"
+
+
+def _normalized_channels(channels: Sequence[str]) -> tuple[str, ...]:
+    return tuple(sorted(channels))
+
+
+def _schedule_detail(
+    *,
+    decision: RecoveryDecision,
+    incident_key: str,
+    component: str,
+    channels: Sequence[str],
+    recovery_budget_remaining: int,
+    cooldown_seconds: int,
+    detail: Mapping[str, object] | None,
+) -> dict[str, object]:
+    normalized_detail: dict[str, object] = {
+        "action_type": decision.action.value if decision.action is not None else "",
+        "budget_remaining": recovery_budget_remaining,
+        "channels": ",".join(_normalized_channels(channels)),
+        "component": component,
+        "cooldown_seconds": cooldown_seconds,
+        "incident_key": incident_key,
+        "next_check_at": _require_aware(decision.next_check_at, "next_check_at").isoformat(),
+        "qualification_breaking": decision.qualification_breaking,
+        "reason_code": decision.reason_code,
+        "severity": decision.incident_severity,
+    }
+    for key, value in _bounded_detail(detail).items():
+        normalized_detail[f"detail.{key}"] = value
+    return _bounded_detail(normalized_detail)
 
 
 def _same_scheduled_action(
@@ -425,7 +362,7 @@ def _lock_runtime_fence(
     cursor: psycopg.Cursor[Any],
     *,
     target_id: str,
-) -> _RuntimeFence | None:
+) -> RuntimeFence | None:
     cursor.execute(
         """
         SELECT attempt_id, lease_epoch, worker_id, stage
@@ -438,7 +375,7 @@ def _lock_runtime_fence(
     row = cursor.fetchone()
     if row is None:
         return None
-    return _RuntimeFence(
+    return RuntimeFence(
         attempt_id=str(row["attempt_id"]),
         lease_epoch=int(row["lease_epoch"]),
         worker_id=str(row["worker_id"]),
@@ -545,7 +482,7 @@ def _existing_replay_or_conflict(
 def _append_recovery_started_event(
     cursor: psycopg.Cursor[Any],
     *,
-    runtime: _RuntimeFence,
+    runtime: RuntimeFence,
     target_id: str,
     component: str,
     decision: RecoveryDecision,
@@ -751,13 +688,20 @@ def schedule_action(
         raise ValueError("channels must be unique")
 
     normalized_detail = _bounded_detail(detail)
+    schedule_detail = _schedule_detail(
+        decision=decision,
+        incident_key=incident_key,
+        component=component,
+        channels=channels,
+        recovery_budget_remaining=recovery_budget_remaining,
+        cooldown_seconds=cooldown_seconds,
+        detail=normalized_detail,
+    )
     next_allowed_at = observed_at + timedelta(seconds=cooldown_seconds)
     idempotency_key = _canonical_idempotency(
         controller=controller,
-        incident_key=incident_key,
         target_type=target_type,
         target_id=target_id,
-        action_type=decision.action,
         expected_attempt_id=expected_attempt_id,
         expected_lease_epoch=expected_lease_epoch,
     )
@@ -780,21 +724,13 @@ def schedule_action(
                 action_type=decision.action,
                 expected_attempt_id=expected_attempt_id,
                 expected_lease_epoch=expected_lease_epoch,
-                detail=normalized_detail,
+                detail=schedule_detail,
             ):
                 raise RecoveryActionConflict("recovery action idempotency conflicts")
             return existing
 
         runtime = _lock_runtime_fence(cursor, target_id=target_id)
         controller_current = _controller_is_current(cursor, controller, now=observed_at)
-        budget = _lock_target_budget(
-            cursor,
-            controller_id=controller.controller_id,
-            target_type=target_type,
-            target_id=target_id,
-            initial_budget=recovery_budget_remaining,
-            now=observed_at,
-        )
 
         result_code: str | None = None
         if not controller_current:
@@ -805,13 +741,24 @@ def schedule_action(
             or runtime.lease_epoch != expected_lease_epoch
         ):
             result_code = "stale-noop"
-        elif budget.remaining_actions <= 0:
-            result_code = "disabled-action"
-        elif (
-            budget.last_next_allowed_at is not None
-            and budget.last_next_allowed_at > observed_at
-        ):
-            result_code = "disabled-action"
+
+        budget: BudgetState | None = None
+        if result_code is None:
+            budget = _lock_target_budget(
+                cursor,
+                controller_id=controller.controller_id,
+                target_type=target_type,
+                target_id=target_id,
+                initial_budget=recovery_budget_remaining,
+                now=observed_at,
+            )
+            if budget.remaining_actions <= 0:
+                result_code = "disabled-action"
+            elif (
+                budget.last_next_allowed_at is not None
+                and budget.last_next_allowed_at > observed_at
+            ):
+                result_code = "disabled-action"
 
         state = "pending" if result_code is None else "completed"
         action = _insert_action_once(
@@ -828,7 +775,7 @@ def schedule_action(
             state=state,
             result_code=result_code,
             next_allowed_at=next_allowed_at,
-            detail=normalized_detail,
+            detail=schedule_detail,
             idempotency_key=idempotency_key,
         )
         if action is None:
@@ -842,12 +789,13 @@ def schedule_action(
                 action_type=decision.action,
                 expected_attempt_id=expected_attempt_id,
                 expected_lease_epoch=expected_lease_epoch,
-                detail=normalized_detail,
+                detail=schedule_detail,
             )
         if result_code is not None:
             return action
 
         assert runtime is not None
+        assert budget is not None
         _consume_budget_and_cooldown(
             cursor,
             controller_id=controller.controller_id,
@@ -922,7 +870,7 @@ def claim_action(
         row = cursor.fetchone()
         if row is None:
             return None
-        action = _action_from_row(row)
+        action = action_from_row(row)
         worker_epoch = action.worker_epoch + 1
         cursor.execute(
             """

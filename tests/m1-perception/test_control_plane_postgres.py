@@ -53,6 +53,7 @@ from polyarb.control_plane.runtime_models import RuntimeEvent, RuntimeEventKind,
 from polyarb.control_plane.runtime_store import (
     RuntimeEventConflict,
     RuntimeFenceError,
+    _event_from_row,
     append_runtime_event_cursor,
 )
 from polyarb.control_plane.structure_artifact import (
@@ -402,6 +403,16 @@ def _progress_stalled_decision(now: datetime) -> RecoveryDecision:
         reason_code="job.progress-stalled",
         incident_severity="warning",
         qualification_breaking=False,
+        next_check_at=now + timedelta(seconds=30),
+    )
+
+
+def _heartbeat_missing_decision(now: datetime) -> RecoveryDecision:
+    return RecoveryDecision(
+        action=RecoveryActionType.RECLAIM_JOB,
+        reason_code="job.heartbeat-missing",
+        incident_severity="critical",
+        qualification_breaking=True,
         next_check_at=now + timedelta(seconds=30),
     )
 
@@ -4495,6 +4506,96 @@ def test_controller_claims_are_monotonic_and_only_latest_schedules_recovery_acti
         assert cursor.fetchone() == ("dashboard", "pending")
 
 
+def test_recovery_action_stale_controller_does_not_create_budget_or_poison_schedule(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-action:stale-controller-budget",
+        job_type="structure-normalize",
+        input_identity="recovery-action:stale-controller-budget",
+        now=now,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    stale_controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="controller-stale-budget",
+        lease_seconds=30,
+        now=now,
+    )
+    current_controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="controller-current-budget",
+        lease_seconds=30,
+        now=now + timedelta(seconds=1),
+    )
+
+    stale = schedule_action(
+        control_plane._connection_factory,
+        controller=stale_controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=0,
+        cooldown_seconds=60,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=2),
+    )
+    assert stale.state == "completed"
+    assert stale.result_code == "stale-noop"
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT count(*)
+            FROM m1_recovery_target_budgets
+            WHERE controller_id = %s AND target_type = 'job' AND target_id = %s
+            """,
+            (stale_controller.controller_id, lease.job_key),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT count(*) FROM m1_incident_events")
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT count(*) FROM m1_alert_outbox")
+        assert cursor.fetchone() == (0,)
+
+    scheduled = schedule_action(
+        control_plane._connection_factory,
+        controller=current_controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=0,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=3),
+    )
+    assert scheduled.state == "pending"
+    assert scheduled.result_code is None
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT remaining_actions
+            FROM m1_recovery_target_budgets
+            WHERE controller_id = %s AND target_type = 'job' AND target_id = %s
+            """,
+            (current_controller.controller_id, lease.job_key),
+        )
+        assert cursor.fetchone() == (0,)
+
+
 def test_recovery_action_schedule_is_idempotent_and_conflicting_replay_fails_closed(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -4549,23 +4650,35 @@ def test_recovery_action_schedule_is_idempotent_and_conflicting_replay_fails_clo
     )
     assert replay == first
 
-    with pytest.raises(RecoveryActionConflict, match="idempotency"):
-        schedule_action(
-            control_plane._connection_factory,
-            controller=controller,
-            decision=_recovery_decision(now),
-            incident_key=f"incident:{lease.job_key}",
-            component="structure-normalize",
-            target_type="job",
-            target_id=lease.job_key,
-            expected_attempt_id=attempt_id,
-            expected_lease_epoch=lease.lease_epoch,
-            recovery_budget_remaining=2,
-            cooldown_seconds=90,
-            channels=("dashboard",),
-            now=now + timedelta(seconds=1),
-            detail={"job_key": lease.job_key, "bounded": False},
-        )
+    conflicting_replays: tuple[dict[str, object], ...] = (
+        {"cooldown_seconds": 90},
+        {"component": "quote-batch"},
+        {"channels": ("telegram", "dashboard")},
+        {"decision": _heartbeat_missing_decision(now)},
+        {"decision": _progress_stalled_decision(now)},
+        {"recovery_budget_remaining": 1},
+        {"incident_key": f"incident:{lease.job_key}:other"},
+        {"detail": {"job_key": lease.job_key, "bounded": False}},
+    )
+    for overrides in conflicting_replays:
+        kwargs: dict[str, object] = {
+            "controller": controller,
+            "decision": _recovery_decision(now),
+            "incident_key": f"incident:{lease.job_key}",
+            "component": "structure-normalize",
+            "target_type": "job",
+            "target_id": lease.job_key,
+            "expected_attempt_id": attempt_id,
+            "expected_lease_epoch": lease.lease_epoch,
+            "recovery_budget_remaining": 2,
+            "cooldown_seconds": 60,
+            "channels": ("dashboard",),
+            "now": now + timedelta(seconds=1),
+            "detail": {"job_key": lease.job_key, "bounded": True},
+        }
+        kwargs.update(overrides)
+        with pytest.raises(RecoveryActionConflict, match="idempotency"):
+            schedule_action(control_plane._connection_factory, **kwargs)  # type: ignore[arg-type]
 
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT count(*) FROM m1_recovery_actions")
@@ -5476,18 +5589,27 @@ def test_recovery_started_detail_uses_actual_progress_stalled_decision(
         now=now + timedelta(seconds=1),
     )
 
-    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+    with (
+        control_plane._connection_factory() as connection,
+        connection.cursor(row_factory=dict_row) as cursor,
+    ):
         cursor.execute(
             """
-            SELECT detail
+            SELECT event_id, job_key, attempt_id, lease_epoch, worker_id,
+                   event_sequence, kind, stage, progress_sequence, progress_current,
+                   progress_total, detail, occurred_at, idempotency_key
             FROM m1_job_runtime_events
             WHERE job_key = %s AND kind = %s
             """,
             (lease.job_key, RuntimeEventKind.RECOVERY_STARTED.value),
         )
-        detail = cursor.fetchone()[0]
-    assert detail["reason_code"] == "job.progress-stalled"
-    assert detail["action_type"] == RecoveryActionType.CANCEL_JOB.value
+        row = cursor.fetchone()
+    assert row is not None
+    event = _event_from_row(row)
+    assert event.kind is RuntimeEventKind.RECOVERY_STARTED
+    assert event.detail["reason_code"] == "job.progress-stalled"
+    assert event.detail["action_type"] == RecoveryActionType.CANCEL_JOB.value
+    detail = event.detail
     assert "Authorization" not in str(detail)
     assert len(str(detail)) < 4096
 

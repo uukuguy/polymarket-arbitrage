@@ -65,6 +65,17 @@ class RuntimeProgress:
 _MAX_DETAIL_KEYS = 20
 _MAX_DETAIL_BYTES = 4096
 _DETAIL_CODE_REGISTRIES: dict[str, frozenset[str]] = {
+    "action_type": frozenset(
+        {
+            "cancel-job",
+            "heartbeat-job",
+            "probe-circuit",
+            "reclaim-job",
+            "restart-machine",
+            "restart-worker-process",
+            "retry-job",
+        }
+    ),
     "component": frozenset(
         {
             "control-plane",
@@ -99,9 +110,42 @@ _DETAIL_CODE_REGISTRIES: dict[str, frozenset[str]] = {
     "qualification_impact": frozenset(
         {"blocked", "delayed", "invalidated", "none", "qualified", "restored"}
     ),
-    "reason_code": frozenset({"checkpoint.advance", "invalid-input", "timeout"}),
+    "reason_code": frozenset(
+        {
+            "checkpoint.advance",
+            "circuit.cooldown",
+            "circuit.probe-due",
+            "failure.authentication",
+            "failure.capacity",
+            "failure.credential",
+            "failure.integrity",
+            "failure.schema",
+            "invalid-input",
+            "job.attempt-deadline",
+            "job.heartbeat-missing",
+            "job.heartbeat-missing-fence",
+            "job.healthy",
+            "job.lease-at-risk",
+            "job.lease-expired",
+            "job.progress-stalled",
+            "recovery.budget-exhausted",
+            "recovery.stale-fence",
+            "timeout",
+        }
+    ),
     "recovery_policy": frozenset(
-        {"exponential-backoff", "retry-job", "retry-same-input", "retry-soon"}
+        {
+            "cancel-job",
+            "exponential-backoff",
+            "heartbeat-job",
+            "probe-circuit",
+            "reclaim-job",
+            "restart-machine",
+            "restart-worker-process",
+            "retry-job",
+            "retry-same-input",
+            "retry-soon",
+        }
     ),
     "result_code": frozenset({"failed", "ok"}),
 }
@@ -116,6 +160,7 @@ _DETAIL_CODE_KEYS = frozenset(
         "reason_code",
         "recovery_policy",
         "result_code",
+        "action_type",
     }
 )
 _DETAIL_SECONDS_KEYS = frozenset({"backoff_seconds", "freshness_seconds"})
@@ -181,6 +226,7 @@ _RUNTIME_EVENT_DETAIL_KEYS = {
     ),
     RuntimeEventKind.RECOVERY_STARTED: frozenset(
         {
+            "action_type",
             "component",
             "reason_code",
             "recovery_policy",
