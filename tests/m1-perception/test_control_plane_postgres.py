@@ -273,7 +273,10 @@ def test_quote_admission_input_uses_bounded_read_only_transaction() -> None:
         "SET TRANSACTION READ ONLY",
         "SET LOCAL statement_timeout = '5000ms'",
         "SET LOCAL lock_timeout = '1000ms'",
-        "SELECT generation_key, bundle_key, bundle_digest FROM m1_quote_admission_inputs WHERE job_key = %s",
+        (
+            "SELECT generation_key, bundle_key, bundle_digest "
+            "FROM m1_quote_admission_inputs WHERE job_key = %s"
+        ),
     ]
 
 
@@ -3455,7 +3458,10 @@ def test_runtime_heartbeat_sets_fenced_timeouts_before_first_query(monkeypatch) 
     assert commands[:3] == [
         "SET LOCAL statement_timeout = '5000ms'",
         "SET LOCAL lock_timeout = '1000ms'",
-        "SELECT attempt_id FROM m1_job_runtime_state WHERE job_key = %s AND lease_epoch = %s AND worker_id = %s",
+        (
+            "SELECT attempt_id FROM m1_job_runtime_state "
+            "WHERE job_key = %s AND lease_epoch = %s AND worker_id = %s"
+        ),
     ]
 
 
