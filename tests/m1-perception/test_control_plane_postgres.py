@@ -1379,6 +1379,89 @@ def test_deployment_preflight_rejects_runtime_event_invariant_drift(
             connection.execute(sql.SQL(restore_sql))
 
 
+def test_deployment_preflight_rejects_replaced_runtime_append_only_function(
+    postgres_dsn: str,
+) -> None:
+    control_plane = PostgresControlPlane(lambda: psycopg.connect(postgres_dsn))
+    with psycopg.connect(postgres_dsn) as connection:
+        database_name = connection.execute("SELECT current_database()").fetchone()
+        connection.execute(
+            """
+            CREATE OR REPLACE FUNCTION m1_reject_runtime_event_mutation() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                RETURN NEW;
+            END;
+            $$;
+            """
+        )
+    assert database_name is not None
+    try:
+        with pytest.raises(Exception, match="runtime event invariants are incomplete"):
+            control_plane.deployment_preflight(expected_database=str(database_name[0]))
+    finally:
+        with psycopg.connect(postgres_dsn) as connection:
+            connection.execute(
+                "CREATE OR REPLACE FUNCTION m1_reject_runtime_event_mutation() "
+                "RETURNS trigger LANGUAGE plpgsql AS $$\n"
+                "        BEGIN\n"
+                "            RAISE EXCEPTION 'runtime events are append-only';\n"
+                "        END;\n"
+                "        $$;"
+            )
+
+
+def test_deployment_preflight_rejects_replica_only_runtime_append_only_trigger(
+    postgres_dsn: str,
+) -> None:
+    control_plane = PostgresControlPlane(lambda: psycopg.connect(postgres_dsn))
+    with psycopg.connect(postgres_dsn) as connection:
+        database_name = connection.execute("SELECT current_database()").fetchone()
+        connection.execute(
+            "ALTER TABLE m1_job_runtime_events ENABLE REPLICA TRIGGER "
+            "m1_runtime_events_immutable"
+        )
+    assert database_name is not None
+    try:
+        with pytest.raises(Exception, match="runtime event invariants are incomplete"):
+            control_plane.deployment_preflight(expected_database=str(database_name[0]))
+    finally:
+        with psycopg.connect(postgres_dsn) as connection:
+            connection.execute(
+                "ALTER TABLE m1_job_runtime_events ENABLE TRIGGER "
+                "m1_runtime_events_immutable"
+            )
+
+
+def test_deployment_preflight_rejects_missing_runtime_state_deadline_column(
+    postgres_dsn: str,
+) -> None:
+    control_plane = PostgresControlPlane(lambda: psycopg.connect(postgres_dsn))
+    with psycopg.connect(postgres_dsn) as connection:
+        database_name = connection.execute("SELECT current_database()").fetchone()
+        connection.execute("ALTER TABLE m1_job_runtime_state DROP COLUMN heartbeat_deadline_at")
+    assert database_name is not None
+    try:
+        with pytest.raises(Exception, match="runtime schema fingerprint is incomplete"):
+            control_plane.deployment_preflight(expected_database=str(database_name[0]))
+    finally:
+        with psycopg.connect(postgres_dsn) as connection:
+            connection.execute(
+                """
+                ALTER TABLE m1_job_runtime_state
+                ADD COLUMN heartbeat_deadline_at TIMESTAMP WITH TIME ZONE NOT NULL
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX m1_job_runtime_state_deadlines
+                ON m1_job_runtime_state (
+                    lease_deadline_at, heartbeat_deadline_at, progress_deadline_at
+                )
+                """
+            )
+
+
 def test_enqueue_quote_generation_is_deterministic(control_plane: PostgresControlPlane) -> None:
     now = _now()
     first = control_plane.enqueue_quote_generation(

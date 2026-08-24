@@ -128,6 +128,262 @@ def _persisted_legs(value: object) -> tuple[QuoteBatchLeg, ...]:
 
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
 
+_RUNTIME_COLUMNS: dict[str, dict[str, tuple[str, bool, str | None]]] = {
+    "m1_job_runtime_state": {
+        "job_key": ("text", True, None),
+        "attempt_id": ("text", True, None),
+        "lease_epoch": ("bigint", True, None),
+        "worker_id": ("text", True, None),
+        "stage": ("text", True, None),
+        "started_at": ("timestamp with time zone", True, None),
+        "last_heartbeat_at": ("timestamp with time zone", True, None),
+        "last_progress_at": ("timestamp with time zone", True, None),
+        "progress_sequence": ("bigint", True, "'0'::bigint"),
+        "progress_current": ("bigint", True, "'0'::bigint"),
+        "progress_total": ("bigint", False, None),
+        "lease_deadline_at": ("timestamp with time zone", True, None),
+        "heartbeat_deadline_at": ("timestamp with time zone", True, None),
+        "progress_deadline_at": ("timestamp with time zone", True, None),
+        "attempt_deadline_at": ("timestamp with time zone", True, None),
+        "recovery_state": ("text", True, "'active'::text"),
+        "updated_at": ("timestamp with time zone", True, "clock_timestamp()"),
+    },
+    "m1_job_runtime_events": {
+        "event_id": ("text", True, None),
+        "job_key": ("text", True, None),
+        "attempt_id": ("text", True, None),
+        "lease_epoch": ("bigint", True, None),
+        "worker_id": ("text", True, None),
+        "event_sequence": ("bigint", True, None),
+        "kind": ("text", True, None),
+        "stage": ("text", True, None),
+        "progress_sequence": ("bigint", False, None),
+        "progress_current": ("bigint", False, None),
+        "progress_total": ("bigint", False, None),
+        "detail": ("jsonb", True, "'{}'::jsonb"),
+        "occurred_at": ("timestamp with time zone", True, None),
+        "idempotency_key": ("text", True, None),
+    },
+}
+_RUNTIME_CONSTRAINTS = {
+    ("m1_job_runtime_state", "pk_m1_job_runtime_state"): (
+        "p",
+        ("job_key",),
+        None,
+        (),
+    ),
+    ("m1_job_runtime_state", "uq_m1_job_runtime_state_attempt"): (
+        "u",
+        ("attempt_id",),
+        None,
+        (),
+    ),
+    ("m1_job_runtime_state", "fk_m1_runtime_state_job"): (
+        "f",
+        ("job_key",),
+        "m1_jobs",
+        ("job_key",),
+    ),
+    ("m1_job_runtime_state", "fk_m1_runtime_state_attempt"): (
+        "f",
+        ("attempt_id",),
+        "m1_job_attempts",
+        ("attempt_id",),
+    ),
+    ("m1_job_runtime_events", "pk_m1_job_runtime_events"): (
+        "p",
+        ("event_id",),
+        None,
+        (),
+    ),
+    ("m1_job_runtime_events", "fk_m1_runtime_events_job"): (
+        "f",
+        ("job_key",),
+        "m1_jobs",
+        ("job_key",),
+    ),
+    ("m1_job_runtime_events", "fk_m1_runtime_events_attempt"): (
+        "f",
+        ("attempt_id",),
+        "m1_job_attempts",
+        ("attempt_id",),
+    ),
+    ("m1_job_runtime_events", "uq_m1_runtime_events_attempt_sequence"): (
+        "u",
+        ("attempt_id", "event_sequence"),
+        None,
+        (),
+    ),
+    ("m1_job_runtime_events", "uq_m1_runtime_events_idempotency"): (
+        "u",
+        ("idempotency_key",),
+        None,
+        (),
+    ),
+}
+_RUNTIME_INDEXES = {
+    ("m1_job_runtime_state", "m1_job_runtime_state_deadlines"): (
+        False,
+        ("lease_deadline_at", "heartbeat_deadline_at", "progress_deadline_at"),
+    ),
+    ("m1_job_runtime_events", "m1_job_runtime_events_job_occurred"): (
+        False,
+        ("job_key", "occurred_at", "event_sequence"),
+    ),
+    ("m1_job_runtime_events", "m1_job_runtime_events_attempt_sequence"): (
+        False,
+        ("attempt_id", "event_sequence"),
+    ),
+}
+_RUNTIME_APPEND_ONLY_FUNCTION_SOURCE = (
+    "\n        BEGIN\n"
+    "            RAISE EXCEPTION 'runtime events are append-only';\n"
+    "        END;\n"
+    "        "
+)
+_RUNTIME_APPEND_ONLY_FUNCTION_SOURCE_SHA256 = sha256(
+    _RUNTIME_APPEND_ONLY_FUNCTION_SOURCE.encode()
+).hexdigest()
+
+
+def _runtime_column_fingerprint(
+    cursor: psycopg.Cursor[Any], tables: Sequence[str]
+) -> dict[str, dict[str, tuple[str, bool, str | None]]]:
+    cursor.execute(
+        """
+        SELECT pg_class.relname AS table_name,
+               pg_attribute.attname AS column_name,
+               pg_catalog.format_type(pg_attribute.atttypid, pg_attribute.atttypmod)
+                 AS data_type,
+               pg_attribute.attnotnull AS not_null,
+               pg_get_expr(pg_attrdef.adbin, pg_attrdef.adrelid) AS default_expr
+        FROM pg_catalog.pg_attribute
+        JOIN pg_catalog.pg_class
+          ON pg_class.oid = pg_attribute.attrelid
+        JOIN pg_catalog.pg_namespace
+          ON pg_namespace.oid = pg_class.relnamespace
+        LEFT JOIN pg_catalog.pg_attrdef
+          ON pg_attrdef.adrelid = pg_attribute.attrelid
+         AND pg_attrdef.adnum = pg_attribute.attnum
+        WHERE pg_namespace.nspname = 'public'
+          AND pg_class.relname = ANY(%s)
+          AND pg_attribute.attnum > 0
+          AND pg_attribute.attisdropped IS FALSE
+        ORDER BY pg_class.relname, pg_attribute.attnum
+        """,
+        (list(tables),),
+    )
+    fingerprint: dict[str, dict[str, tuple[str, bool, str | None]]] = {
+        table: {} for table in tables
+    }
+    for row in cursor.fetchall():
+        fingerprint[str(row["table_name"])][str(row["column_name"])] = (
+            str(row["data_type"]),
+            bool(row["not_null"]),
+            None if row["default_expr"] is None else str(row["default_expr"]),
+        )
+    return fingerprint
+
+
+def _runtime_constraint_fingerprint(
+    cursor: psycopg.Cursor[Any],
+) -> dict[tuple[str, str], tuple[str, tuple[str, ...], str | None, tuple[str, ...]]]:
+    cursor.execute(
+        """
+        SELECT pg_class.relname AS table_name,
+               pg_constraint.conname AS constraint_name,
+               pg_constraint.contype AS constraint_type,
+               array_agg(pg_attribute.attname ORDER BY key.ordinality)
+                 AS local_columns,
+               CASE
+                   WHEN pg_constraint.contype = 'f'
+                   THEN pg_constraint.confrelid::regclass::text
+                   ELSE NULL
+               END AS foreign_table,
+               coalesce(
+                   array_agg(foreign_attribute.attname ORDER BY foreign_key.ordinality)
+                     FILTER (WHERE foreign_attribute.attname IS NOT NULL),
+                   ARRAY[]::text[]
+               ) AS foreign_columns
+        FROM pg_catalog.pg_constraint
+        JOIN pg_catalog.pg_class
+          ON pg_class.oid = pg_constraint.conrelid
+        JOIN pg_catalog.pg_namespace
+          ON pg_namespace.oid = pg_class.relnamespace
+        JOIN unnest(pg_constraint.conkey)
+          WITH ORDINALITY AS key(attnum, ordinality)
+          ON true
+        JOIN pg_catalog.pg_attribute
+          ON pg_attribute.attrelid = pg_class.oid
+         AND pg_attribute.attnum = key.attnum
+        LEFT JOIN unnest(pg_constraint.confkey)
+          WITH ORDINALITY AS foreign_key(attnum, ordinality)
+          ON foreign_key.ordinality = key.ordinality
+        LEFT JOIN pg_catalog.pg_attribute AS foreign_attribute
+          ON foreign_attribute.attrelid = pg_constraint.confrelid
+         AND foreign_attribute.attnum = foreign_key.attnum
+        WHERE pg_namespace.nspname = 'public'
+          AND pg_class.relname = ANY(%s)
+          AND pg_constraint.conname = ANY(%s)
+        GROUP BY pg_class.relname, pg_constraint.conname,
+                 pg_constraint.contype, pg_constraint.confrelid
+        """,
+        (
+            sorted({table for table, _name in _RUNTIME_CONSTRAINTS}),
+            sorted({name for _table, name in _RUNTIME_CONSTRAINTS}),
+        ),
+    )
+    return {
+        (str(row["table_name"]), str(row["constraint_name"])): (
+            str(row["constraint_type"]),
+            tuple(str(column) for column in row["local_columns"]),
+            None if row["foreign_table"] is None else str(row["foreign_table"]),
+            tuple(str(column) for column in row["foreign_columns"]),
+        )
+        for row in cursor.fetchall()
+    }
+
+
+def _runtime_index_fingerprint(
+    cursor: psycopg.Cursor[Any],
+) -> dict[tuple[str, str], tuple[bool, tuple[str, ...]]]:
+    cursor.execute(
+        """
+        SELECT table_class.relname AS table_name,
+               index_class.relname AS index_name,
+               pg_index.indisunique AS is_unique,
+               array_agg(pg_attribute.attname ORDER BY key.ordinality) AS columns
+        FROM pg_catalog.pg_index
+        JOIN pg_catalog.pg_class AS table_class
+          ON table_class.oid = pg_index.indrelid
+        JOIN pg_catalog.pg_namespace
+          ON pg_namespace.oid = table_class.relnamespace
+        JOIN pg_catalog.pg_class AS index_class
+          ON index_class.oid = pg_index.indexrelid
+        JOIN unnest(pg_index.indkey)
+          WITH ORDINALITY AS key(attnum, ordinality)
+          ON true
+        JOIN pg_catalog.pg_attribute
+          ON pg_attribute.attrelid = table_class.oid
+         AND pg_attribute.attnum = key.attnum
+        WHERE pg_namespace.nspname = 'public'
+          AND table_class.relname = ANY(%s)
+          AND index_class.relname = ANY(%s)
+        GROUP BY table_class.relname, index_class.relname, pg_index.indisunique
+        """,
+        (
+            sorted({table for table, _name in _RUNTIME_INDEXES}),
+            sorted({name for _table, name in _RUNTIME_INDEXES}),
+        ),
+    )
+    return {
+        (str(row["table_name"]), str(row["index_name"])): (
+            bool(row["is_unique"]),
+            tuple(str(column) for column in row["columns"]),
+        )
+        for row in cursor.fetchall()
+    }
+
 
 class PostgresControlPlane:
     """Own atomic job transitions; callers provide the connection factory."""
@@ -340,67 +596,50 @@ class PostgresControlPlane:
             delivery_lease_columns = {str(row["attname"]) for row in cursor.fetchall()}
             if delivery_lease_columns != {"lease_owner", "lease_epoch", "lease_expires_at"}:
                 raise ControlPlaneError("control-plane alert delivery lease schema is incomplete")
+            if _runtime_column_fingerprint(cursor, tuple(_RUNTIME_COLUMNS)) != _RUNTIME_COLUMNS:
+                raise ControlPlaneError(
+                    "control-plane revision 022 runtime schema fingerprint is incomplete"
+                )
+            runtime_constraints = _runtime_constraint_fingerprint(cursor)
+            if runtime_constraints != _RUNTIME_CONSTRAINTS:
+                event_unique_constraints = (
+                    ("m1_job_runtime_events", "uq_m1_runtime_events_attempt_sequence"),
+                    ("m1_job_runtime_events", "uq_m1_runtime_events_idempotency"),
+                )
+                if any(
+                    runtime_constraints.get(constraint) != _RUNTIME_CONSTRAINTS[constraint]
+                    for constraint in event_unique_constraints
+                ):
+                    raise ControlPlaneError(
+                        "control-plane revision 022 runtime event invariants are incomplete"
+                    )
+                raise ControlPlaneError(
+                    "control-plane revision 022 runtime schema fingerprint is incomplete"
+                )
+            if _runtime_index_fingerprint(cursor) != _RUNTIME_INDEXES:
+                raise ControlPlaneError(
+                    "control-plane revision 022 runtime schema fingerprint is incomplete"
+                )
             cursor.execute(
                 """
-                SELECT constraint_name, columns
-                FROM (
-                    SELECT
-                        pg_constraint.conname AS constraint_name,
-                        array_agg(pg_attribute.attname ORDER BY key.ordinality) AS columns
-                    FROM pg_catalog.pg_constraint
-                    JOIN pg_catalog.pg_class
-                      ON pg_class.oid = pg_constraint.conrelid
-                    JOIN pg_catalog.pg_namespace
-                      ON pg_namespace.oid = pg_class.relnamespace
-                    JOIN unnest(pg_constraint.conkey)
-                      WITH ORDINALITY AS key(attnum, ordinality)
-                      ON true
-                    JOIN pg_catalog.pg_attribute
-                      ON pg_attribute.attrelid = pg_class.oid
-                     AND pg_attribute.attnum = key.attnum
-                    WHERE pg_namespace.nspname = 'public'
-                      AND pg_class.relname = 'm1_job_runtime_events'
-                      AND pg_constraint.contype = 'u'
-                      AND pg_constraint.conname = ANY(%s)
-                    GROUP BY pg_constraint.conname
-                ) AS runtime_constraints
-                """,
-                (
-                    [
-                        "uq_m1_runtime_events_attempt_sequence",
-                        "uq_m1_runtime_events_idempotency",
-                    ],
-                ),
-            )
-            runtime_constraints = {
-                str(row["constraint_name"]): tuple(str(column) for column in row["columns"])
-                for row in cursor.fetchall()
-            }
-            found_runtime_invariants: list[str] = []
-            if runtime_constraints.get("uq_m1_runtime_events_attempt_sequence") == (
-                "attempt_id",
-                "event_sequence",
-            ):
-                found_runtime_invariants.append("unique_attempt_event_sequence")
-            if runtime_constraints.get("uq_m1_runtime_events_idempotency") == (
-                "idempotency_key",
-            ):
-                found_runtime_invariants.append("unique_idempotency_key")
-            cursor.execute(
-                """
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM pg_catalog.pg_proc
-                    JOIN pg_catalog.pg_namespace
-                      ON pg_namespace.oid = pg_proc.pronamespace
-                    WHERE pg_namespace.nspname = 'public'
-                      AND pg_proc.proname = 'm1_reject_runtime_event_mutation'
-                      AND pg_proc.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype
-                ) AS present
+                SELECT pg_proc.prosrc AS source
+                FROM pg_catalog.pg_proc
+                JOIN pg_catalog.pg_namespace
+                  ON pg_namespace.oid = pg_proc.pronamespace
+                WHERE pg_namespace.nspname = 'public'
+                  AND pg_proc.proname = 'm1_reject_runtime_event_mutation'
+                  AND pg_proc.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype
+                  AND pg_proc.pronargs = 0
                 """
             )
             function_row = cursor.fetchone()
-            if function_row is not None and bool(function_row["present"]):
+            found_runtime_invariants: list[str] = [
+                "unique_attempt_event_sequence",
+                "unique_idempotency_key",
+            ]
+            if function_row is not None and sha256(
+                str(function_row["source"]).encode()
+            ).hexdigest() == _RUNTIME_APPEND_ONLY_FUNCTION_SOURCE_SHA256:
                 found_runtime_invariants.append("append_only_function")
             cursor.execute(
                 """
@@ -424,7 +663,7 @@ class PostgresControlPlane:
             if trigger is not None:
                 trigger_definition = str(trigger["trigger_definition"])
                 if (
-                    str(trigger["enabled"]) != "D"
+                    str(trigger["enabled"]) in {"O", "A"}
                     and "BEFORE" in trigger_definition
                     and "UPDATE" in trigger_definition
                     and "DELETE" in trigger_definition

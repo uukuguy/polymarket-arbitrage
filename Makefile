@@ -645,7 +645,7 @@ control-plane-migrate-test:
 	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic upgrade 014 && \
 	POLYARB_SUPABASE_DB_DSN="$$POLYARB_CONTROL_PLANE_TEST_DSN" uv run alembic current
 
-## control-plane-preflight: Read-only proof of the named 014 database and configured R2 bucket. This authorizes source-window shadow work, never a migration or pointer move. Requires expected_database=.
+## control-plane-preflight: Read-only proof of the named 022 database and configured R2 bucket. This authorizes source-window shadow work, never a migration or pointer move. Requires expected_database=.
 control-plane-preflight:
 	@test -n "$(expected_database)" || (echo "usage: make control-plane-preflight expected_database=<database-name>" >&2; exit 2)
 	@set -a; [ -f .env ] && . ./.env; set +a; \

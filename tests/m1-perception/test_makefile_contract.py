@@ -70,6 +70,33 @@ def test_make_runtime_policy_replay_is_read_only() -> None:
         assert forbidden not in recipe, f"runtime replay must not mutate cloud state: {forbidden}"
 
 
+def test_make_control_plane_preflight_help_and_dry_run_require_revision_022() -> None:
+    help_result = subprocess.run(
+        ["make", "help"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=10,
+    )
+    assert help_result.returncode == 0, f"make help failed: {help_result.stderr}"
+    assert "control-plane-preflight:" in help_result.stdout
+    assert "named 022 database" in help_result.stdout
+    assert "named 014 database" not in help_result.stdout
+
+    dry_run = subprocess.run(
+        ["make", "-n", "control-plane-preflight", "expected_database=control_plane_staging"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert dry_run.returncode == 0, f"make -n failed: {dry_run.stderr}"
+    assert (
+        "uv run python -m polyarb.cli_control_plane preflight "
+        '--expected-database "control_plane_staging" --json'
+    ) in dry_run.stdout
+
+
 def test_make_snapshot_markets_dry_run_recipe() -> None:
     """The subset target must invoke ``python -m polyarb.snapshot`` WITHOUT --full."""
     result = subprocess.run(
