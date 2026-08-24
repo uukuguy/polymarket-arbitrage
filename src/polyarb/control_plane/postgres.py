@@ -4230,7 +4230,9 @@ class PostgresControlPlane:
                 or str(job["state"]) != JobState.SUCCEEDED.value
                 or int(job["lease_epoch"]) != lease.lease_epoch
             ):
-                raise StaleLeaseError(f"durable Quote certification is not proven for {lease.job_key}")
+                raise StaleLeaseError(
+                    f"durable Quote certification is not proven for {lease.job_key}"
+                )
             cursor.execute(
                 """
                 SELECT artifact_digest FROM m1_generation_manifests
@@ -4657,7 +4659,12 @@ class PostgresControlPlane:
         next_attempt_at: datetime | None = None,
         error_class: str | None = None,
     ) -> None:
-        if state not in {JobState.RETRYABLE, JobState.WAITING, JobState.SUCCEEDED, JobState.QUARANTINED}:
+        if state not in {
+            JobState.RETRYABLE,
+            JobState.WAITING,
+            JobState.SUCCEEDED,
+            JobState.QUARANTINED,
+        }:
             raise ValueError("finish only accepts retryable, waiting, succeeded, or quarantined")
         self._validate_aware(now, "now")
         if next_attempt_at is not None:
@@ -5190,24 +5197,58 @@ class PostgresControlPlane:
         return event_id
 
     def record_cloud_usage(
-        self, *, source: str, operation: str, bytes_received: int, item_count: int,
-        artifact_key: str, artifact_digest: str, daily_budget_bytes: int, now: datetime,
+        self,
+        *,
+        source: str,
+        operation: str,
+        bytes_received: int,
+        item_count: int,
+        artifact_key: str,
+        artifact_digest: str,
+        daily_budget_bytes: int,
+        now: datetime,
     ) -> CloudUsageDecision:
         self._validate_nonempty(source=source, operation=operation, artifact_key=artifact_key)
         self._validate_aware(now, "now")
-        if bytes_received < 0 or item_count < 0 or daily_budget_bytes <= 0 or len(artifact_digest) != 64:
+        if (
+            bytes_received < 0
+            or item_count < 0
+            or daily_budget_bytes <= 0
+            or len(artifact_digest) != 64
+        ):
             raise ValueError("invalid cloud usage observation")
         observation_id = str(uuid4())
         budget_day = now.astimezone(UTC).date()
-        with self._connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
-            cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"m1-cloud-egress:{budget_day}",))
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (f"m1-cloud-egress:{budget_day}",),
+            )
             cursor.execute(
                 """INSERT INTO m1_cloud_usage_observations
                    (observation_id,observed_at,budget_day,source,operation,bytes_received,daily_budget_bytes,item_count,artifact_key,artifact_digest)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (observation_id, now, budget_day, source, operation, bytes_received, daily_budget_bytes, item_count, artifact_key, artifact_digest),
+                (
+                    observation_id,
+                    now,
+                    budget_day,
+                    source,
+                    operation,
+                    bytes_received,
+                    daily_budget_bytes,
+                    item_count,
+                    artifact_key,
+                    artifact_digest,
+                ),
             )
-            cursor.execute("SELECT COALESCE(sum(bytes_received),0) AS used FROM m1_cloud_usage_observations WHERE budget_day=%s", (budget_day,))
+            cursor.execute(
+                "SELECT COALESCE(sum(bytes_received),0) AS used "
+                "FROM m1_cloud_usage_observations WHERE budget_day=%s",
+                (budget_day,),
+            )
             used = int(cursor.fetchone()["used"])
             ratio = used * 100 // daily_budget_bytes
             threshold = 90 if ratio >= 90 else 75 if ratio >= 75 else 50 if ratio >= 50 else 0
@@ -5221,7 +5262,12 @@ class PostgresControlPlane:
                     severity="critical" if threshold == 90 else "warning",
                     summary=f"M1 cloud egress reached {threshold}% of its daily budget",
                     kind="detected",
-                    detail={"used_bytes": used, "daily_budget_bytes": daily_budget_bytes, "threshold_percent": threshold, "observation_id": observation_id},
+                    detail={
+                        "used_bytes": used,
+                        "daily_budget_bytes": daily_budget_bytes,
+                        "threshold_percent": threshold,
+                        "observation_id": observation_id,
+                    },
                     idempotency_key=f"{dedupe_key}:{observation_id}",
                     channels=("dashboard", "telegram"),
                     now=now,
@@ -5592,10 +5638,19 @@ class PostgresControlPlane:
                 "budget_day": budget_day.isoformat(),
                 "used_bytes": int(cloud_usage["used_bytes"]),
                 "daily_budget_bytes": (
-                    None if cloud_usage["daily_budget_bytes"] is None else int(cloud_usage["daily_budget_bytes"])
+                    None
+                    if cloud_usage["daily_budget_bytes"] is None
+                    else int(cloud_usage["daily_budget_bytes"])
                 ),
                 "threshold_percent": (
-                    0 if cloud_usage["daily_budget_bytes"] is None else min(100, int(cloud_usage["used_bytes"]) * 100 // int(cloud_usage["daily_budget_bytes"]))
+                    0
+                    if cloud_usage["daily_budget_bytes"] is None
+                    else min(
+                        100,
+                        int(cloud_usage["used_bytes"])
+                        * 100
+                        // int(cloud_usage["daily_budget_bytes"]),
+                    )
                 ),
                 "latest_observation": (
                     None if latest_cloud_usage is None else {
@@ -5920,7 +5975,9 @@ class PostgresControlPlane:
             )
             job = cursor.fetchone()
             if job is None or int(job["lease_epoch"]) != lease.lease_epoch:
-                raise StaleLeaseError(f"durable opportunity projection is not proven for {lease.job_key}")
+                raise StaleLeaseError(
+                    f"durable opportunity projection is not proven for {lease.job_key}"
+                )
             cursor.execute(
                 """
                 SELECT generation_key, structure_generation_key
@@ -5990,7 +6047,9 @@ class PostgresControlPlane:
                     (now, lease.job_key, lease.lease_epoch),
                 )
             else:
-                raise StaleLeaseError(f"durable opportunity projection is not proven for {lease.job_key}")
+                raise StaleLeaseError(
+                    f"durable opportunity projection is not proven for {lease.job_key}"
+                )
 
     def current_quote_projection_inputs(
         self,

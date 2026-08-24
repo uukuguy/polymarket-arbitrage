@@ -3290,7 +3290,9 @@ def test_opportunity_terminal_success_event_rolls_back_projection_and_pointer(
             job_key = f"{generation_key}:certify"
             connection.execute(
                 """
-                INSERT INTO m1_jobs(job_key, job_type, input_identity, state, created_at, updated_at)
+                INSERT INTO m1_jobs(
+                    job_key, job_type, input_identity, state, created_at, updated_at
+                )
                 VALUES (%s, 'certify', %s, 'succeeded', %s, %s)
                 """,
                 (job_key, generation_key, now, now),

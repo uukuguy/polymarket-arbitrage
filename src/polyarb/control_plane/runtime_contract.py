@@ -107,6 +107,15 @@ RUNTIME_STAGE_REGISTRY: Mapping[str, tuple[str, ...]] = MappingProxyType(
 ALL_RUNTIME_STAGES = frozenset(
     stage for stages in RUNTIME_STAGE_REGISTRY.values() for stage in stages
 )
+_SECRET_LIKE_DETAIL_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "credential",
+    "password",
+    "secret",
+    "token",
+)
 
 
 def _read_clock(clock: Clock) -> datetime:
@@ -165,6 +174,19 @@ def _validate_progress_arguments(
         raise TypeError("progress current must be an int")
     if total is not None and type(total) is not int:
         raise TypeError("progress total must be an int or None")
+
+
+def _validate_runtime_detail(detail: dict[str, object] | None) -> None:
+    if detail is None:
+        return
+    if type(detail) is not dict:
+        raise TypeError("runtime detail must be a dict or None")
+    for key in detail:
+        if type(key) is not str:
+            raise TypeError("runtime detail keys must be str")
+        normalized = key.casefold().replace("-", "_")
+        if any(part in normalized for part in _SECRET_LIKE_DETAIL_KEY_PARTS):
+            raise ValueError(f"secret-like runtime detail key is forbidden: {key!r}")
 
 
 def _validate_clock_progression(now: datetime, previous: datetime) -> None:
@@ -235,8 +257,7 @@ class AttemptRuntime:
             current=current,
             total=total,
         )
-        if detail is not None and type(detail) is not dict:
-            raise TypeError("runtime detail must be a dict or None")
+        _validate_runtime_detail(detail)
         sequence = self._sequence + 1
         progress = RuntimeProgress(
             sequence=sequence,

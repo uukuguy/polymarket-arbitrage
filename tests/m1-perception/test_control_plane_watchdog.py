@@ -86,8 +86,21 @@ def test_watchdog_rejects_active_collection_without_fresh_cloud_usage() -> None:
 
     gate = CloudUsageGate(max_age=timedelta(minutes=15))
     now = datetime(2026, 8, 18, 14, 15, 1, tzinfo=UTC)
-    missing = gate.apply(RuntimeObservation(True, ()), {"job_counts": {"succeeded": 1}, "cloud_usage": {}}, now=now)
-    stale = gate.apply(RuntimeObservation(True, ()), {"job_counts": {"succeeded": 1}, "cloud_usage": {"latest_observation": {"observed_at": "2026-08-18T14:00:00+00:00"}}}, now=now)
+    missing = gate.apply(
+        RuntimeObservation(True, ()),
+        {"job_counts": {"succeeded": 1}, "cloud_usage": {}},
+        now=now,
+    )
+    stale = gate.apply(
+        RuntimeObservation(True, ()),
+        {
+            "job_counts": {"succeeded": 1},
+            "cloud_usage": {
+                "latest_observation": {"observed_at": "2026-08-18T14:00:00+00:00"}
+            },
+        },
+        now=now,
+    )
 
     assert missing.failures == ("cloud-usage:observation-missing",)
     assert stale.failures == ("cloud-usage:observation-stale:901s",)
