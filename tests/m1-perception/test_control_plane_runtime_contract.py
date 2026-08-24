@@ -349,6 +349,55 @@ async def test_stop_drains_inflight_thread_call_before_context_exit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancellation_during_stop_drains_thread_then_propagates() -> None:
+    clock = VirtualClock()
+    sleeper = VirtualSleeper()
+    clock.sleeper = sleeper
+    store = BlockingHeartbeatStore()
+    runtime = AsyncAttemptRuntime(
+        store=store,
+        lease=LEASE,
+        profile=replace(PROFILE, heartbeat_seconds=1),
+        clock=clock,
+        sleep=sleeper,
+    )
+    terminal = asyncio.Event()
+    stop_entered = asyncio.Event()
+
+    async def owner() -> None:
+        async with runtime:
+            await asyncio.wait_for(sleeper.started.wait(), timeout=0.2)
+            sleeper.wake()
+            assert await asyncio.to_thread(store.started.wait, 0.5)
+            stop_entered.set()
+            await runtime.stop()
+            terminal.set()
+
+    owner_task = asyncio.create_task(owner())
+    try:
+        assert await asyncio.to_thread(store.started.wait, 0.5)
+        await asyncio.wait_for(stop_entered.wait(), timeout=0.5)
+        owner_task.cancel()
+        await asyncio.sleep(0)
+        assert not store.completed.is_set()
+        assert not terminal.is_set()
+
+        store.released.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(owner_task, timeout=0.5)
+        assert store.completed.is_set()
+        assert not terminal.is_set()
+        assert runtime.heartbeat_task is not None
+        assert runtime.heartbeat_task.done()
+    finally:
+        store.released.set()
+        if not owner_task.done():
+            owner_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await owner_task
+
+
+@pytest.mark.asyncio
 async def test_async_heartbeat_rejects_wall_clock_regression_before_store_call() -> None:
     clock = VirtualClock()
     sleeper = VirtualSleeper()

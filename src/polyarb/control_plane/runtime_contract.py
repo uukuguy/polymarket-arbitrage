@@ -335,10 +335,12 @@ class AsyncAttemptRuntime(AttemptRuntime):
                 raise self._heartbeat_error
             return
         self._stopped.set()
-        await self._drain_heartbeat_task()
+        was_cancelled = await self._drain_heartbeat_task()
         self._stop_complete = True
         if self._heartbeat_error is not None:
             raise self._heartbeat_error
+        if was_cancelled:
+            raise asyncio.CancelledError
 
     async def __aenter__(self) -> AsyncAttemptRuntime:
         return await self.start()
@@ -407,7 +409,9 @@ class AsyncAttemptRuntime(AttemptRuntime):
         except asyncio.CancelledError:
             # A cancelled heartbeat coroutine must still wait for the worker
             # thread to finish before propagating cancellation.
-            await self._drain_task(call_task)
+            error, _ = await self._drain_task(call_task)
+            if error is not None and self._heartbeat_error is None:
+                self._heartbeat_error = error
             raise
         finally:
             if self._heartbeat_call_task is call_task:
@@ -456,28 +460,34 @@ class AsyncAttemptRuntime(AttemptRuntime):
                         if task is sleep_task:
                             raise
 
-    async def _drain_heartbeat_task(self) -> None:
+    async def _drain_heartbeat_task(self) -> bool:
         task = self._heartbeat_task
         if task is None or task is asyncio.current_task():
-            return
-        error = await self._drain_task(task)
+            return False
+        error, was_cancelled = await self._drain_task(task)
         if error is not None and self._heartbeat_error is None:
             self._heartbeat_error = error
+        return was_cancelled
 
-    async def _drain_task(self, task: asyncio.Task[Any]) -> BaseException | None:
+    async def _drain_task(
+        self, task: asyncio.Task[Any]
+    ) -> tuple[BaseException | None, bool]:
         """Await a task to completion without abandoning executor work."""
+        current = asyncio.current_task()
+        was_cancelled = current is not None and current.cancelling() > 0
         while not task.done():
             try:
                 await asyncio.shield(task)
             except asyncio.CancelledError:
+                was_cancelled = True
                 continue
         try:
             task.result()
         except asyncio.CancelledError:
-            return None
+            return None, was_cancelled
         except BaseException as error:
-            return error
-        return None
+            return error, was_cancelled
+        return None, was_cancelled
 
 
 __all__ = [
