@@ -2622,6 +2622,77 @@ def test_quote_batch_receipt_is_fenced_and_idempotent(control_plane: PostgresCon
         )
 
 
+def test_quote_batch_terminal_success_event_rolls_back_receipt(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        token_ids=("token-1",),
+        batch_size=1,
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="quote-terminal", job_types=("quote-batch",), lease_seconds=30, now=now
+    )
+    assert lease is not None
+    original_append = postgres_module.append_runtime_event_cursor
+
+    def fail_success_event(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected quote success event failure")
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", fail_success_event)
+    with pytest.raises(RuntimeError, match="injected quote success event failure"):
+        control_plane.record_quote_batch(
+            lease,
+            token_range_digest=batch.token_range_digest,
+            quote_digest="c" * 64,
+            artifact_key="quote-batches/c/batch.ndjson",
+            artifact_digest="c" * 64,
+            successful_response_count=1,
+            quoted_at=now,
+            now=now,
+            terminal=True,
+        )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_quote_batch_receipts WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
+            (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (0,)
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", original_append)
+    receipt = control_plane.record_quote_batch(
+        lease,
+        token_range_digest=batch.token_range_digest,
+        quote_digest="c" * 64,
+        artifact_key="quote-batches/c/batch.ndjson",
+        artifact_digest="c" * 64,
+        successful_response_count=1,
+        quoted_at=now,
+        now=now,
+        terminal=True,
+    )
+    assert receipt.job_key == lease.job_key
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
+        assert cursor.fetchone() == ("succeeded",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
+            (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (1,)
+
+
 def test_checkpointed_quote_batch_stays_with_original_lease_until_expiry(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -2999,6 +3070,150 @@ def test_complete_quote_generation_certifies_and_publishes_one_pointer(
         connection.close()
 
 
+def test_quote_certifier_success_event_rolls_back_manifest_and_pointer(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        token_ids=("token-1",),
+        batch_size=1,
+        now=now,
+    )[0]
+    batch_lease = control_plane.claim_job(
+        worker_id="quote-cert-batch", job_types=("quote-batch",), lease_seconds=30, now=now
+    )
+    assert batch_lease is not None
+    control_plane.record_quote_batch(
+        batch_lease,
+        token_range_digest=batch.token_range_digest,
+        quote_digest="c" * 64,
+        artifact_key="quote-batches/c/batch.ndjson",
+        artifact_digest="c" * 64,
+        successful_response_count=1,
+        quoted_at=now,
+        now=now,
+    )
+    control_plane.finish(batch_lease, state=JobState.SUCCEEDED, now=now)
+    certifier = control_plane.claim_job(
+        worker_id="quote-certifier", job_types=("quote-certify",), lease_seconds=30, now=now
+    )
+    assert certifier is not None
+    original_append = postgres_module.append_runtime_event_cursor
+
+    def fail_success_event(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected quote certification success event failure")
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", fail_success_event)
+    with pytest.raises(RuntimeError, match="injected quote certification success event failure"):
+        control_plane.certify_quote_generation(
+            certifier,
+            generation_key=batch.generation_key,
+            now=now,
+        )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (certifier.job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_generation_manifests WHERE generation_key = %s",
+            (batch.generation_key,),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_publication_pointers WHERE pointer_key = 'quote:current'"
+        )
+        assert cursor.fetchone() == (0,)
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", original_append)
+    assert (
+        control_plane.certify_quote_generation(
+            certifier,
+            generation_key=batch.generation_key,
+            now=now,
+        )
+        == sha256(
+            f"{batch.job_key}:{batch.token_range_digest}:"
+            f"{'c' * 64}:quote-batches/c/batch.ndjson:{'c' * 64}".encode()
+        ).hexdigest()
+    )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
+            (certifier.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (1,)
+
+
+def test_quote_certification_terminal_transaction_has_bounded_timeout(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        token_ids=("token-timeout",),
+        batch_size=1,
+        now=now,
+    )[0]
+    batch_lease = control_plane.claim_job(
+        worker_id="quote-timeout-batch", job_types=("quote-batch",), lease_seconds=30, now=now
+    )
+    assert batch_lease is not None
+    control_plane.record_quote_batch(
+        batch_lease,
+        token_range_digest=batch.token_range_digest,
+        quote_digest="c" * 64,
+        artifact_key="quote-batches/timeout.ndjson",
+        artifact_digest="c" * 64,
+        successful_response_count=1,
+        quoted_at=now,
+        now=now,
+    )
+    control_plane.finish(batch_lease, state=JobState.SUCCEEDED, now=now)
+    certifier = control_plane.claim_job(
+        worker_id="quote-timeout-certifier",
+        job_types=("quote-certify",),
+        lease_seconds=2,
+        now=now,
+    )
+    assert certifier is not None
+    function_name = "m1_test_quote_certify_timeout_fn"
+    trigger_name = "m1_test_quote_certify_timeout_trigger"
+    _install_sleep_trigger(
+        control_plane,
+        function_name=function_name,
+        trigger_name=trigger_name,
+        table_name="m1_jobs",
+        when_clause="OLD.state = 'leased' AND NEW.state = 'succeeded'",
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(psycopg.errors.QueryCanceled):
+            control_plane.certify_quote_generation(
+                certifier,
+                generation_key=batch.generation_key,
+                now=now,
+            )
+    finally:
+        _remove_sleep_trigger(
+            control_plane,
+            function_name=function_name,
+            trigger_name=trigger_name,
+            table_name="m1_jobs",
+        )
+    assert time.monotonic() - started < 4
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (certifier.job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_generation_manifests WHERE generation_key = %s",
+            (batch.generation_key,),
+        )
+        assert cursor.fetchone() == (0,)
+
+
 def test_opportunity_projection_publish_is_atomic_and_current_pointer_is_pageable(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -3061,6 +3276,110 @@ def test_opportunity_projection_publish_is_atomic_and_current_pointer_is_pageabl
             now=now,
         )
     assert control_plane.current_opportunities(limit=1, after_group_id="")["items"] == [row]
+
+
+def test_opportunity_terminal_success_event_rolls_back_projection_and_pointer(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    quote_generation = "quote:" + "a" * 64
+    structure_generation = "structure:" + "b" * 64
+    with control_plane._connection_factory() as connection:
+        for generation_key in (quote_generation, structure_generation):
+            job_key = f"{generation_key}:certify"
+            connection.execute(
+                """
+                INSERT INTO m1_jobs(job_key, job_type, input_identity, state, created_at, updated_at)
+                VALUES (%s, 'certify', %s, 'succeeded', %s, %s)
+                """,
+                (job_key, generation_key, now, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO m1_generation_manifests
+                    (generation_key, producer_job_key, input_digest, artifact_key,
+                     artifact_digest, record_count, published_at)
+                VALUES (%s, %s, %s, %s, %s, 1, %s)
+                """,
+                (generation_key, job_key, "c" * 64, "artifact", "d" * 64, now),
+            )
+        connection.execute(
+            """
+            INSERT INTO m1_publication_pointers
+                (pointer_key, generation_key, expected_generation_key, lease_epoch, published_at)
+            VALUES ('quote:current', %s, NULL, 1, %s)
+            """,
+            (quote_generation, now),
+        )
+    control_plane.enqueue_job(
+        job_key=f"{quote_generation}:opportunity-certify",
+        job_type="opportunity-certify",
+        input_identity=quote_generation,
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id="opportunity-terminal",
+        job_types=("opportunity-certify",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    row = {
+        "group_id": "group-a",
+        "event_id": "event-a",
+        "membership_hash": "membership-a",
+        "bundle_cost": 0.91,
+        "gross_edge_bps": 900.0,
+        "max_bundle_size": 4.0,
+        "legs": [{"yes_token_id": "token-a", "ask_price": 0.91, "ask_size": 4.0}],
+        "structure_observed_at_ms": 1,
+        "quote_started_at_ms": 2,
+        "quote_quoted_at_ms": 3,
+    }
+    original_append = postgres_module.append_runtime_event_cursor
+
+    def fail_success_event(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected opportunity success event failure")
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", fail_success_event)
+    with pytest.raises(RuntimeError, match="injected opportunity success event failure"):
+        control_plane.publish_opportunity_projection(
+            quote_generation_key=quote_generation,
+            structure_generation_key=structure_generation,
+            rows=(row,),
+            now=now,
+            lease=lease,
+        )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_opportunity_projections WHERE generation_key = %s",
+            (quote_generation,),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_opportunity_publication_pointers"
+        )
+        assert cursor.fetchone() == (0,)
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", original_append)
+    control_plane.publish_opportunity_projection(
+        quote_generation_key=quote_generation,
+        structure_generation_key=structure_generation,
+        rows=(row,),
+        now=now,
+        lease=lease,
+    )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
+        assert cursor.fetchone() == ("succeeded",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
+            (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (1,)
 
 
 def test_current_quote_projection_inputs_follows_quote_to_structure_admission_contract(
@@ -6326,3 +6645,50 @@ def test_retry_runtime_events_are_atomic_and_do_not_copy_error_text(
         assert "error_message" not in events[2][2]
         assert "error_class" not in events[2][2]
         assert "secret" not in str(events[2][2]).lower()
+
+
+def test_quote_retry_event_injection_rolls_back_circuit_and_job_transition(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="runtime-retry:quote-batch",
+        job_type="quote-batch",
+        input_identity="runtime-retry:quote-batch-input",
+        now=now,
+    )
+
+    def fail_retry_event(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected quote retry event failure")
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", fail_retry_event)
+    with pytest.raises(RuntimeError, match="injected quote retry event failure"):
+        control_plane.finish_retryable_with_incident(
+            lease,
+            error_class="TimeoutError",
+            incident_key=f"incident:job-retry:{lease.job_key}",
+            dedupe_key=f"job-retry:{lease.job_key}",
+            component="quote-batch",
+            summary="quote retry failure",
+            detail={"error_message": "Authorization:Bearer secret"},
+            channels=("dashboard",),
+            now=now,
+        )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_circuits WHERE job_key = %s", (lease.job_key,)
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind IN (%s, %s)",
+            (
+                lease.job_key,
+                RuntimeEventKind.RETRYABLE_FAILED.value,
+                RuntimeEventKind.RETRY_SCHEDULED.value,
+            ),
+        )
+        assert cursor.fetchone() == (0,)

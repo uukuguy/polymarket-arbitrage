@@ -1,10 +1,14 @@
+import asyncio
 import hashlib
+import threading
 from datetime import UTC, datetime
 
-from polyarb.control_plane.models import QuoteBatchLeg, QuoteBatchReceipt, QuoteBatchSpec
+import pytest
+
+from polyarb.control_plane.models import JobLease, QuoteBatchLeg, QuoteBatchReceipt, QuoteBatchSpec
 from polyarb.control_plane.opportunity_projection import build_opportunity_rows
 from polyarb.control_plane.opportunity_worker import TransactionalOpportunityCertifier
-from polyarb.control_plane.postgres import OpportunityProjectionCurrentError
+from polyarb.control_plane.postgres import OpportunityProjectionCurrentError, StaleLeaseError
 from polyarb.control_plane.quote_artifact import QuoteBatchInputArtifact
 
 
@@ -211,3 +215,316 @@ def test_certifier_uses_fenced_r2_input_when_postgres_legs_are_compacted() -> No
     ).run_once()
 
     assert control_plane.published["rows"][0]["gross_edge_bps"] == 1000.0
+
+
+def test_opportunity_certifier_reports_projection_stages() -> None:
+    quoted_at = datetime(2030, 1, 1, tzinfo=UTC)
+    payload = (
+        b'{"structure_receipt_digest":"' + b"a" * 64
+        + b'","token_range_digest":"' + b"b" * 64
+        + b'","universe_hash":"' + b"c" * 64 + b'"}\n'
+        + b'{"best_ask_price":0.4,"best_ask_size":4,"terminal_state":"executable",'
+        + b'"yes_token_id":"token-a"}\n'
+    )
+    legs = (QuoteBatchLeg("group-a", "market-a", "condition-a", "a", "token-a", "event-a", "m-a"),)
+
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.runtime_progress: list[dict[str, object]] = []
+
+        def claim_job(self, **kwargs):
+            return JobLease(
+                job_key="quote:job:opportunity-certify",
+                job_type="opportunity-certify",
+                input_identity="quote:" + "a" * 64,
+                lease_owner="worker-a",
+                lease_epoch=1,
+                lease_expires_at=quoted_at,
+                checkpoint_cursor=None,
+                checkpoint_digest=None,
+            )
+
+        def finish(self, *args, **kwargs):
+            pass
+
+        def current_quote_projection_inputs(self):
+            receipt = QuoteBatchReceipt(
+                "job", "d" * 64, "quotes/key", hashlib.sha256(payload).hexdigest(), 1
+            )
+            return "quote:" + "a" * 64, "structure:" + "b" * 64, ((legs, receipt, quoted_at),)
+
+        def publish_opportunity_projection(self, **kwargs):
+            return "e" * 64
+
+        def record_runtime_progress(self, lease, **kwargs):
+            self.runtime_progress.append(kwargs)
+
+        def heartbeat_runtime_attempt(self, lease, **kwargs):
+            return lease
+
+    class Client:
+        def get_object(self, **kwargs):
+            return {"Body": type("Body", (), {"read": lambda self: payload})()}
+
+    control_plane = ControlPlane()
+    result = TransactionalOpportunityCertifier(
+        control_plane=control_plane,
+        object_client=Client(),
+        bucket="bucket",
+        now=lambda: quoted_at,
+    ).run_once()
+
+    assert result.outcome == "certified:" + "e" * 64
+    assert [item["progress"].stage for item in control_plane.runtime_progress] == [
+        "read-current-quote",
+        "compute-opportunities",
+        "upload-projection",
+        "publish-opportunity",
+    ]
+
+
+def _runtime_opportunity_lease() -> JobLease:
+    return JobLease(
+        job_key="quote:" + "a" * 64 + ":opportunity-certify",
+        job_type="opportunity-certify",
+        input_identity="quote:" + "a" * 64,
+        lease_owner="opportunity-worker",
+        lease_epoch=1,
+        lease_expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        checkpoint_cursor=None,
+        checkpoint_digest=None,
+    )
+
+
+async def _wait_thread_event(event: threading.Event) -> None:
+    for _ in range(1_000):
+        if event.is_set():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("timed out waiting for worker event")
+
+
+def test_opportunity_stale_heartbeat_drains_blocking_db_call_without_retry() -> None:
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.heartbeat_seen = threading.Event()
+            self.release = threading.Event()
+            self.finished = threading.Event()
+            self.runtime_progress: list[object] = []
+
+        def claim_job(self, **kwargs):
+            return _runtime_opportunity_lease()
+
+        def record_runtime_progress(self, lease, **kwargs):
+            self.runtime_progress.append(kwargs)
+
+        def heartbeat_runtime_attempt(self, lease, **kwargs):
+            self.heartbeat_seen.set()
+            raise StaleLeaseError("opportunity heartbeat fenced")
+
+        def current_quote_projection_inputs(self):
+            self.started.set()
+            self.release.wait(timeout=5)
+            return "quote:" + "a" * 64, "structure:" + "b" * 64, ()
+
+    async def scenario() -> None:
+        control_plane = ControlPlane()
+        certifier = TransactionalOpportunityCertifier(
+            control_plane=control_plane,
+            object_client=object(),  # type: ignore[arg-type]
+            bucket="bucket",
+            now=lambda: datetime.now(UTC),
+            lease_seconds=3,
+        )
+        task = asyncio.create_task(asyncio.to_thread(certifier.run_once))
+        await _wait_thread_event(control_plane.started)
+        await _wait_thread_event(control_plane.heartbeat_seen)
+        control_plane.release.set()
+        with pytest.raises(StaleLeaseError, match="opportunity heartbeat fenced"):
+            await task
+        assert not any(thread.name.startswith("quote-sync") for thread in threading.enumerate())
+
+    asyncio.run(scenario())
+
+
+def test_opportunity_stale_heartbeat_drains_blocking_r2_body_without_publish() -> None:
+    quoted_at = datetime.now(UTC)
+    payload = (
+        b'{"structure_receipt_digest":"' + b"a" * 64
+        + b'","token_range_digest":"' + b"b" * 64
+        + b'","universe_hash":"' + b"c" * 64 + b'"}\n'
+        + b'{"best_ask_price":0.4,"best_ask_size":4,'
+        + b'"terminal_state":"executable","yes_token_id":"token-a"}\n'
+    )
+    legs = (
+        QuoteBatchLeg(
+            "group-a", "market-a", "condition-a", "a", "token-a", "event-a", "m-a"
+        ),
+    )
+
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.heartbeat_seen = threading.Event()
+            self.release = threading.Event()
+            self.published = False
+
+        def claim_job(self, **kwargs):
+            return _runtime_opportunity_lease()
+
+        def record_runtime_progress(self, lease, **kwargs):
+            return None
+
+        def heartbeat_runtime_attempt(self, lease, **kwargs):
+            self.heartbeat_seen.set()
+            raise StaleLeaseError("opportunity body heartbeat fenced")
+
+        def current_quote_projection_inputs(self):
+            receipt = QuoteBatchReceipt(
+                "batch-job", "d" * 64, "quotes/key", hashlib.sha256(payload).hexdigest(), 1
+            )
+            return "quote:" + "a" * 64, "structure:" + "b" * 64, ((legs, receipt, quoted_at),)
+
+        def publish_opportunity_projection(self, **kwargs):
+            self.published = True
+            return "e" * 64
+
+    class Body:
+        def __init__(self, owner: ControlPlane) -> None:
+            self.owner = owner
+
+        def read(self) -> bytes:
+            self.owner.started.set()
+            self.owner.release.wait(timeout=5)
+            return payload
+
+    class Client:
+        def __init__(self, owner: ControlPlane) -> None:
+            self.owner = owner
+
+        def get_object(self, **kwargs):
+            return {"Body": Body(self.owner)}
+
+    async def scenario() -> None:
+        control_plane = ControlPlane()
+        certifier = TransactionalOpportunityCertifier(
+            control_plane=control_plane,
+            object_client=Client(control_plane),
+            bucket="bucket",
+            now=lambda: datetime.now(UTC),
+            lease_seconds=3,
+        )
+        task = asyncio.create_task(asyncio.to_thread(certifier.run_once))
+        await _wait_thread_event(control_plane.started)
+        await _wait_thread_event(control_plane.heartbeat_seen)
+        control_plane.release.set()
+        with pytest.raises(StaleLeaseError, match="opportunity body heartbeat fenced"):
+            await task
+        assert not control_plane.published
+        assert not any(thread.name.startswith("quote-sync") for thread in threading.enumerate())
+
+    asyncio.run(scenario())
+
+
+def test_opportunity_scheduler_cancellation_drains_db_call_without_late_publish() -> None:
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.finished = threading.Event()
+            self.done = threading.Event()
+            self.runtime_progress: list[object] = []
+            self.published = False
+
+        def claim_job(self, **kwargs):
+            return _runtime_opportunity_lease()
+
+        def record_runtime_progress(self, lease, **kwargs):
+            self.runtime_progress.append(kwargs)
+
+        def heartbeat_runtime_attempt(self, lease, **kwargs):
+            return lease
+
+        def current_quote_projection_inputs(self):
+            self.started.set()
+            self.release.wait(timeout=5)
+            self.finished.set()
+            raise RuntimeError("scheduler cancellation drained")
+
+        def finish_retryable_with_incident(self, lease, **kwargs):
+            self.done.set()
+            return None
+
+    async def scenario() -> None:
+        control_plane = ControlPlane()
+        certifier = TransactionalOpportunityCertifier(
+            control_plane=control_plane,
+            object_client=object(),  # type: ignore[arg-type]
+            bucket="bucket",
+            now=lambda: datetime.now(UTC),
+            lease_seconds=3,
+        )
+        task = asyncio.create_task(asyncio.to_thread(certifier.run_once))
+        await _wait_thread_event(control_plane.started)
+        task.cancel()
+        control_plane.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await _wait_thread_event(control_plane.done)
+        assert not control_plane.published
+        assert not any(thread.name.startswith("quote-sync") for thread in threading.enumerate())
+
+    asyncio.run(scenario())
+
+
+def test_opportunity_terminal_commit_wins_heartbeat_race_without_pending_thread() -> None:
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.heartbeat_seen = threading.Event()
+            self.release = threading.Event()
+            self.runtime_progress: list[object] = []
+            self.heartbeats = 0
+
+        def claim_job(self, **kwargs):
+            return _runtime_opportunity_lease()
+
+        def record_runtime_progress(self, lease, **kwargs):
+            self.runtime_progress.append(kwargs)
+
+        def heartbeat_runtime_attempt(self, lease, **kwargs):
+            self.heartbeats += 1
+            self.heartbeat_seen.set()
+            raise StaleLeaseError("terminal race heartbeat fenced")
+
+        def current_quote_projection_inputs(self):
+            return "quote:" + "a" * 64, "structure:" + "b" * 64, ()
+
+        def publish_opportunity_projection(self, **kwargs):
+            self.started.set()
+            self.release.wait(timeout=5)
+            return "d" * 64
+
+        def record_job_recovery(self, lease, **kwargs):
+            return False
+
+    async def scenario() -> None:
+        control_plane = ControlPlane()
+        certifier = TransactionalOpportunityCertifier(
+            control_plane=control_plane,
+            object_client=object(),  # type: ignore[arg-type]
+            bucket="bucket",
+            now=lambda: datetime.now(UTC),
+            lease_seconds=3,
+        )
+        task = asyncio.create_task(asyncio.to_thread(certifier.run_once))
+        await _wait_thread_event(control_plane.started)
+        await _wait_thread_event(control_plane.heartbeat_seen)
+        control_plane.release.set()
+        result = await task
+        assert result.outcome == "certified:" + "d" * 64
+        assert control_plane.heartbeats >= 1
+        assert not any(thread.name.startswith("quote-sync") for thread in threading.enumerate())
+
+    asyncio.run(scenario())

@@ -2155,6 +2155,99 @@ class PostgresControlPlane:
             raise StaleLeaseError(str(error)) from error
 
     @staticmethod
+    def _append_historical_job_succeeded_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        lease: JobLease,
+        stage: str,
+        component: str,
+        data_product: str,
+        now: datetime,
+    ) -> RuntimeEvent:
+        """Append one success fact for a proven terminal attempt.
+
+        The normal append helper intentionally requires a live leased job.
+        Recovery instead locks the durable succeeded job, attempt, and runtime
+        projection and only repairs the missing immutable event.
+        """
+        cursor.execute(
+            """
+            SELECT attempt_id, lease_epoch, worker_id, progress_sequence,
+                   progress_current, progress_total
+            FROM m1_job_runtime_state WHERE job_key = %s FOR UPDATE
+            """,
+            (lease.job_key,),
+        )
+        state = cursor.fetchone()
+        if state is None:
+            raise StaleLeaseError(f"runtime attempt is no longer current for {lease.job_key}")
+        if (
+            int(state["lease_epoch"]) != lease.lease_epoch
+            or str(state["worker_id"]) != lease.lease_owner
+        ):
+            raise StaleLeaseError(f"runtime attempt is no longer current for {lease.job_key}")
+        cursor.execute(
+            """
+            SELECT state, worker_id FROM m1_job_attempts
+            WHERE job_key = %s AND lease_epoch = %s FOR UPDATE
+            """,
+            (lease.job_key, lease.lease_epoch),
+        )
+        attempt = cursor.fetchone()
+        if (
+            attempt is None
+            or str(attempt["state"]) != JobState.SUCCEEDED.value
+            or str(attempt["worker_id"]) != lease.lease_owner
+        ):
+            raise StaleLeaseError(f"durable attempt is no longer current for {lease.job_key}")
+        cursor.execute(
+            """
+            SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
+            FROM m1_job_runtime_events WHERE attempt_id = %s
+            """,
+            (state["attempt_id"],),
+        )
+        sequence_row = cursor.fetchone()
+        if sequence_row is None:
+            raise ControlPlaneError("runtime event sequence query returned no row")
+        progress_sequence = int(state["progress_sequence"])
+        progress = (
+            None
+            if progress_sequence == 0
+            else RuntimeProgress(
+                sequence=progress_sequence,
+                current=int(state["progress_current"]),
+                total=(
+                    None
+                    if state["progress_total"] is None
+                    else int(state["progress_total"])
+                ),
+                stage=stage,
+            )
+        )
+        return PostgresControlPlane._append_structure_recovery_event_cursor(
+            cursor,
+            event=RuntimeEvent(
+                job_key=lease.job_key,
+                attempt_id=str(state["attempt_id"]),
+                lease_epoch=lease.lease_epoch,
+                worker_id=lease.lease_owner,
+                event_sequence=int(sequence_row["next_sequence"]),
+                kind=RuntimeEventKind.SUCCEEDED,
+                stage=stage,
+                progress=progress,
+                detail={
+                    "component": component,
+                    "data_product": data_product,
+                    "qualification_impact": "qualified",
+                    "result_code": "ok",
+                },
+                occurred_at=now,
+                idempotency_key=f"runtime:{state['attempt_id']}:succeeded",
+            ),
+        )
+
+    @staticmethod
     def _recover_structure_terminal_success_cursor(
         cursor: psycopg.Cursor[dict[str, Any]],
         *,
@@ -3190,10 +3283,19 @@ class PostgresControlPlane:
         successful_response_count: int,
         quoted_at: datetime,
         now: datetime,
+        terminal: bool = False,
     ) -> CheckpointReceipt:
-        """Commit one bounded Quote range under its current worker fence."""
+        """Commit one bounded Quote range under its current worker fence.
+
+        The historical API keeps the receipt checkpointed until the caller
+        explicitly finishes it.  Transactional workers pass ``terminal=True``
+        so the receipt, runtime success fact, job transition, and attempt
+        transition share one database transaction.
+        """
         self._validate_aware(quoted_at, "quoted_at")
         self._validate_aware(now, "now")
+        if type(terminal) is not bool:
+            raise TypeError("terminal must be a bool")
         if lease.job_type != "quote-batch":
             raise ValueError("quote batch receipt requires a quote-batch lease")
         for field, value in (
@@ -3215,6 +3317,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=False)
             cursor.execute(
                 """
                 SELECT checkpoint.receipt_id, checkpoint.checkpoint_cursor,
@@ -3238,7 +3341,7 @@ class PostgresControlPlane:
                     or int(existing["successful_response_count"]) != successful_response_count
                 ):
                     raise CheckpointConflictError(f"idempotency conflict for {idempotency_key!r}")
-                return CheckpointReceipt(
+                receipt = CheckpointReceipt(
                     receipt_id=str(existing["receipt_id"]),
                     job_key=lease.job_key,
                     lease_epoch=int(existing["lease_epoch"]),
@@ -3247,6 +3350,16 @@ class PostgresControlPlane:
                     checkpoint_digest=quote_digest,
                     committed_at=existing["committed_at"],
                 )
+                if terminal:
+                    self._finish_quote_batch_terminal_cursor(
+                        cursor,
+                        lease=lease,
+                        checkpoint_cursor=ordinal,
+                        checkpoint_digest=quote_digest,
+                        now=now,
+                        allow_historical=True,
+                    )
+                return receipt
             cursor.execute(
                 """
                 UPDATE m1_jobs
@@ -3317,7 +3430,146 @@ class PostgresControlPlane:
                 """,
                 (now, lease.job_key, lease.lease_epoch),
             )
+            if terminal:
+                self._finish_quote_batch_terminal_cursor(
+                    cursor,
+                    lease=lease,
+                    checkpoint_cursor=ordinal,
+                    checkpoint_digest=quote_digest,
+                    now=now,
+                )
             return receipt
+
+    def recover_quote_batch_success(self, lease: JobLease, *, now: datetime) -> QuoteBatchReceipt:
+        """Repair a receipt-backed Quote success fact exactly once.
+
+        A prior worker may have committed the immutable receipt and then died
+        before the runtime success event was introduced.  This method accepts
+        only that narrow durable proof and never refetches CLOB/R2 input.
+        """
+        self._validate_aware(now, "now")
+        if lease.job_type != "quote-batch":
+            raise ValueError("Quote batch recovery requires a quote-batch lease")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            _set_structure_read_timeouts(cursor, read_only=False)
+            cursor.execute(
+                """
+                SELECT job_key, structure_receipt_digest, universe_hash,
+                       token_range_digest, quote_digest, artifact_key, artifact_digest,
+                       successful_response_count, quoted_at
+                FROM m1_quote_batch_receipts WHERE job_key = %s
+                """,
+                (lease.job_key,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ControlPlaneError(f"quote batch receipt is unavailable for {lease.job_key!r}")
+            receipt = QuoteBatchReceipt(
+                job_key=str(row["job_key"]),
+                quote_digest=str(row["quote_digest"]),
+                artifact_key=str(row["artifact_key"]),
+                artifact_digest=str(row["artifact_digest"]),
+                successful_response_count=int(row["successful_response_count"]),
+            )
+            self._finish_quote_batch_terminal_cursor(
+                cursor,
+                lease=lease,
+                checkpoint_cursor=self._quote_batch_identity(lease.input_identity)[2],
+                checkpoint_digest=receipt.quote_digest,
+                now=now,
+                allow_historical=True,
+            )
+            return receipt
+
+    @staticmethod
+    def _finish_quote_batch_terminal_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        lease: JobLease,
+        checkpoint_cursor: str,
+        checkpoint_digest: str,
+        now: datetime,
+        allow_historical: bool = False,
+    ) -> None:
+        """Seal a Quote batch and its runtime success under one cursor."""
+        cursor.execute(
+            """
+            SELECT state, lease_owner, lease_epoch, checkpoint_cursor, checkpoint_digest
+            FROM m1_jobs WHERE job_key = %s FOR UPDATE
+            """,
+            (lease.job_key,),
+        )
+        job = cursor.fetchone()
+        if job is None:
+            raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+        state = str(job["state"])
+        if state == JobState.SUCCEEDED.value:
+            if (
+                int(job["lease_epoch"]) != lease.lease_epoch
+                or str(job["checkpoint_cursor"]) != checkpoint_cursor
+                or str(job["checkpoint_digest"]) != checkpoint_digest
+            ):
+                raise CheckpointConflictError(
+                    f"succeeded Quote batch has conflicting durable checkpoint: {lease.job_key}"
+                )
+            if not allow_historical and str(job["lease_owner"] or "") not in {
+                "",
+                lease.lease_owner,
+            }:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            PostgresControlPlane._append_historical_job_succeeded_cursor(
+                cursor,
+                lease=lease,
+                stage="commit-receipt",
+                component="quote-batch",
+                data_product="market-snapshot",
+                now=now,
+            )
+            return
+        if (
+            state not in {JobState.LEASED.value, JobState.CHECKPOINTED.value}
+            or str(job["lease_owner"]) != lease.lease_owner
+            or int(job["lease_epoch"]) != lease.lease_epoch
+        ):
+            raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+        _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+        PostgresControlPlane._append_job_succeeded_cursor(
+            cursor,
+            lease=lease,
+            stage="commit-receipt",
+            component="quote-batch",
+            data_product="market-snapshot",
+            now=now,
+        )
+        cursor.execute(
+            """
+            UPDATE m1_jobs
+            SET state = 'succeeded', checkpoint_cursor = %s, checkpoint_digest = %s,
+                lease_owner = NULL, lease_expires_at = NULL, updated_at = %s
+            WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+              AND state IN ('leased', 'checkpointed')
+            """,
+            (
+                checkpoint_cursor,
+                checkpoint_digest,
+                now,
+                lease.job_key,
+                lease.lease_owner,
+                lease.lease_epoch,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+        cursor.execute(
+            """
+            UPDATE m1_job_attempts SET state = 'succeeded', finished_at = %s
+            WHERE job_key = %s AND lease_epoch = %s AND state IN ('running', 'checkpointed')
+            """,
+            (now, lease.job_key, lease.lease_epoch),
+        )
 
     def record_structure_range(
         self,
@@ -3815,6 +4067,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             cursor.execute(
                 """
                 SELECT job_key, input_identity, created_at
@@ -3866,6 +4119,14 @@ class PostgresControlPlane:
                 ).encode()
             ).hexdigest()
             record_count = sum(int(row["successful_response_count"]) for row in ordered_receipts)
+            self._append_job_succeeded_cursor(
+                cursor,
+                lease=lease,
+                stage="publish-pointer",
+                component="quote-certify",
+                data_product="market-snapshot",
+                now=now,
+            )
             cursor.execute(
                 """
                 UPDATE m1_jobs
@@ -3943,6 +4204,65 @@ class PostgresControlPlane:
                 (now, lease.job_key, lease.lease_epoch),
             )
             return artifact_digest
+
+    def recover_quote_certification_success(
+        self, lease: JobLease, *, generation_key: str, now: datetime
+    ) -> str:
+        """Repair a proven Quote pointer publication missing its success fact."""
+        self._validate_aware(now, "now")
+        if lease.job_type != "quote-certify" or lease.job_key != f"{generation_key}:certify":
+            raise ValueError("Quote certification recovery requires its matching lease")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            _set_structure_read_timeouts(cursor, read_only=False)
+            cursor.execute(
+                """
+                SELECT state, lease_epoch FROM m1_jobs
+                WHERE job_key = %s FOR UPDATE
+                """,
+                (lease.job_key,),
+            )
+            job = cursor.fetchone()
+            if (
+                job is None
+                or str(job["state"]) != JobState.SUCCEEDED.value
+                or int(job["lease_epoch"]) != lease.lease_epoch
+            ):
+                raise StaleLeaseError(f"durable Quote certification is not proven for {lease.job_key}")
+            cursor.execute(
+                """
+                SELECT artifact_digest FROM m1_generation_manifests
+                WHERE generation_key = %s AND producer_job_key = %s
+                """,
+                (generation_key, lease.job_key),
+            )
+            manifest = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT generation_key FROM m1_publication_pointers
+                WHERE pointer_key = 'quote:current'
+                """,
+            )
+            pointer = cursor.fetchone()
+            if (
+                manifest is None
+                or pointer is None
+                or str(pointer["generation_key"]) != generation_key
+            ):
+                raise IncompleteQuoteGenerationError(
+                    "Quote certification recovery lacks durable pointer proof"
+                )
+            self._append_historical_job_succeeded_cursor(
+                cursor,
+                lease=lease,
+                stage="publish-pointer",
+                component="quote-certify",
+                data_product="market-snapshot",
+                now=now,
+            )
+            return str(manifest["artifact_digest"])
 
     def publish_structure_shadow(self, *, generation_key: str, now: datetime) -> str:
         """Move only the transactional shadow pointer to a certified generation."""
@@ -5406,13 +5726,24 @@ class PostgresControlPlane:
         structure_generation_key: str,
         rows: Sequence[Mapping[str, object]],
         now: datetime,
+        lease: JobLease | None = None,
     ) -> str:
-        """Atomically publish one complete, already-authenticated projection."""
+        """Atomically publish one complete, already-authenticated projection.
+
+        Workers pass their live ``opportunity-certify`` lease so the pointer,
+        projection rows, runtime success event, and terminal job transition are
+        one transaction.  Read-only callers may omit it for compatibility.
+        """
         self._validate_nonempty(
             quote_generation_key=quote_generation_key,
             structure_generation_key=structure_generation_key,
         )
         self._validate_aware(now, "now")
+        if lease is not None:
+            if type(lease) is not JobLease or lease.job_type != "opportunity-certify":
+                raise ValueError("opportunity projection requires an opportunity-certify lease")
+            if lease.input_identity != quote_generation_key:
+                raise JobIdentityConflict("opportunity lease names another Quote generation")
         normalized = tuple(
             sorted((dict(row) for row in rows), key=lambda row: str(row.get("group_id")))
         )
@@ -5442,6 +5773,10 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            if lease is None:
+                _set_structure_read_timeouts(cursor, read_only=False)
+            else:
+                _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             cursor.execute(
                 "SELECT generation_key FROM m1_publication_pointers "
                 "WHERE pointer_key='quote:current' FOR UPDATE"
@@ -5463,6 +5798,15 @@ class PostgresControlPlane:
             }:
                 raise IncompleteStructureGenerationError(
                     "opportunity projection requires certified generations"
+                )
+            if lease is not None:
+                self._append_job_succeeded_cursor(
+                    cursor,
+                    lease=lease,
+                    stage="publish-opportunity",
+                    component="opportunity-certify",
+                    data_product="market-snapshot",
+                    now=now,
                 )
             cursor.execute(
                 """INSERT INTO m1_opportunity_projections
@@ -5526,7 +5870,127 @@ class PostgresControlPlane:
                        published_at=excluded.published_at""",
                 (quote_generation_key, now),
             )
+            if lease is not None:
+                cursor.execute(
+                    """
+                    UPDATE m1_jobs
+                    SET state = 'succeeded', lease_owner = NULL, lease_expires_at = NULL,
+                        updated_at = %s
+                    WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+                      AND state = 'leased'
+                    """,
+                    (now, lease.job_key, lease.lease_owner, lease.lease_epoch),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+                cursor.execute(
+                    """
+                    UPDATE m1_job_attempts SET state = 'succeeded', finished_at = %s
+                    WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
+                    """,
+                    (now, lease.job_key, lease.lease_epoch),
+                )
         return digest
+
+    def recover_opportunity_projection_success(
+        self,
+        lease: JobLease,
+        *,
+        quote_generation_key: str,
+        structure_generation_key: str | None,
+        now: datetime,
+    ) -> None:
+        """Repair a proven current opportunity pointer success event exactly once."""
+        self._validate_aware(now, "now")
+        if lease.job_type != "opportunity-certify":
+            raise ValueError("opportunity recovery requires an opportunity-certify lease")
+        if lease.input_identity != quote_generation_key:
+            raise JobIdentityConflict("opportunity recovery names another Quote generation")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            _set_structure_read_timeouts(cursor, read_only=False)
+            cursor.execute(
+                """
+                SELECT state, lease_epoch FROM m1_jobs
+                WHERE job_key = %s FOR UPDATE
+                """,
+                (lease.job_key,),
+            )
+            job = cursor.fetchone()
+            if job is None or int(job["lease_epoch"]) != lease.lease_epoch:
+                raise StaleLeaseError(f"durable opportunity projection is not proven for {lease.job_key}")
+            cursor.execute(
+                """
+                SELECT generation_key, structure_generation_key
+                FROM m1_opportunity_projections
+                WHERE generation_key = %s
+                """,
+                (quote_generation_key,),
+            )
+            projection = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT generation_key FROM m1_opportunity_publication_pointers
+                WHERE pointer_key = 'opportunity:current'
+                """,
+            )
+            pointer = cursor.fetchone()
+            if (
+                projection is None
+                or (
+                    structure_generation_key is not None
+                    and str(projection["structure_generation_key"]) != structure_generation_key
+                )
+                or pointer is None
+                or str(pointer["generation_key"]) != quote_generation_key
+            ):
+                raise IncompleteQuoteGenerationError(
+                    "opportunity recovery lacks durable current-pointer proof"
+                )
+            if str(job["state"]) == JobState.SUCCEEDED.value:
+                self._append_historical_job_succeeded_cursor(
+                    cursor,
+                    lease=lease,
+                    stage="publish-opportunity",
+                    component="opportunity-certify",
+                    data_product="market-snapshot",
+                    now=now,
+                )
+            elif (
+                str(job["state"]) == JobState.LEASED.value
+                and str(job["lease_owner"]) == lease.lease_owner
+            ):
+                _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+                self._append_job_succeeded_cursor(
+                    cursor,
+                    lease=lease,
+                    stage="publish-opportunity",
+                    component="opportunity-certify",
+                    data_product="market-snapshot",
+                    now=now,
+                )
+                cursor.execute(
+                    """
+                    UPDATE m1_jobs SET state = 'succeeded', lease_owner = NULL,
+                        lease_expires_at = NULL, updated_at = %s
+                    WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+                      AND state = 'leased'
+                    """,
+                    (now, lease.job_key, lease.lease_owner, lease.lease_epoch),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+                cursor.execute(
+                    """
+                    UPDATE m1_job_attempts SET state = 'succeeded', finished_at = %s
+                    WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
+                    """,
+                    (now, lease.job_key, lease.lease_epoch),
+                )
+            else:
+                raise StaleLeaseError(f"durable opportunity projection is not proven for {lease.job_key}")
 
     def current_quote_projection_inputs(
         self,
