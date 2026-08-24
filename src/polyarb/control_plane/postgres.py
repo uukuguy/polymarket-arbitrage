@@ -181,13 +181,13 @@ _RUNTIME_CONSTRAINTS = {
     ("m1_job_runtime_state", "fk_m1_runtime_state_job"): (
         "f",
         ("job_key",),
-        "m1_jobs",
+        "public.m1_jobs",
         ("job_key",),
     ),
     ("m1_job_runtime_state", "fk_m1_runtime_state_attempt"): (
         "f",
         ("attempt_id",),
-        "m1_job_attempts",
+        "public.m1_job_attempts",
         ("attempt_id",),
     ),
     ("m1_job_runtime_events", "pk_m1_job_runtime_events"): (
@@ -199,13 +199,13 @@ _RUNTIME_CONSTRAINTS = {
     ("m1_job_runtime_events", "fk_m1_runtime_events_job"): (
         "f",
         ("job_key",),
-        "m1_jobs",
+        "public.m1_jobs",
         ("job_key",),
     ),
     ("m1_job_runtime_events", "fk_m1_runtime_events_attempt"): (
         "f",
         ("attempt_id",),
-        "m1_job_attempts",
+        "public.m1_job_attempts",
         ("attempt_id",),
     ),
     ("m1_job_runtime_events", "uq_m1_runtime_events_attempt_sequence"): (
@@ -219,6 +219,51 @@ _RUNTIME_CONSTRAINTS = {
         ("idempotency_key",),
         None,
         (),
+    ),
+}
+_RUNTIME_CHECK_CONSTRAINTS = {
+    ("m1_job_runtime_state", "ck_m1_runtime_state_epoch"): (
+        "CHECK (lease_epoch > 0)"
+    ),
+    ("m1_job_runtime_state", "ck_m1_runtime_state_progress"): (
+        "CHECK (progress_sequence >= 0 AND progress_current >= 0 AND "
+        "(progress_total IS NULL OR progress_total >= 0 AND "
+        "progress_current <= progress_total))"
+    ),
+    ("m1_job_runtime_state", "ck_m1_runtime_state_recovery"): (
+        "CHECK (recovery_state = ANY (ARRAY['active'::text, 'suspect'::text, "
+        "'recovering'::text, 'recovered'::text, 'terminal'::text]))"
+    ),
+    ("m1_job_runtime_events", "ck_m1_runtime_events_detail_size"): (
+        "CHECK (jsonb_typeof(detail) = 'object'::text AND "
+        "octet_length(detail::text) <= 4096 AND pg_column_size(detail) <= 4096)"
+    ),
+    ("m1_job_runtime_events", "ck_m1_runtime_events_epoch"): (
+        "CHECK (lease_epoch > 0)"
+    ),
+    ("m1_job_runtime_events", "ck_m1_runtime_events_kind"): (
+        "CHECK (kind = ANY (ARRAY['job.started'::text, "
+        "'job.stage-changed'::text, 'job.lease-at-risk'::text, "
+        "'job.progress-stalled'::text, 'job.retryable-failed'::text, "
+        "'job.retry-scheduled'::text, 'job.recovery-started'::text, "
+        "'job.recovered'::text, 'job.terminal-failed'::text, "
+        "'job.succeeded'::text]))"
+    ),
+    ("m1_job_runtime_events", "ck_m1_runtime_events_progress_current"): (
+        "CHECK (progress_current IS NULL OR progress_current >= 0)"
+    ),
+    ("m1_job_runtime_events", "ck_m1_runtime_events_progress_pair"): (
+        "CHECK ((progress_sequence IS NULL) = (progress_current IS NULL))"
+    ),
+    ("m1_job_runtime_events", "ck_m1_runtime_events_progress_sequence"): (
+        "CHECK (progress_sequence IS NULL OR progress_sequence >= 0)"
+    ),
+    ("m1_job_runtime_events", "ck_m1_runtime_events_progress_total"): (
+        "CHECK (progress_total IS NULL OR progress_total >= 0 AND "
+        "progress_current IS NOT NULL AND progress_current <= progress_total)"
+    ),
+    ("m1_job_runtime_events", "ck_m1_runtime_events_sequence"): (
+        "CHECK (event_sequence > 0)"
     ),
 }
 _RUNTIME_INDEXES = {
@@ -244,6 +289,7 @@ _RUNTIME_APPEND_ONLY_FUNCTION_SOURCE = (
 _RUNTIME_APPEND_ONLY_FUNCTION_SOURCE_SHA256 = sha256(
     _RUNTIME_APPEND_ONLY_FUNCTION_SOURCE.encode()
 ).hexdigest()
+_RUNTIME_APPEND_ONLY_TRIGGER_TGTYPE = 27
 
 
 def _runtime_column_fingerprint(
@@ -297,7 +343,7 @@ def _runtime_constraint_fingerprint(
                  AS local_columns,
                CASE
                    WHEN pg_constraint.contype = 'f'
-                   THEN pg_constraint.confrelid::regclass::text
+                   THEN foreign_namespace.nspname || '.' || foreign_class.relname
                    ELSE NULL
                END AS foreign_table,
                coalesce(
@@ -322,11 +368,15 @@ def _runtime_constraint_fingerprint(
         LEFT JOIN pg_catalog.pg_attribute AS foreign_attribute
           ON foreign_attribute.attrelid = pg_constraint.confrelid
          AND foreign_attribute.attnum = foreign_key.attnum
+        LEFT JOIN pg_catalog.pg_class AS foreign_class
+          ON foreign_class.oid = pg_constraint.confrelid
+        LEFT JOIN pg_catalog.pg_namespace AS foreign_namespace
+          ON foreign_namespace.oid = foreign_class.relnamespace
         WHERE pg_namespace.nspname = 'public'
           AND pg_class.relname = ANY(%s)
           AND pg_constraint.conname = ANY(%s)
         GROUP BY pg_class.relname, pg_constraint.conname,
-                 pg_constraint.contype, pg_constraint.confrelid
+                 pg_constraint.contype, foreign_namespace.nspname, foreign_class.relname
         """,
         (
             sorted({table for table, _name in _RUNTIME_CONSTRAINTS}),
@@ -339,6 +389,37 @@ def _runtime_constraint_fingerprint(
             tuple(str(column) for column in row["local_columns"]),
             None if row["foreign_table"] is None else str(row["foreign_table"]),
             tuple(str(column) for column in row["foreign_columns"]),
+        )
+        for row in cursor.fetchall()
+    }
+
+
+def _runtime_check_constraint_fingerprint(
+    cursor: psycopg.Cursor[Any],
+) -> dict[tuple[str, str], str]:
+    cursor.execute(
+        """
+        SELECT pg_class.relname AS table_name,
+               pg_constraint.conname AS constraint_name,
+               pg_get_constraintdef(pg_constraint.oid, true) AS constraint_definition
+        FROM pg_catalog.pg_constraint
+        JOIN pg_catalog.pg_class
+          ON pg_class.oid = pg_constraint.conrelid
+        JOIN pg_catalog.pg_namespace
+          ON pg_namespace.oid = pg_class.relnamespace
+        WHERE pg_namespace.nspname = 'public'
+          AND pg_constraint.contype = 'c'
+          AND pg_class.relname = ANY(%s)
+          AND pg_constraint.conname = ANY(%s)
+        """,
+        (
+            sorted({table for table, _name in _RUNTIME_CHECK_CONSTRAINTS}),
+            sorted({name for _table, name in _RUNTIME_CHECK_CONSTRAINTS}),
+        ),
+    )
+    return {
+        (str(row["table_name"]), str(row["constraint_name"])): str(
+            row["constraint_definition"]
         )
         for row in cursor.fetchall()
     }
@@ -616,6 +697,10 @@ class PostgresControlPlane:
                 raise ControlPlaneError(
                     "control-plane revision 022 runtime schema fingerprint is incomplete"
                 )
+            if _runtime_check_constraint_fingerprint(cursor) != _RUNTIME_CHECK_CONSTRAINTS:
+                raise ControlPlaneError(
+                    "control-plane revision 022 runtime schema fingerprint is incomplete"
+                )
             if _runtime_index_fingerprint(cursor) != _RUNTIME_INDEXES:
                 raise ControlPlaneError(
                     "control-plane revision 022 runtime schema fingerprint is incomplete"
@@ -643,7 +728,8 @@ class PostgresControlPlane:
                 found_runtime_invariants.append("append_only_function")
             cursor.execute(
                 """
-                SELECT pg_get_triggerdef(pg_trigger.oid) AS trigger_definition,
+                SELECT pg_trigger.tgtype AS trigger_type,
+                       pg_trigger.tgattr::text AS trigger_columns,
                        pg_trigger.tgenabled AS enabled
                 FROM pg_catalog.pg_trigger
                 JOIN pg_catalog.pg_class
@@ -661,13 +747,10 @@ class PostgresControlPlane:
             )
             trigger = cursor.fetchone()
             if trigger is not None:
-                trigger_definition = str(trigger["trigger_definition"])
                 if (
                     str(trigger["enabled"]) in {"O", "A"}
-                    and "BEFORE" in trigger_definition
-                    and "UPDATE" in trigger_definition
-                    and "DELETE" in trigger_definition
-                    and "FOR EACH ROW" in trigger_definition
+                    and int(trigger["trigger_type"]) == _RUNTIME_APPEND_ONLY_TRIGGER_TGTYPE
+                    and str(trigger["trigger_columns"]) == ""
                 ):
                     found_runtime_invariants.append("append_only_trigger")
             if tuple(sorted(found_runtime_invariants)) != tuple(

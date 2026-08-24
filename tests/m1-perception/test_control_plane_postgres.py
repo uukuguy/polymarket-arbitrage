@@ -1433,6 +1433,36 @@ def test_deployment_preflight_rejects_replica_only_runtime_append_only_trigger(
             )
 
 
+def test_deployment_preflight_rejects_column_scoped_runtime_append_only_trigger(
+    postgres_dsn: str,
+) -> None:
+    control_plane = PostgresControlPlane(lambda: psycopg.connect(postgres_dsn))
+    with psycopg.connect(postgres_dsn) as connection:
+        database_name = connection.execute("SELECT current_database()").fetchone()
+        connection.execute("DROP TRIGGER m1_runtime_events_immutable ON m1_job_runtime_events")
+        connection.execute(
+            """
+            CREATE TRIGGER m1_runtime_events_immutable
+            BEFORE UPDATE OF detail OR DELETE ON m1_job_runtime_events
+            FOR EACH ROW EXECUTE FUNCTION m1_reject_runtime_event_mutation()
+            """
+        )
+    assert database_name is not None
+    try:
+        with pytest.raises(Exception, match="runtime event invariants are incomplete"):
+            control_plane.deployment_preflight(expected_database=str(database_name[0]))
+    finally:
+        with psycopg.connect(postgres_dsn) as connection:
+            connection.execute("DROP TRIGGER m1_runtime_events_immutable ON m1_job_runtime_events")
+            connection.execute(
+                """
+                CREATE TRIGGER m1_runtime_events_immutable
+                BEFORE UPDATE OR DELETE ON m1_job_runtime_events
+                FOR EACH ROW EXECUTE FUNCTION m1_reject_runtime_event_mutation()
+                """
+            )
+
+
 def test_deployment_preflight_rejects_missing_runtime_state_deadline_column(
     postgres_dsn: str,
 ) -> None:
@@ -1460,6 +1490,133 @@ def test_deployment_preflight_rejects_missing_runtime_state_deadline_column(
                 )
                 """
             )
+
+
+@pytest.mark.parametrize(
+    ("table_name", "constraint_name", "restore_sql"),
+    (
+        (
+            "m1_job_runtime_state",
+            "ck_m1_runtime_state_epoch",
+            "ALTER TABLE m1_job_runtime_state ADD CONSTRAINT "
+            "ck_m1_runtime_state_epoch CHECK (lease_epoch > 0)",
+        ),
+        (
+            "m1_job_runtime_state",
+            "ck_m1_runtime_state_progress",
+            "ALTER TABLE m1_job_runtime_state ADD CONSTRAINT "
+            "ck_m1_runtime_state_progress CHECK ("
+            "progress_sequence >= 0 AND progress_current >= 0 AND "
+            "(progress_total IS NULL OR (progress_total >= 0 AND "
+            "progress_current <= progress_total)))",
+        ),
+        (
+            "m1_job_runtime_state",
+            "ck_m1_runtime_state_recovery",
+            "ALTER TABLE m1_job_runtime_state ADD CONSTRAINT "
+            "ck_m1_runtime_state_recovery CHECK ("
+            "recovery_state IN ('active', 'suspect', 'recovering', 'recovered', 'terminal'))",
+        ),
+        (
+            "m1_job_runtime_events",
+            "ck_m1_runtime_events_detail_size",
+            "ALTER TABLE m1_job_runtime_events ADD CONSTRAINT "
+            "ck_m1_runtime_events_detail_size CHECK ("
+            "jsonb_typeof(detail) = 'object' AND octet_length(detail::text) <= 4096 "
+            "AND pg_column_size(detail) <= 4096)",
+        ),
+        (
+            "m1_job_runtime_events",
+            "ck_m1_runtime_events_epoch",
+            "ALTER TABLE m1_job_runtime_events ADD CONSTRAINT "
+            "ck_m1_runtime_events_epoch CHECK (lease_epoch > 0)",
+        ),
+        (
+            "m1_job_runtime_events",
+            "ck_m1_runtime_events_kind",
+            "ALTER TABLE m1_job_runtime_events ADD CONSTRAINT "
+            "ck_m1_runtime_events_kind CHECK (kind IN ("
+            "'job.started', 'job.stage-changed', 'job.lease-at-risk', "
+            "'job.progress-stalled', 'job.retryable-failed', 'job.retry-scheduled', "
+            "'job.recovery-started', 'job.recovered', 'job.terminal-failed', "
+            "'job.succeeded'))",
+        ),
+        (
+            "m1_job_runtime_events",
+            "ck_m1_runtime_events_progress_current",
+            "ALTER TABLE m1_job_runtime_events ADD CONSTRAINT "
+            "ck_m1_runtime_events_progress_current CHECK ("
+            "progress_current IS NULL OR progress_current >= 0)",
+        ),
+        (
+            "m1_job_runtime_events",
+            "ck_m1_runtime_events_progress_pair",
+            "ALTER TABLE m1_job_runtime_events ADD CONSTRAINT "
+            "ck_m1_runtime_events_progress_pair CHECK ("
+            "(progress_sequence IS NULL) = (progress_current IS NULL))",
+        ),
+        (
+            "m1_job_runtime_events",
+            "ck_m1_runtime_events_progress_sequence",
+            "ALTER TABLE m1_job_runtime_events ADD CONSTRAINT "
+            "ck_m1_runtime_events_progress_sequence CHECK ("
+            "progress_sequence IS NULL OR progress_sequence >= 0)",
+        ),
+        (
+            "m1_job_runtime_events",
+            "ck_m1_runtime_events_progress_total",
+            "ALTER TABLE m1_job_runtime_events ADD CONSTRAINT "
+            "ck_m1_runtime_events_progress_total CHECK ("
+            "progress_total IS NULL OR (progress_total >= 0 AND "
+            "progress_current IS NOT NULL AND progress_current <= progress_total))",
+        ),
+        (
+            "m1_job_runtime_events",
+            "ck_m1_runtime_events_sequence",
+            "ALTER TABLE m1_job_runtime_events ADD CONSTRAINT "
+            "ck_m1_runtime_events_sequence CHECK (event_sequence > 0)",
+        ),
+    ),
+)
+def test_deployment_preflight_rejects_missing_runtime_check_constraint(
+    postgres_dsn: str,
+    table_name: LiteralString,
+    constraint_name: LiteralString,
+    restore_sql: LiteralString,
+) -> None:
+    control_plane = PostgresControlPlane(lambda: psycopg.connect(postgres_dsn))
+    with psycopg.connect(postgres_dsn) as connection:
+        database_name = connection.execute("SELECT current_database()").fetchone()
+        connection.execute(
+            sql.SQL("ALTER TABLE {} DROP CONSTRAINT {}").format(
+                sql.Identifier(table_name),
+                sql.Identifier(constraint_name),
+            )
+        )
+    assert database_name is not None
+    try:
+        with pytest.raises(Exception, match="runtime schema fingerprint is incomplete"):
+            control_plane.deployment_preflight(expected_database=str(database_name[0]))
+    finally:
+        with psycopg.connect(postgres_dsn) as connection:
+            connection.execute(sql.SQL(restore_sql))
+
+
+def test_deployment_preflight_is_independent_of_connection_search_path(
+    postgres_dsn: str,
+) -> None:
+    def connect() -> psycopg.Connection:
+        return psycopg.connect(postgres_dsn, options="-c search_path=pg_catalog")
+
+    control_plane = PostgresControlPlane(connect)
+    with connect() as connection:
+        database_name = connection.execute("SELECT current_database()").fetchone()
+    assert database_name is not None
+
+    result = control_plane.deployment_preflight(expected_database=str(database_name[0]))
+
+    assert result["database_name"] == database_name[0]
+    assert result["revision_022_tables"] == 23
 
 
 def test_enqueue_quote_generation_is_deterministic(control_plane: PostgresControlPlane) -> None:
