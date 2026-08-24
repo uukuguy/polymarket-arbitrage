@@ -9,10 +9,10 @@ import pytest
 
 from polyarb.clients.gamma_client import EventPage, MarketPage, PaginationIntegrityError
 from polyarb.control_plane.models import (
+    CloudUsageDecision,
     JobLease,
     JobState,
     SourceAdmissionDecision,
-    CloudUsageDecision,
     StructureSourcePageSpec,
 )
 from polyarb.control_plane.structure_source import (
@@ -37,6 +37,8 @@ class FakeControlPlane:
         self.quarantines: list[dict[str, object]] = []
         self.retry_incidents: list[dict[str, object]] = []
         self.recoveries: list[dict[str, object]] = []
+        self.runtime_progress: list[dict[str, object]] = []
+        self.runtime_heartbeats: list[dict[str, object]] = []
         self.usage_decision = CloudUsageDecision(True, 0, 0, "usage-1")
 
     def claim_job(self, **kwargs: object) -> JobLease:
@@ -81,6 +83,22 @@ class FakeControlPlane:
     def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
         self.recoveries.append(kwargs)
         return False
+
+    def record_runtime_progress(self, lease: JobLease, **kwargs: object) -> None:
+        self.runtime_progress.append(kwargs)
+
+    def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
+        self.runtime_heartbeats.append(kwargs)
+        return JobLease(
+            job_key=lease.job_key,
+            job_type=lease.job_type,
+            input_identity=lease.input_identity,
+            lease_owner=lease.lease_owner,
+            lease_epoch=lease.lease_epoch,
+            lease_expires_at=kwargs["now"],
+            checkpoint_cursor=lease.checkpoint_cursor,
+            checkpoint_digest=lease.checkpoint_digest,
+        )
 
 
 class FakeGamma:
@@ -497,6 +515,26 @@ def test_source_worker_fetches_one_event_page_uploads_then_records_receipt() -> 
     assert records[0]["kind"] == "structure-source-page"
     assert records[0]["stream"] == "events"
     assert records[1] == {"row": {"id": "event-a", "markets": []}}
+
+
+def test_source_worker_reports_all_fenced_page_lifecycle_stages() -> None:
+    control_plane = FakeControlPlane(_event_spec())
+    worker = TransactionalStructureSourceWorker(
+        control_plane=control_plane,
+        gamma=FakeGamma(),
+        object_client=FakeObjectClient(),
+        bucket="source-pages",
+        worker_id="source-worker-a",
+        now=lambda: NOW,
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    assert [item["progress"].stage for item in control_plane.runtime_progress] == [
+        "fetch-page",
+        "validate-page",
+        "upload-page",
+        "commit-page",
+    ]
 
 
 def test_source_worker_marks_only_current_page_retryable_when_gamma_fails() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -16,8 +16,10 @@ from polyarb.perception.market_truth import market_truth_mismatch_reason
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 
 from .alert_delivery import incident_alert_channels
-from .models import JobLease, StructureSourcePageSpec
+from .models import StructureSourcePageSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
+from .runtime_contract import AsyncAttemptRuntime
+from .runtime_models import RuntimeDeadlineProfile
 from .structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
@@ -38,6 +40,78 @@ from .structure_shadow import plan_shard_structure_ranges, plan_structure_ranges
 from .structure_worker import StructureWorkerResult
 
 DEFAULT_MAX_MARKET_BATCHES = 10_000
+
+
+async def _drain_thread_task(task: asyncio.Task[Any]) -> Any:
+    """Await an executor call to completion even after owner cancellation."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
+
+
+async def _to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run synchronous control-plane/R2 work without abandoning its thread."""
+    task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancellation:
+        try:
+            await _drain_thread_task(task)
+        except BaseException as error:
+            raise cancellation from error
+        raise
+
+
+def _consume_cancellation() -> None:
+    task = asyncio.current_task()
+    if task is None:
+        return
+    while task.cancelling():
+        task.uncancel()
+
+
+async def _terminal_to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Drain a point-of-no-return call before propagating cancellation."""
+    task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancellation:
+        _consume_cancellation()
+        try:
+            result = await _drain_thread_task(task)
+        except BaseException as error:
+            _consume_cancellation()
+            raise error from cancellation
+        _consume_cancellation()
+        return result
+
+
+async def _progress(
+    runtime: AsyncAttemptRuntime,
+    *,
+    stage: str,
+    current: int,
+    total: int | None,
+) -> None:
+    """Persist progress off the event loop and retain cancellation draining."""
+    await _to_thread(runtime.progress, stage=stage, current=current, total=total)
+
+
+def _runtime_profile(lease_seconds: int) -> RuntimeDeadlineProfile:
+    bounded_lease = max(3, int(lease_seconds))
+    heartbeat = max(1, min(30, bounded_lease // 3))
+    progress = max(bounded_lease, heartbeat * 3)
+    attempt = max(progress, bounded_lease * 10)
+    return RuntimeDeadlineProfile(
+        policy_version="runtime-v1",
+        lease_seconds=bounded_lease,
+        heartbeat_seconds=heartbeat,
+        progress_seconds=progress,
+        attempt_seconds=attempt,
+    )
 
 
 class StructureSourceError(RuntimeError):
@@ -588,6 +662,7 @@ class TransactionalStructureSourceWorker:
         object_store_timeout_seconds: float = 90,
         retry_delay: timedelta = timedelta(seconds=15),
         daily_egress_budget_bytes: int = 3_500_000_000,
+        runtime_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
@@ -618,6 +693,7 @@ class TransactionalStructureSourceWorker:
         self._object_store_timeout_seconds = object_store_timeout_seconds
         self._retry_delay = retry_delay
         self._daily_egress_budget_bytes = daily_egress_budget_bytes
+        self._runtime_sleep = runtime_sleep
 
     async def aclose(self) -> None:
         """Release the long-lived Gamma transport when an operator turn ends."""
@@ -632,48 +708,20 @@ class TransactionalStructureSourceWorker:
         )
         if lease is None:
             return StructureWorkerResult(job_key=None, outcome="idle")
+        runtime = AsyncAttemptRuntime(
+            store=self._control_plane,
+            lease=lease,
+            profile=_runtime_profile(self._lease_seconds),
+            clock=self._now,
+            sleep=self._runtime_sleep,
+        )
         try:
-            spec = self._control_plane.structure_source_page_spec(lease.job_key)
-            # Only cursor-driven event traversal needs this page ceiling.  Exact
-            # market-ID batches are independently bounded when the terminal
-            # event source admits at most ``max_market_batches`` of them.
-            if spec.stream == "events" and spec.ordinal >= self._max_pages:
-                self._control_plane.quarantine_structure_source_page(
-                    lease,
-                    error_class="StructureSourcePageLimitError",
-                    now=self._now(),
-                )
-                return StructureWorkerResult(job_key=lease.job_key, outcome="quarantined")
-            artifact, next_cursor, completed, record_count = await self._fetch_artifact(spec)
-            decision = self._control_plane.record_cloud_usage(
-                source="gamma", operation=f"structure-{spec.stream}-page",
-                bytes_received=len(artifact.payload), item_count=record_count,
-                artifact_key=artifact.key, artifact_digest=artifact.sha256,
-                daily_budget_bytes=self._daily_egress_budget_bytes, now=self._now(),
-            )
-            if not decision.allowed:
-                raise StructureSourceError("cloud-egress-budget-exhausted")
-            event_embedded_markets = spec.stream == "events" and completed
-            self._control_plane.record_structure_source_page(
-                lease,
-                artifact_key=artifact.key,
-                artifact_digest=artifact.sha256,
-                next_cursor=next_cursor,
-                completed=completed,
-                record_count=record_count,
-                event_embedded_markets=event_embedded_markets,
-                now=self._now(),
-            )
-            self._control_plane.record_job_recovery(
-                lease,
-                component="structure-fetch",
-                channels=incident_alert_channels(Settings()),
-                now=self._now(),
-            )
-            return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
+            async with runtime:
+                return await self._run_claimed(runtime)
         except StructureSourceBatchLimitError:
-            self._control_plane.quarantine_structure_source_page(
-                lease,
+            await _terminal_to_thread(
+                self._control_plane.quarantine_structure_source_page,
+                runtime.current_lease,
                 error_class="StructureSourceBatchLimitError",
                 now=self._now(),
             )
@@ -689,14 +737,21 @@ class TransactionalStructureSourceWorker:
             # then quarantine on the third lease. A later admission can take a
             # fresh, internally consistent scope. Event and non-integrity
             # failures retain the normal retry/incident path below.
-            exact_batch_integrity_failure = (
-                isinstance(error, PaginationIntegrityError) and bool(spec.market_ids)
-            )
+            try:
+                error_spec = self._control_plane.structure_source_page_spec(
+                    runtime.current_lease.job_key
+                )
+            except Exception:
+                error_spec = None
+            exact_batch_integrity_failure = isinstance(
+                error, PaginationIntegrityError
+            ) and bool(getattr(error_spec, "market_ids", ()))
             if exact_batch_integrity_failure and (
                 str(error) == "exact-id market response is not open" or lease.lease_epoch >= 3
             ):
-                self._control_plane.quarantine_structure_source_page(
-                    lease,
+                await _terminal_to_thread(
+                    self._control_plane.quarantine_structure_source_page,
+                    runtime.current_lease,
                     error_class=(
                         "StructureSourceMemberBecameInactiveError"
                         if str(error) == "exact-id market response is not open"
@@ -705,8 +760,9 @@ class TransactionalStructureSourceWorker:
                     now=self._now(),
                 )
                 return StructureWorkerResult(job_key=lease.job_key, outcome="quarantined")
-            self._control_plane.finish_retryable_with_incident(
-                lease,
+            await _to_thread(
+                self._control_plane.finish_retryable_with_incident,
+                runtime.current_lease,
                 error_class=type(error).__name__,
                 incident_key=f"incident:job-retry:{lease.job_key}",
                 dedupe_key=f"job-retry:{lease.job_key}",
@@ -725,18 +781,88 @@ class TransactionalStructureSourceWorker:
             # lanes and downstream transactional work from making progress.
             return StructureWorkerResult(job_key=lease.job_key, outcome="retryable")
 
+        raise AssertionError("source worker runtime exited without a result")
+
+    async def _run_claimed(self, runtime: AsyncAttemptRuntime) -> StructureWorkerResult:
+        lease = runtime.current_lease
+        spec = await _to_thread(self._control_plane.structure_source_page_spec, lease.job_key)
+        # Only cursor-driven event traversal needs this page ceiling. Exact
+        # market-ID batches are independently bounded by their frozen scope.
+        if spec.stream == "events" and spec.ordinal >= self._max_pages:
+            await _progress(runtime, stage="fetch-page", current=0, total=0)
+            await _progress(runtime, stage="validate-page", current=0, total=0)
+            await runtime.stop()
+            await _terminal_to_thread(
+                self._control_plane.quarantine_structure_source_page,
+                runtime.current_lease,
+                error_class="StructureSourcePageLimitError",
+                now=self._now(),
+            )
+            return StructureWorkerResult(job_key=lease.job_key, outcome="quarantined")
+        artifact, next_cursor, completed, record_count = await self._fetch_artifact(
+            spec, runtime=runtime
+        )
+        decision = await _to_thread(
+            self._control_plane.record_cloud_usage,
+            source="gamma",
+            operation=f"structure-{spec.stream}-page",
+            bytes_received=len(artifact.payload),
+            item_count=record_count,
+            artifact_key=artifact.key,
+            artifact_digest=artifact.sha256,
+            daily_budget_bytes=self._daily_egress_budget_bytes,
+            now=self._now(),
+        )
+        if not decision.allowed:
+            raise StructureSourceError("cloud-egress-budget-exhausted")
+        await _progress(runtime, stage="commit-page", current=1, total=1)
+        await runtime.stop()
+        event_embedded_markets = spec.stream == "events" and completed
+        await _terminal_to_thread(
+            self._control_plane.record_structure_source_page,
+            runtime.current_lease,
+            artifact_key=artifact.key,
+            artifact_digest=artifact.sha256,
+            next_cursor=next_cursor,
+            completed=completed,
+            record_count=record_count,
+            event_embedded_markets=event_embedded_markets,
+            now=self._now(),
+        )
+        try:
+            await _terminal_to_thread(
+                self._control_plane.record_job_recovery,
+                runtime.current_lease,
+                component="structure-fetch",
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
+        except Exception:
+            # The receipt is already durable. Recovery is independently
+            # observable and can be retried by reconciliation.
+            return StructureWorkerResult(
+                job_key=lease.job_key, outcome="succeeded:recovery-pending"
+            )
+        return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
+
     async def _fetch_artifact(
-        self, spec: StructureSourcePageSpec
+        self, spec: StructureSourcePageSpec, *, runtime: AsyncAttemptRuntime
     ) -> tuple[StructureSourcePageArtifact, str | None, bool, int]:
         page: EventPage | MarketPage
         if spec.stream == "events":
-            page = await self._gamma.fetch_active_event_page(
-                spec.requested_cursor, self._page_limit
+            page = await asyncio.wait_for(
+                self._gamma.fetch_active_event_page(
+                    spec.requested_cursor, self._page_limit
+                ),
+                timeout=self._object_store_timeout_seconds,
             )
             records = page.events
         elif spec.market_ids:
             started_at_ms = int(self._now().timestamp() * 1_000)
-            records = await self._gamma.fetch_markets_by_ids(spec.market_ids)
+            records = await asyncio.wait_for(
+                self._gamma.fetch_markets_by_ids(spec.market_ids),
+                timeout=self._object_store_timeout_seconds,
+            )
             finished_at_ms = int(self._now().timestamp() * 1_000)
             artifact = StructureSourcePageArtifact.from_page(
                 spec=spec,
@@ -746,15 +872,22 @@ class TransactionalStructureSourceWorker:
                 started_at_ms=started_at_ms,
                 finished_at_ms=finished_at_ms,
             )
+            await _progress(runtime, stage="fetch-page", current=1, total=1)
+            await _progress(runtime, stage="validate-page", current=1, total=1)
             await self._upload_artifact(artifact)
+            await _progress(runtime, stage="upload-page", current=1, total=1)
             return artifact, None, True, len(records)
         else:
-            page = await self._gamma.fetch_active_market_page(
-                spec.requested_cursor, self._page_limit
+            page = await asyncio.wait_for(
+                self._gamma.fetch_active_market_page(
+                    spec.requested_cursor, self._page_limit
+                ),
+                timeout=self._object_store_timeout_seconds,
             )
             records = page.markets
         if page.requested_cursor != spec.requested_cursor:
             raise StructureSourceError("source page requested cursor mismatch")
+        await _progress(runtime, stage="fetch-page", current=1, total=1)
         artifact = StructureSourcePageArtifact.from_page(
             spec=spec,
             records=records,
@@ -763,13 +896,15 @@ class TransactionalStructureSourceWorker:
             started_at_ms=page.started_at_ms,
             finished_at_ms=page.finished_at_ms,
         )
+        await _progress(runtime, stage="validate-page", current=1, total=1)
         await self._upload_artifact(artifact)
+        await _progress(runtime, stage="upload-page", current=1, total=1)
         return artifact, page.next_cursor, page.completed, len(records)
 
     async def _upload_artifact(self, artifact: StructureSourcePageArtifact) -> None:
         """Keep synchronous R2 PUT/HEAD from freezing the scheduler event loop."""
         await asyncio.wait_for(
-            asyncio.to_thread(
+            _to_thread(
                 upload_structure_source_page_artifact,
                 self._object_client,
                 bucket=self._bucket,
@@ -793,7 +928,11 @@ class TransactionalStructureSourcePool:
         errors = [result for result in results if isinstance(result, BaseException)]
         if errors:
             raise errors[0]
-        completed = [result for result in results if result.job_key is not None]
+        completed = [
+            result
+            for result in results
+            if isinstance(result, StructureWorkerResult) and result.job_key is not None
+        ]
         if not completed:
             return StructureWorkerResult(job_key=None, outcome="idle")
         keys = sorted(str(result.job_key) for result in completed)
@@ -866,6 +1005,7 @@ class TransactionalStructureSourceMaterializer:
         read_concurrency: int = 8,
         shard_page_batch_size: int = 4,
         retry_delay: timedelta = timedelta(seconds=15),
+        runtime_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
@@ -887,6 +1027,7 @@ class TransactionalStructureSourceMaterializer:
         self._read_concurrency = read_concurrency
         self._shard_page_batch_size = shard_page_batch_size
         self._retry_delay = retry_delay
+        self._runtime_sleep = runtime_sleep
 
     async def run_once(self) -> StructureWorkerResult:
         lease = self._control_plane.claim_job(
@@ -897,38 +1038,22 @@ class TransactionalStructureSourceMaterializer:
         )
         if lease is None:
             return StructureWorkerResult(job_key=None, outcome="idle")
+        runtime = AsyncAttemptRuntime(
+            store=self._control_plane,
+            lease=lease,
+            profile=_runtime_profile(self._lease_seconds),
+            clock=self._now,
+            sleep=self._runtime_sleep,
+        )
         try:
-            source_pages = self._control_plane.structure_source_window_pages(lease.input_identity)
-            if len(source_pages) > self._shard_page_batch_size and all(
-                spec.stream == "events" for spec, _key, _digest in source_pages
-            ):
-                return await self._checkpoint_event_shard_batch(lease, source_pages)
-            pages = await self._read_source_pages(source_pages)
-            bundle = materialize_structure_source_pages(pages)
-            upload_structure_bundle_artifact(
-                self._object_client, bucket=self._bucket, artifact=bundle
-            )
-            self._control_plane.admit_structure_source_bundle(
-                lease,
-                identity=parse_structure_bundle_identity(bundle),
-                bundle=bundle,
-                ranges=plan_structure_ranges(
-                    parse_structure_bundle_components(bundle), max_rows=self._range_max_rows
-                ),
-                now=self._now(),
-            )
-            self._control_plane.record_job_recovery(
-                lease,
-                component="structure-materialize",
-                channels=incident_alert_channels(Settings()),
-                now=self._now(),
-            )
-            return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
+            async with runtime:
+                return await self._run_claimed(runtime)
         except StaleLeaseError:
             raise
         except Exception as error:
-            self._control_plane.finish_retryable_with_incident(
-                lease,
+            await _to_thread(
+                self._control_plane.finish_retryable_with_incident,
+                runtime.current_lease,
                 error_class=type(error).__name__,
                 incident_key=f"incident:job-retry:{lease.job_key}",
                 dedupe_key=f"job-retry:{lease.job_key}",
@@ -945,11 +1070,59 @@ class TransactionalStructureSourceMaterializer:
             )
             return StructureWorkerResult(job_key=lease.job_key, outcome="retryable")
 
+        raise AssertionError("materializer runtime exited without a result")
+
+    async def _run_claimed(self, runtime: AsyncAttemptRuntime) -> StructureWorkerResult:
+        lease = runtime.current_lease
+        source_pages = await _to_thread(
+            self._control_plane.structure_source_window_pages, lease.input_identity
+        )
+        if len(source_pages) > self._shard_page_batch_size and all(
+            spec.stream == "events" for spec, _key, _digest in source_pages
+        ):
+            return await self._checkpoint_event_shard_batch(runtime, source_pages)
+        pages = await self._read_source_pages(source_pages, runtime=runtime)
+        bundle = await _to_thread(materialize_structure_source_pages, pages)
+        await _progress(runtime, stage="build-bundle", current=1, total=1)
+        await _to_thread(
+            upload_structure_bundle_artifact,
+            self._object_client,
+            bucket=self._bucket,
+            artifact=bundle,
+        )
+        await _progress(runtime, stage="upload-bundle", current=1, total=1)
+        await _progress(runtime, stage="commit-bundle", current=1, total=1)
+        await runtime.stop()
+        await _terminal_to_thread(
+            self._control_plane.admit_structure_source_bundle,
+            runtime.current_lease,
+            identity=parse_structure_bundle_identity(bundle),
+            bundle=bundle,
+            ranges=plan_structure_ranges(
+                parse_structure_bundle_components(bundle), max_rows=self._range_max_rows
+            ),
+            now=self._now(),
+        )
+        try:
+            await _terminal_to_thread(
+                self._control_plane.record_job_recovery,
+                runtime.current_lease,
+                component="structure-materialize",
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
+        except Exception:
+            return StructureWorkerResult(
+                job_key=lease.job_key, outcome="succeeded:recovery-pending"
+            )
+        return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
+
     async def _checkpoint_event_shard_batch(
         self,
-        lease: JobLease,
+        runtime: AsyncAttemptRuntime,
         source_pages: Sequence[tuple[StructureSourcePageSpec, str, str]],
     ) -> StructureWorkerResult:
+        lease = runtime.current_lease
         # Checkpoints use fixed-width offsets so lexical receipt order remains
         # the durable source order. A fresh lease begins at zero.
         checkpoint_cursor = getattr(lease, "checkpoint_cursor")
@@ -960,16 +1133,32 @@ class TransactionalStructureSourceMaterializer:
         )
         selected = source_pages[start : start + self._shard_page_batch_size]
         if not selected:
-            return await self._finalize_event_shard_manifest(lease, source_pages)
-        pages = await self._read_source_pages(selected)
-        source_digest = self._control_plane.structure_source_window_digest(lease.input_identity)
+            return await self._finalize_event_shard_manifest(runtime, source_pages)
+        pages = await self._read_source_pages(selected, runtime=runtime)
+        source_digest = await _to_thread(
+            self._control_plane.structure_source_window_digest, lease.input_identity
+        )
         receipts: list[StructureShardReceipt] = []
-        for page in pages:
-            page_shards = materialize_event_page_shards(
-                page, source_digest=source_digest
+        page_shards_list = [
+            await _to_thread(
+                materialize_event_page_shards,
+                page,
+                source_digest=source_digest,
             )
+            for page in pages
+        ]
+        total_shards = sum(len(page_shards) for page_shards in page_shards_list)
+        built_shards = 0
+        for page, page_shards in zip(pages, page_shards_list, strict=True):
             for component, artifact in page_shards:
-                await asyncio.to_thread(
+                built_shards += 1
+                await _progress(
+                    runtime,
+                    stage="build-bundle",
+                    current=built_shards,
+                    total=total_shards,
+                )
+                await _to_thread(
                     upload_structure_shard_artifact,
                     self._object_client,
                     bucket=self._bucket,
@@ -988,7 +1177,14 @@ class TransactionalStructureSourceMaterializer:
                         ),
                     )
                 )
-        batch = StructureShardBatchArtifact.from_bytes(
+                await _progress(
+                    runtime,
+                    stage="upload-bundle",
+                    current=built_shards,
+                    total=total_shards,
+                )
+        batch = await _to_thread(
+            StructureShardBatchArtifact.from_bytes,
             canonical_structure_shard_batch_bytes(
                 window_key=lease.input_identity,
                 source_digest=source_digest,
@@ -997,14 +1193,23 @@ class TransactionalStructureSourceMaterializer:
                 shards=receipts,
             )
         )
-        await asyncio.to_thread(
+        await _to_thread(
             upload_structure_shard_batch_artifact,
             self._object_client,
             bucket=self._bucket,
             artifact=batch,
         )
-        self._control_plane.checkpoint(
-            lease,
+        await _progress(
+            runtime,
+            stage="upload-bundle",
+            current=total_shards + 1,
+            total=total_shards + 1,
+        )
+        await _progress(runtime, stage="commit-bundle", current=1, total=1)
+        await runtime.stop()
+        await _terminal_to_thread(
+            self._control_plane.checkpoint,
+            runtime.current_lease,
             checkpoint_cursor=f"shard-batch:{selected[-1][0].ordinal:08d}",
             checkpoint_digest=batch.sha256,
             artifact_key=batch.key,
@@ -1013,8 +1218,9 @@ class TransactionalStructureSourceMaterializer:
             ),
             now=self._now(),
         )
-        self._control_plane.record_job_recovery(
-            lease,
+        await _terminal_to_thread(
+            self._control_plane.record_job_recovery,
+            runtime.current_lease,
             component="structure-materialize",
             channels=incident_alert_channels(Settings()),
             now=self._now(),
@@ -1023,32 +1229,45 @@ class TransactionalStructureSourceMaterializer:
 
     async def _finalize_event_shard_manifest(
         self,
-        lease: JobLease,
+        runtime: AsyncAttemptRuntime,
         source_pages: Sequence[tuple[StructureSourcePageSpec, str, str]],
     ) -> StructureWorkerResult:
-        source_digest = self._control_plane.structure_source_window_digest(lease.input_identity)
-        identity, manifest, ranges = materialize_sharded_source_manifest(
+        lease = runtime.current_lease
+        source_digest = await _to_thread(
+            self._control_plane.structure_source_window_digest, lease.input_identity
+        )
+        batches = await _to_thread(
+            self._control_plane.structure_materializer_batches, lease.input_identity
+        )
+        identity, manifest, ranges = await _to_thread(
+            materialize_sharded_source_manifest,
             window_key=lease.input_identity,
             source_digest=source_digest,
             expected_page_count=len(source_pages),
-            batches=self._control_plane.structure_materializer_batches(lease.input_identity),
+            batches=batches,
             read_batch=lambda key: self._read_object_bytes(key),
         )
-        await asyncio.to_thread(
+        await _progress(runtime, stage="build-bundle", current=1, total=1)
+        await _to_thread(
             upload_structure_bundle_artifact,
             self._object_client,
             bucket=self._bucket,
             artifact=manifest,
         )
-        self._control_plane.admit_structure_source_bundle(
-            lease,
+        await _progress(runtime, stage="upload-bundle", current=1, total=1)
+        await _progress(runtime, stage="commit-bundle", current=1, total=1)
+        await runtime.stop()
+        await _terminal_to_thread(
+            self._control_plane.admit_structure_source_bundle,
+            runtime.current_lease,
             identity=identity,
             bundle=manifest,
             ranges=ranges,
             now=self._now(),
         )
-        self._control_plane.record_job_recovery(
-            lease,
+        await _terminal_to_thread(
+            self._control_plane.record_job_recovery,
+            runtime.current_lease,
             component="structure-materialize",
             channels=incident_alert_channels(Settings()),
             now=self._now(),
@@ -1058,6 +1277,8 @@ class TransactionalStructureSourceMaterializer:
     async def _read_source_pages(
         self,
         source_pages: Sequence[tuple[StructureSourcePageSpec, str, str]],
+        *,
+        runtime: AsyncAttemptRuntime | None = None,
     ) -> list[tuple[StructureSourcePageSpec, StructureSourcePageArtifact]]:
         """Read immutable page evidence concurrently without changing its order."""
         semaphore = asyncio.Semaphore(self._read_concurrency)
@@ -1066,16 +1287,25 @@ class TransactionalStructureSourceMaterializer:
             spec: StructureSourcePageSpec, key: str, digest: str
         ) -> tuple[StructureSourcePageSpec, StructureSourcePageArtifact]:
             async with semaphore:
-                artifact = await asyncio.to_thread(
+                artifact = await _to_thread(
                     self._read_page_artifact, key=key, digest=digest
                 )
             return spec, artifact
 
-        return list(
+        pages = list(
             await asyncio.gather(
                 *(read_one(spec, key, digest) for spec, key, digest in source_pages)
             )
         )
+        if runtime is not None:
+            for index in range(1, len(pages) + 1):
+                await _progress(
+                    runtime,
+                    stage="read-page-receipts",
+                    current=index,
+                    total=len(pages),
+                )
+        return pages
 
     def _read_page_artifact(self, *, key: str, digest: str) -> StructureSourcePageArtifact:
         payload = self._read_object_bytes(key)

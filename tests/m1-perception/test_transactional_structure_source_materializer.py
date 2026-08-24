@@ -45,6 +45,8 @@ class FakeControlPlane:
         self.retry_incidents: list[dict[str, object]] = []
         self.recoveries: list[dict[str, object]] = []
         self.checkpoints: list[dict[str, object]] = []
+        self.runtime_progress: list[dict[str, object]] = []
+        self.runtime_heartbeats: list[dict[str, object]] = []
 
     def claim_job(self, **kwargs: object) -> JobLease:
         assert kwargs["job_types"] == ("structure-materialize",)
@@ -80,6 +82,22 @@ class FakeControlPlane:
     def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
         self.recoveries.append(kwargs)
         return False
+
+    def record_runtime_progress(self, lease: JobLease, **kwargs: object) -> None:
+        self.runtime_progress.append(kwargs)
+
+    def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
+        self.runtime_heartbeats.append(kwargs)
+        return JobLease(
+            job_key=lease.job_key,
+            job_type=lease.job_type,
+            input_identity=lease.input_identity,
+            lease_owner=lease.lease_owner,
+            lease_epoch=lease.lease_epoch,
+            lease_expires_at=kwargs["now"],
+            checkpoint_cursor=lease.checkpoint_cursor,
+            checkpoint_digest=lease.checkpoint_digest,
+        )
 
 
 class MemoryR2:
@@ -180,6 +198,40 @@ def test_materializer_reads_only_sealed_r2_pages_then_admits_ranges() -> None:
         ("markets", "", ""),
         ("issues", "", ""),
     )
+
+
+def test_materializer_reports_all_fenced_bundle_lifecycle_stages() -> None:
+    pages = (
+        _artifact(
+            stream="events",
+            records=(
+                {
+                    "id": "event-a",
+                    "slug": "event-a",
+                    "active": True,
+                    "closed": False,
+                    "markets": [],
+                },
+            ),
+        ),
+    )
+    control_plane = FakeControlPlane(pages)
+    worker = TransactionalStructureSourceMaterializer(
+        control_plane=control_plane,
+        object_client=MemoryR2(pages),
+        bucket="source-pages",
+        worker_id="materializer-a",
+        now=lambda: NOW,
+        range_max_rows=100,
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    assert [item["progress"].stage for item in control_plane.runtime_progress] == [
+        "read-page-receipts",
+        "build-bundle",
+        "upload-bundle",
+        "commit-bundle",
+    ]
 
 
 def test_materializer_reads_sealed_pages_concurrently_in_stable_source_order() -> None:

@@ -91,6 +91,8 @@ class FakeControlPlane:
         self.recorded: dict[str, object] | None = None
         self.recoveries: list[dict[str, object]] = []
         self.retry_incidents: list[dict[str, object]] = []
+        self.runtime_progress: list[dict[str, object]] = []
+        self.runtime_heartbeats: list[dict[str, object]] = []
 
     def claim_job(self, **kwargs: object) -> JobLease:
         return JobLease(
@@ -124,6 +126,22 @@ class FakeControlPlane:
 
     def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
         self.retry_incidents.append(kwargs)
+
+    def record_runtime_progress(self, lease: JobLease, **kwargs: object) -> None:
+        self.runtime_progress.append(kwargs)
+
+    def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
+        self.runtime_heartbeats.append(kwargs)
+        return JobLease(
+            job_key=lease.job_key,
+            job_type=lease.job_type,
+            input_identity=lease.input_identity,
+            lease_owner=lease.lease_owner,
+            lease_epoch=lease.lease_epoch,
+            lease_expires_at=kwargs["now"],
+            checkpoint_cursor=lease.checkpoint_cursor,
+            checkpoint_digest=lease.checkpoint_digest,
+        )
 
 
 def _spec(bundle: StructureBundleArtifact) -> StructureRangeSpec:
@@ -159,6 +177,52 @@ def test_transactional_structure_worker_reads_frozen_r2_range_then_records() -> 
     assert b'"id":"event-a"' in objects.upload["Body"]
     assert b'"id":"event-b"' not in objects.upload["Body"]
     assert control_plane.finished == [JobState.SUCCEEDED]
+
+
+def test_structure_worker_reports_all_fenced_range_lifecycle_stages() -> None:
+    bundle = _bundle()
+    control_plane = FakeControlPlane(_spec(bundle))
+    worker = TransactionalStructureWorker(
+        control_plane=control_plane,
+        object_client=FakeObjectClient(bundle),
+        bucket="structure",
+        worker_id="worker-a",
+        now=lambda: NOW,
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    assert [item["progress"].stage for item in control_plane.runtime_progress] == [
+        "read-range",
+        "normalize-range",
+        "upload-range",
+        "commit-range",
+    ]
+
+
+def test_structure_worker_uses_terminal_range_api_when_available() -> None:
+    bundle = _bundle()
+
+    class TerminalControlPlane(FakeControlPlane):
+        def __init__(self) -> None:
+            super().__init__(_spec(bundle))
+            self.completed: dict[str, object] | None = None
+
+        def complete_structure_range(self, lease: JobLease, **kwargs: object) -> None:
+            self.completed = kwargs
+
+    control_plane = TerminalControlPlane()
+    worker = TransactionalStructureWorker(
+        control_plane=control_plane,
+        object_client=FakeObjectClient(bundle),
+        bucket="structure",
+        worker_id="worker-a",
+        now=lambda: NOW,
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "succeeded"
+    assert control_plane.completed is not None
+    assert control_plane.completed["range_digest"] == control_plane.spec.range_digest
+    assert control_plane.finished == []
 
 
 def test_structure_fault_hook_crashes_after_verified_upload_before_receipt() -> None:
@@ -325,6 +389,7 @@ def test_structure_certifier_heartbeats_during_parity_before_fenced_commit() -> 
             self.certified_lease: JobLease | None = None
             self.recoveries: list[dict[str, object]] = []
             self.heartbeats: list[dict[str, object]] = []
+            self.runtime_progress: list[dict[str, object]] = []
 
         def claim_job(self, **kwargs: object) -> JobLease:
             return JobLease(
@@ -384,6 +449,22 @@ def test_structure_certifier_heartbeats_during_parity_before_fenced_commit() -> 
             self.recoveries.append(kwargs)
             return False
 
+        def record_runtime_progress(self, lease: JobLease, **kwargs: object) -> None:
+            self.runtime_progress.append(kwargs)
+
+        def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
+            self.heartbeats.append(kwargs)
+            return JobLease(
+                job_key=lease.job_key,
+                job_type=lease.job_type,
+                input_identity=lease.input_identity,
+                lease_owner=lease.lease_owner,
+                lease_epoch=lease.lease_epoch,
+                lease_expires_at=kwargs["now"] + timedelta(seconds=kwargs["lease_seconds"]),
+                checkpoint_cursor=lease.checkpoint_cursor,
+                checkpoint_digest=lease.checkpoint_digest,
+            )
+
     class ObjectClient:
         def __init__(self) -> None:
             self.upload: dict[str, object] = {}
@@ -419,6 +500,12 @@ def test_structure_certifier_heartbeats_during_parity_before_fenced_commit() -> 
     assert control_plane.certified_lease is not None
     assert control_plane.certified_lease.lease_expires_at == NOW + timedelta(seconds=30)
     assert control_plane.finished == []
+    assert [item["progress"].stage for item in control_plane.runtime_progress] == [
+        "verify-parity",
+        "build-manifest",
+        "upload-manifest",
+        "commit-certification",
+    ]
 
 
 def test_structure_certifier_waits_for_missing_range_receipts_without_incident() -> None:
@@ -446,6 +533,12 @@ def test_structure_certifier_waits_for_missing_range_receipts_without_incident()
 
         def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
             raise AssertionError("incomplete generation is ordinary waiting, not an incident")
+
+        def record_runtime_progress(self, lease: JobLease, **kwargs: object) -> None:
+            return None
+
+        def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
+            return lease
 
     certifier = TransactionalStructureCertifier(
         control_plane=ControlPlane(),
@@ -519,6 +612,12 @@ def test_structure_certifier_refuses_range_content_that_does_not_reassemble_bund
         def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
             assert kwargs["component"] == "structure-certify"
             assert kwargs["error_class"] == "StructureWorkerError"
+
+        def record_runtime_progress(self, lease: JobLease, **kwargs: object) -> None:
+            return None
+
+        def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
+            return lease
 
     class ObjectClient:
         def get_object(self, **kwargs: object) -> dict[str, object]:

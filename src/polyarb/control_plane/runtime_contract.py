@@ -256,6 +256,20 @@ class AttemptRuntime:
         elapsed_seconds = (now - self._last_heartbeat_at).total_seconds()
         if elapsed_seconds < self._profile.heartbeat_seconds:
             return
+        self._renew_heartbeat(now)
+
+    def heartbeat(self) -> None:
+        """Renew immediately at a worker-defined bounded checkpoint.
+
+        Synchronous parity workers already have a monotonic chunk budget.  A
+        forced renewal lets them retain that existing cadence while keeping
+        the actual fenced store mutation in this shared reporter.
+        """
+        now = _read_clock(self._clock)
+        _validate_clock_progression(now, self._last_heartbeat_at)
+        self._renew_heartbeat(now)
+
+    def _renew_heartbeat(self, now: datetime) -> None:
         renewed = self._store.heartbeat_runtime_attempt(
             self._lease,
             now=now,
