@@ -66,18 +66,23 @@ class RuntimeProgress:
 _MAX_DETAIL_KEYS = 20
 _MAX_DETAIL_BYTES = 4096
 _DETAIL_CODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-_DETAIL_JWT_LIKE_RE = re.compile(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$")
+_DETAIL_JWT_LIKE_RE = re.compile(
+    r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?$"
+)
 _DETAIL_DSN_LIKE_RE = re.compile(
     r"^(?:postgres(?:ql)?|https?):[A-Za-z0-9.-]+(?::[A-Za-z0-9._:-]+)+$",
     re.IGNORECASE,
 )
 _DETAIL_CREDENTIAL_PREFIX_RE = re.compile(
     r"^(?:"
-    r"bearer"
-    r"|sk-(?:live|test)-"
-    r"|pk-(?:live|test)-"
+    r"(?:bearer|basic)[._:-]?"
+    r"|sk-[A-Za-z0-9._:-]{8,}"
+    r"|pk-[A-Za-z0-9._:-]{8,}"
     r"|xox[baprs]-"
-    r"|gh[pousr]-"
+    r"|gh[pousr][_-]"
+    r"|github_pat_"
+    r"|glpat-"
+    r"|AKIA"
     r")",
     re.IGNORECASE,
 )
@@ -88,6 +93,7 @@ _DETAIL_ASSIGNMENT_SECRET_RE = re.compile(
     r"):[A-Za-z0-9._:-]{8,}$",
     re.IGNORECASE,
 )
+_DETAIL_LONG_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,}$")
 _DETAIL_CODE_KEYS = frozenset(
     {
         "component",
@@ -240,16 +246,32 @@ def _is_credential_shaped_detail_code(value: str) -> bool:
     """Reject credentials without blocking ordinary closed taxonomy codes.
 
     Code details allow short stable atoms made from letters, digits, dot, colon,
-    underscore, and hyphen. The boundary here is intentionally narrow: JWT-like
-    triplets, URL/DSN-like colon chains, known token prefixes, and secret-bearing
-    header/assignment names with long values are not valid runtime taxonomy.
+    underscore, and hyphen. The boundary here is intentionally conservative:
+    2- or 3-segment JWT/base64url values, URL/DSN-like colon chains, known
+    credential prefixes, secret-bearing header/assignment names with long
+    values, and long mixed random-token atoms are not valid runtime taxonomy.
     """
     return (
         _DETAIL_JWT_LIKE_RE.fullmatch(value) is not None
         or _DETAIL_DSN_LIKE_RE.fullmatch(value) is not None
         or _DETAIL_CREDENTIAL_PREFIX_RE.match(value) is not None
         or _DETAIL_ASSIGNMENT_SECRET_RE.fullmatch(value) is not None
+        or _looks_like_long_random_token(value)
     )
+
+
+def _looks_like_long_random_token(value: str) -> bool:
+    if _DETAIL_LONG_TOKEN_RE.fullmatch(value) is None:
+        return False
+    classes = sum(
+        (
+            any(character.islower() for character in value),
+            any(character.isupper() for character in value),
+            any(character.isdigit() for character in value),
+            "_" in value or "-" in value,
+        )
+    )
+    return classes >= 2
 
 
 def _require_detail_code(key: str, value: object) -> str:

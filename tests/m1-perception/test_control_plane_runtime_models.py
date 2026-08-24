@@ -321,14 +321,37 @@ def test_runtime_event_rejects_invalid_declared_detail_values(
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVaDQssw5c",
         ),
         (RuntimeEventKind.RETRYABLE_FAILED, "reason_code", "BearerABCDEF0123456789"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "reason_code", "BasicABCDEF0123456789"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "reason_code", "bearer.ABCDEF0123456789"),
+        (
+            RuntimeEventKind.RETRYABLE_FAILED,
+            "failure_signature",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+        ),
         (RuntimeEventKind.STARTED, "component", "Authorization:BearerABCDEF0123456789"),
+        (RuntimeEventKind.STARTED, "component", "Authorization:BasicABCDEF0123456789"),
         (RuntimeEventKind.STARTED, "job_type", "POLYMARKET_API_KEY:ABCDEF0123456789"),
         (RuntimeEventKind.STARTED, "recovery_policy", "sk-live-ABCDEF0123456789"),
+        (RuntimeEventKind.STARTED, "recovery_policy", "sk-proj-ABCDEF0123456789abcdef"),
+        (RuntimeEventKind.STARTED, "recovery_policy", "sk-ABCDEF0123456789abcdef"),
         (RuntimeEventKind.STAGE_CHANGED, "result_code", "xoxb-ABCDEF0123456789"),
         (RuntimeEventKind.STAGE_CHANGED, "data_product", "ghp-ABCDEF0123456789"),
+        (RuntimeEventKind.STAGE_CHANGED, "data_product", "ghp_ABCDEF0123456789abcdef"),
+        (
+            RuntimeEventKind.STAGE_CHANGED,
+            "data_product",
+            "github_pat_11AA22BB33CC44DD55EE66FF77GG88HH",
+        ),
+        (RuntimeEventKind.STAGE_CHANGED, "result_code", "glpat-ABCDEF0123456789"),
+        (RuntimeEventKind.STAGE_CHANGED, "result_code", "AKIAIOSFODNN7EXAMPLE"),
         (RuntimeEventKind.STARTED, "component", "postgres:db.example.com:5432:polyarb"),
         (RuntimeEventKind.STAGE_CHANGED, "component", "https:api.example.com:v1"),
         (RuntimeEventKind.RETRYABLE_FAILED, "reason_code", "token:ABCDEF0123456789"),
+        (
+            RuntimeEventKind.RETRYABLE_FAILED,
+            "reason_code",
+            "A1B2C3D4E5F6G7H8I9J0K1L2M3N4P5Q6",
+        ),
     ],
 )
 def test_runtime_event_code_details_reject_credential_shaped_values(
@@ -338,6 +361,21 @@ def test_runtime_event_code_details_reject_credential_shaped_values(
 ) -> None:
     with pytest.raises(ValueError, match="detail value is invalid"):
         RuntimeEvent(**_valid_runtime_event_kwargs(kind=kind, detail={key: value}))
+
+
+def test_runtime_event_code_detail_rejection_does_not_echo_secret_value() -> None:
+    secret_value = "github_pat_11AA22BB33CC44DD55EE66FF77GG88HH"
+
+    with pytest.raises(ValueError) as exc_info:
+        RuntimeEvent(
+            **_valid_runtime_event_kwargs(
+                kind=RuntimeEventKind.STAGE_CHANGED,
+                detail={"data_product": secret_value},
+            )
+        )
+
+    assert "data_product" in str(exc_info.value)
+    assert secret_value not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
