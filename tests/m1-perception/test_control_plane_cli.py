@@ -1089,3 +1089,74 @@ def test_shadow_sync_reports_idempotent_source_count(monkeypatch, capsys, tmp_pa
         "projected_sources": 1,
         "status": "ok",
     }
+
+
+def test_runtime_policy_replay_is_read_only_and_reports_first_breaking_sample(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.soak_evidence import create_record
+
+    def record(at: str, *, expired: int = 0) -> dict[str, object]:
+        return create_record(
+            observed_at=at,
+            control_api_url="https://control.example/perception/control-plane",
+            machine_states={"worker-a": "started"},
+            control_snapshot={
+                "status": "available",
+                "expired_leases": expired,
+                "open_circuit_count": 0,
+                "queue_health": {},
+                "job_counts": {"succeeded": 10},
+            },
+        )
+
+    class ReadOnlyControlPlane:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def read_soak_observations(self, run_id: str):
+            assert run_id == "run-a"
+            self.reads += 1
+            return (
+                record("2026-08-23T13:41:00Z"),
+                record("2026-08-23T16:22:21Z", expired=1),
+                record("2026-08-23T16:27:21Z"),
+            )
+
+        def __getattr__(self, name: str):
+            raise AssertionError(f"runtime replay must not call {name}")
+
+    control_plane = ReadOnlyControlPlane()
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: control_plane)
+
+    assert (
+        cli_control_plane.main(
+            ["runtime-policy-replay", "--run-id", "run-a", "--max-gap-seconds", "20000", "--json"]
+        )
+        == 0
+    )
+    assert control_plane.reads == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "first_breaking_at": "2026-08-23T16:22:21+00:00",
+        "max_gap_seconds": 9681.0,
+        "reason_codes": ["lease.expired"],
+        "sample_count": 3,
+        "status": "BREAKING",
+    }
+
+
+def test_runtime_policy_replay_requires_scoped_dsn_without_connecting(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.delenv("POLYARB_SUPABASE_DB_DSN", raising=False)
+    monkeypatch.setattr(
+        cli_control_plane.psycopg,
+        "connect",
+        lambda _dsn: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert cli_control_plane.main(["runtime-policy-replay", "--run-id", "run-a", "--json"]) == 2
+    captured = capsys.readouterr()
+    assert "POLYARB_SUPABASE_DB_DSN is required" in captured.err
+    assert "postgresql://" not in captured.err

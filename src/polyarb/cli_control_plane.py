@@ -32,6 +32,7 @@ from polyarb.control_plane.quote_worker import (
     TransactionalQuoteCertifier,
 )
 from polyarb.control_plane.rollout import render_rollout_artifacts
+from polyarb.control_plane.runtime_replay import replay_soak_observations
 from polyarb.control_plane.scheduler import TransactionalControlPlaneScheduler
 from polyarb.control_plane.shadow import project_shadow_sources, read_shadow_sources
 from polyarb.control_plane.shadow_parity import verify_shadow_parity
@@ -289,6 +290,13 @@ def _parser() -> argparse.ArgumentParser:
     soak_verify.add_argument("--minimum-seconds", type=int, default=86_400)
     soak_verify.add_argument("--max-gap-seconds", type=int, default=900)
     soak_verify.add_argument("--json", action="store_true")
+    runtime_replay = subcommands.add_parser(
+        "runtime-policy-replay",
+        help="read immutable cloud soak observations and replay live runtime policy",
+    )
+    runtime_replay.add_argument("--run-id", required=True)
+    runtime_replay.add_argument("--max-gap-seconds", type=float, default=900.0)
+    runtime_replay.add_argument("--json", action="store_true")
     return parser
 
 
@@ -541,8 +549,16 @@ def _read_runtime_watchdog_observation(
         if progress_gate is None
         else progress_gate.apply(restart_observation, control_api_payload, now=now)
     )
-    evidence_observation = progress_observation if soak_evidence_gate is None else soak_evidence_gate.apply(progress_observation, control_api_payload, now=now)
-    return evidence_observation if cloud_usage_gate is None else cloud_usage_gate.apply(evidence_observation, control_api_payload, now=now)
+    evidence_observation = (
+        progress_observation
+        if soak_evidence_gate is None
+        else soak_evidence_gate.apply(progress_observation, control_api_payload, now=now)
+    )
+    return (
+        evidence_observation
+        if cloud_usage_gate is None
+        else cloud_usage_gate.apply(evidence_observation, control_api_payload, now=now)
+    )
 
 
 async def _send_runtime_watchdog_telegram(settings: Settings, text: str) -> None:
@@ -1087,6 +1103,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             detail = str(error) if isinstance(error, SoakEvidenceError) else type(error).__name__
             print(f"soak evidence unavailable: {detail}", file=sys.stderr)
             return 1
+        return 0
+    if args.command == "runtime-policy-replay":
+        control_plane = _control_plane_from_env()
+        if control_plane is None:
+            print("POLYARB_SUPABASE_DB_DSN is required", file=sys.stderr)
+            return 2
+        try:
+            replay = replay_soak_observations(
+                control_plane.read_soak_observations(args.run_id),
+                max_gap_seconds=args.max_gap_seconds,
+            )
+        except (OSError, RuntimeError, ValueError, SoakEvidenceError, psycopg.Error) as error:
+            detail = str(error) if isinstance(error, SoakEvidenceError) else type(error).__name__
+            print(f"runtime policy replay unavailable: {detail}", file=sys.stderr)
+            return 1
+        _write(
+            {
+                "status": replay.status,
+                "first_breaking_at": (
+                    None
+                    if replay.first_breaking_at is None
+                    else replay.first_breaking_at.astimezone(UTC).isoformat()
+                ),
+                "reason_codes": list(replay.reason_codes),
+                "sample_count": replay.sample_count,
+                "max_gap_seconds": replay.max_gap_seconds,
+            },
+            as_json=args.json,
+        )
         return 0
     if args.command == "watchdog-serve":
         try:
