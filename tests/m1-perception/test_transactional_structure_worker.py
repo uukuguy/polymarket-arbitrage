@@ -9,7 +9,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from polyarb.control_plane.faults import IntentionalStagingRetryFault
-from polyarb.control_plane.models import JobLease, JobState, StructureRangeSpec
+from polyarb.control_plane.models import (
+    JobLease,
+    JobState,
+    StructureRangeReceipt,
+    StructureRangeSpec,
+)
 from polyarb.control_plane.postgres import IncompleteStructureGenerationError, StaleLeaseError
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
@@ -118,6 +123,7 @@ class FakeControlPlane:
         self.prior = prior
         self.finished: list[JobState] = []
         self.recorded: dict[str, object] | None = None
+        self.completed: dict[str, object] | None = None
         self.recoveries: list[dict[str, object]] = []
         self.retry_incidents: list[dict[str, object]] = []
         self.runtime_progress: list[dict[str, object]] = []
@@ -145,6 +151,9 @@ class FakeControlPlane:
 
     def record_structure_range(self, lease: JobLease, **kwargs: object) -> None:
         self.recorded = kwargs
+
+    def complete_structure_range(self, lease: JobLease, **kwargs: object) -> None:
+        self.completed = kwargs
 
     def finish(self, lease: JobLease, *, state: JobState, **kwargs: object) -> None:
         self.finished.append(state)
@@ -199,13 +208,13 @@ def test_transactional_structure_worker_reads_frozen_r2_range_then_records() -> 
     result = asyncio.run(worker.run_once())
 
     assert result.outcome == "succeeded"
-    assert control_plane.recorded is not None
-    assert control_plane.recorded["record_count"] == 1
-    assert control_plane.recorded["artifact_key"] == objects.upload["Key"]
-    assert control_plane.recorded["artifact_digest"] == objects.upload["Metadata"]["sha256"]
+    assert control_plane.completed is not None
+    assert control_plane.completed["record_count"] == 1
+    assert control_plane.completed["artifact_key"] == objects.upload["Key"]
+    assert control_plane.completed["artifact_digest"] == objects.upload["Metadata"]["sha256"]
     assert b'"id":"event-a"' in objects.upload["Body"]
     assert b'"id":"event-b"' not in objects.upload["Body"]
-    assert control_plane.finished == [JobState.SUCCEEDED]
+    assert control_plane.finished == []
 
 
 def test_structure_worker_renews_while_normalize_read_exceeds_lease() -> None:
@@ -232,7 +241,7 @@ def test_structure_worker_renews_while_normalize_read_exceeds_lease() -> None:
 
     assert result.outcome == "succeeded"
     assert len(control_plane.runtime_heartbeats) >= 3
-    assert control_plane.recorded is not None
+    assert control_plane.completed is not None
 
 
 def test_stale_normalize_heartbeat_drains_read_and_prevents_terminal_commit() -> None:
@@ -386,7 +395,16 @@ def test_structure_retry_fault_uses_existing_retry_incident_path() -> None:
 
 def test_transactional_structure_worker_recovers_receipt_without_r2_read() -> None:
     bundle = _bundle()
-    control_plane = FakeControlPlane(_spec(bundle), prior=object())
+    prior = StructureRangeReceipt(
+        job_key=_spec(bundle).job_key,
+        bundle_digest=bundle.sha256,
+        component="events",
+        range_digest=_spec(bundle).range_digest,
+        artifact_key="structure-ranges/prior/rows.ndjson",
+        artifact_digest="b" * 64,
+        record_count=1,
+    )
+    control_plane = FakeControlPlane(_spec(bundle), prior=prior)
     worker = TransactionalStructureWorker(
         control_plane=control_plane,
         object_client=FakeObjectClient(bundle),
@@ -399,7 +417,12 @@ def test_transactional_structure_worker_recovers_receipt_without_r2_read() -> No
 
     assert result.outcome == "recovered"
     assert control_plane.recorded is None
-    assert control_plane.finished == [JobState.SUCCEEDED]
+    assert control_plane.completed is not None
+    assert control_plane.completed["range_digest"] == prior.range_digest
+    assert control_plane.completed["artifact_key"] == prior.artifact_key
+    assert control_plane.completed["artifact_digest"] == prior.artifact_digest
+    assert control_plane.completed["record_count"] == prior.record_count
+    assert control_plane.finished == []
 
 
 def test_structure_worker_reads_only_named_v3_shard() -> None:

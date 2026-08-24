@@ -297,9 +297,12 @@ class TransactionalStructureWorker:
             await _heartbeat(runtime)
             await _runtime_sync_call_async(
                 runtime,
-                lambda: self._control_plane.finish(
+                lambda: self._control_plane.complete_structure_range(
                     runtime.current_lease,
-                    state=JobState.SUCCEEDED,
+                    range_digest=prior.range_digest,
+                    artifact_key=prior.artifact_key,
+                    artifact_digest=prior.artifact_digest,
+                    record_count=prior.record_count,
                     now=self._now(),
                 ),
                 terminal=True,
