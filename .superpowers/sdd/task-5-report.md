@@ -1,166 +1,194 @@
-# Task 5 Report — Atomic Structure Generation Readers
+# Task 5 Report — Cross-job transactional runtime coverage
 
 ## Status
 
-Implemented and locally verified. This task does **not** claim rollout, deployment,
-production qualification, or trading authority.
+Implemented, verified, summarized, and committed locally on
+`feat/m1-self-healing`. No production deployment, Fly command, live control-plane
+mutation, wallet/signing, or trading action was performed.
 
-## Delivered contract
+## Scope delivered
 
-- Added `structure_generation_read_mode` with the exact values
-  `legacy | compare | generation`; default remains `legacy`.
-- Added the `current_structure_markets` pointer-joined SQLite view.
-- Added one shared `structure_read_transaction` / `StructureReadContext` which
-  opens one transaction, resolves one identity, and supplies the matching market,
-  membership, group-truth, event, tag, and issue tables.
-- Generation reads authenticate pointer/publication/snapshot identity, component
-  counts, market count, and the frozen generation hash before serving rows.
-- Compare reads serve legacy data and expose a deterministic
-  `StructureReadComparison` containing both snapshot IDs, market counts, universe
-  hashes, source-truth hashes, and ordered mismatch reasons.
-- Exact historical reads resolve the requested snapshot/generation and never
-  consult the current pointer.
-- Quote universe/run certification, focused membership, opportunity scanning,
-  market-map/durable opportunity reads, and Supabase mirror projection now use one
-  resolved identity per operation. Production daemon/CLI wiring propagates the
-  configured mode.
-- No wallet, signing, order placement, or trading authority was introduced.
+- Created `tests/m1-perception/test_transactional_runtime_coverage.py`.
+- Created
+  `.planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/05.6-202-SUMMARY.md`.
+- Added a minimal runtime reporter guard rejecting secret-like progress detail
+  keys before any store call.
+- Performed mechanical Ruff-only line wrapping in the specified Ruff scope so
+  the exact brief command passes.
 
-## TDD evidence
+## RED evidence
 
-RED was observed before implementation:
+Command:
 
-- `uv run pytest -q tests/m1-perception/test_structure_generation_readers.py`
-  failed collection because `StructureGenerationReadError` and the shared read API
-  did not exist.
-- Consumer RED runs failed with unexpected keyword arguments for
-  `NegRiskQuoteStore(... structure_generation_read_mode=...)`,
-  `SqliteStructureMembershipReader`, `scan_neg_risk_buy_all`, and
-  `_read_market_map`, plus a missing atomic mirror projection method.
-- The first required combined run exposed 14 legacy-compatibility failures. Root
-  cause analysis separated generation integrity gates from legacy-default behavior;
-  count/hash fail-closed enforcement remains generation-only.
+```bash
+uv run pytest tests/m1-perception/test_transactional_runtime_coverage.py -q
+```
 
-GREEN verification:
+Result: exit 1.
 
-- Required five-suite command from the brief: **117 tests**, 0 failures, 0 errors,
-  0 skips, 16.438 seconds.
-- Store/config/publication/orchestrator/HTTP/mirror regressions: **272 tests**,
-  0 failures, 0 errors, 1 existing skip, 27.558 seconds.
-- Fresh combined completion run across both groups: **389 tests**, 0 failures,
-  0 errors, 1 existing skip, 42.384 seconds.
-- Changed-file Ruff: `All checks passed!`.
-- `git diff --check`: clean.
-- Direct-read audit across the listed production consumers found no current
-  `markets`, membership, truth, or pointer query outside the shared context; the
-  only textual match is an explanatory Supabase comment.
+Expected failure reason:
 
-## Commit
+- The new coverage file collected and ran.
+- The persisted cross-job fixture and registry-shape checks were not setup
+  failures.
+- The RED was specifically the missing coverage contract for secret-like
+  runtime detail keys:
 
-`feat(m1): read one atomic structure generation` (the commit containing this report).
+```text
+Failed: DID NOT RAISE <class 'ValueError'>
+```
 
-## Concerns / handoff
+This occurred for the seven bound key shapes:
 
-- Compare mismatch is exposed for Task 6 health integration; Task 5 intentionally
-  does not alter `/health` policy.
-- Supabase PostgREST remains a fail-soft, non-transactional remote adapter. This
-  task guarantees that its local metadata and market projection originate from one
-  resolved SQLite generation; it does not make the remote delete/insert atomic.
-- Rollout remains at the default `legacy` mode. `compare` and `generation` require
-  the later health/operations gates before any production enablement claim.
+- `api_key`
+- `apikey`
+- `authorization`
+- `credential`
+- `password`
+- `secret`
+- `token`
 
-## Review hardening follow-up
+The fake store remained callable before the fix, proving the reporter did not
+reject those keys before persistence.
 
-The review follow-up removed all full-universe work from the hot readers and
-made comparison evidence durable:
+## GREEN and gate evidence
 
-- Legacy resolution now reads snapshot metadata only. It does not materialize
-  markets, count structure rows, or compute hashes.
-- Generation resolution is O(1): it authenticates the pointer, publication,
-  snapshot, committed counts, validation hash, and certification marker from
-  bounded metadata rows. Pointer publication remains atomic.
-- Backfill creates a durable `structure_generation_comparison_receipts` row in a
-  pinned SQLite read snapshot before pointer publication. Its two universe and
-  source-truth hashes are computed with ordered cursor streaming outside the
-  writer lock; compare mode then needs one receipt lookup and no universe scan.
-- Missing, stale, identity-corrupt, or validation-hash-corrupt comparison receipts
-  fail deterministically. Pointer/publication/snapshot corruption also fails
-  closed before structure rows are served.
-- Exact legacy Supabase mirror reads retain historical semantics, including
-  invalid and non-`Structure` snapshots.
+After the minimal runtime reporter guard:
 
-Additional RED tests first exposed the old hot-path calls, receipt absence/staleness,
-legacy historical filtering, and metadata corruption. The final review gate ran
-**402 tests**, with 0 failures, 0 errors, and 1 existing skip (62.921 seconds).
-Changed-file Ruff, `git diff --check`, and `make planning-status` all passed; the
-planning check reported no drift.
+```bash
+uv run pytest tests/m1-perception/test_transactional_runtime_coverage.py -q
+```
 
-## Second re-review: bounded authenticated comparison
+Result: exit 0; 9 tests passed.
 
-The second review moved comparison evidence into the same durable certification
-chain as generation validation:
+Complete task gate after commits:
 
-- Normal publications and backfills now traverse four keyset phases—legacy and
-  generation universe, then legacy and generation rejections—before `ready`.
-  Each invocation processes no more than `max_rows`; cursor, row count, digest
-  state, phase, and checkpoint advance by CAS and survive store/process reopen.
-- Canonical hash framing is unchanged. A small pure serializable SHA-256 state
-  persists the eight FIPS state words, byte count, and at most 63 tail bytes.
-  It matched `hashlib.sha256` for NIST vectors (including one million `a` bytes),
-  every 0..130 split/reopen, tail boundaries, randomized partitions, empty input,
-  and multi-block input. Malformed states fail closed and no prefix bytes accumulate.
-- The exact current legacy snapshot is pinned before comparison and revalidated
-  in both the read snapshot and writer transaction. Identity drift aborts sealing.
-  A digest-bound immutable receipt is inserted in the same transaction that
-  makes a normal publication ready; a migrated published pointer uses the same
-  phases and atomically binds the digest without wedging generation reads.
-- `receipt_digest` authenticates every receipt identity, count, universe/source
-  hash, generation validation hash, and creation time. Readers recompute it,
-  verify the pointer binding, and cross-check both snapshot market counts.
-  Digest-sealed receipt UPDATE/DELETE operations are rejected.
-- Literal pre-Task-5 pointers repair only when all four authentication fields are
-  NULL and publication plus snapshot prove the frozen identity. A sealed receipt
-  fills all four fields. Without one, initialization atomically fills the first
-  three and creates active comparison provenance: generation remains usable,
-  compare reports `comparison-receipt-missing`, and bounded backfill later binds
-  the digest. Every fabricated partial, conflicting, or unverifiable state is
-  unchanged by repeated init/backfill and remains fail-closed.
-- Pointer publication verifies metadata and the sealed receipt only. SQL-trace
-  tests prove it executes no `COUNT`, legacy membership scan, or generation market
-  scan; the former one-shot backfill comparison helper is gone.
+```bash
+uv run pytest tests/m1-perception/test_transactional_runtime_coverage.py tests/m1-perception/test_transactional_* -q
+```
 
-Second-review TDD observed RED for the missing SHA module/progress schema, absent
-receipt repair, and the original unbounded backfill assumptions. Final focused
-Task 3–5 verification passed **101 tests** with no failures, errors, or skips.
-The full requested certification/backfill/pointer/schema/migration/hot-reader and
-consumer regression passed **423 tests**, with 0 failures, 0 errors, and 1 existing
-skip (48.941 seconds). Changed-file Ruff and `git diff --check` passed.
+Result: exit 0.
 
-## Final narrow review: pointer state and retention
+Ruff gate after commits:
 
-- Added the complete 14-case partial authentication matrix, including the
-  digest-only fabricated state. Every case preserves the exact pointer row across
-  repeated initialization and generic backfill; no field is opportunistically
-  filled, generation raises, and compare reports a mismatch.
-- Added the distinct all-four-NULL/no-receipt migration case. Initialization
-  atomically records the three provable pointer facts plus durable active comparison
-  provenance; only that provenance authorizes generation reads and bounded digest
-  repair, while compare remains explicitly missing until sealing.
-- Generic snapshot purge now excludes identities referenced by the current
-  generation pointer, publications, comparison progress/receipts, published sync
-  windows, and every generation component table during candidate selection.
-  Tests prove an unrelated expired snapshot is deleted successfully while the
-  authenticated generation plus exact legacy chain remains intact; replay deletes
-  nothing and no sealed receipt mutation or FK rollback is used.
-- Closed the candidate-selection TOCTOU window by acquiring `BEGIN IMMEDIATE`
-  before keep-set and full evidence exclusion. A deterministic injection test
-  reproduces the old FK rollback, then proves a competing generation-evidence
-  insert is locked out until deletion commits, unrelated snapshots are still
-  deleted, and replay is idempotent.
-- Old generation reclamation deliberately remains out of generic retention. A
-  dedicated bounded evidence-aware cleanup API must be implemented and exposed
-  before production closure.
-- Final narrow verification passed **175 focused tests** with no failures, errors,
-  or skips. The complete requested regression passed **439 tests**, with 0
-  failures, 0 errors, and 1 existing skip. Changed-file Ruff, `git diff --check`,
-  and `make planning-status` (no drift) passed.
+```bash
+uv run ruff check src/polyarb/control_plane tests/m1-perception
+```
+
+Result:
+
+```text
+All checks passed!
+```
+
+Planning gate after summary:
+
+```bash
+make planning-status
+```
+
+Result: exit 0; final line:
+
+```text
+✓ no drift detected — every shipped plan has a SUMMARY.
+```
+
+## Runtime coverage contract
+
+The Task 5 test asserts the real `RUNTIME_STAGE_REGISTRY` has exactly these
+eight job types:
+
+1. `structure-fetch`
+2. `structure-materialize`
+3. `structure-normalize`
+4. `structure-certify`
+5. `quote-admit`
+6. `quote-batch`
+7. `quote-certify`
+8. `opportunity-certify`
+
+For each job type, the test uses a real Postgres-backed `PostgresControlPlane`
+fixture to enqueue and claim one job, persist every registered progress stage,
+append one terminal `job.succeeded`, and assert:
+
+- exactly one `job.started`;
+- exactly one stage-progress event per registered stage;
+- exactly one terminal success event;
+- contiguous event sequences;
+- terminal stage/progress equals the final registered stage;
+- no secret-like detail keys are present in persisted runtime events.
+
+The fixture uses the same default production-derived deadline profile for a
+120-second lease:
+
+- `policy_version = runtime-v1`
+- `lease_seconds = 120`
+- `heartbeat_seconds = 30`
+- `progress_seconds = 120`
+- `attempt_seconds = 1200`
+
+## 207-second regression coverage
+
+The full transactional gate includes
+`test_quote_admitter_long_runtime_keeps_lease_live_for_207_simulated_seconds`
+from `tests/m1-perception/test_transactional_quote_admission.py`. That
+regression remains in the passing gate and covers at least six fenced
+heartbeats, monotonic shard/batch progress, no expired lease observation, and
+unchanged terminal Quote identities across 207 simulated seconds.
+
+## Files changed
+
+Committed implementation/test files:
+
+- `tests/m1-perception/test_transactional_runtime_coverage.py` — new cross-job
+  registry and persisted-event coverage gate.
+- `src/polyarb/control_plane/runtime_contract.py` — minimal pre-persistence
+  secret-like detail-key rejection.
+- `src/polyarb/control_plane/postgres.py` — mechanical Ruff line wrapping only.
+- `src/polyarb/control_plane/watchdog.py` — mechanical Ruff line wrapping only.
+- `tests/m1-perception/test_control_plane_postgres.py` — mechanical Ruff line
+  wrapping only.
+- `tests/m1-perception/test_control_plane_watchdog.py` — mechanical Ruff line
+  wrapping only.
+- `.planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/05.6-202-SUMMARY.md`
+  — Plan 02 closure summary.
+
+Report file:
+
+- `.superpowers/sdd/task-5-report.md` — this report; stale unrelated content
+  was fully replaced.
+
+## Commits
+
+- `3fada81c` — `test(05.6-202): cover transactional runtime jobs`
+- `f611eb0b` — `docs(05.6-202): close runtime instrumentation plan`
+- This report commit — `docs(05.6-202): record runtime coverage task report`
+
+## Self-review
+
+- TDD order was preserved: the coverage test was written and run RED before the
+  runtime reporter implementation change.
+- The RED was not a syntax or fixture setup error; it identified a real contract
+  gap at the reporter boundary.
+- The production change is narrowly scoped to rejecting secret-like detail keys
+  before persistence.
+- The cross-job test uses the real closed runtime registry and real persisted
+  event rows rather than mocking the database contract.
+- Existing user/controller changes were not staged or committed.
+- No climb state or adapter files were staged or committed, despite concurrent
+  dirty climb status files appearing in the shared worktree.
+
+## Deviations / concerns
+
+- The exact Ruff command initially failed on pre-existing line-length findings
+  outside the new test file. I applied behavior-preserving formatting-only wraps
+  in the specified Ruff scope so the required gate passes.
+- `make planning-status` still does not list plan `05.6-202` in the displayed
+  workstream table, but it exits 0 and reports no drift after the new summary
+  exists.
+- The worktree still contains unrelated uncommitted changes owned by the
+  controller/user or concurrent agents:
+  `.planning/JOURNAL.md`,
+  `.planning/threads/market-observation-architecture.md`,
+  `.superpowers/sdd/progress.md`, and `docs/status/climb/*`.
+  They were preserved and not committed by this task.
