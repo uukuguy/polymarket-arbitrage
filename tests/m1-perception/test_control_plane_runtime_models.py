@@ -379,6 +379,82 @@ def test_runtime_event_code_detail_rejection_does_not_echo_secret_value() -> Non
 
 
 @pytest.mark.parametrize(
+    ("kind", "key", "value"),
+    [
+        (RuntimeEventKind.STARTED, "component", "quote-batch-worker"),
+        (RuntimeEventKind.STARTED, "job_type", "future-worker"),
+        (RuntimeEventKind.STAGE_CHANGED, "data_product", "l2-top-of-book"),
+        (RuntimeEventKind.LEASE_AT_RISK, "deadline_kind", "deadline"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "failure_signature", "upstream.retryable"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "qualification_impact", "degraded"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "reason_code", "new.reason"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "recovery_policy", "retry-later"),
+        (RuntimeEventKind.STAGE_CHANGED, "result_code", "success"),
+    ],
+)
+def test_runtime_event_code_details_reject_unregistered_taxonomy_values(
+    kind: RuntimeEventKind,
+    key: str,
+    value: str,
+) -> None:
+    with pytest.raises(ValueError, match="detail value is invalid"):
+        RuntimeEvent(**_valid_runtime_event_kwargs(kind=kind, detail={key: value}))
+
+
+@pytest.mark.parametrize(
+    ("kind", "key", "value"),
+    [
+        (RuntimeEventKind.STARTED, "component", "control-plane"),
+        (RuntimeEventKind.STARTED, "component", "structure-fetch"),
+        (RuntimeEventKind.STARTED, "component", "quote-batch"),
+        (RuntimeEventKind.STARTED, "component", "structure-materialize"),
+        (RuntimeEventKind.STARTED, "component", "structure-certify"),
+        (RuntimeEventKind.STARTED, "data_product", "market-snapshot"),
+        (RuntimeEventKind.STARTED, "data_product", "structure-sync"),
+        (RuntimeEventKind.LEASE_AT_RISK, "deadline_kind", "lease"),
+        (RuntimeEventKind.LEASE_AT_RISK, "deadline_kind", "heartbeat"),
+        (RuntimeEventKind.LEASE_AT_RISK, "deadline_kind", "progress"),
+        (RuntimeEventKind.LEASE_AT_RISK, "deadline_kind", "attempt"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "failure_signature", "progress.stalled"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "failure_signature", "upstream.timeout"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "failure_signature", "validation.failed"),
+        (RuntimeEventKind.STARTED, "job_type", "opportunity-certify"),
+        (RuntimeEventKind.STARTED, "job_type", "quote-admit"),
+        (RuntimeEventKind.STARTED, "job_type", "quote-batch"),
+        (RuntimeEventKind.STARTED, "job_type", "quote-certify"),
+        (RuntimeEventKind.STARTED, "job_type", "quote-scan"),
+        (RuntimeEventKind.STARTED, "job_type", "structure-certify"),
+        (RuntimeEventKind.STARTED, "job_type", "structure-fetch"),
+        (RuntimeEventKind.STARTED, "job_type", "structure-materialize"),
+        (RuntimeEventKind.STARTED, "job_type", "structure-normalize"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "qualification_impact", "none"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "qualification_impact", "delayed"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "qualification_impact", "restored"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "qualification_impact", "blocked"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "qualification_impact", "qualified"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "qualification_impact", "invalidated"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "reason_code", "checkpoint.advance"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "reason_code", "timeout"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "reason_code", "invalid-input"),
+        (RuntimeEventKind.STARTED, "recovery_policy", "retry-job"),
+        (RuntimeEventKind.STARTED, "recovery_policy", "retry-soon"),
+        (RuntimeEventKind.STARTED, "recovery_policy", "retry-same-input"),
+        (RuntimeEventKind.STARTED, "recovery_policy", "exponential-backoff"),
+        (RuntimeEventKind.STAGE_CHANGED, "result_code", "ok"),
+        (RuntimeEventKind.STAGE_CHANGED, "result_code", "failed"),
+    ],
+)
+def test_runtime_event_code_details_accept_registered_taxonomy_values(
+    kind: RuntimeEventKind,
+    key: str,
+    value: str,
+) -> None:
+    event = RuntimeEvent(**_valid_runtime_event_kwargs(kind=kind, detail={key: value}))
+
+    assert event.detail[key] == value
+
+
+@pytest.mark.parametrize(
     ("kind", "detail"),
     [
         (
@@ -443,7 +519,7 @@ def test_runtime_event_rejects_oversize_flat_payload() -> None:
 def test_runtime_event_defensively_freezes_detail_after_creation() -> None:
     source_detail: dict[str, object] = {
         "job_type": "quote-batch",
-        "component": "quote-batch-worker",
+        "component": "quote-batch",
     }
 
     event = RuntimeEvent(**_valid_runtime_event_kwargs(detail=source_detail))

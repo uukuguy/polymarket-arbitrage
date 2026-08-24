@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -65,35 +64,43 @@ class RuntimeProgress:
 
 _MAX_DETAIL_KEYS = 20
 _MAX_DETAIL_BYTES = 4096
-_DETAIL_CODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-_DETAIL_JWT_LIKE_RE = re.compile(
-    r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?$"
-)
-_DETAIL_DSN_LIKE_RE = re.compile(
-    r"^(?:postgres(?:ql)?|https?):[A-Za-z0-9.-]+(?::[A-Za-z0-9._:-]+)+$",
-    re.IGNORECASE,
-)
-_DETAIL_CREDENTIAL_PREFIX_RE = re.compile(
-    r"^(?:"
-    r"(?:bearer|basic)[._:-]?"
-    r"|sk-[A-Za-z0-9._:-]{8,}"
-    r"|pk-[A-Za-z0-9._:-]{8,}"
-    r"|xox[baprs]-"
-    r"|gh[pousr][_-]"
-    r"|github_pat_"
-    r"|glpat-"
-    r"|AKIA"
-    r")",
-    re.IGNORECASE,
-)
-_DETAIL_ASSIGNMENT_SECRET_RE = re.compile(
-    r"^(?:"
-    r"(?:authorization|x-api-key|api-key|apikey|token|secret|password)"
-    r"|[A-Za-z0-9_.-]*(?:api[_-]?key|token|secret|password)"
-    r"):[A-Za-z0-9._:-]{8,}$",
-    re.IGNORECASE,
-)
-_DETAIL_LONG_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,}$")
+_DETAIL_CODE_REGISTRIES: dict[str, frozenset[str]] = {
+    "component": frozenset(
+        {
+            "control-plane",
+            "quote-batch",
+            "structure-certify",
+            "structure-fetch",
+            "structure-materialize",
+        }
+    ),
+    "data_product": frozenset({"market-snapshot", "structure-sync"}),
+    "deadline_kind": frozenset({"attempt", "heartbeat", "lease", "progress"}),
+    "failure_signature": frozenset(
+        {"progress.stalled", "upstream.timeout", "validation.failed"}
+    ),
+    "job_type": frozenset(
+        {
+            "opportunity-certify",
+            "quote-admit",
+            "quote-batch",
+            "quote-certify",
+            "quote-scan",
+            "structure-certify",
+            "structure-fetch",
+            "structure-materialize",
+            "structure-normalize",
+        }
+    ),
+    "qualification_impact": frozenset(
+        {"blocked", "delayed", "invalidated", "none", "qualified", "restored"}
+    ),
+    "reason_code": frozenset({"checkpoint.advance", "invalid-input", "timeout"}),
+    "recovery_policy": frozenset(
+        {"exponential-backoff", "retry-job", "retry-same-input", "retry-soon"}
+    ),
+    "result_code": frozenset({"failed", "ok"}),
+}
 _DETAIL_CODE_KEYS = frozenset(
     {
         "component",
@@ -242,44 +249,9 @@ def _invalid_detail_value(key: str) -> ValueError:
     return ValueError(f"runtime event detail value is invalid for {key}")
 
 
-def _is_credential_shaped_detail_code(value: str) -> bool:
-    """Reject credentials without blocking ordinary closed taxonomy codes.
-
-    Code details allow short stable atoms made from letters, digits, dot, colon,
-    underscore, and hyphen. The boundary here is intentionally conservative:
-    2- or 3-segment JWT/base64url values, URL/DSN-like colon chains, known
-    credential prefixes, secret-bearing header/assignment names with long
-    values, and long mixed random-token atoms are not valid runtime taxonomy.
-    """
-    return (
-        _DETAIL_JWT_LIKE_RE.fullmatch(value) is not None
-        or _DETAIL_DSN_LIKE_RE.fullmatch(value) is not None
-        or _DETAIL_CREDENTIAL_PREFIX_RE.match(value) is not None
-        or _DETAIL_ASSIGNMENT_SECRET_RE.fullmatch(value) is not None
-        or _looks_like_long_random_token(value)
-    )
-
-
-def _looks_like_long_random_token(value: str) -> bool:
-    if _DETAIL_LONG_TOKEN_RE.fullmatch(value) is None:
-        return False
-    classes = sum(
-        (
-            any(character.islower() for character in value),
-            any(character.isupper() for character in value),
-            any(character.isdigit() for character in value),
-            "_" in value or "-" in value,
-        )
-    )
-    return classes >= 2
-
-
 def _require_detail_code(key: str, value: object) -> str:
-    if (
-        type(value) is not str
-        or not _DETAIL_CODE_RE.fullmatch(value)
-        or _is_credential_shaped_detail_code(value)
-    ):
+    registry = _DETAIL_CODE_REGISTRIES[key]
+    if type(value) is not str or value not in registry:
         raise _invalid_detail_value(key)
     return value
 
