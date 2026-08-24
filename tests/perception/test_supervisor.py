@@ -364,6 +364,8 @@ async def test_daemon_restarts_a_supervisor_that_returns_while_service_is_live(
         opportunity_reconciliation_enabled = False
         neg_risk_quote_worker_enabled = True
         neg_risk_quote_supervisor_enabled = True
+        neg_risk_quote_supervisor_timeout_s = 210
+        neg_risk_quote_interval_s = 60
         producer_stall_timeout_s = 1.0
         producer_stall_detection_s = 0.1
         producer_terminate_grace_s = 0.1
@@ -387,7 +389,10 @@ async def test_daemon_restarts_a_supervisor_that_returns_while_service_is_live(
     store.init_schema()
     stop = asyncio.Event()
 
-    await asyncio.gather(*daemon_main._start_supervised_producers(Settings, store, stop))
+    await asyncio.wait_for(
+        asyncio.gather(*daemon_main._start_supervised_producers(Settings, store, stop)),
+        timeout=1,
+    )
 
     assert calls == ["quote", "quote"]
 
