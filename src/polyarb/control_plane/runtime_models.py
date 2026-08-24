@@ -300,6 +300,33 @@ def _normalize_detail_scalar(key: str, value: object) -> str | int | float:
     raise ValueError(f"runtime event detail key has no validator: {key}")
 
 
+def validate_runtime_detail_bounds(
+    detail: dict[str, object], *, validate_encoded_size: bool = True
+) -> None:
+    """Validate shared runtime detail size/shape bounds before specialized checks."""
+    if type(detail) is not dict:
+        raise TypeError("detail root must be a dict")
+    if len(detail) > _MAX_DETAIL_KEYS:
+        raise ValueError("runtime event detail is not bounded")
+    for key, value in detail.items():
+        if type(key) is not str:
+            raise ValueError("runtime event detail must be JSON-compatible")
+        if type(value) in (dict, list, tuple):
+            raise ValueError("runtime event detail values must be flat JSON scalars")
+    if validate_encoded_size:
+        try:
+            encoded_detail = json.dumps(
+                detail,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("runtime event detail must be JSON-compatible") from exc
+        if len(encoded_detail) > _MAX_DETAIL_BYTES:
+            raise ValueError("runtime event detail JSON must be at most 4096 bytes")
+
+
 def _freeze_runtime_detail(
     kind: RuntimeEventKind,
     detail: dict[str, object],
@@ -354,8 +381,7 @@ class RuntimeEvent:
             raise ValueError("runtime event sequences must be positive")
         if self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None:
             raise ValueError("runtime event time must be timezone-aware")
-        if len(self.detail) > _MAX_DETAIL_KEYS:
-            raise ValueError("runtime event detail is not bounded")
+        validate_runtime_detail_bounds(self.detail, validate_encoded_size=False)
         frozen_detail = _freeze_runtime_detail(self.kind, self.detail)
         try:
             encoded_detail = json.dumps(
@@ -376,4 +402,5 @@ __all__ = [
     "RuntimeEvent",
     "RuntimeEventKind",
     "RuntimeProgress",
+    "validate_runtime_detail_bounds",
 ]

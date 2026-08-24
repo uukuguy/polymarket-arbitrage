@@ -6,19 +6,27 @@ import os
 import subprocess
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from pathlib import Path
 from typing import Any, cast
 
 import psycopg
 import pytest
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
-from polyarb.control_plane.models import JobLease
+from polyarb.control_plane.models import JobLease, QuoteBatchLeg
 from polyarb.control_plane.postgres import PostgresControlPlane
 from polyarb.control_plane.runtime_contract import RUNTIME_STAGE_REGISTRY, AttemptRuntime
 from polyarb.control_plane.runtime_models import (
     RuntimeDeadlineProfile,
     RuntimeEventKind,
     RuntimeProgress,
+)
+from polyarb.control_plane.structure_artifact import (
+    StructureBundleArtifact,
+    StructureBundleIdentity,
+    canonical_structure_manifest_bytes,
 )
 
 REQUIRED_JOB_TYPES = (
@@ -66,10 +74,18 @@ def _docker_available() -> bool:
         return False
 
 
+def _require_docker_available() -> None:
+    if not _docker_available():
+        pytest.fail(
+            "Docker daemon unavailable; runtime coverage requires Docker/Testcontainers "
+            "Postgres. Start Docker and rerun the transactional runtime gate.",
+            pytrace=False,
+        )
+
+
 @pytest.fixture(scope="module")
 def postgres_dsn() -> Iterator[str]:
-    if not _docker_available():
-        pytest.skip("Docker daemon unavailable; runtime coverage test skipped")
+    _require_docker_available()
     from testcontainers.postgres import PostgresContainer
 
     with PostgresContainer("postgres:16-alpine") as postgres:
@@ -99,9 +115,33 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
 
     with connect() as connection:
         for table in (
+            "m1_soak_observations",
+            "m1_soak_runs",
+            "m1_cloud_usage_observations",
             "m1_job_runtime_events",
             "m1_job_runtime_state",
+            "m1_structure_source_window_bundles",
+            "m1_structure_source_page_receipts",
+            "m1_structure_source_page_inputs",
+            "m1_structure_source_windows",
+            "m1_alert_deliveries",
+            "m1_alert_outbox",
+            "m1_incident_events",
+            "m1_incidents",
+            "m1_opportunity_publication_pointers",
+            "m1_opportunity_projection_rows",
+            "m1_opportunity_projections",
+            "m1_publication_pointers",
+            "m1_generation_manifests",
+            "m1_structure_range_receipts",
+            "m1_structure_range_inputs",
+            "m1_structure_generation_inputs",
+            "m1_quote_batch_receipts",
+            "m1_quote_batch_inputs",
+            "m1_quote_admission_inputs",
+            "m1_checkpoint_receipts",
             "m1_job_attempts",
+            "m1_job_circuits",
             "m1_jobs",
         ):
             connection.execute(f"TRUNCATE {table} CASCADE")
@@ -146,6 +186,15 @@ def test_runtime_registry_has_exact_eight_job_types_with_meaningful_stage_names(
         )
 
 
+def test_runtime_coverage_gate_uses_real_terminal_boundaries_and_fails_closed() -> None:
+    source = Path(__file__).read_text()
+
+    assert "_append_job_" + "succeeded_cursor" not in source
+    assert "pytest." + "skip(" not in source
+    assert "UPDATE m1_" + "jobs" not in source
+    assert "UPDATE m1_" + "job_attempts" not in source
+
+
 @pytest.mark.parametrize("secret_key", SECRET_LIKE_DETAIL_KEY_PARTS)
 def test_runtime_reporter_rejects_secret_like_detail_keys_before_persistence(
     secret_key: str,
@@ -174,132 +223,552 @@ def test_runtime_reporter_rejects_secret_like_detail_keys_before_persistence(
     assert store.progress == []
 
 
-def test_all_transactional_job_types_persist_one_start_progress_chain_and_terminal_event(
-    control_plane: PostgresControlPlane,
-) -> None:
-    assert tuple(RUNTIME_STAGE_REGISTRY) == REQUIRED_JOB_TYPES
-    for index, job_type in enumerate(REQUIRED_JOB_TYPES, start=1):
-        _claim_progress_and_complete(control_plane, job_type=job_type, offset=index)
+def test_runtime_reporter_rejects_unbounded_detail_before_persistence() -> None:
+    lease = JobLease(
+        job_key="runtime-unbounded-detail",
+        job_type="quote-batch",
+        input_identity="runtime-unbounded-detail",
+        lease_owner="runtime-worker",
+        lease_epoch=1,
+        lease_expires_at=NOW + timedelta(seconds=PROFILE.lease_seconds),
+        checkpoint_cursor=None,
+        checkpoint_digest=None,
+    )
+    store = _CapturingStore()
+    runtime = AttemptRuntime(store=store, lease=lease, profile=PROFILE, clock=lambda: NOW)
 
-    rows = _runtime_event_rows(control_plane)
-    rows_by_job_type = {job_type: [] for job_type in REQUIRED_JOB_TYPES}
-    for row in rows:
-        rows_by_job_type[str(row["job_type"])].append(row)
-
-    assert set(rows_by_job_type) == set(REQUIRED_JOB_TYPES)
-    for job_type, events in rows_by_job_type.items():
-        stages = RUNTIME_STAGE_REGISTRY[job_type]
-        kinds = [row["kind"] for row in events]
-        assert kinds.count(RuntimeEventKind.STARTED.value) == 1
-        assert kinds.count(RuntimeEventKind.SUCCEEDED.value) == 1
-        assert kinds.count(RuntimeEventKind.STAGE_CHANGED.value) == len(stages)
-        assert len(events) == len(stages) + 2
-        assert [row["event_sequence"] for row in events] == list(range(1, len(events) + 1))
-        assert events[0]["kind"] == RuntimeEventKind.STARTED.value
-        assert events[0]["stage"] == "started"
-
-        progress_events = [
-            row for row in events if row["kind"] == RuntimeEventKind.STAGE_CHANGED.value
-        ]
-        assert [row["stage"] for row in progress_events] == list(stages)
-        assert [row["progress_sequence"] for row in progress_events] == list(
-            range(1, len(stages) + 1)
+    with pytest.raises(ValueError, match="runtime event detail is not bounded"):
+        runtime.progress(
+            stage="read-input",
+            current=1,
+            total=1,
+            detail={f"component_{index}": "control-plane" for index in range(21)},
         )
-        assert all(row["progress_current"] >= 1 for row in progress_events)
-        assert all(row["progress_total"] >= row["progress_current"] for row in progress_events)
 
-        terminal = events[-1]
-        assert terminal["kind"] == RuntimeEventKind.SUCCEEDED.value
-        assert terminal["stage"] == stages[-1]
-        assert terminal["progress_sequence"] == len(stages)
-        assert terminal["progress_current"] == len(stages)
-        assert terminal["progress_total"] == len(stages)
+    assert store.progress == []
 
-        for event in events:
-            detail = cast(dict[str, object], event["detail"])
-            assert not _secret_like_detail_keys(detail)
+
+@pytest.mark.parametrize("job_type", REQUIRED_JOB_TYPES)
+def test_transactional_job_type_persists_one_start_progress_chain_and_terminal_event(
+    control_plane: PostgresControlPlane,
+    job_type: str,
+) -> None:
+    lease = _claim_progress_and_complete(control_plane, job_type=job_type)
+
+    events = _runtime_event_rows(control_plane, job_keys=(lease.job_key,))
+    stages = RUNTIME_STAGE_REGISTRY[job_type]
+    kinds = [row["kind"] for row in events]
+    assert kinds.count(RuntimeEventKind.STARTED.value) == 1
+    assert kinds.count(RuntimeEventKind.SUCCEEDED.value) == 1
+    assert kinds.count(RuntimeEventKind.STAGE_CHANGED.value) == len(stages)
+    assert len(events) == len(stages) + 2
+    assert [row["event_sequence"] for row in events] == list(range(1, len(events) + 1))
+    assert events[0]["kind"] == RuntimeEventKind.STARTED.value
+    assert events[0]["stage"] == "started"
+
+    progress_events = [
+        row for row in events if row["kind"] == RuntimeEventKind.STAGE_CHANGED.value
+    ]
+    assert [row["stage"] for row in progress_events] == list(stages)
+    assert [row["progress_sequence"] for row in progress_events] == list(
+        range(1, len(stages) + 1)
+    )
+    assert all(row["progress_current"] >= 1 for row in progress_events)
+    assert all(row["progress_total"] >= row["progress_current"] for row in progress_events)
+
+    terminal = events[-1]
+    assert terminal["kind"] == RuntimeEventKind.SUCCEEDED.value
+    assert terminal["stage"] == stages[-1]
+    assert terminal["progress_sequence"] == len(stages)
+    assert terminal["progress_current"] == len(stages)
+    assert terminal["progress_total"] == len(stages)
+
+    for event in events:
+        detail = cast(dict[str, object], event["detail"])
+        assert not _secret_like_detail_keys(detail)
 
 
 def _claim_progress_and_complete(
-    control_plane: PostgresControlPlane, *, job_type: str, offset: int
-) -> None:
-    now = NOW + timedelta(minutes=offset)
-    job_key = f"runtime-coverage:{job_type}"
-    control_plane.enqueue_job(
-        job_key=job_key,
-        job_type=job_type,
-        input_identity=f"runtime-coverage:{job_type}",
-        now=now,
-    )
-    lease = control_plane.claim_job(
-        worker_id=f"{job_type}-worker",
-        job_types=(job_type,),
-        lease_seconds=PROFILE.lease_seconds,
-        now=now,
-    )
-    assert lease is not None
+    control_plane: PostgresControlPlane, *, job_type: str
+) -> JobLease:
+    now = NOW + timedelta(minutes=REQUIRED_JOB_TYPES.index(job_type) + 1)
+    if job_type == "structure-fetch":
+        return _complete_structure_fetch(control_plane, now=now)
+    if job_type == "structure-materialize":
+        return _complete_structure_materialize(control_plane, now=now)
+    if job_type == "structure-normalize":
+        return _complete_structure_normalize(control_plane, now=now)
+    if job_type == "structure-certify":
+        return _complete_structure_certify(control_plane, now=now)
+    if job_type == "quote-admit":
+        return _complete_quote_admit(control_plane, now=now)
+    if job_type == "quote-batch":
+        return _complete_quote_batch(control_plane, now=now)
+    if job_type == "quote-certify":
+        return _complete_quote_certify(control_plane, now=now)
+    if job_type == "opportunity-certify":
+        return _complete_opportunity_certify(control_plane, now=now)
+    raise AssertionError(f"unhandled runtime job type: {job_type}")
 
+
+def _record_all_progress(
+    control_plane: PostgresControlPlane, *, lease: JobLease, now: datetime
+) -> None:
     runtime = AttemptRuntime(
         store=control_plane,
         lease=lease,
         profile=PROFILE,
         clock=lambda: now + timedelta(seconds=1),
     )
-    stages = RUNTIME_STAGE_REGISTRY[job_type]
+    stages = RUNTIME_STAGE_REGISTRY[lease.job_type]
     for current, stage in enumerate(stages, start=1):
         runtime.progress(
             stage=stage,
             current=current,
             total=len(stages),
-            detail={"component": job_type},
+            detail={"component": lease.job_type},
         )
 
-    with (
-        control_plane._connection_factory() as connection,  # noqa: SLF001
-        connection.cursor(row_factory=dict_row) as cursor,
-    ):
-        PostgresControlPlane._append_job_succeeded_cursor(  # noqa: SLF001
-            cursor,
-            lease=runtime.current_lease,
-            stage=stages[-1],
-            component=job_type,
-            data_product=(
-                "structure-sync" if job_type.startswith("structure-") else "market-snapshot"
+
+def _complete_structure_fetch(control_plane: PostgresControlPlane, *, now: datetime) -> JobLease:
+    window_key = "runtime-coverage:source"
+    control_plane.admit_structure_source_window(window_key=window_key, now=now)
+    lease = _claim(control_plane, "structure-fetch", now=now)
+    _record_all_progress(control_plane, lease=lease, now=now)
+    successor = control_plane.record_structure_source_page(
+        lease,
+        artifact_key="structure-source/runtime-coverage/source.json",
+        artifact_digest="a" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        now=now + timedelta(seconds=2),
+    )
+    assert successor is not None
+    return lease
+
+
+def _complete_structure_materialize(
+    control_plane: PostgresControlPlane, *, now: datetime
+) -> JobLease:
+    window_key = "runtime-coverage:materialize"
+    control_plane.admit_structure_source_window(window_key=window_key, now=now)
+    source = _claim(control_plane, "structure-fetch", now=now)
+    control_plane.record_structure_source_page(
+        source,
+        artifact_key="structure-source/runtime-coverage/materialize-source.json",
+        artifact_digest="b" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        event_embedded_markets=True,
+        now=now,
+    )
+    lease = _claim(control_plane, "structure-materialize", now=now)
+    source_digest = control_plane.structure_source_window_digest(window_key)
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"runtime-materialize"}\n')
+    _record_all_progress(control_plane, lease=lease, now=now)
+    specs = control_plane.admit_structure_source_bundle(
+        lease,
+        identity=_structure_identity(
+            suffix="materialize",
+            window_id=window_key,
+            comparison_receipt_digest=source_digest,
+            source_kind="gamma-source-window-events-v3-sharded",
+            events=1,
+            markets=0,
+        ),
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now + timedelta(seconds=2),
+    )
+    assert len(specs) == 1
+    return lease
+
+
+def _complete_structure_normalize(
+    control_plane: PostgresControlPlane, *, now: datetime
+) -> JobLease:
+    spec, _bundle = _enqueue_structure_generation(
+        control_plane, suffix="normalize", now=now
+    )
+    lease = _claim(control_plane, "structure-normalize", now=now)
+    _record_all_progress(control_plane, lease=lease, now=now)
+    receipt = control_plane.complete_structure_range(
+        lease,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/runtime-coverage/normalize.ndjson",
+        artifact_digest="c" * 64,
+        record_count=1,
+        now=now + timedelta(seconds=2),
+    )
+    assert receipt.job_key == lease.job_key
+    return lease
+
+
+def _complete_structure_certify(
+    control_plane: PostgresControlPlane, *, now: datetime
+) -> JobLease:
+    spec, bundle = _enqueue_structure_generation(control_plane, suffix="certify", now=now)
+    range_artifact = "d" * 64
+    range_lease = _claim(control_plane, "structure-normalize", now=now)
+    control_plane.complete_structure_range(
+        range_lease,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/runtime-coverage/certify.ndjson",
+        artifact_digest=range_artifact,
+        record_count=1,
+        now=now,
+    )
+    lease = _claim(control_plane, "structure-certify", now=now)
+    _record_all_progress(control_plane, lease=lease, now=now)
+    manifest_digest = sha256(
+        canonical_structure_manifest_bytes(
+            generation_key=spec.generation_key,
+            bundle_digest=bundle.sha256,
+            receipts=(
+                {
+                    "job_key": spec.job_key,
+                    "component": "events",
+                    "ordinal": 0,
+                    "range_digest": spec.range_digest,
+                    "artifact_key": "structure-ranges/runtime-coverage/certify.ndjson",
+                    "artifact_digest": range_artifact,
+                    "record_count": 1,
+                },
             ),
+        )
+    ).hexdigest()
+    assert (
+        control_plane.certify_structure_generation(
+            lease,
+            generation_key=spec.generation_key,
+            artifact_key=f"structure-manifests/{manifest_digest}/manifest.ndjson",
+            artifact_digest=manifest_digest,
             now=now + timedelta(seconds=2),
         )
-        cursor.execute(
-            """
-            UPDATE m1_jobs
-            SET state = 'succeeded', lease_owner = NULL, lease_expires_at = NULL,
-                updated_at = %s
-            WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
-              AND state = 'leased'
-            """,
-            (
-                now + timedelta(seconds=2),
-                runtime.current_lease.job_key,
-                runtime.current_lease.lease_owner,
-                runtime.current_lease.lease_epoch,
-            ),
-        )
-        assert cursor.rowcount == 1
-        cursor.execute(
-            """
-            UPDATE m1_job_attempts
-            SET state = 'succeeded', finished_at = %s
-            WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
-            """,
-            (
-                now + timedelta(seconds=2),
-                runtime.current_lease.job_key,
-                runtime.current_lease.lease_epoch,
-            ),
-        )
-        assert cursor.rowcount == 1
+        == manifest_digest
+    )
+    return lease
 
 
-def _runtime_event_rows(control_plane: PostgresControlPlane) -> list[dict[str, object]]:
+def _complete_quote_admit(control_plane: PostgresControlPlane, *, now: datetime) -> JobLease:
+    structure_digest = "e" * 64
+    universe_hash = "f" * 64
+    generation_key = f"structure:{structure_digest}"
+    job_key = f"{generation_key}:quote-admit"
+    bundle_key = "bundles/runtime-coverage.ndjson"
+    control_plane.enqueue_job(
+        job_key=job_key,
+        job_type="quote-admit",
+        input_identity=f"{generation_key}:{bundle_key}:{structure_digest}",
+        now=now,
+    )
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        connection.execute(
+            """
+            INSERT INTO m1_structure_generation_inputs
+                (generation_key, bundle_key, bundle_digest, identity, admitted_at)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (generation_key, bundle_key, structure_digest, Jsonb({}), now),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_quote_admission_inputs
+                (job_key, generation_key, bundle_key, bundle_digest, admitted_at)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (job_key, generation_key, bundle_key, structure_digest, now),
+        )
+    lease = _claim(control_plane, "quote-admit", now=now)
+    _record_all_progress(control_plane, lease=lease, now=now)
+    legs = (_leg("quote-admit-token"),)
+    batches = control_plane.quote_batches_from_legs(
+        structure_receipt_digest=structure_digest,
+        universe_hash=universe_hash,
+        legs=legs,
+        batch_size=1,
+    )
+    artifacts = {
+        batch.job_key: (
+            f"quote-inputs/{artifact_digest}/batch.ndjson",
+            artifact_digest,
+            len(batch.legs),
+        )
+        for batch in batches
+        for artifact_digest in (sha256(batch.job_key.encode()).hexdigest(),)
+    }
+    assert (
+        control_plane.admit_quote_generation(
+            lease,
+            structure_receipt_digest=structure_digest,
+            universe_hash=universe_hash,
+            legs=legs,
+            batch_size=1,
+            input_artifacts=artifacts,
+            now=now + timedelta(seconds=2),
+        )
+        == batches
+    )
+    return lease
+
+
+def _complete_quote_batch(control_plane: PostgresControlPlane, *, now: datetime) -> JobLease:
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="1" * 64,
+        universe_hash="2" * 64,
+        legs=(_leg("quote-batch-token"),),
+        batch_size=1,
+        now=now,
+    )[0]
+    lease = _claim(control_plane, "quote-batch", now=now)
+    _record_all_progress(control_plane, lease=lease, now=now)
+    receipt = control_plane.record_quote_batch(
+        lease,
+        token_range_digest=batch.token_range_digest,
+        quote_digest="3" * 64,
+        artifact_key="quote-batches/runtime-coverage/batch.ndjson",
+        artifact_digest="4" * 64,
+        successful_response_count=1,
+        quoted_at=now,
+        now=now + timedelta(seconds=2),
+        terminal=True,
+    )
+    assert receipt.job_key == lease.job_key
+    return lease
+
+
+def _complete_quote_certify(control_plane: PostgresControlPlane, *, now: datetime) -> JobLease:
+    batches = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="5" * 64,
+        universe_hash="6" * 64,
+        legs=(_leg("quote-certify-token-a"), _leg("quote-certify-token-b")),
+        batch_size=1,
+        now=now,
+    )
+    for index, batch in enumerate(batches):
+        batch_lease = _claim(control_plane, "quote-batch", now=now + timedelta(seconds=index))
+        control_plane.record_quote_batch(
+            batch_lease,
+            token_range_digest=batch.token_range_digest,
+            quote_digest=str(7 + index) * 64,
+            artifact_key=f"quote-batches/runtime-coverage/certify-{index}.ndjson",
+            artifact_digest=str(8 + index) * 64,
+            successful_response_count=1,
+            quoted_at=now,
+            now=now + timedelta(seconds=index),
+            terminal=True,
+        )
+    lease = _claim(control_plane, "quote-certify", now=now)
+    _record_all_progress(control_plane, lease=lease, now=now)
+    artifact_digest = control_plane.certify_quote_generation(
+        lease,
+        generation_key=batches[0].generation_key,
+        now=now + timedelta(seconds=2),
+    )
+    assert len(artifact_digest) == 64
+    return lease
+
+
+def _complete_opportunity_certify(
+    control_plane: PostgresControlPlane, *, now: datetime
+) -> JobLease:
+    structure_generation_key, structure_digest = _certify_structure_prerequisite(
+        control_plane, suffix="opportunity", now=now
+    )
+    quote_generation_key = _certify_quote_prerequisite(
+        control_plane,
+        suffix="opportunity",
+        structure_digest=structure_digest,
+        now=now + timedelta(seconds=10),
+    )
+    lease = _claim(control_plane, "opportunity-certify", now=now + timedelta(seconds=20))
+    _record_all_progress(control_plane, lease=lease, now=now + timedelta(seconds=20))
+    digest = control_plane.publish_opportunity_projection(
+        quote_generation_key=quote_generation_key,
+        structure_generation_key=structure_generation_key,
+        rows=(
+            {
+                "group_id": "runtime-coverage-group",
+                "event_id": "runtime-coverage-event",
+                "membership_hash": "runtime-coverage-membership",
+                "bundle_cost": 0.91,
+                "gross_edge_bps": 900.0,
+                "max_bundle_size": 4.0,
+                "legs": [
+                    {
+                        "yes_token_id": "opportunity-token",
+                        "ask_price": 0.91,
+                        "ask_size": 4.0,
+                    }
+                ],
+                "structure_observed_at_ms": 1,
+                "quote_started_at_ms": 2,
+                "quote_quoted_at_ms": 3,
+            },
+        ),
+        now=now + timedelta(seconds=22),
+        lease=lease,
+    )
+    assert len(digest) == 64
+    return lease
+
+
+def _certify_structure_prerequisite(
+    control_plane: PostgresControlPlane, *, suffix: str, now: datetime
+) -> tuple[str, str]:
+    spec, bundle = _enqueue_structure_generation(control_plane, suffix=suffix, now=now)
+    range_artifact = sha256(f"{suffix}:range".encode()).hexdigest()
+    range_lease = _claim(control_plane, "structure-normalize", now=now)
+    control_plane.complete_structure_range(
+        range_lease,
+        range_digest=spec.range_digest,
+        artifact_key=f"structure-ranges/runtime-coverage/{suffix}.ndjson",
+        artifact_digest=range_artifact,
+        record_count=1,
+        now=now,
+    )
+    certifier = _claim(control_plane, "structure-certify", now=now)
+    manifest_digest = sha256(
+        canonical_structure_manifest_bytes(
+            generation_key=spec.generation_key,
+            bundle_digest=bundle.sha256,
+            receipts=(
+                {
+                    "job_key": spec.job_key,
+                    "component": "events",
+                    "ordinal": 0,
+                    "range_digest": spec.range_digest,
+                    "artifact_key": f"structure-ranges/runtime-coverage/{suffix}.ndjson",
+                    "artifact_digest": range_artifact,
+                    "record_count": 1,
+                },
+            ),
+        )
+    ).hexdigest()
+    control_plane.certify_structure_generation(
+        certifier,
+        generation_key=spec.generation_key,
+        artifact_key=f"structure-manifests/{manifest_digest}/manifest.ndjson",
+        artifact_digest=manifest_digest,
+        now=now,
+    )
+    return spec.generation_key, bundle.sha256
+
+
+def _certify_quote_prerequisite(
+    control_plane: PostgresControlPlane,
+    *,
+    suffix: str,
+    structure_digest: str,
+    now: datetime,
+) -> str:
+    batches = control_plane.enqueue_quote_generation(
+        structure_receipt_digest=structure_digest,
+        universe_hash=sha256(f"{suffix}:universe".encode()).hexdigest(),
+        legs=(_leg(f"{suffix}-quote-token"),),
+        batch_size=1,
+        now=now,
+    )
+    batch = batches[0]
+    batch_lease = _claim(control_plane, "quote-batch", now=now)
+    control_plane.record_quote_batch(
+        batch_lease,
+        token_range_digest=batch.token_range_digest,
+        quote_digest=sha256(f"{suffix}:quote".encode()).hexdigest(),
+        artifact_key=f"quote-batches/runtime-coverage/{suffix}.ndjson",
+        artifact_digest=sha256(f"{suffix}:quote-artifact".encode()).hexdigest(),
+        successful_response_count=1,
+        quoted_at=now,
+        now=now,
+        terminal=True,
+    )
+    certifier = _claim(control_plane, "quote-certify", now=now)
+    control_plane.certify_quote_generation(
+        certifier,
+        generation_key=batch.generation_key,
+        now=now,
+    )
+    return batch.generation_key
+
+
+def _enqueue_structure_generation(
+    control_plane: PostgresControlPlane, *, suffix: str, now: datetime
+):
+    bundle = StructureBundleArtifact.from_bytes(
+        f'{{"kind":"runtime-{suffix}-bundle"}}\n'.encode()
+    )
+    specs = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(
+            suffix=suffix,
+            window_id=f"runtime-coverage:{suffix}",
+            comparison_receipt_digest=sha256(f"{suffix}:comparison".encode()).hexdigest(),
+            source_kind="legacy-publication-v1",
+            events=1,
+            markets=0,
+        ),
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )
+    assert len(specs) == 1
+    return specs[0], bundle
+
+
+def _structure_identity(
+    *,
+    suffix: str,
+    window_id: str,
+    comparison_receipt_digest: str,
+    source_kind: str,
+    events: int,
+    markets: int,
+) -> StructureBundleIdentity:
+    return StructureBundleIdentity(
+        publication_id=f"runtime-coverage:{suffix}",
+        window_id=window_id,
+        snapshot_id=42,
+        comparison_receipt_digest=comparison_receipt_digest,
+        normalization_contract_version="structure-v7",
+        source_kind=source_kind,
+        component_counts={
+            "events": events,
+            "event_tags": 0,
+            "memberships": 0,
+            "group_truth": 0,
+            "markets": markets,
+            "issues": 0,
+        },
+    )
+
+
+def _leg(token_id: str) -> QuoteBatchLeg:
+    return QuoteBatchLeg(
+        neg_risk_market_id=f"neg-risk-{token_id}",
+        market_id=f"market-{token_id}",
+        condition_id=f"condition-{token_id}",
+        slug=f"slug-{token_id}",
+        yes_token_id=token_id,
+        event_id=f"event-{token_id}",
+        membership_hash=f"membership-{token_id}",
+    )
+
+
+def _claim(control_plane: PostgresControlPlane, job_type: str, *, now: datetime) -> JobLease:
+    lease = control_plane.claim_job(
+        worker_id=f"runtime-coverage:{job_type}",
+        job_types=(job_type,),
+        lease_seconds=PROFILE.lease_seconds,
+        now=now,
+    )
+    assert lease is not None
+    return lease
+
+
+def _runtime_event_rows(
+    control_plane: PostgresControlPlane, *, job_keys: tuple[str, ...]
+) -> list[dict[str, object]]:
     with control_plane._connection_factory() as connection, connection.cursor(  # noqa: SLF001
         row_factory=dict_row
     ) as cursor:
@@ -310,8 +779,10 @@ def _runtime_event_rows(control_plane: PostgresControlPlane) -> list[dict[str, o
                    event.progress_total, event.detail
             FROM m1_job_runtime_events AS event
             JOIN m1_jobs AS job ON job.job_key = event.job_key
-            ORDER BY job.job_type, event.event_sequence
-            """
+            WHERE event.job_key = ANY(%s)
+            ORDER BY event.event_sequence
+            """,
+            (list(job_keys),),
         )
         return list(cursor.fetchall())
 

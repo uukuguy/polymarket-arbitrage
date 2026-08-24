@@ -192,3 +192,93 @@ Report file:
   `.planning/threads/market-observation-architecture.md`,
   `.superpowers/sdd/progress.md`, and `docs/status/climb/*`.
   They were preserved and not committed by this task.
+
+## Review fix — real terminal boundaries and bounded guards
+
+Review result: Needs fixes. I fixed the Important finding and both Minors.
+
+### Review-fix RED evidence
+
+Command:
+
+```bash
+uv run pytest tests/m1-perception/test_transactional_runtime_coverage.py -q
+```
+
+Result: exit 1 with two expected failures:
+
+- `test_runtime_coverage_gate_uses_real_terminal_boundaries_and_fails_closed`
+  failed because the coverage file still contained the private
+  `_append_job_succeeded_cursor` terminal bypass.
+- `test_runtime_reporter_rejects_unbounded_detail_before_persistence` failed
+  with `Failed: DID NOT RAISE <class 'ValueError'>`, proving 21 runtime detail
+  keys could reach the fake store before bounded validation.
+
+### Fixes applied
+
+- Replaced the generic fake terminal completion with real public/specialized
+  terminal boundaries for all eight job types:
+  - `structure-fetch` → `record_structure_source_page`
+  - `structure-materialize` → `admit_structure_source_bundle`
+  - `structure-normalize` → `complete_structure_range`
+  - `structure-certify` → `certify_structure_generation`
+  - `quote-admit` → `admit_quote_generation`
+  - `quote-batch` → `record_quote_batch(..., terminal=True)`
+  - `quote-certify` → `certify_quote_generation`
+  - `opportunity-certify` → `publish_opportunity_projection(..., lease=...)`
+- Kept exact eight-type registry coverage and the one
+  start/progress-chain/terminal/no-secret assertions, now filtered by each real
+  terminal job key so prerequisite jobs cannot satisfy the gate.
+- Replaced Docker absence skip with fail-closed `pytest.fail(...)` carrying an
+  actionable Docker/Testcontainers message.
+- Extracted shared bounded runtime detail validation into
+  `runtime_models.validate_runtime_detail_bounds(...)`; the reporter invokes it
+  before scanning secret-like keys, preventing unbounded key iteration. Existing
+  `RuntimeEvent` specialized error semantics are preserved by deferring encoded
+  byte-size validation until after per-field normalization.
+
+### Review-fix GREEN evidence
+
+Focused coverage:
+
+```bash
+uv run pytest tests/m1-perception/test_transactional_runtime_coverage.py -q
+```
+
+Result: exit 0; 18 tests passed.
+
+Focused runtime/model/Postgres compatibility:
+
+```bash
+uv run pytest tests/m1-perception/test_control_plane_runtime_contract.py tests/m1-perception/test_control_plane_runtime_models.py tests/m1-perception/test_control_plane_postgres.py -k 'runtime_detail or runtime_event or runtime_progress or runtime' -q
+```
+
+Result: exit 0.
+
+Complete transactional gate:
+
+```bash
+uv run pytest tests/m1-perception/test_transactional_runtime_coverage.py tests/m1-perception/test_transactional_* -q
+```
+
+Result: exit 0.
+
+Ruff:
+
+```bash
+uv run ruff check src/polyarb/control_plane tests/m1-perception
+```
+
+Result:
+
+```text
+All checks passed!
+```
+
+Planning status:
+
+```bash
+make planning-status
+```
+
+Result: exit 0; no drift detected.

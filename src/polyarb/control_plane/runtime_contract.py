@@ -17,7 +17,11 @@ from types import MappingProxyType
 from typing import Any, Protocol
 
 from .models import JobLease
-from .runtime_models import RuntimeDeadlineProfile, RuntimeProgress
+from .runtime_models import (
+    RuntimeDeadlineProfile,
+    RuntimeProgress,
+    validate_runtime_detail_bounds,
+)
 
 
 class RuntimeStore(Protocol):
@@ -179,11 +183,8 @@ def _validate_progress_arguments(
 def _validate_runtime_detail(detail: dict[str, object] | None) -> None:
     if detail is None:
         return
-    if type(detail) is not dict:
-        raise TypeError("runtime detail must be a dict or None")
+    validate_runtime_detail_bounds(detail)
     for key in detail:
-        if type(key) is not str:
-            raise TypeError("runtime detail keys must be str")
         normalized = key.casefold().replace("-", "_")
         if any(part in normalized for part in _SECRET_LIKE_DETAIL_KEY_PARTS):
             raise ValueError(f"secret-like runtime detail key is forbidden: {key!r}")
