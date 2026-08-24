@@ -141,7 +141,7 @@ def _set_fenced_transaction_timeouts(
     remaining_ms = int((lease.lease_expires_at - now).total_seconds() * 1000)
     if remaining_ms <= 1:
         raise StaleLeaseError(
-            f"fenced transaction has no safe terminal budget for {lease.job_key}"
+            f"lease is no longer current or has no safe terminal budget for {lease.job_key}"
         )
     statement_timeout_ms = min(_FENCED_MAX_STATEMENT_TIMEOUT_MS, remaining_ms - 1)
     lock_timeout_ms = min(_FENCED_MAX_LOCK_TIMEOUT_MS, statement_timeout_ms)
@@ -1235,6 +1235,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             source_digest = self._structure_source_window_digest_cursor(cursor, identity.window_id)
             if identity.comparison_receipt_digest != source_digest:
                 raise CheckpointConflictError("source bundle does not bind current page receipts")
@@ -1261,6 +1262,14 @@ class PostgresControlPlane:
                 if persisted != expected:
                     raise CheckpointConflictError("source window names another bundle")
                 return self._structure_generation_specs_cursor(cursor, bundle.sha256)
+            self._append_job_succeeded_cursor(
+                cursor,
+                lease=lease,
+                stage="commit-bundle",
+                component="structure-materialize",
+                data_product="structure-sync",
+                now=now,
+            )
             cursor.execute(
                 """
                 UPDATE m1_jobs
@@ -1417,6 +1426,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             spec = self._structure_source_page_spec_cursor(cursor, lease.job_key)
             if lease.input_identity != spec.input_identity:
                 raise JobIdentityConflict("source page lease identity does not match input")
@@ -1469,6 +1479,14 @@ class PostgresControlPlane:
                 return self._source_successor_spec_cursor(
                     cursor, spec=spec, next_cursor=next_cursor, completed=completed
                 )
+            self._append_job_succeeded_cursor(
+                cursor,
+                lease=lease,
+                stage="commit-page",
+                component="structure-fetch",
+                data_product="structure-sync",
+                now=now,
+            )
             cursor.execute(
                 """
                 UPDATE m1_jobs
@@ -1987,15 +2005,22 @@ class PostgresControlPlane:
         return batches
 
     @staticmethod
-    def _append_quote_admission_success_cursor(
-        cursor: psycopg.Cursor[dict[str, Any]], *, lease: JobLease, now: datetime
+    def _append_job_succeeded_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        lease: JobLease,
+        stage: str,
+        component: str,
+        data_product: str,
+        now: datetime,
     ) -> RuntimeEvent:
-        """Append Quote admission success before its terminal rows are mutated.
+        """Append one terminal success while the supplied job fence is leased.
 
-        ``append_runtime_event_cursor`` validates the live job fence, so the
-        event must be inserted while the job is still leased.  The enclosing
-        transaction then commits the event, terminal job/attempt state, and
-        Quote batch inputs together; any event failure rolls all of them back.
+        The runtime event is deliberately appended before the specialized
+        receipt/pointer method releases ``m1_jobs``.  All callers share this
+        cursor-level implementation so an injected event failure rolls back
+        the receipt, pointer, job, and attempt rows in the surrounding
+        transaction.
         """
         cursor.execute(
             """
@@ -2038,7 +2063,7 @@ class PostgresControlPlane:
                     if state["progress_total"] is None
                     else int(state["progress_total"])
                 ),
-                stage="commit-admission",
+                stage=stage,
             )
         )
         try:
@@ -2051,11 +2076,11 @@ class PostgresControlPlane:
                     worker_id=lease.lease_owner,
                     event_sequence=int(sequence_row["next_sequence"]),
                     kind=RuntimeEventKind.SUCCEEDED,
-                    stage="commit-admission",
+                    stage=stage,
                     progress=progress,
                     detail={
-                        "component": "control-plane",
-                        "data_product": "market-snapshot",
+                        "component": component,
+                        "data_product": data_product,
                         "qualification_impact": "qualified",
                         "result_code": "ok",
                     },
@@ -2068,6 +2093,156 @@ class PostgresControlPlane:
             # treat a fenced terminal operation as stale, never as a normal
             # Quote admission failure eligible for retry under the old lease.
             raise StaleLeaseError(str(error)) from error
+
+    @staticmethod
+    def _append_quote_admission_success_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]], *, lease: JobLease, now: datetime
+    ) -> RuntimeEvent:
+        """Keep Quote admission's established control-plane event payload."""
+        return PostgresControlPlane._append_job_succeeded_cursor(
+            cursor,
+            lease=lease,
+            stage="commit-admission",
+            component="control-plane",
+            data_product="market-snapshot",
+            now=now,
+        )
+
+    @staticmethod
+    def _append_retry_runtime_events_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        lease: JobLease,
+        component: str,
+        error_class: str,
+        retry_count: int,
+        backoff_seconds: int,
+        next_attempt_at: datetime,
+        now: datetime,
+    ) -> tuple[RuntimeEvent, RuntimeEvent]:
+        """Append bounded failure and retry facts before releasing a job lease."""
+        cursor.execute(
+            """
+            SELECT attempt_id, lease_epoch, worker_id, stage, progress_sequence,
+                   progress_current, progress_total
+            FROM m1_job_runtime_state
+            WHERE job_key = %s
+            FOR UPDATE
+            """,
+            (lease.job_key,),
+        )
+        state = cursor.fetchone()
+        if state is None:
+            raise StaleLeaseError(f"runtime attempt is no longer current for {lease.job_key}")
+        if (
+            int(state["lease_epoch"]) != lease.lease_epoch
+            or str(state["worker_id"]) != lease.lease_owner
+        ):
+            raise StaleLeaseError(f"runtime attempt is no longer current for {lease.job_key}")
+
+        # ``finish_retryable_with_incident`` intentionally preserves the
+        # checkpointed state as a legal retry source.  The cursor-level runtime
+        # fence is defined in terms of a leased job, so move that state into its
+        # leased representation inside this transaction; a later failure rolls
+        # the temporary transition back with every other effect.
+        cursor.execute(
+            """
+            UPDATE m1_jobs SET state = 'leased'
+            WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+              AND state = 'checkpointed'
+            """,
+            (lease.job_key, lease.lease_owner, lease.lease_epoch),
+        )
+        stage = str(state["stage"])
+        progress_sequence = int(state["progress_sequence"])
+        progress = (
+            None
+            if progress_sequence == 0
+            else RuntimeProgress(
+                sequence=progress_sequence,
+                current=int(state["progress_current"]),
+                total=(
+                    None
+                    if state["progress_total"] is None
+                    else int(state["progress_total"])
+                ),
+                stage=stage,
+            )
+        )
+        normalized_error = error_class.casefold()
+        if "timeout" in normalized_error or "deadline" in normalized_error:
+            failure_signature = "upstream.timeout"
+            reason_code = "timeout"
+        elif "progress" in normalized_error or "stalled" in normalized_error:
+            failure_signature = "progress.stalled"
+            reason_code = "invalid-input"
+        else:
+            failure_signature = "validation.failed"
+            reason_code = "invalid-input"
+        attempt_id = str(state["attempt_id"])
+        cursor.execute(
+            """
+            SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
+            FROM m1_job_runtime_events
+            WHERE attempt_id = %s
+            """,
+            (attempt_id,),
+        )
+        sequence_row = cursor.fetchone()
+        if sequence_row is None:
+            raise ControlPlaneError("runtime event sequence query returned no row")
+        first_sequence = int(sequence_row["next_sequence"])
+        try:
+            failed = append_runtime_event_cursor(
+                cursor,
+                RuntimeEvent(
+                    job_key=lease.job_key,
+                    attempt_id=attempt_id,
+                    lease_epoch=lease.lease_epoch,
+                    worker_id=lease.lease_owner,
+                    event_sequence=first_sequence,
+                    kind=RuntimeEventKind.RETRYABLE_FAILED,
+                    stage=stage,
+                    progress=progress,
+                    detail={
+                        "component": component,
+                        "failure_signature": failure_signature,
+                        "qualification_impact": "delayed",
+                        "reason_code": reason_code,
+                        "recovery_policy": "exponential-backoff",
+                        "retry_count": retry_count,
+                    },
+                    occurred_at=now,
+                    idempotency_key=f"runtime:{attempt_id}:retryable-failed",
+                ),
+            )
+            scheduled = append_runtime_event_cursor(
+                cursor,
+                RuntimeEvent(
+                    job_key=lease.job_key,
+                    attempt_id=attempt_id,
+                    lease_epoch=lease.lease_epoch,
+                    worker_id=lease.lease_owner,
+                    event_sequence=first_sequence + 1,
+                    kind=RuntimeEventKind.RETRY_SCHEDULED,
+                    stage=stage,
+                    progress=progress,
+                    detail={
+                        "backoff_seconds": backoff_seconds,
+                        "next_decision_at": next_attempt_at.isoformat(),
+                        "reason_code": reason_code,
+                        "recovery_policy": "exponential-backoff",
+                        "retry_count": retry_count,
+                    },
+                    occurred_at=now,
+                    idempotency_key=f"runtime:{attempt_id}:retry-scheduled",
+                ),
+            )
+        except RuntimeFenceError as error:
+            raise StaleLeaseError(str(error)) from error
+        except RuntimeEventConflict as error:
+            raise RuntimeEventConflictError(str(error)) from error
+        return failed, scheduled
 
     @staticmethod
     def quote_batches_from_legs(
@@ -2809,6 +2984,49 @@ class PostgresControlPlane:
         now: datetime,
     ) -> CheckpointReceipt:
         """Atomically checkpoint one normalized Structure range under its lease fence."""
+        return self._record_structure_range(
+            lease,
+            range_digest=range_digest,
+            artifact_key=artifact_key,
+            artifact_digest=artifact_digest,
+            record_count=record_count,
+            now=now,
+            terminal=False,
+        )
+
+    def complete_structure_range(
+        self,
+        lease: JobLease,
+        *,
+        range_digest: str,
+        artifact_key: str,
+        artifact_digest: str,
+        record_count: int,
+        now: datetime,
+    ) -> CheckpointReceipt:
+        """Commit one normalized range and its terminal runtime success atomically."""
+        return self._record_structure_range(
+            lease,
+            range_digest=range_digest,
+            artifact_key=artifact_key,
+            artifact_digest=artifact_digest,
+            record_count=record_count,
+            now=now,
+            terminal=True,
+        )
+
+    def _record_structure_range(
+        self,
+        lease: JobLease,
+        *,
+        range_digest: str,
+        artifact_key: str,
+        artifact_digest: str,
+        record_count: int,
+        now: datetime,
+        terminal: bool,
+    ) -> CheckpointReceipt:
+        """Persist a range receipt, optionally sealing the leased attempt."""
         self._validate_aware(now, "now")
         if lease.job_type != "structure-normalize":
             raise ValueError("structure range receipt requires a structure-normalize lease")
@@ -2865,21 +3083,51 @@ class PostgresControlPlane:
                     checkpoint_digest=artifact_digest,
                     committed_at=existing["committed_at"],
                 )
-            cursor.execute(
-                """
-                UPDATE m1_jobs
-                SET checkpoint_cursor = %s, checkpoint_digest = %s, updated_at = %s
-                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s AND state = 'leased'
-                """,
-                (
-                    checkpoint_cursor,
-                    artifact_digest,
-                    now,
-                    lease.job_key,
-                    lease.lease_owner,
-                    lease.lease_epoch,
-                ),
-            )
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+            if terminal:
+                self._append_job_succeeded_cursor(
+                    cursor,
+                    lease=lease,
+                    stage="commit-range",
+                    component="structure-normalize",
+                    data_product="structure-sync",
+                    now=now,
+                )
+                cursor.execute(
+                    """
+                    UPDATE m1_jobs
+                    SET checkpoint_cursor = %s, checkpoint_digest = %s,
+                        state = 'succeeded', lease_owner = NULL, lease_expires_at = NULL,
+                        updated_at = %s
+                    WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+                      AND state = 'leased'
+                    """,
+                    (
+                        checkpoint_cursor,
+                        artifact_digest,
+                        now,
+                        lease.job_key,
+                        lease.lease_owner,
+                        lease.lease_epoch,
+                    ),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE m1_jobs
+                    SET checkpoint_cursor = %s, checkpoint_digest = %s, updated_at = %s
+                    WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+                      AND state = 'leased'
+                    """,
+                    (
+                        checkpoint_cursor,
+                        artifact_digest,
+                        now,
+                        lease.job_key,
+                        lease.lease_owner,
+                        lease.lease_epoch,
+                    ),
+                )
             if cursor.rowcount != 1:
                 raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
             receipt = CheckpointReceipt(
@@ -2928,23 +3176,37 @@ class PostgresControlPlane:
             )
             cursor.execute(
                 """
-                UPDATE m1_job_attempts SET state = 'checkpointed', finished_at = %s
+                UPDATE m1_job_attempts SET state = %s, finished_at = %s
                 WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
                 """,
-                (now, lease.job_key, lease.lease_epoch),
+                (
+                    "succeeded" if terminal else "checkpointed",
+                    now,
+                    lease.job_key,
+                    lease.lease_epoch,
+                ),
             )
-            cursor.execute(
-                """
-                UPDATE m1_jobs SET state = 'runnable', next_attempt_at = %s,
-                    last_error_class = NULL, updated_at = %s
-                WHERE job_key = %s AND state = 'waiting'
-                  AND (SELECT count(*) FROM m1_structure_range_receipts AS receipt
-                       JOIN m1_structure_range_inputs AS input ON input.job_key = receipt.job_key
-                       WHERE input.generation_key = %s)
-                    = (SELECT count(*) FROM m1_structure_range_inputs WHERE generation_key = %s)
-                """,
-                (now, now, f"{spec.generation_key}:certify", spec.generation_key, spec.generation_key),
-            )
+            if not terminal:
+                cursor.execute(
+                    """
+                    UPDATE m1_jobs SET state = 'runnable', next_attempt_at = %s,
+                        last_error_class = NULL, updated_at = %s
+                    WHERE job_key = %s AND state = 'waiting'
+                      AND (SELECT count(*) FROM m1_structure_range_receipts AS receipt
+                           JOIN m1_structure_range_inputs AS input
+                             ON input.job_key = receipt.job_key
+                           WHERE input.generation_key = %s)
+                        = (SELECT count(*) FROM m1_structure_range_inputs
+                           WHERE generation_key = %s)
+                    """,
+                    (
+                        now,
+                        now,
+                        f"{spec.generation_key}:certify",
+                        spec.generation_key,
+                        spec.generation_key,
+                    ),
+                )
             return receipt
 
     def certify_structure_generation(
@@ -2970,6 +3232,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             cursor.execute(
                 """
                 SELECT job_key, bundle_digest, component, ordinal, range_digest, admitted_at
@@ -3077,6 +3340,14 @@ class PostgresControlPlane:
                     "Structure manifest digest does not match range receipts"
                 )
             record_count = sum(int(row["record_count"]) for row in ordered)
+            self._append_job_succeeded_cursor(
+                cursor,
+                lease=lease,
+                stage="commit-certification",
+                component="structure-certify",
+                data_product="structure-sync",
+                now=now,
+            )
             cursor.execute(
                 """
                 UPDATE m1_jobs
@@ -3840,6 +4111,28 @@ class PostgresControlPlane:
             )
             cursor.execute(
                 """
+                INSERT INTO m1_job_circuits (
+                    job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (job_key) DO UPDATE
+                SET consecutive_failures = EXCLUDED.consecutive_failures,
+                    state = EXCLUDED.state, opened_at = EXCLUDED.opened_at,
+                    next_probe_at = EXCLUDED.next_probe_at, updated_at = EXCLUDED.updated_at
+                """,
+                (lease.job_key, failures, circuit_state, opened_at, next_attempt_at, now),
+            )
+            self._append_retry_runtime_events_cursor(
+                cursor,
+                lease=lease,
+                component=component,
+                error_class=error_class,
+                retry_count=failures,
+                backoff_seconds=delay_seconds,
+                next_attempt_at=next_attempt_at,
+                now=now,
+            )
+            cursor.execute(
+                """
                 UPDATE m1_jobs
                 SET state = 'retryable', next_attempt_at = %s, last_error_class = %s,
                     lease_owner = NULL, lease_expires_at = NULL, updated_at = %s
@@ -3864,18 +4157,6 @@ class PostgresControlPlane:
                 WHERE job_key = %s AND lease_epoch = %s
                 """,
                 (now, error_class, lease.job_key, lease.lease_epoch),
-            )
-            cursor.execute(
-                """
-                INSERT INTO m1_job_circuits (
-                    job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (job_key) DO UPDATE
-                SET consecutive_failures = EXCLUDED.consecutive_failures,
-                    state = EXCLUDED.state, opened_at = EXCLUDED.opened_at,
-                    next_probe_at = EXCLUDED.next_probe_at, updated_at = EXCLUDED.updated_at
-                """,
-                (lease.job_key, failures, circuit_state, opened_at, next_attempt_at, now),
             )
             kind = (
                 "circuit-opened"

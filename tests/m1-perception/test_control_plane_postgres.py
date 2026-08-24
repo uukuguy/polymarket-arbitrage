@@ -555,11 +555,11 @@ def test_structure_worker_takeover_after_upload_before_receipt_has_one_receipt(
         def __getattr__(self, name: str):
             return getattr(self._delegate, name)
 
-        def record_structure_range(self, *args: object, **kwargs: object):
+        def complete_structure_range(self, *args: object, **kwargs: object):
             if self.crash:
                 self.crash = False
                 raise KeyboardInterrupt("simulated process death after R2 upload")
-            return self._delegate.record_structure_range(*args, **kwargs)
+            return self._delegate.complete_structure_range(*args, **kwargs)
 
     objects = MemoryR2()
     crashing = CrashBeforeReceipt(control_plane)
@@ -1937,7 +1937,7 @@ def test_structure_range_receipt_is_fenced_and_idempotent(
             artifact_key="structure-ranges/c/rows.ndjson",
             artifact_digest="c" * 64,
             record_count=3,
-            now=now + timedelta(seconds=1),
+            now=now + timedelta(milliseconds=500),
         )
         == receipt
     )
@@ -5073,3 +5073,433 @@ def test_operational_snapshot_reports_retry_age_for_source_and_quote_admission(
 
     assert snapshot["structure"]["oldest_retryable_source_age_seconds"] == 45.0
     assert snapshot["quote"]["oldest_retryable_admission_age_seconds"] == 45.0
+
+
+def test_structure_source_success_event_is_atomic_and_fenced(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    window_key = "runtime-success:source"
+    control_plane.admit_structure_source_window(window_key=window_key, now=now)
+    lease = control_plane.claim_job(
+        worker_id="source-runtime",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+
+    original_append = postgres_module.append_runtime_event_cursor
+
+    def fail_success_event(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected source success event failure")
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", fail_success_event)
+    with pytest.raises(RuntimeError, match="injected source success event failure"):
+        control_plane.record_structure_source_page(
+            lease,
+            artifact_key="structure-source/runtime-success/source.json",
+            artifact_digest="a" * 64,
+            next_cursor=None,
+            completed=True,
+            record_count=1,
+            now=now,
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT state FROM m1_job_attempts WHERE job_key = %s AND lease_epoch = %s",
+            (lease.job_key, lease.lease_epoch),
+        )
+        assert cursor.fetchone() == ("running",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_structure_source_page_receipts WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
+            (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (0,)
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", original_append)
+    successor = control_plane.record_structure_source_page(
+        lease,
+        artifact_key="structure-source/runtime-success/source.json",
+        artifact_digest="a" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        now=now,
+    )
+    assert successor is not None
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT attempt_id FROM m1_job_attempts WHERE job_key = %s AND lease_epoch = %s",
+            (lease.job_key, lease.lease_epoch),
+        )
+        attempt_row = cursor.fetchone()
+        assert attempt_row is not None
+        attempt_id = attempt_row[0]
+        cursor.execute(
+            "SELECT event_sequence, stage, detail, idempotency_key "
+            "FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
+            (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (
+            2,
+            "commit-page",
+            {
+                "component": "structure-fetch",
+                "data_product": "structure-sync",
+                "qualification_impact": "qualified",
+                "result_code": "ok",
+            },
+            f"runtime:{attempt_id}:succeeded",
+        )
+
+
+def test_structure_bundle_success_event_rolls_back_bundle_and_generation(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    window_key = "runtime-success:bundle"
+    control_plane.admit_structure_source_window(window_key=window_key, now=now)
+    source_lease = control_plane.claim_job(
+        worker_id="source-runtime",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert source_lease is not None
+    control_plane.record_structure_source_page(
+        source_lease,
+        artifact_key="structure-source/runtime-success/bundle-source.json",
+        artifact_digest="b" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        event_embedded_markets=True,
+        now=now,
+    )
+    materializer = control_plane.claim_job(
+        worker_id="materializer-runtime",
+        job_types=("structure-materialize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert materializer is not None
+    source_digest = control_plane.structure_source_window_digest(window_key)
+    identity = StructureBundleIdentity(
+        publication_id="runtime-success-publication",
+        window_id=window_key,
+        snapshot_id=7,
+        comparison_receipt_digest=source_digest,
+        normalization_contract_version="structure-v7",
+        source_kind="gamma-source-window-events-v3-sharded",
+        component_counts={
+            "events": 1,
+            "event_tags": 0,
+            "memberships": 0,
+            "group_truth": 0,
+            "markets": 0,
+            "issues": 0,
+        },
+    )
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"runtime-success-bundle"}\n')
+    original_append = postgres_module.append_runtime_event_cursor
+
+    def fail_success_event(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected bundle success event failure")
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", fail_success_event)
+    with pytest.raises(RuntimeError, match="injected bundle success event failure"):
+        control_plane.admit_structure_source_bundle(
+            materializer,
+            identity=identity,
+            bundle=bundle,
+            ranges=(("events", "", ""),),
+            now=now,
+        )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (materializer.job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_structure_source_window_bundles WHERE window_key = %s",
+            (window_key,),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_structure_generation_inputs WHERE generation_key LIKE %s",
+            (f"{window_key}:%",),
+        )
+        assert cursor.fetchone() == (0,)
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", original_append)
+    specs = control_plane.admit_structure_source_bundle(
+        materializer,
+        identity=identity,
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )
+    assert len(specs) == 1
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT event_sequence, stage FROM m1_job_runtime_events "
+            "WHERE job_key = %s AND kind = %s",
+            (materializer.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (2, "commit-bundle")
+
+
+def test_complete_structure_range_success_event_is_atomic(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"runtime-range-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="normalize-runtime",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    original_append = postgres_module.append_runtime_event_cursor
+
+    def fail_success_event(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected range success event failure")
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", fail_success_event)
+    with pytest.raises(RuntimeError, match="injected range success event failure"):
+        control_plane.complete_structure_range(
+            lease,
+            range_digest=spec.range_digest,
+            artifact_key="structure-ranges/runtime-range/rows.ndjson",
+            artifact_digest="c" * 64,
+            record_count=1,
+            now=now,
+        )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_structure_range_receipts WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (0,)
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", original_append)
+    receipt = control_plane.complete_structure_range(
+        lease,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/runtime-range/rows.ndjson",
+        artifact_digest="c" * 64,
+        record_count=1,
+        now=now,
+    )
+    assert receipt.job_key == lease.job_key
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
+        assert cursor.fetchone() == ("succeeded",)
+        cursor.execute(
+            "SELECT state FROM m1_job_attempts WHERE job_key = %s AND lease_epoch = %s",
+            (lease.job_key, lease.lease_epoch),
+        )
+        assert cursor.fetchone() == ("succeeded",)
+        cursor.execute(
+            "SELECT event_sequence, stage FROM m1_job_runtime_events "
+            "WHERE job_key = %s AND kind = %s",
+            (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (2, "commit-range")
+
+
+def test_structure_certification_success_event_rolls_back_manifest(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"runtime-certify-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )[0]
+    range_lease = control_plane.claim_job(
+        worker_id="normalize-runtime",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert range_lease is not None
+    control_plane.record_structure_range(
+        range_lease,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/runtime-certify/rows.ndjson",
+        artifact_digest="d" * 64,
+        record_count=1,
+        now=now,
+    )
+    control_plane.finish(range_lease, state=JobState.SUCCEEDED, now=now)
+    certifier = control_plane.claim_job(
+        worker_id="certifier-runtime",
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert certifier is not None
+    manifest_digest = sha256(
+        canonical_structure_manifest_bytes(
+            generation_key=spec.generation_key,
+            bundle_digest=bundle.sha256,
+            receipts=(
+                {
+                    "job_key": spec.job_key,
+                    "component": "events",
+                    "ordinal": 0,
+                    "range_digest": spec.range_digest,
+                    "artifact_key": "structure-ranges/runtime-certify/rows.ndjson",
+                    "artifact_digest": "d" * 64,
+                    "record_count": 1,
+                },
+            ),
+        )
+    ).hexdigest()
+    original_append = postgres_module.append_runtime_event_cursor
+
+    def fail_success_event(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected certification success event failure")
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", fail_success_event)
+    with pytest.raises(RuntimeError, match="injected certification success event failure"):
+        control_plane.certify_structure_generation(
+            certifier,
+            generation_key=spec.generation_key,
+            artifact_key=f"structure-manifests/{manifest_digest}/manifest.ndjson",
+            artifact_digest=manifest_digest,
+            now=now,
+        )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state FROM m1_jobs WHERE job_key = %s", (certifier.job_key,)
+        )
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_generation_manifests WHERE generation_key = %s",
+            (spec.generation_key,),
+        )
+        assert cursor.fetchone() == (0,)
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", original_append)
+    assert (
+        control_plane.certify_structure_generation(
+            certifier,
+            generation_key=spec.generation_key,
+            artifact_key=f"structure-manifests/{manifest_digest}/manifest.ndjson",
+            artifact_digest=manifest_digest,
+            now=now,
+        )
+        == manifest_digest
+    )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT event_sequence, stage FROM m1_job_runtime_events "
+            "WHERE job_key = %s AND kind = %s",
+            (certifier.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (2, "commit-certification")
+
+
+def test_retry_runtime_events_are_atomic_and_do_not_copy_error_text(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="runtime-retry:source",
+        job_type="structure-fetch",
+        input_identity="runtime-retry:source-input",
+        now=now,
+    )
+    original_append = postgres_module.append_runtime_event_cursor
+
+    def fail_retry_event(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected retry event failure")
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", fail_retry_event)
+    with pytest.raises(RuntimeError, match="injected retry event failure"):
+        control_plane.finish_retryable_with_incident(
+            lease,
+            error_class="TimeoutError",
+            incident_key=f"incident:job-retry:{lease.job_key}",
+            dedupe_key=f"job-retry:{lease.job_key}",
+            component="structure-fetch",
+            summary="runtime retry failure",
+            detail={"error_message": "Authorization:Bearer secret", "job_key": lease.job_key},
+            channels=("dashboard",),
+            now=now,
+        )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_circuits WHERE job_key = %s", (lease.job_key,)
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s "
+            "AND kind IN (%s, %s)",
+            (
+                lease.job_key,
+                RuntimeEventKind.RETRYABLE_FAILED.value,
+                RuntimeEventKind.RETRY_SCHEDULED.value,
+            ),
+        )
+        assert cursor.fetchone() == (0,)
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", original_append)
+    control_plane.finish_retryable_with_incident(
+        lease,
+        error_class="TimeoutError",
+        incident_key=f"incident:job-retry:{lease.job_key}",
+        dedupe_key=f"job-retry:{lease.job_key}",
+        component="structure-fetch",
+        summary="runtime retry failure",
+        detail={"error_message": "Authorization:Bearer secret", "job_key": lease.job_key},
+        channels=("dashboard",),
+        now=now,
+    )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT event_sequence, kind, detail FROM m1_job_runtime_events "
+            "WHERE job_key = %s ORDER BY event_sequence",
+            (lease.job_key,),
+        )
+        events = cursor.fetchall()
+        assert [row[0] for row in events] == [1, 2, 3]
+        assert [row[1] for row in events] == [
+            RuntimeEventKind.STARTED.value,
+            RuntimeEventKind.RETRYABLE_FAILED.value,
+            RuntimeEventKind.RETRY_SCHEDULED.value,
+        ]
+        assert "error_message" not in events[1][2]
+        assert "error_class" not in events[1][2]
+        assert "secret" not in str(events[1][2]).lower()
+        assert "error_message" not in events[2][2]
+        assert "error_class" not in events[2][2]
+        assert "secret" not in str(events[2][2]).lower()

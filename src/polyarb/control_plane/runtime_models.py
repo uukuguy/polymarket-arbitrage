@@ -68,10 +68,14 @@ _DETAIL_CODE_REGISTRIES: dict[str, frozenset[str]] = {
     "component": frozenset(
         {
             "control-plane",
+            "opportunity-certify",
+            "quote-admit",
             "quote-batch",
+            "quote-certify",
             "structure-certify",
             "structure-fetch",
             "structure-materialize",
+            "structure-normalize",
         }
     ),
     "data_product": frozenset({"market-snapshot", "structure-sync"}),
