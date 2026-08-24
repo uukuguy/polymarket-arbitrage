@@ -41,6 +41,7 @@ from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
 )
+from polyarb.control_plane.recovery_executor import RecoveryExecutor
 from polyarb.control_plane.recovery_models import RecoveryActionType, RecoveryDecision
 from polyarb.control_plane.recovery_store import (
     RecoveryActionConflict,
@@ -5700,6 +5701,272 @@ def test_recovery_started_detail_uses_actual_progress_stalled_decision(
     detail = event.detail
     assert "Authorization" not in str(detail)
     assert len(str(detail)) < 4096
+
+
+def test_recovery_executor_heartbeats_exact_attempt_without_business_receipt(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-executor:heartbeat",
+        job_type="structure-normalize",
+        input_identity="recovery-executor:heartbeat",
+        now=now,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="executor-heartbeat",
+        lease_seconds=30,
+        now=now,
+    )
+    decision = RecoveryDecision(
+        action=RecoveryActionType.HEARTBEAT_JOB,
+        reason_code="job.lease-at-risk",
+        incident_severity="warning",
+        qualification_breaking=False,
+        next_check_at=now,
+    )
+    scheduled = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=decision,
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=0,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=1),
+    )
+    result = RecoveryExecutor(
+        connection_factory=control_plane._connection_factory,
+        control_plane=control_plane,
+        controller=controller,
+        worker_id="executor-heartbeat-worker",
+    ).run_once(now=now + timedelta(seconds=2))
+
+    assert result is not None and result.outcome == "succeeded"
+    assert result.action_id == scheduled.action_id
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state, result_code FROM m1_recovery_actions WHERE action_id = %s",
+            (scheduled.action_id,),
+        )
+        assert cursor.fetchone() == ("completed", "succeeded")
+        cursor.execute("SELECT count(*) FROM m1_checkpoint_receipts")
+        assert cursor.fetchone() == (0,)
+        cursor.execute("SELECT count(*) FROM m1_publication_pointers")
+        assert cursor.fetchone() == (0,)
+
+
+def test_recovery_executor_cancel_is_cooperative_retry_and_exactly_fenced(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-executor:cancel",
+        job_type="structure-normalize",
+        input_identity="recovery-executor:cancel",
+        now=now,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="executor-cancel",
+        lease_seconds=30,
+        now=now,
+    )
+    scheduled = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=_progress_stalled_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=0,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=1),
+    )
+    result = RecoveryExecutor(
+        connection_factory=control_plane._connection_factory,
+        control_plane=control_plane,
+        controller=controller,
+        worker_id="executor-cancel-worker",
+    ).run_once(now=now + timedelta(seconds=2))
+
+    assert result is not None and result.outcome == "succeeded"
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state, lease_owner FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == ("retryable", None)
+        cursor.execute(
+            "SELECT state, result_code FROM m1_recovery_actions WHERE action_id = %s",
+            (scheduled.action_id,),
+        )
+        assert cursor.fetchone() == ("completed", "succeeded")
+        cursor.execute(
+            "SELECT count(*) FROM m1_publication_pointers WHERE pointer_key LIKE %s",
+            (f"%{lease.job_key}%",),
+        )
+        assert cursor.fetchone() == (0,)
+
+
+def test_recovery_executor_reclaims_expired_lease_without_claiming_another_job(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-executor:reclaim",
+        job_type="structure-normalize",
+        input_identity="recovery-executor:reclaim",
+        now=now,
+        lease_seconds=1,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="executor-reclaim",
+        lease_seconds=30,
+        now=now + timedelta(seconds=2),
+    )
+    scheduled = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=0,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=2),
+    )
+    result = RecoveryExecutor(
+        connection_factory=control_plane._connection_factory,
+        control_plane=control_plane,
+        controller=controller,
+        worker_id="executor-reclaim-worker",
+    ).run_once(now=now + timedelta(seconds=3))
+
+    assert result is not None and result.outcome == "succeeded"
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state, lease_owner, lease_expires_at FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        state, owner, expires_at = cursor.fetchone()
+        assert state == "retryable"
+        assert owner is None and expires_at is None
+        cursor.execute(
+            "SELECT state, recovery_state FROM m1_job_attempts AS a "
+            "JOIN m1_job_runtime_state AS r USING (job_key, lease_epoch) "
+            "WHERE a.attempt_id = %s",
+            (attempt_id,),
+        )
+        assert cursor.fetchone() == ("retryable", "recovered")
+        cursor.execute(
+            "SELECT state, result_code FROM m1_recovery_actions WHERE action_id = %s",
+            (scheduled.action_id,),
+        )
+        assert cursor.fetchone() == ("completed", "succeeded")
+
+
+def test_recovery_executor_releases_one_due_circuit_probe(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-executor:probe",
+        job_type="structure-normalize",
+        input_identity="recovery-executor:probe",
+        now=now,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            "UPDATE m1_jobs SET state = 'retryable', lease_owner = NULL, "
+            "lease_expires_at = NULL, next_attempt_at = %s WHERE job_key = %s",
+            (now + timedelta(seconds=30), lease.job_key),
+        )
+        connection.execute(
+            "INSERT INTO m1_job_circuits "
+            "(job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at) "
+            "VALUES (%s, 3, 'open', %s, %s, %s)",
+            (lease.job_key, now - timedelta(minutes=5), now - timedelta(seconds=1), now),
+        )
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="executor-probe",
+        lease_seconds=30,
+        now=now,
+    )
+    decision = RecoveryDecision(
+        action=RecoveryActionType.PROBE_CIRCUIT,
+        reason_code="circuit.probe-due",
+        incident_severity="warning",
+        qualification_breaking=False,
+        next_check_at=now,
+    )
+    scheduled = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=decision,
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="circuit",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=0,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=1),
+    )
+    result = RecoveryExecutor(
+        connection_factory=control_plane._connection_factory,
+        control_plane=control_plane,
+        controller=controller,
+        worker_id="executor-probe-worker",
+    ).run_once(now=now + timedelta(seconds=2))
+
+    assert result is not None and result.outcome == "succeeded"
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state, next_attempt_at FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == ("retryable", now + timedelta(seconds=2))
+        cursor.execute(
+            "SELECT state, next_probe_at > %s FROM m1_job_circuits WHERE job_key = %s",
+            (now + timedelta(seconds=2), lease.job_key),
+        )
+        assert cursor.fetchone() == ("open", True)
+        cursor.execute(
+            "SELECT state, result_code FROM m1_recovery_actions WHERE action_id = %s",
+            (scheduled.action_id,),
+        )
+        assert cursor.fetchone() == ("completed", "succeeded")
 
 
 def test_checkpoint_is_idempotent_and_fenced(control_plane: PostgresControlPlane) -> None:
