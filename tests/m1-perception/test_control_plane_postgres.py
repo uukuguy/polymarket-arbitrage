@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from typing import Any, LiteralString, cast
 
 import psycopg
 import pytest
+from psycopg import sql
+from psycopg.rows import dict_row
 
 from polyarb.control_plane.models import (
     JobState,
@@ -177,6 +180,52 @@ def test_cloud_soak_ledger_is_append_only_and_idempotent(
         "latest_run_id": "formal-cloud-v1",
         "latest_observed_at": "2030-01-01T00:00:00+00:00",
     }
+
+
+def test_read_soak_observations_uses_bounded_read_only_transaction() -> None:
+    commands: list[str] = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, sql: str, params: object = None) -> None:
+            commands.append(" ".join(sql.split()))
+            if "FROM m1_soak_observations" in sql:
+                assert params == ("formal-cloud-v1",)
+
+        def fetchall(self):
+            return [
+                {"record": {"observed_at": "2030-01-01T00:00:00+00:00", "sample": 1}},
+                {"record": {"observed_at": "2030-01-01T00:05:00+00:00", "sample": 2}},
+            ]
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def cursor(self, **kwargs: object):
+            assert kwargs == {"row_factory": dict_row}
+            return Cursor()
+
+    factory = cast(Callable[[], psycopg.Connection[Any]], lambda: Connection())
+    observations = PostgresControlPlane(factory).read_soak_observations("formal-cloud-v1")
+
+    assert observations == (
+        {"observed_at": "2030-01-01T00:00:00+00:00", "sample": 1},
+        {"observed_at": "2030-01-01T00:05:00+00:00", "sample": 2},
+    )
+    assert commands[:3] == [
+        "SET TRANSACTION READ ONLY",
+        "SET LOCAL statement_timeout = '5000ms'",
+        "SELECT record FROM m1_soak_observations WHERE run_id = %s ORDER BY observed_at ASC",
+    ]
 
 
 def _now() -> datetime:
@@ -1246,7 +1295,7 @@ def test_quote_batch_spec_normalizes_one_immutable_token_range() -> None:
     assert batch.input_identity.startswith(f"quote:{'a' * 64}:{'b' * 64}:2:")
 
 
-def test_deployment_preflight_requires_named_database_and_all_021_tables(
+def test_deployment_preflight_requires_named_database_and_all_022_runtime_invariants(
     control_plane: PostgresControlPlane,
 ) -> None:
     with control_plane._connection_factory() as connection:  # noqa: SLF001
@@ -1254,9 +1303,80 @@ def test_deployment_preflight_requires_named_database_and_all_021_tables(
     assert database_name is not None
     result = control_plane.deployment_preflight(expected_database=str(database_name[0]))
     assert result["database_name"] == database_name[0]
-    assert result["revision_021_tables"] == 21
+    assert result["revision_022_tables"] == 23
+    assert result["runtime_event_invariants"] == [
+        "append_only_function",
+        "append_only_trigger",
+        "unique_attempt_event_sequence",
+        "unique_idempotency_key",
+    ]
     with pytest.raises(Exception, match="database identity mismatch"):
         control_plane.deployment_preflight(expected_database="not-the-control-plane")
+
+
+def _run_alembic(postgres_dsn: str, *args: str) -> None:
+    result = subprocess.run(
+        ["uv", "run", "alembic", *args],
+        env={**os.environ, "POLYARB_SUPABASE_DB_DSN": postgres_dsn},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_deployment_preflight_rejects_021_database_before_runtime_workers(
+    postgres_dsn: str,
+) -> None:
+    _run_alembic(postgres_dsn, "downgrade", "021")
+    try:
+        control_plane = PostgresControlPlane(lambda: psycopg.connect(postgres_dsn))
+        with psycopg.connect(postgres_dsn) as connection:
+            database_name = connection.execute("SELECT current_database()").fetchone()
+        assert database_name is not None
+        with pytest.raises(Exception, match="revision 022 runtime schema is incomplete"):
+            control_plane.deployment_preflight(expected_database=str(database_name[0]))
+    finally:
+        _run_alembic(postgres_dsn, "upgrade", "head")
+
+
+@pytest.mark.parametrize(
+    ("break_sql", "restore_sql"),
+    (
+        (
+            "ALTER TABLE m1_job_runtime_events "
+            "DROP CONSTRAINT uq_m1_runtime_events_attempt_sequence",
+            "ALTER TABLE m1_job_runtime_events ADD CONSTRAINT "
+            "uq_m1_runtime_events_attempt_sequence UNIQUE (attempt_id, event_sequence)",
+        ),
+        (
+            "ALTER TABLE m1_job_runtime_events "
+            "DROP CONSTRAINT uq_m1_runtime_events_idempotency",
+            "ALTER TABLE m1_job_runtime_events ADD CONSTRAINT "
+            "uq_m1_runtime_events_idempotency UNIQUE (idempotency_key)",
+        ),
+        (
+            "DROP TRIGGER m1_runtime_events_immutable ON m1_job_runtime_events",
+            "CREATE TRIGGER m1_runtime_events_immutable BEFORE UPDATE OR DELETE "
+            "ON m1_job_runtime_events FOR EACH ROW EXECUTE FUNCTION "
+            "m1_reject_runtime_event_mutation()",
+        ),
+    ),
+)
+def test_deployment_preflight_rejects_runtime_event_invariant_drift(
+    postgres_dsn: str, break_sql: LiteralString, restore_sql: LiteralString
+) -> None:
+    control_plane = PostgresControlPlane(lambda: psycopg.connect(postgres_dsn))
+    with psycopg.connect(postgres_dsn) as connection:
+        database_name = connection.execute("SELECT current_database()").fetchone()
+        connection.execute(sql.SQL(break_sql))
+    assert database_name is not None
+    try:
+        with pytest.raises(Exception, match="runtime event invariants are incomplete"):
+            control_plane.deployment_preflight(expected_database=str(database_name[0]))
+    finally:
+        with psycopg.connect(postgres_dsn) as connection:
+            connection.execute(sql.SQL(restore_sql))
 
 
 def test_enqueue_quote_generation_is_deterministic(control_plane: PostgresControlPlane) -> None:

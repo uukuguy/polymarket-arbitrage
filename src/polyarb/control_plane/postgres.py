@@ -251,6 +251,8 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
             cursor.execute(
                 """
                 SELECT record FROM m1_soak_observations
@@ -261,7 +263,7 @@ class PostgresControlPlane:
             return tuple(dict(row["record"]) for row in cursor.fetchall())
 
     def deployment_preflight(self, *, expected_database: str) -> dict[str, object]:
-        """Prove the named authority has the complete additive 021 schema.
+        """Prove the named authority has the complete additive 022 schema.
 
         This is intentionally read-only: passing it authorizes shadow-only
         operator steps, never a migration, scheduler loop, or pointer change.
@@ -290,6 +292,14 @@ class PostgresControlPlane:
             "m1_structure_source_page_receipts",
             "m1_structure_source_window_bundles",
             "m1_cloud_usage_observations",
+            "m1_job_runtime_state",
+            "m1_job_runtime_events",
+        )
+        expected_runtime_invariants = (
+            "append_only_function",
+            "append_only_trigger",
+            "unique_attempt_event_sequence",
+            "unique_idempotency_key",
         )
         with (
             self._connection_factory() as connection,
@@ -315,7 +325,9 @@ class PostgresControlPlane:
             )
             found = {str(row["relname"]) for row in cursor.fetchall()}
             if found != set(required_tables):
-                raise ControlPlaneError("control-plane revision 021 schema is incomplete")
+                raise ControlPlaneError(
+                    "control-plane revision 022 runtime schema is incomplete"
+                )
             cursor.execute(
                 """
                 SELECT attname FROM pg_catalog.pg_attribute
@@ -328,10 +340,108 @@ class PostgresControlPlane:
             delivery_lease_columns = {str(row["attname"]) for row in cursor.fetchall()}
             if delivery_lease_columns != {"lease_owner", "lease_epoch", "lease_expires_at"}:
                 raise ControlPlaneError("control-plane alert delivery lease schema is incomplete")
+            cursor.execute(
+                """
+                SELECT constraint_name, columns
+                FROM (
+                    SELECT
+                        pg_constraint.conname AS constraint_name,
+                        array_agg(pg_attribute.attname ORDER BY key.ordinality) AS columns
+                    FROM pg_catalog.pg_constraint
+                    JOIN pg_catalog.pg_class
+                      ON pg_class.oid = pg_constraint.conrelid
+                    JOIN pg_catalog.pg_namespace
+                      ON pg_namespace.oid = pg_class.relnamespace
+                    JOIN unnest(pg_constraint.conkey)
+                      WITH ORDINALITY AS key(attnum, ordinality)
+                      ON true
+                    JOIN pg_catalog.pg_attribute
+                      ON pg_attribute.attrelid = pg_class.oid
+                     AND pg_attribute.attnum = key.attnum
+                    WHERE pg_namespace.nspname = 'public'
+                      AND pg_class.relname = 'm1_job_runtime_events'
+                      AND pg_constraint.contype = 'u'
+                      AND pg_constraint.conname = ANY(%s)
+                    GROUP BY pg_constraint.conname
+                ) AS runtime_constraints
+                """,
+                (
+                    [
+                        "uq_m1_runtime_events_attempt_sequence",
+                        "uq_m1_runtime_events_idempotency",
+                    ],
+                ),
+            )
+            runtime_constraints = {
+                str(row["constraint_name"]): tuple(str(column) for column in row["columns"])
+                for row in cursor.fetchall()
+            }
+            found_runtime_invariants: list[str] = []
+            if runtime_constraints.get("uq_m1_runtime_events_attempt_sequence") == (
+                "attempt_id",
+                "event_sequence",
+            ):
+                found_runtime_invariants.append("unique_attempt_event_sequence")
+            if runtime_constraints.get("uq_m1_runtime_events_idempotency") == (
+                "idempotency_key",
+            ):
+                found_runtime_invariants.append("unique_idempotency_key")
+            cursor.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_proc
+                    JOIN pg_catalog.pg_namespace
+                      ON pg_namespace.oid = pg_proc.pronamespace
+                    WHERE pg_namespace.nspname = 'public'
+                      AND pg_proc.proname = 'm1_reject_runtime_event_mutation'
+                      AND pg_proc.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype
+                ) AS present
+                """
+            )
+            function_row = cursor.fetchone()
+            if function_row is not None and bool(function_row["present"]):
+                found_runtime_invariants.append("append_only_function")
+            cursor.execute(
+                """
+                SELECT pg_get_triggerdef(pg_trigger.oid) AS trigger_definition,
+                       pg_trigger.tgenabled AS enabled
+                FROM pg_catalog.pg_trigger
+                JOIN pg_catalog.pg_class
+                  ON pg_class.oid = pg_trigger.tgrelid
+                JOIN pg_catalog.pg_namespace
+                  ON pg_namespace.oid = pg_class.relnamespace
+                JOIN pg_catalog.pg_proc
+                  ON pg_proc.oid = pg_trigger.tgfoid
+                WHERE pg_namespace.nspname = 'public'
+                  AND pg_class.relname = 'm1_job_runtime_events'
+                  AND pg_trigger.tgname = 'm1_runtime_events_immutable'
+                  AND pg_trigger.tgisinternal IS FALSE
+                  AND pg_proc.proname = 'm1_reject_runtime_event_mutation'
+                """
+            )
+            trigger = cursor.fetchone()
+            if trigger is not None:
+                trigger_definition = str(trigger["trigger_definition"])
+                if (
+                    str(trigger["enabled"]) != "D"
+                    and "BEFORE" in trigger_definition
+                    and "UPDATE" in trigger_definition
+                    and "DELETE" in trigger_definition
+                    and "FOR EACH ROW" in trigger_definition
+                ):
+                    found_runtime_invariants.append("append_only_trigger")
+            if tuple(sorted(found_runtime_invariants)) != tuple(
+                sorted(expected_runtime_invariants)
+            ):
+                raise ControlPlaneError(
+                    "control-plane revision 022 runtime event invariants are incomplete"
+                )
             return {
                 "database_name": str(identity["database_name"]),
                 "postgres_version": str(identity["postgres_version"]),
-                "revision_021_tables": len(found),
+                "revision_022_tables": len(found),
+                "runtime_event_invariants": list(expected_runtime_invariants),
             }
 
     def enqueue_job(
