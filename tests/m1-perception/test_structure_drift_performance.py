@@ -1844,6 +1844,10 @@ def _fresh_projection_query_plan_evidence(db_path: Path) -> dict[str, bool]:
         "idx_structure_event_member_resume",
         "sqlite_autoindex_structure_sync_event_member_staging_1",
     )
+    approved_market_count_indexes = (
+        "idx_structure_sync_market_ordinal",
+        "sqlite_autoindex_structure_sync_market_staging_1",
+    )
     print(
         "fresh-projection-query-plans "
         + json.dumps(
@@ -1874,9 +1878,11 @@ def _fresh_projection_query_plan_evidence(db_path: Path) -> dict[str, bool]:
         "event_only_page_uses_market_index": (
             "sqlite_autoindex_structure_sync_market_staging_1" in event_only_plan
         ),
-        "candidate_market_count_uses_staging_index": (
-            "sqlite_autoindex_structure_sync_market_staging_1"
-            in market_count_plan
+        "market_count_uses_approved_covering_index": (
+            any(
+                index_name in market_count_plan
+                for index_name in approved_market_count_indexes
+            )
         ),
         "candidate_count_uses_sidecar_index": (
             "idx_structure_event_member_market" in candidate_count_plan
@@ -1977,7 +1983,7 @@ def test_120k_production_shaped_candidate_count_antijoin_uses_indexes(
     assert evidence["event_only_page_scans_member"] is False
     assert evidence["event_only_page_uses_temp_sort"] is False
     assert evidence["event_only_page_uses_market_index"] is True
-    assert evidence["candidate_market_count_uses_staging_index"] is True
+    assert evidence["market_count_uses_approved_covering_index"] is True
     assert evidence["candidate_count_uses_sidecar_index"] is True
     assert evidence["candidate_count_uses_market_index"] is True
     assert evidence["candidate_count_scans_market"] is False

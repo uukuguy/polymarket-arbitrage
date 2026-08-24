@@ -368,7 +368,7 @@ def _insert_terminal_receipt(
     return receipt_digest
 
 
-def _stale_overlap_v3_store(tmp_path: Path) -> tuple[SQLiteStore, str]:
+def _stale_overlap_current_store(tmp_path: Path) -> tuple[SQLiteStore, str]:
     store = _drift_store(tmp_path)
     with sqlite3.connect(store.db_path) as con:
         con.execute("DROP TRIGGER trg_structure_generation_markets_frozen_update_v2")
@@ -381,7 +381,7 @@ def _stale_overlap_v3_store(tmp_path: Path) -> tuple[SQLiteStore, str]:
     return store, comparison_id
 
 
-def _stale_unclassified_v3_store(tmp_path: Path) -> tuple[SQLiteStore, str]:
+def _stale_unclassified_current_store(tmp_path: Path) -> tuple[SQLiteStore, str]:
     store = _drift_store(tmp_path, omit_generation_market_id="addition")
     comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
     assert _run_drift_to_terminal(store, comparison_id) == "stale"
@@ -397,7 +397,7 @@ def _rewrite_stale_terminal_class_evidence(
     terminal_reason: str | None = None,
 ) -> None:
     fields = sqlite_store_module._structure_drift_terminal_receipt_fields(
-        STRUCTURE_DRIFT_CLASSIFIER_V3
+        STRUCTURE_DRIFT_CLASSIFIER_V4
     )
     counts_json = json.dumps(class_counts, sort_keys=True, separators=(",", ":"))
     digests_json = json.dumps(class_digests, sort_keys=True, separators=(",", ":"))
@@ -446,7 +446,7 @@ def _rewrite_stale_terminal_diagnostic_evidence(
     diagnostic_samples: dict[str, object] | None = None,
 ) -> None:
     fields = sqlite_store_module._structure_drift_terminal_receipt_fields(
-        STRUCTURE_DRIFT_CLASSIFIER_V3
+        STRUCTURE_DRIFT_CLASSIFIER_V4
     )
     with sqlite3.connect(store.db_path) as con:
         row = con.execute(
@@ -588,7 +588,7 @@ def _assert_stale_terminal_public_aggregate(
 
 
 def test_stale_terminal_relabel_cannot_change_public_semantics(tmp_path: Path) -> None:
-    store, comparison_id = _stale_unclassified_v3_store(tmp_path)
+    store, comparison_id = _stale_unclassified_current_store(tmp_path)
     counts, root, samples = _stale_terminal_diagnostic_evidence(store, comparison_id)
     total = sum(int(value) for value in counts.values())
     sample_values = [sample for values in samples.values() for sample in values]
@@ -623,7 +623,7 @@ def test_stale_terminal_relabel_cannot_change_public_semantics(tmp_path: Path) -
 def test_stale_terminal_joint_overlap_forgery_cannot_change_public_reason(
     tmp_path: Path,
 ) -> None:
-    store, comparison_id = _stale_unclassified_v3_store(tmp_path)
+    store, comparison_id = _stale_unclassified_current_store(tmp_path)
     counts, digests = _stale_terminal_class_evidence(store, comparison_id)
     diagnostic_counts, root, _ = _stale_terminal_diagnostic_evidence(
         store, comparison_id
@@ -649,7 +649,7 @@ def test_stale_terminal_joint_overlap_forgery_cannot_change_public_reason(
 def test_stale_terminal_suppresses_well_formed_wrong_positive_root(
     tmp_path: Path,
 ) -> None:
-    store, comparison_id = _stale_overlap_v3_store(tmp_path)
+    store, comparison_id = _stale_overlap_current_store(tmp_path)
     counts, digests = _stale_terminal_class_evidence(store, comparison_id)
     digests["overlap-conflict"] = "f" * 64
     _rewrite_stale_terminal_class_evidence(
@@ -667,7 +667,7 @@ def test_stale_terminal_suppresses_well_formed_wrong_positive_root(
 def test_stale_unclassified_suppresses_well_formed_count_and_root_injection(
     tmp_path: Path,
 ) -> None:
-    store, comparison_id = _stale_unclassified_v3_store(tmp_path)
+    store, comparison_id = _stale_unclassified_current_store(tmp_path)
     counts, digests = _stale_terminal_class_evidence(store, comparison_id)
     counts["fresh-addition"] = 100
     digests["fresh-addition"] = "e" * 64
@@ -686,7 +686,7 @@ def test_stale_unclassified_suppresses_well_formed_count_and_root_injection(
 def test_stale_terminal_rejects_joint_diagnostic_evidence_forgery(
     tmp_path: Path,
 ) -> None:
-    store, comparison_id = _stale_unclassified_v3_store(tmp_path)
+    store, comparison_id = _stale_unclassified_current_store(tmp_path)
     _rewrite_stale_terminal_diagnostic_evidence(
         store,
         comparison_id,
@@ -703,7 +703,7 @@ def test_stale_terminal_rejects_joint_diagnostic_evidence_forgery(
 def test_stale_terminal_rejects_joint_terminal_reason_forgery(
     tmp_path: Path,
 ) -> None:
-    store, comparison_id = _stale_unclassified_v3_store(tmp_path)
+    store, comparison_id = _stale_unclassified_current_store(tmp_path)
     _rewrite_stale_terminal_diagnostic_evidence(
         store,
         comparison_id,
@@ -718,7 +718,7 @@ def test_stale_terminal_rejects_joint_terminal_reason_forgery(
 def test_stale_terminal_rejects_joint_invented_class_count_forgery(
     tmp_path: Path,
 ) -> None:
-    store, comparison_id = _stale_overlap_v3_store(tmp_path)
+    store, comparison_id = _stale_overlap_current_store(tmp_path)
     _rewrite_stale_terminal_class_evidence(
         store,
         comparison_id,
@@ -746,7 +746,7 @@ def test_stale_terminal_rejects_invalid_class_commitment(
     tmp_path: Path,
     tamper: str,
 ) -> None:
-    store, comparison_id = _stale_overlap_v3_store(tmp_path)
+    store, comparison_id = _stale_overlap_current_store(tmp_path)
     counts, digests = _stale_terminal_class_evidence(store, comparison_id)
     if tamper == "negative-count":
         counts["overlap-conflict"] = -1
@@ -3707,7 +3707,7 @@ def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
     } <= observed_phases
     with sqlite3.connect(store.db_path) as con:
         receipt_fields = sqlite_store_module._structure_drift_receipt_fields(
-            STRUCTURE_DRIFT_CLASSIFIER_V3
+            STRUCTURE_DRIFT_CLASSIFIER_V4
         )
         row = con.execute(
             "SELECT "
@@ -3786,7 +3786,7 @@ def test_nonempty_drift_state_machine_seals_all_partitions_and_receipt(
     assert tampered_status["reason"] == "structure-drift-receipt-invalid"
 
 
-def test_v3_checkpoint_commitments_are_chunk_partition_independent(
+def test_current_checkpoint_commitments_are_chunk_partition_independent(
     tmp_path: Path,
 ) -> None:
     commitment_fields = (
@@ -3853,7 +3853,7 @@ def test_v3_checkpoint_commitments_are_chunk_partition_independent(
     assert observed[0] == observed[1] == observed[2]
 
 
-def test_v3_checkpoint_conserves_one_member_and_every_exclusion_reason(
+def test_current_checkpoint_conserves_one_member_and_every_exclusion_reason(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3864,7 +3864,7 @@ def test_v3_checkpoint_conserves_one_member_and_every_exclusion_reason(
         generation_snapshot_id=2,
         cursor=None,
         limit=500,
-        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V3,
+        classifier_contract=STRUCTURE_DRIFT_CLASSIFIER_V4,
     )
     member = next(
         item
@@ -4119,14 +4119,14 @@ def _run_drift_to_terminal(
     pytest.fail("drift comparison did not terminate")
 
 
-def _sealed_v3_store(tmp_path: Path) -> tuple[SQLiteStore, str]:
+def _sealed_current_store(tmp_path: Path) -> tuple[SQLiteStore, str]:
     store = _drift_store(tmp_path)
     comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
     assert _run_drift_to_terminal(store, comparison_id) == "sealed"
     return store, comparison_id
 
 
-def _rewrite_v3_exclusion_evidence(
+def _rewrite_current_exclusion_evidence(
     store: SQLiteStore,
     comparison_id: str,
     *,
@@ -4136,7 +4136,7 @@ def _rewrite_v3_exclusion_evidence(
     corrupt_digest: bool = False,
 ) -> None:
     fields = sqlite_store_module._structure_drift_receipt_fields(
-        STRUCTURE_DRIFT_CLASSIFIER_V3
+        STRUCTURE_DRIFT_CLASSIFIER_V4
     )
     with sqlite3.connect(store.db_path) as con:
         row = con.execute(
@@ -4189,15 +4189,15 @@ def _rewrite_v3_exclusion_evidence(
         )
 
 
-def test_v3_sealed_status_exposes_authenticated_expected_exclusions(
+def test_current_sealed_status_exposes_authenticated_expected_exclusions(
     tmp_path: Path,
 ) -> None:
-    store, _ = _sealed_v3_store(tmp_path)
+    store, _ = _sealed_current_store(tmp_path)
 
     status = store.structure_generation_drift_status()
 
     assert status["authorized"] is True
-    assert status["classifier_contract_version"] == STRUCTURE_DRIFT_CLASSIFIER_V3
+    assert status["classifier_contract_version"] == STRUCTURE_DRIFT_CLASSIFIER_V4
     assert status["projection_candidate_count"] == (
         status["projection_member_count"]
         + status["projection_exclusion_count"]
@@ -4215,7 +4215,7 @@ def test_v3_sealed_status_exposes_authenticated_expected_exclusions(
     assert all(value > 0 for value in status["projection_exclusion_counts"].values())
 
 
-def _forge_v3_terminal_candidate_and_exclusion_count(
+def _forge_current_terminal_candidate_and_exclusion_count(
     store: SQLiteStore,
     comparison_id: str,
     *,
@@ -4228,11 +4228,11 @@ def _forge_v3_terminal_candidate_and_exclusion_count(
     )
     receipt_fields = (
         sqlite_store_module._structure_drift_receipt_fields(
-            STRUCTURE_DRIFT_CLASSIFIER_V3
+            STRUCTURE_DRIFT_CLASSIFIER_V4
         )
         if terminal == "sealed"
         else sqlite_store_module._structure_drift_terminal_receipt_fields(
-            STRUCTURE_DRIFT_CLASSIFIER_V3
+            STRUCTURE_DRIFT_CLASSIFIER_V4
         )
     )
     digest_helper = (
@@ -4314,20 +4314,20 @@ def _forge_v3_terminal_candidate_and_exclusion_count(
 
 
 @pytest.mark.parametrize("terminal", ("sealed", "stale"))
-def test_v3_terminal_status_recomputes_pinned_candidate_count_before_exposure(
+def test_current_terminal_status_recomputes_pinned_candidate_count_before_exposure(
     tmp_path: Path,
     terminal: str,
 ) -> None:
     if terminal == "sealed":
-        store, comparison_id = _sealed_v3_store(tmp_path)
+        store, comparison_id = _sealed_current_store(tmp_path)
         assert store.structure_generation_drift_status()["authorized"] is True
     else:
-        store, comparison_id = _stale_unclassified_v3_store(tmp_path)
+        store, comparison_id = _stale_unclassified_current_store(tmp_path)
         _assert_stale_terminal_public_evidence_suppressed(
             store.structure_generation_drift_status()
         )
 
-    _forge_v3_terminal_candidate_and_exclusion_count(
+    _forge_current_terminal_candidate_and_exclusion_count(
         store, comparison_id, terminal=terminal
     )
 
@@ -4343,11 +4343,11 @@ def test_v3_terminal_status_recomputes_pinned_candidate_count_before_exposure(
 
 
 @pytest.mark.parametrize("tamper", ("unknown-reason", "missing-reason", "count-sum", "one-root"))
-def test_v3_sealed_status_rejects_semantic_exclusion_tamper(
+def test_current_sealed_status_rejects_semantic_exclusion_tamper(
     tmp_path: Path,
     tamper: str,
 ) -> None:
-    store, comparison_id = _sealed_v3_store(tmp_path)
+    store, comparison_id = _sealed_current_store(tmp_path)
     status = store.structure_generation_drift_status()
     counts = dict(status["projection_exclusion_counts"])
     roots = dict(status["projection_exclusion_roots"])
@@ -4378,7 +4378,7 @@ def test_v3_sealed_status_rejects_semantic_exclusion_tamper(
     else:
         reason = next(iter(roots))
         raw_roots[reason] = "f" * 64
-    _rewrite_v3_exclusion_evidence(
+    _rewrite_current_exclusion_evidence(
         store,
         comparison_id,
         counts=raw_counts,
@@ -4393,9 +4393,9 @@ def test_v3_sealed_status_rejects_semantic_exclusion_tamper(
     assert "projection_exclusion_roots" not in tampered
 
 
-def test_v3_sealed_status_rejects_receipt_digest_tamper(tmp_path: Path) -> None:
-    store, comparison_id = _sealed_v3_store(tmp_path)
-    _rewrite_v3_exclusion_evidence(store, comparison_id, corrupt_digest=True)
+def test_current_sealed_status_rejects_receipt_digest_tamper(tmp_path: Path) -> None:
+    store, comparison_id = _sealed_current_store(tmp_path)
+    _rewrite_current_exclusion_evidence(store, comparison_id, corrupt_digest=True)
 
     status = store.structure_generation_drift_status()
 
@@ -4404,10 +4404,10 @@ def test_v3_sealed_status_rejects_receipt_digest_tamper(tmp_path: Path) -> None:
     assert "projection_candidate_count" not in status
 
 
-def test_invalid_v3_receipt_never_falls_back_to_valid_v2_authority(
+def test_invalid_current_receipt_never_falls_back_to_valid_v2_authority(
     tmp_path: Path,
 ) -> None:
-    store, comparison_id = _sealed_v3_store(tmp_path)
+    store, comparison_id = _sealed_current_store(tmp_path)
     v2_comparison_id = "2" * 64
     with sqlite3.connect(store.db_path) as con:
         progress_columns = [
@@ -4436,16 +4436,16 @@ def test_invalid_v3_receipt_never_falls_back_to_valid_v2_authority(
             + ")",
             tuple(historical_progress[column] for column in progress_columns),
         )
-        v3_fields = sqlite_store_module._structure_drift_receipt_fields(
-            STRUCTURE_DRIFT_CLASSIFIER_V3
+        current_fields = sqlite_store_module._structure_drift_receipt_fields(
+            STRUCTURE_DRIFT_CLASSIFIER_V4
         )
         receipt_row = con.execute(
-            "SELECT " + ",".join(v3_fields) + " FROM "
+            "SELECT " + ",".join(current_fields) + " FROM "
             "structure_generation_drift_receipts WHERE comparison_id=?",
             (comparison_id,),
         ).fetchone()
         assert receipt_row is not None
-        v3_payload = dict(zip(v3_fields, receipt_row, strict=True))
+        current_payload = dict(zip(current_fields, receipt_row, strict=True))
         v2_fields = sqlite_store_module._structure_drift_receipt_fields(
             STRUCTURE_DRIFT_CLASSIFIER_V2
         )
@@ -4455,7 +4455,7 @@ def test_invalid_v3_receipt_never_falls_back_to_valid_v2_authority(
                 if field == "comparison_id"
                 else STRUCTURE_DRIFT_CLASSIFIER_V2
                 if field == "classifier_contract_version"
-                else v3_payload[field]
+                else current_payload[field]
             )
             for field in v2_fields
         }
@@ -4468,7 +4468,7 @@ def test_invalid_v3_receipt_never_falls_back_to_valid_v2_authority(
             + ")",
             (*(v2_payload[field] for field in v2_fields), v2_digest),
         )
-    _rewrite_v3_exclusion_evidence(store, comparison_id, corrupt_digest=True)
+    _rewrite_current_exclusion_evidence(store, comparison_id, corrupt_digest=True)
 
     status = store.structure_generation_drift_status()
 
@@ -4487,12 +4487,12 @@ def test_invalid_v3_receipt_never_falls_back_to_valid_v2_authority(
         "projection_exclusion_roots_json",
     ),
 )
-def test_v3_sealed_status_rejects_null_v3_receipt_fields(
+def test_current_sealed_status_rejects_null_current_receipt_fields(
     tmp_path: Path,
     null_field: str,
 ) -> None:
-    store, comparison_id = _sealed_v3_store(tmp_path)
-    _rewrite_v3_exclusion_evidence(
+    store, comparison_id = _sealed_current_store(tmp_path)
+    _rewrite_current_exclusion_evidence(
         store,
         comparison_id,
         null_field=null_field,
@@ -4505,7 +4505,7 @@ def test_v3_sealed_status_rejects_null_v3_receipt_fields(
     assert "projection_exclusion_count" not in status
 
 
-def _advance_to_v3_finalization_checkpoint(
+def _advance_to_finalization_checkpoint(
     store: SQLiteStore, comparison_id: str
 ) -> int:
     now_ms = 3_001
@@ -4540,14 +4540,14 @@ def _advance_to_v3_finalization_checkpoint(
         ("exclusion-root", "structure-drift-exclusion-commitment-invalid"),
     ),
 )
-def test_v3_candidate_conservation_finalizer_rejects_independent_tamper(
+def test_current_candidate_conservation_finalizer_rejects_independent_tamper(
     tmp_path: Path,
     tamper: str,
     reason: str,
 ) -> None:
     store = _drift_store(tmp_path)
     comparison_id = store.initialize_structure_drift_comparison(now_ms=3_000)
-    now_ms = _advance_to_v3_finalization_checkpoint(store, comparison_id)
+    now_ms = _advance_to_finalization_checkpoint(store, comparison_id)
     with sqlite3.connect(store.db_path) as con:
         if tamper == "candidate-conservation":
             con.execute(
