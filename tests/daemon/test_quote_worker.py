@@ -1407,15 +1407,18 @@ async def test_hard_timeout_explicitly_waits_if_killed_child_pipes_never_close(
     async def spawn(*_args, **_kwargs):
         return process
 
+    db_path = tmp_path / "state.db"
+    settings = Settings(
+        db_path=db_path,
+        neg_risk_quote_child_hard_limit_s=0.08,
+        neg_risk_quote_fetch_timeout_s=0.05,
+        neg_risk_quote_shutdown_reserve_s=0.02,
+    )
+    SQLiteStore(db_path).init_schema()
     started = time.monotonic()
     with pytest.raises(QuoteCollectionSubprocessError, match="subprocess-timeout"):
         await collect_quotes_in_subprocess(
-            Settings(
-                db_path=tmp_path / "state.db",
-                neg_risk_quote_child_hard_limit_s=0.08,
-                neg_risk_quote_fetch_timeout_s=0.05,
-                neg_risk_quote_shutdown_reserve_s=0.02,
-            ),
+            settings,
             spawn=spawn,
             terminate_timeout_s=0.01,
         )
@@ -1425,7 +1428,7 @@ async def test_hard_timeout_explicitly_waits_if_killed_child_pipes_never_close(
     assert time.monotonic() - process.terminated_at < 0.08
     assert process.killed is True
     assert process.wait_called is True
-    attempt = NegRiskQuoteStore(tmp_path / "state.db").latest_collection_attempt()
+    attempt = NegRiskQuoteStore(db_path).latest_collection_attempt()
     assert attempt is not None
     assert attempt["outcome"] == "failed"
     await asyncio.sleep(0.05)
