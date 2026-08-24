@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import monotonic
@@ -116,6 +118,97 @@ async def _terminal_to_thread(call: Callable[..., Any], *args: Any, **kwargs: An
         return result
 
 
+def _run_bounded_sync_call[SyncResult](
+    call: Callable[[], SyncResult],
+    *,
+    heartbeat: Callable[[], None] | None,
+    heartbeat_interval_seconds: float,
+    attempt_timeout_seconds: float,
+    monotonic_clock: Callable[[], float] = monotonic,
+    terminal: bool = False,
+) -> SyncResult:
+    """Run one blocking call while the current thread polls its lease.
+
+    The call owns a dedicated executor future.  Heartbeat or cancellation
+    errors never abandon that future: the runner drains it before surfacing
+    the error, so a late R2/DB mutation cannot outlive the worker decision.
+    Terminal calls deliberately skip heartbeat polling after the caller has
+    crossed its point of no return (the transaction itself remains bounded by
+    the attempt/underlying timeout).
+    """
+    if heartbeat_interval_seconds <= 0 or attempt_timeout_seconds <= 0:
+        raise ValueError("sync call deadlines must be positive")
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="structure-sync")
+    future = executor.submit(call)
+    primary_error: BaseException | None = None
+    try:
+        deadline = monotonic_clock() + attempt_timeout_seconds
+        while True:
+            remaining = deadline - monotonic_clock()
+            if remaining <= 0:
+                primary_error = TimeoutError("structure sync call exceeded attempt deadline")
+                break
+            try:
+                return future.result(timeout=min(heartbeat_interval_seconds, remaining))
+            except FutureTimeoutError:
+                if terminal or heartbeat is None:
+                    continue
+                try:
+                    heartbeat()
+                except BaseException as error:
+                    primary_error = error
+                    break
+            except BaseException as error:
+                primary_error = error
+                break
+
+        # A worker-side timeout/fence/cancellation is only observable after
+        # the underlying call has quiesced.  This is the no-late-effect fence.
+        underlying_error: BaseException | None = None
+        try:
+            future.result()
+        except BaseException as error:
+            underlying_error = error
+        if primary_error is None:
+            raise AssertionError("sync call exited without a result or error")
+        if underlying_error is not None:
+            raise primary_error from underlying_error
+        raise primary_error
+    finally:
+        executor.shutdown(wait=True, cancel_futures=False)
+
+
+async def _run_bounded_sync_call_async[SyncResult](
+    call: Callable[[], SyncResult],
+    *,
+    heartbeat: Callable[[], None] | None,
+    heartbeat_interval_seconds: float,
+    attempt_timeout_seconds: float,
+    monotonic_clock: Callable[[], float] = monotonic,
+    terminal: bool = False,
+) -> SyncResult:
+    """Async owner wrapper for :func:`_run_bounded_sync_call`."""
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            _run_bounded_sync_call,
+            call,
+            heartbeat=heartbeat,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+            attempt_timeout_seconds=attempt_timeout_seconds,
+            monotonic_clock=monotonic_clock,
+            terminal=terminal,
+        )
+    )
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancellation:
+        try:
+            await _drain_thread_task(task)
+        except BaseException as error:
+            raise cancellation from error
+        raise
+
+
 async def _progress(
     runtime: AttemptRuntime,
     *,
@@ -128,6 +221,22 @@ async def _progress(
 
 async def _heartbeat(runtime: AttemptRuntime) -> None:
     await _to_thread(runtime.heartbeat_if_due)
+
+
+async def _runtime_sync_call_async[SyncResult](
+    runtime: AttemptRuntime,
+    call: Callable[[], SyncResult],
+    *,
+    terminal: bool = False,
+) -> SyncResult:
+    profile = runtime.profile
+    return await _run_bounded_sync_call_async(
+        call,
+        heartbeat=None if terminal else runtime.heartbeat_if_due,
+        heartbeat_interval_seconds=float(profile.heartbeat_seconds),
+        attempt_timeout_seconds=float(profile.attempt_seconds),
+        terminal=terminal,
+    )
 
 
 class TransactionalStructureWorker:
@@ -177,37 +286,47 @@ class TransactionalStructureWorker:
             profile=_runtime_profile(self._lease_seconds),
             clock=self._now,
         )
-        prior = await _to_thread(
-            self._control_plane.structure_range_receipt, runtime.current_lease.job_key
+        prior = await _runtime_sync_call_async(
+            runtime,
+            lambda: self._control_plane.structure_range_receipt(
+                runtime.current_lease.job_key
+            ),
         )
         if prior is not None:
             await _progress(runtime, stage="read-range", current=1, total=1)
             await _heartbeat(runtime)
-            await _terminal_to_thread(
-                self._control_plane.finish,
-                runtime.current_lease,
-                state=JobState.SUCCEEDED,
-                now=self._now(),
+            await _runtime_sync_call_async(
+                runtime,
+                lambda: self._control_plane.finish(
+                    runtime.current_lease,
+                    state=JobState.SUCCEEDED,
+                    now=self._now(),
+                ),
+                terminal=True,
             )
             return StructureWorkerResult(job_key=lease.job_key, outcome="recovered")
         try:
-            spec = await _to_thread(
-                self._control_plane.structure_range_spec,
-                runtime.current_lease.job_key,
+            spec = await _runtime_sync_call_async(
+                runtime,
+                lambda: self._control_plane.structure_range_spec(
+                    runtime.current_lease.job_key
+                ),
             )
             await _progress(runtime, stage="read-range", current=1, total=1)
             await _heartbeat(runtime)
-            artifact, record_count = await _to_thread(
-                self._process_range,
-                spec, heartbeat=runtime.heartbeat_if_due
+            artifact, record_count = await _runtime_sync_call_async(
+                runtime,
+                lambda: self._process_range(spec),
             )
             await _progress(runtime, stage="normalize-range", current=1, total=1)
             await _heartbeat(runtime)
-            await _to_thread(
-                upload_structure_range_artifact,
-                self._object_client,
-                bucket=self._bucket,
-                artifact=artifact,
+            await _runtime_sync_call_async(
+                runtime,
+                lambda: upload_structure_range_artifact(
+                    self._object_client,
+                    bucket=self._bucket,
+                    artifact=artifact,
+                ),
             )
             await _progress(runtime, stage="upload-range", current=1, total=1)
             await _heartbeat(runtime)
@@ -219,39 +338,51 @@ class TransactionalStructureWorker:
                 self._retry_fault_before_receipt(runtime.current_lease)
             complete = getattr(self._control_plane, "complete_structure_range", None)
             if callable(complete):
-                await _terminal_to_thread(
-                    complete,
-                    runtime.current_lease,
-                    range_digest=spec.range_digest,
-                    artifact_key=artifact.key,
-                    artifact_digest=artifact.sha256,
-                    record_count=record_count,
-                    now=self._now(),
+                await _runtime_sync_call_async(
+                    runtime,
+                    lambda: complete(
+                        runtime.current_lease,
+                        range_digest=spec.range_digest,
+                        artifact_key=artifact.key,
+                        artifact_digest=artifact.sha256,
+                        record_count=record_count,
+                        now=self._now(),
+                    ),
+                    terminal=True,
                 )
             else:
-                await _terminal_to_thread(
-                    self._control_plane.record_structure_range,
-                    runtime.current_lease,
-                    range_digest=spec.range_digest,
-                    artifact_key=artifact.key,
-                    artifact_digest=artifact.sha256,
-                    record_count=record_count,
-                    now=self._now(),
+                await _runtime_sync_call_async(
+                    runtime,
+                    lambda: self._control_plane.record_structure_range(
+                        runtime.current_lease,
+                        range_digest=spec.range_digest,
+                        artifact_key=artifact.key,
+                        artifact_digest=artifact.sha256,
+                        record_count=record_count,
+                        now=self._now(),
+                    ),
+                    terminal=True,
                 )
-                await _terminal_to_thread(
-                    self._control_plane.finish,
-                    runtime.current_lease,
-                    state=JobState.SUCCEEDED,
-                    now=self._now(),
+                await _runtime_sync_call_async(
+                    runtime,
+                    lambda: self._control_plane.finish(
+                        runtime.current_lease,
+                        state=JobState.SUCCEEDED,
+                        now=self._now(),
+                    ),
+                    terminal=True,
                 )
             try:
-                await _terminal_to_thread(
-                    self._control_plane.record_job_recovery,
-                    runtime.current_lease,
-                    component="structure-normalize",
-                    channels=incident_alert_channels(Settings()),
-                    now=self._now(),
-                    acceptance_run_id=self._acceptance_run_id,
+                await _runtime_sync_call_async(
+                    runtime,
+                    lambda: self._control_plane.record_job_recovery(
+                        runtime.current_lease,
+                        component="structure-normalize",
+                        channels=incident_alert_channels(Settings()),
+                        now=self._now(),
+                        acceptance_run_id=self._acceptance_run_id,
+                    ),
+                    terminal=True,
                 )
             except Exception:
                 return StructureWorkerResult(
@@ -259,50 +390,61 @@ class TransactionalStructureWorker:
                 )
             return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
         except (StructureBundleError, StructureWorkerError):
-            await _terminal_to_thread(
-                self._control_plane.finish,
-                runtime.current_lease,
-                state=JobState.QUARANTINED,
-                error_class="StructureBundleError",
-                now=self._now(),
+            await _runtime_sync_call_async(
+                runtime,
+                lambda: self._control_plane.finish(
+                    runtime.current_lease,
+                    state=JobState.QUARANTINED,
+                    error_class="StructureBundleError",
+                    now=self._now(),
+                ),
+                terminal=True,
             )
             raise
         except StaleLeaseError:
             raise
         except IntentionalStagingRetryFault as error:
-            await _terminal_to_thread(
-                self._control_plane.finish_retryable_with_incident,
-                runtime.current_lease,
-                error_class=type(error).__name__,
-                incident_key=f"incident:job-retry:{lease.job_key}",
-                dedupe_key=f"job-retry:{lease.job_key}",
-                component="structure-normalize",
-                summary="structure-normalize retryable failure",
-                detail={
-                    "job_key": lease.job_key,
-                    "lease_epoch": lease.lease_epoch,
-                    "error_class": type(error).__name__,
-                },
-                channels=incident_alert_channels(Settings()),
-                now=self._now(),
+            error_class = type(error).__name__
+            await _runtime_sync_call_async(
+                runtime,
+                lambda: self._control_plane.finish_retryable_with_incident(
+                    runtime.current_lease,
+                    error_class=error_class,
+                    incident_key=f"incident:job-retry:{lease.job_key}",
+                    dedupe_key=f"job-retry:{lease.job_key}",
+                    component="structure-normalize",
+                    summary="structure-normalize retryable failure",
+                    detail={
+                        "job_key": lease.job_key,
+                        "lease_epoch": lease.lease_epoch,
+                        "error_class": error_class,
+                    },
+                    channels=incident_alert_channels(Settings()),
+                    now=self._now(),
+                ),
+                terminal=True,
             )
             return StructureWorkerResult(job_key=lease.job_key, outcome="retryable")
         except Exception as error:
-            await _terminal_to_thread(
-                self._control_plane.finish_retryable_with_incident,
-                runtime.current_lease,
-                error_class=type(error).__name__,
-                incident_key=f"incident:job-retry:{lease.job_key}",
-                dedupe_key=f"job-retry:{lease.job_key}",
-                component="structure-normalize",
-                summary="structure-normalize retryable failure",
-                detail={
-                    "job_key": lease.job_key,
-                    "lease_epoch": lease.lease_epoch,
-                    "error_class": type(error).__name__,
-                },
-                channels=incident_alert_channels(Settings()),
-                now=self._now(),
+            error_class = type(error).__name__
+            await _runtime_sync_call_async(
+                runtime,
+                lambda: self._control_plane.finish_retryable_with_incident(
+                    runtime.current_lease,
+                    error_class=error_class,
+                    incident_key=f"incident:job-retry:{lease.job_key}",
+                    dedupe_key=f"job-retry:{lease.job_key}",
+                    component="structure-normalize",
+                    summary="structure-normalize retryable failure",
+                    detail={
+                        "job_key": lease.job_key,
+                        "lease_epoch": lease.lease_epoch,
+                        "error_class": error_class,
+                    },
+                    channels=incident_alert_channels(Settings()),
+                    now=self._now(),
+                ),
+                terminal=True,
             )
             raise
 
@@ -438,38 +580,73 @@ class TransactionalStructureCertifier:
             runtime.heartbeat()
             last_heartbeat = current_monotonic
 
+        def sync_call(
+            call: Callable[[], Any], *, terminal: bool = False
+        ) -> Any:
+            profile = runtime.profile
+            return _run_bounded_sync_call(
+                call,
+                heartbeat=None if terminal else heartbeat_if_due,
+                heartbeat_interval_seconds=float(profile.heartbeat_seconds),
+                attempt_timeout_seconds=float(profile.attempt_seconds),
+                monotonic_clock=self._monotonic_clock,
+                terminal=terminal,
+            )
+
+        def report_progress(current: int, total: int) -> None:
+            sync_call(
+                lambda: runtime.progress(
+                    stage="verify-parity", current=current, total=total
+                )
+            )
+
         try:
             self._verify_content_parity(
                 generation_key,
                 heartbeat=heartbeat_if_due,
-                progress=lambda current, total: runtime.progress(
-                    stage="verify-parity", current=current, total=total
-                ),
+                progress=report_progress,
+                sync_call=sync_call,
             )
             heartbeat_if_due()
-            payload = self._control_plane.structure_manifest_payload(generation_key)
+            payload = sync_call(
+                lambda: self._control_plane.structure_manifest_payload(generation_key)
+            )
             artifact = StructureManifestArtifact.from_bytes(payload)
-            runtime.progress(stage="build-manifest", current=1, total=1)
-            heartbeat_if_due()
-            upload_structure_manifest_artifact(
-                self._object_client, bucket=self._bucket, artifact=artifact
+            sync_call(
+                lambda: runtime.progress(stage="build-manifest", current=1, total=1)
             )
-            runtime.progress(stage="upload-manifest", current=1, total=1)
-            runtime.progress(stage="commit-certification", current=1, total=1)
             heartbeat_if_due()
-            self._control_plane.certify_structure_generation(
-                runtime.current_lease,
-                generation_key=generation_key,
-                artifact_key=artifact.key,
-                artifact_digest=artifact.sha256,
-                now=self._now(),
+            sync_call(
+                lambda: upload_structure_manifest_artifact(
+                    self._object_client, bucket=self._bucket, artifact=artifact
+                )
+            )
+            sync_call(
+                lambda: runtime.progress(stage="upload-manifest", current=1, total=1)
+            )
+            sync_call(
+                lambda: runtime.progress(stage="commit-certification", current=1, total=1)
+            )
+            heartbeat_if_due()
+            sync_call(
+                lambda: self._control_plane.certify_structure_generation(
+                    runtime.current_lease,
+                    generation_key=generation_key,
+                    artifact_key=artifact.key,
+                    artifact_digest=artifact.sha256,
+                    now=self._now(),
+                ),
+                terminal=True,
             )
             try:
-                self._control_plane.record_job_recovery(
-                    runtime.current_lease,
-                    component="structure-certify",
-                    channels=incident_alert_channels(Settings()),
-                    now=self._now(),
+                sync_call(
+                    lambda: self._control_plane.record_job_recovery(
+                        runtime.current_lease,
+                        component="structure-certify",
+                        channels=incident_alert_channels(Settings()),
+                        now=self._now(),
+                    ),
+                    terminal=True,
                 )
             except Exception:
                 return StructureWorkerResult(
@@ -477,29 +654,36 @@ class TransactionalStructureCertifier:
                 )
             return StructureWorkerResult(job_key=lease.job_key, outcome="certified")
         except IncompleteStructureGenerationError:
-            self._control_plane.finish(
-                runtime.current_lease,
-                state=JobState.WAITING,
-                now=self._now(),
+            sync_call(
+                lambda: self._control_plane.finish(
+                    runtime.current_lease,
+                    state=JobState.WAITING,
+                    now=self._now(),
+                ),
+                terminal=True,
             )
             return StructureWorkerResult(job_key=lease.job_key, outcome="waiting")
         except StaleLeaseError:
             raise
         except Exception as error:
-            self._control_plane.finish_retryable_with_incident(
-                runtime.current_lease,
-                error_class=type(error).__name__,
-                incident_key=f"incident:job-retry:{lease.job_key}",
-                dedupe_key=f"job-retry:{lease.job_key}",
-                component="structure-certify",
-                summary="structure-certify retryable failure",
-                detail={
-                    "job_key": lease.job_key,
-                    "lease_epoch": lease.lease_epoch,
-                    "error_class": type(error).__name__,
-                },
-                channels=incident_alert_channels(Settings()),
-                now=self._now(),
+            error_class = type(error).__name__
+            sync_call(
+                lambda: self._control_plane.finish_retryable_with_incident(
+                    runtime.current_lease,
+                    error_class=error_class,
+                    incident_key=f"incident:job-retry:{lease.job_key}",
+                    dedupe_key=f"job-retry:{lease.job_key}",
+                    component="structure-certify",
+                    summary="structure-certify retryable failure",
+                    detail={
+                        "job_key": lease.job_key,
+                        "lease_epoch": lease.lease_epoch,
+                        "error_class": error_class,
+                    },
+                    channels=incident_alert_channels(Settings()),
+                    now=self._now(),
+                ),
+                terminal=True,
             )
             raise
 
@@ -509,12 +693,17 @@ class TransactionalStructureCertifier:
         *,
         heartbeat: Callable[[], None],
         progress: Callable[[int, int], None],
+        sync_call: Callable[..., Any],
     ) -> None:
-        ranges = self._control_plane.structure_generation_receipts(generation_key)
+        ranges = sync_call(
+            lambda: self._control_plane.structure_generation_receipts(generation_key)
+        )
         source_spec = ranges[0][0]
         heartbeat()
-        source_payload = _read_object_bytes(
-            self._object_client, bucket=self._bucket, key=source_spec.bundle_key
+        source_payload = sync_call(
+            lambda: _read_object_bytes(
+                self._object_client, bucket=self._bucket, key=source_spec.bundle_key
+            )
         )
         try:
             identity, source_components = parse_structure_bundle_bytes(
@@ -527,7 +716,11 @@ class TransactionalStructureCertifier:
             if identity.source_kind != "gamma-source-window-events-v3-sharded":
                 raise
             self._verify_v3_content_parity(
-                ranges, shards, heartbeat=heartbeat, progress=progress
+                ranges,
+                shards,
+                heartbeat=heartbeat,
+                progress=progress,
+                sync_call=sync_call,
             )
             return
         rebuilt: dict[str, list[dict[str, object]]] = {
@@ -541,8 +734,10 @@ class TransactionalStructureCertifier:
                 or spec.bundle_digest != source_spec.bundle_digest
             ):
                 raise StructureWorkerError("structure-content-parity-mixed-source")
-            payload = _read_object_bytes(
-                self._object_client, bucket=self._bucket, key=receipt.artifact_key
+            payload = sync_call(
+                lambda: _read_object_bytes(
+                    self._object_client, bucket=self._bucket, key=receipt.artifact_key
+                )
             )
             range_identity, rows = parse_structure_range_bytes(
                 payload, expected_sha256=receipt.artifact_digest
@@ -572,6 +767,7 @@ class TransactionalStructureCertifier:
         *,
         heartbeat: Callable[[], None],
         progress: Callable[[int, int], None],
+        sync_call: Callable[..., Any],
     ) -> None:
         by_identity = {(shard.component, shard.ordinal): shard for shard in shards}
         total_ranges = len(ranges)
@@ -581,15 +777,23 @@ class TransactionalStructureCertifier:
             shard = by_identity.get((spec.component, ordinal))
             if shard is None or spec.range_end != f"shard:{ordinal + 1:08d}":
                 raise StructureWorkerError("structure-v3-content-parity-range-identity")
-            source_payload = _read_object_bytes(
-                self._object_client, bucket=self._bucket, key=shard.artifact_key
+            shard_artifact_key = shard.artifact_key
+            shard_artifact_digest = shard.artifact_digest
+            source_payload = sync_call(
+                lambda: _read_object_bytes(
+                    self._object_client, bucket=self._bucket, key=shard_artifact_key
+                )
             )
             _header, expected_rows = parse_structure_shard_bytes(
-                source_payload, expected_sha256=shard.artifact_digest
+                source_payload, expected_sha256=shard_artifact_digest
             )
             heartbeat()
-            payload = _read_object_bytes(
-                self._object_client, bucket=self._bucket, key=getattr(receipt, "artifact_key")
+            payload = sync_call(
+                lambda: _read_object_bytes(
+                    self._object_client,
+                    bucket=self._bucket,
+                    key=getattr(receipt, "artifact_key"),
+                )
             )
             _range_identity, actual_rows = parse_structure_range_bytes(
                 payload, expected_sha256=getattr(receipt, "artifact_digest")

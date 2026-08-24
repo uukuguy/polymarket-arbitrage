@@ -6,9 +6,15 @@ import time
 from datetime import UTC, datetime
 
 from polyarb.control_plane.models import JobLease, StructureSourcePageSpec
+from polyarb.control_plane.structure_artifact import (
+    StructureShardBatchArtifact,
+    StructureShardReceipt,
+    canonical_structure_shard_batch_bytes,
+)
 from polyarb.control_plane.structure_source import (
     StructureSourcePageArtifact,
     TransactionalStructureSourceMaterializer,
+    materialize_event_page_shards,
 )
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
@@ -98,6 +104,104 @@ class FakeControlPlane:
             checkpoint_cursor=lease.checkpoint_cursor,
             checkpoint_digest=lease.checkpoint_digest,
         )
+
+
+def test_final_shard_manifest_recovery_failure_is_not_retried_after_admission() -> None:
+    pages = (
+        _artifact(
+            stream="events",
+            ordinal=0,
+            records=(
+                {
+                    "id": "event-a",
+                    "slug": "event-a",
+                    "active": True,
+                    "closed": False,
+                    "negRisk": False,
+                    "markets": [],
+                },
+            ),
+        ),
+        _artifact(
+            stream="events",
+            ordinal=1,
+            records=(
+                {
+                    "id": "event-b",
+                    "slug": "event-b",
+                    "active": True,
+                    "closed": False,
+                    "negRisk": False,
+                    "markets": [],
+                },
+            ),
+        ),
+    )
+    source_digest = "a" * 64
+    shard_receipts: list[StructureShardReceipt] = []
+    objects = MemoryR2(pages)
+    for page in pages:
+        for component, artifact in materialize_event_page_shards(
+            page, source_digest=source_digest
+        ):
+            objects.objects[artifact.key] = artifact.payload
+            shard_receipts.append(
+                StructureShardReceipt(
+                    component=component,
+                    ordinal=page[0].ordinal,
+                    artifact_key=artifact.key,
+                    artifact_digest=artifact.sha256,
+                    row_count=1,
+                )
+            )
+    batch = StructureShardBatchArtifact.from_bytes(
+        canonical_structure_shard_batch_bytes(
+            window_key="source-window:materializer",
+            source_digest=source_digest,
+            start_ordinal=0,
+            end_ordinal=2,
+            shards=shard_receipts,
+        )
+    )
+    objects.objects[batch.key] = batch.payload
+
+    class FinalizingControlPlane(FakeControlPlane):
+        def claim_job(self, **kwargs: object) -> JobLease:
+            lease = super().claim_job(**kwargs)
+            return JobLease(
+                job_key=lease.job_key,
+                job_type=lease.job_type,
+                input_identity=lease.input_identity,
+                lease_owner=lease.lease_owner,
+                lease_epoch=lease.lease_epoch,
+                lease_expires_at=lease.lease_expires_at,
+                checkpoint_cursor="shard-batch:00000001",
+                checkpoint_digest=batch.sha256,
+            )
+
+        def structure_materializer_batches(self, window_key: str):
+            assert window_key == "source-window:materializer"
+            return (("shard-batch:00000000", batch.sha256, batch.key),)
+
+        def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
+            raise RuntimeError("recovery delivery unavailable after admission")
+
+    control_plane = FinalizingControlPlane(pages)
+    worker = TransactionalStructureSourceMaterializer(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="source-pages",
+        worker_id="materializer-a",
+        now=lambda: NOW,
+        range_max_rows=100,
+        shard_page_batch_size=1,
+    )
+
+    result = asyncio.run(worker.run_once())
+
+    assert result.outcome == "succeeded:recovery-pending"
+    assert control_plane.admitted is not None
+    assert control_plane.retry_incidents == []
 
 
 class MemoryR2:

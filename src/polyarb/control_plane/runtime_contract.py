@@ -209,6 +209,11 @@ class AttemptRuntime:
     def last_heartbeat_at(self) -> datetime:
         return self._last_heartbeat_at
 
+    @property
+    def profile(self) -> RuntimeDeadlineProfile:
+        """Return the immutable deadline contract used by this attempt."""
+        return self._profile
+
     def progress(
         self,
         *,

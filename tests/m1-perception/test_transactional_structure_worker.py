@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from polyarb.control_plane.faults import IntentionalStagingRetryFault
 from polyarb.control_plane.models import JobLease, JobState, StructureRangeSpec
-from polyarb.control_plane.postgres import IncompleteStructureGenerationError
+from polyarb.control_plane.postgres import IncompleteStructureGenerationError, StaleLeaseError
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
@@ -81,6 +84,32 @@ class FakeObjectClient:
 
     def head_object(self, **kwargs: object) -> dict[str, object]:
         return {"ContentLength": len(self.upload["Body"]), "Metadata": self.upload["Metadata"]}
+
+
+class BlockingRangeObjectClient(FakeObjectClient):
+    def __init__(self, bundle: StructureBundleArtifact) -> None:
+        super().__init__(bundle)
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def get_object(self, **kwargs: object) -> dict[str, object]:
+        self.started.set()
+        if not self.release.wait(timeout=10):
+            raise AssertionError("blocking range read was not released")
+        return super().get_object(**kwargs)
+
+
+def _elapsed_clock() -> Callable[[], datetime]:
+    started = time.monotonic()
+    return lambda: NOW + timedelta(seconds=time.monotonic() - started)
+
+
+async def _wait_for_heartbeats(control_plane: FakeControlPlane, count: int) -> None:
+    for _ in range(500):
+        if len(control_plane.runtime_heartbeats) >= count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"expected at least {count} runtime heartbeats")
 
 
 class FakeControlPlane:
@@ -177,6 +206,89 @@ def test_transactional_structure_worker_reads_frozen_r2_range_then_records() -> 
     assert b'"id":"event-a"' in objects.upload["Body"]
     assert b'"id":"event-b"' not in objects.upload["Body"]
     assert control_plane.finished == [JobState.SUCCEEDED]
+
+
+def test_structure_worker_renews_while_normalize_read_exceeds_lease() -> None:
+    bundle = _bundle()
+    control_plane = FakeControlPlane(_spec(bundle))
+    objects = BlockingRangeObjectClient(bundle)
+    worker = TransactionalStructureWorker(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="structure",
+        worker_id="worker-a",
+        now=_elapsed_clock(),
+        lease_seconds=3,
+    )
+
+    async def run():
+        task = asyncio.create_task(worker.run_once())
+        assert await asyncio.to_thread(objects.started.wait, 2)
+        await _wait_for_heartbeats(control_plane, 3)
+        objects.release.set()
+        return await task
+
+    result = asyncio.run(run())
+
+    assert result.outcome == "succeeded"
+    assert len(control_plane.runtime_heartbeats) >= 3
+    assert control_plane.recorded is not None
+
+
+def test_stale_normalize_heartbeat_drains_read_and_prevents_terminal_commit() -> None:
+    bundle = _bundle()
+    objects = BlockingRangeObjectClient(bundle)
+
+    class StaleControlPlane(FakeControlPlane):
+        def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
+            self.runtime_heartbeats.append(kwargs)
+            objects.release.set()
+            raise StaleLeaseError("normalize lease was fenced")
+
+    control_plane = StaleControlPlane(_spec(bundle))
+    worker = TransactionalStructureWorker(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="structure",
+        worker_id="worker-a",
+        now=_elapsed_clock(),
+        lease_seconds=3,
+    )
+
+    with pytest.raises(StaleLeaseError, match="fenced"):
+        asyncio.run(worker.run_once())
+
+    assert control_plane.recorded is None
+    assert control_plane.finished == []
+    assert objects.upload == {}
+
+
+def test_cancelled_normalize_read_is_drained_without_terminal_commit() -> None:
+    bundle = _bundle()
+    control_plane = FakeControlPlane(_spec(bundle))
+    objects = BlockingRangeObjectClient(bundle)
+    worker = TransactionalStructureWorker(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="structure",
+        worker_id="worker-a",
+        now=_elapsed_clock(),
+        lease_seconds=3,
+    )
+
+    async def run() -> None:
+        task = asyncio.create_task(worker.run_once())
+        assert await asyncio.to_thread(objects.started.wait, 2)
+        task.cancel()
+        objects.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+
+    assert control_plane.recorded is None
+    assert control_plane.finished == []
+    assert objects.upload == {}
 
 
 def test_structure_worker_reports_all_fenced_range_lifecycle_stages() -> None:
@@ -506,6 +618,145 @@ def test_structure_certifier_heartbeats_during_parity_before_fenced_commit() -> 
         "upload-manifest",
         "commit-certification",
     ]
+
+
+def test_structure_certifier_renews_while_parity_read_exceeds_lease() -> None:
+    bundle = _bundle()
+    spec = StructureRangeSpec.create(
+        bundle_key=bundle.key,
+        bundle_digest=bundle.sha256,
+        component="events",
+        ordinal=0,
+        range_start="",
+        range_end="",
+    )
+    range_artifact = StructureRangeArtifact.from_bytes(
+        canonical_structure_range_bytes(
+            bundle_digest=bundle.sha256,
+            component="events",
+            range_digest=spec.range_digest,
+            rows=({"id": "event-a"}, {"id": "event-b"}),
+        )
+    )
+
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.heartbeats: list[dict[str, object]] = []
+            self.runtime_progress: list[dict[str, object]] = []
+            self.certified = False
+
+        def claim_job(self, **kwargs: object) -> JobLease:
+            return JobLease(
+                job_key="structure:" + "a" * 64 + ":certify",
+                job_type="structure-certify",
+                input_identity="structure:" + "a" * 64,
+                lease_owner="certifier-a",
+                lease_epoch=1,
+                lease_expires_at=NOW,
+                checkpoint_cursor=None,
+                checkpoint_digest=None,
+            )
+
+        def structure_generation_receipts(self, generation_key: str):
+            assert generation_key == "structure:" + "a" * 64
+            return (
+                (
+                    spec,
+                    type(
+                        "Receipt",
+                        (),
+                        {
+                            "artifact_key": range_artifact.key,
+                            "artifact_digest": range_artifact.sha256,
+                            "record_count": 2,
+                        },
+                    )(),
+                ),
+            )
+
+        def structure_manifest_payload(self, generation_key: str) -> bytes:
+            assert generation_key == "structure:" + "a" * 64
+            return b'{"kind":"structure-manifest"}\n'
+
+        def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
+            self.heartbeats.append(kwargs)
+            return JobLease(
+                job_key=lease.job_key,
+                job_type=lease.job_type,
+                input_identity=lease.input_identity,
+                lease_owner=lease.lease_owner,
+                lease_epoch=lease.lease_epoch,
+                lease_expires_at=kwargs["now"] + timedelta(seconds=kwargs["lease_seconds"]),
+                checkpoint_cursor=lease.checkpoint_cursor,
+                checkpoint_digest=lease.checkpoint_digest,
+            )
+
+        def record_runtime_progress(self, lease: JobLease, **kwargs: object) -> None:
+            self.runtime_progress.append(kwargs)
+
+        def certify_structure_generation(self, lease: JobLease, **kwargs: object) -> str:
+            self.certified = True
+            return str(kwargs["artifact_digest"])
+
+        def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
+            return False
+
+        def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
+            raise AssertionError("blocking parity read must not be retried")
+
+    class BlockingObjects:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.block_once = True
+            self.upload: dict[str, object] = {}
+
+        def get_object(self, **kwargs: object) -> dict[str, object]:
+            if self.block_once:
+                self.block_once = False
+                self.started.set()
+                if not self.release.wait(timeout=10):
+                    raise AssertionError("blocking parity read was not released")
+            payload = bundle.payload if kwargs["Key"] == bundle.key else range_artifact.payload
+            return {"Body": _Body(payload)}
+
+        def put_object(self, **kwargs: object) -> None:
+            self.upload = kwargs
+
+        def head_object(self, **kwargs: object) -> dict[str, object]:
+            return {
+                "ContentLength": len(self.upload["Body"]),
+                "Metadata": self.upload["Metadata"],
+            }
+
+    control_plane = ControlPlane()
+    objects = BlockingObjects()
+    certifier = TransactionalStructureCertifier(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="structure",
+        worker_id="certifier-a",
+        now=_elapsed_clock(),
+        lease_seconds=3,
+    )
+
+    async def run():
+        task = asyncio.create_task(asyncio.to_thread(certifier.run_once))
+        assert await asyncio.to_thread(objects.started.wait, 2)
+        for _ in range(500):
+            if len(control_plane.heartbeats) >= 3:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("expected parity heartbeats while R2 read blocked")
+        objects.release.set()
+        return await task
+
+    result = asyncio.run(run())
+
+    assert result.outcome == "certified"
+    assert control_plane.certified
+    assert len(control_plane.heartbeats) >= 3
 
 
 def test_structure_certifier_waits_for_missing_range_receipts_without_incident() -> None:

@@ -1265,13 +1265,21 @@ class TransactionalStructureSourceMaterializer:
             ranges=ranges,
             now=self._now(),
         )
-        await _terminal_to_thread(
-            self._control_plane.record_job_recovery,
-            runtime.current_lease,
-            component="structure-materialize",
-            channels=incident_alert_channels(Settings()),
-            now=self._now(),
-        )
+        try:
+            await _terminal_to_thread(
+                self._control_plane.record_job_recovery,
+                runtime.current_lease,
+                component="structure-materialize",
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
+        except Exception:
+            # Admission already committed the terminal bundle.  Recovery
+            # delivery is a separate observable fact and must not re-enter the
+            # generic retry path with a lease that has been released.
+            return StructureWorkerResult(
+                job_key=lease.job_key, outcome="succeeded:recovery-pending"
+            )
         return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
 
     async def _read_source_pages(
