@@ -111,6 +111,7 @@ class BlockingHeartbeatStore(FakeStore):
         self.started = threading.Event()
         self.released = threading.Event()
         self.completed = threading.Event()
+        self.renewed_expires_at: datetime | None = None
 
     def heartbeat_runtime_attempt(
         self,
@@ -126,7 +127,11 @@ class BlockingHeartbeatStore(FakeStore):
         self.completed.set()
         return replace(
             lease,
-            lease_expires_at=now + timedelta(seconds=lease_seconds),
+            lease_expires_at=(
+                self.renewed_expires_at
+                if self.renewed_expires_at is not None
+                else now + timedelta(seconds=lease_seconds)
+            ),
         )
 
 
@@ -337,6 +342,64 @@ async def test_stop_drains_inflight_thread_call_before_context_exit() -> None:
         assert runtime.heartbeat_task is not None
         assert runtime.heartbeat_task.done()
 
+        sleeper.wake()
+        await asyncio.sleep(0)
+        assert len(store.heartbeats) == 1
+    finally:
+        store.released.set()
+        if not owner_task.done():
+            owner_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await owner_task
+
+
+@pytest.mark.asyncio
+async def test_stop_race_retains_completed_renewal_for_terminal_commit() -> None:
+    clock = VirtualClock()
+    sleeper = VirtualSleeper()
+    clock.sleeper = sleeper
+    store = BlockingHeartbeatStore()
+    store.renewed_expires_at = NOW + timedelta(seconds=3)
+    race_lease = replace(LEASE, lease_expires_at=NOW + timedelta(seconds=1))
+    race_profile = replace(
+        PROFILE,
+        lease_seconds=3,
+        heartbeat_seconds=1,
+        progress_seconds=2,
+        attempt_seconds=3,
+    )
+    runtime = AsyncAttemptRuntime(
+        store=store,
+        lease=race_lease,
+        profile=race_profile,
+        clock=clock,
+        sleep=sleeper,
+    )
+    terminal_expires_at: datetime | None = None
+    stop_entered = asyncio.Event()
+
+    async def owner() -> None:
+        nonlocal terminal_expires_at
+        async with runtime:
+            await asyncio.wait_for(sleeper.started.wait(), timeout=0.2)
+            sleeper.wake()
+            assert await asyncio.to_thread(store.started.wait, 0.5)
+            stop_entered.set()
+            await runtime.stop()
+            terminal_expires_at = runtime.lease.lease_expires_at
+
+    owner_task = asyncio.create_task(owner())
+    try:
+        assert await asyncio.to_thread(store.started.wait, 0.5)
+        await asyncio.wait_for(stop_entered.wait(), timeout=0.5)
+        assert not owner_task.done()
+        store.released.set()
+        await asyncio.wait_for(owner_task, timeout=0.5)
+
+        assert terminal_expires_at is not None
+        assert terminal_expires_at == NOW + timedelta(seconds=3)
+        assert terminal_expires_at > clock()
+        assert len(store.heartbeats) == 1
         sleeper.wake()
         await asyncio.sleep(0)
         assert len(store.heartbeats) == 1

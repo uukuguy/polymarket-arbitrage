@@ -373,12 +373,12 @@ class AsyncAttemptRuntime(AttemptRuntime):
                 now = _read_clock(self._clock)
                 _validate_clock_progression(now, self._last_heartbeat_at)
                 renewed = await self._run_heartbeat_call(now)
-                if self._stopped.is_set():
-                    break
                 if type(renewed) is not JobLease:
                     raise TypeError("heartbeat store must return JobLease")
                 self._lease = renewed
                 self._last_heartbeat_at = now
+                if self._stopped.is_set():
+                    break
         except asyncio.CancelledError:
             raise
         except BaseException as error:
