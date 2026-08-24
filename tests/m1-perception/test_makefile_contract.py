@@ -50,6 +50,26 @@ def test_make_help_lists_snapshot_markets() -> None:
     assert "snapshot-markets-full:" in result.stdout
 
 
+def test_make_runtime_policy_replay_is_read_only() -> None:
+    """The historical replay target must stay a DSN-scoped, read-only command."""
+    result = subprocess.run(
+        ["make", "-n", "runtime-policy-replay", "run_id=run-a"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, f"make -n failed: {result.stderr}"
+    assert (
+        'uv run python -m polyarb.cli_control_plane runtime-policy-replay '
+        '--run-id "run-a" --json'
+    ) in result.stdout
+
+    recipe = result.stdout.lower()
+    for forbidden in ("flyctl", "deploy", "machines", "curl --request post", "curl --request put"):
+        assert forbidden not in recipe, f"runtime replay must not mutate cloud state: {forbidden}"
+
+
 def test_make_snapshot_markets_dry_run_recipe() -> None:
     """The subset target must invoke ``python -m polyarb.snapshot`` WITHOUT --full."""
     result = subprocess.run(

@@ -719,6 +719,14 @@ control-plane-status:
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane status --limit "$(or $(limit),20)" --json
 
+## runtime-policy-replay: Read immutable cloud observations and report the first live-policy break; never mutates jobs or Machines.
+runtime-policy-replay:
+	@test -n "$(run_id)" || (echo "usage: make runtime-policy-replay run_id=<run-id>" >&2; exit 2)
+	@test -n "$$POLYARB_SUPABASE_DB_DSN" || (echo "ERROR: explicitly export scoped DSN" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane runtime-policy-replay --run-id "$(run_id)" --json
+
+.PHONY: runtime-policy-replay
+
 ## quote-control-plane-once: Explicitly run one transactional Quote batch and certification attempt; requires enable=1 plus DSN and R2 credentials.
 quote-control-plane-once:
 	@test "$(enable)" = "1" || (echo "usage: make quote-control-plane-once enable=1 [worker_id=quote-operator-once]" >&2; exit 2)
