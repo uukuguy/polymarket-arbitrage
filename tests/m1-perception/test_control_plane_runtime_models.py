@@ -312,6 +312,86 @@ def test_runtime_event_rejects_invalid_declared_detail_values(
         RuntimeEvent(**_valid_runtime_event_kwargs(kind=kind, detail=detail))
 
 
+@pytest.mark.parametrize(
+    ("kind", "key", "value"),
+    [
+        (
+            RuntimeEventKind.RETRYABLE_FAILED,
+            "failure_signature",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVaDQssw5c",
+        ),
+        (RuntimeEventKind.RETRYABLE_FAILED, "reason_code", "BearerABCDEF0123456789"),
+        (RuntimeEventKind.STARTED, "component", "Authorization:BearerABCDEF0123456789"),
+        (RuntimeEventKind.STARTED, "job_type", "POLYMARKET_API_KEY:ABCDEF0123456789"),
+        (RuntimeEventKind.STARTED, "recovery_policy", "sk-live-ABCDEF0123456789"),
+        (RuntimeEventKind.STAGE_CHANGED, "result_code", "xoxb-ABCDEF0123456789"),
+        (RuntimeEventKind.STAGE_CHANGED, "data_product", "ghp-ABCDEF0123456789"),
+        (RuntimeEventKind.STARTED, "component", "postgres:db.example.com:5432:polyarb"),
+        (RuntimeEventKind.STAGE_CHANGED, "component", "https:api.example.com:v1"),
+        (RuntimeEventKind.RETRYABLE_FAILED, "reason_code", "token:ABCDEF0123456789"),
+    ],
+)
+def test_runtime_event_code_details_reject_credential_shaped_values(
+    kind: RuntimeEventKind,
+    key: str,
+    value: str,
+) -> None:
+    with pytest.raises(ValueError, match="detail value is invalid"):
+        RuntimeEvent(**_valid_runtime_event_kwargs(kind=kind, detail={key: value}))
+
+
+@pytest.mark.parametrize(
+    ("kind", "detail"),
+    [
+        (
+            RuntimeEventKind.STARTED,
+            {
+                "component": "control-plane",
+                "job_type": "structure-fetch",
+                "recovery_policy": "retry-job",
+            },
+        ),
+        (
+            RuntimeEventKind.STAGE_CHANGED,
+            {
+                "component": "structure-fetch",
+                "data_product": "market-snapshot",
+                "reason_code": "checkpoint.advance",
+                "result_code": "ok",
+            },
+        ),
+        (
+            RuntimeEventKind.RETRYABLE_FAILED,
+            {
+                "component": "quote-batch",
+                "failure_signature": "upstream.timeout",
+                "reason_code": "timeout",
+                "recovery_policy": "exponential-backoff",
+                "qualification_impact": "none",
+            },
+        ),
+        (
+            RuntimeEventKind.PROGRESS_STALLED,
+            {
+                "component": "structure-materialize",
+                "failure_signature": "progress.stalled",
+                "data_product": "structure-sync",
+                "deadline_kind": "progress",
+                "qualification_impact": "delayed",
+                "recovery_policy": "retry-same-input",
+            },
+        ),
+    ],
+)
+def test_runtime_event_code_details_accept_closed_taxonomy_style_codes(
+    kind: RuntimeEventKind,
+    detail: dict[str, object],
+) -> None:
+    event = RuntimeEvent(**_valid_runtime_event_kwargs(kind=kind, detail=detail))
+
+    assert dict(event.detail) == detail
+
+
 def test_runtime_event_rejects_oversize_flat_payload() -> None:
     with pytest.raises(ValueError, match="detail value is invalid"):
         RuntimeEvent(
