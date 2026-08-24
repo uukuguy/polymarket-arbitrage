@@ -23,11 +23,19 @@ from polyarb.control_plane.postgres import (
     IncompleteQuoteGenerationError,
     IncompleteStructureGenerationError,
     PostgresControlPlane,
+    RuntimeEventConflictError,
+    RuntimeProgressConflictError,
     StaleLeaseError,
 )
 from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
+)
+from polyarb.control_plane.runtime_models import RuntimeEvent, RuntimeEventKind, RuntimeProgress
+from polyarb.control_plane.runtime_store import (
+    RuntimeEventConflict,
+    RuntimeFenceError,
+    append_runtime_event_cursor,
 )
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
@@ -88,6 +96,8 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
             "m1_soak_observations",
             "m1_soak_runs",
             "m1_cloud_usage_observations",
+            "m1_job_runtime_events",
+            "m1_job_runtime_state",
             "m1_structure_source_window_bundles",
             "m1_structure_source_page_receipts",
             "m1_structure_source_page_inputs",
@@ -2299,6 +2309,574 @@ def test_claim_reclaim_and_epoch_fencing(control_plane: PostgresControlPlane) ->
     assert second.lease_epoch == 2
     with pytest.raises(StaleLeaseError):
         control_plane.heartbeat(first, now=now + timedelta(seconds=31))
+
+
+def test_claim_commits_runtime_state_and_started_event_together(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="runtime:claim",
+        job_type="structure-normalize",
+        input_identity="runtime-claim",
+        now=now,
+    )
+
+    lease = control_plane.claim_job(
+        worker_id="runtime-worker",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT attempt_id, lease_epoch, worker_id, stage, progress_sequence,
+                   last_heartbeat_at, last_progress_at, lease_deadline_at,
+                   heartbeat_deadline_at, progress_deadline_at, attempt_deadline_at
+            FROM m1_job_runtime_state WHERE job_key = %s
+            """,
+            (lease.job_key,),
+        )
+        state = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT attempt_id, lease_epoch, worker_id, event_sequence, kind,
+                   stage, idempotency_key
+            FROM m1_job_runtime_events
+            WHERE job_key = %s ORDER BY event_sequence
+            """,
+            (lease.job_key,),
+        )
+        events = cursor.fetchall()
+
+    assert state is not None
+    assert isinstance(state[0], str) and state[0]
+    assert state[1:4] == (lease.lease_epoch, lease.lease_owner, "started")
+    assert state[4] == 0
+    assert state[5] == state[6] == now
+    assert all(value is not None for value in state[7:])
+    assert len(events) == 1
+    assert events[0][0:5] == (
+        state[0],
+        lease.lease_epoch,
+        lease.lease_owner,
+        1,
+        RuntimeEventKind.STARTED.value,
+    )
+    assert events[0][5] == "started"
+
+
+def test_runtime_progress_is_fenced_monotonic_and_idempotent(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="runtime:progress",
+        job_type="structure-normalize",
+        input_identity="runtime-progress",
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id="runtime-worker",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+
+    first = control_plane.record_runtime_progress(
+        lease,
+        progress=RuntimeProgress(sequence=1, current=2, total=5, stage="upload"),
+        now=now + timedelta(seconds=1),
+        idempotency_key="runtime-progress:1",
+    )
+    duplicate = control_plane.record_runtime_progress(
+        lease,
+        progress=RuntimeProgress(sequence=1, current=2, total=5, stage="upload"),
+        now=now + timedelta(seconds=1),
+        idempotency_key="runtime-progress:1",
+    )
+    assert duplicate == first
+    with pytest.raises(RuntimeProgressConflictError, match="progress sequence"):
+        control_plane.record_runtime_progress(
+            lease,
+            progress=RuntimeProgress(sequence=1, current=3, total=5, stage="upload"),
+            now=now + timedelta(seconds=2),
+            idempotency_key="runtime-progress:conflict",
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT progress_sequence, progress_current, last_progress_at "
+            "FROM m1_job_runtime_state WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (1, 2, now + timedelta(seconds=1))
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (2,)
+
+
+def test_runtime_heartbeat_updates_liveness_without_progress(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="runtime:heartbeat",
+        job_type="structure-normalize",
+        input_identity="runtime-heartbeat",
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id="runtime-worker",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    renewed = control_plane.heartbeat_runtime_attempt(
+        lease, now=now + timedelta(seconds=5), lease_seconds=30
+    )
+    assert renewed.lease_expires_at == now + timedelta(seconds=35)
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT last_heartbeat_at, last_progress_at, progress_sequence, "
+            "lease_deadline_at, heartbeat_deadline_at "
+            "FROM m1_job_runtime_state WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        row = cursor.fetchone()
+        assert row is not None
+        assert row[0] == now + timedelta(seconds=5)
+        assert row[1] == now
+        assert row[2] == 0
+        assert row[3] == now + timedelta(seconds=35)
+        assert row[4] > row[0]
+
+
+def test_runtime_expired_lease_rejects_heartbeat_and_progress_without_mutation(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="runtime:expired",
+        job_type="structure-normalize",
+        input_identity="runtime-expired",
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id="runtime-worker",
+        job_types=("structure-normalize",),
+        lease_seconds=3,
+        now=now,
+    )
+    assert lease is not None
+    expired_at = now + timedelta(seconds=4)
+
+    with pytest.raises(StaleLeaseError):
+        control_plane.heartbeat_runtime_attempt(lease, now=expired_at, lease_seconds=30)
+    with pytest.raises(StaleLeaseError):
+        control_plane.record_runtime_progress(
+            lease,
+            progress=RuntimeProgress(sequence=1, current=1, total=1, stage="upload"),
+            now=expired_at,
+            idempotency_key="runtime:expired:1",
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT lease_expires_at FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (now + timedelta(seconds=3),)
+        cursor.execute(
+            "SELECT last_heartbeat_at, progress_sequence, last_progress_at "
+            "FROM m1_job_runtime_state WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (now, 0, now)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (1,)
+
+
+def test_runtime_direct_append_fences_new_events_but_replays_exact_expired_event(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="runtime:append-expired",
+        job_type="structure-normalize",
+        input_identity="runtime-append-expired",
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id="runtime-worker",
+        job_types=("structure-normalize",),
+        lease_seconds=3,
+        now=now,
+    )
+    assert lease is not None
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT attempt_id FROM m1_job_runtime_state WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        attempt_row = cursor.fetchone()
+        assert attempt_row is not None
+        attempt_id = str(attempt_row[0])
+
+    replay = RuntimeEvent(
+        job_key=lease.job_key,
+        attempt_id=attempt_id,
+        lease_epoch=lease.lease_epoch,
+        worker_id=lease.lease_owner,
+        event_sequence=2,
+        kind=RuntimeEventKind.LEASE_AT_RISK,
+        stage="upload",
+        progress=None,
+        detail={
+            "component": "control-plane",
+            "deadline_kind": "lease",
+            "deadline_at": (now + timedelta(seconds=3)).isoformat(),
+            "recovery_policy": "retry-job",
+        },
+        occurred_at=now + timedelta(seconds=1),
+        idempotency_key="runtime:append-expired:replay",
+    )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        assert append_runtime_event_cursor(cursor, replay) == replay
+
+    expired_new_event = RuntimeEvent(
+        job_key=replay.job_key,
+        attempt_id=replay.attempt_id,
+        lease_epoch=replay.lease_epoch,
+        worker_id=replay.worker_id,
+        event_sequence=3,
+        kind=RuntimeEventKind.LEASE_AT_RISK,
+        stage=replay.stage,
+        progress=None,
+        detail=dict(replay.detail),
+        occurred_at=now + timedelta(seconds=4),
+        idempotency_key="runtime:append-expired:new",
+    )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        with pytest.raises(RuntimeFenceError, match="lease is no longer current"):
+            append_runtime_event_cursor(cursor, expired_new_event)
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (2,)
+
+
+def test_runtime_default_progress_idempotency_is_attempt_scoped(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="runtime:attempt-key",
+        job_type="structure-normalize",
+        input_identity="runtime-attempt-key",
+        now=now,
+    )
+    first = control_plane.claim_job(
+        worker_id="runtime-worker-a",
+        job_types=("structure-normalize",),
+        lease_seconds=3,
+        now=now,
+    )
+    assert first is not None
+    first_progress = control_plane.record_runtime_progress(
+        first,
+        progress=RuntimeProgress(sequence=1, current=1, total=2, stage="upload"),
+        now=now + timedelta(seconds=1),
+    )
+
+    second = control_plane.claim_job(
+        worker_id="runtime-worker-b",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=4),
+    )
+    assert second is not None
+    second_progress = control_plane.record_runtime_progress(
+        second,
+        progress=RuntimeProgress(sequence=1, current=1, total=2, stage="upload"),
+        now=now + timedelta(seconds=5),
+    )
+    assert second_progress.attempt_id != first_progress.attempt_id
+    assert second_progress.idempotency_key != first_progress.idempotency_key
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT attempt_id FROM m1_job_attempts "
+            "WHERE job_key = %s ORDER BY lease_epoch",
+            (second.job_key,),
+        )
+        attempt_ids = tuple(row[0] for row in cursor.fetchall())
+        assert len(attempt_ids) == 2
+        cursor.execute(
+            "SELECT attempt_id, event_sequence, idempotency_key "
+            "FROM m1_job_runtime_events WHERE job_key = %s "
+            "AND kind = %s ORDER BY attempt_id",
+            (second.job_key, RuntimeEventKind.STAGE_CHANGED.value),
+        )
+        progress_events = cursor.fetchall()
+        assert len(progress_events) == 2
+        assert all(row[1] == 2 for row in progress_events)
+        assert len({row[2] for row in progress_events}) == 2
+
+
+def test_runtime_stale_exact_replay_is_read_only_and_conflicts_do_not_mutate(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="runtime:stale-replay",
+        job_type="structure-normalize",
+        input_identity="runtime-stale-replay",
+        now=now,
+    )
+    first = control_plane.claim_job(
+        worker_id="runtime-worker-a",
+        job_types=("structure-normalize",),
+        lease_seconds=3,
+        now=now,
+    )
+    assert first is not None
+    first_progress = control_plane.record_runtime_progress(
+        first,
+        progress=RuntimeProgress(sequence=1, current=1, total=2, stage="upload"),
+        now=now + timedelta(seconds=1),
+        idempotency_key="runtime:stale-replay:1",
+    )
+    second = control_plane.claim_job(
+        worker_id="runtime-worker-b",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=4),
+    )
+    assert second is not None
+
+    replay = control_plane.record_runtime_progress(
+        first,
+        progress=RuntimeProgress(sequence=1, current=1, total=2, stage="upload"),
+        now=now + timedelta(seconds=1),
+        idempotency_key="runtime:stale-replay:1",
+    )
+    assert replay == first_progress
+
+    with pytest.raises(RuntimeEventConflictError, match="idempotency key conflicts"):
+        control_plane.record_runtime_progress(
+            first,
+            progress=RuntimeProgress(sequence=1, current=2, total=2, stage="upload"),
+            now=now + timedelta(seconds=1),
+            idempotency_key="runtime:stale-replay:1",
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT attempt_id, worker_id, progress_sequence, progress_current "
+            "FROM m1_job_runtime_state WHERE job_key = %s",
+            (second.job_key,),
+        )
+        current = cursor.fetchone()
+        assert current is not None
+        assert current[0] != first_progress.attempt_id
+        assert current[1:] == (second.lease_owner, 0, 0)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s",
+            (second.job_key,),
+        )
+        assert cursor.fetchone() == (3,)
+
+
+def test_stale_runtime_update_does_not_mutate_current_attempt(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="runtime:fence",
+        job_type="structure-normalize",
+        input_identity="runtime-fence",
+        now=now,
+    )
+    first = control_plane.claim_job(
+        worker_id="runtime-worker-a",
+        job_types=("structure-normalize",),
+        lease_seconds=3,
+        now=now,
+    )
+    assert first is not None
+    second = control_plane.claim_job(
+        worker_id="runtime-worker-b",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=4),
+    )
+    assert second is not None
+    with pytest.raises(StaleLeaseError):
+        control_plane.record_runtime_progress(
+            first,
+            progress=RuntimeProgress(sequence=1, current=1, total=1, stage="upload"),
+            now=now + timedelta(seconds=5),
+            idempotency_key="runtime-stale:1",
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT attempt_id, worker_id, progress_sequence "
+            "FROM m1_job_runtime_state WHERE job_key = %s",
+            (second.job_key,),
+        )
+        current = cursor.fetchone()
+        assert current is not None
+        assert isinstance(current[0], str) and current[0]
+        assert current[1:] == (second.lease_owner, 0)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s",
+            (second.job_key,),
+        )
+        assert cursor.fetchone() == (2,)
+
+
+def test_runtime_events_are_immutable_and_timestamp_detail_is_utc(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="runtime:append-only",
+        job_type="structure-normalize",
+        input_identity="runtime-append-only",
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id="runtime-worker",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT attempt_id FROM m1_job_runtime_state WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        attempt_row = cursor.fetchone()
+        assert attempt_row is not None
+        attempt_id = attempt_row[0]
+        event = RuntimeEvent(
+            job_key=lease.job_key,
+            attempt_id=attempt_id,
+            lease_epoch=lease.lease_epoch,
+            worker_id=lease.lease_owner,
+            event_sequence=2,
+            kind=RuntimeEventKind.LEASE_AT_RISK,
+            stage="upload",
+            progress=None,
+            detail={
+                "component": "control-plane",
+                "deadline_at": "2030-01-01T13:00:00+01:00",
+            },
+            occurred_at=now + timedelta(seconds=1),
+            idempotency_key="runtime:append-only:2",
+        )
+        persisted = append_runtime_event_cursor(cursor, event)
+        assert persisted.detail["deadline_at"] == "2030-01-01T12:00:00+00:00"
+        cursor.execute(
+            "SELECT detail->>'deadline_at' FROM m1_job_runtime_events "
+            "WHERE idempotency_key = %s",
+            (event.idempotency_key,),
+        )
+        assert cursor.fetchone() == ("2030-01-01T12:00:00+00:00",)
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            cursor.execute(
+                "UPDATE m1_job_runtime_events SET stage = 'forged' "
+                "WHERE idempotency_key = %s",
+                (event.idempotency_key,),
+            )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            cursor.execute(
+                "DELETE FROM m1_job_runtime_events WHERE idempotency_key = %s",
+                (event.idempotency_key,),
+            )
+
+
+def test_runtime_event_replay_is_exact_and_conflicts_are_rejected(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="runtime:replay",
+        job_type="structure-normalize",
+        input_identity="runtime-replay",
+        now=now,
+    )
+    lease = control_plane.claim_job(
+        worker_id="runtime-worker",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT attempt_id FROM m1_job_runtime_state WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        attempt_row = cursor.fetchone()
+        assert attempt_row is not None
+        attempt_id = attempt_row[0]
+        event = RuntimeEvent(
+            job_key=lease.job_key,
+            attempt_id=attempt_id,
+            lease_epoch=lease.lease_epoch,
+            worker_id=lease.lease_owner,
+            event_sequence=2,
+            kind=RuntimeEventKind.STAGE_CHANGED,
+            stage="upload",
+            progress=RuntimeProgress(sequence=1, current=1, total=2, stage="upload"),
+            detail={"component": "control-plane"},
+            occurred_at=now + timedelta(seconds=1),
+            idempotency_key="runtime:replay:2",
+        )
+        assert append_runtime_event_cursor(cursor, event) == event
+        assert append_runtime_event_cursor(cursor, event) == event
+        with pytest.raises(RuntimeEventConflict):
+            append_runtime_event_cursor(
+                cursor,
+                RuntimeEvent(
+                    job_key=event.job_key,
+                    attempt_id=event.attempt_id,
+                    lease_epoch=event.lease_epoch,
+                    worker_id=event.worker_id,
+                    event_sequence=event.event_sequence,
+                    kind=event.kind,
+                    stage="parse",
+                    progress=RuntimeProgress(
+                        sequence=1, current=1, total=2, stage="parse"
+                    ),
+                    detail=dict(event.detail),
+                    occurred_at=event.occurred_at,
+                    idempotency_key=event.idempotency_key,
+                ),
+            )
 
 
 def test_checkpoint_is_idempotent_and_fenced(control_plane: PostgresControlPlane) -> None:

@@ -15,8 +15,8 @@ from psycopg.types.json import Jsonb
 
 from .models import (
     AlertDeliveryLease,
-    CloudUsageDecision,
     CheckpointReceipt,
+    CloudUsageDecision,
     JobLease,
     JobState,
     QuoteBatchLeg,
@@ -26,6 +26,15 @@ from .models import (
     StructureRangeReceipt,
     StructureRangeSpec,
     StructureSourcePageSpec,
+)
+from .runtime_models import RuntimeEvent, RuntimeEventKind, RuntimeProgress
+from .runtime_store import (
+    RuntimeEventConflict,
+    RuntimeFenceError,
+    RuntimeProgressConflict,
+    start_runtime_attempt_cursor,
+    update_runtime_heartbeat_cursor,
+    update_runtime_progress_cursor,
 )
 from .soak_evidence import SoakEvidenceError, _observed_at, _validated
 from .structure_artifact import (
@@ -65,6 +74,15 @@ class IncompleteStructureGenerationError(ControlPlaneError):
 
 class SoakEvidenceConflictError(ControlPlaneError):
     """A cloud soak run or observation conflicts with immutable evidence."""
+
+
+class RuntimeEventConflictError(ControlPlaneError):
+    """Runtime event idempotency or sequence was reused for different data."""
+
+
+class RuntimeProgressConflictError(ControlPlaneError):
+    """Runtime progress did not strictly advance the current attempt."""
+
 
 def _quote_batch_leg_payload(leg: QuoteBatchLeg) -> dict[str, str | None]:
     """Keep batch input JSON explicit and independent of routing internals."""
@@ -2901,13 +2919,25 @@ class PostgresControlPlane:
                 """,
                 (worker_id, epoch, expires_at, now, job["job_key"]),
             )
+            attempt_id = str(uuid4())
             cursor.execute(
                 """
                 INSERT INTO m1_job_attempts (
                     attempt_id, job_key, lease_epoch, worker_id, state, started_at
                 ) VALUES (%s, %s, %s, %s, 'running', %s)
                 """,
-                (str(uuid4()), job["job_key"], epoch, worker_id, now),
+                (attempt_id, job["job_key"], epoch, worker_id, now),
+            )
+            start_runtime_attempt_cursor(
+                cursor,
+                job_key=str(job["job_key"]),
+                job_type=str(job["job_type"]),
+                attempt_id=attempt_id,
+                lease_epoch=epoch,
+                worker_id=worker_id,
+                started_at=now,
+                lease_deadline_at=expires_at,
+                lease_seconds=lease_seconds,
             )
             return JobLease(
                 job_key=job["job_key"],
@@ -2921,30 +2951,109 @@ class PostgresControlPlane:
             )
 
     def heartbeat(self, lease: JobLease, *, now: datetime, lease_seconds: int = 30) -> JobLease:
+        """Renew a lease and its runtime liveness projection atomically."""
+        return self.heartbeat_runtime_attempt(lease, now=now, lease_seconds=lease_seconds)
+
+    def heartbeat_runtime_attempt(
+        self, lease: JobLease, *, now: datetime, lease_seconds: int = 30
+    ) -> JobLease:
+        """Renew job/runtime state under the current attempt fence."""
         self._validate_aware(now, "now")
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
-        expires_at = now + timedelta(seconds=lease_seconds)
-        with self._connection_factory() as connection, connection.cursor() as cursor:
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
             cursor.execute(
                 """
-                UPDATE m1_jobs SET lease_expires_at = %s, updated_at = %s
-                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s AND state = 'leased'
+                SELECT attempt_id FROM m1_job_runtime_state
+                WHERE job_key = %s AND lease_epoch = %s AND worker_id = %s
                 """,
-                (expires_at, now, lease.job_key, lease.lease_owner, lease.lease_epoch),
+                (lease.job_key, lease.lease_epoch, lease.lease_owner),
             )
-            if cursor.rowcount != 1:
-                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            runtime_state = cursor.fetchone()
+            if runtime_state is None:
+                raise StaleLeaseError(f"runtime attempt is no longer current for {lease.job_key}")
+            try:
+                heartbeat = update_runtime_heartbeat_cursor(
+                    cursor,
+                    job_key=lease.job_key,
+                    attempt_id=str(runtime_state["attempt_id"]),
+                    lease_epoch=lease.lease_epoch,
+                    worker_id=lease.lease_owner,
+                    now=now,
+                    lease_seconds=lease_seconds,
+                )
+            except RuntimeFenceError as error:
+                raise StaleLeaseError(str(error)) from error
+        expires_at = heartbeat["lease_deadline_at"]
         return JobLease(
             job_key=lease.job_key,
             job_type=lease.job_type,
             input_identity=lease.input_identity,
             lease_owner=lease.lease_owner,
             lease_epoch=lease.lease_epoch,
-            lease_expires_at=expires_at,
+            lease_expires_at=expires_at,  # type: ignore[arg-type]
             checkpoint_cursor=lease.checkpoint_cursor,
             checkpoint_digest=lease.checkpoint_digest,
         )
+
+    def record_runtime_progress(
+        self,
+        lease: JobLease,
+        *,
+        progress: RuntimeProgress,
+        now: datetime,
+        idempotency_key: str | None = None,
+        detail: dict[str, object] | None = None,
+    ) -> RuntimeEvent:
+        """Persist task progress and its event under one lease transaction."""
+        self._validate_aware(now, "now")
+        if type(progress) is not RuntimeProgress:
+            raise TypeError("progress must be RuntimeProgress")
+        event_detail: dict[str, object] = (
+            {"component": "control-plane"} if detail is None else dict(detail)
+        )
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT attempt_id FROM m1_job_attempts
+                WHERE job_key = %s AND lease_epoch = %s AND worker_id = %s
+                """,
+                (lease.job_key, lease.lease_epoch, lease.lease_owner),
+            )
+            attempt = cursor.fetchone()
+            if attempt is None:
+                raise StaleLeaseError(f"runtime attempt is no longer known for {lease.job_key}")
+            attempt_id = str(attempt["attempt_id"])
+            if idempotency_key is None:
+                idempotency_key = f"runtime:{attempt_id}:progress:{progress.sequence}"
+            self._validate_nonempty(idempotency_key=idempotency_key)
+            event = RuntimeEvent(
+                job_key=lease.job_key,
+                attempt_id=attempt_id,
+                lease_epoch=lease.lease_epoch,
+                worker_id=lease.lease_owner,
+                event_sequence=1,
+                kind=RuntimeEventKind.STAGE_CHANGED,
+                stage=progress.stage,
+                progress=progress,
+                detail=event_detail,
+                occurred_at=now,
+                idempotency_key=idempotency_key,
+            )
+            try:
+                return update_runtime_progress_cursor(cursor, event=event)
+            except RuntimeFenceError as error:
+                raise StaleLeaseError(str(error)) from error
+            except RuntimeProgressConflict as error:
+                raise RuntimeProgressConflictError(str(error)) from error
+            except RuntimeEventConflict as error:
+                raise RuntimeEventConflictError(str(error)) from error
 
     def checkpoint(
         self,
