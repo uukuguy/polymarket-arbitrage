@@ -27,6 +27,7 @@ from polyarb.perception.fault_control import (
     FaultRuntimeIdentity,
 )
 from polyarb.perception.fault_runtime import FaultRuntime
+from polyarb.perception.gamma_incidents import GammaBatchIncidents
 from polyarb.perception.reconciliation import (
     ReconciliationRunner,
     ReconciliationWorker,
@@ -536,6 +537,19 @@ async def test_real_reconciliation_cursor_chain_recovers_on_new_checkpoint(
     store = OpportunityPerceptionStore(path)
     store.init_schema()
     base_ms = int(time.time() * 1_000)
+
+    class SyntheticClock:
+        def __init__(self, now_ms: int) -> None:
+            self.now_ms = now_ms
+
+        def __call__(self) -> int:
+            return self.now_ms
+
+        def advance(self, delta_ms: int) -> int:
+            self.now_ms += delta_ms
+            return self.now_ms
+
+    clock = SyntheticClock(base_ms + 10)
     identity = FaultRuntimeIdentity(
         component="reconciliation",
         release_id="a" * 40,
@@ -565,16 +579,10 @@ async def test_real_reconciliation_cursor_chain_recovers_on_new_checkpoint(
         ),
         accepted_at_ms=base_ms + 1,
     ).accepted
-    wall = iter(
-        (
-            *range(base_ms + 10, base_ms + 16),
-            *range(base_ms + 100, base_ms + 200),
-        )
-    )
     runtime = FaultRuntime(
         identity=identity,
         authority=authority,
-        clock_ms=wall.__next__,
+        clock_ms=clock,
         monotonic=lambda: 10.0,
     )
     stop = asyncio.Event()
@@ -587,7 +595,9 @@ async def test_real_reconciliation_cursor_chain_recovers_on_new_checkpoint(
             if self.calls == 2:
                 await asyncio.sleep(0.01)
                 stop.set()
-            page_ms = base_ms + 50 + self.calls
+                page_ms = clock.advance(50)
+            else:
+                page_ms = clock()
             return EventPage(
                 events=(),
                 requested_cursor=cursor,
@@ -604,15 +614,21 @@ async def test_real_reconciliation_cursor_chain_recovers_on_new_checkpoint(
     worker = ReconciliationWorker(
         gamma=gamma,
         store=store,
-        clock_ms=lambda: base_ms + 10,
+        clock_ms=clock,
         fault_runtime=runtime,
     )
-    await ReconciliationRunner(
+    runner = ReconciliationRunner(
         worker=worker,
         gamma=gamma,
         interval_s=0.001,
         store=store,
-    ).run(stop)
+    )
+    runner._gamma_incidents = GammaBatchIncidents(
+        store,
+        scope="reconciliation",
+        clock_ms=clock,
+    )
+    await runner.run(stop)
 
     history = authority.validate_history("fault-cursor")
     assert history.valid is True
@@ -632,11 +648,43 @@ async def test_real_reconciliation_cursor_chain_recovers_on_new_checkpoint(
     assert store.open_incidents() == ()
     checkpoint = store.current_reconciliation()
     assert checkpoint is not None
-    assert checkpoint.checkpoint_at_ms > next(
+    injected_at_ms = next(
         event.occurred_at_ms
         for event in history.events
         if event.state.value == "injected"
     )
+    recovered_at_ms = next(
+        event.occurred_at_ms
+        for event in history.events
+        if event.state is not None and event.state.value == "recovered"
+    )
+    with store._connect() as con:
+        incident_events = con.execute(
+            "SELECT state,occurred_at_ms FROM neg_risk_incident_events "
+            "WHERE scope='reconciliation' AND kind='gamma-cursor' "
+            "ORDER BY sequence"
+        ).fetchall()
+    assert [row["state"] for row in incident_events] == [
+        "detected",
+        "classified",
+        "contained",
+        "recovering",
+        "verified",
+    ]
+    recovery_started_at_ms = next(
+        row["occurred_at_ms"]
+        for row in incident_events
+        if row["state"] == "recovering"
+    )
+    verified_at_ms = next(
+        row["occurred_at_ms"]
+        for row in incident_events
+        if row["state"] == "verified"
+    )
+    assert checkpoint.checkpoint_at_ms > injected_at_ms
+    assert checkpoint.checkpoint_at_ms > recovery_started_at_ms
+    assert checkpoint.checkpoint_at_ms <= recovered_at_ms
+    assert checkpoint.checkpoint_at_ms <= verified_at_ms
 
 
 @pytest.mark.asyncio
