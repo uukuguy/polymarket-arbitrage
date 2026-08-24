@@ -322,6 +322,8 @@ async def test_isolated_topology_supervises_quote_as_its_only_collector(
         opportunity_reconciliation_enabled = False
         neg_risk_quote_worker_enabled = True
         neg_risk_quote_supervisor_enabled = True
+        neg_risk_quote_supervisor_timeout_s = 210
+        neg_risk_quote_interval_s = 60
         producer_stall_timeout_s = 180.0
         producer_stall_detection_s = 30.0
         producer_terminate_grace_s = 1.0
@@ -344,7 +346,7 @@ async def test_isolated_topology_supervises_quote_as_its_only_collector(
     store.init_schema()
 
     tasks = daemon_main._start_supervised_producers(Settings, store, asyncio.Event())
-    await asyncio.gather(*tasks)
+    await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
 
     assert [spec.component for spec in specs] == ["quote"]
     assert specs[0].stall_detection_s is None
