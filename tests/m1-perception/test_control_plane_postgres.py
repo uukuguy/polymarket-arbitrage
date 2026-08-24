@@ -4690,6 +4690,94 @@ def test_recovery_action_schedule_is_idempotent_and_conflicting_replay_fails_clo
         assert cursor.fetchone() == (1,)
 
 
+def test_recovery_action_channel_replay_encoding_is_unambiguous(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-action:channel-canonical",
+        job_type="structure-normalize",
+        input_identity="recovery-action:channel-canonical",
+        now=now,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="controller-channel-canonical",
+        lease_seconds=30,
+        now=now,
+    )
+
+    first = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=2,
+        cooldown_seconds=60,
+        channels=("a,b", "c"),
+        now=now + timedelta(seconds=1),
+    )
+    same_set_replay = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=2,
+        cooldown_seconds=60,
+        channels=("c", "a,b"),
+        now=now + timedelta(seconds=1),
+    )
+    assert same_set_replay == first
+
+    with pytest.raises(RecoveryActionConflict, match="idempotency"):
+        schedule_action(
+            control_plane._connection_factory,
+            controller=controller,
+            decision=_recovery_decision(now),
+            incident_key=f"incident:{lease.job_key}",
+            component="structure-normalize",
+            target_type="job",
+            target_id=lease.job_key,
+            expected_attempt_id=attempt_id,
+            expected_lease_epoch=lease.lease_epoch,
+            recovery_budget_remaining=2,
+            cooldown_seconds=60,
+            channels=("a", "b,c"),
+            now=now + timedelta(seconds=1),
+        )
+
+    for channels in (("a", "a"), ("a", "")):
+        with pytest.raises(ValueError):
+            schedule_action(
+                control_plane._connection_factory,
+                controller=controller,
+                decision=_recovery_decision(now),
+                incident_key=f"incident:{lease.job_key}",
+                component="structure-normalize",
+                target_type="job",
+                target_id=lease.job_key,
+                expected_attempt_id=attempt_id,
+                expected_lease_epoch=lease.lease_epoch,
+                recovery_budget_remaining=2,
+                cooldown_seconds=60,
+                channels=channels,
+                now=now + timedelta(seconds=1),
+            )
+
+
 def test_recovery_action_stale_attempt_lease_is_completed_noop_without_mutation(
     control_plane: PostgresControlPlane,
 ) -> None:

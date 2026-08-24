@@ -305,6 +305,14 @@ def _normalized_channels(channels: Sequence[str]) -> tuple[str, ...]:
     return tuple(sorted(channels))
 
 
+def _encoded_channels(channels: Sequence[str]) -> str:
+    return json.dumps(
+        list(_normalized_channels(channels)),
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
 def _schedule_detail(
     *,
     decision: RecoveryDecision,
@@ -318,7 +326,7 @@ def _schedule_detail(
     normalized_detail: dict[str, object] = {
         "action_type": decision.action.value if decision.action is not None else "",
         "budget_remaining": recovery_budget_remaining,
-        "channels": ",".join(_normalized_channels(channels)),
+        "channels": _encoded_channels(channels),
         "component": component,
         "cooldown_seconds": cooldown_seconds,
         "incident_key": incident_key,
