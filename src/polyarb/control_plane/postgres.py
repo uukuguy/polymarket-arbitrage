@@ -32,6 +32,7 @@ from .runtime_store import (
     RuntimeEventConflict,
     RuntimeFenceError,
     RuntimeProgressConflict,
+    append_runtime_event_cursor,
     start_runtime_attempt_cursor,
     update_runtime_heartbeat_cursor,
     update_runtime_progress_cursor,
@@ -1905,6 +1906,13 @@ class PostgresControlPlane:
         self._validate_aware(now, "now")
         if lease.job_type != "quote-admit":
             raise ValueError("Quote generation admission requires a quote-admit lease")
+        remaining_ms = int((lease.lease_expires_at - now).total_seconds() * 1000)
+        if remaining_ms <= 1:
+            raise StaleLeaseError(
+                f"quote admission has no safe terminal budget for {lease.job_key}"
+            )
+        statement_timeout_ms = min(5000, remaining_ms - 1)
+        lock_timeout_ms = min(1000, statement_timeout_ms)
         if len(structure_receipt_digest) != 64 or len(universe_hash) != 64:
             raise ValueError("Quote admission digests must be sha256")
         if not legs or batch_size <= 0:
@@ -1921,6 +1929,11 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            # Keep every terminal lock and statement bounded below the live
+            # lease.  The integer budget is derived before opening the
+            # transaction, and SET LOCAL makes both limits rollback-scoped.
+            cursor.execute(f"SET LOCAL statement_timeout = '{statement_timeout_ms}ms'")
+            cursor.execute(f"SET LOCAL lock_timeout = '{lock_timeout_ms}ms'")
             generation_key, bundle_key, bundle_digest = self._quote_admission_input_cursor(
                 cursor, lease.job_key
             )
@@ -1928,6 +1941,7 @@ class PostgresControlPlane:
                 raise JobIdentityConflict("Quote admission lease names another Structure bundle")
             if structure_receipt_digest != bundle_digest:
                 raise CheckpointConflictError("Quote admission names another Structure bundle")
+            self._append_quote_admission_success_cursor(cursor, lease=lease, now=now)
             cursor.execute(
                 """
                 UPDATE m1_jobs
@@ -1951,6 +1965,89 @@ class PostgresControlPlane:
                 (now, lease.job_key, lease.lease_epoch),
             )
         return batches
+
+    @staticmethod
+    def _append_quote_admission_success_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]], *, lease: JobLease, now: datetime
+    ) -> RuntimeEvent:
+        """Append Quote admission success before its terminal rows are mutated.
+
+        ``append_runtime_event_cursor`` validates the live job fence, so the
+        event must be inserted while the job is still leased.  The enclosing
+        transaction then commits the event, terminal job/attempt state, and
+        Quote batch inputs together; any event failure rolls all of them back.
+        """
+        cursor.execute(
+            """
+            SELECT attempt_id, lease_epoch, worker_id, progress_sequence,
+                   progress_current, progress_total
+            FROM m1_job_runtime_state
+            WHERE job_key = %s
+            FOR UPDATE
+            """,
+            (lease.job_key,),
+        )
+        state = cursor.fetchone()
+        if state is None:
+            raise StaleLeaseError(f"runtime attempt is no longer current for {lease.job_key}")
+        if (
+            int(state["lease_epoch"]) != lease.lease_epoch
+            or str(state["worker_id"]) != lease.lease_owner
+        ):
+            raise StaleLeaseError(f"runtime attempt is no longer current for {lease.job_key}")
+        cursor.execute(
+            """
+            SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
+            FROM m1_job_runtime_events
+            WHERE attempt_id = %s
+            """,
+            (state["attempt_id"],),
+        )
+        sequence_row = cursor.fetchone()
+        if sequence_row is None:
+            raise ControlPlaneError("runtime event sequence query returned no row")
+        progress_sequence = int(state["progress_sequence"])
+        progress = (
+            None
+            if progress_sequence == 0
+            else RuntimeProgress(
+                sequence=progress_sequence,
+                current=int(state["progress_current"]),
+                total=(
+                    None
+                    if state["progress_total"] is None
+                    else int(state["progress_total"])
+                ),
+                stage="commit-admission",
+            )
+        )
+        try:
+            return append_runtime_event_cursor(
+                cursor,
+                RuntimeEvent(
+                    job_key=lease.job_key,
+                    attempt_id=str(state["attempt_id"]),
+                    lease_epoch=lease.lease_epoch,
+                    worker_id=lease.lease_owner,
+                    event_sequence=int(sequence_row["next_sequence"]),
+                    kind=RuntimeEventKind.SUCCEEDED,
+                    stage="commit-admission",
+                    progress=progress,
+                    detail={
+                        "component": "control-plane",
+                        "data_product": "market-snapshot",
+                        "qualification_impact": "qualified",
+                        "result_code": "ok",
+                    },
+                    occurred_at=now,
+                    idempotency_key=f"runtime:{state['attempt_id']}:succeeded",
+                ),
+            )
+        except RuntimeFenceError as error:
+            # Keep the public control-plane contract stable: callers should
+            # treat a fenced terminal operation as stale, never as a normal
+            # Quote admission failure eligible for retry under the old lease.
+            raise StaleLeaseError(str(error)) from error
 
     @staticmethod
     def quote_batches_from_legs(

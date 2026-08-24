@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -14,8 +15,11 @@ import psycopg
 import pytest
 from psycopg import sql
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
+from polyarb.control_plane import postgres as postgres_module
 from polyarb.control_plane.models import (
+    JobLease,
     JobState,
     QuoteBatchLeg,
     QuoteBatchSpec,
@@ -242,6 +246,50 @@ def _leg(token_id: str, *, suffix: str = "") -> QuoteBatchLeg:
         event_id=f"event-{token_id}",
         membership_hash=f"membership-{suffix or token_id}",
     )
+
+
+def _seed_quote_admission_job(
+    control_plane: PostgresControlPlane,
+    *,
+    generation_key: str,
+    now: datetime,
+    lease_seconds: int,
+) -> tuple[JobLease, str, tuple[QuoteBatchSpec, ...]]:
+    bundle_digest = "a" * 64
+    job_key = f"{generation_key}:quote-admit"
+    control_plane.enqueue_job(
+        job_key=job_key,
+        job_type="quote-admit",
+        input_identity=f"{generation_key}:bundles/current.ndjson:{bundle_digest}",
+        now=now,
+    )
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            "INSERT INTO m1_structure_generation_inputs "
+            "(generation_key, bundle_key, bundle_digest, identity, admitted_at) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (generation_key, "bundles/current.ndjson", bundle_digest, Jsonb({}), now),
+        )
+        connection.execute(
+            "INSERT INTO m1_quote_admission_inputs "
+            "(job_key, generation_key, bundle_key, bundle_digest, admitted_at) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (job_key, generation_key, "bundles/current.ndjson", bundle_digest, now),
+        )
+    lease = control_plane.claim_job(
+        worker_id="quote-admitter",
+        job_types=("quote-admit",),
+        lease_seconds=lease_seconds,
+        now=now,
+    )
+    assert lease is not None
+    batches = control_plane.quote_batches_from_legs(
+        structure_receipt_digest=bundle_digest,
+        universe_hash="b" * 64,
+        legs=(_leg(f"token-{generation_key}"),),
+        batch_size=100,
+    )
+    return lease, bundle_digest, batches
 
 
 def _structure_identity() -> StructureBundleIdentity:
@@ -1924,6 +1972,266 @@ def test_structure_certification_requires_complete_matching_range_receipts(
         "d" * 64,
         1,
     )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT attempt_id, lease_epoch, worker_id, event_sequence, kind, stage, "
+            "detail, "
+            "idempotency_key FROM m1_job_runtime_events "
+            "WHERE job_key = %s AND kind = %s",
+            (quote_admit.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        success_event = cursor.fetchone()
+    assert success_event is not None
+    assert success_event[0:5] == (
+        success_event[0],
+        quote_admit.lease_epoch,
+        quote_admit.lease_owner,
+        2,
+        RuntimeEventKind.SUCCEEDED.value,
+    )
+    assert success_event[5] == "commit-admission"
+    assert success_event[6] == {
+        "component": "control-plane",
+        "data_product": "market-snapshot",
+        "qualification_impact": "qualified",
+        "result_code": "ok",
+    }
+    assert success_event[7] == f"runtime:{success_event[0]}:succeeded"
+
+
+def test_quote_admission_success_event_failure_rolls_back_terminal_rows(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    generation_key = "quote:atomic-success"
+    job_key = f"{generation_key}:quote-admit"
+    bundle_digest = "a" * 64
+    control_plane.enqueue_job(
+        job_key=job_key,
+        job_type="quote-admit",
+        input_identity=f"{generation_key}:bundles/current.ndjson:{bundle_digest}",
+        now=now,
+    )
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            "INSERT INTO m1_structure_generation_inputs "
+            "(generation_key, bundle_key, bundle_digest, identity, admitted_at) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (generation_key, "bundles/current.ndjson", bundle_digest, Jsonb({}), now),
+        )
+        connection.execute(
+            "INSERT INTO m1_quote_admission_inputs "
+            "(job_key, generation_key, bundle_key, bundle_digest, admitted_at) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (job_key, generation_key, "bundles/current.ndjson", bundle_digest, now),
+        )
+    lease = control_plane.claim_job(
+        worker_id="quote-admitter", job_types=("quote-admit",), lease_seconds=120, now=now
+    )
+    assert lease is not None
+    batches = control_plane.quote_batches_from_legs(
+        structure_receipt_digest=bundle_digest,
+        universe_hash="b" * 64,
+        legs=(_leg("token-atomic"),),
+        batch_size=100,
+    )
+
+    def fail_success_event(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("injected success event failure")
+
+    monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", fail_success_event)
+    with pytest.raises(RuntimeError, match="injected success event failure"):
+        control_plane.admit_quote_generation(
+            lease,
+            structure_receipt_digest=bundle_digest,
+            universe_hash="b" * 64,
+            legs=(_leg("token-atomic"),),
+            batch_size=100,
+            input_artifacts={
+                batches[0].job_key: (
+                    f"quote-inputs/{'c' * 64}/batch.ndjson",
+                    "c" * 64,
+                    1,
+                )
+            },
+            now=now,
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT state FROM m1_job_attempts WHERE job_key = %s AND lease_epoch = %s",
+            (job_key, lease.lease_epoch),
+        )
+        assert cursor.fetchone() == ("running",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_quote_batch_inputs WHERE job_key LIKE %s",
+            (f"{generation_key}:%",),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
+            (job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (0,)
+
+
+def test_quote_admission_rejects_expired_terminal_budget_before_mutation(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease, bundle_digest, batches = _seed_quote_admission_job(
+        control_plane,
+        generation_key="quote:expired-terminal-budget",
+        now=now,
+        lease_seconds=3,
+    )
+
+    with pytest.raises(StaleLeaseError, match="no safe terminal budget"):
+        control_plane.admit_quote_generation(
+            lease,
+            structure_receipt_digest=bundle_digest,
+            universe_hash="b" * 64,
+            legs=(_leg("token-quote:expired-terminal-budget"),),
+            batch_size=100,
+            input_artifacts={
+                batches[0].job_key: (
+                    f"quote-inputs/{'c' * 64}/batch.ndjson",
+                    "c" * 64,
+                    1,
+                )
+            },
+            now=now + timedelta(seconds=3),
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT state FROM m1_job_attempts WHERE job_key = %s AND lease_epoch = %s",
+            (lease.job_key, lease.lease_epoch),
+        )
+        assert cursor.fetchone() == ("running",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_quote_batch_inputs WHERE job_key LIKE %s",
+            ("quote:expired-terminal-budget:%",),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
+            (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (0,)
+
+
+def test_quote_admission_statement_timeout_rolls_back_terminal_transaction(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    lease, bundle_digest, batches = _seed_quote_admission_job(
+        control_plane,
+        generation_key="quote:statement-timeout",
+        now=now,
+        lease_seconds=2,
+    )
+
+    def sleep_until_statement_timeout(cursor: object, event: object) -> object:
+        assert event is not None
+        cast(Any, cursor).execute("SELECT pg_sleep(10)")
+        return event
+
+    monkeypatch.setattr(
+        postgres_module, "append_runtime_event_cursor", sleep_until_statement_timeout
+    )
+    started = time.monotonic()
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        control_plane.admit_quote_generation(
+            lease,
+            structure_receipt_digest=bundle_digest,
+            universe_hash="b" * 64,
+            legs=(_leg("token-quote:statement-timeout"),),
+            batch_size=100,
+            input_artifacts={
+                batches[0].job_key: (
+                    f"quote-inputs/{'c' * 64}/batch.ndjson",
+                    "c" * 64,
+                    1,
+                )
+            },
+            now=now,
+        )
+    assert time.monotonic() - started < 3
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_quote_batch_inputs WHERE job_key LIKE %s",
+            ("quote:statement-timeout:%",),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
+            (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (0,)
+
+
+def test_quote_admission_lock_timeout_rolls_back_terminal_transaction(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease, bundle_digest, batches = _seed_quote_admission_job(
+        control_plane,
+        generation_key="quote:lock-timeout",
+        now=now,
+        lease_seconds=3,
+    )
+    blocker = control_plane._connection_factory()
+    try:
+        with blocker.cursor() as cursor:
+            cursor.execute(
+                "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE",
+                (lease.job_key,),
+            )
+        started = time.monotonic()
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            control_plane.admit_quote_generation(
+                lease,
+                structure_receipt_digest=bundle_digest,
+                universe_hash="b" * 64,
+                legs=(_leg("token-quote:lock-timeout"),),
+                batch_size=100,
+                input_artifacts={
+                    batches[0].job_key: (
+                        f"quote-inputs/{'c' * 64}/batch.ndjson",
+                        "c" * 64,
+                        1,
+                    )
+                },
+                now=now,
+            )
+        assert time.monotonic() - started < 3
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
+        assert cursor.fetchone() == ("leased",)
+        cursor.execute(
+            "SELECT count(*) FROM m1_quote_batch_inputs WHERE job_key LIKE %s",
+            ("quote:lock-timeout:%",),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
+            (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
+        )
+        assert cursor.fetchone() == (0,)
 
 
 def test_structure_certification_refuses_component_count_parity_mismatch(

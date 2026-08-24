@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Any, Protocol
@@ -15,6 +16,8 @@ from .models import QuoteBatchLeg, QuoteBatchSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .quote_artifact import QuoteBatchInputArtifact, upload_quote_batch_artifact
 from .quote_worker import QuoteBatchWorkerResult
+from .runtime_contract import AsyncAttemptRuntime
+from .runtime_models import RuntimeDeadlineProfile
 from .structure_artifact import (
     StructureBundleError,
     parse_structure_bundle_bytes,
@@ -27,12 +30,83 @@ class QuoteAdmissionError(RuntimeError):
     """A certified Structure bundle cannot safely freeze Quote work."""
 
 
+async def _drain_thread_task(task: asyncio.Task[Any]) -> Any:
+    """Await a worker thread to completion, even while cancellation is pending."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
+
+
+async def _to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run blocking work without abandoning its thread when the owner cancels."""
+    task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancellation:
+        try:
+            await _drain_thread_task(task)
+        except BaseException as error:
+            # Retrieve the underlying exception so the executor task is never
+            # left unobserved, while preserving the caller's cancellation.
+            raise cancellation from error
+        raise
+
+
+def _consume_cancellation() -> None:
+    """Consume cancellation already delivered to a point-of-no-return owner."""
+    task = asyncio.current_task()
+    if task is None:
+        return
+    while task.cancelling():
+        task.uncancel()
+
+
+async def _terminal_to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Drain a terminal DB call and return committed success after cancellation.
+
+    Terminal admission is the point of no return: once cancellation reaches
+    the owner, the database call is allowed to finish.  A committed result
+    wins over the cancellation so the scheduler cannot report a timeout for
+    work that is already durable; a real terminal error remains authoritative.
+    """
+    task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancellation:
+        _consume_cancellation()
+        try:
+            result = await _drain_thread_task(task)
+        except BaseException as error:
+            _consume_cancellation()
+            raise error from cancellation
+        _consume_cancellation()
+        return result
+
+
+def _runtime_profile(lease_seconds: int) -> RuntimeDeadlineProfile:
+    """Match the Plan 01 derived profile without coupling to a private helper."""
+    bounded_lease = max(3, int(lease_seconds))
+    heartbeat = max(1, min(30, bounded_lease // 3))
+    progress = max(bounded_lease, heartbeat * 3)
+    attempt = max(progress, bounded_lease * 10)
+    return RuntimeDeadlineProfile(
+        policy_version="runtime-v1",
+        lease_seconds=bounded_lease,
+        heartbeat_seconds=heartbeat,
+        progress_seconds=progress,
+        attempt_seconds=attempt,
+    )
+
+
 class _ObjectClient(Protocol):
     def get_object(self, **kwargs: Any) -> Mapping[str, Any]: ...
 
     def put_object(self, **kwargs: Any) -> Any: ...
 
-    def head_object(self, **kwargs: Any) -> Mapping[str, Any]: ...
+    def head_object(self, **kwargs: Any) -> dict[str, Any]: ...
 
 
 def quote_legs_from_structure_components(
@@ -159,6 +233,7 @@ class TransactionalQuoteAdmitter:
         batch_size: int,
         lease_seconds: int = 120,
         retry_delay: timedelta = timedelta(seconds=15),
+        runtime_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         if not bucket or not worker_id or batch_size <= 0 or lease_seconds <= 0:
             raise ValueError("Quote admission bounds and identities must be positive")
@@ -170,6 +245,7 @@ class TransactionalQuoteAdmitter:
         self._batch_size = batch_size
         self._lease_seconds = lease_seconds
         self._retry_delay = retry_delay
+        self._runtime_sleep = runtime_sleep
 
     async def run_once(self) -> QuoteBatchWorkerResult:
         lease = self._control_plane.claim_job(
@@ -180,60 +256,22 @@ class TransactionalQuoteAdmitter:
         )
         if lease is None:
             return QuoteBatchWorkerResult(job_key=None, outcome="idle")
+        runtime = AsyncAttemptRuntime(
+            store=self._control_plane,
+            lease=lease,
+            profile=_runtime_profile(self._lease_seconds),
+            clock=self._now,
+            sleep=self._runtime_sleep,
+        )
         try:
-            _generation, bundle_key, bundle_digest = self._control_plane.quote_admission_input(
-                lease.job_key
-            )
-            payload = self._read_bundle(bundle_key)
-            try:
-                identity, components = parse_structure_bundle_bytes(
-                    payload, expected_sha256=bundle_digest
-                )
-            except StructureBundleError:
-                identity, shards = parse_structure_shard_manifest_bytes(
-                    payload, expected_sha256=bundle_digest
-                )
-                if identity.source_kind != "gamma-source-window-events-v3-sharded":
-                    raise
-                legs = self._read_v3_quote_legs(shards)
-            else:
-                legs = quote_legs_from_structure_components(components)
-            universe_hash = canonical_quote_universe_hash(legs)
-            batches = quote_batches_from_legs(
-                structure_receipt_digest=bundle_digest,
-                universe_hash=universe_hash,
-                legs=legs,
-                batch_size=self._batch_size,
-            )
-            input_artifacts = tuple(QuoteBatchInputArtifact.from_spec(batch) for batch in batches)
-            for artifact in input_artifacts:
-                upload_quote_batch_artifact(
-                    self._object_client, bucket=self._bucket, artifact=artifact
-                )
-            self._control_plane.admit_quote_generation(
-                lease,
-                structure_receipt_digest=bundle_digest,
-                universe_hash=universe_hash,
-                legs=legs,
-                batch_size=self._batch_size,
-                input_artifacts={
-                    batch.job_key: (artifact.key, artifact.sha256, len(batch.legs))
-                    for batch, artifact in zip(batches, input_artifacts, strict=True)
-                },
-                now=self._now(),
-            )
-            self._control_plane.record_job_recovery(
-                lease,
-                component="quote-admit",
-                channels=incident_alert_channels(Settings()),
-                now=self._now(),
-            )
-            return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="admitted")
+            async with runtime:
+                return await self._run_claimed(runtime)
         except StaleLeaseError:
             raise
         except Exception as error:
-            self._control_plane.finish_retryable_with_incident(
-                lease,
+            await _to_thread(
+                self._control_plane.finish_retryable_with_incident,
+                runtime.current_lease,
                 error_class=type(error).__name__,
                 incident_key=f"incident:job-retry:{lease.job_key}",
                 dedupe_key=f"job-retry:{lease.job_key}",
@@ -250,6 +288,100 @@ class TransactionalQuoteAdmitter:
             if isinstance(error, QuoteAdmissionError):
                 raise
             raise QuoteAdmissionError("Quote admission bundle digest or contract failed") from error
+        raise AssertionError("quote admission runtime exited without a result")
+
+    async def _run_claimed(self, runtime: AsyncAttemptRuntime) -> QuoteBatchWorkerResult:
+        """Run one claimed admission while the shared runtime owns its fence."""
+        lease = runtime.current_lease
+        _generation, bundle_key, bundle_digest = await _to_thread(
+            self._control_plane.quote_admission_input, lease.job_key
+        )
+        payload = await _to_thread(self._read_bundle, bundle_key)
+        try:
+            identity, components = parse_structure_bundle_bytes(
+                payload, expected_sha256=bundle_digest
+            )
+        except StructureBundleError:
+            identity, shards = parse_structure_shard_manifest_bytes(
+                payload, expected_sha256=bundle_digest
+            )
+            if identity.source_kind != "gamma-source-window-events-v3-sharded":
+                raise
+            await self._progress(runtime, stage="read-manifest", current=1, total=1)
+            legs = await self._read_v3_quote_legs_async(shards, runtime=runtime)
+        else:
+            await self._progress(runtime, stage="read-manifest", current=1, total=1)
+            legs = quote_legs_from_structure_components(components)
+            await self._progress(runtime, stage="read-shards", current=1, total=1)
+        universe_hash = canonical_quote_universe_hash(legs)
+        batches = quote_batches_from_legs(
+            structure_receipt_digest=bundle_digest,
+            universe_hash=universe_hash,
+            legs=legs,
+            batch_size=self._batch_size,
+        )
+        await self._progress(
+            runtime, stage="build-batches", current=len(batches), total=len(batches)
+        )
+        input_artifacts = tuple(QuoteBatchInputArtifact.from_spec(batch) for batch in batches)
+        for index, artifact in enumerate(input_artifacts, start=1):
+            await _to_thread(
+                upload_quote_batch_artifact,
+                self._object_client,
+                bucket=self._bucket,
+                artifact=artifact,
+            )
+            await self._progress(
+                runtime,
+                stage="upload-batches",
+                current=index,
+                total=len(input_artifacts),
+            )
+        await self._progress(runtime, stage="commit-admission", current=1, total=1)
+        # Stop heartbeats before the terminal transaction clears the leased
+        # state.  Otherwise a heartbeat that races the commit observes the
+        # newly-succeeded job as a stale lease and can cancel a successful run.
+        await runtime.stop()
+        await _terminal_to_thread(
+            self._control_plane.admit_quote_generation,
+            runtime.current_lease,
+            structure_receipt_digest=bundle_digest,
+            universe_hash=universe_hash,
+            legs=legs,
+            batch_size=self._batch_size,
+            input_artifacts={
+                batch.job_key: (artifact.key, artifact.sha256, len(batch.legs))
+                for batch, artifact in zip(batches, input_artifacts, strict=True)
+            },
+            now=self._now(),
+        )
+        # Recovery is post-terminal finalization.  Treat it as part of the
+        # same point-of-no-return envelope so a scheduler cancellation cannot
+        # report timeout after admission has already committed.
+        await _terminal_to_thread(
+            self._control_plane.record_job_recovery,
+            runtime.current_lease,
+            component="quote-admit",
+            channels=incident_alert_channels(Settings()),
+            now=self._now(),
+        )
+        return QuoteBatchWorkerResult(job_key=runtime.current_lease.job_key, outcome="admitted")
+
+    async def _progress(
+        self,
+        runtime: AsyncAttemptRuntime,
+        *,
+        stage: str,
+        current: int,
+        total: int | None,
+    ) -> None:
+        """Keep synchronous progress persistence off the event-loop thread."""
+        await _to_thread(
+            runtime.progress,
+            stage=stage,
+            current=current,
+            total=total,
+        )
 
     def _read_bundle(self, key: str) -> bytes:
         response = self._object_client.get_object(Bucket=self._bucket, Key=key)
@@ -277,6 +409,40 @@ class TransactionalQuoteAdmitter:
                 if leg.yes_token_id in by_token:
                     raise QuoteAdmissionError("Structure bundle has duplicate YES token")
                 by_token[leg.yes_token_id] = leg
+        if not by_token:
+            raise QuoteAdmissionError("Structure bundle has no eligible Quote legs")
+        return tuple(by_token[token] for token in sorted(by_token))
+
+    async def _read_v3_quote_legs_async(
+        self,
+        shards: Sequence[object],
+        *,
+        runtime: AsyncAttemptRuntime,
+    ) -> tuple[QuoteBatchLeg, ...]:
+        by_token: dict[str, QuoteBatchLeg] = {}
+        markets = tuple(
+            sorted(
+                (shard for shard in shards if getattr(shard, "component") == "markets"),
+                key=lambda shard: getattr(shard, "ordinal"),
+            )
+        )
+        for index, shard in enumerate(markets, start=1):
+            payload = await _to_thread(self._read_bundle, getattr(shard, "artifact_key"))
+            header, rows = parse_structure_shard_bytes(
+                payload, expected_sha256=getattr(shard, "artifact_digest")
+            )
+            if header.component != "markets" or header.ordinal != getattr(shard, "ordinal"):
+                raise QuoteAdmissionError("Quote admission v3 shard identity invalid")
+            for leg in quote_legs_from_market_rows(rows, require_nonempty=False):
+                if leg.yes_token_id in by_token:
+                    raise QuoteAdmissionError("Structure bundle has duplicate YES token")
+                by_token[leg.yes_token_id] = leg
+            await self._progress(
+                runtime,
+                stage="read-shards",
+                current=index,
+                total=len(markets),
+            )
         if not by_token:
             raise QuoteAdmissionError("Structure bundle has no eligible Quote legs")
         return tuple(by_token[token] for token in sorted(by_token))
