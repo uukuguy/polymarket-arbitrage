@@ -48,10 +48,14 @@ def test_writer_returns_existing_receipt_for_an_idempotent_retry(monkeypatch) ->
 
     class Cursor:
         def __init__(self) -> None:
+            self.calls: list[str] = []
             self.parameters: list[object] = []
         def __enter__(self): return self
         def __exit__(self, *_args): return None
-        def execute(self, _sql, params=()): self.parameters.append(params)
+        def execute(self, sql, params=()):
+            self.calls.append(sql)
+            if not sql.startswith("SET LOCAL"):
+                self.parameters.append(params)
         def fetchone(self): return {"incident_event_id": "event-existing"}
 
     cursor = Cursor()
@@ -61,7 +65,13 @@ def test_writer_returns_existing_receipt_for_an_idempotent_retry(monkeypatch) ->
         def __exit__(self, *_args): return None
         def cursor(self, **_kwargs): return cursor
 
-    monkeypatch.setattr(runtime_event_writer.psycopg, "connect", lambda _dsn: Connection())
+    connect_calls: list[dict[str, object]] = []
+
+    def connect(_dsn: str, **kwargs: object) -> Connection:
+        connect_calls.append(kwargs)
+        return Connection()
+
+    monkeypatch.setattr(runtime_event_writer.psycopg, "connect", connect)
     app = Starlette(
         routes=[
             Route("/runtime-events", runtime_event_writer.append_runtime_event, methods=["POST"])
@@ -81,6 +91,11 @@ def test_writer_returns_existing_receipt_for_an_idempotent_retry(monkeypatch) ->
     assert response.status_code == 201
     assert response.json() == {"status": "duplicate", "incident_event_id": "event-existing"}
     assert cursor.parameters[0] == ("runtime:" + "a" * 64,)
+    assert cursor.calls[:2] == [
+        "SET LOCAL statement_timeout = '5000ms'",
+        "SET LOCAL lock_timeout = '1000ms'",
+    ]
+    assert connect_calls == [{"connect_timeout": 5}]
 
 
 def test_writer_records_detected_event_against_conflict_returned_incident(monkeypatch) -> None:
@@ -97,23 +112,32 @@ def test_writer_records_detected_event_against_conflict_returned_incident(monkey
         def __exit__(self, *_args): return None
         def execute(self, sql, params=()):
             self.calls.append(sql)
-            self.parameters.append(params)
+            if not sql.startswith("SET LOCAL"):
+                self.parameters.append(params)
+
         def fetchone(self):
-            if len(self.calls) == 1:
+            query_count = sum(not call.startswith("SET LOCAL") for call in self.calls)
+            if query_count == 1:
                 return None
-            if len(self.calls) == 2:
+            if query_count == 2:
                 return None
             return {"incident_key": "persisted-incident"}
 
     cursor = Cursor()
-    monkeypatch.setattr(runtime_event_writer.psycopg.types.json, "Jsonb", lambda value: value)
+    monkeypatch.setattr(runtime_event_writer, "Jsonb", lambda value: value)
 
     class Connection:
         def __enter__(self): return self
         def __exit__(self, *_args): return None
         def cursor(self, **_kwargs): return cursor
 
-    monkeypatch.setattr(runtime_event_writer.psycopg, "connect", lambda _dsn: Connection())
+    connect_calls: list[dict[str, object]] = []
+
+    def connect(_dsn: str, **kwargs: object) -> Connection:
+        connect_calls.append(kwargs)
+        return Connection()
+
+    monkeypatch.setattr(runtime_event_writer.psycopg, "connect", connect)
     app = Starlette(
         routes=[
             Route("/runtime-events", runtime_event_writer.append_runtime_event, methods=["POST"])
@@ -134,11 +158,18 @@ def test_writer_records_detected_event_against_conflict_returned_incident(monkey
     assert response.status_code == 201
     assert response.json()["incident_key"] == "persisted-incident"
     assert cursor.parameters[1] == ("runtime-watchdog:cloudflare-watchdog-supervisor",)
-    assert "RETURNING incident_key" in cursor.calls[2]
-    assert cursor.parameters[-1][3] == {
+    assert cursor.calls[:2] == [
+        "SET LOCAL statement_timeout = '5000ms'",
+        "SET LOCAL lock_timeout = '1000ms'",
+    ]
+    assert any("RETURNING incident_key" in call for call in cursor.calls)
+    last_parameters = cursor.parameters[-1]
+    assert isinstance(last_parameters, tuple)
+    assert last_parameters[3] == {
         "failures": ["control-api:timeout"],
         "source": "cloudflare-watchdog-supervisor",
     }
+    assert connect_calls == [{"connect_timeout": 5}]
 
 
 def test_writer_accepts_initial_recovery_as_noop(monkeypatch) -> None:
@@ -146,17 +177,28 @@ def test_writer_accepts_initial_recovery_as_noop(monkeypatch) -> None:
     from polyarb.control_plane import runtime_event_writer
 
     class Cursor:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
         def __enter__(self): return self
         def __exit__(self, *_args): return None
-        def execute(self, _sql, _params=()): return None
+        def execute(self, sql, _params=()): self.calls.append(sql)
         def fetchone(self): return None
+
+    cursor = Cursor()
 
     class Connection:
         def __enter__(self): return self
         def __exit__(self, *_args): return None
-        def cursor(self, **_kwargs): return Cursor()
+        def cursor(self, **_kwargs): return cursor
 
-    monkeypatch.setattr(runtime_event_writer.psycopg, "connect", lambda _dsn: Connection())
+    connect_calls: list[dict[str, object]] = []
+
+    def connect(_dsn: str, **kwargs: object) -> Connection:
+        connect_calls.append(kwargs)
+        return Connection()
+
+    monkeypatch.setattr(runtime_event_writer.psycopg, "connect", connect)
     app = Starlette(
         routes=[
             Route("/runtime-events", runtime_event_writer.append_runtime_event, methods=["POST"])
@@ -171,3 +213,8 @@ def test_writer_accepts_initial_recovery_as_noop(monkeypatch) -> None:
         )
     assert response.status_code == 201
     assert response.json() == {"status": "noop"}
+    assert cursor.calls[:2] == [
+        "SET LOCAL statement_timeout = '5000ms'",
+        "SET LOCAL lock_timeout = '1000ms'",
+    ]
+    assert connect_calls == [{"connect_timeout": 5}]

@@ -11,6 +11,7 @@ from uuid import uuid4
 import psycopg
 import uvicorn
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -55,7 +56,11 @@ async def append_runtime_event(request: Request) -> JSONResponse:
         else f"runtime-watchdog:{source}"
     )
     dsn = request.app.state.dsn
-    with psycopg.connect(dsn) as connection, connection.cursor(row_factory=dict_row) as cursor:
+    with psycopg.connect(dsn, connect_timeout=5) as connection, connection.cursor(
+        row_factory=dict_row
+    ) as cursor:
+        cursor.execute("SET LOCAL statement_timeout = '5000ms'")
+        cursor.execute("SET LOCAL lock_timeout = '1000ms'")
         cursor.execute("SELECT incident_event_id FROM m1_incident_events WHERE idempotency_key=%s", (f"runtime:{key}",))
         existing = cursor.fetchone()
         if existing is not None:
@@ -68,7 +73,10 @@ async def append_runtime_event(request: Request) -> JSONResponse:
                 ON CONFLICT (dedupe_key) DO UPDATE SET state='open', severity='critical', summary=EXCLUDED.summary, updated_at=EXCLUDED.updated_at
                 RETURNING incident_key
             """, (str(uuid4()), incident_dedupe_key, occurred_at, occurred_at))
-            incident_key = str(cursor.fetchone()["incident_key"])
+            incident = cursor.fetchone()
+            if incident is None:
+                raise RuntimeError("runtime incident insert returned no row")
+            incident_key = str(incident["incident_key"])
         else:
             if row is None:
                 # A watchdog's first healthy observation has no preceding
@@ -79,7 +87,7 @@ async def append_runtime_event(request: Request) -> JSONResponse:
             cursor.execute("UPDATE m1_incidents SET state='resolved', resolved_at=%s, updated_at=%s WHERE incident_key=%s", (occurred_at, occurred_at, incident_key))
         event_id = str(uuid4())
         cursor.execute("""INSERT INTO m1_incident_events (incident_event_id,incident_key,kind,detail,idempotency_key,occurred_at)
-            VALUES (%s,%s,%s,%s,%s,%s)""", (event_id, incident_key, kind, psycopg.types.json.Jsonb({"failures": failures, "source": source}), f"runtime:{key}", occurred_at))
+            VALUES (%s,%s,%s,%s,%s,%s)""", (event_id, incident_key, kind, Jsonb({"failures": failures, "source": source}), f"runtime:{key}", occurred_at))
     return JSONResponse({"status": "recorded", "incident_key": incident_key, "incident_event_id": event_id}, status_code=201)
 
 

@@ -69,6 +69,11 @@ def create_control_plane_app(*, control_plane: Any | None) -> Starlette:
     return app
 
 
+def _build_control_plane(dsn: str) -> PostgresControlPlane:
+    """Build the standalone API's Postgres client with a bounded connect."""
+    return PostgresControlPlane(lambda: psycopg.connect(dsn, connect_timeout=5))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="control-plane-api")
     parser.add_argument("--host", default="0.0.0.0")
@@ -81,7 +86,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     port = args.port or default_port
     if port <= 0:
         parser.error("--port must be positive")
-    control_plane = PostgresControlPlane(lambda: psycopg.connect(dsn))
+    control_plane = _build_control_plane(dsn)
     uvicorn.run(
         create_control_plane_app(control_plane=control_plane),
         host=args.host,

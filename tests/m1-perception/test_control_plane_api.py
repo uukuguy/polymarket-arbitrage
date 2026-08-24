@@ -97,3 +97,20 @@ def test_standalone_control_api_fails_readiness_when_postgres_is_unavailable() -
     assert health.json() == {"status": "unavailable", "reason": "control-plane-read-unavailable"}
     assert operator.status_code == 503
     assert opportunities.status_code == 503
+
+
+def test_control_api_connection_factory_bounds_postgres_connect_time(monkeypatch) -> None:
+    from polyarb.control_plane import api
+
+    calls: list[tuple[str, dict[str, object]]] = []
+    sentinel = object()
+
+    def connect(dsn: str, **kwargs: object) -> object:
+        calls.append((dsn, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(api.psycopg, "connect", connect)
+    control_plane = api._build_control_plane("postgresql://control-plane")
+
+    assert control_plane._connection_factory() is sentinel
+    assert calls == [("postgresql://control-plane", {"connect_timeout": 5})]
