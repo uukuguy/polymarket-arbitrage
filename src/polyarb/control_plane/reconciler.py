@@ -53,6 +53,40 @@ class RuntimeReconciler:
                 breaking=True,
             )
 
+        heartbeat_missing = (
+            now
+            >= state.last_heartbeat_at
+            + timedelta(seconds=state.profile.missed_heartbeat_incident_seconds)
+        )
+        if heartbeat_missing:
+            if now >= state.lease_expires_at:
+                return self._decision(
+                    RecoveryActionType.RECLAIM_JOB,
+                    "job.heartbeat-missing",
+                    now=now,
+                    next_check_at=now,
+                    critical=True,
+                    breaking=True,
+                )
+            return self._decision(
+                None,
+                "job.heartbeat-missing-fence",
+                now=now,
+                next_check_at=state.lease_expires_at,
+                critical=True,
+                breaking=True,
+            )
+
+        if now >= state.lease_expires_at:
+            return self._decision(
+                RecoveryActionType.RECLAIM_JOB,
+                "job.lease-expired",
+                now=now,
+                next_check_at=now,
+                critical=True,
+                breaking=True,
+            )
+
         if state.open_circuit:
             assert state.circuit_opened_at is not None
             probe_at = state.circuit_opened_at + timedelta(
@@ -78,30 +112,6 @@ class RuntimeReconciler:
                 "job.attempt-deadline",
                 now=now,
                 next_check_at=now,
-                critical=True,
-                breaking=True,
-            )
-
-        heartbeat_missing = (
-            now
-            >= state.last_heartbeat_at
-            + timedelta(seconds=state.profile.missed_heartbeat_incident_seconds)
-        )
-        if heartbeat_missing:
-            if now >= state.lease_expires_at:
-                return self._decision(
-                    RecoveryActionType.RECLAIM_JOB,
-                    "job.heartbeat-missing",
-                    now=now,
-                    next_check_at=now,
-                    critical=True,
-                    breaking=True,
-                )
-            return self._decision(
-                None,
-                "job.heartbeat-missing-fence",
-                now=now,
-                next_check_at=state.lease_expires_at,
                 critical=True,
                 breaking=True,
             )
@@ -151,6 +161,7 @@ class RuntimeReconciler:
             + timedelta(seconds=state.profile.missed_heartbeat_incident_seconds)
             or now
             >= state.last_heartbeat_at + timedelta(seconds=state.profile.heartbeat_seconds)
+            or now >= state.lease_expires_at
             or now >= state.lease_expires_at - timedelta(seconds=state.profile.heartbeat_seconds)
         )
 

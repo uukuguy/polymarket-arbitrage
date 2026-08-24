@@ -125,6 +125,123 @@ def test_missing_heartbeat_waits_for_fence_before_reclaim() -> None:
 
 
 @pytest.mark.parametrize(
+    "runtime_state",
+    [
+        state(heartbeat_age=5, progress_age=5, lease_remaining_seconds=0),
+        state(heartbeat_age=5, progress_age=5, lease_remaining_seconds=-1),
+        state(heartbeat_age=5, progress_age=5, attempt_age=300, lease_remaining_seconds=-1),
+        state(heartbeat_age=5, progress_age=90, lease_remaining_seconds=-1),
+        state(heartbeat_age=30, progress_age=5, lease_remaining_seconds=-1),
+        state(
+            heartbeat_age=5,
+            progress_age=5,
+            lease_remaining_seconds=-1,
+            open_circuit=True,
+            circuit_open_age=60,
+        ),
+    ],
+)
+def test_expired_lease_fence_outranks_owner_authority_actions(
+    runtime_state: RecoveryRuntimeState,
+) -> None:
+    decision = RuntimeReconciler().evaluate(runtime_state, now=NOW)
+
+    assert decision.action is RecoveryActionType.RECLAIM_JOB
+    assert decision.reason_code == "job.lease-expired"
+    assert decision.incident_severity == "critical"
+    assert decision.qualification_breaking is True
+
+
+def test_expired_lease_respects_higher_precedence_no_action_safety_branches() -> None:
+    reconciler = RuntimeReconciler()
+
+    stale = reconciler.evaluate(
+        state(owner_is_current=False, lease_remaining_seconds=-1),
+        now=NOW,
+    )
+    assert stale.action is None
+    assert stale.reason_code == "recovery.stale-fence"
+
+    human_only = reconciler.evaluate(
+        state(
+            failure_class=RecoveryFailureClass.INTEGRITY,
+            lease_remaining_seconds=-1,
+        ),
+        now=NOW,
+    )
+    assert human_only.action is None
+    assert human_only.reason_code == "failure.integrity"
+
+    budget_exhausted = reconciler.evaluate(
+        state(lease_remaining_seconds=-1, recovery_budget_remaining=0),
+        now=NOW,
+    )
+    assert budget_exhausted.action is None
+    assert budget_exhausted.reason_code == "recovery.budget-exhausted"
+
+
+def test_exact_deadline_boundaries_are_inclusive_at_policy_thresholds() -> None:
+    reconciler = RuntimeReconciler()
+
+    heartbeat = reconciler.evaluate(state(heartbeat_age=30, lease_remaining_seconds=60), now=NOW)
+    assert heartbeat.action is RecoveryActionType.HEARTBEAT_JOB
+    assert heartbeat.reason_code == "job.lease-at-risk"
+
+    progress = reconciler.evaluate(state(heartbeat_age=5, progress_age=90), now=NOW)
+    assert progress.action is RecoveryActionType.CANCEL_JOB
+    assert progress.reason_code == "job.progress-stalled"
+
+    missed_heartbeat = reconciler.evaluate(
+        state(heartbeat_age=90, progress_age=5, lease_remaining_seconds=60),
+        now=NOW,
+    )
+    assert missed_heartbeat.action is None
+    assert missed_heartbeat.reason_code == "job.heartbeat-missing-fence"
+
+    attempt = reconciler.evaluate(state(heartbeat_age=5, progress_age=5, attempt_age=300), now=NOW)
+    assert attempt.action is RecoveryActionType.CANCEL_JOB
+    assert attempt.reason_code == "job.attempt-deadline"
+
+    probe = reconciler.evaluate(state(open_circuit=True, circuit_open_age=60), now=NOW)
+    assert probe.action is RecoveryActionType.PROBE_CIRCUIT
+    assert probe.reason_code == "circuit.probe-due"
+
+    lease = reconciler.evaluate(state(lease_remaining_seconds=0), now=NOW)
+    assert lease.action is RecoveryActionType.RECLAIM_JOB
+    assert lease.reason_code == "job.lease-expired"
+
+
+def test_deadline_boundaries_are_not_triggered_before_policy_thresholds() -> None:
+    reconciler = RuntimeReconciler()
+
+    heartbeat = reconciler.evaluate(
+        state(heartbeat_age=29, progress_age=5, attempt_age=30, lease_remaining_seconds=60),
+        now=NOW,
+    )
+    assert heartbeat.action is None
+    assert heartbeat.reason_code == "job.healthy"
+
+    progress = reconciler.evaluate(state(heartbeat_age=5, progress_age=89), now=NOW)
+    assert progress.action is None
+    assert progress.reason_code == "job.healthy"
+
+    missed_heartbeat = reconciler.evaluate(
+        state(heartbeat_age=89, progress_age=5, lease_remaining_seconds=60),
+        now=NOW,
+    )
+    assert missed_heartbeat.action is RecoveryActionType.HEARTBEAT_JOB
+    assert missed_heartbeat.reason_code == "job.lease-at-risk"
+
+    attempt = reconciler.evaluate(state(heartbeat_age=5, progress_age=5, attempt_age=299), now=NOW)
+    assert attempt.action is None
+    assert attempt.reason_code == "job.healthy"
+
+    cooldown = reconciler.evaluate(state(open_circuit=True, circuit_open_age=59), now=NOW)
+    assert cooldown.action is None
+    assert cooldown.reason_code == "circuit.cooldown"
+
+
+@pytest.mark.parametrize(
     "failure_class",
     [
         RecoveryFailureClass.INTEGRITY,
@@ -247,5 +364,119 @@ def test_recovery_decision_enforces_closed_reason_codes_and_invariants() -> None
             reason_code="failure.schema",
             incident_severity="warning",
             qualification_breaking=False,
+            next_check_at=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("action", "reason_code", "incident_severity", "qualification_breaking"),
+    [
+        (RecoveryActionType.HEARTBEAT_JOB, "job.lease-at-risk", "warning", False),
+        (RecoveryActionType.CANCEL_JOB, "job.progress-stalled", "warning", False),
+        (RecoveryActionType.CANCEL_JOB, "job.attempt-deadline", "critical", True),
+        (RecoveryActionType.RECLAIM_JOB, "job.heartbeat-missing", "critical", True),
+        (RecoveryActionType.RECLAIM_JOB, "job.lease-expired", "critical", True),
+        (RecoveryActionType.PROBE_CIRCUIT, "circuit.probe-due", "warning", False),
+    ],
+)
+def test_recovery_decision_allows_only_exact_action_reason_pairs(
+    action: RecoveryActionType,
+    reason_code: str,
+    incident_severity: str,
+    qualification_breaking: bool,
+) -> None:
+    decision = RecoveryDecision(
+        action=action,
+        reason_code=reason_code,
+        incident_severity=incident_severity,
+        qualification_breaking=qualification_breaking,
+        next_check_at=NOW,
+    )
+
+    assert decision.action is action
+    assert decision.reason_code == reason_code
+
+
+@pytest.mark.parametrize(
+    ("action", "reason_code"),
+    [
+        (RecoveryActionType.RESTART_MACHINE, "job.progress-stalled"),
+        (RecoveryActionType.RESTART_WORKER_PROCESS, "job.heartbeat-missing"),
+        (RecoveryActionType.RETRY_JOB, "circuit.probe-due"),
+        (RecoveryActionType.CANCEL_JOB, "circuit.probe-due"),
+        (RecoveryActionType.PROBE_CIRCUIT, "job.lease-at-risk"),
+        (None, "job.progress-stalled"),
+    ],
+)
+def test_recovery_decision_rejects_wrong_action_reason_pairs(
+    action: RecoveryActionType | None,
+    reason_code: str,
+) -> None:
+    with pytest.raises(ValueError, match="action"):
+        RecoveryDecision(
+            action=action,
+            reason_code=reason_code,
+            incident_severity="warning",
+            qualification_breaking=False,
+            next_check_at=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "reason_code",
+    [
+        "job.healthy",
+        "job.heartbeat-missing-fence",
+        "circuit.cooldown",
+        "recovery.budget-exhausted",
+        "recovery.stale-fence",
+        "failure.schema",
+    ],
+)
+def test_recovery_decision_requires_no_action_for_no_action_reasons(reason_code: str) -> None:
+    with pytest.raises(ValueError, match="automatic action"):
+        RecoveryDecision(
+            action=RecoveryActionType.HEARTBEAT_JOB,
+            reason_code=reason_code,
+            incident_severity="critical",
+            qualification_breaking=True,
+            next_check_at=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("reason_code", "incident_severity", "qualification_breaking"),
+    [
+        ("job.attempt-deadline", "warning", True),
+        ("job.attempt-deadline", "critical", False),
+        ("job.heartbeat-missing", "warning", True),
+        ("job.lease-expired", "critical", False),
+        ("job.progress-stalled", "critical", False),
+        ("circuit.probe-due", "warning", True),
+        ("recovery.budget-exhausted", "warning", True),
+        ("recovery.stale-fence", "critical", False),
+    ],
+)
+def test_recovery_decision_rejects_wrong_severity_or_breaking_for_reason(
+    reason_code: str,
+    incident_severity: str,
+    qualification_breaking: bool,
+) -> None:
+    valid_action_by_reason = {
+        "job.attempt-deadline": RecoveryActionType.CANCEL_JOB,
+        "job.heartbeat-missing": RecoveryActionType.RECLAIM_JOB,
+        "job.lease-expired": RecoveryActionType.RECLAIM_JOB,
+        "job.progress-stalled": RecoveryActionType.CANCEL_JOB,
+        "circuit.probe-due": RecoveryActionType.PROBE_CIRCUIT,
+        "recovery.budget-exhausted": None,
+        "recovery.stale-fence": None,
+    }
+
+    with pytest.raises(ValueError, match="severity|qualification"):
+        RecoveryDecision(
+            action=valid_action_by_reason[reason_code],
+            reason_code=reason_code,
+            incident_severity=incident_severity,
+            qualification_breaking=qualification_breaking,
             next_check_at=NOW,
         )

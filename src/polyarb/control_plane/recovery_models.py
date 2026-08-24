@@ -35,6 +35,7 @@ RECOVERY_REASON_CODES = frozenset(
         "job.progress-stalled",
         "job.heartbeat-missing-fence",
         "job.heartbeat-missing",
+        "job.lease-expired",
         "job.attempt-deadline",
         "circuit.probe-due",
         "circuit.cooldown",
@@ -47,6 +48,29 @@ RECOVERY_REASON_CODES = frozenset(
         "failure.capacity",
     }
 )
+type _ReasonPolicy = tuple[
+    RecoveryActionType | None,
+    Literal["warning", "critical"],
+    bool,
+]
+_REASON_POLICY: dict[str, _ReasonPolicy] = {
+    "job.healthy": (None, "warning", False),
+    "job.lease-at-risk": (RecoveryActionType.HEARTBEAT_JOB, "warning", False),
+    "job.progress-stalled": (RecoveryActionType.CANCEL_JOB, "warning", False),
+    "job.heartbeat-missing-fence": (None, "critical", True),
+    "job.heartbeat-missing": (RecoveryActionType.RECLAIM_JOB, "critical", True),
+    "job.lease-expired": (RecoveryActionType.RECLAIM_JOB, "critical", True),
+    "job.attempt-deadline": (RecoveryActionType.CANCEL_JOB, "critical", True),
+    "circuit.probe-due": (RecoveryActionType.PROBE_CIRCUIT, "warning", False),
+    "circuit.cooldown": (None, "warning", False),
+    "recovery.budget-exhausted": (None, "critical", True),
+    "recovery.stale-fence": (None, "critical", True),
+    "failure.integrity": (None, "critical", True),
+    "failure.authentication": (None, "critical", True),
+    "failure.schema": (None, "critical", True),
+    "failure.credential": (None, "critical", True),
+    "failure.capacity": (None, "critical", True),
+}
 _NO_ACTION_REASON_CODES = frozenset(
     {
         "job.healthy",
@@ -171,9 +195,17 @@ class RecoveryDecision:
         require_timezone_aware(self.next_check_at, field_name="next_check_at")
         if self.reason_code in _NO_ACTION_REASON_CODES and self.action is not None:
             raise ValueError("reason_code with no automatic action cannot carry automatic action")
+        expected_action, expected_severity, expected_breaking = _REASON_POLICY[self.reason_code]
+        if self.action is not expected_action:
+            raise ValueError("action must exactly match reason_code")
         if self.reason_code in _HUMAN_ONLY_REASON_CODES:
             if self.incident_severity != "critical" or not self.qualification_breaking:
                 raise ValueError("human-only failures must be critical and qualification-breaking")
+        if (
+            self.incident_severity != expected_severity
+            or self.qualification_breaking is not expected_breaking
+        ):
+            raise ValueError("incident severity and qualification impact must match reason_code")
 
 
 __all__ = [
