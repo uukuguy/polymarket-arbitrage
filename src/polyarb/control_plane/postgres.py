@@ -134,6 +134,22 @@ _FENCED_MAX_STATEMENT_TIMEOUT_MS = 5_000
 _FENCED_MAX_LOCK_TIMEOUT_MS = 1_000
 
 
+def _set_structure_read_timeouts(cursor: psycopg.Cursor[Any], *, read_only: bool) -> None:
+    """Bound Structure reads and mixed receipt-recovery transactions."""
+    if read_only:
+        cursor.execute("SET TRANSACTION READ ONLY")
+    cursor.execute(
+        sql.SQL("SET LOCAL statement_timeout = {}").format(
+            sql.Literal(f"{_FENCED_MAX_STATEMENT_TIMEOUT_MS}ms")
+        )
+    )
+    cursor.execute(
+        sql.SQL("SET LOCAL lock_timeout = {}").format(
+            sql.Literal(f"{_FENCED_MAX_LOCK_TIMEOUT_MS}ms")
+        )
+    )
+
+
 def _set_fenced_transaction_timeouts(
     cursor: psycopg.Cursor[Any], *, lease: JobLease, now: datetime
 ) -> tuple[int, int]:
@@ -946,6 +962,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT window_key, stream, ordinal, requested_cursor,
@@ -967,6 +984,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT artifact_key, artifact_digest, next_cursor, completed, record_count
@@ -1063,7 +1081,10 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            return self._structure_source_window_digest_cursor(cursor, window_key)
+            _set_structure_read_timeouts(cursor, read_only=True)
+            return self._structure_source_window_digest_cursor(
+                cursor, window_key, lock_window=False
+            )
 
     def structure_source_window_bundle(self, window_key: str) -> dict[str, str] | None:
         """Read the one immutable bundle receipt bound to a source window."""
@@ -1072,6 +1093,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT source_digest, bundle_key, bundle_digest
@@ -1097,7 +1119,10 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            self._structure_source_window_digest_cursor(cursor, window_key)
+            _set_structure_read_timeouts(cursor, read_only=True)
+            self._structure_source_window_digest_cursor(
+                cursor, window_key, lock_window=False
+            )
             cursor.execute(
                 """
                 SELECT input.window_key, input.stream, input.ordinal, input.requested_cursor,
@@ -1130,6 +1155,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT checkpoint_cursor, checkpoint_digest, artifact_key
@@ -1154,6 +1180,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT checkpoint_cursor, checkpoint_digest, artifact_key
@@ -1185,6 +1212,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT input.window_key, input.stream, input.ordinal, input.requested_cursor,
@@ -1235,7 +1263,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+            _set_structure_read_timeouts(cursor, read_only=False)
             source_digest = self._structure_source_window_digest_cursor(cursor, identity.window_id)
             if identity.comparison_receipt_digest != source_digest:
                 raise CheckpointConflictError("source bundle does not bind current page receipts")
@@ -1261,7 +1289,18 @@ class PostgresControlPlane:
                 }
                 if persisted != expected:
                     raise CheckpointConflictError("source window names another bundle")
+                self._recover_structure_terminal_success_cursor(
+                    cursor,
+                    lease=lease,
+                    stage="commit-bundle",
+                    component="structure-materialize",
+                    data_product="structure-sync",
+                    checkpoint_cursor="bundle",
+                    checkpoint_digest=bundle.sha256,
+                    now=now,
+                )
                 return self._structure_generation_specs_cursor(cursor, bundle.sha256)
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             self._append_job_succeeded_cursor(
                 cursor,
                 lease=lease,
@@ -1339,10 +1378,14 @@ class PostgresControlPlane:
 
     @staticmethod
     def _structure_source_window_digest_cursor(
-        cursor: psycopg.Cursor[dict[str, Any]], window_key: str
+        cursor: psycopg.Cursor[dict[str, Any]],
+        window_key: str,
+        *,
+        lock_window: bool = True,
     ) -> str:
         cursor.execute(
-            "SELECT state FROM m1_structure_source_windows WHERE window_key = %s FOR SHARE",
+            "SELECT state FROM m1_structure_source_windows WHERE window_key = %s"
+            + (" FOR SHARE" if lock_window else ""),
             (window_key,),
         )
         window = cursor.fetchone()
@@ -1426,7 +1469,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+            _set_structure_read_timeouts(cursor, read_only=False)
             spec = self._structure_source_page_spec_cursor(cursor, lease.job_key)
             if lease.input_identity != spec.input_identity:
                 raise JobIdentityConflict("source page lease identity does not match input")
@@ -1467,6 +1510,17 @@ class PostgresControlPlane:
                     raise CheckpointConflictError(
                         f"source page receipt conflicts for {lease.job_key!r}"
                     )
+                if self._recover_structure_terminal_success_cursor(
+                    cursor,
+                    lease=lease,
+                    stage="commit-page",
+                    component="structure-fetch",
+                    data_product="structure-sync",
+                    checkpoint_cursor=f"{spec.stream}:{spec.ordinal}",
+                    checkpoint_digest=artifact_digest,
+                    now=now,
+                ):
+                    return None
                 if spec.stream == "events" and completed and normalized_market_batches is not None:
                     return self._admit_scoped_market_batches_cursor(
                         cursor, event_spec=spec, market_batches=normalized_market_batches, now=now
@@ -1476,9 +1530,15 @@ class PostgresControlPlane:
                         cursor, event_spec=spec, now=now
                     )
                     return None
-                return self._source_successor_spec_cursor(
+                successor = self._source_successor_spec_cursor(
                     cursor, spec=spec, next_cursor=next_cursor, completed=completed
                 )
+                if successor is not None:
+                    self._enqueue_structure_source_page_cursor(
+                        cursor, spec=successor, now=now
+                    )
+                return successor
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             self._append_job_succeeded_cursor(
                 cursor,
                 lease=lease,
@@ -2095,6 +2155,80 @@ class PostgresControlPlane:
             raise StaleLeaseError(str(error)) from error
 
     @staticmethod
+    def _recover_structure_terminal_success_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        lease: JobLease,
+        stage: str,
+        component: str,
+        data_product: str,
+        checkpoint_cursor: str,
+        checkpoint_digest: str,
+        now: datetime,
+    ) -> bool:
+        """Complete a receipt-backed Structure terminal effect exactly once."""
+        cursor.execute(
+            """
+            SELECT state, lease_owner, lease_epoch
+            FROM m1_jobs
+            WHERE job_key = %s
+            FOR UPDATE
+            """,
+            (lease.job_key,),
+        )
+        job = cursor.fetchone()
+        if job is None:
+            raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+        if str(job["state"]) == "succeeded":
+            # The business truth is already terminal.  A replay must not need
+            # the old lease or attempt another fenced mutation.
+            return True
+        if (
+            str(job["state"]) != "leased"
+            or str(job["lease_owner"]) != lease.lease_owner
+            or int(job["lease_epoch"]) != lease.lease_epoch
+        ):
+            raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+        _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+        PostgresControlPlane._append_job_succeeded_cursor(
+            cursor,
+            lease=lease,
+            stage=stage,
+            component=component,
+            data_product=data_product,
+            now=now,
+        )
+        cursor.execute(
+            """
+            UPDATE m1_jobs
+            SET checkpoint_cursor = %s, checkpoint_digest = %s,
+                state = 'succeeded', lease_owner = NULL, lease_expires_at = NULL,
+                updated_at = %s
+            WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+              AND state = 'leased'
+            """,
+            (
+                checkpoint_cursor,
+                checkpoint_digest,
+                now,
+                lease.job_key,
+                lease.lease_owner,
+                lease.lease_epoch,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+        cursor.execute(
+            """
+            UPDATE m1_job_attempts
+            SET state = 'succeeded', finished_at = %s
+            WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
+            """,
+            (now, lease.job_key, lease.lease_epoch),
+        )
+        return False
+
+    @staticmethod
     def _append_quote_admission_success_cursor(
         cursor: psycopg.Cursor[dict[str, Any]], *, lease: JobLease, now: datetime
     ) -> RuntimeEvent:
@@ -2558,6 +2692,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT bundle_key, bundle_digest, component, ordinal, range_start, range_end
@@ -2680,6 +2815,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT job_key, bundle_digest, component, range_digest, artifact_key,
@@ -2708,6 +2844,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT input.job_key, input.bundle_digest, input.component, input.ordinal,
@@ -2760,6 +2897,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=True)
             cursor.execute(
                 """
                 SELECT input.job_key, input.bundle_key, input.bundle_digest, input.component,
@@ -3047,6 +3185,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            _set_structure_read_timeouts(cursor, read_only=False)
             cursor.execute(
                 """
                 SELECT checkpoint.receipt_id, checkpoint.checkpoint_cursor,
@@ -3074,6 +3213,17 @@ class PostgresControlPlane:
                     or int(existing["record_count"]) != record_count
                 ):
                     raise CheckpointConflictError(f"idempotency conflict for {idempotency_key!r}")
+                if terminal:
+                    self._recover_structure_terminal_success_cursor(
+                        cursor,
+                        lease=lease,
+                        stage="commit-range",
+                        component="structure-normalize",
+                        data_product="structure-sync",
+                        checkpoint_cursor=checkpoint_cursor,
+                        checkpoint_digest=artifact_digest,
+                        now=now,
+                    )
                 return CheckpointReceipt(
                     receipt_id=str(existing["receipt_id"]),
                     job_key=lease.job_key,
