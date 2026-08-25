@@ -158,6 +158,10 @@ class FlyRecoveryAdapter:
             RecoveryActionType.RESTART_MACHINE,
         }:
             return FlyRecoveryResult("provider-unavailable", "action-disabled")
+        if action.controller_id != controller.controller_id:
+            return FlyRecoveryResult("stale-noop", "controller-id-mismatch")
+        if action.controller_owner_id != controller.owner_id:
+            return FlyRecoveryResult("stale-noop", "controller-owner-mismatch")
         if action.expected_controller_epoch != controller.lease_epoch:
             return FlyRecoveryResult("stale-noop", "controller-epoch-mismatch")
         if controller.lease_expires_at <= now:

@@ -271,6 +271,40 @@ def test_restart_exact_machine_fails_closed_on_controller_epoch_mismatch() -> No
     assert http.calls == []
 
 
+def test_restart_exact_machine_fails_closed_on_controller_id_mismatch() -> None:
+    http = FakeHttpClient()
+    adapter = _adapter(http)
+
+    result = adapter.restart_exact_machine(
+        app=APP,
+        machine_id=MACHINE_ID,
+        action=replace(_action(), controller_id="other-controller"),
+        controller=_controller(),
+        now=NOW,
+    )
+
+    assert result.code == "stale-noop"
+    assert result.reason == "controller-id-mismatch"
+    assert http.calls == []
+
+
+def test_restart_exact_machine_fails_closed_on_controller_owner_mismatch() -> None:
+    http = FakeHttpClient()
+    adapter = _adapter(http)
+
+    result = adapter.restart_exact_machine(
+        app=APP,
+        machine_id=MACHINE_ID,
+        action=replace(_action(), controller_owner_id="other-owner"),
+        controller=_controller(),
+        now=NOW,
+    )
+
+    assert result.code == "stale-noop"
+    assert result.reason == "controller-owner-mismatch"
+    assert http.calls == []
+
+
 def test_restart_exact_machine_fails_closed_on_expired_controller_lease() -> None:
     http = FakeHttpClient()
     adapter = _adapter(http)
