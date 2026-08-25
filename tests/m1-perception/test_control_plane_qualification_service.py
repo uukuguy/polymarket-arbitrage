@@ -147,6 +147,115 @@ def test_real_schema_rows_map_to_fail_loud_qualification_facts() -> None:
         )
 
 
+def test_legitimate_incident_kinds_map_to_closed_qualification_reasons() -> None:
+    base = {
+        "incident_event_id": "incident-1",
+        "incident_key": "incident:retry",
+        "severity": "warning",
+        "state": "open",
+        "occurred_at": NOW,
+        "detail": {},
+    }
+
+    attempt = incident_event_row_to_fact_record({**base, "kind": "attempt-failed"})
+    assert attempt.fact.reason == "recovery.started"
+
+    recovery_started = incident_event_row_to_fact_record(
+        {**base, "incident_event_id": "incident-2", "kind": "recovery-started"}
+    )
+    assert recovery_started.fact.reason == "recovery.started"
+
+    for index, kind in enumerate(("circuit-opened", "circuit-probe-failed", "escalated")):
+        record = incident_event_row_to_fact_record(
+            {**base, "incident_event_id": f"incident-break-{index}", "kind": kind}
+        )
+        assert record.fact.reason == "incident.p1-slo"
+
+    critical = incident_event_row_to_fact_record(
+        {
+            **base,
+            "incident_event_id": "incident-critical",
+            "kind": "detected",
+            "severity": "critical",
+            "detail": {"qualification_breaking": True, "reason_code": "incident.p1"},
+        }
+    )
+    assert critical.fact.reason == "incident.p1-slo"
+
+    for index, kind in enumerate(("recovered", "resolved")):
+        record = incident_event_row_to_fact_record(
+            {
+                **base,
+                "incident_event_id": f"incident-recovered-{index}",
+                "kind": kind,
+                "state": "resolved",
+            }
+        )
+        assert record.fact.reason == "recovery.confirmed"
+        assert record.fact.recovery_confirmed is True
+
+    with pytest.raises(ValueError, match="unknown incident event kind"):
+        incident_event_row_to_fact_record({**base, "kind": "not-a-real-transition"})
+
+
+def test_retryable_failure_runtime_and_incident_facts_do_not_qualify_or_crash() -> None:
+    runtime = runtime_event_row_to_fact_record(
+        {
+            "event_id": "runtime-retryable",
+            "kind": "job.retryable-failed",
+            "occurred_at": NOW + timedelta(minutes=1),
+            "job_key": "structure:source:retry",
+            "attempt_id": "attempt-retry",
+            "lease_epoch": 1,
+            "event_sequence": 3,
+            "progress_current": 2,
+            "detail": {
+                "qualification_impact": "delayed",
+                "reason_code": "timeout",
+                "retry_count": 1,
+            },
+        }
+    )
+    incident = incident_event_row_to_fact_record(
+        {
+            "incident_event_id": "incident-retryable",
+            "incident_key": "job-retry:structure:source:retry",
+            "kind": "attempt-failed",
+            "severity": "warning",
+            "state": "open",
+            "occurred_at": NOW + timedelta(minutes=1, seconds=1),
+            "detail": {
+                "job_key": "structure:source:retry",
+                "stage": "source-fetch",
+                "error_class": "TimeoutError",
+                "consecutive_failures": 1,
+                "retry_after_seconds": 15,
+            },
+        }
+    )
+    store = InMemoryQualificationStore()
+    service = QualificationService(
+        policy=_policy(),
+        fact_source=StaticQualificationFactSource((runtime, incident)),
+        state_store=store,
+        writer_id="test-service",
+        batch_size=2,
+    )
+
+    initialized = service.tick(NOW)
+    assert initialized.applied == 0
+    result = service.tick(NOW + timedelta(minutes=2))
+
+    assert result.state is QualificationState.ACCUMULATING
+    assert result.applied == 2
+    assert store.current.qualified_at is None
+    assert [fact.reason for fact in store.current.facts] == [
+        "recovery.started",
+        "recovery.started",
+    ]
+    assert not store.certificates
+
+
 def test_virtual_26h_recovery_replay_seals_one_reproducible_certificate() -> None:
     first_start = NOW
     recovered = NOW + timedelta(hours=2)

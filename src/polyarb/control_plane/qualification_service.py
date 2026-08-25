@@ -67,6 +67,23 @@ _RECOVERY_ACTION_REASONS = {
     "restart-worker-process": "recovery.process-replacement",
     "probe-circuit": "recovery.circuit-probe",
 }
+_INCIDENT_KINDS = frozenset(
+    {
+        "attempt-failed",
+        "circuit-opened",
+        "circuit-probe-failed",
+        "detected",
+        "escalated",
+        "recovery-started",
+        "recovered",
+        "resolved",
+    }
+)
+_INCIDENT_RECOVERY_KINDS = frozenset({"recovered", "resolved"})
+_INCIDENT_BREAKING_KINDS = frozenset(
+    {"circuit-opened", "circuit-probe-failed", "escalated"}
+)
+_INCIDENT_RECOVERY_STARTED_KINDS = frozenset({"attempt-failed", "recovery-started"})
 _FRESHNESS_PRODUCTS = frozenset({"structure", "quote", "opportunity"})
 
 
@@ -875,13 +892,20 @@ def incident_event_row_to_fact_record(row: Mapping[str, object]) -> Qualificatio
         detail = _detail(row.get("detail"))
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("incident event row is malformed") from exc
-    if kind not in {"detected", "recovered", "resolved", "recovery-started"}:
+    if kind not in _INCIDENT_KINDS:
         raise ValueError(f"unknown incident event kind: {kind}")
-    if kind in {"recovered", "resolved"} or state == "resolved":
+    if kind in _INCIDENT_RECOVERY_KINDS or state == "resolved":
         reason = "recovery.confirmed"
         kwargs: dict[str, Any] = {"recovery_confirmed": True}
-    elif bool(detail.get("qualification_breaking")) or severity == "critical":
-        reason = str(detail.get("reason_code") or "incident.p1-slo")
+    elif (
+        kind in _INCIDENT_BREAKING_KINDS
+        or bool(detail.get("qualification_breaking"))
+        or severity == "critical"
+    ):
+        reason = "incident.p1-slo"
+        kwargs = {}
+    elif kind in _INCIDENT_RECOVERY_STARTED_KINDS:
+        reason = "recovery.started"
         kwargs = {}
     else:
         reason = "healthy"

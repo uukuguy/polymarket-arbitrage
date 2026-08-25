@@ -207,6 +207,21 @@ def test_gap_equal_to_limit_is_allowed_but_gap_over_limit_breaks() -> None:
     assert broken.invalidation_reason == "evidence.gap"
 
 
+def test_recovery_started_appends_without_qualifying_accumulating_epoch() -> None:
+    policy = _policy(required_seconds=60, max_gap_seconds=3_600)
+    started = policy.apply(
+        _state(policy),
+        _fact("retryable-runtime", NOW + timedelta(seconds=120), reason="recovery.started"),
+    )
+
+    assert started.state is QualificationState.ACCUMULATING
+    assert started.qualified_at is None
+    assert started.last_fact_at == NOW + timedelta(seconds=120)
+    assert started.facts == (
+        _fact("retryable-runtime", NOW + timedelta(seconds=120), reason="recovery.started"),
+    )
+
+
 @pytest.mark.parametrize(
     "reason",
     sorted(BREAKING_REASONS),

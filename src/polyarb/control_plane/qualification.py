@@ -599,9 +599,7 @@ class RollingQualificationPolicy:
             )
 
         if fact.reason == "recovery.started":
-            raise QualificationError(
-                "recovery.started must use recovering() as a separate epoch boundary"
-            )
+            return self._append_fact(state, fact)
         appended = self._append_fact(state, fact)
         if appended.coverage_seconds >= self.required_seconds and fact.evidence_complete:
             boundary = appended.started_at + timedelta(seconds=self.required_seconds)
