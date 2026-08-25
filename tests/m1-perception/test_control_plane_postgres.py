@@ -7540,7 +7540,7 @@ def test_runtime_read_model_projects_self_healing_state_bounded_and_read_only(
     )
     first_progress = control_plane.record_runtime_progress(
         first,
-        progress=RuntimeProgress(sequence=2, current=7, total=10, stage="upload"),
+        progress=RuntimeProgress(sequence=2, current=7, total=10, stage="upload-artifact"),
         now=now - timedelta(seconds=7),
         detail={"component": "quote-batch"},
     )
@@ -7555,7 +7555,7 @@ def test_runtime_read_model_projects_self_healing_state_bounded_and_read_only(
         control_plane._connection_factory,
         controller=controller,
         decision=_recovery_decision(now),
-        incident_key="runtime-read-model:incident",
+        incident_key=f"recovery:job:{first.job_key}",
         component="quote-batch",
         target_type="job",
         target_id=first.job_key,
@@ -7612,7 +7612,7 @@ def test_runtime_read_model_projects_self_healing_state_bounded_and_read_only(
             "job_type": "quote-batch",
             "worker_id": first.lease_owner,
             "lease_epoch": first.lease_epoch,
-            "stage": "upload",
+            "stage": "upload-artifact",
             "recovery_state": "recovering",
             "progress": {"current": 7, "total": 10},
             "started_at": (now - timedelta(seconds=20)).isoformat(),
@@ -7630,7 +7630,7 @@ def test_runtime_read_model_projects_self_healing_state_bounded_and_read_only(
     ]
     assert snapshot["runtime_incidents"]["total"] == 1
     incident = snapshot["runtime_incidents"]["items"][0]
-    assert incident["incident_key"] == "runtime-read-model:incident"
+    assert incident["incident_key"] == f"recovery:job:{first.job_key}"
     assert incident["transition"] == "recovery-started"
     assert incident["age_seconds"] == 6.0
     assert incident["transitions"] == [
@@ -7646,7 +7646,7 @@ def test_runtime_read_model_projects_self_healing_state_bounded_and_read_only(
     assert snapshot["recovery_actions"]["items"] == [
         {
             "action_id": action.action_id,
-            "incident_key": "runtime-read-model:incident",
+            "incident_key": f"recovery:job:{first.job_key}",
             "target_type": "job",
             "target_id": first.job_key,
             "action_type": "reclaim-job",
@@ -7686,6 +7686,370 @@ def test_runtime_read_model_projects_self_healing_state_bounded_and_read_only(
     }
     assert "must-not-leak" not in json.dumps(snapshot, sort_keys=True)
     assert second.job_key not in json.dumps(snapshot["active_tasks"]["items"])
+
+
+def test_runtime_read_model_uses_canonical_controller_and_filters_runtime_incidents(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    canonical = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="canonical-controller",
+        lease_seconds=90,
+        now=now - timedelta(seconds=10),
+    )
+    claim_controller(
+        control_plane._connection_factory,
+        controller_id="newer-test-controller",
+        owner_id="must-not-win",
+        lease_seconds=90,
+        now=now - timedelta(seconds=1),
+    )
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="runtime-read-model:filtered",
+        job_type="quote-batch",
+        input_identity="runtime-read-model:filtered",
+        now=now - timedelta(seconds=20),
+        lease_seconds=120,
+    )
+    progress = control_plane.record_runtime_progress(
+        lease,
+        progress=RuntimeProgress(sequence=2, current=1, total=2, stage="fetch-books"),
+        now=now - timedelta(seconds=12),
+    )
+    schedule_action(
+        control_plane._connection_factory,
+        controller=canonical,
+        decision=_recovery_decision(now),
+        incident_key=f"recovery:job:{lease.job_key}",
+        component="quote-batch",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=progress.attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=30,
+        channels=("dashboard",),
+        now=now - timedelta(seconds=8),
+    )
+    control_plane.record_incident_event(
+        incident_key="cloud-egress:open",
+        dedupe_key="cloud-egress:open",
+        component="cloud-egress",
+        severity="critical",
+        summary="unrelated cloud incident",
+        kind="not-a-runtime-kind",
+        detail={"qualification_impact": "nonsense"},
+        idempotency_key="cloud-egress:open",
+        channels=("dashboard",),
+        now=now - timedelta(seconds=1),
+    )
+
+    snapshot = cast(dict[str, Any], control_plane.operational_snapshot(now=now, sample_limit=10))
+
+    assert snapshot["runtime_controller"]["controller_id"] == "m1-runtime-reconciler"
+    assert snapshot["runtime_controller"]["owner_id"] == "canonical-controller"
+    assert snapshot["runtime_incidents"]["total"] == 1
+    assert [item["incident_key"] for item in snapshot["runtime_incidents"]["items"]] == [
+        f"recovery:job:{lease.job_key}"
+    ]
+
+
+def test_runtime_read_model_missing_canonical_controller_reports_unavailable(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    claim_controller(
+        control_plane._connection_factory,
+        controller_id="newer-test-controller",
+        owner_id="must-not-win",
+        lease_seconds=90,
+        now=now - timedelta(seconds=1),
+    )
+
+    snapshot = cast(dict[str, Any], control_plane.operational_snapshot(now=now))
+
+    assert snapshot["runtime_controller"] == {
+        "status": "unavailable",
+        "reason": "missing-controller",
+        "controller_id": "m1-runtime-reconciler",
+        "owner_id": None,
+        "epoch": None,
+        "claimed_at": None,
+        "last_tick_at": None,
+        "lease_expires_at": None,
+        "lease_active": False,
+        "lease_age_seconds": None,
+        "lease_overdue_seconds": None,
+    }
+
+
+def test_qualification_read_model_uses_persisted_coverage_not_wall_clock(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO m1_qualification_epochs (
+                epoch_id, state, version, identity_key, policy_version, release_id,
+                config_id, role_identity, started_at, last_fact_at,
+                coverage_seconds, max_gap_seconds, required_seconds, fact_records
+            ) VALUES (
+                'qualification-coverage-review', 'accumulating', 1,
+                'qualification-coverage-review',
+                'm1-rolling-qualification-v1', 'release-a', 'config-a',
+                %s, %s, %s, 12, 900, 86400, %s
+            )
+            """,
+            (
+                Jsonb(["m1", "structure"]),
+                now - timedelta(days=1),
+                now - timedelta(seconds=4),
+                Jsonb([]),
+            ),
+        )
+
+    snapshot = cast(dict[str, Any], control_plane.operational_snapshot(now=now))
+
+    assert snapshot["qualification"]["eligible_seconds"] == 12
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE m1_qualification_epochs
+            SET last_fact_at = started_at - INTERVAL '1 second'
+            WHERE epoch_id = 'qualification-coverage-review'
+            """
+        )
+    with pytest.raises(ControlPlaneError, match="qualification time source is malformed"):
+        control_plane.operational_snapshot(now=now)
+
+
+def test_runtime_read_model_rejects_unknown_review_vocab_from_postgres(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="controller-review-vocab",
+        lease_seconds=90,
+        now=now - timedelta(seconds=1),
+    )
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="runtime-read-model:vocab",
+        job_type="quote-batch",
+        input_identity="runtime-read-model:vocab",
+        now=now - timedelta(seconds=20),
+        lease_seconds=120,
+    )
+    progress = control_plane.record_runtime_progress(
+        lease,
+        progress=RuntimeProgress(sequence=2, current=1, total=2, stage="fetch-books"),
+        now=now - timedelta(seconds=12),
+    )
+    action = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=_recovery_decision(now),
+        incident_key=f"recovery:job:{lease.job_key}",
+        component="quote-batch",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=progress.attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=30,
+        channels=("dashboard",),
+        now=now - timedelta(seconds=8),
+    )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE m1_incident_events
+            SET detail = (detail - 'qualification_breaking')
+                || jsonb_build_object('qualification_impact', 'unknown-impact')
+            WHERE incident_key = %s
+            """,
+            (f"recovery:job:{lease.job_key}",),
+        )
+    with pytest.raises(ControlPlaneError, match="qualification impact is malformed"):
+        control_plane.operational_snapshot(now=now)
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE m1_incident_events
+            SET detail = (detail - 'qualification_impact')
+                || jsonb_build_object('qualification_breaking', true)
+            WHERE incident_key = %s
+            """,
+            (f"recovery:job:{lease.job_key}",),
+        )
+        cursor.execute(
+            "UPDATE m1_incident_events SET kind = 'unknown-kind' WHERE incident_key = %s",
+            (f"recovery:job:{lease.job_key}",),
+        )
+    with pytest.raises(ControlPlaneError, match="incident transition is malformed"):
+        control_plane.operational_snapshot(now=now)
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE m1_incident_events SET kind = 'recovery-started' WHERE incident_key = %s",
+            (f"recovery:job:{lease.job_key}",),
+        )
+        cursor.execute(
+            "ALTER TABLE m1_incidents DROP CONSTRAINT ck_m1_incidents_severity"
+        )
+        cursor.execute(
+            "UPDATE m1_incidents SET severity = 'urgent' WHERE incident_key = %s",
+            (f"recovery:job:{lease.job_key}",),
+        )
+    try:
+        with pytest.raises(ControlPlaneError, match="incident severity is malformed"):
+            control_plane.operational_snapshot(now=now)
+    finally:
+        with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE m1_incidents SET severity = 'critical' WHERE incident_key = %s",
+                (f"recovery:job:{lease.job_key}",),
+            )
+            cursor.execute(
+                "ALTER TABLE m1_incidents ADD CONSTRAINT ck_m1_incidents_severity "
+                "CHECK (severity IN ('info', 'warning', 'critical'))"
+            )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "ALTER TABLE m1_recovery_actions "
+            "DISABLE TRIGGER m1_qualification_recovery_actions_ingress"
+        )
+        cursor.execute(
+            "ALTER TABLE m1_recovery_actions DROP CONSTRAINT ck_m1_recovery_actions_type"
+        )
+        cursor.execute(
+            "UPDATE m1_recovery_actions SET action_type = 'invent-action' WHERE action_id = %s",
+            (action.action_id,),
+        )
+    try:
+        with pytest.raises(ControlPlaneError, match="recovery action type is malformed"):
+            control_plane.operational_snapshot(now=now)
+    finally:
+        with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE m1_recovery_actions SET action_type = 'reclaim-job' WHERE action_id = %s",
+                (action.action_id,),
+            )
+            cursor.execute(
+                "ALTER TABLE m1_recovery_actions ADD CONSTRAINT ck_m1_recovery_actions_type "
+                "CHECK (action_type IN ('heartbeat-job', 'cancel-job', 'retry-job', "
+                "'reclaim-job', 'probe-circuit', 'restart-worker-process', 'restart-machine'))"
+            )
+            cursor.execute(
+                "ALTER TABLE m1_recovery_actions "
+                "ENABLE TRIGGER m1_qualification_recovery_actions_ingress"
+            )
+
+
+def test_runtime_read_model_rejects_unknown_active_task_registry_values(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="controller-active-task-vocab",
+        lease_seconds=90,
+        now=now - timedelta(seconds=1),
+    )
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="runtime-read-model:active-vocab",
+        job_type="quote-batch",
+        input_identity="runtime-read-model:active-vocab",
+        now=now - timedelta(seconds=20),
+        lease_seconds=120,
+    )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE m1_jobs SET job_type = 'invent-job' WHERE job_key = %s",
+            (lease.job_key,),
+        )
+    with pytest.raises(ControlPlaneError, match="runtime task job type is malformed"):
+        control_plane.operational_snapshot(now=now)
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE m1_jobs SET job_type = 'quote-batch' WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        cursor.execute(
+            "UPDATE m1_job_runtime_state SET stage = 'invent-stage' WHERE job_key = %s",
+            (lease.job_key,),
+        )
+    with pytest.raises(ControlPlaneError, match="runtime task stage is malformed"):
+        control_plane.operational_snapshot(now=now)
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE m1_job_runtime_state SET stage = 'started' WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        cursor.execute(
+            "ALTER TABLE m1_job_runtime_state DROP CONSTRAINT ck_m1_runtime_state_recovery"
+        )
+        cursor.execute(
+            "UPDATE m1_job_runtime_state SET recovery_state = 'invent-state' WHERE job_key = %s",
+            (lease.job_key,),
+        )
+    try:
+        with pytest.raises(ControlPlaneError, match="runtime task state is malformed"):
+            control_plane.operational_snapshot(now=now)
+    finally:
+        with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE m1_job_runtime_state SET recovery_state = 'active' WHERE job_key = %s",
+                (lease.job_key,),
+            )
+            cursor.execute(
+                "ALTER TABLE m1_job_runtime_state ADD CONSTRAINT ck_m1_runtime_state_recovery "
+                "CHECK (recovery_state IN "
+                "('active', 'suspect', 'recovering', 'recovered', 'terminal'))"
+            )
+
+
+def test_control_plane_route_maps_real_postgres_permission_denied_to_fixed_unavailable(
+    control_plane: PostgresControlPlane,
+    http_test_client,
+) -> None:
+    role_name = "m1_snapshot_read_denied"
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role_name))
+        )
+
+    def denied_connect() -> psycopg.Connection:
+        connection = control_plane._connection_factory()
+        connection.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(role_name)))
+        return connection
+
+    http_test_client.app.state.control_plane = PostgresControlPlane(denied_connect)
+    try:
+        response = http_test_client.get("/perception/control-plane")
+    finally:
+        with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+            cursor.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role_name)))
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unavailable",
+        "reason": "control-plane-read-unavailable",
+    }
 
 
 def test_qualification_read_model_rejects_malformed_epoch_json(

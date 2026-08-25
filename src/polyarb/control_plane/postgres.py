@@ -30,6 +30,7 @@ from .models import (
     StructureSourcePageSpec,
 )
 from .recovery_records import RecoveryActionRecord
+from .runtime_contract import RUNTIME_STAGE_REGISTRY
 from .runtime_models import RuntimeEvent, RuntimeEventKind, RuntimeProgress
 from .runtime_store import (
     RuntimeEventConflict,
@@ -134,10 +135,26 @@ ConnectionFactory = Callable[[], psycopg.Connection[Any]]
 
 _FENCED_MAX_STATEMENT_TIMEOUT_MS = 5_000
 _FENCED_MAX_LOCK_TIMEOUT_MS = 1_000
-_SNAPSHOT_RUNTIME_STATES = frozenset({"active", "suspect", "recovering", "recovered", "terminal"})
+_SNAPSHOT_RUNTIME_CONTROLLER_ID = "m1-runtime-reconciler"
+_SNAPSHOT_RUNTIME_INITIAL_STAGE = "started"
+_SNAPSHOT_ACTIVE_TASK_STATES = frozenset({"active", "suspect", "recovering"})
 _SNAPSHOT_INCIDENT_STATES = frozenset({"open", "acknowledged", "resolved"})
+_SNAPSHOT_INCIDENT_SEVERITIES = frozenset({"info", "warning", "critical"})
 _SNAPSHOT_INCIDENT_TRANSITIONS = frozenset(
     {"detected", "recovery-started", "recovery-attempted", "recovered", "resolved", "escalated"}
+)
+_SNAPSHOT_QUALIFICATION_IMPACTS = frozenset({"breaking", "contained", "qualified", "delayed"})
+_SNAPSHOT_ACTION_TARGET_TYPES = frozenset({"job", "circuit", "worker-process", "machine"})
+_SNAPSHOT_ACTION_TYPES = frozenset(
+    {
+        "heartbeat-job",
+        "cancel-job",
+        "retry-job",
+        "reclaim-job",
+        "probe-circuit",
+        "restart-worker-process",
+        "restart-machine",
+    }
 )
 _SNAPSHOT_ACTION_STATES = frozenset({"pending", "running", "completed"})
 _SNAPSHOT_ACTION_RESULTS = frozenset(
@@ -256,12 +273,13 @@ def _snapshot_transition_detail(detail: object) -> dict[str, object]:
     reason_code = detail.get("reason_code")
     if isinstance(reason_code, str) and reason_code:
         result["reason_code"] = _snapshot_text(reason_code, "reason_code")
-    if bool(detail.get("qualification_breaking")):
+    impact = detail.get("qualification_impact")
+    if impact is not None:
+        if type(impact) is not str or impact not in _SNAPSHOT_QUALIFICATION_IMPACTS:
+            raise ControlPlaneError("qualification impact is malformed")
+        result["qualification_impact"] = impact
+    elif bool(detail.get("qualification_breaking")):
         result["qualification_impact"] = "breaking"
-    else:
-        impact = detail.get("qualification_impact")
-        if isinstance(impact, str) and impact in {"breaking", "contained", "qualified", "delayed"}:
-            result["qualification_impact"] = impact
     return result
 
 
@@ -6322,10 +6340,10 @@ class PostgresControlPlane:
                        EXTRACT(EPOCH FROM GREATEST(%s - lease_expires_at, INTERVAL '0 seconds'))
                            AS lease_overdue_seconds
                 FROM m1_runtime_controller_leases
-                ORDER BY updated_at DESC, controller_id DESC
+                WHERE controller_id = %s
                 LIMIT 1
                 """,
-                (now, now),
+                (now, now, _SNAPSHOT_RUNTIME_CONTROLLER_ID),
             )
             runtime_controller_row = cursor.fetchone()
             cursor.execute(
@@ -6334,7 +6352,6 @@ class PostgresControlPlane:
                 FROM m1_job_runtime_state AS runtime
                 JOIN m1_jobs AS job ON job.job_key = runtime.job_key
                 WHERE job.state = 'leased'
-                  AND runtime.recovery_state IN ('active', 'suspect', 'recovering')
                 """
             )
             active_task_total = cursor.fetchone()
@@ -6357,7 +6374,6 @@ class PostgresControlPlane:
                 FROM m1_job_runtime_state AS runtime
                 JOIN m1_jobs AS job ON job.job_key = runtime.job_key
                 WHERE job.state = 'leased'
-                  AND runtime.recovery_state IN ('active', 'suspect', 'recovering')
                 ORDER BY
                     CASE runtime.recovery_state
                         WHEN 'recovering' THEN 0
@@ -6378,6 +6394,8 @@ class PostgresControlPlane:
                 SELECT count(*) AS count
                 FROM m1_incidents
                 WHERE state IN ('open', 'acknowledged')
+                  AND (component IN ('runtime', 'recovery')
+                       OR incident_key LIKE 'recovery:' || chr(37))
                 """
             )
             runtime_incident_total = cursor.fetchone()
@@ -6386,6 +6404,8 @@ class PostgresControlPlane:
                 SELECT incident_key, component, severity, state, summary, opened_at, updated_at
                 FROM m1_incidents
                 WHERE state IN ('open', 'acknowledged')
+                  AND (component IN ('runtime', 'recovery')
+                       OR incident_key LIKE 'recovery:' || chr(37))
                 ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
                          updated_at DESC, incident_key DESC
                 LIMIT %s
@@ -6653,8 +6673,9 @@ class PostgresControlPlane:
         _snapshot_aware(now, "now")
         if row is None:
             return {
-                "status": "critical",
-                "controller_id": None,
+                "status": "unavailable",
+                "reason": "missing-controller",
+                "controller_id": _SNAPSHOT_RUNTIME_CONTROLLER_ID,
                 "owner_id": None,
                 "epoch": None,
                 "claimed_at": None,
@@ -6695,8 +6716,17 @@ class PostgresControlPlane:
         items = []
         for row in rows:
             recovery_state = _snapshot_text(row["recovery_state"], "recovery_state")
-            if recovery_state not in _SNAPSHOT_RUNTIME_STATES:
+            if recovery_state not in _SNAPSHOT_ACTIVE_TASK_STATES:
                 raise ControlPlaneError("runtime task state is malformed")
+            job_type = _snapshot_text(row["job_type"], "job_type")
+            if job_type not in RUNTIME_STAGE_REGISTRY:
+                raise ControlPlaneError("runtime task job type is malformed")
+            stage = _snapshot_text(row["stage"], "stage")
+            if (
+                stage != _SNAPSHOT_RUNTIME_INITIAL_STAGE
+                and stage not in RUNTIME_STAGE_REGISTRY[job_type]
+            ):
+                raise ControlPlaneError("runtime task stage is malformed")
             progress_current = _snapshot_int(row["progress_current"], "progress_current")
             progress_total = (
                 None
@@ -6709,10 +6739,10 @@ class PostgresControlPlane:
                 {
                     "job_key": _snapshot_text(row["job_key"], "job_key"),
                     "attempt_id": _snapshot_text(row["attempt_id"], "attempt_id"),
-                    "job_type": _snapshot_text(row["job_type"], "job_type"),
+                    "job_type": job_type,
                     "worker_id": _snapshot_text(row["worker_id"], "worker_id"),
                     "lease_epoch": _snapshot_int(row["lease_epoch"], "lease_epoch"),
-                    "stage": _snapshot_text(row["stage"], "stage"),
+                    "stage": stage,
                     "recovery_state": recovery_state,
                     "progress": {"current": progress_current, "total": progress_total},
                     "started_at": _snapshot_aware(row["started_at"], "started_at").isoformat(),
@@ -6782,6 +6812,9 @@ class PostgresControlPlane:
             state = _snapshot_text(row["state"], "incident_state")
             if state not in _SNAPSHOT_INCIDENT_STATES:
                 raise ControlPlaneError("incident state is malformed")
+            severity = _snapshot_text(row["severity"], "incident_severity")
+            if severity not in _SNAPSHOT_INCIDENT_SEVERITIES:
+                raise ControlPlaneError("incident severity is malformed")
             incident_key = _snapshot_text(row["incident_key"], "incident_key")
             incident_transitions = transitions.get(incident_key, [])
             transition = incident_transitions[0]["kind"] if incident_transitions else None
@@ -6789,7 +6822,7 @@ class PostgresControlPlane:
                 {
                     "incident_key": incident_key,
                     "component": _snapshot_text(row["component"], "component"),
-                    "severity": _snapshot_text(row["severity"], "severity"),
+                    "severity": severity,
                     "state": state,
                     "summary": _snapshot_text(row["summary"], "summary"),
                     "opened_at": _snapshot_aware(row["opened_at"], "opened_at").isoformat(),
@@ -6815,6 +6848,12 @@ class PostgresControlPlane:
             state = _snapshot_text(row["state"], "action_state")
             if state not in _SNAPSHOT_ACTION_STATES:
                 raise ControlPlaneError("recovery action state is malformed")
+            target_type = _snapshot_text(row["target_type"], "target_type")
+            if target_type not in _SNAPSHOT_ACTION_TARGET_TYPES:
+                raise ControlPlaneError("recovery action target type is malformed")
+            action_type = _snapshot_text(row["action_type"], "action_type")
+            if action_type not in _SNAPSHOT_ACTION_TYPES:
+                raise ControlPlaneError("recovery action type is malformed")
             result_code = None
             if row["result_code"] is not None:
                 result_code = _snapshot_text(row["result_code"], "result_code")
@@ -6828,9 +6867,9 @@ class PostgresControlPlane:
                         if row["incident_key"] is None
                         else _snapshot_text(row["incident_key"], "incident_key")
                     ),
-                    "target_type": _snapshot_text(row["target_type"], "target_type"),
+                    "target_type": target_type,
                     "target_id": _snapshot_text(row["target_id"], "target_id"),
-                    "action_type": _snapshot_text(row["action_type"], "action_type"),
+                    "action_type": action_type,
                     "state": state,
                     "result_code": result_code,
                     "expected_controller_epoch": _snapshot_int(
@@ -6898,11 +6937,17 @@ class PostgresControlPlane:
         role_identity = _snapshot_role_identity(epoch["role_identity"])
         _snapshot_json_array(epoch["fact_records"], "fact_records")
         started_at = _snapshot_aware(epoch["started_at"], "qualification_started_at")
+        if started_at > observed_at:
+            raise ControlPlaneError("qualification time source is malformed")
         last_fact_at = (
             None
             if epoch["last_fact_at"] is None
             else _snapshot_aware(epoch["last_fact_at"], "last_fact_at")
         )
+        if last_fact_at is not None and (
+            last_fact_at < started_at or last_fact_at > observed_at
+        ):
+            raise ControlPlaneError("qualification time source is malformed")
         required_seconds = (
             None
             if epoch["required_seconds"] is None
@@ -6934,11 +6979,14 @@ class PostgresControlPlane:
                 ).isoformat(),
             }
         eligible_seconds = _snapshot_int(epoch["coverage_seconds"], "coverage_seconds")
-        if state == "accumulating":
-            eligible_seconds = max(
-                eligible_seconds,
-                int((observed_at - started_at).total_seconds()),
-            )
+        if required_seconds is not None and eligible_seconds > required_seconds:
+            raise ControlPlaneError("qualification coverage source is malformed")
+        if (
+            state == "qualified"
+            and required_seconds is not None
+            and eligible_seconds != required_seconds
+        ):
+            raise ControlPlaneError("qualification coverage source is malformed")
         return {
             "state": state,
             "epoch_id": _snapshot_text(epoch["epoch_id"], "epoch_id"),
