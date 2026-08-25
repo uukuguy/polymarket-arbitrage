@@ -731,6 +731,7 @@ class RollingQualificationPolicy:
         recovering: QualificationDecision,
         fact: QualificationFact,
     ) -> QualificationDecision:
+        self._check_recovery_identity(recovering, fact)
         previous_epoch_id = recovering.previous_epoch_id or recovering.epoch_id
         new_epoch_id = self._derive_epoch_id(
             fact.observed_at,
@@ -756,6 +757,21 @@ class RollingQualificationPolicy:
             fact_digests=((fact.fact_id, fact.digest),),
             recovery_confirmed_at=fact.observed_at,
         )
+
+    @staticmethod
+    def _check_recovery_identity(
+        recovering: QualificationDecision,
+        fact: QualificationFact,
+    ) -> None:
+        for field, expected, actual in (
+            ("policy_version", recovering.policy_version, fact.policy_version),
+            ("release_id", recovering.release_id, fact.release_id),
+            ("config_id", recovering.config_id, fact.config_id),
+        ):
+            if actual is not None and actual != expected:
+                raise QualificationError(f"recovery confirmation identity conflict: {field}")
+        if fact.role_identity is not None and fact.role_identity != recovering.role_identity:
+            raise QualificationError("recovery confirmation identity conflict: role_identity")
 
     @staticmethod
     def _is_recovery_confirmation(fact: QualificationFact) -> bool:

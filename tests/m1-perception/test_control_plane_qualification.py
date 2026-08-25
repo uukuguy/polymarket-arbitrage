@@ -8,6 +8,7 @@ import pytest
 
 from polyarb.control_plane.qualification import (
     BREAKING_REASONS,
+    QualificationError,
     QualificationFact,
     QualificationFactConflict,
     QualificationState,
@@ -113,6 +114,71 @@ def test_recovery_confirmation_opens_new_epoch_automatically() -> None:
             recovery_confirmed=True,
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("policy_version", "policy-b"),
+        ("release_id", "release-b"),
+        ("config_id", "config-b"),
+        ("role_identity", ("other-role",)),
+    ],
+)
+def test_recovery_confirmation_identity_drift_fails_closed(
+    field: str,
+    value: object,
+) -> None:
+    policy = _policy()
+    invalidated = policy.apply(
+        _state(policy),
+        _fact("lease", NOW + timedelta(hours=1), reason="lease.expired"),
+    )
+    recovering = policy.recovering(
+        invalidated,
+        started_at=NOW + timedelta(hours=1, seconds=1),
+    )
+    with pytest.raises(QualificationError, match="identity conflict"):
+        policy.apply(
+            recovering,
+            _fact(
+                "recovery-drift-" + field,
+                NOW + timedelta(hours=1, seconds=30),
+                reason="recovery.confirmed",
+                recovery_confirmed=True,
+                **{field: value},
+            ),
+        )
+
+    assert recovering.state is QualificationState.RECOVERING
+    assert recovering.previous_epoch_id == invalidated.epoch_id
+
+
+def test_recovery_confirmation_accepts_omitted_or_matching_identity() -> None:
+    policy = _policy()
+    invalidated = policy.apply(
+        _state(policy),
+        _fact("lease", NOW + timedelta(hours=1), reason="lease.expired"),
+    )
+    recovering = policy.recovering(
+        invalidated,
+        started_at=NOW + timedelta(hours=1, seconds=1),
+    )
+    result = policy.apply(
+        recovering,
+        _fact(
+            "recovery-ok-explicit",
+            NOW + timedelta(hours=1, seconds=30),
+            reason="recovery.confirmed",
+            recovery_confirmed=True,
+            policy_version=policy.policy_version,
+            release_id=policy.release_id,
+            config_id=policy.config_id,
+            role_identity=policy.role_identity,
+        ),
+    )
+    assert result.state is QualificationState.ACCUMULATING
+    assert result.previous_epoch_id == invalidated.epoch_id
 
 
 def test_exact_24_hour_boundary_qualifies_only_with_coverage() -> None:
