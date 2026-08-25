@@ -1,0 +1,27 @@
+{
+  "artifact_version": 1,
+  "gate": "runtime-process-recovery-production",
+  "status": "not-run",
+  "recorded_at": "2026-08-25T16:55:14+08:00",
+  "reason": "No exact production mutation authorization names the release, allowlisted Fly app/Machine, process-loss fault, rollback, and this evidence file.",
+  "prerequisites": {
+    "job_recovery_production_gate": "not-run",
+    "capability_limited_adapter_commit": "3101a6da",
+    "independent_health_confirmation_required": true,
+    "process_or_machine_actions_enabled_in_production": false
+  },
+  "production_operations": {
+    "fly_token_or_role_change": false,
+    "exact_target_allowlist_enablement": false,
+    "process_or_machine_fault_injection": false,
+    "machine_restart": false,
+    "recovery_confirmation": false
+  },
+  "authorization_required": {
+    "release_sha": true,
+    "fly_app_and_machine_id": true,
+    "fault_and_maximum_effect": true,
+    "rollback": true,
+    "evidence_file": "runtime-process-recovery.json"
+  }
+}

@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Plans 201-205 are locally complete and H-017 is confirmed; next is Plan 206 deterministic fault qualification and least-privilege production enablement
-last_updated: "2026-08-25T15:44:29+08:00"
+stopped_at: Plan 206 is locally complete with production gates explicitly NOT RUN; next is H-018 confirmation, then an exact authorized observe-only production release
+last_updated: "2026-08-25T16:55:14+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -74,16 +74,21 @@ progress:
   Telegram/outbox transitions, restart-safe reminders, authenticated-body
   smoke and teaching chapter 87. Stale/equal-time observations cannot move the
   incident ledger backward.
+- Plan `05.6-206` is locally complete through migration 025, a deterministic
+  12-class real-PostgreSQL fault matrix, isolated runtime/qualification apps,
+  an exact capability-limited Fly recovery adapter, durable observe-only
+  decision/idle facts, and a read-only zero-mutation verifier. The production
+  observe, job-recovery, and process-recovery gates are explicitly NOT RUN.
 - Climb H-014 cycle 15 through H-017 cycle 18 scored 100/100 on dedicated local
   gates. H-016 run `20260825-053507-h-016` covers real
   migration/trust/late-ingress/freshness/recovery-observation behavior plus
   exact 26-hour restart/replay certificate evidence; H-017 run
   `20260825-074318-h-017` covers strict reads, real-PostgreSQL event/outbox
   chains, API/smoke contracts and restart/ordering behavior.
-- These changes have **not** been deployed and migrations 022/023/024 have not
+- These changes have **not** been deployed and migrations 022/023/024/025 have not
   been applied to production. The production topology still reflects the
-  earlier runtime and must not be described as self-healing until Plans
-  206, deployment verification and a new automatic qualification epoch
+  earlier runtime and must not be described as self-healing until exact
+  deployment verification and a new automatic qualification epoch
   complete.
 
 ## Formal Acceptance
@@ -94,8 +99,9 @@ progress:
   final acceptance.
 - Repeatedly starting another manual 24-hour run is no longer an accepted
   detection/recovery mechanism. Plan `05.6-204` now provides the local automatic
-  epoch/certificate mechanism and Plan `05.6-205` now provides shared operator
-  truth. Plan 206 must prove least-privilege production enablement before a
+  epoch/certificate mechanism, Plan `05.6-205` provides shared operator truth,
+  and Plan `05.6-206` provides deterministic local enablement proof. An exact
+  authorized production observe-only release must still pass before a
   production epoch can start.
 - A future production epoch may qualify only after the new runtime facts,
   reconciler, recovery service, alerts and Dashboard are deployed and the
@@ -109,14 +115,14 @@ progress:
 | Structure/Quote cloud worker migration | three independent fixed-role workers and advancing durable successes | complete |
 | Process-loss recovery | fenced R2-before-receipt takeover evidence for both job classes | complete |
 | Immediate fault visibility | Fly watchdog plus independent Cloudflare supervisor, Telegram and source-aware Dashboard incident/recovery ledger | complete |
-| Continuous final-topology acceptance | rolling epoch + immutable certificate | local mechanism and operator surfaces complete; blocked on Plan 206 and fresh production enablement |
+| Continuous final-topology acceptance | rolling epoch + immutable certificate | local mechanism plus deterministic enablement complete; blocked on exact authorized production enablement |
 
 ## Resume
 
-1. Execute Plan `05.6-206` Task 1: the deterministic local runtime fault matrix.
-2. Continue with Plan 206 least-privilege topology and exact recovery adapter.
-   Do not deploy or inject production faults without the plan's exact separate
-   authorization gate.
-3. After production enablement, let recovery confirmation open a fresh epoch
+1. Run the dedicated climb H-018 local confirmation profile.
+2. Before production, present one exact observe-only authorization package:
+   release SHA, six app identities, database, migration 022-025 plan, rollback,
+   and evidence directory. Do not infer this authority from generic approval.
+3. After authorized production enablement, let recovery confirmation open a fresh epoch
    automatically; independently verify its immutable certificate before
    marking Phase 05.6 and M1 complete.

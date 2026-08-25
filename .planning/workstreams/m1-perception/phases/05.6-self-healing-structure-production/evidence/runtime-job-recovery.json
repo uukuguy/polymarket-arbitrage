@@ -1,0 +1,27 @@
+{
+  "artifact_version": 1,
+  "gate": "runtime-job-recovery-production",
+  "status": "not-run",
+  "recorded_at": "2026-08-25T16:55:14+08:00",
+  "reason": "No exact production mutation authorization names the release, job target, bounded timeout fault, rollback, and this evidence file.",
+  "prerequisites": {
+    "observe_only_production_gate": "not-run",
+    "local_fault_matrix": "pass",
+    "job_action_classes_implemented": true,
+    "job_action_classes_enabled_in_production": false
+  },
+  "production_operations": {
+    "heartbeat_or_retry_action_enablement": false,
+    "job_fault_injection": false,
+    "telegram_transition_proof": false,
+    "dashboard_transition_proof": false,
+    "automatic_recovery_proof": false
+  },
+  "authorization_required": {
+    "release_sha": true,
+    "app_and_job_target": true,
+    "fault_and_maximum_effect": true,
+    "rollback": true,
+    "evidence_file": "runtime-job-recovery.json"
+  }
+}

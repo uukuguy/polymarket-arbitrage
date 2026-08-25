@@ -1690,3 +1690,28 @@ success is not user receipt/read evidence.
   bounds facts, the Dashboard decoder fails closed, and authenticated smoke
   checks real panel content rather than HTTP reachability. Recovery mutation
   remains behind controller/job/action/attempt/lease fences.
+
+### §2.31 Deterministic fault proof and production authority are separate gates (2026-08-25)
+
+- Repeated 24-hour restarts are a poor debugging loop. A local matrix now runs
+  12 fault classes twice against a disposable database upgraded through the
+  real migration head, checking incidents, actions, fences, Dashboard and
+  qualification projection. It exposed real decoder/ingress defects; the gate
+  fixed the production chain instead of excluding failing cases.
+- Observe-only must be durable, not a log level. Each bounded candidate becomes
+  an immutable decision bound to controller owner+epoch and runtime-state
+  digest; an empty turn writes idle. A read-only repeatable snapshot rejects
+  tick gaps, stale identity, replay mismatch, candidate mismatch and any
+  recovery action overlapping the window.
+- Concurrent visibility and bounded mutation have different cardinality. When
+  three sampling points fail together, observe-only records all three; execute
+  mode may still select only the first actionable target per turn to preserve
+  budget and active-target arbitration.
+- `--enable` starts a guarded service but is not recovery authority. Execute
+  requires a separate closed mode. Process/Machine recovery additionally needs
+  action-class enablement, an exact immutable `(app, machine_id)` allowlist,
+  current controller/action leases, database preflight and independent health.
+- Local proof cannot silently become production mutation authority. Deployment,
+  job fault and process/Machine fault each need an exact release/target/fault/
+  maximum-effect/rollback/evidence authorization. Until then the evidence must
+  say NOT RUN, not pending-pass or implied approval.

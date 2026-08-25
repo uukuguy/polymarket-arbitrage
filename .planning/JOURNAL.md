@@ -10228,3 +10228,35 @@ Plan 06 grants and verifies least-privilege enablement.
 deterministic runtime fault matrix. Then build the least-privilege deployment
 topology and exact Fly recovery adapter. Production deployment and controlled
 fault mutation remain behind Plan 206's exact separate authorization gates.
+
+## SESSION 304 — 2026-08-25 (deterministic runtime enablement and observe-only authority)
+
+- [IMPLEMENTED] Plan `05.6-206` added isolated runtime-controller and
+  qualification-worker Fly templates, an exact capability-limited Fly recovery
+  adapter, migration 025 append-only observe decisions, a zero-mutation
+  verifier, and default observe-only CLI/Make integration. Simultaneous
+  candidates are all recorded; an empty turn records idle.
+- [FAULT MATRIX] Twelve task/runtime/infrastructure/replay fault classes now run
+  twice against a disposable fully migrated local PostgreSQL database. The
+  matrix exposed retryable-ingress, recovery-action decode, recovery-proof and
+  lifecycle-version defects in the qualification chain; all were fixed rather
+  than excluded. Both canonical runs pass.
+- [AUTHORITY] `--enable` starts the controller but does not select execute mode.
+  Process/Machine recovery also requires a separately enabled action class,
+  exact immutable app/Machine allowlist, live controller/action leases,
+  database preflight, budget/competition checks and independent health.
+- [PRODUCTION NOT RUN] No migration, deploy, secret/role change, recovery action
+  enablement, controlled fault, Fly mutation, Dashboard smoke or certificate
+  claim ran. Three credential-free evidence artifacts record NOT RUN because no
+  authorization named an exact release, target, fault, rollback and evidence
+  file.
+- [REVIEW] Independent integration review reran 31 focused tests, migration
+  025, Ruff, Pyright and wheel build and approved commit `8c45e76b` with zero
+  findings.
+- [LEARNING] Added `docs/learning/88-确定性故障矩阵与Observe-Only上线门.md` and
+  architecture §2.31. H-018 now has an exact local gate profile; its final climb
+  cycle is the next action.
+
+[NEXT] Run `make climb-cycle hypothesis=H-018`. If it confirms locally, prepare
+the exact observe-only production authorization package; do not deploy or inject
+faults from generic approval.

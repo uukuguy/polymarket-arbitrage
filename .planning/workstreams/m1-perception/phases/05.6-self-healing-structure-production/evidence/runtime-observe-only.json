@@ -1,0 +1,30 @@
+{
+  "artifact_version": 1,
+  "gate": "runtime-observe-only-production",
+  "status": "not-run",
+  "recorded_at": "2026-08-25T16:55:14+08:00",
+  "reason": "Exact production deployment authorization was not granted for a named release and six-app target topology.",
+  "local_implementation": {
+    "observe_only_commit": "8c45e76b",
+    "required_migration_revisions": ["022", "023", "024", "025"],
+    "runtime_controller_template_sha256": "a639ccdf733a3138c8735d51a4bd03fbe0944e35ba0b321916debbcd4449f831",
+    "qualification_worker_template_sha256": "a9e5e6efbb5748f211f07e9332b58641f259f8ac0c3d45ac3a8a13c041838ff4",
+    "default_recovery_mode": "observe-only",
+    "local_fault_matrix": "pass",
+    "production_decision_window_seconds": 0
+  },
+  "production_operations": {
+    "migration": false,
+    "deployment": false,
+    "secret_or_role_change": false,
+    "recovery_action_enablement": false,
+    "fault_mutation": false
+  },
+  "authorization_required": {
+    "release_sha": true,
+    "six_app_identities": true,
+    "expected_database": true,
+    "rollback": true,
+    "evidence_directory": true
+  }
+}
