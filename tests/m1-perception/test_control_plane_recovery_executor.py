@@ -71,6 +71,7 @@ class FakeStore:
         self.actions = actions
         self.claimed: list[RecoveryActionRecord] = []
         self.finished: list[tuple[RecoveryActionRecord, str, dict[str, object]]] = []
+        self.executed: list[str] = []
 
     def claim_action(self, **kwargs: Any) -> RecoveryActionRecord | None:
         now = kwargs["now"]
@@ -123,10 +124,41 @@ class FakeStore:
             return finished
         raise AssertionError("action missing")
 
+    def execute_claimed_action(self, **kwargs: Any) -> RecoveryActionRecord:
+        action = next(
+            action for action in self.actions if action.action_id == kwargs["action_id"]
+        )
+        if (
+            action.state != "running"
+            or action.worker_id != kwargs["worker_id"]
+            or action.worker_epoch != kwargs["worker_epoch"]
+            or action.worker_lease_expires_at is None
+            or action.worker_lease_expires_at <= kwargs["now"]
+        ):
+            return action
+        self.executed.append(action.action_id)
+        result_code = kwargs["callback"](None, action)
+        if not isinstance(result_code, str) or result_code not in {
+            "succeeded",
+            "failed",
+            "stale-noop",
+            "disabled-action",
+        }:
+            raise ValueError("invalid fake terminal result")
+        return self.finish_action(
+            action_id=action.action_id,
+            worker_id=action.worker_id,
+            worker_epoch=action.worker_epoch,
+            result_code=result_code,
+            now=kwargs["now"],
+            detail={"postcondition": result_code},
+        )
+
 
 class FakeControlPlane:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.heartbeat_lease_seconds: list[int] = []
         self.crash_once = False
 
     def _run(self, name: str, action: RecoveryActionRecord, *, now: datetime) -> str:
@@ -136,7 +168,14 @@ class FakeControlPlane:
             raise RuntimeError("simulated executor crash")
         return "succeeded"
 
-    def heartbeat_recovering_job(self, action: RecoveryActionRecord, *, now: datetime) -> str:
+    def heartbeat_recovering_job(
+        self,
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+        lease_seconds: int,
+    ) -> str:
+        self.heartbeat_lease_seconds.append(lease_seconds)
         return self._run("heartbeat", action, now=now)
 
     def cancel_stalled_job(self, action: RecoveryActionRecord, *, now: datetime) -> str:
@@ -189,6 +228,24 @@ def test_only_allowlisted_job_actions_dispatch_to_control_plane(
     )
 
 
+def test_heartbeat_lease_seconds_are_forwarded_to_the_typed_adapter() -> None:
+    store = FakeStore([_action(RecoveryActionType.HEARTBEAT_JOB)])
+    control_plane = FakeControlPlane()
+
+    result = RecoveryExecutor(
+        store=store,
+        control_plane=control_plane,
+        controller=_controller(),
+        worker_id="recovery-worker",
+        action_lease_seconds=5,
+        heartbeat_lease_seconds=77,
+    ).run_once(now=NOW + timedelta(seconds=1))
+
+    assert result is not None and result.outcome == "succeeded"
+    assert control_plane.heartbeat_lease_seconds == [77]
+    assert store.executed == ["action:heartbeat-job"]
+
+
 @pytest.mark.parametrize(
     "action_type", (RecoveryActionType.RESTART_WORKER_PROCESS, RecoveryActionType.RESTART_MACHINE)
 )
@@ -216,7 +273,7 @@ def test_duplicate_command_is_completed_once_and_second_turn_is_idle() -> None:
     second = executor.run_once(now=NOW + timedelta(seconds=2))
 
     assert first is not None and first.outcome == "succeeded"
-    assert second is not None and second.outcome == "idle"
+    assert second is None
     assert control_plane.calls == [("reclaim", "job-1")]
     assert len(store.finished) == 1
 
@@ -247,8 +304,23 @@ def test_exhausted_budget_is_not_claimable_and_does_not_mutate_any_business_fact
 
     result = _executor(store, control_plane).run_once(now=NOW + timedelta(seconds=1))
 
-    assert result is not None and result.outcome == "idle"
+    assert result is None
     assert control_plane.calls == []
+    assert store.finished == []
+
+
+def test_none_adapter_result_is_contract_error_and_not_succeeded() -> None:
+    class NoneControlPlane(FakeControlPlane):
+        def cancel_stalled_job(self, action: RecoveryActionRecord, *, now: datetime) -> None:
+            return None
+
+    store = FakeStore([_action(RecoveryActionType.CANCEL_JOB)])
+    control_plane = NoneControlPlane()
+
+    with pytest.raises(ValueError, match="invalid result code"):
+        _executor(store, control_plane).run_once(now=NOW + timedelta(seconds=1))
+
+    assert store.actions[0].state == "running"
     assert store.finished == []
 
 
@@ -269,6 +341,55 @@ def test_executor_crash_leaves_running_action_for_expiry_reclaim() -> None:
     assert store.actions[0].state == "completed"
     assert store.actions[0].worker_epoch == 2
     assert control_plane.calls == [("cancel", "job-1"), ("cancel", "job-1")]
+
+
+def test_expired_old_action_worker_cannot_execute_after_reclaim_epoch_bump() -> None:
+    store = FakeStore([_action(RecoveryActionType.RECLAIM_JOB)])
+    control_plane = FakeControlPlane()
+    first = store.claim_action(
+        worker_id="old-worker",
+        controller=_controller(),
+        lease_seconds=1,
+        now=NOW + timedelta(seconds=1),
+    )
+    assert first is not None
+    replacement = store.claim_action(
+        worker_id="new-worker",
+        controller=_controller(),
+        lease_seconds=30,
+        now=NOW + timedelta(seconds=3),
+    )
+    assert replacement is not None
+    assert replacement.worker_epoch == first.worker_epoch + 1
+
+    old_result = store.execute_claimed_action(
+        action_id=first.action_id,
+        worker_id="old-worker",
+        worker_epoch=first.worker_epoch,
+        controller=_controller(),
+        now=NOW + timedelta(seconds=4),
+        callback=lambda _cursor, _action: control_plane.reclaim_expired_job(
+            _action, now=NOW + timedelta(seconds=4)
+        ),
+    )
+
+    assert old_result.state == "running"
+    assert old_result.worker_id == "new-worker"
+    assert control_plane.calls == []
+
+    new_result = store.execute_claimed_action(
+        action_id=replacement.action_id,
+        worker_id="new-worker",
+        worker_epoch=replacement.worker_epoch,
+        controller=_controller(),
+        now=NOW + timedelta(seconds=4),
+        callback=lambda _cursor, action: control_plane.reclaim_expired_job(
+            action, now=NOW + timedelta(seconds=4)
+        ),
+    )
+    assert new_result.state == "completed"
+    assert new_result.result_code == "succeeded"
+    assert control_plane.calls == [("reclaim", "job-1")]
 
 
 def test_recovery_action_result_never_exposes_receipt_or_pointer_postconditions() -> None:

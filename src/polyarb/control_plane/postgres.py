@@ -152,10 +152,19 @@ def _set_structure_read_timeouts(cursor: psycopg.Cursor[Any], *, read_only: bool
 
 
 def _set_fenced_transaction_timeouts(
-    cursor: psycopg.Cursor[Any], *, lease: JobLease, now: datetime
+    cursor: psycopg.Cursor[Any],
+    *,
+    lease: JobLease,
+    now: datetime,
+    action_deadline: datetime | None = None,
 ) -> tuple[int, int]:
     """Bound one fenced transaction below the lease's remaining lifetime."""
     remaining_ms = int((lease.lease_expires_at - now).total_seconds() * 1000)
+    if action_deadline is not None:
+        remaining_ms = min(
+            remaining_ms,
+            int((action_deadline - now).total_seconds() * 1000),
+        )
     if remaining_ms <= 1:
         raise StaleLeaseError(
             f"lease is no longer current or has no safe terminal budget for {lease.job_key}"
@@ -4533,43 +4542,40 @@ class PostgresControlPlane:
             return ("dashboard",)
         return channels
 
-    def _recovery_job_lease(
+    def _recovery_job_lease_cursor(
         self,
+        cursor: psycopg.Cursor[Any],
         action: RecoveryActionRecord,
         *,
         now: datetime,
         allow_expired: bool = False,
     ) -> JobLease:
-        """Materialize a JobLease only after checking the exact action fence."""
+        """Materialize a JobLease under the caller's existing transaction."""
         self._validate_aware(now, "now")
         if action.target_type != "job":
             raise ValueError("job recovery action must target a job")
-        with (
-            self._connection_factory() as connection,
-            connection.cursor(row_factory=dict_row) as cursor,
-        ):
-            cursor.execute(
-                """
-                SELECT j.job_key, j.job_type, j.input_identity, j.lease_owner,
-                       j.lease_epoch, j.lease_expires_at, j.checkpoint_cursor,
-                       j.checkpoint_digest, j.state
-                FROM m1_jobs AS j
-                JOIN m1_job_runtime_state AS r ON r.job_key = j.job_key
-                WHERE j.job_key = %s
-                  AND r.attempt_id = %s
-                  AND r.lease_epoch = %s
-                  AND r.worker_id = j.lease_owner
-                  AND j.lease_epoch = %s
-                FOR UPDATE
-                """,
-                (
-                    action.target_id,
-                    action.expected_attempt_id,
-                    action.expected_lease_epoch,
-                    action.expected_lease_epoch,
-                ),
-            )
-            row = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT j.job_key, j.job_type, j.input_identity, j.lease_owner,
+                   j.lease_epoch, j.lease_expires_at, j.checkpoint_cursor,
+                   j.checkpoint_digest, j.state
+            FROM m1_jobs AS j
+            JOIN m1_job_runtime_state AS r ON r.job_key = j.job_key
+            WHERE j.job_key = %s
+              AND r.attempt_id = %s
+              AND r.lease_epoch = %s
+              AND r.worker_id = j.lease_owner
+              AND j.lease_epoch = %s
+            FOR UPDATE
+            """,
+            (
+                action.target_id,
+                action.expected_attempt_id,
+                action.expected_lease_epoch,
+                action.expected_lease_epoch,
+            ),
+        )
+        row = cursor.fetchone()
         if row is None or row["state"] != JobState.LEASED.value or row["lease_owner"] is None:
             raise StaleLeaseError(f"recovery action fence is stale for {action.target_id}")
         if row["lease_expires_at"] is None:
@@ -4588,22 +4594,210 @@ class PostgresControlPlane:
             checkpoint_digest=row["checkpoint_digest"],
         )
 
+    def _recovery_job_lease(
+        self,
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+        allow_expired: bool = False,
+    ) -> JobLease:
+        """Materialize a JobLease only after checking the exact action fence."""
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            return self._recovery_job_lease_cursor(
+                cursor,
+                action,
+                now=now,
+                allow_expired=allow_expired,
+            )
+
+    def _finish_retryable_with_incident_cursor(
+        self,
+        cursor: psycopg.Cursor[dict[str, Any]],
+        lease: JobLease,
+        *,
+        error_class: str,
+        incident_key: str,
+        dedupe_key: str,
+        component: str,
+        summary: str,
+        detail: dict[str, object],
+        channels: Sequence[str],
+        now: datetime,
+        action_deadline: datetime | None = None,
+    ) -> datetime:
+        """Retry transition composed into an outer recovery transaction."""
+        self._validate_aware(now, "now")
+        self._validate_nonempty(
+            error_class=error_class,
+            incident_key=incident_key,
+            dedupe_key=dedupe_key,
+            component=component,
+            summary=summary,
+        )
+        if not channels or any(not channel.strip() for channel in channels):
+            raise ValueError("channels must contain non-empty values")
+        if len(set(channels)) != len(channels):
+            raise ValueError("channels must be unique")
+        _set_fenced_transaction_timeouts(
+            cursor,
+            lease=lease,
+            now=now,
+            action_deadline=action_deadline,
+        )
+        cursor.execute(
+            """
+            SELECT consecutive_failures, state, opened_at
+            FROM m1_job_circuits WHERE job_key = %s FOR UPDATE
+            """,
+            (lease.job_key,),
+        )
+        circuit = cursor.fetchone()
+        failures = (0 if circuit is None else int(circuit["consecutive_failures"])) + 1
+        delay_seconds = min(15 * (2 ** (failures - 1)), 300)
+        next_attempt_at = now + timedelta(seconds=delay_seconds)
+        circuit_state = "open" if failures >= 3 else "closed"
+        opened_at = now if failures == 3 else (None if circuit is None else circuit["opened_at"])
+        cursor.execute(
+            """
+            INSERT INTO m1_job_circuits (
+                job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (job_key) DO UPDATE
+            SET consecutive_failures = EXCLUDED.consecutive_failures,
+                state = EXCLUDED.state, opened_at = EXCLUDED.opened_at,
+                next_probe_at = EXCLUDED.next_probe_at, updated_at = EXCLUDED.updated_at
+            """,
+            (lease.job_key, failures, circuit_state, opened_at, next_attempt_at, now),
+        )
+        self._append_retry_runtime_events_cursor(
+            cursor,
+            lease=lease,
+            component=component,
+            error_class=error_class,
+            retry_count=failures,
+            backoff_seconds=delay_seconds,
+            next_attempt_at=next_attempt_at,
+            now=now,
+        )
+        cursor.execute(
+            """
+            UPDATE m1_jobs
+            SET state = 'retryable', next_attempt_at = %s, last_error_class = %s,
+                lease_owner = NULL, lease_expires_at = NULL, updated_at = %s
+            WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+              AND state IN ('leased', 'checkpointed')
+            """,
+            (
+                next_attempt_at,
+                error_class,
+                now,
+                lease.job_key,
+                lease.lease_owner,
+                lease.lease_epoch,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+        cursor.execute(
+            """
+            UPDATE m1_job_attempts
+            SET state = 'retryable', finished_at = %s, error_class = %s
+            WHERE job_key = %s AND lease_epoch = %s
+            """,
+            (now, error_class, lease.job_key, lease.lease_epoch),
+        )
+        kind = (
+            "circuit-opened"
+            if failures == 3
+            else ("circuit-probe-failed" if failures > 3 else "attempt-failed")
+        )
+        self._record_incident_event(
+            cursor,
+            incident_key=incident_key,
+            dedupe_key=dedupe_key,
+            component=component,
+            severity="warning",
+            summary=summary,
+            kind=kind,
+            detail={
+                **detail,
+                "consecutive_failures": failures,
+                "circuit_state": circuit_state,
+                "next_probe_at": next_attempt_at.isoformat(),
+                "retry_after_seconds": delay_seconds,
+            },
+            idempotency_key=f"job-retry:{lease.job_key}:{lease.lease_epoch}",
+            channels=channels,
+            now=now,
+        )
+        return next_attempt_at
+
     def heartbeat_recovering_job(
         self,
         action: RecoveryActionRecord,
         *,
         now: datetime,
         lease_seconds: int = 30,
+        _cursor: psycopg.Cursor[Any] | None = None,
     ) -> str:
         """Renew only the exact job attempt named by a heartbeat action."""
         self._recovery_action(action, "heartbeat-job")
+        if _cursor is not None:
+            lease = self._recovery_job_lease_cursor(_cursor, action, now=now)
+            try:
+                update_runtime_heartbeat_cursor(
+                    _cursor,
+                    job_key=lease.job_key,
+                    attempt_id=action.expected_attempt_id,
+                    lease_epoch=lease.lease_epoch,
+                    worker_id=lease.lease_owner,
+                    now=now,
+                    lease_seconds=lease_seconds,
+                )
+            except RuntimeFenceError as error:
+                raise StaleLeaseError(str(error)) from error
+            return "succeeded"
         lease = self._recovery_job_lease(action, now=now)
         self.heartbeat_runtime_attempt(lease, now=now, lease_seconds=lease_seconds)
         return "succeeded"
 
-    def cancel_stalled_job(self, action: RecoveryActionRecord, *, now: datetime) -> str:
+    def cancel_stalled_job(
+        self,
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+        _cursor: psycopg.Cursor[dict[str, Any]] | None = None,
+        _action_deadline: datetime | None = None,
+    ) -> str:
         """Cooperatively end a current stalled attempt and put it on retry backoff."""
         self._recovery_action(action, "cancel-job")
+        if _cursor is not None:
+            lease = self._recovery_job_lease_cursor(_cursor, action, now=now)
+            self._finish_retryable_with_incident_cursor(
+                _cursor,
+                lease,
+                error_class="RecoveryProgressStalled",
+                incident_key=action.incident_key or f"recovery:job:{action.target_id}",
+                dedupe_key=f"recovery:job:{action.target_id}",
+                component=self._recovery_component(action),
+                summary=(
+                    f"{self._recovery_component(action)} recovery cancelled stalled job"
+                ),
+                detail={
+                    "action_id": action.action_id,
+                    "reason_code": action.detail.get(
+                        "reason_code", "job.progress-stalled"
+                    ),
+                    "recovery_action": action.action_type,
+                },
+                channels=self._recovery_channels(action),
+                now=now,
+                action_deadline=_action_deadline,
+            )
+            return "succeeded"
         lease = self._recovery_job_lease(action, now=now)
         component = self._recovery_component(action)
         incident_key = action.incident_key or f"recovery:job:{action.target_id}"
@@ -4624,12 +4818,93 @@ class PostgresControlPlane:
         )
         return "succeeded"
 
-    def release_retryable_job(self, action: RecoveryActionRecord, *, now: datetime) -> str:
+    def _release_retryable_job_cursor(
+        self,
+        cursor: psycopg.Cursor[dict[str, Any]],
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+        action_deadline: datetime | None = None,
+    ) -> str:
+        cursor.execute(
+            """
+            SELECT j.state, j.lease_owner, j.lease_epoch, j.lease_expires_at,
+                   r.attempt_id, r.lease_epoch AS runtime_epoch
+            FROM m1_jobs AS j
+            JOIN m1_job_runtime_state AS r ON r.job_key = j.job_key
+            WHERE j.job_key = %s
+              AND r.attempt_id = %s
+              AND r.lease_epoch = %s
+              AND j.lease_epoch = %s
+            FOR UPDATE
+            """,
+            (
+                action.target_id,
+                action.expected_attempt_id,
+                action.expected_lease_epoch,
+                action.expected_lease_epoch,
+            ),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise StaleLeaseError(f"retry action fence is stale for {action.target_id}")
+        if row["state"] == JobState.RETRYABLE.value:
+            cursor.execute(
+                """
+                UPDATE m1_jobs
+                SET next_attempt_at = %s, updated_at = %s
+                WHERE job_key = %s AND state = 'retryable'
+                """,
+                (now, now, action.target_id),
+            )
+            return "succeeded"
+        if (
+            row["state"] != JobState.LEASED.value
+            or row["lease_owner"] is None
+            or row["lease_expires_at"] is None
+            or row["lease_expires_at"] <= now
+        ):
+            raise StaleLeaseError(f"retry action job is not current for {action.target_id}")
+        lease = self._recovery_job_lease_cursor(cursor, action, now=now)
+        self._finish_retryable_with_incident_cursor(
+            cursor,
+            lease,
+            error_class="RecoveryRetryRequested",
+            incident_key=action.incident_key or f"recovery:job:{action.target_id}",
+            dedupe_key=f"recovery:job:{action.target_id}",
+            component=self._recovery_component(action),
+            summary=f"{self._recovery_component(action)} recovery retry requested",
+            detail={
+                "action_id": action.action_id,
+                "reason_code": action.detail.get("reason_code", "job.retry-requested"),
+                "recovery_action": action.action_type,
+            },
+            channels=self._recovery_channels(action),
+            now=now,
+            action_deadline=action_deadline,
+        )
+        return "succeeded"
+
+    def release_retryable_job(
+        self,
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+        _cursor: psycopg.Cursor[dict[str, Any]] | None = None,
+        _action_deadline: datetime | None = None,
+    ) -> str:
         """Release one retryable job immediately, preserving its input identity."""
         self._recovery_action(action, "retry-job")
         self._validate_aware(now, "now")
         if action.target_type != "job":
             raise ValueError("retry recovery action must target a job")
+        if _cursor is not None:
+            return self._release_retryable_job_cursor(
+                _cursor,
+                action,
+                now=now,
+                action_deadline=_action_deadline,
+            )
         with (
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
@@ -4695,7 +4970,147 @@ class PostgresControlPlane:
         )
         return "succeeded"
 
-    def reclaim_expired_job(self, action: RecoveryActionRecord, *, now: datetime) -> str:
+    def _reclaim_expired_job_cursor(
+        self,
+        cursor: psycopg.Cursor[dict[str, Any]],
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+    ) -> str:
+        event_idempotency = f"{action.idempotency_key}:reclaimed"
+        cursor.execute(
+            """
+            SELECT event_id FROM m1_job_runtime_events
+            WHERE idempotency_key = %s
+            """,
+            (event_idempotency,),
+        )
+        existing_event = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT j.job_key, j.state, j.lease_owner, j.lease_epoch,
+                   j.lease_expires_at, j.attempt_count,
+                   r.attempt_id, r.worker_id, r.lease_epoch AS runtime_epoch,
+                   r.stage
+            FROM m1_jobs AS j
+            JOIN m1_job_runtime_state AS r ON r.job_key = j.job_key
+            WHERE j.job_key = %s
+            FOR UPDATE
+            """,
+            (action.target_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise StaleLeaseError(f"reclaim job is missing for {action.target_id}")
+        exact_runtime = (
+            str(row["attempt_id"]) == action.expected_attempt_id
+            and int(row["runtime_epoch"]) == action.expected_lease_epoch
+            and int(row["lease_epoch"]) == action.expected_lease_epoch
+        )
+        if not exact_runtime:
+            raise StaleLeaseError(f"reclaim action fence is stale for {action.target_id}")
+        if existing_event is not None:
+            if row["state"] == JobState.RETRYABLE.value and row["lease_owner"] is None:
+                return "succeeded"
+            raise StaleLeaseError(f"reclaim replay is no longer current for {action.target_id}")
+        if (
+            row["state"] != JobState.LEASED.value
+            or row["lease_owner"] is None
+            or row["lease_expires_at"] is None
+            or row["lease_expires_at"] > now
+        ):
+            raise StaleLeaseError(f"job lease is not expired for {action.target_id}")
+        cursor.execute(
+            """
+            UPDATE m1_jobs
+            SET state = 'retryable', next_attempt_at = %s,
+                last_error_class = 'RecoveryLeaseExpired', lease_owner = NULL,
+                lease_expires_at = NULL, updated_at = %s
+            WHERE job_key = %s AND state = 'leased'
+              AND lease_epoch = %s AND lease_owner = %s
+            """,
+            (
+                now,
+                now,
+                action.target_id,
+                action.expected_lease_epoch,
+                row["lease_owner"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StaleLeaseError(f"job changed during reclaim for {action.target_id}")
+        cursor.execute(
+            """
+            UPDATE m1_job_attempts
+            SET state = 'retryable', finished_at = %s,
+                error_class = 'RecoveryLeaseExpired'
+            WHERE attempt_id = %s AND job_key = %s AND lease_epoch = %s
+              AND state = 'running'
+            """,
+            (now, action.expected_attempt_id, action.target_id, action.expected_lease_epoch),
+        )
+        if cursor.rowcount != 1:
+            raise StaleLeaseError(f"attempt changed during reclaim for {action.target_id}")
+        cursor.execute(
+            """
+            UPDATE m1_job_runtime_state
+            SET recovery_state = 'recovered', updated_at = %s
+            WHERE job_key = %s AND attempt_id = %s AND lease_epoch = %s
+            """,
+            (now, action.target_id, action.expected_attempt_id, action.expected_lease_epoch),
+        )
+        if cursor.rowcount != 1:
+            raise StaleLeaseError(f"runtime state changed during reclaim for {action.target_id}")
+        cursor.execute(
+            """
+            SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
+            FROM m1_job_runtime_events
+            WHERE attempt_id = %s
+            """,
+            (action.expected_attempt_id,),
+        )
+        sequence_row = cursor.fetchone()
+        if sequence_row is None:
+            raise RuntimeError("reclaim event sequence query returned no row")
+        cursor.execute(
+            """
+            INSERT INTO m1_job_runtime_events (
+                event_id, job_key, attempt_id, lease_epoch, worker_id,
+                event_sequence, kind, stage, progress_sequence, progress_current,
+                progress_total, detail, occurred_at, idempotency_key
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'job.retry-scheduled', %s,
+                      NULL, NULL, NULL, %s, %s, %s)
+            """,
+            (
+                str(uuid4()),
+                action.target_id,
+                action.expected_attempt_id,
+                action.expected_lease_epoch,
+                row["worker_id"],
+                int(sequence_row["next_sequence"]),
+                row["stage"],
+                Jsonb(
+                    {
+                        "backoff_seconds": 0,
+                        "next_decision_at": now.isoformat(),
+                        "reason_code": action.detail.get("reason_code", "job.lease-expired"),
+                        "recovery_policy": "reclaim-job",
+                        "retry_count": int(row["attempt_count"]),
+                    }
+                ),
+                now,
+                event_idempotency,
+            ),
+        )
+        return "succeeded"
+
+    def reclaim_expired_job(
+        self,
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+        _cursor: psycopg.Cursor[dict[str, Any]] | None = None,
+    ) -> str:
         """Fence an expired owner and release exactly that job for retry.
 
         This path intentionally does not call ``claim_job``: claiming a new
@@ -4706,6 +5121,8 @@ class PostgresControlPlane:
         self._validate_aware(now, "now")
         if action.target_type != "job":
             raise ValueError("reclaim recovery action must target a job")
+        if _cursor is not None:
+            return self._reclaim_expired_job_cursor(_cursor, action, now=now)
         event_idempotency = f"{action.idempotency_key}:reclaimed"
         with (
             self._connection_factory() as connection,
@@ -4840,17 +5257,132 @@ class PostgresControlPlane:
             )
         return "succeeded"
 
+    def _release_one_circuit_probe_cursor(
+        self,
+        cursor: psycopg.Cursor[dict[str, Any]],
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+    ) -> str:
+        event_idempotency = f"{action.idempotency_key}:probe-released"
+        cursor.execute(
+            """
+            SELECT c.state AS circuit_state, c.next_probe_at,
+                   j.state AS job_state, j.lease_epoch,
+                   r.attempt_id, r.lease_epoch AS runtime_epoch,
+                   r.worker_id, r.stage
+            FROM m1_job_circuits AS c
+            JOIN m1_jobs AS j ON j.job_key = c.job_key
+            JOIN m1_job_runtime_state AS r ON r.job_key = c.job_key
+            WHERE c.job_key = %s
+              AND r.attempt_id = %s
+              AND r.lease_epoch = %s
+              AND j.lease_epoch = %s
+            FOR UPDATE
+            """,
+            (
+                action.target_id,
+                action.expected_attempt_id,
+                action.expected_lease_epoch,
+                action.expected_lease_epoch,
+            ),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise StaleLeaseError(f"circuit probe fence is stale for {action.target_id}")
+        if row["circuit_state"] != "open" or row["next_probe_at"] is None:
+            raise StaleLeaseError(f"circuit is not open for {action.target_id}")
+        if row["next_probe_at"] > now:
+            raise StaleLeaseError(f"circuit probe is not due for {action.target_id}")
+        if row["job_state"] not in {JobState.RETRYABLE.value, JobState.RUNNABLE.value}:
+            raise StaleLeaseError(f"circuit target is not retryable for {action.target_id}")
+        cursor.execute(
+            """
+            SELECT event_id FROM m1_job_runtime_events
+            WHERE idempotency_key = %s
+            """,
+            (event_idempotency,),
+        )
+        if cursor.fetchone() is not None:
+            return "succeeded"
+        cursor.execute(
+            """
+            UPDATE m1_jobs
+            SET state = 'retryable', next_attempt_at = %s, updated_at = %s
+            WHERE job_key = %s AND lease_epoch = %s
+              AND state IN ('retryable', 'runnable')
+            """,
+            (now, now, action.target_id, action.expected_lease_epoch),
+        )
+        if cursor.rowcount != 1:
+            raise StaleLeaseError(f"circuit target changed for {action.target_id}")
+        cursor.execute(
+            """
+            UPDATE m1_job_circuits
+            SET next_probe_at = %s, updated_at = %s
+            WHERE job_key = %s AND state = 'open'
+            """,
+            (now + timedelta(minutes=5), now, action.target_id),
+        )
+        if cursor.rowcount != 1:
+            raise StaleLeaseError(f"circuit changed during probe release for {action.target_id}")
+        cursor.execute(
+            """
+            SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
+            FROM m1_job_runtime_events
+            WHERE attempt_id = %s
+            """,
+            (action.expected_attempt_id,),
+        )
+        sequence_row = cursor.fetchone()
+        if sequence_row is None:
+            raise RuntimeError("probe event sequence query returned no row")
+        cursor.execute(
+            """
+            INSERT INTO m1_job_runtime_events (
+                event_id, job_key, attempt_id, lease_epoch, worker_id,
+                event_sequence, kind, stage, progress_sequence, progress_current,
+                progress_total, detail, occurred_at, idempotency_key
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'job.retry-scheduled', %s,
+                      NULL, NULL, NULL, %s, %s, %s)
+            """,
+            (
+                str(uuid4()),
+                action.target_id,
+                action.expected_attempt_id,
+                action.expected_lease_epoch,
+                row["worker_id"],
+                int(sequence_row["next_sequence"]),
+                row["stage"],
+                Jsonb(
+                    {
+                        "backoff_seconds": 0,
+                        "next_decision_at": now.isoformat(),
+                        "reason_code": action.detail.get("reason_code", "circuit.probe-due"),
+                        "recovery_policy": "probe-circuit",
+                        "retry_count": 0,
+                    }
+                ),
+                now,
+                event_idempotency,
+            ),
+        )
+        return "succeeded"
+
     def release_one_circuit_probe(
         self,
         action: RecoveryActionRecord,
         *,
         now: datetime,
+        _cursor: psycopg.Cursor[dict[str, Any]] | None = None,
     ) -> str:
         """Make exactly one due circuit target claimable for a probe."""
         self._recovery_action(action, "probe-circuit")
         self._validate_aware(now, "now")
         if action.target_type != "circuit":
             raise ValueError("circuit probe action must target a circuit")
+        if _cursor is not None:
+            return self._release_one_circuit_probe_cursor(_cursor, action, now=now)
         event_idempotency = f"{action.idempotency_key}:probe-released"
         with (
             self._connection_factory() as connection,
@@ -4964,6 +5496,44 @@ class PostgresControlPlane:
                 ),
             )
         return "succeeded"
+
+    def execute_recovery_action_cursor(
+        self,
+        cursor: psycopg.Cursor[dict[str, Any]],
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+        heartbeat_lease_seconds: int = 30,
+    ) -> str:
+        """Dispatch a claimed action using the store-owned transaction."""
+        if action.action_type == "heartbeat-job":
+            return self.heartbeat_recovering_job(
+                action,
+                now=now,
+                lease_seconds=heartbeat_lease_seconds,
+                _cursor=cursor,
+            )
+        if action.action_type == "cancel-job":
+            return self.cancel_stalled_job(
+                action,
+                now=now,
+                _cursor=cursor,
+                _action_deadline=action.worker_lease_expires_at,
+            )
+        if action.action_type == "retry-job":
+            return self.release_retryable_job(
+                action,
+                now=now,
+                _cursor=cursor,
+                _action_deadline=action.worker_lease_expires_at,
+            )
+        if action.action_type == "reclaim-job":
+            return self.reclaim_expired_job(action, now=now, _cursor=cursor)
+        if action.action_type == "probe-circuit":
+            return self.release_one_circuit_probe(action, now=now, _cursor=cursor)
+        if action.action_type in {"restart-worker-process", "restart-machine"}:
+            return "disabled-action"
+        return "disabled-action"
 
     def record_runtime_progress(
         self,

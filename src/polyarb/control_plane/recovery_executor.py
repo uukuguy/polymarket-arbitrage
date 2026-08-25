@@ -71,15 +71,15 @@ class _RecoveryStore(Protocol):
         now: datetime,
     ) -> RecoveryActionRecord | None: ...
 
-    def finish_action(
+    def execute_claimed_action(
         self,
         *,
         action_id: str,
         worker_id: str,
         worker_epoch: int,
-        result_code: str,
+        controller: RuntimeControllerLease,
         now: datetime,
-        detail: Mapping[str, object] | None = None,
+        callback: Callable[[Any, RecoveryActionRecord], object],
     ) -> RecoveryActionRecord: ...
 
 
@@ -92,18 +92,8 @@ class _ModuleRecoveryStore:
     def claim_action(self, **kwargs: Any) -> RecoveryActionRecord | None:
         return recovery_store_module.claim_action(self._connection_factory, **kwargs)
 
-    def finish_action(self, **kwargs: Any) -> RecoveryActionRecord:
-        return recovery_store_module.finish_action(self._connection_factory, **kwargs)
-
-
-def _as_result_code(value: object) -> str:
-    if isinstance(value, str) and value in _CLOSED_RESULT_CODES:
-        return value
-    if value is True or value is None:
-        return "succeeded"
-    if value is False:
-        return "failed"
-    raise ValueError("recovery control-plane method returned an invalid result code")
+    def execute_claimed_action(self, **kwargs: Any) -> RecoveryActionRecord:
+        return recovery_store_module.execute_claimed_action(self._connection_factory, **kwargs)
 
 
 class RecoveryExecutor:
@@ -160,52 +150,72 @@ class RecoveryExecutor:
             now=now,
         )
         if action is None:
-            return RecoveryActionResult(action_id=None, outcome="idle")
-
+            return None
         if action.state == "completed":
             return self._result_from_record(action)
 
-        try:
-            action_type = RecoveryActionType(action.action_type)
-        except ValueError:
-            # The database check constraint prevents this in normal operation;
-            # fail closed if a future migration presents an unknown command.
-            return self._finish(action, result_code="disabled-action", now=now)
-
-        if action_type in _DISABLED_ACTIONS or action_type not in _JOB_ACTIONS:
-            return self._finish(action, result_code="disabled-action", now=now)
-
-        method_name = _JOB_ACTIONS[action_type]
-        method = getattr(self._control_plane, method_name, None)
-        if method is None:
-            raise RuntimeError(f"control plane lacks recovery method {method_name}")
-
-        try:
-            # Keep the typed adapter boundary uniform: every job action gets
-            # only the action record and observation time.  The Postgres
-            # adapter owns its bounded heartbeat renewal policy.
-            raw_result = method(action, now=now)
-        except StaleLeaseError:
-            return self._finish(action, result_code="stale-noop", now=now)
-
-        return self._finish(action, result_code=_as_result_code(raw_result), now=now)
-
-    def _finish(
-        self,
-        action: RecoveryActionRecord,
-        *,
-        result_code: str,
-        now: datetime,
-    ) -> RecoveryActionResult:
-        finished = self._store.finish_action(
+        finished = self._store.execute_claimed_action(
             action_id=action.action_id,
             worker_id=action.worker_id or self._worker_id,
             worker_epoch=action.worker_epoch,
-            result_code=result_code,
+            controller=self._controller,
             now=now,
-            detail={"postcondition": result_code},
+            callback=lambda cursor, claimed: self._execute_claimed(
+                cursor, claimed, now=now
+            ),
         )
         return self._result_from_record(finished)
+
+    def _execute_claimed(
+        self,
+        cursor: Any,
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+    ) -> str:
+        """Dispatch inside the store-owned transaction boundary."""
+        try:
+            action_type = RecoveryActionType(action.action_type)
+        except ValueError:
+            return "disabled-action"
+        if action_type in _DISABLED_ACTIONS or action_type not in _JOB_ACTIONS:
+            return "disabled-action"
+
+        if cursor is not None:
+            atomic_dispatch = getattr(
+                self._control_plane, "execute_recovery_action_cursor", None
+            )
+            if atomic_dispatch is None:
+                raise RuntimeError("control plane lacks atomic recovery dispatch")
+            try:
+                result = atomic_dispatch(
+                    cursor,
+                    action,
+                    now=now,
+                    heartbeat_lease_seconds=self._heartbeat_lease_seconds,
+                )
+            except StaleLeaseError:
+                return "stale-noop"
+        else:
+            method_name = _JOB_ACTIONS[action_type]
+            method = getattr(self._control_plane, method_name, None)
+            if method is None:
+                raise RuntimeError(f"control plane lacks recovery method {method_name}")
+            try:
+                if action_type is RecoveryActionType.HEARTBEAT_JOB:
+                    result = method(
+                        action,
+                        now=now,
+                        lease_seconds=self._heartbeat_lease_seconds,
+                    )
+                else:
+                    result = method(action, now=now)
+            except StaleLeaseError:
+                return "stale-noop"
+
+        if not isinstance(result, str) or result not in _CLOSED_RESULT_CODES:
+            raise ValueError("recovery control-plane method returned an invalid result code")
+        return result
 
     @staticmethod
     def _result_from_record(action: RecoveryActionRecord) -> RecoveryActionResult:

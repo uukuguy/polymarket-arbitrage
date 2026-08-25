@@ -15,7 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 import psycopg
-from psycopg import sql
+from psycopg import Cursor, sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -37,6 +37,7 @@ _RECOVERY_LOCK_TIMEOUT_MS = 1_000
 _CLOSED_RESULT_CODES = frozenset(
     {"succeeded", "failed", "stale-noop", "disabled-action"}
 )
+RecoveryActionCallback = Callable[[Cursor[Any], RecoveryActionRecord], object]
 
 
 class RecoveryStoreError(RuntimeError):
@@ -83,15 +84,25 @@ def _bounded_detail(detail: Mapping[str, object] | None) -> dict[str, object]:
     return bounded
 
 
-def _set_recovery_timeouts(cursor: psycopg.Cursor[Any]) -> None:
+def _set_recovery_timeouts(
+    cursor: psycopg.Cursor[Any],
+    *,
+    now: datetime | None = None,
+    deadlines: Sequence[datetime] = (),
+) -> None:
+    statement_timeout_ms = _RECOVERY_STATEMENT_TIMEOUT_MS
+    if now is not None and deadlines:
+        remaining_ms = min(int((deadline - now).total_seconds() * 1000) for deadline in deadlines)
+        statement_timeout_ms = min(statement_timeout_ms, max(1, remaining_ms - 1))
+    lock_timeout_ms = min(_RECOVERY_LOCK_TIMEOUT_MS, statement_timeout_ms)
     cursor.execute(
         sql.SQL("SET LOCAL statement_timeout = {}").format(
-            sql.Literal(f"{_RECOVERY_STATEMENT_TIMEOUT_MS}ms")
+            sql.Literal(f"{statement_timeout_ms}ms")
         )
     )
     cursor.execute(
         sql.SQL("SET LOCAL lock_timeout = {}").format(
-            sql.Literal(f"{_RECOVERY_LOCK_TIMEOUT_MS}ms")
+            sql.Literal(f"{lock_timeout_ms}ms")
         )
     )
 
@@ -969,6 +980,178 @@ def finish_action(
         return finished
 
 
+def execute_claimed_action(
+    connection_factory: ConnectionFactory,
+    *,
+    action_id: str,
+    worker_id: str,
+    worker_epoch: int,
+    controller: RuntimeControllerLease,
+    now: datetime,
+    callback: RecoveryActionCallback,
+) -> RecoveryActionRecord:
+    """Run a claimed action and close its ledger row in one transaction.
+
+    The action row is the outer lock for the worker lease.  The controller and
+    exact runtime/job rows are then locked before the callback is invoked.  A
+    callback exception rolls back both business mutation and terminal action
+    state, leaving the action reclaimable after its worker lease expires.
+    """
+    _require_nonempty(action_id=action_id, worker_id=worker_id)
+    if worker_epoch <= 0:
+        raise ValueError("worker_epoch must be positive")
+    if type(controller) is not RuntimeControllerLease:
+        raise TypeError("controller must be RuntimeControllerLease")
+    if not callable(callback):
+        raise TypeError("callback must be callable")
+    observed_at = _require_aware(now, "now")
+    with connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
+        _set_recovery_timeouts(cursor)
+        action = _fetch_action_by_id(cursor, action_id, for_update=True)
+        if action is None:
+            raise RecoveryStoreError("recovery action is missing")
+        if (
+            action.state != "running"
+            or action.worker_id != worker_id
+            or action.worker_epoch != worker_epoch
+            or action.worker_lease_expires_at is None
+            or action.worker_lease_expires_at <= observed_at
+        ):
+            return action
+        _set_recovery_timeouts(
+            cursor,
+            now=observed_at,
+            deadlines=(action.worker_lease_expires_at,),
+        )
+
+        controller_current = (
+            action.controller_id == controller.controller_id
+            and action.controller_owner_id == controller.owner_id
+            and action.expected_controller_epoch == controller.lease_epoch
+            and _controller_is_current(cursor, controller, now=observed_at)
+        )
+        if not controller_current:
+            return _complete_action_cursor(
+                cursor,
+                action=action,
+                result_code="stale-noop",
+                now=observed_at,
+            )
+
+        if action.target_type in {"job", "circuit"} and not _action_runtime_fence_current(
+            cursor, action=action, now=observed_at
+        ):
+            return _complete_action_cursor(
+                cursor,
+                action=action,
+                result_code="stale-noop",
+                now=observed_at,
+            )
+
+        raw_result = callback(cursor, action)
+        result_code = _closed_result_code(raw_result)
+        return _complete_action_cursor(
+            cursor,
+            action=action,
+            result_code=result_code,
+            now=observed_at,
+        )
+
+
+def _closed_result_code(value: object) -> str:
+    if isinstance(value, str) and value in _CLOSED_RESULT_CODES:
+        return value
+    if value is True or value is False:
+        return "succeeded" if value else "failed"
+    raise RecoveryStoreError("recovery callback returned no bounded result code")
+
+
+def _complete_action_cursor(
+    cursor: psycopg.Cursor[Any],
+    *,
+    action: RecoveryActionRecord,
+    result_code: str,
+    now: datetime,
+) -> RecoveryActionRecord:
+    if result_code not in _CLOSED_RESULT_CODES:
+        raise RecoveryStoreError("recovery result code is not in the action contract")
+    detail = _bounded_detail({"postcondition": result_code})
+    cursor.execute(
+        """
+        UPDATE m1_recovery_actions
+        SET state = 'completed', result_code = %s, finished_at = %s, detail = %s
+        WHERE action_id = %s AND state = 'running'
+          AND worker_id = %s AND worker_epoch = %s
+          AND worker_lease_expires_at > %s
+        """,
+        (
+            result_code,
+            now,
+            Jsonb(detail),
+            action.action_id,
+            action.worker_id,
+            action.worker_epoch,
+            now,
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise RecoveryActionConflict("action worker lease changed during terminal finish")
+    finished = _fetch_action_by_id(cursor, action.action_id)
+    if finished is None:
+        raise RecoveryStoreError("recovery action disappeared after terminal finish")
+    return finished
+
+
+def _action_runtime_fence_current(
+    cursor: psycopg.Cursor[Any],
+    *,
+    action: RecoveryActionRecord,
+    now: datetime,
+) -> bool:
+    cursor.execute(
+        """
+        SELECT j.state, j.lease_owner, j.lease_epoch, j.lease_expires_at,
+               r.attempt_id, r.lease_epoch AS runtime_epoch
+        FROM m1_jobs AS j
+        JOIN m1_job_runtime_state AS r ON r.job_key = j.job_key
+        WHERE j.job_key = %s
+        FOR UPDATE
+        """,
+        (action.target_id,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return False
+    assert action.worker_lease_expires_at is not None
+    deadlines: list[datetime] = [action.worker_lease_expires_at]
+    if row["lease_expires_at"] is not None and _require_aware(
+        row["lease_expires_at"], "lease_expires_at"
+    ) > now:
+        deadlines.append(_require_aware(row["lease_expires_at"], "lease_expires_at"))
+    _set_recovery_timeouts(cursor, now=now, deadlines=tuple(deadlines))
+    if (
+        str(row["attempt_id"]) != action.expected_attempt_id
+        or int(row["runtime_epoch"]) != action.expected_lease_epoch
+        or int(row["lease_epoch"]) != action.expected_lease_epoch
+    ):
+        return False
+    if action.action_type in {"heartbeat-job", "cancel-job"}:
+        return bool(
+            row["state"] == "leased"
+            and row["lease_owner"] is not None
+            and row["lease_expires_at"] is not None
+            and _require_aware(row["lease_expires_at"], "lease_expires_at") > now
+        )
+    if action.action_type == "reclaim-job":
+        return bool(
+            row["state"] == "leased"
+            and row["lease_owner"] is not None
+            and row["lease_expires_at"] is not None
+            and _require_aware(row["lease_expires_at"], "lease_expires_at") <= now
+        )
+    return str(row["state"]) in {"retryable", "runnable", "leased"}
+
+
 __all__ = [
     "RecoveryActionConflict",
     "RecoveryActionRecord",
@@ -976,6 +1159,7 @@ __all__ = [
     "RuntimeControllerLease",
     "claim_action",
     "claim_controller",
+    "execute_claimed_action",
     "finish_action",
     "schedule_action",
 ]
