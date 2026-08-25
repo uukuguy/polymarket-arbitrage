@@ -1259,6 +1259,11 @@ def _runtime_reconcile_once(
         action_name = scheduled.action_type
     elif result is not None:
         action_name = result.action_type
+    budget_remaining = None
+    if candidate is not None:
+        budget_remaining = candidate.runtime_state.recovery_budget.remaining_actions
+        if scheduled is not None and scheduled.state in {"pending", "running"}:
+            budget_remaining = max(0, budget_remaining - 1)
     return {
         "status": "ok",
         "state": state,
@@ -1282,7 +1287,7 @@ def _runtime_reconcile_once(
             None
             if candidate is None
             else {
-                "remaining_actions": candidate.runtime_state.recovery_budget.remaining_actions,
+                "remaining_actions": budget_remaining,
                 "cooldown_seconds": candidate.cooldown_seconds,
             }
         ),
