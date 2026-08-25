@@ -372,7 +372,7 @@ function isValidCalendarDate(year: number, month: number, day: number): boolean 
 function isIsoTimestamp(value: unknown): value is string {
   if (!isString(value)) return false;
   const match =
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?(Z|[+-]\d{2}:\d{2})$/.exec(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/.exec(
       value,
     );
   if (!match) return false;
@@ -766,20 +766,21 @@ function validateRecoveryActionLifecycle(
     );
   }
   if (resultCode === null || !isDateString(value.finished_at)) return false;
-  if (resultCode === "succeeded" || resultCode === "failed") {
-    return (
-      isDateString(value.started_at) &&
-      isString(value.worker_id) &&
-      isPositiveInteger(value.worker_epoch) &&
-      isDateString(value.worker_lease_expires_at)
-    );
-  }
-  return (
-    (value.started_at === null || isDateString(value.started_at)) &&
+  const isClaimedTerminal =
+    isDateString(value.started_at) &&
+    isString(value.worker_id) &&
+    isPositiveInteger(value.worker_epoch) &&
+    isDateString(value.worker_lease_expires_at);
+  const isImmediateTerminal =
+    value.started_at === null &&
     value.worker_id === null &&
     value.worker_epoch === 0 &&
-    value.worker_lease_expires_at === null
-  );
+    value.worker_lease_expires_at === null &&
+    value.finished_at === value.requested_at;
+  if (resultCode === "succeeded" || resultCode === "failed") {
+    return isClaimedTerminal;
+  }
+  return isClaimedTerminal || isImmediateTerminal;
 }
 
 function validateRecoveryAction(value: unknown): RecoveryAction | null {

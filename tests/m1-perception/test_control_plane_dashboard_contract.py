@@ -187,8 +187,8 @@ def test_control_plane_decoder_rejects_malformed_operator_facts() -> None:
                     "expected_attempt_id": "attempt-2",
                     "expected_lease_epoch": 1,
                     "requested_at": "2026-08-25T11:58:10+00:00",
-                    "started_at": "2026-08-25T11:58:15+00:00",
-                    "finished_at": "2026-08-25T11:58:16+00:00",
+                    "started_at": None,
+                    "finished_at": "2026-08-25T11:58:10+00:00",
                     "next_allowed_at": "2026-08-25T12:08:10+00:00",
                     "worker_id": None,
                     "worker_epoch": 0,
@@ -245,14 +245,52 @@ def test_control_plane_decoder_rejects_malformed_operator_facts() -> None:
                     "expected_lease_epoch": 1,
                     "requested_at": "2026-08-25T11:55:10+00:00",
                     "started_at": None,
-                    "finished_at": "2026-08-25T11:55:11+00:00",
+                    "finished_at": "2026-08-25T11:55:10+00:00",
                     "next_allowed_at": "2026-08-25T12:05:10+00:00",
                     "worker_id": None,
                     "worker_epoch": 0,
                     "worker_lease_expires_at": None,
                 },
+                {
+                    "action_id": "action-6",
+                    "incident_key": "runtime-6",
+                    "target_type": "job",
+                    "target_id": "job-6",
+                    "action_type": "reclaim-job",
+                    "state": "completed",
+                    "result_code": "stale-noop",
+                    "expected_controller_epoch": 4,
+                    "expected_attempt_id": "attempt-6",
+                    "expected_lease_epoch": 1,
+                    "requested_at": "2026-08-25T11:54:10+00:00",
+                    "started_at": "2026-08-25T11:54:11+00:00",
+                    "finished_at": "2026-08-25T11:54:12+00:00",
+                    "next_allowed_at": "2026-08-25T12:04:10+00:00",
+                    "worker_id": "recovery-worker-2",
+                    "worker_epoch": 2,
+                    "worker_lease_expires_at": "2026-08-25T11:55:11+00:00",
+                },
+                {
+                    "action_id": "action-7",
+                    "incident_key": "runtime-7",
+                    "target_type": "worker-process",
+                    "target_id": "worker-7",
+                    "action_type": "restart-worker-process",
+                    "state": "completed",
+                    "result_code": "disabled-action",
+                    "expected_controller_epoch": 4,
+                    "expected_attempt_id": "attempt-7",
+                    "expected_lease_epoch": 1,
+                    "requested_at": "2026-08-25T11:53:10+00:00",
+                    "started_at": "2026-08-25T11:53:11+00:00",
+                    "finished_at": "2026-08-25T11:53:12+00:00",
+                    "next_allowed_at": "2026-08-25T12:03:10+00:00",
+                    "worker_id": "recovery-worker-3",
+                    "worker_epoch": 3,
+                    "worker_lease_expires_at": "2026-08-25T11:54:11+00:00",
+                },
             ],
-            "total": 5,
+            "total": 7,
         },
         "qualification": {
             "state": "accumulating",
@@ -300,6 +338,8 @@ assert.equal(decoded.recovery_actions.items[1].result_code, "disabled-action");
 assert.equal(decoded.recovery_actions.items[2].state, "pending");
 assert.equal(decoded.recovery_actions.items[3].state, "running");
 assert.equal(decoded.recovery_actions.items[4].state, "stale-noop");
+assert.equal(decoded.recovery_actions.items[5].state, "stale-noop");
+assert.equal(decoded.recovery_actions.items[6].state, "failed");
 assert.equal(
   decoded.runtime_incidents.items[0].transitions[0].reason_code,
   "job.lease-expired",
@@ -398,6 +438,18 @@ for (const mutate of [
     body.recovery_actions.items[0].finished_at = null;
   }},
   (body) => {{
+    body.recovery_actions.items[1].finished_at = "2026-08-25T11:58:11+00:00";
+  }},
+  (body) => {{
+    body.recovery_actions.items[1].worker_id = "half-claimed";
+  }},
+  (body) => {{
+    body.recovery_actions.items[5].worker_lease_expires_at = null;
+  }},
+  (body) => {{
+    body.recovery_actions.items[6].worker_epoch = 0;
+  }},
+  (body) => {{
     body.runtime_watchdog.recent_events[0].severity = "notice";
   }},
   (body) => {{
@@ -454,6 +506,13 @@ critical.runtime_controller.status = "critical";
 critical.runtime_controller.lease_active = false;
 critical.runtime_controller.lease_overdue_seconds = 1;
 assert.equal(decodeControlPlaneRead(critical).status, "available");
+
+const fractionalTimestamps = clone(fixture);
+fractionalTimestamps.runtime_controller.claimed_at = "2026-08-25T11:59:00.1+00:00";
+fractionalTimestamps.runtime_controller.last_tick_at = "2026-08-25T11:59:30.123456+00:00";
+fractionalTimestamps.runtime_controller.lease_expires_at = "2026-08-25T12:00:30.123Z";
+fractionalTimestamps.active_tasks.items[0].started_at = "2026-08-25T11:58:00.123456Z";
+assert.equal(decodeControlPlaneRead(fractionalTimestamps).status, "available");
 """
     result = _run_node_case(script)
 
