@@ -614,7 +614,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-egress-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-start control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-egress-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-start control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify runtime-controller-status runtime-reconcile-once runtime-reconcile-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -725,7 +725,21 @@ runtime-policy-replay:
 	@test -n "$$POLYARB_SUPABASE_DB_DSN" || (echo "ERROR: explicitly export scoped DSN" >&2; exit 2)
 	@uv run python -m polyarb.cli_control_plane runtime-policy-replay --run-id "$(run_id)" --json
 
-.PHONY: runtime-policy-replay
+## runtime-controller-status: Read the current runtime controller lease, active runtime incidents, recovery budgets, and action outcomes; never mutates Postgres.
+runtime-controller-status:
+	@uv run python -m polyarb.cli_control_plane runtime-controller-status --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --limit "$(or $(limit),20)" --json
+
+## runtime-reconcile-once: Evaluate runtime facts and execute at most one fenced recovery action; requires enable=1.
+runtime-reconcile-once:
+	@test "$(enable)" = "1" || (echo "usage: make runtime-reconcile-once enable=1 [controller_id=m1-runtime-reconciler]" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane runtime-reconcile-once --enable --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --owner-id "$(or $(owner_id),runtime-reconcile-once)" --worker-id "$(or $(worker_id),runtime-recovery-executor)" --limit "$(or $(limit),100)" --json
+
+## runtime-reconcile-serve: Run sequential deadline reconciliation and one-action recovery turns; requires enable=1 and exits on fencing/store failure.
+runtime-reconcile-serve:
+	@test "$(enable)" = "1" || (echo "usage: make runtime-reconcile-serve enable=1 [interval_seconds=30]" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane runtime-reconcile-serve --enable --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --owner-id "$(or $(owner_id),runtime-reconcile-service)" --worker-id "$(or $(worker_id),runtime-recovery-executor)" --interval-seconds "$(or $(interval_seconds),30)" --limit "$(or $(limit),100)" --json
+
+.PHONY: runtime-policy-replay runtime-controller-status runtime-reconcile-once runtime-reconcile-serve
 
 ## quote-control-plane-once: Explicitly run one transactional Quote batch and certification attempt; requires enable=1 plus DSN and R2 credentials.
 quote-control-plane-once:

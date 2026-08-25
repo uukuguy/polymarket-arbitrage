@@ -70,6 +70,64 @@ def test_make_runtime_policy_replay_is_read_only() -> None:
         assert forbidden not in recipe, f"runtime replay must not mutate cloud state: {forbidden}"
 
 
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        (
+            "runtime-controller-status",
+            "uv run python -m polyarb.cli_control_plane runtime-controller-status",
+        ),
+        (
+            "runtime-reconcile-once",
+            "uv run python -m polyarb.cli_control_plane runtime-reconcile-once --enable",
+        ),
+        (
+            "runtime-reconcile-serve",
+            "uv run python -m polyarb.cli_control_plane runtime-reconcile-serve --enable",
+        ),
+    ],
+)
+def test_make_runtime_controller_targets_are_wired(target: str, expected: str) -> None:
+    result = subprocess.run(
+        ["make", "-n", target, "enable=1"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert expected in result.stdout
+    assert "flyctl" not in result.stdout.lower()
+    assert "deploy" not in result.stdout.lower()
+
+
+def test_make_runtime_mutation_target_has_enable_guard() -> None:
+    for target in ("runtime-reconcile-once", "runtime-reconcile-serve"):
+        result = subprocess.run(
+            ["make", target],
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_ROOT,
+            timeout=5,
+        )
+        assert result.returncode == 2
+        assert "enable=1" in result.stderr
+
+
+def test_make_runtime_status_is_read_only_dry_run() -> None:
+    result = subprocess.run(
+        ["make", "-n", "runtime-controller-status"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    recipe = result.stdout.lower()
+    assert "--enable" not in recipe
+    assert "claim_controller" not in recipe
+
+
 def test_make_control_plane_preflight_help_and_dry_run_require_revision_022() -> None:
     help_result = subprocess.run(
         ["make", "help"],

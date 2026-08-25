@@ -50,6 +50,8 @@ from polyarb.control_plane.recovery_store import (
     claim_controller,
     execute_claimed_action,
     finish_action,
+    read_runtime_controller_status,
+    read_runtime_reconcile_states,
     schedule_action,
 )
 from polyarb.control_plane.runtime_models import RuntimeEvent, RuntimeEventKind, RuntimeProgress
@@ -4507,6 +4509,67 @@ def test_controller_claims_are_monotonic_and_only_latest_schedules_recovery_acti
         assert [row[0] for row in cursor.fetchall()] == ["recovery-started"]
         cursor.execute("SELECT channel, state FROM m1_alert_outbox")
         assert cursor.fetchone() == ("dashboard", "pending")
+
+
+def test_runtime_controller_status_and_facts_are_read_only(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """The dashboard/fact projection cannot create controller/action mutations."""
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="runtime-controller-status:read-only",
+        job_type="structure-normalize",
+        input_identity="runtime-controller-status:read-only",
+        now=now,
+    )
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler-status",
+        owner_id="status-reader",
+        lease_seconds=60,
+        now=now,
+    )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM m1_recovery_actions WHERE controller_id = %s",
+            (controller.controller_id,),
+        )
+        before_actions = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT count(*) FROM m1_recovery_target_budgets WHERE controller_id = %s",
+            (controller.controller_id,),
+        )
+        before_budgets = cursor.fetchone()[0]
+
+    status = read_runtime_controller_status(
+        control_plane._connection_factory,
+        controller_id=controller.controller_id,
+        now=now,
+        sample_limit=10,
+    )
+    facts = read_runtime_reconcile_states(
+        control_plane._connection_factory,
+        controller_id=controller.controller_id,
+        now=now,
+        sample_limit=10,
+    )
+    assert status["controller"]["lease_epoch"] == controller.lease_epoch
+    assert status["actions"] == {"pending": [], "running": [], "recent_completed": []}
+    assert facts and facts[0].target_id == lease.job_key
+    assert facts[0].runtime_state.owner_is_current is True
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM m1_recovery_actions WHERE controller_id = %s",
+            (controller.controller_id,),
+        )
+        assert cursor.fetchone()[0] == before_actions
+        cursor.execute(
+            "SELECT count(*) FROM m1_recovery_target_budgets WHERE controller_id = %s",
+            (controller.controller_id,),
+        )
+        assert cursor.fetchone()[0] == before_budgets
 
 
 def test_recovery_action_stale_controller_does_not_create_budget_or_poison_schedule(

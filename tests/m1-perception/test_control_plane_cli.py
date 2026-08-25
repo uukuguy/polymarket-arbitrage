@@ -717,6 +717,254 @@ def test_watchdog_observes_a_secondary_app_with_qualified_machine_identity(monke
     ]
 
 
+def test_runtime_controller_status_is_read_only_and_bounded(monkeypatch, capsys) -> None:
+    """The dashboard path must not claim a lease or invoke an action worker."""
+    from polyarb import cli_control_plane
+
+    calls: list[str] = []
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    def status(factory, *, controller_id, now, sample_limit):
+        assert factory is ControlPlane._connection_factory
+        assert controller_id == "controller-a"
+        assert sample_limit == 2
+        calls.append("read")
+        return {
+            "read_at": now.isoformat(),
+            "controller": {
+                "controller_id": controller_id,
+                "owner_id": "owner-a",
+                "lease_epoch": 4,
+                "lease_active": True,
+            },
+            "active_runtime_incidents": [],
+            "recovery_budget": [],
+            "actions": {"pending": [], "running": [], "recent_completed": []},
+            "last_outcome": None,
+            "next_check_at": None,
+        }
+
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(cli_control_plane, "read_runtime_controller_status", status)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "claim_controller",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("status must not claim")),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "schedule_action",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("status must not schedule")),
+    )
+
+    assert (
+        cli_control_plane.main(
+            [
+                "runtime-controller-status",
+                "--controller-id",
+                "controller-a",
+                "--limit",
+                "2",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "available"
+    assert payload["controller"]["lease_epoch"] == 4
+    assert calls == ["read"]
+
+
+def test_runtime_reconcile_once_requires_enable_before_database_or_controller(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_control_plane_from_env",
+        lambda: (_ for _ in ()).throw(AssertionError("mutation guard must run first")),
+    )
+    assert cli_control_plane.main(["runtime-reconcile-once", "--json"]) == 2
+    assert "--enable is required" in capsys.readouterr().err
+
+
+def test_runtime_reconcile_once_evaluates_schedules_and_executes_one_action(
+    monkeypatch, capsys
+) -> None:
+    from datetime import UTC, datetime
+
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.recovery_models import (
+        RecoveryActionType,
+        RecoveryBudget,
+        RecoveryDecision,
+        RecoveryRuntimeState,
+    )
+    from polyarb.control_plane.recovery_records import RecoveryActionRecord, RuntimeControllerLease
+    from polyarb.control_plane.runtime_models import RuntimeDeadlineProfile
+
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    controller = RuntimeControllerLease("controller-a", "owner-a", 1, now + timedelta(seconds=90))
+    state = RecoveryRuntimeState(
+        job_key="job-a",
+        attempt_id="attempt-a",
+        lease_epoch=2,
+        owner_is_current=True,
+        profile=RuntimeDeadlineProfile("test", 30, 10, 20, 30),
+        attempt_started_at=now - timedelta(seconds=25),
+        last_heartbeat_at=now - timedelta(seconds=5),
+        last_progress_at=now - timedelta(seconds=25),
+        lease_expires_at=now + timedelta(seconds=5),
+        retry_count=0,
+        recovery_budget=RecoveryBudget(2),
+    )
+    from polyarb.control_plane.recovery_store import RuntimeReconcileCandidate
+
+    candidate = RuntimeReconcileCandidate(
+        runtime_state=state,
+        job_type="structure-normalize",
+        job_state="leased",
+        worker_id="worker-a",
+        target_type="job",
+        target_id="job-a",
+        component="structure-normalize",
+        incident_key="recovery:job:job-a",
+        channels=("dashboard", "telegram"),
+        cooldown_seconds=15,
+    )
+    action = RecoveryActionRecord(
+        action_id="action-a",
+        controller_id="controller-a",
+        controller_owner_id="owner-a",
+        incident_key="recovery:job:job-a",
+        target_type="job",
+        target_id="job-a",
+        action_type="heartbeat-job",
+        expected_controller_epoch=1,
+        expected_attempt_id="attempt-a",
+        expected_lease_epoch=2,
+        requested_at=now,
+        started_at=now,
+        finished_at=now,
+        state="completed",
+        result_code="succeeded",
+        next_allowed_at=now + timedelta(seconds=15),
+        worker_id="runtime-recovery-executor",
+        worker_epoch=1,
+        worker_lease_expires_at=now + timedelta(seconds=30),
+        detail={"reason_code": "job.lease-at-risk", "component": "structure-normalize"},
+        idempotency_key="recovery-action:a",
+    )
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    class Executor:
+        def __init__(self, **kwargs):
+            assert kwargs["controller"] == controller
+            assert kwargs["worker_id"] == "executor-a"
+
+        def run_once(self, *, now):
+            return cli_control_plane.RecoveryActionResult(
+                action_id="action-a",
+                action_type="heartbeat-job",
+                target_id="job-a",
+                outcome="succeeded",
+            )
+
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "read_runtime_reconcile_states",
+        lambda *a, **k: (candidate,),
+    )
+    decision = RecoveryDecision(
+        action=RecoveryActionType.HEARTBEAT_JOB,
+        reason_code="job.lease-at-risk",
+        incident_severity="warning",
+        qualification_breaking=False,
+        next_check_at=now,
+    )
+    monkeypatch.setattr(cli_control_plane.RuntimeReconciler, "evaluate", lambda *a, **k: decision)
+    monkeypatch.setattr(cli_control_plane, "schedule_action", lambda *a, **k: action)
+    monkeypatch.setattr(cli_control_plane, "RecoveryExecutor", Executor)
+    clock = type("Clock", (), {"now": staticmethod(lambda *_: now)})
+    monkeypatch.setattr(cli_control_plane, "datetime", clock)
+
+    assert (
+        cli_control_plane.main(
+            [
+                "runtime-reconcile-once",
+                "--enable",
+                "--worker-id",
+                "executor-a",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "recovery-executed"
+    assert payload["reason"] == "job.lease-at-risk"
+    assert payload["action"] == "heartbeat-job"
+    assert payload["outcome"] == "succeeded"
+    assert payload["pointer_mutations"] == 0
+
+
+def test_runtime_reconcile_serve_stops_cleanly_on_signal_and_is_sequential(monkeypatch) -> None:
+    """The loop owns no deployment or process authority and exits on its stop event."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.recovery_records import RuntimeControllerLease
+
+    args = cli_control_plane._parser().parse_args(
+        ["runtime-reconcile-serve", "--enable", "--interval-seconds", "0.001"]
+    )
+    stop_after_first = {"count": 0}
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    controller = RuntimeControllerLease("controller-a", "owner-a", 1, now + timedelta(seconds=90))
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    class StopEvent:
+        def __init__(self):
+            self.stopped = False
+
+        def set(self):
+            self.stopped = True
+
+        def is_set(self):
+            return self.stopped
+
+        async def wait(self):
+            stop_after_first["count"] += 1
+            self.set()
+            return True
+
+    monkeypatch.setattr(cli_control_plane.asyncio, "Event", StopEvent)
+
+    monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_runtime_reconcile_once",
+        lambda *a, **k: {"status": "ok"},
+    )
+    result = asyncio.run(cli_control_plane._run_runtime_reconcile_service(ControlPlane(), args))
+    assert result == {"status": "stopped", "turns": 1}
+    assert stop_after_first["count"] == 1
+
+
 def test_watchdog_observation_applies_cloud_evidence_freshness_gate(monkeypatch) -> None:
     from polyarb import cli_control_plane
     from polyarb.control_plane.watchdog import SoakEvidenceGate
