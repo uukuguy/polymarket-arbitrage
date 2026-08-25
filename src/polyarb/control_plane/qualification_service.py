@@ -87,6 +87,8 @@ _INCIDENT_BREAKING_KINDS = frozenset(
     {"circuit-opened", "circuit-probe-failed", "escalated"}
 )
 _INCIDENT_RECOVERY_STARTED_KINDS = frozenset({"attempt-failed", "recovery-started"})
+_INCIDENT_SEVERITIES = frozenset({"info", "warning", "critical"})
+_INCIDENT_STATES = frozenset({"open", "acknowledged", "resolved"})
 _FRESHNESS_PRODUCTS = frozenset({"structure", "quote", "opportunity"})
 
 
@@ -897,6 +899,10 @@ def incident_event_row_to_fact_record(row: Mapping[str, object]) -> Qualificatio
         raise ValueError("incident event row is malformed") from exc
     if kind not in _INCIDENT_KINDS:
         raise ValueError(f"unknown incident event kind: {kind}")
+    if severity not in _INCIDENT_SEVERITIES:
+        raise ValueError(f"unknown incident severity: {severity}")
+    if state not in _INCIDENT_STATES:
+        raise ValueError(f"unknown incident state: {state}")
     if kind in _INCIDENT_RECOVERY_KINDS or state == "resolved":
         reason = "recovery.confirmed"
         kwargs: dict[str, Any] = {"recovery_confirmed": True}

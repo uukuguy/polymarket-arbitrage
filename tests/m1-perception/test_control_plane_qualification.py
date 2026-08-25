@@ -222,6 +222,83 @@ def test_recovery_started_appends_without_qualifying_accumulating_epoch() -> Non
     )
 
 
+@pytest.mark.parametrize("reason", ["healthy", "progress"])
+def test_pending_recovery_start_blocks_healthy_or_progress_from_qualifying(
+    reason: str,
+) -> None:
+    policy = _policy(required_seconds=60, max_gap_seconds=3_600)
+    started = policy.apply(
+        _state(policy),
+        _fact("retryable-runtime", NOW + timedelta(seconds=60), reason="recovery.started"),
+    )
+
+    observed = policy.apply(
+        started,
+        _fact("post-start-" + reason, NOW + timedelta(seconds=61), reason=reason),
+    )
+
+    assert observed.state is QualificationState.ACCUMULATING
+    assert observed.qualified_at is None
+    assert observed.last_fact_at == NOW + timedelta(seconds=61)
+    assert [fact.reason for fact in observed.facts] == ["recovery.started", reason]
+
+
+def test_contained_recovery_clears_pending_start_and_allows_qualification() -> None:
+    policy = _policy(required_seconds=60, max_gap_seconds=3_600)
+    started = policy.apply(
+        _state(policy),
+        _fact("retryable-runtime", NOW + timedelta(seconds=60), reason="recovery.started"),
+    )
+    observed = policy.apply(started, _fact("post-start-healthy", NOW + timedelta(seconds=61)))
+
+    qualified = policy.apply(
+        observed,
+        _fact(
+            "contained-retry",
+            NOW + timedelta(seconds=62),
+            reason="recovery.retry",
+            signature="upstream.timeout",
+            recovery_duration_seconds=20,
+            recovery_slo_seconds=60,
+        ),
+    )
+
+    assert qualified.state is QualificationState.QUALIFIED
+    assert qualified.qualified_at == NOW + timedelta(seconds=60)
+    assert [fact.reason for fact in qualified.facts] == [
+        "recovery.started",
+        "healthy",
+        "recovery.retry",
+    ]
+
+
+def test_recovery_confirmed_clears_pending_start_and_allows_qualification() -> None:
+    policy = _policy(required_seconds=60, max_gap_seconds=3_600)
+    started = policy.apply(
+        _state(policy),
+        _fact("retryable-runtime", NOW + timedelta(seconds=60), reason="recovery.started"),
+    )
+    observed = policy.apply(started, _fact("post-start-healthy", NOW + timedelta(seconds=61)))
+
+    qualified = policy.apply(
+        observed,
+        _fact(
+            "confirmed",
+            NOW + timedelta(seconds=62),
+            reason="recovery.confirmed",
+            recovery_confirmed=True,
+        ),
+    )
+
+    assert qualified.state is QualificationState.QUALIFIED
+    assert qualified.qualified_at == NOW + timedelta(seconds=60)
+    assert [fact.reason for fact in qualified.facts] == [
+        "recovery.started",
+        "healthy",
+        "recovery.confirmed",
+    ]
+
+
 @pytest.mark.parametrize(
     "reason",
     sorted(BREAKING_REASONS),

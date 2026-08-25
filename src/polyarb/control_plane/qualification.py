@@ -603,6 +603,9 @@ class RollingQualificationPolicy:
         if fact.reason == "recovery.started":
             return self._append_fact(state, fact)
         appended = self._append_fact(state, fact)
+        if self._has_pending_recovery_start(state):
+            if fact.reason not in CONTAINED_REASONS and not self._is_recovery_confirmation(fact):
+                return appended
         if appended.coverage_seconds >= self.required_seconds and fact.evidence_complete:
             boundary = appended.started_at + timedelta(seconds=self.required_seconds)
             return replace(
@@ -776,6 +779,18 @@ class RollingQualificationPolicy:
     @staticmethod
     def _is_recovery_confirmation(fact: QualificationFact) -> bool:
         return fact.reason == "recovery.confirmed" and fact.recovery_confirmed
+
+    @staticmethod
+    def _has_pending_recovery_start(state: QualificationDecision) -> bool:
+        for fact in reversed(state.facts):
+            if fact.reason == "recovery.started":
+                return True
+            if (
+                fact.reason in CONTAINED_REASONS
+                or RollingQualificationPolicy._is_recovery_confirmation(fact)
+            ):
+                return False
+        return False
 
     @staticmethod
     def _derive_epoch_id(

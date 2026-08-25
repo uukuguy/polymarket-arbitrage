@@ -198,6 +198,67 @@ def test_legitimate_incident_kinds_map_to_closed_qualification_reasons() -> None
         incident_event_row_to_fact_record({**base, "kind": "not-a-real-transition"})
 
 
+@pytest.mark.parametrize("severity", ["info", "warning", "critical"])
+def test_incident_mapper_accepts_schema_severity_enum(severity: str) -> None:
+    record = incident_event_row_to_fact_record(
+        {
+            "incident_event_id": "incident-" + severity,
+            "incident_key": "incident:severity",
+            "kind": "detected",
+            "severity": severity,
+            "state": "open",
+            "occurred_at": NOW,
+            "detail": {},
+        }
+    )
+
+    assert record.fact.reason == ("incident.p1-slo" if severity == "critical" else "healthy")
+
+
+@pytest.mark.parametrize("state", ["open", "acknowledged", "resolved"])
+def test_incident_mapper_accepts_schema_state_enum(state: str) -> None:
+    record = incident_event_row_to_fact_record(
+        {
+            "incident_event_id": "incident-" + state,
+            "incident_key": "incident:state",
+            "kind": "detected",
+            "severity": "warning",
+            "state": state,
+            "occurred_at": NOW,
+            "detail": {},
+        }
+    )
+
+    assert record.fact.reason == ("recovery.confirmed" if state == "resolved" else "healthy")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("severity", "urgent", "unknown incident severity"),
+        ("state", "stale", "unknown incident state"),
+    ],
+)
+def test_incident_mapper_rejects_unknown_schema_enums(
+    field: str,
+    value: str,
+    match: str,
+) -> None:
+    row = {
+        "incident_event_id": "incident-bad-" + field,
+        "incident_key": "incident:bad",
+        "kind": "detected",
+        "severity": "warning",
+        "state": "open",
+        "occurred_at": NOW,
+        "detail": {},
+    }
+    row[field] = value
+
+    with pytest.raises(ValueError, match=match):
+        incident_event_row_to_fact_record(row)
+
+
 def test_successful_recovery_action_types_map_to_closed_qualification_reasons() -> None:
     expected_reasons = {
         "heartbeat-job": "recovery.heartbeat",
