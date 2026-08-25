@@ -7,6 +7,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import total_ordering
 from typing import Any, Protocol, Self, cast
 
 import psycopg
@@ -50,7 +51,6 @@ _RUNTIME_KINDS = frozenset(
         "job.recovered",
         "job.terminal-failed",
         "job.succeeded",
-        "job.failed",
     }
 )
 _RUNTIME_BREAKING_REASONS = {
@@ -77,13 +77,15 @@ class QualificationCursorConflict(QualificationServiceError):
     """The durable source cursor lost its compare-and-swap fence."""
 
 
-@dataclass(frozen=True, order=True, slots=True)
+@total_ordering
+@dataclass(frozen=True, slots=True)
 class FactCursor:
     """Total durable ordering key for source facts."""
 
     observed_at: datetime
     source_rank: int
     stable_id: str
+    ingest_seq: int | None = None
 
     def __post_init__(self) -> None:
         if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
@@ -93,13 +95,30 @@ class FactCursor:
             raise ValueError("cursor source_rank must be a non-negative integer")
         if type(self.stable_id) is not str or not self.stable_id:
             raise ValueError("cursor stable_id must be non-empty")
+        if self.ingest_seq is not None and (
+            type(self.ingest_seq) is not int or self.ingest_seq <= 0
+        ):
+            raise ValueError("cursor ingest_seq must be a positive integer when provided")
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, FactCursor):
+            return NotImplemented
+        return self._order_key() < other._order_key()
+
+    def _order_key(self) -> tuple[object, ...]:
+        if self.ingest_seq is not None:
+            return (0, self.ingest_seq)
+        return (1, self.observed_at, self.source_rank, self.stable_id)
 
     def to_json(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "observed_at": self.observed_at.isoformat(),
             "source_rank": self.source_rank,
             "stable_id": self.stable_id,
         }
+        if self.ingest_seq is not None:
+            payload["ingest_seq"] = self.ingest_seq
+        return payload
 
     @classmethod
     def from_json(cls, value: Mapping[str, object] | None) -> Self | None:
@@ -109,11 +128,14 @@ class FactCursor:
             observed_at = _parse_datetime(value["observed_at"], "source_cursor.observed_at")
             source_rank = value["source_rank"]
             stable_id = value["stable_id"]
+            ingest_seq = value.get("ingest_seq")
         except KeyError as exc:
             raise ValueError("source cursor is malformed") from exc
         if type(source_rank) is not int or type(stable_id) is not str:
             raise ValueError("source cursor is malformed")
-        return cls(observed_at, source_rank, stable_id)
+        if ingest_seq is not None and type(ingest_seq) is not int:
+            raise ValueError("source cursor is malformed")
+        return cls(observed_at, source_rank, stable_id, ingest_seq=ingest_seq)
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +264,7 @@ class InMemoryQualificationStore:
         self._cursor: FactCursor | None = None
         self._epochs: list[QualificationDecision] = []
         self._applied_cursors: list[FactCursor] = []
+        self._last_applied_count = 0
         self.certificates: list[dict[str, object]] = []
 
     @property
@@ -261,6 +284,10 @@ class InMemoryQualificationStore:
     @property
     def applied_cursors(self) -> tuple[FactCursor, ...]:
         return tuple(self._applied_cursors)
+
+    @property
+    def last_applied_count(self) -> int:
+        return self._last_applied_count
 
     def initialize(self, policy: RollingQualificationPolicy, *, now: datetime) -> None:
         if self._current is None:
@@ -286,17 +313,29 @@ class InMemoryQualificationStore:
         epochs = list(self._epochs)
         applied = list(self._applied_cursors)
         cursor = self._cursor
+        applied_count = 0
         for record in sorted(records, key=lambda item: item.cursor):
+            if (
+                current.state is QualificationState.RECOVERING
+                and not _is_recovery_confirmation_fact(record.fact)
+            ):
+                cursor = record.cursor
+                applied.append(record.cursor)
+                applied_count += 1
+                continue
+            opened_recovered_epoch = current.state is QualificationState.RECOVERING
             current = self._apply_one(policy, current, epochs, record.fact)
             epochs[-1] = current
             cursor = record.cursor
             applied.append(record.cursor)
-            if current.state is QualificationState.QUALIFIED:
+            applied_count += 1
+            if opened_recovered_epoch or current.state is QualificationState.QUALIFIED:
                 break
         self._current = current
         self._epochs = epochs
         self._cursor = cursor
         self._applied_cursors = applied
+        self._last_applied_count = applied_count
         if self.fail_after_commit_once:
             self.fail_after_commit_once = False
             raise RuntimeError("injected after commit")
@@ -387,7 +426,7 @@ class QualificationService:
             certificate = self._state_store.ensure_certificate(decision)
         return QualificationTickResult(
             status="ok",
-            applied=len(records),
+            applied=int(getattr(self._state_store, "last_applied_count", len(records))),
             cursor=self._state_store.cursor,
             epoch_id=decision.epoch_id,
             state=decision.state,
@@ -398,7 +437,7 @@ class QualificationService:
 
 
 class PostgresQualificationFactSource:
-    """Read-only source over durable control-plane evidence tables."""
+    """Source over the monotonic qualification ingress ledger."""
 
     def __init__(self, connection_factory: ConnectionFactory) -> None:
         self._connection_factory = connection_factory
@@ -413,74 +452,42 @@ class PostgresQualificationFactSource:
         observed_at = _require_aware(now, "now")
         if limit <= 0:
             raise ValueError("limit must be positive")
-        lower_bound = datetime(1970, 1, 1, tzinfo=UTC) if cursor is None else cursor.observed_at
-        rows: list[QualificationFactRecord] = []
+        lower_seq = 0 if cursor is None else cursor.ingest_seq
+        if lower_seq is None:
+            raise ValueError("Postgres qualification cursor requires ingest_seq")
         with (
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as db,
         ):
-            db.execute("SET TRANSACTION READ ONLY")
             _set_timeouts(db)
+            self._insert_freshness_observations(db, now=observed_at)
             db.execute(
                 """
-                SELECT event_id, kind, occurred_at, job_key, attempt_id, lease_epoch,
-                       event_sequence, progress_current, detail
-                FROM m1_job_runtime_events
-                WHERE occurred_at >= %s AND occurred_at <= %s
-                ORDER BY occurred_at, event_id
+                SELECT ingest_seq, ingested_at, source, source_id, source_version,
+                       original_observed_at, payload, payload_sha256,
+                       %s::timestamptz AS qualification_observed_at
+                FROM m1_qualification_ingress_ledger
+                WHERE ingest_seq > %s
+                ORDER BY ingest_seq
                 LIMIT %s
                 """,
-                (lower_bound, observed_at, limit),
+                (observed_at, lower_seq, limit),
             )
-            rows.extend(runtime_event_row_to_fact_record(row) for row in db.fetchall())
-            db.execute(
-                """
-                SELECT event.incident_event_id, event.incident_key, event.kind,
-                       event.detail, event.occurred_at, incident.severity, incident.state
-                FROM m1_incident_events AS event
-                JOIN m1_incidents AS incident ON incident.incident_key = event.incident_key
-                WHERE event.occurred_at >= %s AND event.occurred_at <= %s
-                ORDER BY event.occurred_at, event.incident_event_id
-                LIMIT %s
-                """,
-                (lower_bound, observed_at, limit),
-            )
-            rows.extend(incident_event_row_to_fact_record(row) for row in db.fetchall())
-            db.execute(
-                """
-                SELECT action_id, action_type, target_id, state, result_code,
-                       requested_at, started_at, finished_at, detail
-                FROM m1_recovery_actions
-                WHERE COALESCE(finished_at, started_at, requested_at) >= %s
-                  AND COALESCE(finished_at, started_at, requested_at) <= %s
-                ORDER BY COALESCE(finished_at, started_at, requested_at), action_id
-                LIMIT %s
-                """,
-                (lower_bound, observed_at, limit),
-            )
-            rows.extend(recovery_action_row_to_fact_record(row) for row in db.fetchall())
-            rows.extend(self._freshness_records(db, lower_bound=lower_bound, now=observed_at))
-        return tuple(
-            record
-            for record in sorted(rows, key=lambda item: item.cursor)
-            if cursor is None or record.cursor > cursor
-        )[:limit]
+            return tuple(ledger_row_to_fact_record(row) for row in db.fetchall())
 
-    def _freshness_records(
+    def _insert_freshness_observations(
         self,
         cursor: psycopg.Cursor[dict[str, Any]],
         *,
-        lower_bound: datetime,
         now: datetime,
-    ) -> tuple[QualificationFactRecord, ...]:
-        records: list[QualificationFactRecord] = []
+    ) -> None:
         for product, query in (
             (
                 "structure",
                 """
-                SELECT 'freshness:structure:' || manifest.generation_key AS fact_id,
+                SELECT 'freshness:structure:' || %s || ':' || pointer.pointer_key AS fact_id,
                        'structure' AS data_product,
-                       manifest.published_at AS observed_at,
+                       %s::timestamptz AS observed_at,
                        EXTRACT(EPOCH FROM (%s - manifest.published_at))::bigint
                            AS freshness_seconds,
                        900::bigint AS freshness_slo_seconds,
@@ -490,7 +497,6 @@ class PostgresQualificationFactSource:
                 JOIN m1_generation_manifests AS manifest
                   ON manifest.generation_key = pointer.generation_key
                 WHERE pointer.pointer_key = 'structure:current'
-                  AND manifest.published_at >= %s
                 ORDER BY manifest.published_at DESC
                 LIMIT 1
                 """,
@@ -498,9 +504,9 @@ class PostgresQualificationFactSource:
             (
                 "quote",
                 """
-                SELECT 'freshness:quote:' || manifest.generation_key AS fact_id,
+                SELECT 'freshness:quote:' || %s || ':' || pointer.pointer_key AS fact_id,
                        'quote' AS data_product,
-                       manifest.published_at AS observed_at,
+                       %s::timestamptz AS observed_at,
                        EXTRACT(EPOCH FROM (%s - manifest.published_at))::bigint
                            AS freshness_seconds,
                        900::bigint AS freshness_slo_seconds,
@@ -510,7 +516,6 @@ class PostgresQualificationFactSource:
                 JOIN m1_generation_manifests AS manifest
                   ON manifest.generation_key = pointer.generation_key
                 WHERE pointer.pointer_key = 'quote:current'
-                  AND manifest.published_at >= %s
                 ORDER BY manifest.published_at DESC
                 LIMIT 1
                 """,
@@ -518,9 +523,9 @@ class PostgresQualificationFactSource:
             (
                 "opportunity",
                 """
-                SELECT 'freshness:opportunity:' || projection.generation_key AS fact_id,
+                SELECT 'freshness:opportunity:' || %s || ':' || pointer.pointer_key AS fact_id,
                        'opportunity' AS data_product,
-                       projection.certified_at AS observed_at,
+                       %s::timestamptz AS observed_at,
                        EXTRACT(EPOCH FROM (%s - projection.certified_at))::bigint
                            AS freshness_seconds,
                        900::bigint AS freshness_slo_seconds,
@@ -530,20 +535,36 @@ class PostgresQualificationFactSource:
                 JOIN m1_opportunity_projections AS projection
                   ON projection.generation_key = pointer.generation_key
                 WHERE pointer.pointer_key = 'opportunity:current'
-                  AND projection.certified_at >= %s
                 ORDER BY projection.certified_at DESC
                 LIMIT 1
                 """,
             ),
         ):
-            cursor.execute(cast(Any, query), (now, lower_bound))
+            observed_key = _cursor_time_key(now)
+            cursor.execute(cast(Any, query), (observed_key, now, now))
             row = cursor.fetchone()
-            if row is not None:
-                mapped = freshness_row_to_fact_record(row)
-                if mapped.fact.freshness_product != product:
-                    raise ValueError("freshness product query returned malformed row")
-                records.append(mapped)
-        return tuple(records)
+            payload = (
+                _freshness_gap_payload(product=product, now=now)
+                if row is None
+                else _json_payload(row)
+            )
+            cursor.execute(
+                """
+                SELECT m1_record_qualification_ingress(
+                    'freshness',
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+                """,
+                (
+                    cast(str, payload["fact_id"]),
+                    str(payload.get("data_product", product)),
+                    now,
+                    Jsonb(payload),
+                ),
+            )
 
 
 class PostgresQualificationServiceStore:
@@ -553,6 +574,7 @@ class PostgresQualificationServiceStore:
         self._connection_factory = connection_factory
         self._current: QualificationDecision | None = None
         self._cursor: FactCursor | None = None
+        self._last_applied_count = 0
 
     @property
     def cursor(self) -> FactCursor | None:
@@ -564,6 +586,10 @@ class PostgresQualificationServiceStore:
             raise QualificationServiceError("qualification store is not initialized")
         return self._current
 
+    @property
+    def last_applied_count(self) -> int:
+        return self._last_applied_count
+
     def initialize(self, policy: RollingQualificationPolicy, *, now: datetime) -> None:
         observed_at = _require_aware(now, "now")
         with (
@@ -572,6 +598,7 @@ class PostgresQualificationServiceStore:
         ):
             _set_timeouts(cursor)
             record = _fetch_current_epoch(cursor, policy=policy, for_update=False)
+            cursor_record = _ensure_source_cursor_row(cursor, policy=policy, writer_id=None)
             if record is None:
                 decision = policy.new_epoch(started_at=observed_at)
                 _insert_epoch_cursor(
@@ -582,7 +609,7 @@ class PostgresQualificationServiceStore:
                     raise QualificationServiceError("qualification epoch insert returned no row")
             self._current = _decision_from_epoch(record)
             self._cursor = FactCursor.from_json(
-                cast(Mapping[str, object] | None, record.source_cursor)
+                cast(Mapping[str, object] | None, cursor_record["source_cursor"])
             )
 
     def apply_records(
@@ -603,29 +630,86 @@ class PostgresQualificationServiceStore:
             record = _fetch_current_epoch(cursor, policy=policy, for_update=True)
             if record is None:
                 raise QualificationServiceError("qualification epoch is missing")
+            cursor_record = _ensure_source_cursor_row(
+                cursor,
+                policy=policy,
+                writer_id=writer_id,
+                for_update=True,
+            )
             persisted_cursor = FactCursor.from_json(
-                cast(Mapping[str, object] | None, record.source_cursor)
+                cast(Mapping[str, object] | None, cursor_record["source_cursor"])
             )
             if persisted_cursor != expected_cursor:
                 raise QualificationCursorConflict("qualification cursor CAS failed")
             current = _decision_from_epoch(record)
-            fact_records = list(_records_from_epoch(record))
+            epoch_fact_records = list(_records_from_epoch(record))
             source_cursor = persisted_cursor
+            applied_count = 0
             for fact_record in sorted(records, key=lambda item: item.cursor):
-                current = _apply_one(policy, current, cursor, fact_record.fact, writer_id=writer_id)
+                opened_recovered_epoch = False
+                if current.state is QualificationState.RECOVERING:
+                    if not _is_recovery_confirmation_fact(fact_record.fact):
+                        source_cursor = fact_record.cursor
+                        applied_count += 1
+                        _update_source_cursor(
+                            cursor,
+                            policy=policy,
+                            source_cursor=source_cursor,
+                            writer_id=writer_id,
+                        )
+                        continue
+                    current = policy.apply(current, fact_record.fact)
+                    opened_recovered_epoch = True
+                    if current.state is not QualificationState.ACCUMULATING:
+                        raise QualificationServiceError(
+                            "recovery confirmation did not open an accumulating epoch"
+                        )
+                    epoch_fact_records = [fact_record]
+                    _insert_epoch_cursor(
+                        cursor,
+                        current,
+                        source_cursor=None,
+                        fact_records=epoch_fact_records,
+                        writer_id=writer_id,
+                    )
+                else:
+                    current = policy.apply(current, fact_record.fact)
+                    epoch_fact_records.append(fact_record)
+                    _update_epoch_cursor(
+                        cursor,
+                        current,
+                        source_cursor=None,
+                        fact_records=epoch_fact_records,
+                        writer_id=writer_id,
+                    )
+                    if current.state is QualificationState.INVALIDATED:
+                        current = policy.recovering(
+                            current,
+                            started_at=current.invalidated_at or fact_record.fact.observed_at,
+                        )
+                        epoch_fact_records = []
+                        _insert_epoch_cursor(
+                            cursor,
+                            current,
+                            source_cursor=None,
+                            fact_records=(),
+                            writer_id=writer_id,
+                        )
                 source_cursor = fact_record.cursor
-                fact_records.append(fact_record)
-                _update_epoch_cursor(
+                applied_count += 1
+                _update_source_cursor(
                     cursor,
-                    current,
+                    policy=policy,
                     source_cursor=source_cursor,
-                    fact_records=fact_records,
                     writer_id=writer_id,
                 )
                 if current.state is QualificationState.QUALIFIED:
                     break
+                if opened_recovered_epoch:
+                    break
             self._current = current
             self._cursor = source_cursor
+            self._last_applied_count = applied_count
             return current
 
     def ensure_certificate(self, decision: QualificationDecision) -> Mapping[str, object] | None:
@@ -725,7 +809,7 @@ def runtime_event_row_to_fact_record(row: Mapping[str, object]) -> Qualification
     try:
         event_id = _nonempty(row["event_id"], "event_id")
         kind = _nonempty(row["kind"], "kind")
-        occurred_at = _parse_datetime(row["occurred_at"], "occurred_at")
+        observed_at = _qualification_observed_at(row, "occurred_at")
         job_key = _nonempty(row["job_key"], "job_key")
         attempt_id = _nonempty(row["attempt_id"], "attempt_id")
         lease_epoch = _int(row["lease_epoch"], "lease_epoch")
@@ -737,7 +821,7 @@ def runtime_event_row_to_fact_record(row: Mapping[str, object]) -> Qualification
         raise ValueError(f"unknown runtime event kind: {kind}")
     reason = "healthy"
     reason_code = str(detail.get("reason_code", ""))
-    if kind in {"job.failed", "job.terminal-failed"}:
+    if kind == "job.terminal-failed":
         reason = _RUNTIME_BREAKING_REASONS.get(reason_code, "recovery.human-intervention")
     elif kind == "job.progress-stalled":
         reason = "recovery.started"
@@ -745,7 +829,8 @@ def runtime_event_row_to_fact_record(row: Mapping[str, object]) -> Qualification
         reason = "recovery.started"
     elif kind == "job.recovered":
         reason = "recovery.confirmed"
-    progress_count = _optional_int(row.get("progress_current"), "progress_current")
+    raw_progress_count = _optional_int(row.get("progress_current"), "progress_current")
+    progress_count = raw_progress_count if kind == "job.terminal-failed" else None
     fact_kwargs: dict[str, Any] = {
         "epoch_id": str(detail["epoch_id"]) if isinstance(detail.get("epoch_id"), str) else None,
         "progress_count": progress_count,
@@ -753,10 +838,15 @@ def runtime_event_row_to_fact_record(row: Mapping[str, object]) -> Qualification
     if reason == "recovery.confirmed":
         fact_kwargs["recovery_confirmed"] = True
     return QualificationFactRecord(
-        cursor=FactCursor(occurred_at, _SOURCE_RANK_RUNTIME, event_id),
+        cursor=FactCursor(
+            observed_at,
+            _SOURCE_RANK_RUNTIME,
+            _qualification_stable_id(row, event_id),
+            ingest_seq=_qualification_ingest_seq(row),
+        ),
         fact=QualificationFact(
             fact_id=f"runtime:{job_key}:{attempt_id}:{lease_epoch}:{event_sequence}:{event_id}",
-            observed_at=occurred_at,
+            observed_at=observed_at,
             reason=reason,
             **fact_kwargs,
         ),
@@ -771,7 +861,7 @@ def incident_event_row_to_fact_record(row: Mapping[str, object]) -> Qualificatio
         kind = _nonempty(row["kind"], "kind")
         severity = _nonempty(row["severity"], "severity")
         state = _nonempty(row["state"], "state")
-        occurred_at = _parse_datetime(row["occurred_at"], "occurred_at")
+        observed_at = _qualification_observed_at(row, "occurred_at")
         detail = _detail(row.get("detail"))
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("incident event row is malformed") from exc
@@ -787,10 +877,15 @@ def incident_event_row_to_fact_record(row: Mapping[str, object]) -> Qualificatio
         reason = "healthy"
         kwargs = {}
     return QualificationFactRecord(
-        cursor=FactCursor(occurred_at, _SOURCE_RANK_INCIDENT, event_id),
+        cursor=FactCursor(
+            observed_at,
+            _SOURCE_RANK_INCIDENT,
+            _qualification_stable_id(row, event_id),
+            ingest_seq=_qualification_ingest_seq(row),
+        ),
         fact=QualificationFact(
             fact_id=f"incident:{incident_key}:{event_id}",
-            observed_at=occurred_at,
+            observed_at=observed_at,
             reason=reason,
             **kwargs,
         ),
@@ -813,7 +908,12 @@ def recovery_action_row_to_fact_record(row: Mapping[str, object]) -> Qualificati
     result_code = (
         None if row.get("result_code") is None else _nonempty(row["result_code"], "result_code")
     )
-    observed_at = finished_at or started_at or requested_at
+    observed_at = _qualification_recovery_observed_at(
+        row,
+        requested_at=requested_at,
+        started_at=started_at,
+        finished_at=finished_at,
+    )
     reason = "healthy"
     kwargs: dict[str, Any] = {}
     if state == "completed" and result_code == "succeeded":
@@ -835,7 +935,12 @@ def recovery_action_row_to_fact_record(row: Mapping[str, object]) -> Qualificati
     elif state not in {"pending", "running", "completed"}:
         raise ValueError(f"unknown recovery action state: {state}")
     return QualificationFactRecord(
-        cursor=FactCursor(observed_at, _SOURCE_RANK_RECOVERY, action_id),
+        cursor=FactCursor(
+            observed_at,
+            _SOURCE_RANK_RECOVERY,
+            _qualification_stable_id(row, action_id),
+            ingest_seq=_qualification_ingest_seq(row),
+        ),
         fact=QualificationFact(
             fact_id=f"recovery:{target_id}:{action_id}",
             observed_at=observed_at,
@@ -850,27 +955,60 @@ def freshness_row_to_fact_record(row: Mapping[str, object]) -> QualificationFact
     try:
         fact_id = _nonempty(row["fact_id"], "fact_id")
         product = _nonempty(row["data_product"], "data_product")
-        observed_at = _parse_datetime(row["observed_at"], "observed_at")
+        observed_at = _qualification_observed_at(row, "observed_at")
         freshness_seconds = _int(row["freshness_seconds"], "freshness_seconds")
         freshness_slo_seconds = _int(row["freshness_slo_seconds"], "freshness_slo_seconds")
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("freshness row is malformed") from exc
     if product not in _FRESHNESS_PRODUCTS:
         raise ValueError(f"unknown freshness data product: {product}")
+    reason = _optional_str(row.get("reason"), "reason") or "healthy"
     return QualificationFactRecord(
-        cursor=FactCursor(observed_at, _SOURCE_RANK_FRESHNESS, fact_id),
+        cursor=FactCursor(
+            observed_at,
+            _SOURCE_RANK_FRESHNESS,
+            _qualification_stable_id(row, fact_id),
+            ingest_seq=_qualification_ingest_seq(row),
+        ),
         fact=QualificationFact(
             fact_id=fact_id,
             observed_at=observed_at,
-            reason="healthy",
+            reason=reason,
             freshness_product=product,
             freshness_seconds=freshness_seconds,
             freshness_slo_seconds=freshness_slo_seconds,
             progress_count=_optional_int(row.get("progress_count"), "progress_count"),
             successful_count=_optional_int(row.get("successful_count"), "successful_count"),
+            evidence_complete=_bool(row.get("evidence_complete", True), "evidence_complete"),
         ),
         source="freshness",
     )
+
+
+def ledger_row_to_fact_record(row: Mapping[str, object]) -> QualificationFactRecord:
+    try:
+        ingest_seq = _int(row["ingest_seq"], "ingest_seq")
+        source = _nonempty(row["source"], "source")
+        source_id = _nonempty(row["source_id"], "source_id")
+        source_version = _nonempty(row["source_version"], "source_version")
+        qualification_observed_at = _parse_datetime(
+            row["qualification_observed_at"], "qualification_observed_at"
+        )
+        payload = _detail(row["payload"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("qualification ingress row is malformed") from exc
+    payload["qualification_observed_at"] = qualification_observed_at
+    payload["qualification_ingest_seq"] = ingest_seq
+    payload["qualification_stable_id"] = f"{source}:{source_id}:{source_version}"
+    if source == "runtime":
+        return runtime_event_row_to_fact_record(payload)
+    if source == "incident":
+        return incident_event_row_to_fact_record(payload)
+    if source == "recovery":
+        return recovery_action_row_to_fact_record(payload)
+    if source == "freshness":
+        return freshness_row_to_fact_record(payload)
+    raise ValueError(f"unknown qualification ingress source: {source}")
 
 
 def _apply_one(
@@ -928,6 +1066,10 @@ def _assert_cursor_batch(
         previous = record.cursor
 
 
+def _is_recovery_confirmation_fact(fact: QualificationFact) -> bool:
+    return fact.reason == "recovery.confirmed" and fact.recovery_confirmed
+
+
 def _set_timeouts(cursor: psycopg.Cursor[Any]) -> None:
     cursor.execute(
         sql.SQL("SET LOCAL statement_timeout = {}").format(
@@ -952,8 +1094,7 @@ def _fetch_current_epoch(
         "OR (state = 'qualified' AND NOT EXISTS ("
         "SELECT 1 FROM m1_qualification_certificates AS certificate "
         "WHERE certificate.epoch_id = m1_qualification_epochs.epoch_id))) "
-        "ORDER BY started_at DESC, epoch_id DESC LIMIT 1"
-        + (" FOR UPDATE" if for_update else ""),
+        "ORDER BY started_at DESC, epoch_id DESC LIMIT 1" + (" FOR UPDATE" if for_update else ""),
         (identity_key,),
     )
     row = cursor.fetchone()
@@ -978,6 +1119,65 @@ def _fetch_epoch(
     )
     row = cursor.fetchone()
     return None if row is None else _epoch_from_row(row)
+
+
+def _ensure_source_cursor_row(
+    cursor: psycopg.Cursor[dict[str, Any]],
+    *,
+    policy: RollingQualificationPolicy,
+    writer_id: str | None,
+    for_update: bool = False,
+) -> Mapping[str, object]:
+    identity_key = _identity_key(policy)
+    cursor.execute(
+        """
+        INSERT INTO m1_qualification_source_cursors (
+            identity_key, policy_version, release_id, config_id,
+            role_identity, source_cursor, writer_id
+        ) VALUES (%s, %s, %s, %s, %s, NULL, %s)
+        ON CONFLICT (identity_key) DO NOTHING
+        """,
+        (
+            identity_key,
+            policy.policy_version,
+            policy.release_id,
+            policy.config_id,
+            Jsonb(list(policy.role_identity)),
+            writer_id,
+        ),
+    )
+    cursor.execute(
+        """
+        SELECT identity_key, source_cursor
+        FROM m1_qualification_source_cursors
+        WHERE identity_key = %s
+        """
+        + (" FOR UPDATE" if for_update else ""),
+        (identity_key,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        raise QualificationServiceError("qualification source cursor insert returned no row")
+    return row
+
+
+def _update_source_cursor(
+    cursor: psycopg.Cursor[dict[str, Any]],
+    *,
+    policy: RollingQualificationPolicy,
+    source_cursor: FactCursor,
+    writer_id: str,
+) -> None:
+    cursor.execute(
+        """
+        UPDATE m1_qualification_source_cursors
+        SET source_cursor = %s, writer_id = %s, updated_at = clock_timestamp()
+        WHERE identity_key = %s
+        """,
+        (Jsonb(source_cursor.to_json()), writer_id, _identity_key(policy)),
+    )
+    if cursor.rowcount != 1:
+        raise QualificationCursorConflict("qualification source cursor update failed")
 
 
 def _insert_epoch_cursor(
@@ -1076,7 +1276,7 @@ def _epoch_values(
         Jsonb(evidence["contained_incidents"]),
         Jsonb(evidence["recovery_actions"]),
         writer_id,
-        Jsonb(None if source_cursor is None else source_cursor.to_json()),
+        None if source_cursor is None else Jsonb(source_cursor.to_json()),
         Jsonb([record.to_json() for record in fact_records]),
     )
 
@@ -1351,9 +1551,67 @@ def _detail(value: object) -> dict[str, object]:
     return dict(value)
 
 
+def _qualification_observed_at(row: Mapping[str, object], fallback_field: str) -> datetime:
+    override = row.get("qualification_observed_at")
+    return _parse_datetime(
+        row[fallback_field] if override is None else override,
+        "qualification_observed_at" if override is not None else fallback_field,
+    )
+
+
+def _qualification_recovery_observed_at(
+    row: Mapping[str, object],
+    *,
+    requested_at: datetime,
+    started_at: datetime | None,
+    finished_at: datetime | None,
+) -> datetime:
+    override = row.get("qualification_observed_at")
+    if override is not None:
+        return _parse_datetime(override, "qualification_observed_at")
+    return finished_at or started_at or requested_at
+
+
+def _qualification_ingest_seq(row: Mapping[str, object]) -> int | None:
+    return _optional_int(row.get("qualification_ingest_seq"), "qualification_ingest_seq")
+
+
+def _qualification_stable_id(row: Mapping[str, object], fallback: str) -> str:
+    return _optional_str(row.get("qualification_stable_id"), "qualification_stable_id") or fallback
+
+
+def _cursor_time_key(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _freshness_gap_payload(*, product: str, now: datetime) -> dict[str, object]:
+    return {
+        "data_product": product,
+        "evidence_complete": False,
+        "fact_id": f"freshness:{product}:{_cursor_time_key(now)}:missing",
+        "freshness_seconds": 0,
+        "freshness_slo_seconds": 900,
+        "observed_at": now.isoformat(),
+        "progress_count": 0,
+        "reason": "evidence.gap",
+        "successful_count": 0,
+    }
+
+
+def _json_payload(row: Mapping[str, object]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, value in row.items():
+        if isinstance(value, datetime):
+            payload[key] = value.astimezone(UTC).isoformat()
+        else:
+            payload[key] = value
+    return payload
+
+
 __all__ = [
     "FactCursor",
     "InMemoryQualificationStore",
+    "ledger_row_to_fact_record",
     "PostgresQualificationFactSource",
     "PostgresQualificationServiceStore",
     "QualificationCursorConflict",

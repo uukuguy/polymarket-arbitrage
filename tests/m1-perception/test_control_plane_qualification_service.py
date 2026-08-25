@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import pytest
 
@@ -41,7 +43,7 @@ def _record(
     at: datetime,
     *,
     reason: str = "healthy",
-    **kwargs: object,
+    **kwargs: Any,
 ) -> QualificationFactRecord:
     return QualificationFactRecord(
         cursor=FactCursor(
@@ -58,7 +60,7 @@ def test_real_schema_rows_map_to_fail_loud_qualification_facts() -> None:
     runtime = runtime_event_row_to_fact_record(
         {
             "event_id": "runtime-1",
-            "kind": "job.failed",
+            "kind": "job.terminal-failed",
             "occurred_at": NOW,
             "job_key": "quote:one:admit",
             "attempt_id": "attempt-a",
@@ -214,8 +216,10 @@ def test_virtual_26h_recovery_replay_seals_one_reproducible_certificate() -> Non
     assert left.epochs[1].state is QualificationState.RECOVERING
     assert left.epochs[2].state is QualificationState.QUALIFIED
     assert len(left.certificates) == 1
-    assert left.certificates[0]["payload"]["identity"]["epoch_id"] == left.epochs[2].epoch_id
-    assert left.certificates[0]["digest"] == certificate_digest(left.certificates[0]["payload"])
+    payload = cast(Mapping[str, object], left.certificates[0]["payload"])
+    identity = cast(Mapping[str, object], payload["identity"])
+    assert identity["epoch_id"] == left.epochs[2].epoch_id
+    assert left.certificates[0]["digest"] == certificate_digest(payload)
     assert left.certificates[0]["digest"] == right.certificates[0]["digest"]
 
 

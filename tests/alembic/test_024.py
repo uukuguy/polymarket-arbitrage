@@ -21,6 +21,8 @@ def test_024_chains_after_023_and_declares_qualification_tables() -> None:
     assert 'down_revision = "023"' in text
     assert '"m1_qualification_epochs"' in text
     assert '"m1_qualification_certificates"' in text
+    assert '"m1_qualification_ingress_ledger"' in text
+    assert '"m1_qualification_source_cursors"' in text
     assert "ck_m1_qualification_epochs_state" in text
     assert "m1_qualification_certificates_immutable" in text
 
@@ -33,6 +35,12 @@ def test_024_schema_declares_state_version_cas_and_certificate_uniqueness() -> N
     assert '"fact_records"' in text
     assert "ck_m1_qualification_epochs_source_cursor" in text
     assert "ck_m1_qualification_epochs_fact_records" in text
+    assert '"ingest_seq"' in text
+    assert "sa.Identity(always=True)" in text
+    assert "uq_m1_qualification_ingress_source_version" in text
+    assert "m1_qualification_runtime_events_ingress" in text
+    assert "m1_qualification_incident_events_ingress" in text
+    assert "m1_qualification_recovery_actions_ingress" in text
     assert "version > 0" in text
     assert "ACCUMULATING" not in text
     assert "state IN ('accumulating', 'invalidated', 'recovering', 'qualified')" in text
@@ -99,6 +107,8 @@ def test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigge
         with psycopg.connect(dsn) as connection:
             assert _table_exists(connection, "m1_qualification_epochs")
             assert _table_exists(connection, "m1_qualification_certificates")
+            assert _table_exists(connection, "m1_qualification_ingress_ledger")
+            assert _table_exists(connection, "m1_qualification_source_cursors")
             assert _check_exists(
                 connection,
                 "m1_qualification_epochs",
@@ -118,6 +128,21 @@ def test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigge
                 connection,
                 "m1_qualification_certificates",
                 "m1_qualification_certificates_immutable",
+            )
+            assert _trigger_exists(
+                connection,
+                "m1_job_runtime_events",
+                "m1_qualification_runtime_events_ingress",
+            )
+            assert _trigger_exists(
+                connection,
+                "m1_incident_events",
+                "m1_qualification_incident_events_ingress",
+            )
+            assert _trigger_exists(
+                connection,
+                "m1_recovery_actions",
+                "m1_qualification_recovery_actions_ingress",
             )
             certificate_id, identity_key = _insert_epoch_and_certificate(connection)
             assert certificate_id.startswith("qualification-certificate:")
@@ -178,15 +203,28 @@ def test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigge
         with psycopg.connect(dsn) as connection:
             assert not _table_exists(connection, "m1_qualification_certificates")
             assert not _table_exists(connection, "m1_qualification_epochs")
+            assert not _table_exists(connection, "m1_qualification_ingress_ledger")
+            assert not _table_exists(connection, "m1_qualification_source_cursors")
+            assert not _trigger_exists(
+                connection,
+                "m1_job_runtime_events",
+                "m1_qualification_runtime_events_ingress",
+            )
             assert _table_exists(connection, "m1_recovery_actions")
 
         _run_alembic(dsn, "upgrade", "024")
         with psycopg.connect(dsn) as connection:
             assert _table_exists(connection, "m1_qualification_epochs")
+            assert _table_exists(connection, "m1_qualification_ingress_ledger")
             assert _trigger_exists(
                 connection,
                 "m1_qualification_certificates",
                 "m1_qualification_certificates_immutable",
+            )
+            assert _trigger_exists(
+                connection,
+                "m1_recovery_actions",
+                "m1_qualification_recovery_actions_ingress",
             )
 
 

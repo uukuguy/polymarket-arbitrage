@@ -24,6 +24,254 @@ depends_on = None
 def upgrade() -> None:
     op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
     op.create_table(
+        "m1_qualification_ingress_ledger",
+        sa.Column(
+            "ingest_seq",
+            sa.BigInteger,
+            sa.Identity(always=True),
+            nullable=False,
+        ),
+        sa.Column(
+            "ingested_at",
+            sa.TIMESTAMP(timezone=True),
+            nullable=False,
+            server_default=sa.text("clock_timestamp()"),
+        ),
+        sa.Column("source", sa.Text, nullable=False),
+        sa.Column("source_id", sa.Text, nullable=False),
+        sa.Column("source_version", sa.Text, nullable=False),
+        sa.Column("original_observed_at", sa.TIMESTAMP(timezone=True), nullable=False),
+        sa.Column("payload", postgresql.JSONB, nullable=False),
+        sa.Column("payload_sha256", sa.Text, nullable=False),
+        sa.PrimaryKeyConstraint("ingest_seq", name="pk_m1_qualification_ingress_ledger"),
+        sa.UniqueConstraint(
+            "source",
+            "source_id",
+            "source_version",
+            name="uq_m1_qualification_ingress_source_version",
+        ),
+        sa.CheckConstraint(
+            "source IN ('runtime', 'incident', 'recovery', 'freshness') "
+            "AND length(source_id) > 0 AND length(source_version) > 0",
+            name="ck_m1_qualification_ingress_source",
+        ),
+        sa.CheckConstraint(
+            "jsonb_typeof(payload) = 'object'",
+            name="ck_m1_qualification_ingress_payload",
+        ),
+        sa.CheckConstraint(
+            "payload_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_m1_qualification_ingress_digest",
+        ),
+    )
+    op.create_index(
+        "m1_qualification_ingress_source_seq",
+        "m1_qualification_ingress_ledger",
+        ["source", "ingest_seq"],
+    )
+    op.create_table(
+        "m1_qualification_source_cursors",
+        sa.Column("identity_key", sa.Text, nullable=False),
+        sa.Column("policy_version", sa.Text, nullable=False),
+        sa.Column("release_id", sa.Text, nullable=False),
+        sa.Column("config_id", sa.Text, nullable=False),
+        sa.Column("role_identity", postgresql.JSONB, nullable=False),
+        sa.Column("source_cursor", postgresql.JSONB, nullable=True),
+        sa.Column("writer_id", sa.Text, nullable=True),
+        sa.Column(
+            "updated_at",
+            sa.TIMESTAMP(timezone=True),
+            nullable=False,
+            server_default=sa.text("clock_timestamp()"),
+        ),
+        sa.PrimaryKeyConstraint("identity_key", name="pk_m1_qualification_source_cursors"),
+        sa.CheckConstraint(
+            "jsonb_typeof(role_identity) = 'array' AND jsonb_array_length(role_identity) > 0",
+            name="ck_m1_qualification_source_cursors_role_identity",
+        ),
+        sa.CheckConstraint(
+            "source_cursor IS NULL OR jsonb_typeof(source_cursor) = 'object'",
+            name="ck_m1_qualification_source_cursors_cursor",
+        ),
+    )
+
+    op.execute(
+        """
+        CREATE FUNCTION m1_record_qualification_ingress(
+            p_source text,
+            p_source_id text,
+            p_source_version text,
+            p_original_observed_at timestamptz,
+            p_payload jsonb
+        ) RETURNS void
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            payload_digest text;
+            existing_digest text;
+        BEGIN
+            IF p_payload IS NULL OR jsonb_typeof(p_payload) <> 'object' THEN
+                RAISE EXCEPTION 'qualification ingress payload must be an object';
+            END IF;
+            payload_digest := encode(
+                digest(convert_to(p_payload::text, 'UTF8'), 'sha256'),
+                'hex'
+            );
+            INSERT INTO m1_qualification_ingress_ledger (
+                source, source_id, source_version, original_observed_at,
+                payload, payload_sha256
+            ) VALUES (
+                p_source, p_source_id, p_source_version, p_original_observed_at,
+                p_payload, payload_digest
+            )
+            ON CONFLICT (source, source_id, source_version) DO NOTHING;
+
+            SELECT payload_sha256 INTO existing_digest
+            FROM m1_qualification_ingress_ledger
+            WHERE source = p_source
+              AND source_id = p_source_id
+              AND source_version = p_source_version;
+            IF existing_digest IS NULL THEN
+                RAISE EXCEPTION 'qualification ingress idempotency raced';
+            END IF;
+            IF existing_digest <> payload_digest THEN
+                RAISE EXCEPTION 'qualification ingress source version conflicts';
+            END IF;
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        """
+        CREATE FUNCTION m1_project_runtime_qualification_ingress() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            PERFORM m1_record_qualification_ingress(
+                'runtime',
+                NEW.event_id,
+                'v1',
+                NEW.occurred_at,
+                to_jsonb(NEW)
+            );
+            RETURN NEW;
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        """
+        CREATE FUNCTION m1_project_incident_qualification_ingress() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        DECLARE
+            incident_row m1_incidents%ROWTYPE;
+        BEGIN
+            SELECT * INTO incident_row
+            FROM m1_incidents
+            WHERE incident_key = NEW.incident_key;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'qualification incident ingress missing incident row';
+            END IF;
+            PERFORM m1_record_qualification_ingress(
+                'incident',
+                NEW.incident_event_id,
+                'v1',
+                NEW.occurred_at,
+                to_jsonb(NEW) || jsonb_build_object(
+                    'severity', incident_row.severity,
+                    'state', incident_row.state
+                )
+            );
+            RETURN NEW;
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        """
+        CREATE FUNCTION m1_project_recovery_qualification_ingress() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        DECLARE
+            observed_at timestamptz;
+            projected_version text;
+        BEGIN
+            observed_at := COALESCE(NEW.finished_at, NEW.started_at, NEW.requested_at);
+            projected_version := NEW.state || ':' || COALESCE(NEW.result_code, 'none')
+                || ':' || COALESCE(
+                    NEW.finished_at::text,
+                    NEW.started_at::text,
+                    NEW.requested_at::text
+                );
+            PERFORM m1_record_qualification_ingress(
+                'recovery',
+                NEW.action_id,
+                projected_version,
+                observed_at,
+                to_jsonb(NEW)
+            );
+            RETURN NEW;
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER m1_qualification_runtime_events_ingress
+        AFTER INSERT ON m1_job_runtime_events
+        FOR EACH ROW EXECUTE FUNCTION m1_project_runtime_qualification_ingress();
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER m1_qualification_incident_events_ingress
+        AFTER INSERT ON m1_incident_events
+        FOR EACH ROW EXECUTE FUNCTION m1_project_incident_qualification_ingress();
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER m1_qualification_recovery_actions_ingress
+        AFTER INSERT OR UPDATE ON m1_recovery_actions
+        FOR EACH ROW EXECUTE FUNCTION m1_project_recovery_qualification_ingress();
+        """
+    )
+    op.execute(
+        """
+        SELECT m1_record_qualification_ingress(
+            'runtime', event_id, 'v1', occurred_at, to_jsonb(m1_job_runtime_events)
+        )
+        FROM m1_job_runtime_events;
+        """
+    )
+    op.execute(
+        """
+        SELECT m1_record_qualification_ingress(
+            'incident',
+            event.incident_event_id,
+            'v1',
+            event.occurred_at,
+            to_jsonb(event) || jsonb_build_object(
+                'severity', incident.severity,
+                'state', incident.state
+            )
+        )
+        FROM m1_incident_events AS event
+        JOIN m1_incidents AS incident ON incident.incident_key = event.incident_key;
+        """
+    )
+    op.execute(
+        """
+        SELECT m1_record_qualification_ingress(
+            'recovery',
+            action_id,
+            state || ':' || COALESCE(result_code, 'none') || ':' ||
+                COALESCE(finished_at::text, started_at::text, requested_at::text),
+            COALESCE(finished_at, started_at, requested_at),
+            to_jsonb(m1_recovery_actions)
+        )
+        FROM m1_recovery_actions;
+        """
+    )
+    op.create_table(
         "m1_qualification_epochs",
         sa.Column("epoch_id", sa.Text, nullable=False),
         sa.Column("state", sa.Text, nullable=False),
@@ -111,8 +359,7 @@ def upgrade() -> None:
             name="ck_m1_qualification_epochs_role_identity",
         ),
         sa.CheckConstraint(
-            "jsonb_typeof(fact_digests) = 'array' "
-            "AND jsonb_typeof(contained_recoveries) = 'array'",
+            "jsonb_typeof(fact_digests) = 'array' AND jsonb_typeof(contained_recoveries) = 'array'",
             name="ck_m1_qualification_epochs_evidence_json",
         ),
         sa.CheckConstraint(
@@ -166,7 +413,7 @@ def upgrade() -> None:
         """
         CREATE UNIQUE INDEX uq_m1_qualification_active_identity
         ON m1_qualification_epochs(identity_key)
-        WHERE state IN ('accumulating', 'recovering')
+        WHERE state = 'accumulating'
         """
     )
 
@@ -524,13 +771,17 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("DROP TRIGGER m1_qualification_recovery_actions_ingress ON m1_recovery_actions")
+    op.execute("DROP TRIGGER m1_qualification_incident_events_ingress ON m1_incident_events")
+    op.execute("DROP TRIGGER m1_qualification_runtime_events_ingress ON m1_job_runtime_events")
+    op.execute("DROP FUNCTION m1_project_recovery_qualification_ingress()")
+    op.execute("DROP FUNCTION m1_project_incident_qualification_ingress()")
+    op.execute("DROP FUNCTION m1_project_runtime_qualification_ingress()")
     op.execute(
-        "DROP TRIGGER m1_qualification_certificates_immutable "
-        "ON m1_qualification_certificates"
+        "DROP TRIGGER m1_qualification_certificates_immutable ON m1_qualification_certificates"
     )
     op.execute(
-        "DROP TRIGGER m1_qualification_certificates_verify_insert "
-        "ON m1_qualification_certificates"
+        "DROP TRIGGER m1_qualification_certificates_verify_insert ON m1_qualification_certificates"
     )
     op.execute(
         "DROP FUNCTION m1_insert_qualification_certificate("
@@ -551,3 +802,12 @@ def downgrade() -> None:
         table_name="m1_qualification_epochs",
     )
     op.drop_table("m1_qualification_epochs")
+    op.drop_table("m1_qualification_source_cursors")
+    op.drop_index(
+        "m1_qualification_ingress_source_seq",
+        table_name="m1_qualification_ingress_ledger",
+    )
+    op.drop_table("m1_qualification_ingress_ledger")
+    op.execute(
+        "DROP FUNCTION m1_record_qualification_ingress(text, text, text, timestamptz, jsonb)"
+    )

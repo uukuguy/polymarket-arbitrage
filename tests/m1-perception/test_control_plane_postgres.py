@@ -44,6 +44,11 @@ from polyarb.control_plane.qualification import (
     QualificationState,
     RollingQualificationPolicy,
 )
+from polyarb.control_plane.qualification_service import (
+    PostgresQualificationFactSource,
+    PostgresQualificationServiceStore,
+    QualificationService,
+)
 from polyarb.control_plane.qualification_store import (
     QualificationCertificateConflict,
     QualificationEpochConflict,
@@ -139,6 +144,8 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
         for table in (
             "m1_qualification_certificates",
             "m1_qualification_epochs",
+            "m1_qualification_source_cursors",
+            "m1_qualification_ingress_ledger",
             "m1_soak_observations",
             "m1_soak_runs",
             "m1_cloud_usage_observations",
@@ -1683,8 +1690,7 @@ def test_deployment_preflight_rejects_021_database_before_runtime_workers(
             "uq_m1_runtime_events_attempt_sequence UNIQUE (attempt_id, event_sequence)",
         ),
         (
-            "ALTER TABLE m1_job_runtime_events "
-            "DROP CONSTRAINT uq_m1_runtime_events_idempotency",
+            "ALTER TABLE m1_job_runtime_events DROP CONSTRAINT uq_m1_runtime_events_idempotency",
             "ALTER TABLE m1_job_runtime_events ADD CONSTRAINT "
             "uq_m1_runtime_events_idempotency UNIQUE (idempotency_key)",
         ),
@@ -1751,8 +1757,7 @@ def test_deployment_preflight_rejects_replica_only_runtime_append_only_trigger(
     with psycopg.connect(postgres_dsn) as connection:
         database_name = connection.execute("SELECT current_database()").fetchone()
         connection.execute(
-            "ALTER TABLE m1_job_runtime_events ENABLE REPLICA TRIGGER "
-            "m1_runtime_events_immutable"
+            "ALTER TABLE m1_job_runtime_events ENABLE REPLICA TRIGGER m1_runtime_events_immutable"
         )
     assert database_name is not None
     try:
@@ -1761,8 +1766,7 @@ def test_deployment_preflight_rejects_replica_only_runtime_append_only_trigger(
     finally:
         with psycopg.connect(postgres_dsn) as connection:
             connection.execute(
-                "ALTER TABLE m1_job_runtime_events ENABLE TRIGGER "
-                "m1_runtime_events_immutable"
+                "ALTER TABLE m1_job_runtime_events ENABLE TRIGGER m1_runtime_events_immutable"
             )
 
 
@@ -3439,9 +3443,7 @@ def test_opportunity_terminal_success_event_rolls_back_projection_and_pointer(
             (quote_generation,),
         )
         assert cursor.fetchone() == (0,)
-        cursor.execute(
-            "SELECT count(*) FROM m1_opportunity_publication_pointers"
-        )
+        cursor.execute("SELECT count(*) FROM m1_opportunity_publication_pointers")
         assert cursor.fetchone() == (0,)
 
     monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", original_append)
@@ -3923,9 +3925,7 @@ def test_runtime_heartbeat_lock_timeout_rolls_back_liveness(
             )
         started = time.monotonic()
         with pytest.raises(psycopg.errors.LockNotAvailable):
-            control_plane.heartbeat_runtime_attempt(
-                lease, now=now, lease_seconds=30
-            )
+            control_plane.heartbeat_runtime_attempt(lease, now=now, lease_seconds=30)
         assert time.monotonic() - started < 3
     finally:
         blocker.rollback()
@@ -4172,8 +4172,7 @@ def test_runtime_default_progress_idempotency_is_attempt_scoped(
 
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
-            "SELECT attempt_id FROM m1_job_attempts "
-            "WHERE job_key = %s ORDER BY lease_epoch",
+            "SELECT attempt_id FROM m1_job_attempts WHERE job_key = %s ORDER BY lease_epoch",
             (second.job_key,),
         )
         attempt_ids = tuple(row[0] for row in cursor.fetchall())
@@ -4347,8 +4346,7 @@ def test_runtime_events_are_immutable_and_timestamp_detail_is_utc(
         persisted = append_runtime_event_cursor(cursor, event)
         assert persisted.detail["deadline_at"] == "2030-01-01T12:00:00+00:00"
         cursor.execute(
-            "SELECT detail->>'deadline_at' FROM m1_job_runtime_events "
-            "WHERE idempotency_key = %s",
+            "SELECT detail->>'deadline_at' FROM m1_job_runtime_events WHERE idempotency_key = %s",
             (event.idempotency_key,),
         )
         assert cursor.fetchone() == ("2030-01-01T12:00:00+00:00",)
@@ -4356,8 +4354,7 @@ def test_runtime_events_are_immutable_and_timestamp_detail_is_utc(
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
             cursor.execute(
-                "UPDATE m1_job_runtime_events SET stage = 'forged' "
-                "WHERE idempotency_key = %s",
+                "UPDATE m1_job_runtime_events SET stage = 'forged' WHERE idempotency_key = %s",
                 (event.idempotency_key,),
             )
 
@@ -4420,9 +4417,7 @@ def test_runtime_event_replay_is_exact_and_conflicts_are_rejected(
                     event_sequence=event.event_sequence,
                     kind=event.kind,
                     stage="parse",
-                    progress=RuntimeProgress(
-                        sequence=1, current=1, total=2, stage="parse"
-                    ),
+                    progress=RuntimeProgress(sequence=1, current=1, total=2, stage="parse"),
                     detail=dict(event.detail),
                     occurred_at=event.occurred_at,
                     idempotency_key=event.idempotency_key,
@@ -5457,15 +5452,18 @@ def test_recovery_action_finish_requires_unexpired_worker_lease_and_exact_replay
         now=now + timedelta(seconds=6),
         detail={"result": "ok"},
     )
-    assert finish_action(
-        control_plane._connection_factory,
-        action_id=claim.action_id,
-        worker_id=reclaimed.worker_id or "",
-        worker_epoch=reclaimed.worker_epoch,
-        result_code="succeeded",
-        now=now + timedelta(seconds=7),
-        detail={"result": "ok"},
-    ) == finished
+    assert (
+        finish_action(
+            control_plane._connection_factory,
+            action_id=claim.action_id,
+            worker_id=reclaimed.worker_id or "",
+            worker_epoch=reclaimed.worker_epoch,
+            result_code="succeeded",
+            now=now + timedelta(seconds=7),
+            detail={"result": "ok"},
+        )
+        == finished
+    )
     with pytest.raises(RecoveryActionConflict, match="finish replay"):
         finish_action(
             control_plane._connection_factory,
@@ -7582,8 +7580,7 @@ def test_structure_source_existing_receipt_recovers_terminal_runtime_atomically(
         )
         assert cursor.fetchone() == ("running",)
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events "
-            "WHERE job_key = %s AND kind = %s",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
             (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
         )
         assert cursor.fetchone() == (0,)
@@ -7609,8 +7606,7 @@ def test_structure_source_existing_receipt_recovers_terminal_runtime_atomically(
         )
         assert cursor.fetchone() == ("succeeded",)
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events "
-            "WHERE job_key = %s AND kind = %s",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
             (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
         )
         assert cursor.fetchone() == (1,)
@@ -7715,20 +7711,22 @@ def test_structure_bundle_existing_receipt_recovers_terminal_runtime_atomically(
         )
         assert cursor.fetchone() == ("running",)
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events "
-            "WHERE job_key = %s AND kind = %s",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
             (materializer.job_key, RuntimeEventKind.SUCCEEDED.value),
         )
         assert cursor.fetchone() == (0,)
 
     monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", append_runtime_event_cursor)
-    assert control_plane.admit_structure_source_bundle(
-        materializer,
-        identity=identity,
-        bundle=bundle,
-        ranges=(("events", "", ""),),
-        now=now,
-    ) == specs
+    assert (
+        control_plane.admit_structure_source_bundle(
+            materializer,
+            identity=identity,
+            bundle=bundle,
+            ranges=(("events", "", ""),),
+            now=now,
+        )
+        == specs
+    )
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (materializer.job_key,))
         assert cursor.fetchone() == ("succeeded",)
@@ -7738,18 +7736,20 @@ def test_structure_bundle_existing_receipt_recovers_terminal_runtime_atomically(
         )
         assert cursor.fetchone() == ("succeeded",)
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events "
-            "WHERE job_key = %s AND kind = %s",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
             (materializer.job_key, RuntimeEventKind.SUCCEEDED.value),
         )
         assert cursor.fetchone() == (1,)
-    assert control_plane.admit_structure_source_bundle(
-        materializer,
-        identity=identity,
-        bundle=bundle,
-        ranges=(("events", "", ""),),
-        now=now + timedelta(seconds=31),
-    ) == specs
+    assert (
+        control_plane.admit_structure_source_bundle(
+            materializer,
+            identity=identity,
+            bundle=bundle,
+            ranges=(("events", "", ""),),
+            now=now + timedelta(seconds=31),
+        )
+        == specs
+    )
 
 
 def test_structure_range_existing_receipt_recovers_terminal_runtime_atomically(
@@ -7829,21 +7829,23 @@ def test_structure_range_existing_receipt_recovers_terminal_runtime_atomically(
         )
         assert cursor.fetchone() == ("running",)
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events "
-            "WHERE job_key = %s AND kind = %s",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
             (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
         )
         assert cursor.fetchone() == (0,)
 
     monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", append_runtime_event_cursor)
-    assert control_plane.complete_structure_range(
-        lease,
-        range_digest=spec.range_digest,
-        artifact_key=artifact_key,
-        artifact_digest=artifact_digest,
-        record_count=1,
-        now=now,
-    ).job_key == lease.job_key
+    assert (
+        control_plane.complete_structure_range(
+            lease,
+            range_digest=spec.range_digest,
+            artifact_key=artifact_key,
+            artifact_digest=artifact_digest,
+            record_count=1,
+            now=now,
+        ).job_key
+        == lease.job_key
+    )
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
         assert cursor.fetchone() == ("succeeded",)
@@ -7853,8 +7855,7 @@ def test_structure_range_existing_receipt_recovers_terminal_runtime_atomically(
         )
         assert cursor.fetchone() == ("succeeded",)
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events "
-            "WHERE job_key = %s AND kind = %s",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
             (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
         )
         assert cursor.fetchone() == (1,)
@@ -7941,8 +7942,7 @@ def test_structure_source_succeeded_without_event_repairs_only_proven_attempt(
         )
         assert cursor.fetchone() == ("succeeded",)
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events "
-            "WHERE job_key = %s AND kind = %s",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
             (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
         )
         assert cursor.fetchone() == (0,)
@@ -7974,8 +7974,7 @@ def test_structure_source_succeeded_without_event_repairs_only_proven_attempt(
     )
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events "
-            "WHERE job_key = %s AND kind = %s",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
             (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
         )
         assert cursor.fetchone() == (1,)
@@ -8068,31 +8067,35 @@ def test_structure_bundle_succeeded_without_event_repairs_only_proven_attempt(
         cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (materializer.job_key,))
         assert cursor.fetchone() == ("succeeded",)
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events "
-            "WHERE job_key = %s AND kind = %s",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
             (materializer.job_key, RuntimeEventKind.SUCCEEDED.value),
         )
         assert cursor.fetchone() == (0,)
 
     monkeypatch.setattr(postgres_module, "append_runtime_event_cursor", append_runtime_event_cursor)
-    assert control_plane.admit_structure_source_bundle(
-        materializer,
-        identity=identity,
-        bundle=bundle,
-        ranges=(("events", "", ""),),
-        now=now + timedelta(seconds=31),
-    ) == specs
-    assert control_plane.admit_structure_source_bundle(
-        materializer,
-        identity=identity,
-        bundle=bundle,
-        ranges=(("events", "", ""),),
-        now=now + timedelta(seconds=32),
-    ) == specs
+    assert (
+        control_plane.admit_structure_source_bundle(
+            materializer,
+            identity=identity,
+            bundle=bundle,
+            ranges=(("events", "", ""),),
+            now=now + timedelta(seconds=31),
+        )
+        == specs
+    )
+    assert (
+        control_plane.admit_structure_source_bundle(
+            materializer,
+            identity=identity,
+            bundle=bundle,
+            ranges=(("events", "", ""),),
+            now=now + timedelta(seconds=32),
+        )
+        == specs
+    )
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events "
-            "WHERE job_key = %s AND kind = %s",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
             (materializer.job_key, RuntimeEventKind.SUCCEEDED.value),
         )
         assert cursor.fetchone() == (1,)
@@ -8178,8 +8181,7 @@ def test_structure_range_succeeded_without_event_repairs_only_proven_attempt(
         cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
         assert cursor.fetchone() == ("succeeded",)
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events "
-            "WHERE job_key = %s AND kind = %s",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
             (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
         )
         assert cursor.fetchone() == (0,)
@@ -8209,8 +8211,7 @@ def test_structure_range_succeeded_without_event_repairs_only_proven_attempt(
     )
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events "
-            "WHERE job_key = %s AND kind = %s",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind = %s",
             (lease.job_key, RuntimeEventKind.SUCCEEDED.value),
         )
         assert cursor.fetchone() == (1,)
@@ -8622,9 +8623,7 @@ def test_structure_certification_success_event_rolls_back_manifest(
             now=now,
         )
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT state FROM m1_jobs WHERE job_key = %s", (certifier.job_key,)
-        )
+        cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (certifier.job_key,))
         assert cursor.fetchone() == ("leased",)
         cursor.execute(
             "SELECT count(*) FROM m1_generation_manifests WHERE generation_key = %s",
@@ -8685,13 +8684,10 @@ def test_retry_runtime_events_are_atomic_and_do_not_copy_error_text(
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
         assert cursor.fetchone() == ("leased",)
-        cursor.execute(
-            "SELECT count(*) FROM m1_job_circuits WHERE job_key = %s", (lease.job_key,)
-        )
+        cursor.execute("SELECT count(*) FROM m1_job_circuits WHERE job_key = %s", (lease.job_key,))
         assert cursor.fetchone() == (0,)
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s "
-            "AND kind IN (%s, %s)",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind IN (%s, %s)",
             (
                 lease.job_key,
                 RuntimeEventKind.RETRYABLE_FAILED.value,
@@ -8765,13 +8761,10 @@ def test_quote_retry_event_injection_rolls_back_circuit_and_job_transition(
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT state FROM m1_jobs WHERE job_key = %s", (lease.job_key,))
         assert cursor.fetchone() == ("leased",)
-        cursor.execute(
-            "SELECT count(*) FROM m1_job_circuits WHERE job_key = %s", (lease.job_key,)
-        )
+        cursor.execute("SELECT count(*) FROM m1_job_circuits WHERE job_key = %s", (lease.job_key,))
         assert cursor.fetchone() == (0,)
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s "
-            "AND kind IN (%s, %s)",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind IN (%s, %s)",
             (
                 lease.job_key,
                 RuntimeEventKind.RETRYABLE_FAILED.value,
@@ -8857,6 +8850,199 @@ def test_qualification_epoch_transition_is_state_version_cas_and_rolls_back_old_
         assert cursor.fetchone() == (0,)
 
 
+def test_qualification_service_first_tick_initializes_sql_null_cursor(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    _seed_freshness_pointers(control_plane, published_at=now)
+    service = _qualification_service(control_plane, batch_size=20)
+
+    result = service.tick(now)
+
+    assert result.applied == 3
+    assert result.state is QualificationState.ACCUMULATING
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT source_cursor, jsonb_typeof(source_cursor), jsonb_array_length(fact_records)
+            FROM m1_qualification_epochs
+            WHERE epoch_id = %s
+            """,
+            (result.epoch_id,),
+        )
+        row = cursor.fetchone()
+    assert row is not None
+    assert row[0] is None
+    assert row[1] is None
+    assert row[2] == 3
+
+
+def test_qualification_ingress_late_runtime_commit_is_consumed_after_cursor(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    _seed_freshness_pointers(control_plane, published_at=now)
+    service = _qualification_service(control_plane, batch_size=20)
+    first = service.tick(now)
+    assert first.applied == 3
+
+    _insert_runtime_event(
+        control_plane,
+        job_key="qualification:late-runtime",
+        kind="job.terminal-failed",
+        reason_code="lease.expired",
+        occurred_at=now - timedelta(hours=3),
+        sequence=2,
+    )
+    restarted = _qualification_service(control_plane, batch_size=20)
+    second = restarted.tick(now + timedelta(seconds=1))
+
+    assert second.state is QualificationState.RECOVERING
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT count(*)
+            FROM m1_qualification_ingress_ledger
+            WHERE source = 'runtime'
+            """
+        )
+        assert cursor.fetchone() == (2,)
+        cursor.execute(
+            """
+            SELECT state, invalidation_reason
+            FROM m1_qualification_epochs
+            WHERE state = 'invalidated'
+            """
+        )
+        assert cursor.fetchone() == ("invalidated", "lease.expired")
+
+
+def test_qualification_recovery_restart_keeps_epoch_fact_history_local(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    _seed_freshness_pointers(control_plane, published_at=now)
+    terminal = _insert_runtime_event(
+        control_plane,
+        job_key="qualification:cross-batch",
+        kind="job.terminal-failed",
+        reason_code="lease.expired",
+        occurred_at=now,
+        sequence=2,
+    )
+    service = _qualification_service(control_plane, batch_size=10)
+    invalidated = service.tick(now + timedelta(seconds=1))
+    assert invalidated.state is QualificationState.RECOVERING
+
+    _insert_runtime_event(
+        control_plane,
+        job_key=terminal.job_key,
+        kind="job.recovered",
+        reason_code="job.recovered",
+        occurred_at=now + timedelta(seconds=2),
+        sequence=3,
+    )
+    restarted = _qualification_service(control_plane, batch_size=10)
+    recovered = restarted.tick(now + timedelta(seconds=3))
+    assert recovered.state is QualificationState.ACCUMULATING
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT state, jsonb_array_length(fact_records), started_at, last_fact_at
+            FROM m1_qualification_epochs
+            ORDER BY started_at, state
+            """
+        )
+        rows = cursor.fetchall()
+    states = [row[0] for row in rows]
+    assert states == ["invalidated", "recovering", "accumulating"]
+    invalidated_row = next(row for row in rows if row[0] == "invalidated")
+    accumulating_row = next(row for row in rows if row[0] == "accumulating")
+    recovering_row = next(row for row in rows if row[0] == "recovering")
+    assert invalidated_row[1] == 2
+    assert recovering_row[1] == 0
+    assert accumulating_row[1] == 1
+    assert accumulating_row[3] >= accumulating_row[2]
+
+
+def test_qualification_same_batch_recovery_keeps_recovering_epoch_empty(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    _seed_freshness_pointers(control_plane, published_at=now)
+    lease = _insert_runtime_event(
+        control_plane,
+        job_key="qualification:same-batch",
+        kind="job.terminal-failed",
+        reason_code="lease.expired",
+        occurred_at=now,
+        sequence=2,
+    )
+    _insert_runtime_event(
+        control_plane,
+        job_key=lease.job_key,
+        kind="job.recovered",
+        reason_code="job.recovered",
+        occurred_at=now + timedelta(seconds=1),
+        sequence=3,
+    )
+
+    result = _qualification_service(control_plane, batch_size=20).tick(now + timedelta(seconds=2))
+
+    assert result.state is QualificationState.ACCUMULATING
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT state, jsonb_array_length(fact_records)
+            FROM m1_qualification_epochs
+            ORDER BY started_at, state
+            """
+        )
+        rows = cursor.fetchall()
+    assert ("recovering", 0) in rows
+    assert ("accumulating", 1) in rows
+
+
+def test_qualification_freshness_reobserves_same_pointer_and_invalidates_on_aging(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    _seed_freshness_pointers(control_plane, published_at=now - timedelta(seconds=800))
+    service = _qualification_service(control_plane, batch_size=20)
+
+    first = service.tick(now)
+    assert first.state is QualificationState.ACCUMULATING
+    _insert_runtime_event(
+        control_plane,
+        job_key="qualification:healthy-runtime",
+        kind="job.succeeded",
+        reason_code="",
+        occurred_at=now + timedelta(seconds=50),
+        sequence=2,
+    )
+    second = service.tick(now + timedelta(seconds=200))
+
+    assert second.state is QualificationState.RECOVERING
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT count(*)
+            FROM m1_qualification_ingress_ledger
+            WHERE source = 'freshness' AND source_id LIKE 'freshness:quote:%'
+            """
+        )
+        assert cursor.fetchone() == (2,)
+        cursor.execute(
+            """
+            SELECT invalidation_reason
+            FROM m1_qualification_epochs
+            WHERE state = 'invalidated'
+            """
+        )
+        assert cursor.fetchone() == ("freshness.structure",)
+
+
 def test_qualification_certificate_is_canonical_idempotent_and_conflict_loud(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -8868,9 +9054,7 @@ def test_qualification_certificate_is_canonical_idempotent_and_conflict_loud(
         b'{"bounds":{"max_gap_seconds":900,"qualified_at":"2030-01-02T12:00:00+00:00",'
         b'"required_seconds":86400,"started_at":"2030-01-01T12:00:00+00:00"},'
         b'"contained_incidents":[],"counts":{"progress_count":12,"successful_count":12},'
-        b'"evidence_digest":"'
-        + evidence_digest.encode("ascii")
-        + b'",'
+        b'"evidence_digest":"' + evidence_digest.encode("ascii") + b'",'
         b'"identity":{"config_id":"config-a","epoch_id":"qualification-epoch-cert",'
         b'"policy_version":"m1-rolling-qualification-v1","release_id":"release-a",'
         b'"role_identity":["m1","structure"]},"policy_version":"m1-rolling-qualification-v1",'
@@ -8892,10 +9076,13 @@ def test_qualification_certificate_is_canonical_idempotent_and_conflict_loud(
     assert first.canonical_payload.encode("utf-8") == canonical_certificate_bytes(payload)
     assert first.created_at.tzinfo is not None
     assert first.created_at.utcoffset() == timedelta(0)
-    assert read_qualification_certificate(
-        control_plane._connection_factory,
-        certificate_id=first.certificate_id,
-    ) == first
+    assert (
+        read_qualification_certificate(
+            control_plane._connection_factory,
+            certificate_id=first.certificate_id,
+        )
+        == first
+    )
     assert list_qualification_certificates(control_plane._connection_factory) == (first,)
 
     conflict_payload = {
@@ -8919,7 +9106,7 @@ def test_qualification_certificate_is_canonical_idempotent_and_conflict_loud(
             cursor.execute(
                 "DELETE FROM m1_qualification_certificates WHERE certificate_id = %s",
                 (first.certificate_id,),
-        )
+            )
         connection.rollback()
 
     with pytest.raises(ValueError, match="JSON-safe"):
@@ -9076,10 +9263,13 @@ def test_read_qualification_certificate_recomputes_canonical_digest_and_fails_on
         control_plane._connection_factory,
         decision=qualified,
     )
-    assert read_qualification_certificate(
-        control_plane._connection_factory,
-        certificate_id=record.certificate_id,
-    ) == record
+    assert (
+        read_qualification_certificate(
+            control_plane._connection_factory,
+            certificate_id=record.certificate_id,
+        )
+        == record
+    )
 
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
@@ -9129,8 +9319,7 @@ def test_read_qualification_certificate_rejects_tampered_ids(
             "DISABLE TRIGGER m1_qualification_certificates_immutable"
         )
         cursor.execute(
-            "UPDATE m1_qualification_certificates SET identity_key = %s "
-            "WHERE certificate_id = %s",
+            "UPDATE m1_qualification_certificates SET identity_key = %s WHERE certificate_id = %s",
             ("attacker-identity", record.certificate_id),
         )
         cursor.execute(
@@ -9189,6 +9378,178 @@ def _persist_qualified_epoch(
         writer_id="qualifier",
     )
     return qualified
+
+
+def _qualification_service(
+    control_plane: PostgresControlPlane,
+    *,
+    batch_size: int = 100,
+) -> QualificationService:
+    return QualificationService(
+        policy=_qualification_policy(),
+        fact_source=PostgresQualificationFactSource(control_plane._connection_factory),
+        state_store=PostgresQualificationServiceStore(control_plane._connection_factory),
+        writer_id="qualification-test",
+        batch_size=batch_size,
+    )
+
+
+def _insert_runtime_event(
+    control_plane: PostgresControlPlane,
+    *,
+    job_key: str,
+    kind: str,
+    reason_code: str,
+    occurred_at: datetime,
+    sequence: int,
+) -> JobLease:
+    lease = _read_runtime_lease(control_plane, job_key)
+    if lease is None:
+        lease = _seed_claimed_job(
+            control_plane,
+            job_key=job_key,
+            job_type="quote-batch",
+            input_identity=f"{job_key}:input",
+            now=occurred_at - timedelta(seconds=1),
+        )
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            """
+            INSERT INTO m1_job_runtime_events (
+                event_id, job_key, attempt_id, lease_epoch, worker_id,
+                event_sequence, kind, stage, progress_sequence, progress_current,
+                progress_total, detail, occurred_at, idempotency_key
+            )
+            SELECT %s, state.job_key, state.attempt_id, state.lease_epoch,
+                   state.worker_id, %s, %s, state.stage, %s, %s, NULL, %s, %s, %s
+            FROM m1_job_runtime_state AS state
+            WHERE state.job_key = %s
+            """,
+            (
+                f"qualification-runtime:{job_key}:{sequence}",
+                sequence,
+                kind,
+                sequence,
+                sequence,
+                Jsonb({"reason_code": reason_code} if reason_code else {}),
+                occurred_at,
+                f"qualification-runtime:{job_key}:{sequence}",
+                job_key,
+            ),
+        )
+    return lease
+
+
+def _read_runtime_lease(
+    control_plane: PostgresControlPlane,
+    job_key: str,
+) -> JobLease | None:
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT job.job_key, job.job_type, job.input_identity, state.worker_id,
+                   state.lease_epoch, state.lease_deadline_at
+            FROM m1_job_runtime_state AS state
+            JOIN m1_jobs AS job ON job.job_key = state.job_key
+            WHERE state.job_key = %s
+            """,
+            (job_key,),
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return None
+    return JobLease(
+        job_key=str(row[0]),
+        job_type=str(row[1]),
+        input_identity=str(row[2]),
+        lease_owner=str(row[3]),
+        lease_epoch=int(cast(int, row[4])),
+        lease_expires_at=cast(datetime, row[5]),
+        checkpoint_cursor=None,
+        checkpoint_digest=None,
+    )
+
+
+def _seed_freshness_pointers(
+    control_plane: PostgresControlPlane,
+    *,
+    published_at: datetime,
+) -> None:
+    structure_key = "structure:qualification-freshness"
+    quote_key = "quote:qualification-freshness"
+    with control_plane._connection_factory() as connection:
+        for job_key, job_type in (
+            ("job:qualification-structure", "structure"),
+            ("job:qualification-quote", "quote-certify"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO m1_jobs(
+                    job_key, job_type, input_identity, state, created_at, updated_at
+                )
+                VALUES (%s, %s, %s, 'succeeded', %s, %s)
+                ON CONFLICT (job_key) DO NOTHING
+                """,
+                (job_key, job_type, f"{job_key}:input", published_at, published_at),
+            )
+        connection.execute(
+            """
+            INSERT INTO m1_generation_manifests (
+                generation_key, producer_job_key, input_digest, artifact_key,
+                artifact_digest, record_count, published_at
+            ) VALUES
+                (%s, 'job:qualification-structure', %s, %s, %s, 3, %s),
+                (%s, 'job:qualification-quote', %s, %s, %s, 5, %s)
+            ON CONFLICT (generation_key) DO NOTHING
+            """,
+            (
+                structure_key,
+                "a" * 64,
+                "structure.ndjson",
+                "b" * 64,
+                published_at,
+                quote_key,
+                "c" * 64,
+                "quote.ndjson",
+                "d" * 64,
+                published_at,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_publication_pointers (
+                pointer_key, generation_key, expected_generation_key, lease_epoch, published_at
+            ) VALUES
+                ('structure:current', %s, NULL, 1, %s),
+                ('quote:current', %s, NULL, 1, %s)
+            ON CONFLICT (pointer_key) DO UPDATE
+            SET generation_key = EXCLUDED.generation_key,
+                lease_epoch = EXCLUDED.lease_epoch,
+                published_at = EXCLUDED.published_at
+            """,
+            (structure_key, published_at, quote_key, published_at),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_opportunity_projections (
+                generation_key, structure_generation_key, projection_digest,
+                record_count, certified_at
+            ) VALUES (%s, %s, %s, 7, %s)
+            ON CONFLICT (generation_key) DO NOTHING
+            """,
+            (quote_key, structure_key, "e" * 64, published_at),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_opportunity_publication_pointers (
+                pointer_key, generation_key, published_at
+            ) VALUES ('opportunity:current', %s, %s)
+            ON CONFLICT (pointer_key) DO UPDATE
+            SET generation_key = EXCLUDED.generation_key,
+                published_at = EXCLUDED.published_at
+            """,
+            (quote_key, published_at),
+        )
 
 
 def _direct_insert_qualification_certificate(
