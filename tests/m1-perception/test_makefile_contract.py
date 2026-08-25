@@ -11,12 +11,15 @@ Plan 01-5 T5 — covers two responsibilities:
      stdout/stderr → exit-code path is wired correctly under mocks.
 
 Critical: ``make snapshot-markets`` is NEVER actually executed (would hit live
-APIs and take 10-20 minutes). All make assertions use ``-n`` (dry-run).
+APIs and take 10-20 minutes). Legacy live/API targets stay on ``make -n``;
+qualification targets execute through a fake ``uv`` binary so Make guard and
+argv contracts are tested without touching the real CLI or database.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -31,8 +34,38 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
 runner = CliRunner(mix_stderr=False)
 
 
+def _fake_uv_env(tmp_path: Path) -> tuple[dict[str, str], Path]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "uv-argv.jsonl"
+    fake_uv = bin_dir / "uv"
+    fake_uv.write_text(
+        "#!/usr/bin/env python3\n"
+        "from __future__ import annotations\n"
+        "import json\n"
+        "import os\n"
+        "import sys\n"
+        "log = os.environ['FAKE_UV_LOG']\n"
+        "with open(log, 'a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps({'argv': sys.argv[1:]}, separators=(',', ':')) + '\\n')\n"
+        "print(json.dumps({'fake_uv': sys.argv[1:]}, separators=(',', ':')))\n"
+    )
+    fake_uv.chmod(0o755)
+    env = os.environ.copy()
+    env["FAKE_UV_LOG"] = str(log_path)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    return env, log_path
+
+
+def _fake_uv_calls(log_path: Path) -> list[list[str]]:
+    if not log_path.exists():
+        return []
+    return [json.loads(line)["argv"] for line in log_path.read_text().splitlines() if line]
+
+
 # =============================================================================
-# Makefile contract — dry-run only, never invoke against live APIs
+# Makefile contract — most legacy targets dry-run; qualification targets execute
+# with a fake uv binary so the Make guard/argv path is tested without live APIs.
 # =============================================================================
 
 
@@ -146,106 +179,114 @@ def test_make_help_lists_rolling_qualification_targets() -> None:
 
 
 @pytest.mark.parametrize(
-    ("target", "args", "expected"),
+    ("make_args", "expected_argv"),
     [
         (
-            "qualification-status",
-            (),
-            "uv run python -m polyarb.cli_control_plane qualification-status --json",
+            ("qualification-status",),
+            [
+                "run",
+                "python",
+                "-m",
+                "polyarb.cli_control_plane",
+                "qualification-status",
+                "--json",
+            ],
         ),
         (
-            "qualification-certificates",
-            ("limit=7",),
-            "uv run python -m polyarb.cli_control_plane "
-            'qualification-certificates --limit "7" --json',
+            ("qualification-certificates",),
+            [
+                "run",
+                "python",
+                "-m",
+                "polyarb.cli_control_plane",
+                "qualification-certificates",
+                "--limit",
+                "20",
+                "--json",
+            ],
+        ),
+        (
+            ("qualification-certificates", "limit=7"),
+            [
+                "run",
+                "python",
+                "-m",
+                "polyarb.cli_control_plane",
+                "qualification-certificates",
+                "--limit",
+                "7",
+                "--json",
+            ],
         ),
     ],
 )
-def test_make_qualification_read_targets_are_strictly_read_only(
-    target: str, args: tuple[str, ...], expected: str
+def test_make_qualification_read_targets_execute_fake_uv_only(
+    tmp_path: Path, make_args: tuple[str, ...], expected_argv: list[str]
 ) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
     result = subprocess.run(
-        ["make", "-n", target, *args],
+        ["make", *make_args],
         capture_output=True,
         text=True,
         cwd=PROJECT_ROOT,
+        env=env,
         timeout=5,
     )
 
     assert result.returncode == 0, result.stderr
-    assert expected in result.stdout
-    recipe = result.stdout.lower()
-    forbidden = (
-        "alembic",
-        "flyctl",
-        " deploy",
-        "machine",
-        "r2",
-        "tick-once",
-        "reconcile",
-        "quote-once",
-        "structure-once",
-        "structure-source-once",
-        "shadow-publish",
-        "--enable",
-    )
-    for term in forbidden:
-        assert term not in recipe, f"{target} must stay read-only: {term}"
+    assert _fake_uv_calls(log_path) == [expected_argv]
 
 
-def test_make_qualification_certificates_default_limit_is_20() -> None:
-    result = subprocess.run(
-        ["make", "-n", "qualification-certificates"],
-        capture_output=True,
-        text=True,
-        cwd=PROJECT_ROOT,
-        timeout=5,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert 'qualification-certificates --limit "20" --json' in result.stdout
-
-
-def test_make_qualification_serve_requires_enable_before_cli() -> None:
+def test_make_qualification_serve_requires_enable_before_cli(tmp_path: Path) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
     result = subprocess.run(
         ["make", "qualification-serve"],
         capture_output=True,
         text=True,
         cwd=PROJECT_ROOT,
+        env=env,
         timeout=5,
     )
 
     assert result.returncode == 2
     assert "enable=1" in result.stderr
-    assert "polyarb.cli_control_plane" not in result.stdout
-    assert "polyarb.cli_control_plane" not in result.stderr
+    assert _fake_uv_calls(log_path) == []
 
 
-def test_make_qualification_serve_is_enable_guarded_and_bounded() -> None:
+@pytest.mark.parametrize(
+    ("make_args", "expected_interval"),
+    [
+        (("qualification-serve", "enable=1"), "30"),
+        (("qualification-serve", "enable=1", "interval_seconds=5"), "5"),
+    ],
+)
+def test_make_qualification_serve_executes_fake_uv_after_enable_guard(
+    tmp_path: Path, make_args: tuple[str, ...], expected_interval: str
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
     result = subprocess.run(
-        [
-            "make",
-            "-n",
-            "qualification-serve",
-            "enable=1",
-            "interval_seconds=5",
-        ],
+        ["make", *make_args],
         capture_output=True,
         text=True,
         cwd=PROJECT_ROOT,
+        env=env,
         timeout=5,
     )
 
     assert result.returncode == 0, result.stderr
-    assert (
-        "uv run python -m polyarb.cli_control_plane qualification-serve "
-        '--enable --interval-seconds "5" --json'
-    ) in result.stdout
-    recipe = result.stdout.lower()
-    for forbidden in ("alembic", "flyctl", " deploy", "machine", "r2"):
-        assert forbidden not in recipe, (
-            f"qualification serve must not mutate deployment: {forbidden}"
-        )
+    assert _fake_uv_calls(log_path) == [
+        [
+            "run",
+            "python",
+            "-m",
+            "polyarb.cli_control_plane",
+            "qualification-serve",
+            "--enable",
+            "--interval-seconds",
+            expected_interval,
+            "--json",
+        ]
+    ]
 
 
 def test_make_control_plane_preflight_help_and_dry_run_require_revision_022() -> None:
