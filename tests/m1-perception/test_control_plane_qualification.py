@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -78,9 +79,9 @@ def test_recovery_confirmation_opens_new_epoch_automatically() -> None:
         _state(policy),
         _fact("lease", NOW + timedelta(hours=1), reason="lease.expired"),
     )
-    recovering = policy.apply(
+    recovering = policy.recovering(
         invalidated,
-        _fact("recovery-start", NOW + timedelta(hours=1, seconds=1), reason="recovery.started"),
+        started_at=NOW + timedelta(hours=1, seconds=1),
     )
     result = policy.apply(
         recovering,
@@ -93,10 +94,17 @@ def test_recovery_confirmation_opens_new_epoch_automatically() -> None:
     )
 
     assert recovering.state is QualificationState.RECOVERING
+    assert invalidated.state is QualificationState.INVALIDATED
+    assert invalidated.invalidated_at == NOW + timedelta(hours=1)
+    assert invalidated.invalidation_reason == "lease.expired"
+    assert recovering.invalidated_at is None
+    assert recovering.invalidation_reason is None
+    assert recovering.previous_epoch_id == invalidated.epoch_id
+    assert recovering.epoch_id != invalidated.epoch_id
     assert result.state is QualificationState.ACCUMULATING
     assert result.started_at == NOW + timedelta(hours=1, seconds=30)
-    assert result.previous_epoch_id == "epoch-a"
-    assert result.epoch_id != "epoch-a"
+    assert result.previous_epoch_id == invalidated.epoch_id
+    assert result.epoch_id not in {invalidated.epoch_id, recovering.epoch_id}
     assert result.facts == (
         _fact(
             "recovery-ok",
@@ -248,6 +256,21 @@ def test_terminal_epochs_replay_exact_fact_but_reject_new_mutation() -> None:
     assert policy.apply(invalidated, _fact("break", NOW, reason="lease.expired")) is invalidated
     with pytest.raises(QualificationTerminalError):
         policy.apply(invalidated, _fact("new", NOW + timedelta(seconds=1)))
+    with pytest.raises(QualificationTerminalError):
+        policy.apply(
+            invalidated,
+            _fact("recovery-start", NOW + timedelta(seconds=1), reason="recovery.started"),
+        )
+    with pytest.raises(QualificationTerminalError):
+        policy.apply(
+            invalidated,
+            _fact(
+                "recovery-ok",
+                NOW + timedelta(seconds=1),
+                reason="recovery.confirmed",
+                recovery_confirmed=True,
+            ),
+        )
 
     short_policy = _policy(required_seconds=1, max_gap_seconds=60)
     state = _state(short_policy)
@@ -256,6 +279,26 @@ def test_terminal_epochs_replay_exact_fact_but_reject_new_mutation() -> None:
     assert short_policy.apply(qualified, _fact("finish", NOW + timedelta(seconds=1))) is qualified
     with pytest.raises(QualificationTerminalError):
         short_policy.apply(qualified, _fact("new", NOW + timedelta(seconds=2)))
+
+
+def test_decision_rejects_impossible_four_state_combinations() -> None:
+    policy = _policy()
+    initial = _state(policy)
+    with pytest.raises(ValueError, match="only invalidated"):
+        replace(initial, invalidated_at=NOW, invalidation_reason="lease.expired")
+    with pytest.raises(ValueError, match="qualified decision"):
+        replace(initial, state=QualificationState.QUALIFIED)
+    with pytest.raises(ValueError, match="previous_epoch_id"):
+        replace(initial, state=QualificationState.RECOVERING)
+    fact = _fact("sample", NOW)
+    with pytest.raises(ValueError, match="only previous epoch"):
+        replace(
+            initial,
+            state=QualificationState.RECOVERING,
+            previous_epoch_id="epoch-old",
+            facts=(fact,),
+            fact_digests=((fact.fact_id, fact.digest),),
+        )
 
 
 @pytest.mark.parametrize(

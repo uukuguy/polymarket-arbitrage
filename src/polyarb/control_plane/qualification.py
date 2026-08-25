@@ -333,6 +333,11 @@ class QualificationDecision:
             )
             if self.invalidation_reason not in BREAKING_REASONS:
                 raise QualificationError("invalidation_reason must be breaking")
+        if self.state is QualificationState.INVALIDATED:
+            if self.invalidated_at is None or self.invalidation_reason is None:
+                raise QualificationError("invalidated decision needs exact breaker metadata")
+        elif self.invalidated_at is not None or self.invalidation_reason is not None:
+            raise QualificationError("only invalidated decisions may carry invalidation metadata")
         for field in ("max_gap_seconds", "coverage_seconds", "progress_count", "successful_count"):
             value = getattr(self, field)
             if value is not None:
@@ -354,13 +359,27 @@ class QualificationDecision:
         object.__setattr__(self, "fact_digests", expected_digests)
         if self.last_fact_at is None and facts:
             object.__setattr__(self, "last_fact_at", facts[-1].observed_at)
-        if self.state is QualificationState.INVALIDATED:
-            if self.invalidated_at is None or self.invalidation_reason is None:
-                raise QualificationError("invalidated decision needs exact breaker metadata")
         if self.state is QualificationState.QUALIFIED and self.qualified_at is None:
             raise QualificationError("qualified decision needs exact certificate boundary")
         if self.state is not QualificationState.QUALIFIED and self.qualified_at is not None:
             raise QualificationError("only qualified decisions may carry qualified_at")
+        if self.state is QualificationState.RECOVERING:
+            if self.previous_epoch_id is None:
+                raise QualificationError("recovering decision needs previous_epoch_id")
+            if (
+                self.last_fact_at is not None
+                or facts
+                or self.contained_recoveries
+                or self.max_gap_seconds != 0
+                or self.coverage_seconds != 0
+                or self.progress_count is not None
+                or self.successful_count is not None
+                or self.signature_counts
+                or self.recovery_confirmed_at is not None
+            ):
+                raise QualificationError(
+                    "recovering decision may carry only previous epoch identity"
+                )
         signatures = tuple(self.signature_counts)
         if len({signature for signature, _count in signatures}) != len(signatures):
             raise QualificationError("signature counts must have unique signatures")
@@ -495,21 +514,43 @@ class RollingQualificationPolicy:
 
     def recovering(
         self,
-        *,
         previous_epoch: str | QualificationDecision,
+        *,
         started_at: datetime,
     ) -> QualificationDecision:
+        """Create a fresh recovery boundary without mutating its old epoch."""
+
+        started = _aware(started_at, field="started_at")
         if isinstance(previous_epoch, QualificationDecision):
-            return replace(
-                previous_epoch,
+            if previous_epoch.state is not QualificationState.INVALIDATED:
+                raise QualificationError("recovery must derive from an invalidated epoch")
+            previous_id = previous_epoch.epoch_id
+            return QualificationDecision(
                 state=QualificationState.RECOVERING,
-                recovery_confirmed_at=None,
+                epoch_id=self._derive_epoch_id(
+                    started,
+                    previous_epoch.policy_version,
+                    previous_epoch.release_id,
+                    previous_epoch.config_id,
+                    previous_epoch.role_identity,
+                    previous_epoch_id=previous_id,
+                ),
+                started_at=started,
+                policy_version=previous_epoch.policy_version,
+                release_id=previous_epoch.release_id,
+                config_id=previous_epoch.config_id,
+                role_identity=previous_epoch.role_identity,
+                previous_epoch_id=previous_id,
             )
         if type(previous_epoch) is not str or not previous_epoch:
             raise QualificationError("previous_epoch must be a non-empty epoch ID")
         return replace(
-            self.new_epoch(started_at=started_at, epoch_id=previous_epoch),
+            self.new_epoch(
+                started_at=started,
+                previous_epoch_id=previous_epoch,
+            ),
             state=QualificationState.RECOVERING,
+            previous_epoch_id=previous_epoch,
         )
 
     def apply(self, state: QualificationDecision, fact: QualificationFact) -> QualificationDecision:
@@ -539,21 +580,11 @@ class RollingQualificationPolicy:
             raise QualificationError("facts must be ordered by observed_at")
 
         if state.state is QualificationState.INVALIDATED:
-            if fact.reason == "recovery.started":
-                return self._append_fact(
-                    state,
-                    fact,
-                    next_state=QualificationState.RECOVERING,
-                )
-            if self._is_recovery_confirmation(fact):
-                return self._open_recovered_epoch(state, fact)
-            raise QualificationTerminalError("invalidated epoch accepts recovery only")
+            raise QualificationTerminalError("invalidated epoch is immutable")
 
         if state.state is QualificationState.RECOVERING:
             if self._is_recovery_confirmation(fact):
                 return self._open_recovered_epoch(state, fact)
-            if fact.reason == "recovery.started":
-                return self._append_fact(state, fact, next_state=QualificationState.RECOVERING)
             raise QualificationError("recovering epoch awaits recovery confirmation")
 
         breaking_reason = self._breaking_reason(state, fact)
@@ -567,9 +598,11 @@ class RollingQualificationPolicy:
                 qualified_at=None,
             )
 
-        appended = self._append_fact(state, fact)
         if fact.reason == "recovery.started":
-            return replace(appended, state=QualificationState.RECOVERING)
+            raise QualificationError(
+                "recovery.started must use recovering() as a separate epoch boundary"
+            )
+        appended = self._append_fact(state, fact)
         if appended.coverage_seconds >= self.required_seconds and fact.evidence_complete:
             boundary = appended.started_at + timedelta(seconds=self.required_seconds)
             return replace(
@@ -695,29 +728,30 @@ class RollingQualificationPolicy:
 
     def _open_recovered_epoch(
         self,
-        invalidated: QualificationDecision,
+        recovering: QualificationDecision,
         fact: QualificationFact,
     ) -> QualificationDecision:
+        previous_epoch_id = recovering.previous_epoch_id or recovering.epoch_id
         new_epoch_id = self._derive_epoch_id(
             fact.observed_at,
-            fact.policy_version or invalidated.policy_version,
-            fact.release_id or invalidated.release_id,
-            fact.config_id or invalidated.config_id,
-            fact.role_identity or invalidated.role_identity,
-            previous_epoch_id=invalidated.epoch_id,
+            fact.policy_version or recovering.policy_version,
+            fact.release_id or recovering.release_id,
+            fact.config_id or recovering.config_id,
+            fact.role_identity or recovering.role_identity,
+            previous_epoch_id=previous_epoch_id,
             recovery_fact=fact,
         )
-        roles = fact.role_identity if fact.role_identity is not None else invalidated.role_identity
+        roles = fact.role_identity if fact.role_identity is not None else recovering.role_identity
         return QualificationDecision(
             state=QualificationState.ACCUMULATING,
             epoch_id=new_epoch_id,
             started_at=fact.observed_at,
-            policy_version=fact.policy_version or invalidated.policy_version,
-            release_id=fact.release_id or invalidated.release_id,
-            config_id=fact.config_id or invalidated.config_id,
+            policy_version=fact.policy_version or recovering.policy_version,
+            release_id=fact.release_id or recovering.release_id,
+            config_id=fact.config_id or recovering.config_id,
             role_identity=_identity_tuple(roles, field="role_identity"),
             last_fact_at=fact.observed_at,
-            previous_epoch_id=invalidated.epoch_id,
+            previous_epoch_id=previous_epoch_id,
             facts=(fact,),
             fact_digests=((fact.fact_id, fact.digest),),
             recovery_confirmed_at=fact.observed_at,
