@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -15,6 +16,7 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from .alert_delivery import DEFAULT_RUNTIME_DASHBOARD_URL, runtime_incident_transition_payload
 from .models import (
     AlertDeliveryLease,
     CheckpointReceipt,
@@ -163,6 +165,112 @@ _SNAPSHOT_ACTION_RESULTS = frozenset(
 _SNAPSHOT_QUALIFICATION_STATES = frozenset(
     {"accumulating", "invalidated", "recovering", "qualified"}
 )
+_ALERT_BOUNDED_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:/._ @#=+-]{0,255}$")
+_ALERT_SECRET_WORDS = ("secret", "token", "password", "api_key", "apikey", "authorization")
+_ALERT_ACTIONS = frozenset(
+    {
+        "none",
+        "heartbeat-job",
+        "cancel-job",
+        "retry-job",
+        "reclaim-job",
+        "probe-circuit",
+        "restart-worker-process",
+        "restart-machine",
+    }
+)
+_ALERT_QUALIFICATION_IMPACTS = frozenset(
+    {"none", "unknown", "delayed", "invalidated", "recovering", "qualified", "breaking"}
+)
+
+
+def _safe_alert_text(value: object, *, max_len: int = 256) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > max_len:
+        return None
+    if not _ALERT_BOUNDED_TEXT.fullmatch(value):
+        return None
+    lower = value.lower()
+    if any(word in lower for word in _ALERT_SECRET_WORDS):
+        return None
+    return value
+
+
+def _alert_transition(kind: str) -> str:
+    if kind == "recovered":
+        return "recovered"
+    if kind == "recovery-started":
+        return "recovery-started"
+    if kind == "escalated":
+        return "escalated"
+    return "detected"
+
+
+def _alert_action(kind: str, detail: Mapping[str, object]) -> str:
+    action = _safe_alert_text(detail.get("action_type")) or _safe_alert_text(
+        detail.get("action")
+    )
+    if action in _ALERT_ACTIONS:
+        return action
+    if kind == "recovered":
+        return "none"
+    if kind == "recovery-started":
+        return "reclaim-job"
+    if kind in {"circuit-opened", "circuit-probe-failed"}:
+        return "probe-circuit"
+    if kind == "attempt-failed":
+        return "retry-job"
+    return "none"
+
+
+def _alert_qualification_impact(kind: str, detail: Mapping[str, object]) -> str:
+    impact = _safe_alert_text(detail.get("qualification_impact"))
+    if impact in _ALERT_QUALIFICATION_IMPACTS:
+        return impact
+    if detail.get("qualification_breaking") is True:
+        return "breaking"
+    if kind == "recovered":
+        return "none"
+    if kind == "recovery-started":
+        return "breaking"
+    return "unknown"
+
+
+def _alert_reason(kind: str, detail: Mapping[str, object]) -> str:
+    for field in ("reason_code", "reason", "error_class", "failure_class"):
+        reason = _safe_alert_text(detail.get(field))
+        if reason is not None:
+            return reason
+    return kind
+
+
+def _incident_alert_payload(
+    *,
+    incident_key: str,
+    component: str,
+    kind: str,
+    detail: Mapping[str, object],
+    now: datetime,
+    acceptance_run_id: str | None = None,
+) -> dict[str, object]:
+    return runtime_incident_transition_payload(
+        transition=_alert_transition(kind),
+        incident_id=incident_key,
+        incident_key=incident_key,
+        component=component,
+        source="transactional-control-plane",
+        job_key=_safe_alert_text(detail.get("job_key")),
+        stage=(
+            _safe_alert_text(detail.get("stage"), max_len=128)
+            or _safe_alert_text(detail.get("job_type"), max_len=128)
+            or component
+        ),
+        reason=_alert_reason(kind, detail),
+        action=_alert_action(kind, detail),
+        qualification_impact=_alert_qualification_impact(kind, detail),
+        dashboard_url=DEFAULT_RUNTIME_DASHBOARD_URL,
+        occurred_at=now,
+        acceptance_run_id=acceptance_run_id,
+    )
 
 
 def _set_structure_read_timeouts(cursor: psycopg.Cursor[Any], *, read_only: bool) -> None:
@@ -5606,6 +5714,9 @@ class PostgresControlPlane:
                 kind=kind,
                 detail={
                     **detail,
+                    "job_key": lease.job_key,
+                    "stage": detail.get("stage", component),
+                    "error_class": error_class,
                     "consecutive_failures": failures,
                     "circuit_state": circuit_state,
                     "next_probe_at": next_attempt_at.isoformat(),
@@ -5642,9 +5753,12 @@ class PostgresControlPlane:
                     """
                 SELECT outbox_id, incident_event_id, channel, payload, lease_epoch, attempt_count
                 FROM m1_alert_outbox
-                WHERE (state IN ('pending', 'retryable') AND next_attempt_at <= %s)
+                WHERE (
+                    state IN ('pending', 'retryable')
+                    AND COALESCE(next_attempt_at, created_at) <= %s
+                )
                    OR (state = 'retryable' AND lease_expires_at <= %s)
-                ORDER BY next_attempt_at, created_at, outbox_id
+                ORDER BY COALESCE(next_attempt_at, created_at), created_at, outbox_id
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
                 """,
@@ -5655,10 +5769,11 @@ class PostgresControlPlane:
                     """
                 SELECT outbox_id, incident_event_id, channel, payload, lease_epoch, attempt_count
                 FROM m1_alert_outbox
-                WHERE ((state IN ('pending', 'retryable') AND next_attempt_at <= %s)
+                WHERE ((state IN ('pending', 'retryable')
+                    AND COALESCE(next_attempt_at, created_at) <= %s)
                    OR (state = 'retryable' AND lease_expires_at <= %s))
                   AND payload->>'acceptance_run_id' = %s
-                ORDER BY next_attempt_at, created_at, outbox_id
+                ORDER BY COALESCE(next_attempt_at, created_at), created_at, outbox_id
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
                 """,
@@ -5777,6 +5892,14 @@ class PostgresControlPlane:
             if cursor.fetchone() is not None:
                 return True
             event_id = str(uuid4())
+            detail_payload = {
+                "job_key": lease.job_key,
+                "lease_epoch": lease.lease_epoch,
+                "component": component,
+                "reason": "runtime-healthy",
+                "action_type": "none",
+                "qualification_impact": "none",
+            }
             cursor.execute(
                 """
                 INSERT INTO m1_incident_events (
@@ -5786,16 +5909,18 @@ class PostgresControlPlane:
                 (
                     event_id,
                     incident_key,
-                    Jsonb(
-                        {
-                            "job_key": lease.job_key,
-                            "lease_epoch": lease.lease_epoch,
-                            "component": component,
-                        }
-                    ),
+                    Jsonb(detail_payload),
                     idempotency_key,
                     now,
                 ),
+            )
+            alert_payload = _incident_alert_payload(
+                incident_key=incident_key,
+                component=component,
+                kind="recovered",
+                detail=detail_payload,
+                now=now,
+                acceptance_run_id=acceptance_run_id,
             )
             for channel in channels:
                 cursor.execute(
@@ -5810,17 +5935,7 @@ class PostgresControlPlane:
                         str(uuid4()),
                         event_id,
                         channel,
-                        Jsonb(
-                            {
-                                "incident_key": incident_key,
-                                "kind": "recovered",
-                                **(
-                                    {}
-                                    if acceptance_run_id is None
-                                    else {"acceptance_run_id": acceptance_run_id}
-                                ),
-                            }
-                        ),
+                        Jsonb(alert_payload),
                         now,
                         now,
                     ),
@@ -5881,7 +5996,7 @@ class PostgresControlPlane:
 
     @staticmethod
     def _record_incident_event(
-        cursor: object,
+        cursor: Any,
         *,
         incident_key: str,
         dedupe_key: str,
@@ -5916,6 +6031,13 @@ class PostgresControlPlane:
         if existing is not None:
             return str(existing["incident_event_id"])
         event_id = str(uuid4())
+        alert_payload = _incident_alert_payload(
+            incident_key=incident_key,
+            component=component,
+            kind=kind,
+            detail=detail,
+            now=now,
+        )
         cursor.execute(
             """
             INSERT INTO m1_incident_events (
@@ -5937,7 +6059,7 @@ class PostgresControlPlane:
                     str(uuid4()),
                     event_id,
                     channel,
-                    Jsonb({"incident_key": incident_key, "kind": kind}),
+                    Jsonb(alert_payload),
                     now,
                     now,
                 ),

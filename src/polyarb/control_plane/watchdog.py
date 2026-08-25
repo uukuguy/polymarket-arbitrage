@@ -7,6 +7,12 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from .alert_delivery import (
+    DEFAULT_RUNTIME_DASHBOARD_URL,
+    render_runtime_incident_message,
+    runtime_incident_transition_payload,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeObservation:
@@ -14,6 +20,13 @@ class RuntimeObservation:
 
     healthy: bool
     failures: tuple[str, ...]
+    incident_id: str = "runtime-watchdog"
+    component: str = "runtime-watchdog"
+    source: str = "independent-runtime-watchdog"
+    job_key: str | None = None
+    stage: str | None = None
+    action: str = "restart-machine"
+    qualification_impact: str = "unknown"
 
 
 class RestartEventGate:
@@ -81,6 +94,9 @@ class ProgressGate:
                 healthy=False,
                 failures=(*observation.failures, "control-api:invalid-job-counts"),
             )
+        assert isinstance(succeeded, int)
+        assert isinstance(runnable, int)
+        assert isinstance(leased, int)
         pending = runnable + leased > 0
         started_pending_work = pending and not self._was_pending
         if (
@@ -237,15 +253,19 @@ async def run_watchdog_service(
     *,
     observe: Callable[[], RuntimeObservation],
     send: Callable[[str], Awaitable[None]],
-    persist_transition: Callable[..., Awaitable[None]] | None = None,
+    persist_transition: Callable[..., Awaitable[object]] | None = None,
     on_check: Callable[[RuntimeObservation], Awaitable[None]] | None = None,
     interval_seconds: float,
     stop_event: asyncio.Event,
     wait: Callable[[float], Awaitable[None]] | None = None,
+    now: Callable[[], datetime] | None = None,
+    dashboard_url: str = DEFAULT_RUNTIME_DASHBOARD_URL,
 ) -> dict[str, object]:
     """Page on a health transition; repeated identical failures do not storm chat."""
     if interval_seconds <= 0:
         raise ValueError("interval_seconds must be positive")
+    if not dashboard_url:
+        raise ValueError("dashboard_url must be non-empty")
 
     async def wait_for_next_tick(seconds: float) -> None:
         try:
@@ -254,19 +274,68 @@ async def run_watchdog_service(
             return
 
     sleep = wait or wait_for_next_tick
+    clock = now or (lambda: datetime.now(UTC))
     previous_healthy: bool | None = None
+    break_glass_sent = False
     checks = 0
     alerts = 0
     while not stop_event.is_set():
+        tick_at = clock().astimezone(UTC)
         observation = await asyncio.to_thread(observe)
         checks += 1
         if on_check is not None:
             await on_check(observation)
-        if previous_healthy is None or observation.healthy != previous_healthy:
-            if persist_transition is not None:
-                await persist_transition(observation, recovered=observation.healthy)
-            await send(render_alert(observation, recovered=observation.healthy))
+        if persist_transition is not None:
+            proposal = _runtime_transition_payload(
+                observation,
+                transition="recovered" if observation.healthy else "detected",
+                occurred_at=tick_at,
+                dashboard_url=dashboard_url,
+            )
+            try:
+                await persist_transition(proposal)
+                break_glass_sent = False
+            except (OSError, ValueError):
+                if not break_glass_sent:
+                    await send(
+                        "M1 runtime event writer unavailable; Telegram is in "
+                        "break-glass mode and the dashboard ledger may be stale."
+                    )
+                    break_glass_sent = True
+                    alerts += 1
+        elif previous_healthy is None or observation.healthy != previous_healthy:
+            payload = _runtime_transition_payload(
+                observation,
+                transition="recovered" if observation.healthy else "detected",
+                occurred_at=tick_at,
+                dashboard_url=dashboard_url,
+            )
+            await send(render_runtime_incident_message(payload))
             alerts += 1
         previous_healthy = observation.healthy
         await sleep(interval_seconds)
     return {"status": "stopped", "checks": checks, "alerts": alerts}
+
+
+def _runtime_transition_payload(
+    observation: RuntimeObservation,
+    *,
+    transition: str,
+    occurred_at: datetime,
+    dashboard_url: str,
+) -> dict[str, object]:
+    reason = observation.failures[0] if observation.failures else "runtime-healthy"
+    return runtime_incident_transition_payload(
+        transition=transition,
+        incident_id=observation.incident_id,
+        incident_key=f"runtime-watchdog:{observation.source}",
+        component=observation.component,
+        source=observation.source,
+        job_key=observation.job_key,
+        stage=observation.stage,
+        reason=reason,
+        action="none" if transition == "recovered" else observation.action,
+        qualification_impact=observation.qualification_impact,
+        dashboard_url=dashboard_url,
+        occurred_at=occurred_at.astimezone(UTC),
+    )

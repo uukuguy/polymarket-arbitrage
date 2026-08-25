@@ -178,8 +178,8 @@ def test_watchdog_service_pages_once_then_sends_recovery_on_state_transition() -
     )
 
     assert result == {"status": "stopped", "checks": 3, "alerts": 2}
-    assert delivered[0].startswith("M1 runtime incident:")
-    assert delivered[1].startswith("M1 runtime recovered:")
+    assert delivered[0].startswith("M1 runtime DETECTED")
+    assert delivered[1].startswith("M1 runtime RECOVERED")
 
 
 def test_watchdog_service_emits_a_heartbeat_for_every_completed_check() -> None:
@@ -229,18 +229,18 @@ def test_watchdog_persists_each_state_transition_before_telegram() -> None:
         )
     )
     delivered: list[str] = []
-    persisted: list[tuple[bool, tuple[str, ...]]] = []
+    persisted: list[dict[str, object]] = []
     stop = asyncio.Event()
 
-    async def persist(observation: RuntimeObservation, *, recovered: bool) -> None:
-        persisted.append((recovered, observation.failures))
+    async def persist(payload: dict[str, object]) -> dict[str, object]:
+        persisted.append(payload)
+        return {"transition_payload": payload}
 
     async def send(text: str) -> None:
-        assert persisted
         delivered.append(text)
 
     async def wait(_seconds: float) -> None:
-        if len(delivered) == 2:
+        if len(persisted) == 2:
             stop.set()
 
     result = asyncio.run(
@@ -254,5 +254,224 @@ def test_watchdog_persists_each_state_transition_before_telegram() -> None:
         )
     )
 
-    assert result == {"status": "stopped", "checks": 2, "alerts": 2}
-    assert persisted == [(False, ("machine:evidence/restart",)), (True, ())]
+    assert result == {"status": "stopped", "checks": 2, "alerts": 0}
+    assert [payload["transition"] for payload in persisted] == ["detected", "recovered"]
+    assert delivered == []
+
+
+def test_runtime_transition_watchdog_persists_normalized_payload_before_telegram() -> None:
+    from polyarb.control_plane.watchdog import RuntimeObservation, run_watchdog_service
+
+    observations = iter(
+        (
+            RuntimeObservation(
+                healthy=False,
+                failures=("control-api:TimeoutError",),
+                incident_id="runtime-watchdog-incident-a",
+                job_key="quote:batch:42",
+                stage="quote-fetch",
+                action="restart-machine",
+                qualification_impact="invalidated",
+            ),
+            RuntimeObservation(
+                healthy=False,
+                failures=("control-api:TimeoutError",),
+                incident_id="runtime-watchdog-incident-a",
+                job_key="quote:batch:42",
+                stage="quote-fetch",
+                action="restart-machine",
+                qualification_impact="invalidated",
+            ),
+        )
+    )
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    proposals: list[dict[str, object]] = []
+    delivered: list[str] = []
+    stop = asyncio.Event()
+
+    async def persist(payload: dict[str, object]) -> dict[str, object]:
+        proposals.append(payload)
+        return {"status": "noop"}
+
+    async def send(text: str) -> None:
+        delivered.append(text)
+
+    async def wait(_seconds: float) -> None:
+        if len(proposals) == 2:
+            stop.set()
+
+    result = asyncio.run(
+        run_watchdog_service(
+            observe=lambda: next(observations),
+            send=send,
+            persist_transition=persist,
+            interval_seconds=30,
+            stop_event=stop,
+            wait=wait,
+            now=lambda: now,
+            dashboard_url="https://dashboard.example/control-plane",
+        )
+    )
+
+    assert result == {"status": "stopped", "checks": 2, "alerts": 0}
+    assert proposals[0] == {
+        "schema_version": "m1-runtime-incident-transition-v1",
+        "transition": "detected",
+        "incident_id": "runtime-watchdog-incident-a",
+        "incident_key": "runtime-watchdog:independent-runtime-watchdog",
+        "component": "runtime-watchdog",
+        "source": "independent-runtime-watchdog",
+        "job_key": "quote:batch:42",
+        "stage": "quote-fetch",
+        "reason": "control-api:TimeoutError",
+        "action": "restart-machine",
+        "qualification_impact": "invalidated",
+        "dashboard_url": "https://dashboard.example/control-plane",
+        "occurred_at": "2030-01-01T00:00:00+00:00",
+    }
+    assert proposals[1] == proposals[0]
+    assert delivered == []
+
+
+def test_runtime_transition_watchdog_uses_persisted_duplicate_result_to_skip_delivery() -> None:
+    from polyarb.control_plane.watchdog import RuntimeObservation, run_watchdog_service
+
+    observations = iter(
+        (
+            RuntimeObservation(
+                healthy=False,
+                failures=("control-api:TimeoutError",),
+                incident_id="runtime-watchdog-incident-a",
+            ),
+        )
+    )
+    persisted: list[dict[str, object]] = []
+    delivered: list[str] = []
+    stop = asyncio.Event()
+
+    async def persist(payload: dict[str, object]) -> dict[str, object]:
+        persisted.append(payload)
+        return {"status": "duplicate"}
+
+    async def send(text: str) -> None:
+        delivered.append(text)
+
+    async def wait(_seconds: float) -> None:
+        stop.set()
+
+    result = asyncio.run(
+        run_watchdog_service(
+            observe=lambda: next(observations),
+            send=send,
+            persist_transition=persist,
+            interval_seconds=30,
+            stop_event=stop,
+            wait=wait,
+            now=lambda: datetime(2030, 1, 1, tzinfo=UTC),
+            dashboard_url="https://dashboard.example/control-plane",
+        )
+    )
+
+    assert result == {"status": "stopped", "checks": 1, "alerts": 0}
+    assert len(persisted) == 1
+    assert delivered == []
+
+
+def test_runtime_transition_watchdog_delegates_reminder_timing_to_writer() -> None:
+    from polyarb.control_plane.watchdog import RuntimeObservation, run_watchdog_service
+
+    clock = iter(
+        (
+            datetime(2030, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2030, 1, 1, 0, 14, tzinfo=UTC),
+            datetime(2030, 1, 1, 0, 15, tzinfo=UTC),
+            datetime(2030, 1, 1, 1, 14, tzinfo=UTC),
+            datetime(2030, 1, 1, 1, 15, tzinfo=UTC),
+        )
+    )
+    observation = RuntimeObservation(
+        healthy=False,
+        failures=("control-api:job-progress-stalled:901s",),
+        incident_id="runtime-watchdog-incident-a",
+        job_key="structure:bundle:7",
+        stage="structure-certify",
+        action="restart-machine",
+        qualification_impact="delayed",
+    )
+    persisted: list[dict[str, object]] = []
+    delivered: list[str] = []
+    stop = asyncio.Event()
+
+    async def persist(payload: dict[str, object]) -> dict[str, object]:
+        persisted.append(payload)
+        return {"status": "noop"}
+
+    async def send(text: str) -> None:
+        delivered.append(text)
+
+    async def wait(_seconds: float) -> None:
+        if len(persisted) == 5:
+            stop.set()
+
+    result = asyncio.run(
+        run_watchdog_service(
+            observe=lambda: observation,
+            send=send,
+            persist_transition=persist,
+            interval_seconds=30,
+            stop_event=stop,
+            wait=wait,
+            now=lambda: next(clock),
+            dashboard_url="https://dashboard.example/control-plane",
+        )
+    )
+
+    assert result == {"status": "stopped", "checks": 5, "alerts": 0}
+    assert [payload["transition"] for payload in persisted] == [
+        "detected",
+        "detected",
+        "detected",
+        "detected",
+        "detected",
+    ]
+    assert delivered == []
+
+
+def test_runtime_transition_watchdog_break_glass_pages_once_when_writer_fails() -> None:
+    from polyarb.control_plane.watchdog import RuntimeObservation, run_watchdog_service
+
+    delivered: list[str] = []
+    checks = 0
+    stop = asyncio.Event()
+
+    def observe() -> RuntimeObservation:
+        nonlocal checks
+        checks += 1
+        return RuntimeObservation(healthy=False, failures=("control-api:TimeoutError",))
+
+    async def persist(_payload: dict[str, object]) -> dict[str, object]:
+        raise OSError("writer-down")
+
+    async def send(text: str) -> None:
+        delivered.append(text)
+
+    async def wait(_seconds: float) -> None:
+        if checks == 3:
+            stop.set()
+
+    result = asyncio.run(
+        run_watchdog_service(
+            observe=observe,
+            send=send,
+            persist_transition=persist,
+            interval_seconds=30,
+            stop_event=stop,
+            wait=wait,
+        )
+    )
+
+    assert result == {"status": "stopped", "checks": 3, "alerts": 1}
+    assert delivered == [
+        "M1 runtime event writer unavailable; Telegram is in break-glass mode "
+        "and the dashboard ledger may be stale."
+    ]

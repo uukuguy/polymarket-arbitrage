@@ -289,6 +289,87 @@ def test_make_qualification_serve_executes_fake_uv_after_enable_guard(
     ]
 
 
+@pytest.mark.parametrize(
+    ("make_args", "expected_argv"),
+    [
+        (
+            ("control-plane-alert-serve", "enable=1"),
+            [
+                "run",
+                "python",
+                "-m",
+                "polyarb.cli_control_plane",
+                "alert-serve",
+                "--enable",
+                "--worker-id",
+                "control-plane-alert-service",
+                "--interval-seconds",
+                "15",
+                "--json",
+            ],
+        ),
+        (
+            (
+                "control-plane-alert-serve",
+                "enable=1",
+                "acceptance_run_id=run-a",
+                "interval_seconds=5",
+            ),
+            [
+                "run",
+                "python",
+                "-m",
+                "polyarb.cli_control_plane",
+                "alert-serve",
+                "--enable",
+                "--worker-id",
+                "control-plane-alert-service",
+                "--acceptance-run-id",
+                "run-a",
+                "--interval-seconds",
+                "5",
+                "--json",
+            ],
+        ),
+    ],
+)
+def test_make_control_plane_alert_serve_executes_fake_uv_with_optional_acceptance_scope(
+    tmp_path: Path, make_args: tuple[str, ...], expected_argv: list[str]
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env["POLYARB_SUPABASE_DB_DSN"] = "postgresql://operator@example.test/control"
+    result = subprocess.run(
+        ["make", *make_args],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _fake_uv_calls(log_path) == [expected_argv]
+
+
+def test_make_control_plane_alert_serve_requires_enable_before_fake_uv(
+    tmp_path: Path,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env["POLYARB_SUPABASE_DB_DSN"] = "postgresql://operator@example.test/control"
+    result = subprocess.run(
+        ["make", "control-plane-alert-serve"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert "enable=1" in result.stderr
+    assert _fake_uv_calls(log_path) == []
+
+
 def test_make_control_plane_preflight_help_and_dry_run_require_revision_022() -> None:
     help_result = subprocess.run(
         ["make", "help"],

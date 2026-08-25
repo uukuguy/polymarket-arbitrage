@@ -645,6 +645,39 @@ def test_alert_serve_forwards_acceptance_run_scope(monkeypatch, capsys) -> None:
     assert captured["acceptance_run_id"] == "run-a"
 
 
+def test_alert_serve_leaves_acceptance_scope_unset_for_production_claims(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
+    )
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: object())
+
+    class AlertWorker:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(cli_control_plane, "TransactionalAlertDeliveryWorker", AlertWorker)
+
+    async def run_alert_service(worker, *, interval_seconds: float, as_json: bool):
+        assert isinstance(worker, AlertWorker)
+        assert interval_seconds == 7.5
+        assert as_json is True
+        return {"status": "stopped", "turns": 1}
+
+    monkeypatch.setattr(cli_control_plane, "_run_alert_service", run_alert_service)
+    assert (
+        cli_control_plane.main(
+            ["alert-serve", "--enable", "--interval-seconds", "7.5", "--json"]
+        )
+        == 0
+    )
+    assert captured["acceptance_run_id"] is None
+
+
 def test_watchdog_requires_explicit_enable_before_any_database_connect(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 

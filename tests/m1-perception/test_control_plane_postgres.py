@@ -19,8 +19,13 @@ import pytest
 from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
 
 from polyarb.control_plane import postgres as postgres_module
+from polyarb.control_plane import runtime_event_writer
+from polyarb.control_plane.alert_delivery import render_runtime_incident_message
 from polyarb.control_plane.models import (
     JobLease,
     JobState,
@@ -180,6 +185,67 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
         ):
             connection.execute(f"TRUNCATE {table} CASCADE")
     yield PostgresControlPlane(connect)
+
+
+def test_runtime_event_writer_concurrent_first_detected_records_one_event_and_two_outbox(
+    postgres_dsn: str, control_plane: PostgresControlPlane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del control_plane
+    monkeypatch.setenv("POLYARB_RUNTIME_EVENT_WRITER_TOKEN", "test-token")
+    app = Starlette(
+        routes=[
+            Route(
+                "/runtime-events",
+                runtime_event_writer.append_runtime_event,
+                methods=["POST"],
+            )
+        ]
+    )
+    app.state.dsn = postgres_dsn
+    payload = {
+        "schema_version": "m1-runtime-incident-transition-v1",
+        "transition": "detected",
+        "incident_id": "runtime-watchdog-incident-a",
+        "incident_key": "runtime-watchdog:independent-runtime-watchdog",
+        "component": "runtime-watchdog",
+        "source": "independent-runtime-watchdog",
+        "job_key": "quote:batch:42",
+        "stage": "quote-fetch",
+        "reason": "control-api:TimeoutError",
+        "action": "restart-machine",
+        "qualification_impact": "invalidated",
+        "dashboard_url": "https://dashboard.example/control-plane",
+        "occurred_at": "2030-01-01T00:00:00+00:00",
+    }
+
+    def post(idempotency_key: str) -> dict[str, object]:
+        with TestClient(app) as client:
+            response = client.post(
+                "/runtime-events",
+                headers={
+                    "Authorization": "Bearer test-token",
+                    "Idempotency-Key": idempotency_key,
+                },
+                json=payload,
+        )
+        assert response.status_code == 201
+        return cast(dict[str, object], response.json())
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = tuple(pool.map(post, ("a" * 64, "b" * 64)))
+
+    assert sorted(str(response["status"]) for response in responses) == ["noop", "recorded"]
+    with psycopg.connect(postgres_dsn) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT kind FROM m1_incident_events")
+        assert cursor.fetchall() == [("detected",)]
+        cursor.execute("SELECT channel, payload FROM m1_alert_outbox ORDER BY channel")
+        outbox_rows = cursor.fetchall()
+    assert [row[0] for row in outbox_rows] == ["dashboard", "telegram"]
+    for _channel, outbox_payload in outbox_rows:
+        assert isinstance(outbox_payload, dict)
+        assert outbox_payload["schema_version"] == "m1-runtime-incident-transition-v1"
+        assert outbox_payload["transition"] == "detected"
+        assert "DETECTED" in render_runtime_incident_message(outbox_payload)
 
 
 def test_cloud_usage_budget_refuses_ninety_percent_without_an_artifact_bypass(
@@ -4528,6 +4594,21 @@ def test_controller_claims_are_monotonic_and_only_latest_schedules_recovery_acti
         cursor.execute("SELECT channel, state FROM m1_alert_outbox")
         assert cursor.fetchone() == ("dashboard", "pending")
 
+    recovery_started_alert = control_plane.claim_alert_delivery(
+        worker_id="alert-worker-recovery-started-rich",
+        lease_seconds=30,
+        now=now + timedelta(seconds=3),
+    )
+    assert recovery_started_alert is not None
+    body = render_runtime_incident_message(recovery_started_alert.payload)
+    assert "RECOVERY STARTED" in body
+    assert f"incident:{lease.job_key}" in body
+    assert lease.job_key in body
+    assert "structure-normalize" in body
+    assert "job.lease-expired" in body
+    assert "reclaim-job" in body
+    assert "breaking" in body
+
 
 def test_recovery_action_active_target_race_persists_one_stale_noop(
     control_plane: PostgresControlPlane,
@@ -7026,6 +7107,22 @@ def test_successful_terminal_job_closes_circuit_and_resolves_retry_incident(
     finally:
         connection.close()
 
+    recovery_alert = control_plane.claim_alert_delivery(
+        worker_id="alert-worker-recovery-rich",
+        lease_seconds=30,
+        now=now + timedelta(seconds=17),
+        acceptance_run_id="staging-retry-fault-20260815",
+    )
+    assert recovery_alert is not None
+    body = render_runtime_incident_message(recovery_alert.payload)
+    assert "RECOVERED" in body
+    assert f"incident:job-retry:{job_key}" in body
+    assert job_key in body
+    assert "structure-fetch" in body
+    assert "runtime-healthy" in body
+    assert "none" in body
+    assert "staging-retry-fault-20260815" not in body
+
 
 def test_job_recovery_lock_timeout_rolls_back_circuit_incident_event_and_alert(
     control_plane: PostgresControlPlane,
@@ -7252,6 +7349,48 @@ def test_alert_delivery_lease_records_one_receipt_and_fences_stale_worker(
             assert cursor.fetchone() == (1, "delivered", "dashboard-visible")
     finally:
         connection.close()
+
+
+def test_retryable_failure_alert_claim_renders_rich_detected_transition(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    job_key = "alert-rich:structure-fetch:timeout"
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key=job_key,
+        job_type="structure-fetch",
+        input_identity="alert-rich:structure-fetch:timeout",
+        now=now,
+    )
+    control_plane.finish_retryable_with_incident(
+        lease,
+        error_class="TimeoutError",
+        incident_key=f"incident:job-retry:{job_key}",
+        dedupe_key=f"job-retry:{job_key}",
+        component="structure-fetch",
+        summary="structure-fetch retryable failure",
+        detail={"secret_token": "must-not-leak"},
+        channels=("telegram",),
+        now=now,
+    )
+
+    alert = control_plane.claim_alert_delivery(
+        worker_id="alert-worker-runtime-rich", lease_seconds=30, now=now
+    )
+
+    assert alert is not None
+    assert alert.channel == "telegram"
+    body = render_runtime_incident_message(alert.payload)
+    assert "DETECTED" in body
+    assert f"incident:job-retry:{job_key}" in body
+    assert "structure-fetch" in body
+    assert job_key in body
+    assert "TimeoutError" in body
+    assert "retry-job" in body
+    assert "unknown" in body
+    assert "Dashboard:" in body
+    assert "secret" not in body.lower()
 
 
 def test_scoped_alert_claim_never_claims_historical_outbox(

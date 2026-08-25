@@ -827,12 +827,12 @@ control-plane-serve-quote-batch:
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane serve --enable --worker-id "$(or $(worker_id),control-plane-quote-batch)" --worker-role quote-batch --pool-turns "$(or $(pool_turns),2)" --interval-seconds "$(or $(interval_seconds),2)" --json
 
-## control-plane-alert-serve: Deliver only one named acceptance run when acceptance_run_id= is set; requires enable=1 and never replays historical outbox rows under that scope.
+## control-plane-alert-serve: Deliver due alert outbox rows; optional acceptance_run_id= filters one acceptance run.
 control-plane-alert-serve:
-	@test "$(enable)" = "1" -a -n "$(acceptance_run_id)" || (echo "usage: make control-plane-alert-serve enable=1 acceptance_run_id=<run-id> [interval_seconds=15]" >&2; exit 2)
+	@test "$(enable)" = "1" || (echo "usage: make control-plane-alert-serve enable=1 [acceptance_run_id=<run-id>] [interval_seconds=15]" >&2; exit 2)
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
-	uv run python -m polyarb.cli_control_plane alert-serve --enable --worker-id "$(or $(worker_id),control-plane-alert-service)" --acceptance-run-id "$(acceptance_run_id)" --interval-seconds "$(or $(interval_seconds),15)" --json
+	uv run python -m polyarb.cli_control_plane alert-serve --enable --worker-id "$(or $(worker_id),control-plane-alert-service)" $(if $(acceptance_run_id),--acceptance-run-id "$(acceptance_run_id)") --interval-seconds "$(or $(interval_seconds),15)" --json
 
 ## control-plane-watchdog-serve: Independently page Telegram when the formal API or exact business Machines fail; soak_run_id= binds evidence freshness to one formal run.
 control-plane-watchdog-serve:

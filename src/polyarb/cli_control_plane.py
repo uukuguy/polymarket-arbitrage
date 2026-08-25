@@ -712,8 +712,8 @@ async def _send_runtime_watchdog_telegram(settings: Settings, text: str) -> None
 
 
 async def _persist_runtime_watchdog_transition(
-    settings: Settings, observation: RuntimeObservation, *, recovered: bool
-) -> None:
+    settings: Settings, payload: dict[str, object]
+) -> object:
     """Submit redacted transition facts to the private ledger writer.
 
     The alert process retains its deliberately database-free boundary.  The
@@ -723,19 +723,13 @@ async def _persist_runtime_watchdog_transition(
     token = settings.runtime_event_writer_token.get_secret_value()
     if not url or not token:
         raise OSError("runtime-event-writer-unconfigured")
-    payload = json.dumps(
-        {
-            "kind": "recovered" if recovered else "detected",
-            "failures": list(observation.failures),
-            "occurred_at": datetime.now(UTC).isoformat(),
-        }
-    ).encode()
-    idempotency_key = sha256(payload).hexdigest()
+    body = json.dumps(payload, sort_keys=True).encode()
+    idempotency_key = sha256(body).hexdigest()
 
-    def post() -> None:
+    def post() -> object:
         request = Request(
             f"{url}/runtime-events",
-            data=payload,
+            data=body,
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {token}",
@@ -746,8 +740,12 @@ async def _persist_runtime_watchdog_transition(
         with urlopen(request, timeout=5) as response:  # noqa: S310 -- configured private endpoint
             if response.status != 201:
                 raise OSError("runtime-event-writer-rejected")
+            response_payload = json.loads(response.read())
+        if not isinstance(response_payload, dict):
+            raise OSError("runtime-event-writer-invalid-response")
+        return response_payload
 
-    await asyncio.to_thread(post)
+    return await asyncio.to_thread(post)
 
 
 async def _run_runtime_watchdog_service(
@@ -778,17 +776,8 @@ async def _run_runtime_watchdog_service(
             as_json=args.json,
         )
 
-    async def persist_transition(observation: RuntimeObservation, *, recovered: bool) -> None:
-        try:
-            await _persist_runtime_watchdog_transition(settings, observation, recovered=recovered)
-        except (OSError, ValueError):
-            # Telegram is deliberately independent: loss of the dashboard
-            # ledger must be visible immediately rather than stopping checks.
-            await _send_runtime_watchdog_telegram(
-                settings,
-                "M1 runtime dashboard ledger unavailable; Telegram remains the active "
-                "incident record until the writer recovers.",
-            )
+    async def persist_transition(payload: dict[str, object]) -> object:
+        return await _persist_runtime_watchdog_transition(settings, payload)
 
     return await run_watchdog_service(
         observe=lambda: _read_runtime_watchdog_observation(

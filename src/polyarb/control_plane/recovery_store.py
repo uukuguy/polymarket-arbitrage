@@ -20,6 +20,7 @@ from psycopg import Cursor, sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from .alert_delivery import DEFAULT_RUNTIME_DASHBOARD_URL, runtime_incident_transition_payload
 from .recovery_models import (
     RecoveryActionType,
     RecoveryBudget,
@@ -1175,6 +1176,20 @@ def _record_recovery_incident(
             raise RecoveryActionConflict("incident event idempotency raced")
         event_id = str(existing["incident_event_id"])
 
+    alert_payload = runtime_incident_transition_payload(
+        transition="recovery-started",
+        incident_id=incident_key,
+        incident_key=incident_key,
+        component=component,
+        source="runtime-reconciler",
+        job_key=target_id,
+        stage="recovery-started",
+        reason=decision.reason_code,
+        action=decision.action.value if decision.action else "none",
+        qualification_impact="breaking" if decision.qualification_breaking else "none",
+        dashboard_url=DEFAULT_RUNTIME_DASHBOARD_URL,
+        occurred_at=now,
+    )
     for channel in channels:
         cursor.execute(
             """
@@ -1188,7 +1203,7 @@ def _record_recovery_incident(
                 str(uuid4()),
                 event_id,
                 channel,
-                Jsonb({"incident_key": incident_key, "kind": "recovery-started"}),
+                Jsonb(alert_payload),
                 now,
                 now,
             ),
