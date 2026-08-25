@@ -750,6 +750,57 @@ def test_manual_keeps_reviewed_operator_safety_facts() -> None:
     assert "手工检查 `/status`" in text
 
 
+def test_self_healing_operator_surfaces_are_documented_with_boundaries() -> None:
+    text = (ROOT / MANUAL).read_text()
+
+    for phrase in (
+        "`make smoke-control-plane-dashboard`",
+        "任务本身事件触发",
+        "watchdog 兜底检测",
+        "durable incident",
+        "outbox",
+        "15 分钟提醒",
+        "每小时提醒",
+        "break-glass",
+        "读边界",
+        "写边界",
+        "Runtime overview",
+        "Active tasks",
+        "Incident timeline",
+        "Rolling qualification",
+    ):
+        assert phrase in text
+
+
+def test_self_healing_learning_chapter_87_is_indexed_after_86() -> None:
+    chapter = ROOT / "docs/learning/87-任务自愈与滚动验收.md"
+    assert chapter.is_file()
+    text = chapter.read_text()
+
+    for phrase in (
+        "## 30 秒心智模型",
+        "任务本身事件触发",
+        "watchdog",
+        "durable incident",
+        "outbox",
+        "Rolling qualification",
+        "break-glass",
+        "read boundary",
+        "mutation boundary",
+        "## 设计取舍",
+        "## 自检题",
+        "## FAQ 增量",
+    ):
+        assert phrase in text
+
+    index = (ROOT / "docs/learning/00-INDEX.md").read_text()
+    previous = "[滚动资格证书与自动重开](86-滚动资格证书与自动重开.md)"
+    current = "[任务自愈与滚动验收](87-任务自愈与滚动验收.md)"
+    assert current in index
+    assert index.index(previous) < index.index(current)
+    assert "84-任务自愈与滚动验收.md" not in index
+
+
 def test_phase_054_operator_commands_are_centralized_and_documented() -> None:
     read_only = (
         "l3-evidence-status",

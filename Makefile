@@ -1042,7 +1042,7 @@ logs-tail-axiom:
 
 .PHONY: dashboard-dev dashboard-fixture-api dashboard-build dashboard-typecheck dashboard-deploy smoke-l2-dashboard
 .PHONY: smoke-perception-dashboard qualify-perception-local qualify-perception-prod-readonly
-.PHONY: smoke-operator-console
+.PHONY: smoke-operator-console smoke-control-plane-dashboard
 
 ## dashboard-dev: 本地起 dashboard (next dev :3000)
 dashboard-dev:
@@ -1138,6 +1138,38 @@ smoke-operator-console:
 	  200) echo "  /perception/console: 200 reachable" ;; \
 	  *) echo "  /perception/console: $$code operator visibility FAIL"; exit 1 ;; \
 	esac
+
+## smoke-control-plane-dashboard: Verify authenticated /control-plane renders all self-healing operator panels
+## Usage: make smoke-control-plane-dashboard dashboard_url=https://... cookie_file=/path/to/cookie.jar
+##        make smoke-control-plane-dashboard dashboard_url=https://... auth_header_file=/path/to/header.txt
+## Requires a pre-existing authenticated cookie jar or a file containing one HTTP header.
+## Rejects auth/login HTML even when it returns HTTP 200; does not claim data freshness.
+smoke-control-plane-dashboard:
+	@if [ -z "$(cookie_file)" ] && [ -z "$(auth_header_file)" ]; then echo "usage: make smoke-control-plane-dashboard dashboard_url=<url> cookie_file=<cookie.jar> or auth_header_file=<header-file>" >&2; exit 2; fi
+	@if [ -n "$(cookie_file)" ] && [ ! -f "$(cookie_file)" ]; then echo "cookie_file does not exist" >&2; exit 2; fi
+	@if [ -n "$(auth_header_file)" ] && [ ! -f "$(auth_header_file)" ]; then echo "auth_header_file does not exist" >&2; exit 2; fi
+	@DASHBOARD_URL="$${DASHBOARD_URL:-$(or $(dashboard_url),https://polymarket-arbitrage-jiangwen-su-s-projects.vercel.app)}"; \
+	URL="$${DASHBOARD_URL%/}/control-plane"; \
+	body=$$(mktemp); \
+	trap 'rm -f "$$body"' EXIT; \
+	echo ">> smoke-control-plane-dashboard — GET $$URL"; \
+	if [ -n "$(cookie_file)" ]; then \
+	  code=$$(curl --disable --request GET --connect-timeout 3 --max-time 10 --retry 0 -sS --cookie "$(cookie_file)" -o "$$body" -w "%{http_code}" "$$URL") || { echo "  /control-plane: transport FAIL" >&2; exit 1; }; \
+	else \
+	  code=$$(curl --disable --request GET --connect-timeout 3 --max-time 10 --retry 0 -sS --header "@$(auth_header_file)" -o "$$body" -w "%{http_code}" "$$URL") || { echo "  /control-plane: transport FAIL" >&2; exit 1; }; \
+	fi; \
+	if [ "$$code" != "200" ]; then echo "  /control-plane: $$code FAIL" >&2; exit 1; fi; \
+	if grep -Eiq 'Vercel Authentication|Magic-link login|<h1[^>]*>Login|href="/login"|/login' "$$body"; then \
+	  echo "  /control-plane: auth/login page returned HTTP 200; authenticated operator body required" >&2; \
+	  exit 1; \
+	fi; \
+	for panel in "Runtime overview" "Active tasks" "Incident timeline" "Rolling qualification"; do \
+	  if ! grep -Fq "$$panel" "$$body"; then \
+	    echo "  /control-plane: missing authenticated panel: $$panel" >&2; \
+	    exit 1; \
+	  fi; \
+	done; \
+	echo "  /control-plane: authenticated operator panels OK"
 
 ## qualify-perception-local: Deterministic observer-only conformance gate for the M1 qualification evaluator
 ## Uses committed synthetic evidence; PASS does not claim production readiness.

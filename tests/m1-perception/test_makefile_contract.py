@@ -63,6 +63,44 @@ def _fake_uv_calls(log_path: Path) -> list[list[str]]:
     return [json.loads(line)["argv"] for line in log_path.read_text().splitlines() if line]
 
 
+def _fake_curl_env(tmp_path: Path, *, body: str, status: str = "200") -> tuple[dict[str, str], Path]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "curl-argv.jsonl"
+    fake_curl = bin_dir / "curl"
+    fake_curl.write_text(
+        "#!/usr/bin/env python3\n"
+        "from __future__ import annotations\n"
+        "import json\n"
+        "import os\n"
+        "import sys\n"
+        "args = sys.argv[1:]\n"
+        "with open(os.environ['FAKE_CURL_LOG'], 'a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps({'argv': args}, separators=(',', ':')) + '\\n')\n"
+        "body_path = None\n"
+        "for index, arg in enumerate(args):\n"
+        "    if arg in ('-o', '--output') and index + 1 < len(args):\n"
+        "        body_path = args[index + 1]\n"
+        "if body_path is not None:\n"
+        "    with open(body_path, 'w', encoding='utf-8') as handle:\n"
+        "        handle.write(os.environ.get('FAKE_CURL_BODY', ''))\n"
+        "print(os.environ.get('FAKE_CURL_STATUS', '200'), end='')\n"
+    )
+    fake_curl.chmod(0o755)
+    env = os.environ.copy()
+    env["FAKE_CURL_LOG"] = str(log_path)
+    env["FAKE_CURL_BODY"] = body
+    env["FAKE_CURL_STATUS"] = status
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    return env, log_path
+
+
+def _fake_curl_calls(log_path: Path) -> list[list[str]]:
+    if not log_path.exists():
+        return []
+    return [json.loads(line)["argv"] for line in log_path.read_text().splitlines() if line]
+
+
 # =============================================================================
 # Makefile contract — most legacy targets dry-run; qualification targets execute
 # with a fake uv binary so the Make guard/argv path is tested without live APIs.
@@ -368,6 +406,109 @@ def test_make_control_plane_alert_serve_requires_enable_before_fake_uv(
     assert result.returncode == 2
     assert "enable=1" in result.stderr
     assert _fake_uv_calls(log_path) == []
+
+
+def test_make_help_lists_control_plane_dashboard_smoke() -> None:
+    result = subprocess.run(
+        ["make", "help"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, f"make help failed: {result.stderr}"
+    assert "smoke-control-plane-dashboard:" in result.stdout
+    assert "authenticated /control-plane" in result.stdout
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    assert "auth_header_file" in makefile
+    assert "auth_header=" not in makefile
+
+
+def test_smoke_control_plane_dashboard_requires_authenticated_input_before_curl(
+    tmp_path: Path,
+) -> None:
+    env, log_path = _fake_curl_env(
+        tmp_path,
+        body="<main><h1>auth page</h1></main>",
+    )
+    result = subprocess.run(
+        ["make", "smoke-control-plane-dashboard", "dashboard_url=http://dashboard.test"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert "cookie_file=<cookie.jar> or auth_header_file=<header-file>" in result.stderr
+    assert _fake_curl_calls(log_path) == []
+
+
+def test_smoke_control_plane_dashboard_rejects_auth_or_empty_200_page(
+    tmp_path: Path,
+) -> None:
+    cookie_file = tmp_path / "session.cookie"
+    cookie_file.write_text("session=fixture\n")
+    env, log_path = _fake_curl_env(
+        tmp_path,
+        body="<main><h1>Login</h1><p>Vercel Authentication</p></main>",
+    )
+    result = subprocess.run(
+        [
+            "make",
+            "smoke-control-plane-dashboard",
+            "dashboard_url=http://dashboard.test",
+            f"cookie_file={cookie_file}",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
+    assert "auth/login page returned HTTP 200" in result.stderr
+    calls = _fake_curl_calls(log_path)
+    assert len(calls) == 1
+    joined = " ".join(calls[0])
+    assert "--request GET" in joined
+    assert "--cookie" in joined
+    assert "http://dashboard.test/control-plane" in joined
+
+
+def test_smoke_control_plane_dashboard_accepts_authenticated_operator_body(
+    tmp_path: Path,
+) -> None:
+    header_file = tmp_path / "headers.txt"
+    header_file.write_text("Authorization: Bearer fixture\n")
+    env, _log_path = _fake_curl_env(
+        tmp_path,
+        body=(
+            "<main><h2>Runtime overview</h2><h2>Active tasks</h2>"
+            "<h2>Incident timeline</h2><h2>Rolling qualification</h2></main>"
+        ),
+    )
+    result = subprocess.run(
+        [
+            "make",
+            "smoke-control-plane-dashboard",
+            "dashboard_url=http://dashboard.test",
+            f"auth_header_file={header_file}",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "/control-plane: authenticated operator panels OK" in result.stdout
+    assert "Bearer fixture" not in result.stdout
+    assert "Bearer fixture" not in result.stderr
 
 
 def test_make_control_plane_preflight_help_and_dry_run_require_revision_022() -> None:

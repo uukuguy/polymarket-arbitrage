@@ -200,7 +200,7 @@ git commit -m "feat(05.6-205): page runtime recovery transitions"
 - Modify: `Makefile`
 - Modify: `tests/m1-perception/test_makefile_contract.py`
 - Modify: `docs/M1-市场感知平台使用手册.md`
-- Create: `docs/learning/84-任务自愈与滚动验收.md`
+- Create: `docs/learning/87-任务自愈与滚动验收.md`
 - Modify: `docs/learning/00-INDEX.md`
 - Create: `.planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/05.6-205-SUMMARY.md`
 
@@ -209,7 +209,7 @@ git commit -m "feat(05.6-205): page runtime recovery transitions"
 Assert `make smoke-control-plane-dashboard` checks authenticated page text for
 runtime, incident, recovery, and qualification panels; docs list every new
 read-only command and mutation boundary. The teaching file is exactly
-`docs/learning/84-任务自愈与滚动验收.md` and the index places it after chapter 83.
+`docs/learning/87-任务自愈与滚动验收.md` and the index places it after chapter 86.
 
 - [ ] **Step 2: Implement target and documentation**
 

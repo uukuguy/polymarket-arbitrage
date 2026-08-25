@@ -98,6 +98,7 @@
 | 84 | [任务局部事实与事件驱动自愈](84-任务局部事实与事件驱动自愈.md) | heartbeat 与 progress 为什么不能混为一谈 / terminal fact 如何和业务结果原子提交 / timer 与 watchdog 为什么只能做兜底 / 八任务真实终态门如何防止假阳性 |
 | 85 | [有围栏的截止时间协调器](85-有围栏的截止时间协调器.md) | 任务事实如何进入纯 deadline 判断 / controller、job、action 三层租约 / durable budget 与 active-target 仲裁 / stale-noop 与 fail-loud 错误的区别 / 只读 status 与 job-level 权限边界 |
 | 86 | [滚动资格证书与自动重开](86-滚动资格证书与自动重开.md) | contained 与 breaking 如何决定 epoch 命运 / ingest_seq cursor 为什么不丢迟到事实 / freshness 双视角 / certificate read+reverify trust 边界 / Make 入口权限 |
+| 87 | [任务自愈与滚动验收](87-任务自愈与滚动验收.md) | 任务本身事件触发与 watchdog 兜底如何汇合 / control-plane Dashboard 四面板如何读 / Telegram 与 outbox 边界 / smoke 为什么必须用已认证正文 |
 
 ## Phase 02.1 教学增量（2026-05）
 
