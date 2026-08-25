@@ -4511,6 +4511,97 @@ def test_controller_claims_are_monotonic_and_only_latest_schedules_recovery_acti
         assert cursor.fetchone() == ("dashboard", "pending")
 
 
+def test_recovery_action_active_target_race_persists_one_stale_noop(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """Concurrent valid controllers produce one active action and one durable stale result."""
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-action:active-target-race",
+        job_type="structure-normalize",
+        input_identity="recovery-action:active-target-race",
+        now=now,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    controllers = tuple(
+        claim_controller(
+            control_plane._connection_factory,
+            controller_id=f"m1-runtime-race-{suffix}",
+            owner_id=f"owner-{suffix}",
+            lease_seconds=30,
+            now=now,
+        )
+        for suffix in ("a", "b")
+    )
+    barrier = Barrier(2)
+
+    def schedule(controller):
+        barrier.wait()
+        return schedule_action(
+            control_plane._connection_factory,
+            controller=controller,
+            decision=_recovery_decision(now),
+            incident_key=f"incident:{lease.job_key}:{controller.controller_id}",
+            component="structure-normalize",
+            target_type="job",
+            target_id=lease.job_key,
+            expected_attempt_id=attempt_id,
+            expected_lease_epoch=lease.lease_epoch,
+            recovery_budget_remaining=1,
+            cooldown_seconds=60,
+            channels=("dashboard",),
+            now=now + timedelta(seconds=1),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(schedule, controllers))
+
+    stale_controller, stale = next(
+        (controller, result)
+        for controller, result in zip(controllers, results, strict=True)
+        if result.result_code == "stale-noop"
+    )
+    active = next(result for result in results if result.state == "pending")
+    assert stale.state == "completed"
+    assert stale.detail["stale_reason"] == "active-target-authoritative"
+    assert active.result_code is None
+    assert active.target_id == stale.target_id == lease.job_key
+
+    replay = schedule_action(
+        control_plane._connection_factory,
+        controller=stale_controller,
+        decision=_recovery_decision(now),
+        incident_key=f"incident:{lease.job_key}:{stale_controller.controller_id}",
+        component="structure-normalize",
+        target_type="job",
+        target_id=lease.job_key,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=60,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=1),
+    )
+    assert replay == stale
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state, result_code, detail FROM m1_recovery_actions "
+            "WHERE target_id = %s ORDER BY requested_at, action_id",
+            (lease.job_key,),
+        )
+        rows = cursor.fetchall()
+        assert len(rows) == 2
+        assert sorted((row[0], row[1]) for row in rows) == [
+            ("completed", "stale-noop"),
+            ("pending", None),
+        ]
+        assert next(row[2]["stale_reason"] for row in rows if row[1] == "stale-noop") == (
+            "active-target-authoritative"
+        )
+
+
 def test_runtime_controller_status_and_facts_are_read_only(
     control_plane: PostgresControlPlane,
 ) -> None:

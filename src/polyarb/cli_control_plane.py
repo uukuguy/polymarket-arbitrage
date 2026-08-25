@@ -13,6 +13,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+from typing import Any, Protocol
 from urllib.request import Request, urlopen
 
 import psycopg
@@ -36,7 +37,6 @@ from polyarb.control_plane.recovery_executor import RecoveryActionResult, Recove
 from polyarb.control_plane.recovery_models import RecoveryActionType
 from polyarb.control_plane.recovery_records import RecoveryActionRecord, RuntimeControllerLease
 from polyarb.control_plane.recovery_store import (
-    RecoveryActionConflict,
     RuntimeReconcileCandidate,
     claim_controller,
     read_runtime_controller_status,
@@ -88,6 +88,23 @@ from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
 from polyarb.storage.r2_sync import _build_client
 
 _R2_UPLOAD_FAULT_ACK = "staging-r2-upload-before-receipt"
+
+
+class _RuntimeReconcileControlPlane(Protocol):
+    """Minimal atomic surface consumed by the bounded runtime controller."""
+
+    _connection_factory: Callable[[], psycopg.Connection[Any]]
+
+    def _execute_recovery_action_cursor(
+        self,
+        cursor: Any,
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+        heartbeat_lease_seconds: int,
+    ) -> object: ...
+
+
 _RETRY_FAULT_ACK = "staging-retry-before-receipt"
 
 
@@ -1139,7 +1156,7 @@ def _runtime_result_payload(result: RecoveryActionResult | None) -> dict[str, ob
 
 
 def _runtime_reconcile_once(
-    control_plane: PostgresControlPlane,
+    control_plane: _RuntimeReconcileControlPlane,
     args: argparse.Namespace,
     *,
     controller: RuntimeControllerLease | None = None,
@@ -1188,36 +1205,29 @@ def _runtime_reconcile_once(
     candidate: RuntimeReconcileCandidate | None = None
     decision = None
     scheduled: RecoveryActionRecord | None = None
-    scheduling_stale = False
     if selected is not None:
         candidate, decision = selected
         action_type = getattr(decision, "action", None)
         if isinstance(action_type, RecoveryActionType):
-            try:
-                scheduled = schedule_action(
-                    connection_factory,
-                    controller=selected_controller,
-                    decision=decision,
-                    incident_key=candidate.incident_key,
-                    component=candidate.component,
-                    target_type=candidate.target_type,
-                    target_id=candidate.target_id,
-                    expected_attempt_id=candidate.runtime_state.attempt_id,
-                    expected_lease_epoch=candidate.runtime_state.lease_epoch,
-                    recovery_budget_remaining=candidate.runtime_state.recovery_budget.remaining_actions,
-                    cooldown_seconds=max(0, candidate.cooldown_seconds),
-                    channels=candidate.channels,
-                    now=now,
-                    detail={
-                        "job_type": candidate.job_type,
-                        "job_state": candidate.job_state,
-                    },
-                )
-            except RecoveryActionConflict:
-                # An active action for the exact target is already authoritative.
-                # Treat the duplicate observation as a stale-noop and let the
-                # executor process the existing action, if it is claimable.
-                scheduling_stale = True
+            scheduled = schedule_action(
+                connection_factory,
+                controller=selected_controller,
+                decision=decision,
+                incident_key=candidate.incident_key,
+                component=candidate.component,
+                target_type=candidate.target_type,
+                target_id=candidate.target_id,
+                expected_attempt_id=candidate.runtime_state.attempt_id,
+                expected_lease_epoch=candidate.runtime_state.lease_epoch,
+                recovery_budget_remaining=candidate.runtime_state.recovery_budget.remaining_actions,
+                cooldown_seconds=max(0, candidate.cooldown_seconds),
+                channels=candidate.channels,
+                now=now,
+                detail={
+                    "job_type": candidate.job_type,
+                    "job_state": candidate.job_state,
+                },
+            )
 
     executor = RecoveryExecutor(
         control_plane=control_plane,
@@ -1230,10 +1240,7 @@ def _runtime_reconcile_once(
     result = executor.run_once(now=now)
     decision_action = None if decision is None else getattr(decision, "action", None)
     reason = "runtime.no-active-attempts" if decision is None else decision.reason_code
-    if scheduling_stale:
-        state = "stale-noop"
-        outcome = "stale-noop"
-    elif result is not None:
+    if result is not None:
         state = "recovery-executed"
         outcome = result.outcome
     elif scheduled is not None and scheduled.result_code is not None:
@@ -1312,7 +1319,7 @@ def _runtime_reconcile_once(
 
 
 async def _run_runtime_reconcile_service(
-    control_plane: PostgresControlPlane,
+    control_plane: _RuntimeReconcileControlPlane,
     args: argparse.Namespace,
 ) -> dict[str, object]:
     """Run sequential reconciliation turns and fail immediately on store errors."""
@@ -1836,7 +1843,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         _write({"status": "ok", **snapshot}, as_json=args.json)
         return 0
     except (OSError, RuntimeError, ValueError, psycopg.Error) as error:
-        print(f"control-plane command unavailable: {type(error).__name__}", file=sys.stderr)
+        if args.command in {"runtime-reconcile-once", "runtime-reconcile-serve"}:
+            detail = _runtime_safe_text(error)
+            print(f"runtime reconciliation unavailable: {detail}", file=sys.stderr)
+        else:
+            print(f"control-plane command unavailable: {type(error).__name__}", file=sys.stderr)
         return 1
 
 

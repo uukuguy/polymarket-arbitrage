@@ -919,6 +919,162 @@ def test_runtime_reconcile_once_evaluates_schedules_and_executes_one_action(
     assert payload["pointer_mutations"] == 0
 
 
+def _install_runtime_reconcile_conflict(monkeypatch, message: str) -> None:
+    """Make one runtime turn reach the store conflict boundary without a DB."""
+    from datetime import UTC, datetime
+
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.recovery_models import (
+        RecoveryActionType,
+        RecoveryBudget,
+        RecoveryDecision,
+        RecoveryRuntimeState,
+    )
+    from polyarb.control_plane.recovery_records import RuntimeControllerLease
+    from polyarb.control_plane.recovery_store import (
+        RecoveryActionConflict,
+        RuntimeReconcileCandidate,
+    )
+    from polyarb.control_plane.runtime_models import RuntimeDeadlineProfile
+
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    controller = RuntimeControllerLease("controller-a", "owner-a", 1, now + timedelta(seconds=90))
+    candidate = RuntimeReconcileCandidate(
+        runtime_state=RecoveryRuntimeState(
+            job_key="job-a",
+            attempt_id="attempt-a",
+            lease_epoch=2,
+            owner_is_current=True,
+            profile=RuntimeDeadlineProfile("test", 30, 10, 20, 30),
+            attempt_started_at=now - timedelta(seconds=25),
+            last_heartbeat_at=now - timedelta(seconds=5),
+            last_progress_at=now - timedelta(seconds=25),
+            lease_expires_at=now + timedelta(seconds=5),
+            retry_count=0,
+            recovery_budget=RecoveryBudget(2),
+        ),
+        job_type="structure-normalize",
+        job_state="leased",
+        worker_id="worker-a",
+        target_type="job",
+        target_id="job-a",
+        component="structure-normalize",
+        incident_key="recovery:job:job-a",
+        channels=("dashboard",),
+        cooldown_seconds=15,
+    )
+    decision = RecoveryDecision(
+        action=RecoveryActionType.RECLAIM_JOB,
+        reason_code="job.lease-expired",
+        incident_severity="critical",
+        qualification_breaking=True,
+        next_check_at=now,
+    )
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    class Executor:
+        def __init__(self, **_kwargs):
+            return None
+
+        def run_once(self, *, now):
+            return None
+
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "read_runtime_reconcile_states",
+        lambda *a, **k: (candidate,),
+    )
+    monkeypatch.setattr(cli_control_plane.RuntimeReconciler, "evaluate", lambda *a, **k: decision)
+    monkeypatch.setattr(cli_control_plane, "RecoveryExecutor", Executor)
+
+    def conflict(*_args, **_kwargs):
+        raise RecoveryActionConflict(message)
+
+    monkeypatch.setattr(cli_control_plane, "schedule_action", conflict)
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "recovery budget changed during scheduling",
+        "recovery action idempotency conflicts",
+        "runtime recovery state changed during scheduling",
+        "incident identity conflicts",
+    ),
+)
+def test_runtime_reconcile_once_store_conflicts_fail_loud(
+    monkeypatch, capsys, message: str
+) -> None:
+    from polyarb import cli_control_plane
+
+    _install_runtime_reconcile_conflict(monkeypatch, message)
+
+    assert (
+        cli_control_plane.main(
+            ["runtime-reconcile-once", "--enable", "--worker-id", "executor-a", "--json"]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert message in captured.err
+    assert '"status": "ok"' not in captured.out
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "recovery budget changed during scheduling",
+        "recovery action idempotency conflicts",
+        "runtime recovery state changed during scheduling",
+        "incident identity conflicts",
+    ),
+)
+def test_runtime_reconcile_serve_store_conflicts_exit_current_turn(
+    monkeypatch, capsys, message: str
+) -> None:
+    from polyarb import cli_control_plane
+
+    _install_runtime_reconcile_conflict(monkeypatch, message)
+
+    class StopEvent:
+        def __init__(self):
+            self.stopped = False
+
+        def set(self):
+            self.stopped = True
+
+        def is_set(self):
+            return self.stopped
+
+        async def wait(self):
+            self.set()
+            return True
+
+    monkeypatch.setattr(cli_control_plane.asyncio, "Event", StopEvent)
+
+    assert (
+        cli_control_plane.main(
+            [
+                "runtime-reconcile-serve",
+                "--enable",
+                "--interval-seconds",
+                "0.001",
+                "--worker-id",
+                "executor-a",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert message in captured.err
+    assert '"status": "ok"' not in captured.out
+
+
 def test_runtime_reconcile_serve_stops_cleanly_on_signal_and_is_sequential(monkeypatch) -> None:
     """The loop owns no deployment or process authority and exits on its stop event."""
     import asyncio

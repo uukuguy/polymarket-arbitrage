@@ -863,6 +863,16 @@ def _same_scheduled_action(
     expected_lease_epoch: int,
     detail: Mapping[str, object],
 ) -> bool:
+    persisted_detail = existing.detail
+    if (
+        existing.result_code == "stale-noop"
+        and persisted_detail.get("stale_reason") == "active-target-authoritative"
+    ):
+        persisted_detail = {
+            key: value
+            for key, value in persisted_detail.items()
+            if key not in {"stale_reason", "active_action_id"}
+        }
     return (
         existing.controller_id == controller.controller_id
         and existing.controller_owner_id == controller.owner_id
@@ -873,7 +883,7 @@ def _same_scheduled_action(
         and existing.expected_controller_epoch == controller.lease_epoch
         and existing.expected_attempt_id == expected_attempt_id
         and existing.expected_lease_epoch == expected_lease_epoch
-        and existing.detail == dict(detail)
+        and persisted_detail == dict(detail)
     )
 
 
@@ -902,6 +912,29 @@ def _lock_runtime_fence(
     )
 
 
+def _fetch_active_action_for_target(
+    cursor: psycopg.Cursor[Any],
+    *,
+    target_type: str,
+    target_id: str,
+) -> RecoveryActionRecord | None:
+    """Lock the authoritative pending/running action for one target, if any."""
+    cursor.execute(
+        f"""
+        SELECT {_ACTION_COLUMNS}
+        FROM m1_recovery_actions
+        WHERE target_type = %s AND target_id = %s
+          AND state IN ('pending', 'running')
+        ORDER BY requested_at, action_id
+        LIMIT 1
+        FOR UPDATE
+        """,
+        (target_type, target_id),
+    )
+    row = cursor.fetchone()
+    return None if row is None else action_from_row(row)
+
+
 def _insert_action_once(
     cursor: psycopg.Cursor[Any],
     *,
@@ -920,42 +953,39 @@ def _insert_action_once(
     detail: Mapping[str, object],
     idempotency_key: str,
 ) -> RecoveryActionRecord | None:
-    try:
-        cursor.execute(
-            """
-            INSERT INTO m1_recovery_actions (
-                action_id, controller_id, controller_owner_id, incident_key,
-                target_type, target_id, action_type, expected_controller_epoch,
-                expected_attempt_id, expected_lease_epoch, requested_at, state,
-                result_code, next_allowed_at, finished_at, detail, idempotency_key
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      CASE WHEN %s = 'completed' THEN %s ELSE NULL END, %s, %s)
-            ON CONFLICT (idempotency_key) DO NOTHING
-            RETURNING action_id
-            """,
-            (
-                action_id,
-                controller.controller_id,
-                controller.owner_id,
-                incident_key,
-                target_type,
-                target_id,
-                action_type.value,
-                controller.lease_epoch,
-                expected_attempt_id,
-                expected_lease_epoch,
-                requested_at,
-                state,
-                result_code,
-                next_allowed_at,
-                state,
-                requested_at,
-                Jsonb(dict(detail)),
-                idempotency_key,
-            ),
-        )
-    except psycopg.errors.UniqueViolation as error:
-        raise RecoveryActionConflict("active recovery action conflicts") from error
+    cursor.execute(
+        """
+        INSERT INTO m1_recovery_actions (
+            action_id, controller_id, controller_owner_id, incident_key,
+            target_type, target_id, action_type, expected_controller_epoch,
+            expected_attempt_id, expected_lease_epoch, requested_at, state,
+            result_code, next_allowed_at, finished_at, detail, idempotency_key
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                  CASE WHEN %s = 'completed' THEN %s ELSE NULL END, %s, %s)
+        ON CONFLICT (idempotency_key) DO NOTHING
+        RETURNING action_id
+        """,
+        (
+            action_id,
+            controller.controller_id,
+            controller.owner_id,
+            incident_key,
+            target_type,
+            target_id,
+            action_type.value,
+            controller.lease_epoch,
+            expected_attempt_id,
+            expected_lease_epoch,
+            requested_at,
+            state,
+            result_code,
+            next_allowed_at,
+            state,
+            requested_at,
+            Jsonb(dict(detail)),
+            idempotency_key,
+        ),
+    )
     row = cursor.fetchone()
     if row is None:
         return None
@@ -1263,6 +1293,64 @@ def schedule_action(
 
         budget: BudgetState | None = None
         if result_code is None:
+            active = _fetch_active_action_for_target(
+                cursor,
+                target_type=target_type,
+                target_id=target_id,
+            )
+            if active is not None:
+                if active.idempotency_key == idempotency_key:
+                    if not _same_scheduled_action(
+                        active,
+                        controller=controller,
+                        incident_key=incident_key,
+                        target_type=target_type,
+                        target_id=target_id,
+                        action_type=decision.action,
+                        expected_attempt_id=expected_attempt_id,
+                        expected_lease_epoch=expected_lease_epoch,
+                        detail=schedule_detail,
+                    ):
+                        raise RecoveryActionConflict("recovery action idempotency conflicts")
+                    return active
+                stale_detail = _bounded_detail(
+                    {
+                        **schedule_detail,
+                        "stale_reason": "active-target-authoritative",
+                        "active_action_id": active.action_id,
+                    }
+                )
+                stale = _insert_action_once(
+                    cursor,
+                    action_id=str(uuid4()),
+                    controller=controller,
+                    incident_key=None,
+                    target_type=target_type,
+                    target_id=target_id,
+                    action_type=decision.action,
+                    expected_attempt_id=expected_attempt_id,
+                    expected_lease_epoch=expected_lease_epoch,
+                    requested_at=observed_at,
+                    state="completed",
+                    result_code="stale-noop",
+                    next_allowed_at=next_allowed_at,
+                    detail=stale_detail,
+                    idempotency_key=idempotency_key,
+                )
+                if stale is None:
+                    return _existing_replay_or_conflict(
+                        cursor,
+                        idempotency_key=idempotency_key,
+                        controller=controller,
+                        incident_key=incident_key,
+                        target_type=target_type,
+                        target_id=target_id,
+                        action_type=decision.action,
+                        expected_attempt_id=expected_attempt_id,
+                        expected_lease_epoch=expected_lease_epoch,
+                        detail=stale_detail,
+                    )
+                return stale
             budget = _lock_target_budget(
                 cursor,
                 controller_id=controller.controller_id,
