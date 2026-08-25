@@ -236,6 +236,7 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
         "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
     )
     monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: object())
+
     def transactional_scheduler(
         _control_plane,
         *,
@@ -335,10 +336,7 @@ def test_control_plane_serve_coordinator_excludes_dedicated_pool_workers(
     monkeypatch.setattr(cli_control_plane, "_run_scheduler_service", run_service)
 
     assert (
-        cli_control_plane.main(
-            ["serve", "--enable", "--worker-role", "coordinator", "--json"]
-        )
-        == 0
+        cli_control_plane.main(["serve", "--enable", "--worker-role", "coordinator", "--json"]) == 0
     )
     assert json.loads(capsys.readouterr().out) == {"status": "stopped", "ticks": 1}
     assert captured["include_structure_range"] is False
@@ -585,6 +583,7 @@ def test_control_plane_tick_once_reports_bounded_turns(monkeypatch, capsys) -> N
         "POLYARB_SUPABASE_DB_DSN", "postgresql://operator:secret@example.test/control"
     )
     monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: object())
+
     def transactional_scheduler(
         _control_plane,
         *,
@@ -632,8 +631,13 @@ def test_alert_serve_forwards_acceptance_run_scope(monkeypatch, capsys) -> None:
     assert (
         cli_control_plane.main(
             [
-                "alert-serve", "--enable", "--interval-seconds", "7.5",
-                "--acceptance-run-id", "run-a", "--json",
+                "alert-serve",
+                "--enable",
+                "--interval-seconds",
+                "7.5",
+                "--acceptance-run-id",
+                "run-a",
+                "--json",
             ]
         )
         == 0
@@ -1591,3 +1595,136 @@ def test_runtime_policy_replay_requires_scoped_dsn_without_connecting(monkeypatc
     captured = capsys.readouterr()
     assert "POLYARB_SUPABASE_DB_DSN is required" in captured.err
     assert "postgresql://" not in captured.err
+
+
+def test_qualification_status_uses_scoped_dsn_and_is_read_only(monkeypatch, capsys) -> None:
+    from datetime import UTC, datetime
+
+    from polyarb import cli_control_plane
+
+    captured: dict[str, object] = {}
+    monkeypatch.delenv("POLYARB_SUPABASE_DB_DSN", raising=False)
+    monkeypatch.setenv(
+        "POLYARB_QUALIFICATION_DB_DSN",
+        "postgresql://qualification:secret@example.test/control",
+    )
+    monkeypatch.setattr(
+        cli_control_plane.psycopg,
+        "connect",
+        lambda dsn, **kwargs: captured.update(dsn=dsn, kwargs=kwargs) or object(),
+    )
+
+    class Store:
+        def __init__(self, connection_factory):
+            self.connection_factory = connection_factory
+
+        def status(self, *, now):
+            assert now.tzinfo is not None
+            self.connection_factory()
+            return {
+                "epoch": {"epoch_id": "epoch-a", "state": "accumulating"},
+                "duration_seconds": 12,
+                "evidence_gap_seconds": 0,
+                "last_fact": None,
+                "last_breaker": None,
+                "contained_recoveries": [],
+                "certificate": None,
+            }
+
+    monkeypatch.setattr(cli_control_plane, "PostgresQualificationServiceStore", Store)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "datetime",
+        type("Clock", (), {"now": staticmethod(lambda *_args: datetime(2026, 8, 25, tzinfo=UTC))}),
+    )
+
+    assert cli_control_plane.main(["qualification-status", "--json"]) == 0
+    assert captured == {
+        "dsn": "postgresql://qualification:secret@example.test/control",
+        "kwargs": {"connect_timeout": 5},
+    }
+    assert json.loads(capsys.readouterr().out)["epoch"]["epoch_id"] == "epoch-a"
+
+
+def test_qualification_certificates_reverify_read_only_limit(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setenv("POLYARB_QUALIFICATION_DB_DSN", "postgresql://qualification@example/control")
+
+    class Store:
+        def __init__(self, connection_factory):
+            self.connection_factory = connection_factory
+
+        def certificates(self, *, limit: int):
+            assert limit == 2
+            return [
+                {
+                    "certificate_id": "qualification-certificate:" + "a" * 64,
+                    "epoch_id": "epoch-a",
+                    "certificate_digest": "a" * 64,
+                    "reverified": True,
+                }
+            ]
+
+    monkeypatch.setattr(cli_control_plane, "PostgresQualificationServiceStore", Store)
+    monkeypatch.setattr(cli_control_plane.psycopg, "connect", lambda *_args, **_kwargs: object())
+
+    assert cli_control_plane.main(["qualification-certificates", "--limit", "2", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "certificates": [
+            {
+                "certificate_digest": "a" * 64,
+                "certificate_id": "qualification-certificate:" + "a" * 64,
+                "epoch_id": "epoch-a",
+                "reverified": True,
+            }
+        ],
+        "status": "available",
+    }
+
+
+def test_qualification_serve_requires_enable_before_connect(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setenv("POLYARB_QUALIFICATION_DB_DSN", "postgresql://qualification@example/control")
+    monkeypatch.setattr(
+        cli_control_plane.psycopg,
+        "connect",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert (
+        cli_control_plane.main(["qualification-serve", "--interval-seconds", "30", "--json"]) == 2
+    )
+    assert "--enable is required" in capsys.readouterr().err
+
+
+def test_qualification_serve_stops_on_tick_error_without_overlap(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setenv("POLYARB_QUALIFICATION_DB_DSN", "postgresql://qualification@example/control")
+    monkeypatch.setattr(cli_control_plane.psycopg, "connect", lambda *_args, **_kwargs: object())
+
+    calls: list[str] = []
+
+    class Service:
+        def tick(self, now):
+            assert now.tzinfo is not None
+            calls.append("tick")
+            raise RuntimeError("source query timeout")
+
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_qualification_service_from_env",
+        lambda **_kwargs: Service(),
+    )
+
+    assert (
+        cli_control_plane.main(
+            ["qualification-serve", "--enable", "--interval-seconds", "0.001", "--json"]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert calls == ["tick"]
+    assert "source query timeout" in captured.err

@@ -84,6 +84,8 @@ class QualificationEpochRecord:
     slo: dict[str, object]
     contained_incident_details: tuple[dict[str, object], ...]
     recovery_action_details: tuple[dict[str, object], ...]
+    source_cursor: dict[str, object] | None
+    fact_records: tuple[dict[str, object], ...]
     writer_id: str | None
     created_at: datetime
     updated_at: datetime
@@ -189,10 +191,11 @@ def start_qualification_epoch(
                 invalidation_reason, qualified_at, previous_epoch_id, fact_digests,
                 contained_recoveries, coverage_seconds, max_gap_seconds,
                 progress_count, successful_count, evidence_digest, required_seconds,
-                slo, contained_incident_details, recovery_action_details, writer_id
+                slo, contained_incident_details, recovery_action_details,
+                source_cursor, fact_records, writer_id
             ) VALUES (
                 %s, %s, 1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (epoch_id) DO NOTHING
             """,
@@ -221,6 +224,8 @@ def start_qualification_epoch(
                 Jsonb(evidence["slo"]),
                 Jsonb(evidence["contained_incidents"]),
                 Jsonb(evidence["recovery_actions"]),
+                None,
+                Jsonb([]),
                 writer_id,
             ),
         )
@@ -282,6 +287,8 @@ def transition_qualification_epoch(
                 slo = %s,
                 contained_incident_details = %s,
                 recovery_action_details = %s,
+                source_cursor = COALESCE(source_cursor, %s),
+                fact_records = COALESCE(fact_records, %s),
                 writer_id = %s,
                 updated_at = clock_timestamp()
             WHERE epoch_id = %s AND state = %s AND version = %s
@@ -311,6 +318,8 @@ def transition_qualification_epoch(
                 Jsonb(evidence["slo"]),
                 Jsonb(evidence["contained_incidents"]),
                 Jsonb(evidence["recovery_actions"]),
+                None,
+                Jsonb([]),
                 writer_id,
                 expected_epoch_id,
                 state_value,
@@ -528,9 +537,7 @@ def _decision_slo(
 
 def _contained_incident_details(decision: QualificationDecision) -> list[dict[str, object]]:
     return [
-        _contained_fact_payload(fact)
-        for fact in decision.facts
-        if fact.reason in CONTAINED_REASONS
+        _contained_fact_payload(fact) for fact in decision.facts if fact.reason in CONTAINED_REASONS
     ]
 
 
@@ -730,8 +737,10 @@ def _parse_utc_iso(value: str, field: str) -> datetime:
 
 
 def _is_sha256(value: object) -> bool:
-    return type(value) is str and len(value) == 64 and all(
-        character in "0123456789abcdef" for character in value
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 
@@ -889,9 +898,7 @@ def _epoch_from_row(row: Mapping[str, object]) -> QualificationEpochRecord:
         role_identity=tuple(cast(Sequence[str], row["role_identity"])),
         started_at=_utc(cast(datetime, row["started_at"]), "started_at"),
         last_fact_at=_utc_or_none(cast(datetime | None, row["last_fact_at"]), "last_fact_at"),
-        invalidated_at=_utc_or_none(
-            cast(datetime | None, row["invalidated_at"]), "invalidated_at"
-        ),
+        invalidated_at=_utc_or_none(cast(datetime | None, row["invalidated_at"]), "invalidated_at"),
         invalidation_reason=(
             None if row["invalidation_reason"] is None else str(row["invalidation_reason"])
         ),
@@ -926,6 +933,15 @@ def _epoch_from_row(row: Mapping[str, object]) -> QualificationEpochRecord:
         recovery_action_details=tuple(
             dict(cast(Mapping[str, object], item))
             for item in cast(Sequence[object], row["recovery_action_details"])
+        ),
+        source_cursor=(
+            None
+            if row.get("source_cursor") is None
+            else dict(cast(Mapping[str, object], row["source_cursor"]))
+        ),
+        fact_records=tuple(
+            dict(cast(Mapping[str, object], item))
+            for item in cast(Sequence[object], row.get("fact_records", ()))
         ),
         writer_id=None if row["writer_id"] is None else str(row["writer_id"]),
         created_at=_utc(cast(datetime, row["created_at"]), "created_at"),

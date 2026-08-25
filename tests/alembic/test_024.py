@@ -29,6 +29,10 @@ def test_024_schema_declares_state_version_cas_and_certificate_uniqueness() -> N
     text = MIGRATION_PATH.read_text()
 
     assert '"version"' in text
+    assert '"source_cursor"' in text
+    assert '"fact_records"' in text
+    assert "ck_m1_qualification_epochs_source_cursor" in text
+    assert "ck_m1_qualification_epochs_fact_records" in text
     assert "version > 0" in text
     assert "ACCUMULATING" not in text
     assert "state IN ('accumulating', 'invalidated', 'recovering', 'qualified')" in text

@@ -75,6 +75,13 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("'[]'::jsonb"),
         ),
+        sa.Column("source_cursor", postgresql.JSONB, nullable=True),
+        sa.Column(
+            "fact_records",
+            postgresql.JSONB,
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+        ),
         sa.Column("writer_id", sa.Text, nullable=True),
         sa.Column(
             "created_at",
@@ -124,6 +131,14 @@ def upgrade() -> None:
             "AND jsonb_typeof(contained_incident_details) = 'array' "
             "AND jsonb_typeof(recovery_action_details) = 'array'",
             name="ck_m1_qualification_epochs_derived_evidence",
+        ),
+        sa.CheckConstraint(
+            "source_cursor IS NULL OR jsonb_typeof(source_cursor) = 'object'",
+            name="ck_m1_qualification_epochs_source_cursor",
+        ),
+        sa.CheckConstraint(
+            "jsonb_typeof(fact_records) = 'array'",
+            name="ck_m1_qualification_epochs_fact_records",
         ),
         sa.CheckConstraint(
             "("

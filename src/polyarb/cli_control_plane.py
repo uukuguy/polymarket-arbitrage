@@ -9,11 +9,11 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from urllib.request import Request, urlopen
 
 import psycopg
@@ -27,6 +27,13 @@ from polyarb.control_plane.faults import IntentionalStagingRetryFault
 from polyarb.control_plane.models import JobLease
 from polyarb.control_plane.opportunity_worker import TransactionalOpportunityCertifier
 from polyarb.control_plane.postgres import PostgresControlPlane
+from polyarb.control_plane.qualification import RollingQualificationPolicy
+from polyarb.control_plane.qualification_service import (
+    PostgresQualificationFactSource,
+    PostgresQualificationServiceStore,
+    QualificationService,
+    run_qualification_service,
+)
 from polyarb.control_plane.quote_admission import TransactionalQuoteAdmitter
 from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
@@ -361,6 +368,26 @@ def _parser() -> argparse.ArgumentParser:
     runtime_serve.add_argument("--limit", type=int, default=100)
     runtime_serve.add_argument("--interval-seconds", type=float, default=30.0)
     runtime_serve.add_argument("--json", action="store_true")
+    qualification_status = subcommands.add_parser(
+        "qualification-status",
+        help="read current rolling qualification progress and last breaker",
+    )
+    qualification_status.add_argument("--json", action="store_true")
+    qualification_certificates = subcommands.add_parser(
+        "qualification-certificates",
+        help="read and reverify recent immutable qualification certificates",
+    )
+    qualification_certificates.add_argument("--limit", type=int, default=20)
+    qualification_certificates.add_argument("--json", action="store_true")
+    qualification_serve = subcommands.add_parser(
+        "qualification-serve",
+        help="run sequential rolling qualification ticks until SIGTERM or SIGINT",
+    )
+    qualification_serve.add_argument("--enable", action="store_true")
+    qualification_serve.add_argument("--interval-seconds", type=float, default=30.0)
+    qualification_serve.add_argument("--batch-size", type=int, default=100)
+    qualification_serve.add_argument("--writer-id", default="qualification-service")
+    qualification_serve.add_argument("--json", action="store_true")
     return parser
 
 
@@ -371,7 +398,47 @@ def _control_plane_from_env() -> PostgresControlPlane | None:
     return PostgresControlPlane(lambda: psycopg.connect(dsn, connect_timeout=5))
 
 
-def _write(payload: dict[str, object], *, as_json: bool) -> None:
+def _qualification_connection_factory_from_env() -> Callable[[], psycopg.Connection[Any]] | None:
+    dsn = os.environ.get("POLYARB_QUALIFICATION_DB_DSN", "").strip()
+    if not dsn:
+        return None
+    return lambda: psycopg.connect(dsn, connect_timeout=5)
+
+
+def _qualification_policy_from_env() -> RollingQualificationPolicy:
+    roles = tuple(
+        role.strip()
+        for role in os.environ.get(
+            "POLYARB_QUALIFICATION_ROLE_IDENTITY",
+            "opportunity,quote,structure",
+        ).split(",")
+        if role.strip()
+    )
+    return RollingQualificationPolicy(
+        release_id=os.environ.get("POLYARB_QUALIFICATION_RELEASE_ID", "release-unknown"),
+        config_id=os.environ.get("POLYARB_QUALIFICATION_CONFIG_ID", "config-unknown"),
+        role_identity=roles or ("opportunity", "quote", "structure"),
+    )
+
+
+def _qualification_service_from_env(
+    *,
+    batch_size: int = 100,
+    writer_id: str = "qualification-service",
+) -> QualificationService:
+    connection_factory = _qualification_connection_factory_from_env()
+    if connection_factory is None:
+        raise ValueError("POLYARB_QUALIFICATION_DB_DSN is required")
+    return QualificationService(
+        policy=_qualification_policy_from_env(),
+        fact_source=PostgresQualificationFactSource(connection_factory),
+        state_store=PostgresQualificationServiceStore(connection_factory),
+        writer_id=writer_id,
+        batch_size=batch_size,
+    )
+
+
+def _write(payload: Mapping[str, object], *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, sort_keys=True))
         return
@@ -577,17 +644,13 @@ def _read_runtime_watchdog_observation(
         for target in args.secondary_target or []:
             app, separator, machine_id = target.partition("/")
             if not separator or not app or not machine_id or "/" in machine_id:
-                raise ValueError(
-                    "secondary watchdog target must use <app>/<machine-id> form"
-                )
+                raise ValueError("secondary watchdog target must use <app>/<machine-id> form")
             additional_targets.setdefault(app, []).append(machine_id)
         target_states.extend(additional_targets.items())
         expected_machine_ids: list[str] = []
         for app, machine_ids in target_states:
             states = _read_cloud_fly_machine_states(machine_ids, app=app, token=token)
-            restarts = _read_cloud_fly_machine_restart_counts(
-                machine_ids, app=app, token=token
-            )
+            restarts = _read_cloud_fly_machine_restart_counts(machine_ids, app=app, token=token)
             for machine_id, state in states.items():
                 qualified_id = f"{app}/{machine_id}"
                 machine_states[qualified_id] = state
@@ -704,6 +767,7 @@ async def _run_runtime_watchdog_service(
             loop.add_signal_handler(stop_signal, stop_event.set)
         except (NotImplementedError, RuntimeError):
             pass
+
     async def write_heartbeat(observation: RuntimeObservation) -> None:
         _write(
             {
@@ -803,8 +867,8 @@ def _transactional_quote_workers(
     return (
         TransactionalQuoteBatchWorker(
             control_plane=control_plane,
-            reader=ClobReaderClient(settings),
-            object_client=object_client,
+            reader=cast(Any, ClobReaderClient(settings)),
+            object_client=cast(Any, object_client),
             bucket=settings.r2_bucket,
             worker_id=worker_id,
             now=lambda: datetime.now(UTC),
@@ -990,7 +1054,7 @@ def _transactional_scheduler(
     )
 
 
-def _structure_object_client() -> tuple[object, str]:
+def _structure_object_client() -> tuple[Any, str]:
     settings = Settings()
     if not settings.r2_enabled:
         raise RuntimeError("transactional Structure requires configured R2 credentials")
@@ -1299,19 +1363,17 @@ def _runtime_reconcile_once(
             }
         ),
         "next_check_at": (
-            None
-            if decision is None
-            else decision.next_check_at.astimezone(UTC).isoformat()
+            None if decision is None else decision.next_check_at.astimezone(UTC).isoformat()
         ),
         "timestamps": {
             "evaluated_at": now.isoformat(),
             "requested_at": None if scheduled is None else scheduled.requested_at.isoformat(),
-            "started_at": None if scheduled is None else (
-                None if scheduled.started_at is None else scheduled.started_at.isoformat()
-            ),
-            "finished_at": None if scheduled is None else (
-                None if scheduled.finished_at is None else scheduled.finished_at.isoformat()
-            ),
+            "started_at": None
+            if scheduled is None
+            else (None if scheduled.started_at is None else scheduled.started_at.isoformat()),
+            "finished_at": None
+            if scheduled is None
+            else (None if scheduled.finished_at is None else scheduled.finished_at.isoformat()),
         },
         "executor": _runtime_result_payload(result),
         "pointer_mutations": 0,
@@ -1379,6 +1441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "render-rollout",
         "runtime-reconcile-once",
         "runtime-reconcile-serve",
+        "qualification-serve",
     }
     if args.command in requires_enable and not args.enable:
         print(f"--enable is required for {args.command}", file=sys.stderr)
@@ -1502,6 +1565,55 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         except (OSError, RuntimeError, ValueError) as error:
             print(f"runtime watchdog unavailable: {type(error).__name__}", file=sys.stderr)
+            return 1
+    if args.command in {
+        "qualification-status",
+        "qualification-certificates",
+        "qualification-serve",
+    }:
+        connection_factory = _qualification_connection_factory_from_env()
+        if connection_factory is None:
+            print("POLYARB_QUALIFICATION_DB_DSN is required", file=sys.stderr)
+            return 2
+        try:
+            if args.command == "qualification-status":
+                store = PostgresQualificationServiceStore(connection_factory)
+                _write(
+                    {"status": "available", **store.status(now=datetime.now(UTC))},
+                    as_json=args.json,
+                )
+                return 0
+            if args.command == "qualification-certificates":
+                store = PostgresQualificationServiceStore(connection_factory)
+                _write(
+                    {
+                        "status": "available",
+                        "certificates": store.certificates(limit=args.limit),
+                    },
+                    as_json=args.json,
+                )
+                return 0
+            if args.interval_seconds <= 0 or args.batch_size <= 0:
+                print("--interval-seconds and --batch-size must be positive", file=sys.stderr)
+                return 2
+            service = _qualification_service_from_env(
+                batch_size=args.batch_size,
+                writer_id=args.writer_id,
+            )
+            result = asyncio.run(
+                run_qualification_service(
+                    service,
+                    interval_seconds=args.interval_seconds,
+                    emit=lambda payload: _write(
+                        {"event": "qualification-tick", **payload},
+                        as_json=args.json,
+                    ),
+                )
+            )
+            _write(result, as_json=args.json)
+            return 0
+        except (OSError, RuntimeError, ValueError, psycopg.Error) as error:
+            print(f"qualification service unavailable: {error}", file=sys.stderr)
             return 1
     control_plane = _control_plane_from_env()
     if control_plane is None:
