@@ -656,6 +656,89 @@ def test_bounded_operator_truth_surfaces_gate_nodes_collect_nonzero() -> None:
         assert "collected 0 items" not in completed.stdout
 
 
+def test_deterministic_runtime_production_enablement_profile_uses_exact_local_gates() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "deterministic-runtime-production-enablement"}
+    )
+
+    assert commands == {
+        "planning": ["make", "planning-status"],
+        "unit": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_fly_recovery.py",
+            "tests/m1-perception/test_control_plane_deployment_templates.py::test_runtime_controller_template_is_private_observe_only_recovery_topology",
+            "tests/m1-perception/test_control_plane_deployment_templates.py::test_qualification_worker_template_has_only_scoped_database_and_no_recovery_authority",
+            "-q",
+        ],
+        "integration": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_runtime_fault_matrix.py::test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database",
+            "tests/m1-perception/test_control_plane_runtime_fault_matrix.py::test_runtime_fault_matrix_exercises_real_migrated_authority_paths",
+            "-q",
+        ],
+        "cli": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_cli.py::test_runtime_observe_verify_derives_exact_current_identity_and_never_mutates",
+            "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_once_observe_only_records_every_candidate_without_recovery_mutation",
+            "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_once_observe_only_records_idle_without_executor",
+            "tests/m1-perception/test_makefile_contract.py::test_make_runtime_observe_verify_is_read_only_and_bounded",
+            "tests/m1-perception/test_makefile_contract.py::test_make_render_rollout_exposes_exact_six_app_topology",
+            "-q",
+        ],
+        "restart": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_runtime_observe.py::test_insert_rejects_stale_controller_identity_or_conflicting_idempotency",
+            "tests/m1-perception/test_control_plane_runtime_observe.py::test_verifier_fails_on_gap_recovery_mutation_mixed_identity_or_replay_mismatch",
+            "tests/m1-perception/test_control_plane_runtime_observe.py::test_real_postgres_records_idempotent_idle_window_and_verifies_read_only",
+            "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_once_store_conflicts_fail_loud",
+            "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_serve_store_conflicts_exit_current_turn",
+            "-q",
+        ],
+    }
+
+    flattened = [argument for command in commands.values() for argument in command]
+    assert all(
+        any("::test_" in argument for argument in commands[gate])
+        for gate in ("integration", "cli", "restart")
+    )
+    assert not any(
+        forbidden in argument.lower()
+        for argument in flattened
+        if "::test_" not in argument
+        for forbidden in ("flyctl", "deploy", "production", "http://", "https://")
+    )
+
+
+def test_deterministic_runtime_production_enablement_gate_nodes_collect_nonzero() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "deterministic-runtime-production-enablement"}
+    )
+
+    for gate in ("unit", "integration", "cli", "restart"):
+        command = [argument for argument in commands[gate] if argument != "-q"]
+        command.extend(("--collect-only", "-q"))
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        assert completed.returncode == 0, (
+            f"{gate} collection failed:\n{completed.stdout}\n{completed.stderr}"
+        )
+        assert "collected 0 items" not in completed.stdout
+
+
 def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:
     assert eval_local.gate_commands_for({"paradigm": "repository"}) == GATE_COMMANDS
     assert eval_local.gate_commands_for({"paradigm": "unknown"}) == GATE_COMMANDS

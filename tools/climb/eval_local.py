@@ -553,6 +553,48 @@ BOUNDED_OPERATOR_TRUTH_SURFACES_GATE_COMMANDS = {
         "-q",
     ],
 }
+DETERMINISTIC_RUNTIME_PRODUCTION_ENABLEMENT_GATE_COMMANDS = {
+    "planning": ["make", "planning-status"],
+    "unit": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_fly_recovery.py",
+        "tests/m1-perception/test_control_plane_deployment_templates.py::test_runtime_controller_template_is_private_observe_only_recovery_topology",
+        "tests/m1-perception/test_control_plane_deployment_templates.py::test_qualification_worker_template_has_only_scoped_database_and_no_recovery_authority",
+        "-q",
+    ],
+    "integration": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_runtime_fault_matrix.py::test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database",
+        "tests/m1-perception/test_control_plane_runtime_fault_matrix.py::test_runtime_fault_matrix_exercises_real_migrated_authority_paths",
+        "-q",
+    ],
+    "cli": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_cli.py::test_runtime_observe_verify_derives_exact_current_identity_and_never_mutates",
+        "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_once_observe_only_records_every_candidate_without_recovery_mutation",
+        "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_once_observe_only_records_idle_without_executor",
+        "tests/m1-perception/test_makefile_contract.py::test_make_runtime_observe_verify_is_read_only_and_bounded",
+        "tests/m1-perception/test_makefile_contract.py::test_make_render_rollout_exposes_exact_six_app_topology",
+        "-q",
+    ],
+    "restart": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/m1-perception/test_control_plane_runtime_observe.py::test_insert_rejects_stale_controller_identity_or_conflicting_idempotency",
+        "tests/m1-perception/test_control_plane_runtime_observe.py::test_verifier_fails_on_gap_recovery_mutation_mixed_identity_or_replay_mismatch",
+        "tests/m1-perception/test_control_plane_runtime_observe.py::test_real_postgres_records_idempotent_idle_window_and_verifies_read_only",
+        "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_once_store_conflicts_fail_loud",
+        "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_serve_store_conflicts_exit_current_turn",
+        "-q",
+    ],
+}
 
 
 def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]:
@@ -578,6 +620,8 @@ def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]
         commands = ROLLING_QUALIFICATION_CERTIFICATES_GATE_COMMANDS
     elif manifest.get("paradigm") == "bounded-operator-truth-surfaces":
         commands = BOUNDED_OPERATOR_TRUTH_SURFACES_GATE_COMMANDS
+    elif manifest.get("paradigm") == "deterministic-runtime-production-enablement":
+        commands = DETERMINISTIC_RUNTIME_PRODUCTION_ENABLEMENT_GATE_COMMANDS
     else:
         commands = GATE_COMMANDS
     return {name: list(command) for name, command in commands.items()}
