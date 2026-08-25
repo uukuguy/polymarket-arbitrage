@@ -10163,3 +10163,36 @@ Do not restart a 24-hour qualification run.
 rolling qualification policy and virtual-time state machine. Do not restart a
 manual 24-hour run; automatic epochs and immutable certificates must exist
 before production enablement.
+
+## SESSION 302 — 2026-08-25 (rolling qualification loop and climb H-016 confirmation)
+
+- [IMPLEMENTED] Plan `05.6-204` replaced manually restarted 24-hour runs with
+  a pure rolling qualification policy, additive migration 024, a monotonic
+  ingress ledger, durable source cursor, immutable certificates, a continuous
+  qualification service, read-only status/certificate commands and guarded
+  sequential service commands.
+- [TWO DETECTORS] Task-local runtime, incident and recovery facts enter through
+  database projection triggers and can break an epoch on the next bounded tick;
+  three explicit per-tick freshness observations cover silent/missing-fact
+  failures. Late commits cannot hide behind an old `occurred_at` because the
+  source cursor advances by database `ingest_seq`.
+- [HISTORY] Invalidated epochs are terminal and immutable. Recovery uses a
+  separate recovering epoch; non-confirmation facts observed during recovery
+  are kept in an append-only recovery-observation ledger, remain visible after
+  restart and confirmation, and do not contaminate the next clean epoch.
+- [TRUST] Certificate payload, digest, certificate ID and identity key are
+  derived and cross-checked in Python and PostgreSQL. Ordinary application
+  roles cannot insert or execute the `SECURITY DEFINER` writer; reads recompute
+  and fail loud on tamper. Two independent 26-hour replays produced digest
+  `a0c5ab1f1bae4f7356a15430b0889b6a3de433654888f640a601b748ce878875`.
+- [VERIFIED] All four Plan 04 tasks passed independent review after closing
+  terminal-state, identity-drift, certificate-forgery, SQL-NULL, recovery-fact,
+  freshness, late-arrival and Make-contract gaps. H-016 cycle 17 run
+  `20260825-053507-h-016` scored 100/100 in planning, unit, integration, CLI
+  and restart gates. No production deploy, migration or service enablement ran.
+- [LEARNING] Added `docs/learning/86-滚动资格证书与自动重开.md`.
+
+[NEXT] Continue climb with H-017 / Plan `05.6-205` Task 1: build the bounded,
+fail-closed control API read model for active tasks, incidents, recovery actions
+and qualification. Do not deploy or apply migration 024 in production before
+Plan 06 grants and verifies least-privilege enablement.

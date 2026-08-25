@@ -404,15 +404,42 @@ hypotheses:
     verdict: confirmed
     decision_reason: all local gates passed
 - id: H-016
-  description: Automatic rolling qualification epochs that distinguish contained
-    recovery from breaking truth failures and seal immutable reproducible certificates
-    eliminate manual 24-hour restarts as the acceptance control loop.
+  description: Automatic rolling qualification epochs that distinguish contained recovery
+    from breaking truth failures and seal immutable reproducible certificates eliminate
+    manual 24-hour restarts as the acceptance control loop.
   parent_paradigm: rolling-qualification-certificates
   expected_lift: Preserve failed history while automatically invalidating broken epochs,
     opening a fresh epoch after recovery confirmation, and proving exact 24-hour coverage
     with a replayable certificate
   cost_h: 8.0
   ranking: 1.0
-  status: pending
+  status: confirmed
   created_at: '2026-08-25T00:00:00+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 17
+    run: 20260825-053507-h-016
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
+- id: H-017
+  description: A bounded fail-closed operator read model rendered consistently by
+    the control API, Dashboard, and Telegram makes task progress, incidents,
+    recovery actions, and rolling qualification immediately understandable without
+    inventing state.
+  parent_paradigm: bounded-operator-truth-surfaces
+  expected_lift: Turn the durable self-healing ledger into timely 5/10/35/40/60/65-second
+    operator visibility with one normalized source of truth across API, UI, alerts,
+    and authenticated smoke evidence
+  cost_h: 8.0
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-25T13:36:48+08:00'
   results: []

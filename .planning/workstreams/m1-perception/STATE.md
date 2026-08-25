@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Plans 201-203 are locally complete; next is Plan 204 rolling qualification, with no manual 24-hour restart before automatic epochs exist
-last_updated: "2026-08-25T10:15:00+08:00"
+stopped_at: Plans 201-204 are locally complete and H-016 is confirmed; next is Plan 205 operator surfaces, with production enablement reserved for Plan 206
+last_updated: "2026-08-25T13:36:48+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -65,13 +65,18 @@ progress:
   pure deadline decisions, controller/action/budget fencing, a five-action
   job-level executor, read-only status, guarded one-shot control and a
   fail-loud sequential service. Process and Machine actions remain disabled.
-- Climb H-014 cycle 15 and H-015 cycle 16 both scored 100/100 on dedicated
-  local gates. H-015 run `20260825-021111-h-015` covers real Testcontainers
-  migration/fencing/race/DB-clock rollback plus CLI fail-loud behavior.
-- These changes have **not** been deployed and migrations 022/023 have not
+- Plan `05.6-204` is locally complete through additive migration 024, a
+  monotonic source-ingress ledger, automatic rolling epochs, recovery-period
+  observations, immutable reproducible certificates, read-only status/history
+  and a guarded sequential qualification service.
+- Climb H-014 cycle 15, H-015 cycle 16 and H-016 cycle 17 scored 100/100 on
+  dedicated local gates. H-016 run `20260825-053507-h-016` covers real
+  migration/trust/late-ingress/freshness/recovery-observation behavior plus
+  exact 26-hour restart/replay certificate evidence.
+- These changes have **not** been deployed and migrations 022/023/024 have not
   been applied to production. The production topology still reflects the
   earlier runtime and must not be described as self-healing until Plans
-  204-206, deployment verification and a new automatic qualification epoch
+  205-206, deployment verification and a new automatic qualification epoch
   complete.
 
 ## Formal Acceptance
@@ -81,9 +86,9 @@ progress:
   `2026-08-23T16:22:21Z`, so its earlier 338-second liveness pass cannot become
   final acceptance.
 - Repeatedly starting another manual 24-hour run is no longer an accepted
-  detection/recovery mechanism. Plan `05.6-204` must first provide automatic
-  rolling epochs and immutable certificates; Plans 205-206 then add operator
-  surfaces and least-privilege production enablement.
+  detection/recovery mechanism. Plan `05.6-204` now provides the local automatic
+  epoch/certificate mechanism; Plans 205-206 must add shared operator truth and
+  least-privilege production enablement before a production epoch can start.
 - A future production epoch may qualify only after the new runtime facts,
   reconciler, recovery service, alerts and Dashboard are deployed and the
   certificate independently verifies exact 86,400-second coverage.
@@ -96,13 +101,13 @@ progress:
 | Structure/Quote cloud worker migration | three independent fixed-role workers and advancing durable successes | complete |
 | Process-loss recovery | fenced R2-before-receipt takeover evidence for both job classes | complete |
 | Immediate fault visibility | Fly watchdog plus independent Cloudflare supervisor, Telegram and source-aware Dashboard incident/recovery ledger | complete |
-| Continuous final-topology acceptance | rolling epoch + immutable certificate | blocked on Plans 204-206 and fresh production enablement |
+| Continuous final-topology acceptance | rolling epoch + immutable certificate | local mechanism complete; blocked on Plans 205-206 and fresh production enablement |
 
 ## Resume
 
-1. Execute Plan `05.6-204` Task 1: pure rolling qualification policy and
-   virtual-time state machine. Keep old soak rows and failed runs immutable.
-2. Complete Plans 204-205 locally, then use Plan 206 for migration/deployment
+1. Execute Plan `05.6-205` Task 1: bounded fail-closed control API read model
+   for runtime, incidents, recovery and qualification.
+2. Complete Plan 205 locally, then use Plan 206 for migration/deployment
    authority. Do not run local implementation commands against production.
 3. After production enablement, let recovery confirmation open a fresh epoch
    automatically; independently verify its immutable certificate before

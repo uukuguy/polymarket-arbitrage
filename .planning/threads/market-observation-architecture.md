@@ -1644,3 +1644,28 @@ success is not user receipt/read evidence.
   Heartbeat, cancel, retry, expired reclaim and one circuit probe are enabled;
   process/Machine actions remain `disabled-action` until a separate
   least-privilege production-enablement plan proves that boundary.
+
+### §2.29 Rolling qualification needs two histories and two detection clocks (2026-08-25)
+
+- Task-local facts and periodic observations answer different questions. A
+  terminal task event can invalidate immediately on the next bounded tick;
+  per-tick Structure, Quote and opportunity freshness observations detect the
+  absence of events. Neither can replace the other.
+- Business `occurred_at` is not a safe durable cursor because an old-timestamp
+  row may commit late. Migration 024 projects source changes into an append-only
+  ingress ledger with a database monotonic `ingest_seq`; the original time stays
+  in the payload while detection order cannot skip a late commit.
+- Epoch evidence and recovery-period evidence have different certificate
+  meaning. A breaking fact terminates the old epoch. Facts seen while recovering
+  belong to an append-only recovery-observation ledger, so they remain visible
+  without violating the policy invariant that a recovering epoch has no
+  qualifying facts. Confirmation opens a new clean epoch automatically.
+- An immutable row is not automatically trustworthy. Certificate canonical
+  bytes, digest, content-derived IDs, epoch bounds, counts, SLO results and
+  evidence digest are checked at the Python API, the PostgreSQL insert trigger
+  and the read verifier. Ordinary API roles can read but cannot invoke the
+  privileged writer.
+- Qualification status must follow the history chain. When the active row is
+  recovering, `last_breaker` comes from the latest breaking recovery observation
+  or the previous invalidated epoch; returning `None` would recreate the silent
+  failure the operator surface is meant to eliminate.
