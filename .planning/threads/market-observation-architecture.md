@@ -1619,3 +1619,28 @@ success is not user receipt/read evidence.
   authority needed for transactional proof is unavailable, skipping converts an
   unevaluated invariant into a false pass; the operator must receive an
   actionable gate failure instead.
+
+### §2.28 Recovery authority needs three fences and two kinds of no-op (2026-08-25)
+
+- A pure deadline decision is not recovery authority. Multiple reconcilers can
+  correctly derive the same action; controller identity+epoch, exact
+  attempt/job lease, active-target uniqueness and durable budget must arbitrate
+  scheduling in one Postgres transaction.
+- Job ownership and recovery-action ownership are distinct. A job lease may be
+  expired precisely because it needs reclaim, while an expired action-worker
+  lease means that executor must not mutate anything. Business mutation and
+  action terminal completion therefore share a transaction with a final
+  DB-clock action-lease check.
+- `stale-noop` is a durable expected outcome for an obsolete fence or a real
+  active-target race. Budget changes, conflicting idempotency payloads,
+  runtime-state changes and incident identity conflicts are store failures;
+  converting them to CLI `status=ok` recreates silent permanent failure.
+- Read-only status and mutation control are separate capabilities. Status may
+  expose controller, incident, budget/cooldown and action outcome but cannot
+  claim/renew a controller or consume recovery budget. Once/serve require an
+  explicit operator enable gate, and serve exits nonzero on unhandled
+  store/fencing errors so an outer supervisor can alert or restart it.
+- Automatic job recovery is intentionally narrower than topology recovery.
+  Heartbeat, cancel, retry, expired reclaim and one circuit probe are enabled;
+  process/Machine actions remain `disabled-action` until a separate
+  least-privilege production-enablement plan proves that boundary.

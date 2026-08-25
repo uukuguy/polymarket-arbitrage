@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: final cloud acceptance is collecting immutable evidence; do not change the topology or declare completion before its 24-hour verifier passes
-last_updated: "2026-08-23T21:47:00+08:00"
+stopped_at: Plans 201-203 are locally complete; next is Plan 204 rolling qualification, with no manual 24-hour restart before automatic epochs exist
+last_updated: "2026-08-25T10:15:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -55,19 +55,38 @@ progress:
   The evidence sampler and Cloudflare supervisor each have separate short-lived
   Fly read-only credentials; neither shares a worker credential.
 
+## Local Event-Driven Recovery Closure (2026-08-25)
+
+- Plans `05.6-201` and `05.6-202` now make all eight transactional task
+  lifecycles explicit: start, closed stage/progress chain, heartbeat and one
+  atomic terminal/retry fact. Task-local results are the primary detector;
+  watchdogs remain the missing-fact and infrastructure backstop.
+- Plan `05.6-203` is locally complete through additive migrations 022/023,
+  pure deadline decisions, controller/action/budget fencing, a five-action
+  job-level executor, read-only status, guarded one-shot control and a
+  fail-loud sequential service. Process and Machine actions remain disabled.
+- Climb H-014 cycle 15 and H-015 cycle 16 both scored 100/100 on dedicated
+  local gates. H-015 run `20260825-021111-h-015` covers real Testcontainers
+  migration/fencing/race/DB-clock rollback plus CLI fail-loud behavior.
+- These changes have **not** been deployed and migrations 022/023 have not
+  been applied to production. The production topology still reflects the
+  earlier runtime and must not be described as self-healing until Plans
+  204-206, deployment verification and a new automatic qualification epoch
+  complete.
+
 ## Formal Acceptance
 
-- **Only qualifying run:** `m1-formal-20260823T1335Z`.
-- **Baseline:** `2026-08-23T13:41:00.721027Z`; the independent sampler's first
-  append-only sample followed at `13:41:37Z` after all three workers were
-  started, and the second arrived at `13:46:38Z`.
-- **Early bounded proof:** the fail-closed verifier passed at 338 seconds with
-  three persisted ticks, all three expected workers, and advancing successful
-  work. This is liveness evidence only, not 24-hour acceptance.
-- **Hard completion gate:** `make control-plane-cloud-soak-verify
-  run_id=m1-formal-20260823T1335Z` must pass its default 86,400-second,
-  900-second-gap fail-closed policy. Earlier runs are immutable audit history
-  only and are not qualifying evidence.
+- **Active qualifying run:** none. `m1-formal-20260823T1335Z` is immutable
+  historical evidence; replay found the first breaking `lease.expired` fact at
+  `2026-08-23T16:22:21Z`, so its earlier 338-second liveness pass cannot become
+  final acceptance.
+- Repeatedly starting another manual 24-hour run is no longer an accepted
+  detection/recovery mechanism. Plan `05.6-204` must first provide automatic
+  rolling epochs and immutable certificates; Plans 205-206 then add operator
+  surfaces and least-privilege production enablement.
+- A future production epoch may qualify only after the new runtime facts,
+  reconciler, recovery service, alerts and Dashboard are deployed and the
+  certificate independently verifies exact 86,400-second coverage.
 
 ## Completion Audit
 
@@ -77,14 +96,14 @@ progress:
 | Structure/Quote cloud worker migration | three independent fixed-role workers and advancing durable successes | complete |
 | Process-loss recovery | fenced R2-before-receipt takeover evidence for both job classes | complete |
 | Immediate fault visibility | Fly watchdog plus independent Cloudflare supervisor, Telegram and source-aware Dashboard incident/recovery ledger | complete |
-| Continuous final-topology acceptance | cloud evidence verifier | in progress: full 24 hours required |
+| Continuous final-topology acceptance | rolling epoch + immutable certificate | blocked on Plans 204-206 and fresh production enablement |
 
 ## Resume
 
-1. Read-only verify `m1-formal-20260823T1335Z` periodically; do not restart or
-   reconfigure a qualifying target during its 24-hour no-gap window.
-2. If an alert opens, diagnose the smallest failing boundary from the API,
-   source-aware Dashboard ledger and exact Machine state; repair it, then start
-   a fresh uniquely named formal run rather than relabeling this evidence.
-3. After the 24-hour verifier passes, perform the final topology/document audit
-   and only then mark Phase 05.6 and the M1 goal complete.
+1. Execute Plan `05.6-204` Task 1: pure rolling qualification policy and
+   virtual-time state machine. Keep old soak rows and failed runs immutable.
+2. Complete Plans 204-205 locally, then use Plan 206 for migration/deployment
+   authority. Do not run local implementation commands against production.
+3. After production enablement, let recovery confirmation open a fresh epoch
+   automatically; independently verify its immutable certificate before
+   marking Phase 05.6 and M1 complete.

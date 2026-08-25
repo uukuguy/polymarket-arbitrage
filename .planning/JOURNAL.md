@@ -10129,3 +10129,37 @@ final whole-branch review. Do not restart a 24-hour qualification run.
 [NEXT] Continue climb with H-015 / Plan `05.6-203`: implement Task 1's pure
 deadline reconciler decision table, then fenced recovery storage/execution.
 Do not restart a 24-hour qualification run.
+
+## SESSION 301 — 2026-08-25 (fenced recovery loop and climb H-015 confirmation)
+
+- [IMPLEMENTED] Plan `05.6-203` added a pure deadline reconciler, migration
+  023 controller/action/budget ledger, and a job-level recovery executor. The
+  executable actions are heartbeat, cooperative cancel, retry, expired-lease
+  reclaim and one circuit probe; process and Machine restart remain durable
+  `disabled-action` boundaries.
+- [HARDENED] Controller identity+epoch, attempt/job lease, action worker lease,
+  active-target uniqueness and durable budget are checked under Postgres
+  locks. Job/circuit mutation and action terminal completion share one
+  transaction and use DB time at the terminal fence. A crashed executor can be
+  reclaimed; an old worker cannot mutate after its action lease expires.
+- [FAIL-LOUD] The runtime CLI no longer converts generic budget, idempotency,
+  runtime-state or incident conflicts into successful `stale-noop` output.
+  Only a real active-target competition persists a completed stale-noop;
+  other store/fencing failures make one-shot and service commands exit nonzero.
+- [OPERATOR] Added read-only `make runtime-controller-status`, guarded
+  `make runtime-reconcile-once enable=1`, and guarded sequential
+  `make runtime-reconcile-serve enable=1`. Status exposes controller, runtime
+  facts, incidents, budgets/cooldowns and action outcomes without mutation.
+- [VERIFIED] All four Plan 03 tasks passed independent review. H-015
+  `fenced-deadline-reconciler` completed cycle 16 at 100/100 across planning,
+  unit, local Postgres integration, CLI/Make fail-loud and restart/recovery
+  gates. Run: `20260825-021111-h-015`; no deployment, production migration or
+  external submission occurred.
+- [LEARNING] Added `docs/learning/85-有围栏的截止时间协调器.md`, explaining
+  controller/job/action ownership, durable budget, active-target arbitration,
+  durable stale-noop versus fail-loud errors, and the read-only status boundary.
+
+[NEXT] Continue climb with H-016 / Plan `05.6-204` Task 1: implement the pure
+rolling qualification policy and virtual-time state machine. Do not restart a
+manual 24-hour run; automatic epochs and immutable certificates must exist
+before production enablement.
