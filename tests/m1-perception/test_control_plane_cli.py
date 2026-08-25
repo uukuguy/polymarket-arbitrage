@@ -1078,10 +1078,14 @@ def test_runtime_reconcile_serve_store_conflicts_exit_current_turn(
 def test_runtime_reconcile_serve_stops_cleanly_on_signal_and_is_sequential(monkeypatch) -> None:
     """The loop owns no deployment or process authority and exits on its stop event."""
     import asyncio
+    from collections.abc import Callable
     from datetime import UTC, datetime
+    from typing import Any, cast
+
+    import psycopg
 
     from polyarb import cli_control_plane
-    from polyarb.control_plane.recovery_records import RuntimeControllerLease
+    from polyarb.control_plane.recovery_records import RecoveryActionRecord, RuntimeControllerLease
 
     args = cli_control_plane._parser().parse_args(
         ["runtime-reconcile-serve", "--enable", "--interval-seconds", "0.001"]
@@ -1091,7 +1095,18 @@ def test_runtime_reconcile_serve_stops_cleanly_on_signal_and_is_sequential(monke
     controller = RuntimeControllerLease("controller-a", "owner-a", 1, now + timedelta(seconds=90))
 
     class ControlPlane:
-        _connection_factory = object()
+        def __init__(self) -> None:
+            self._connection_factory = cast(Callable[[], psycopg.Connection[Any]], lambda: None)
+
+        def _execute_recovery_action_cursor(
+            self,
+            cursor: Any,
+            action: RecoveryActionRecord,
+            *,
+            now: datetime,
+            heartbeat_lease_seconds: int,
+        ) -> object:
+            raise AssertionError("patched reconcile turn must not execute recovery")
 
     class StopEvent:
         def __init__(self):
