@@ -128,6 +128,126 @@ def test_make_runtime_status_is_read_only_dry_run() -> None:
     assert "claim_controller" not in recipe
 
 
+def test_make_help_lists_rolling_qualification_targets() -> None:
+    result = subprocess.run(
+        ["make", "help"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, f"make help failed: {result.stderr}"
+    assert "qualification-status:" in result.stdout
+    assert "qualification-certificates:" in result.stdout
+    assert "qualification-serve:" in result.stdout
+    assert "immutable qualification certificates" in result.stdout
+    assert "requires enable=1" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("target", "args", "expected"),
+    [
+        (
+            "qualification-status",
+            (),
+            "uv run python -m polyarb.cli_control_plane qualification-status --json",
+        ),
+        (
+            "qualification-certificates",
+            ("limit=7",),
+            "uv run python -m polyarb.cli_control_plane "
+            'qualification-certificates --limit "7" --json',
+        ),
+    ],
+)
+def test_make_qualification_read_targets_are_strictly_read_only(
+    target: str, args: tuple[str, ...], expected: str
+) -> None:
+    result = subprocess.run(
+        ["make", "-n", target, *args],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert expected in result.stdout
+    recipe = result.stdout.lower()
+    forbidden = (
+        "alembic",
+        "flyctl",
+        " deploy",
+        "machine",
+        "r2",
+        "tick-once",
+        "reconcile",
+        "quote-once",
+        "structure-once",
+        "structure-source-once",
+        "shadow-publish",
+        "--enable",
+    )
+    for term in forbidden:
+        assert term not in recipe, f"{target} must stay read-only: {term}"
+
+
+def test_make_qualification_certificates_default_limit_is_20() -> None:
+    result = subprocess.run(
+        ["make", "-n", "qualification-certificates"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert 'qualification-certificates --limit "20" --json' in result.stdout
+
+
+def test_make_qualification_serve_requires_enable_before_cli() -> None:
+    result = subprocess.run(
+        ["make", "qualification-serve"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert "enable=1" in result.stderr
+    assert "polyarb.cli_control_plane" not in result.stdout
+    assert "polyarb.cli_control_plane" not in result.stderr
+
+
+def test_make_qualification_serve_is_enable_guarded_and_bounded() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "qualification-serve",
+            "enable=1",
+            "interval_seconds=5",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "uv run python -m polyarb.cli_control_plane qualification-serve "
+        '--enable --interval-seconds "5" --json'
+    ) in result.stdout
+    recipe = result.stdout.lower()
+    for forbidden in ("alembic", "flyctl", " deploy", "machine", "r2"):
+        assert forbidden not in recipe, (
+            f"qualification serve must not mutate deployment: {forbidden}"
+        )
+
+
 def test_make_control_plane_preflight_help_and_dry_run_require_revision_022() -> None:
     help_result = subprocess.run(
         ["make", "help"],
@@ -398,6 +518,9 @@ def test_makefile_phony_declaration_present() -> None:
         "snapshot-markets-full",
         "sync-structure-local",
         "archive-markets-local",
+        "qualification-status",
+        "qualification-certificates",
+        "qualification-serve",
     }
     missing = required - phony_targets
     assert not missing, f"missing .PHONY declarations for: {missing}"

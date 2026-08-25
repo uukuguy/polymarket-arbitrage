@@ -97,6 +97,7 @@
 | 83 | [可诊断运行异常 Dashboard](83-可诊断运行异常Dashboard.md) | 为什么“有一条报警”还不够、检测/恢复如何构成同一事件生命周期、怎样从页面直接定位受影响对象 |
 | 84 | [任务局部事实与事件驱动自愈](84-任务局部事实与事件驱动自愈.md) | heartbeat 与 progress 为什么不能混为一谈 / terminal fact 如何和业务结果原子提交 / timer 与 watchdog 为什么只能做兜底 / 八任务真实终态门如何防止假阳性 |
 | 85 | [有围栏的截止时间协调器](85-有围栏的截止时间协调器.md) | 任务事实如何进入纯 deadline 判断 / controller、job、action 三层租约 / durable budget 与 active-target 仲裁 / stale-noop 与 fail-loud 错误的区别 / 只读 status 与 job-level 权限边界 |
+| 86 | [滚动资格证书与自动重开](86-滚动资格证书与自动重开.md) | contained 与 breaking 如何决定 epoch 命运 / ingest_seq cursor 为什么不丢迟到事实 / freshness 双视角 / certificate read+reverify trust 边界 / Make 入口权限 |
 
 ## Phase 02.1 教学增量（2026-05）
 

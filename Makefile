@@ -739,7 +739,20 @@ runtime-reconcile-serve:
 	@test "$(enable)" = "1" || (echo "usage: make runtime-reconcile-serve enable=1 [interval_seconds=30]" >&2; exit 2)
 	@uv run python -m polyarb.cli_control_plane runtime-reconcile-serve --enable --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --owner-id "$(or $(owner_id),runtime-reconcile-service)" --worker-id "$(or $(worker_id),runtime-recovery-executor)" --interval-seconds "$(or $(interval_seconds),30)" --limit "$(or $(limit),100)" --json
 
-.PHONY: runtime-policy-replay runtime-controller-status runtime-reconcile-once runtime-reconcile-serve
+## qualification-status: Read current rolling qualification progress and last breaker; read-only, DSN handled by CLI.
+qualification-status:
+	@uv run python -m polyarb.cli_control_plane qualification-status --json
+
+## qualification-certificates: Read and reverify recent immutable qualification certificates; read-only. Optional limit=20.
+qualification-certificates:
+	@uv run python -m polyarb.cli_control_plane qualification-certificates --limit "$(or $(limit),20)" --json
+
+## qualification-serve: Run sequential rolling qualification ticks; requires enable=1 and does not deploy or migrate.
+qualification-serve:
+	@test "$(enable)" = "1" || (echo "usage: make qualification-serve enable=1 [interval_seconds=30]" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane qualification-serve --enable --interval-seconds "$(or $(interval_seconds),30)" --json
+
+.PHONY: runtime-policy-replay runtime-controller-status runtime-reconcile-once runtime-reconcile-serve qualification-status qualification-certificates qualification-serve
 
 ## quote-control-plane-once: Explicitly run one transactional Quote batch and certification attempt; requires enable=1 plus DSN and R2 credentials.
 quote-control-plane-once:
