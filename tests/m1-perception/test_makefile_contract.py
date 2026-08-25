@@ -63,7 +63,9 @@ def _fake_uv_calls(log_path: Path) -> list[list[str]]:
     return [json.loads(line)["argv"] for line in log_path.read_text().splitlines() if line]
 
 
-def _fake_curl_env(tmp_path: Path, *, body: str, status: str = "200") -> tuple[dict[str, str], Path]:
+def _fake_curl_env(
+    tmp_path: Path, *, body: str, status: str = "200"
+) -> tuple[dict[str, str], Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log_path = tmp_path / "curl-argv.jsonl"
@@ -197,6 +199,64 @@ def test_make_runtime_status_is_read_only_dry_run() -> None:
     recipe = result.stdout.lower()
     assert "--enable" not in recipe
     assert "claim_controller" not in recipe
+
+
+def test_make_help_lists_runtime_fault_matrix() -> None:
+    result = subprocess.run(
+        ["make", "help"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, f"make help failed: {result.stderr}"
+    assert "runtime-fault-matrix:" in result.stdout
+    assert "local deterministic self-healing fault matrix" in result.stdout
+
+
+def test_make_runtime_fault_matrix_requires_test_dsn_before_fake_uv(tmp_path: Path) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env.pop("POLYARB_CONTROL_PLANE_TEST_DSN", None)
+    result = subprocess.run(
+        ["make", "runtime-fault-matrix"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert "POLYARB_CONTROL_PLANE_TEST_DSN" in result.stderr
+    assert _fake_uv_calls(log_path) == []
+
+
+def test_make_runtime_fault_matrix_executes_fake_uv_with_explicit_test_dsn(
+    tmp_path: Path,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env["POLYARB_CONTROL_PLANE_TEST_DSN"] = "postgresql://localhost/test"
+    result = subprocess.run(
+        ["make", "runtime-fault-matrix"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _fake_uv_calls(log_path) == [
+        [
+            "run",
+            "python",
+            "-m",
+            "polyarb.cli_control_plane",
+            "runtime-fault-matrix",
+            "--json",
+        ]
+    ]
 
 
 def test_make_help_lists_rolling_qualification_targets() -> None:

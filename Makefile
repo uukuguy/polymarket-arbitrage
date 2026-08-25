@@ -614,7 +614,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-egress-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-start control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify runtime-controller-status runtime-reconcile-once runtime-reconcile-serve supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-egress-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-start control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify runtime-policy-replay runtime-fault-matrix runtime-controller-status runtime-reconcile-once runtime-reconcile-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -725,6 +725,11 @@ runtime-policy-replay:
 	@test -n "$$POLYARB_SUPABASE_DB_DSN" || (echo "ERROR: explicitly export scoped DSN" >&2; exit 2)
 	@uv run python -m polyarb.cli_control_plane runtime-policy-replay --run-id "$(run_id)" --json
 
+## runtime-fault-matrix: Run the local deterministic self-healing fault matrix; never contacts production.
+runtime-fault-matrix:
+	@test -n "$$POLYARB_CONTROL_PLANE_TEST_DSN" || (echo "ERROR: explicitly export POLYARB_CONTROL_PLANE_TEST_DSN" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane runtime-fault-matrix --json
+
 ## runtime-controller-status: Read the current runtime controller lease, active runtime incidents, recovery budgets, and action outcomes; never mutates Postgres.
 runtime-controller-status:
 	@uv run python -m polyarb.cli_control_plane runtime-controller-status --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --limit "$(or $(limit),20)" --json
@@ -752,7 +757,7 @@ qualification-serve:
 	@test "$(enable)" = "1" || (echo "usage: make qualification-serve enable=1 [interval_seconds=30]" >&2; exit 2)
 	@uv run python -m polyarb.cli_control_plane qualification-serve --enable --interval-seconds "$(or $(interval_seconds),30)" --json
 
-.PHONY: runtime-policy-replay runtime-controller-status runtime-reconcile-once runtime-reconcile-serve qualification-status qualification-certificates qualification-serve
+.PHONY: runtime-policy-replay runtime-fault-matrix runtime-controller-status runtime-reconcile-once runtime-reconcile-serve qualification-status qualification-certificates qualification-serve
 
 ## quote-control-plane-once: Explicitly run one transactional Quote batch and certification attempt; requires enable=1 plus DSN and R2 credentials.
 quote-control-plane-once:

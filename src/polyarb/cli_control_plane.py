@@ -52,6 +52,7 @@ from polyarb.control_plane.recovery_store import (
     schedule_action,
 )
 from polyarb.control_plane.rollout import render_rollout_artifacts
+from polyarb.control_plane.runtime_fault_matrix import RuntimeFaultMatrixError, run_fault_matrix
 from polyarb.control_plane.runtime_replay import replay_soak_observations
 from polyarb.control_plane.scheduler import TransactionalControlPlaneScheduler
 from polyarb.control_plane.shadow import project_shadow_sources, read_shadow_sources
@@ -334,6 +335,11 @@ def _parser() -> argparse.ArgumentParser:
     runtime_replay.add_argument("--run-id", required=True)
     runtime_replay.add_argument("--max-gap-seconds", type=float, default=900.0)
     runtime_replay.add_argument("--json", action="store_true")
+    runtime_fault_matrix = subcommands.add_parser(
+        "runtime-fault-matrix",
+        help="run the local deterministic self-healing runtime fault matrix",
+    )
+    runtime_fault_matrix.add_argument("--json", action="store_true")
     runtime_status = subcommands.add_parser(
         "runtime-controller-status",
         help="read the current runtime controller lease, incidents, budgets, and recovery actions",
@@ -1526,6 +1532,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
             as_json=args.json,
         )
+        return 0
+    if args.command == "runtime-fault-matrix":
+        try:
+            _write(run_fault_matrix(), as_json=args.json)
+        except RuntimeFaultMatrixError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+        except (OSError, RuntimeError, ValueError, psycopg.Error) as error:
+            print(f"runtime fault matrix unavailable: {type(error).__name__}", file=sys.stderr)
+            return 1
         return 0
     if args.command == "watchdog-serve":
         try:
