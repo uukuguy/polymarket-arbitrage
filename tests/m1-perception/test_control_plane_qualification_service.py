@@ -198,6 +198,55 @@ def test_legitimate_incident_kinds_map_to_closed_qualification_reasons() -> None
         incident_event_row_to_fact_record({**base, "kind": "not-a-real-transition"})
 
 
+def test_successful_recovery_action_types_map_to_closed_qualification_reasons() -> None:
+    expected_reasons = {
+        "heartbeat-job": "recovery.heartbeat",
+        "cancel-job": "recovery.started",
+        "retry-job": "recovery.retry",
+        "reclaim-job": "recovery.reclaim",
+        "probe-circuit": "recovery.circuit-probe",
+        "restart-worker-process": "recovery.process-replacement",
+        "restart-machine": "recovery.machine-replacement",
+    }
+
+    for index, (action_type, expected_reason) in enumerate(expected_reasons.items()):
+        record = recovery_action_row_to_fact_record(
+            {
+                "action_id": f"action-{index}",
+                "action_type": action_type,
+                "target_id": "job-a",
+                "state": "completed",
+                "result_code": "succeeded",
+                "requested_at": NOW,
+                "finished_at": NOW + timedelta(seconds=20),
+                "detail": {"reason_code": action_type, "recovery_slo_seconds": 60},
+            }
+        )
+        assert record.fact.reason == expected_reason
+        if expected_reason == "recovery.started":
+            assert record.fact.recovery_duration_seconds is None
+            assert record.fact.recovery_slo_seconds is None
+            assert record.fact.signature is None
+        else:
+            assert record.fact.recovery_duration_seconds == 20
+            assert record.fact.recovery_slo_seconds == 60
+            assert record.fact.signature == action_type
+
+    with pytest.raises(ValueError, match="unknown successful recovery action type"):
+        recovery_action_row_to_fact_record(
+            {
+                "action_id": "action-unknown",
+                "action_type": "unknown-action",
+                "target_id": "job-a",
+                "state": "completed",
+                "result_code": "succeeded",
+                "requested_at": NOW,
+                "finished_at": NOW + timedelta(seconds=20),
+                "detail": {},
+            }
+        )
+
+
 def test_retryable_failure_runtime_and_incident_facts_do_not_qualify_or_crash() -> None:
     runtime = runtime_event_row_to_fact_record(
         {

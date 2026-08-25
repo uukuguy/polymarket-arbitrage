@@ -62,10 +62,13 @@ _RUNTIME_BREAKING_REASONS = {
     "progress.regressed": "progress.regressed",
 }
 _RECOVERY_ACTION_REASONS = {
+    "heartbeat-job": "recovery.heartbeat",
+    "cancel-job": "recovery.started",
     "retry-job": "recovery.retry",
     "reclaim-job": "recovery.reclaim",
-    "restart-worker-process": "recovery.process-replacement",
     "probe-circuit": "recovery.circuit-probe",
+    "restart-worker-process": "recovery.process-replacement",
+    "restart-machine": "recovery.machine-replacement",
 }
 _INCIDENT_KINDS = frozenset(
     {
@@ -954,16 +957,21 @@ def recovery_action_row_to_fact_record(row: Mapping[str, object]) -> Qualificati
         if action_type not in _RECOVERY_ACTION_REASONS:
             raise ValueError(f"unknown successful recovery action type: {action_type}")
         reason = _RECOVERY_ACTION_REASONS[action_type]
-        duration = 0 if finished_at is None else int((finished_at - requested_at).total_seconds())
-        kwargs = {
-            "signature": str(detail.get("reason_code") or target_id),
-            "recovery_duration_seconds": max(0, duration),
-            "recovery_slo_seconds": _optional_int(
-                detail.get("recovery_slo_seconds"), "recovery_slo_seconds"
+        if reason in BREAKING_REASONS or reason == "recovery.started":
+            kwargs = {}
+        else:
+            duration = (
+                0 if finished_at is None else int((finished_at - requested_at).total_seconds())
             )
-            or 300,
-            "resolved": True,
-        }
+            kwargs = {
+                "signature": str(detail.get("reason_code") or target_id),
+                "recovery_duration_seconds": max(0, duration),
+                "recovery_slo_seconds": _optional_int(
+                    detail.get("recovery_slo_seconds"), "recovery_slo_seconds"
+                )
+                or 300,
+                "resolved": True,
+            }
     elif state == "completed" and result_code in {"failed", "disabled-action"}:
         reason = "recovery.human-intervention"
     elif state not in {"pending", "running", "completed"}:

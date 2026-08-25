@@ -50,8 +50,10 @@ BREAKING_REASONS: Final[frozenset[str]] = frozenset(
 
 CONTAINED_REASONS: Final[frozenset[str]] = frozenset(
     {
+        "recovery.heartbeat",
         "recovery.retry",
         "recovery.reclaim",
+        "recovery.machine-replacement",
         "recovery.process-replacement",
         "recovery.circuit-probe",
     }
