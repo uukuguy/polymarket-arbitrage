@@ -105,7 +105,7 @@ async def append_runtime_event(request: Request) -> JSONResponse:
                     if row is None:
                         raise RuntimeError("runtime incident conflict returned no row")
                     incident_key = str(row["incident_key"])
-                    event_kind = _runtime_existing_detected_event_kind(
+                    event_kind = _runtime_detected_event_kind(
                         cursor=cursor,
                         incident=row,
                         incident_key=incident_key,
@@ -114,6 +114,13 @@ async def append_runtime_event(request: Request) -> JSONResponse:
                     if event_kind is None:
                         return JSONResponse({"status": "noop"}, status_code=201)
             elif row.get("state") != "open":
+                latest_transition = _runtime_latest_transition(cursor, str(row["incident_key"]))
+                if _runtime_transition_is_stale(
+                    incident=row,
+                    latest_event=latest_transition,
+                    occurred_at=occurred_at,
+                ):
+                    return JSONResponse({"status": "noop"}, status_code=201)
                 cursor.execute("""
                     UPDATE m1_incidents
                     SET state='open', severity='critical',
@@ -129,7 +136,7 @@ async def append_runtime_event(request: Request) -> JSONResponse:
                 event_kind = "detected"
             else:
                 incident_key = str(row["incident_key"])
-                event_kind = _runtime_existing_detected_event_kind(
+                event_kind = _runtime_detected_event_kind(
                     cursor=cursor,
                     incident=row,
                     incident_key=incident_key,
@@ -146,6 +153,13 @@ async def append_runtime_event(request: Request) -> JSONResponse:
             if row.get("state") == "resolved":
                 return JSONResponse({"status": "noop"}, status_code=201)
             incident_key = str(row["incident_key"])
+            latest_transition = _runtime_latest_transition(cursor, incident_key)
+            if _runtime_transition_is_stale(
+                incident=row,
+                latest_event=latest_transition,
+                occurred_at=occurred_at,
+            ):
+                return JSONResponse({"status": "noop"}, status_code=201)
             cursor.execute("UPDATE m1_incidents SET state='resolved', resolved_at=%s, updated_at=%s WHERE incident_key=%s", (occurred_at, occurred_at, incident_key))
             event_kind = "recovered"
         event_id = str(uuid4())
@@ -274,13 +288,45 @@ def _runtime_reminder_kind(
     return None
 
 
-def _runtime_existing_detected_event_kind(
+def _runtime_detected_event_kind(
     *,
     cursor: Any,
     incident: Mapping[str, object],
     incident_key: str,
     occurred_at: datetime,
 ) -> str | None:
+    latest_event = _runtime_latest_transition(cursor, incident_key)
+    if _runtime_transition_is_stale(
+        incident=incident,
+        latest_event=latest_event,
+        occurred_at=occurred_at,
+    ):
+        return None
+    latest_reminder_event = _runtime_latest_detected_or_escalated(cursor, incident_key)
+    return _runtime_reminder_kind(
+        incident=incident,
+        latest_event=latest_reminder_event,
+        occurred_at=occurred_at,
+    )
+
+
+def _runtime_latest_transition(
+    cursor: Any, incident_key: str
+) -> Mapping[str, object] | None:
+    cursor.execute("""
+        SELECT kind, occurred_at
+        FROM m1_incident_events
+        WHERE incident_key=%s
+          AND kind IN ('detected','escalated','recovery-started','recovered')
+        ORDER BY occurred_at DESC, incident_event_id DESC
+        LIMIT 1
+    """, (incident_key,))
+    return cursor.fetchone()
+
+
+def _runtime_latest_detected_or_escalated(
+    cursor: Any, incident_key: str
+) -> Mapping[str, object] | None:
     cursor.execute("""
         SELECT kind, occurred_at
         FROM m1_incident_events
@@ -288,11 +334,21 @@ def _runtime_existing_detected_event_kind(
         ORDER BY occurred_at DESC, incident_event_id DESC
         LIMIT 1
     """, (incident_key,))
-    return _runtime_reminder_kind(
-        incident=incident,
-        latest_event=cursor.fetchone(),
-        occurred_at=occurred_at,
-    )
+    return cursor.fetchone()
+
+
+def _runtime_transition_is_stale(
+    *,
+    incident: Mapping[str, object],
+    latest_event: Mapping[str, object] | None,
+    occurred_at: datetime,
+) -> bool:
+    watermark = _coerce_time(incident.get("opened_at"))
+    if latest_event is not None:
+        latest_at = _coerce_time(latest_event.get("occurred_at"))
+        if latest_at > watermark:
+            watermark = latest_at
+    return occurred_at <= watermark
 
 
 def _coerce_time(value: object) -> datetime:

@@ -288,6 +288,8 @@ def test_runtime_transition_writer_suppresses_restart_duplicate_from_open_incide
                 }
             if query_count == 3:
                 return {"kind": "detected", "occurred_at": "2030-01-01T00:00:00+00:00"}
+            if query_count == 4:
+                return {"kind": "detected", "occurred_at": "2030-01-01T00:00:00+00:00"}
             raise AssertionError("duplicate unhealthy observation must not write another event")
 
     cursor = Cursor()
@@ -351,6 +353,8 @@ def test_runtime_transition_writer_returns_escalated_payload_after_durable_remin
                     "opened_at": "2030-01-01T00:00:00+00:00",
                 }
             if query_count == 3:
+                return self.latest_event
+            if query_count == 4:
                 return self.latest_event
             return None
 
@@ -493,3 +497,209 @@ def test_runtime_transition_writer_records_recovered_once_and_suppresses_replay(
     assert replay.json() == {"status": "noop"}
     assert [len(cursor.outbox_payloads) for cursor in all_cursors] == [2, 0]
     assert "RECOVERED" in render_runtime_incident_message(all_cursors[0].outbox_payloads[0])
+
+
+def test_runtime_transition_writer_rejects_stale_recovered_before_latest_detected(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("POLYARB_RUNTIME_EVENT_WRITER_TOKEN", "test-token")
+    from polyarb.control_plane import runtime_event_writer
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.outbox_payloads: list[dict[str, object]] = []
+
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, sql, params=()):
+            self.calls.append(sql)
+            if "INSERT INTO m1_alert_outbox" in sql:
+                self.outbox_payloads.append(params[3])
+        def fetchone(self):
+            query_count = sum(not call.startswith("SET LOCAL") for call in self.calls)
+            if query_count == 1:
+                return None
+            if query_count == 2:
+                return {
+                    "incident_key": "runtime-incident-a",
+                    "state": "open",
+                    "opened_at": "2030-01-01T00:00:00+00:00",
+                }
+            if query_count == 3:
+                return {"kind": "detected", "occurred_at": "2030-01-01T00:10:00+00:00"}
+            return None
+
+    cursor = Cursor()
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def cursor(self, **_kwargs): return cursor
+
+    monkeypatch.setattr(
+        runtime_event_writer.psycopg,
+        "connect",
+        lambda *_args, **_kwargs: Connection(),
+    )
+    monkeypatch.setattr(runtime_event_writer, "Jsonb", lambda value: value)
+    app = Starlette(
+        routes=[
+            Route("/runtime-events", runtime_event_writer.append_runtime_event, methods=["POST"])
+        ]
+    )
+    app.state.dsn = "postgresql://not-used"
+    with TestClient(app) as client:
+        response = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "4" * 64},
+            json=_runtime_transition_payload(
+                transition="recovered",
+                occurred_at="2030-01-01T00:05:00+00:00",
+            ),
+        )
+
+    assert response.status_code == 201
+    assert response.json() == {"status": "noop"}
+    assert not any("UPDATE m1_incidents SET state='resolved'" in call for call in cursor.calls)
+    assert cursor.outbox_payloads == []
+
+
+def test_runtime_transition_writer_rejects_stale_detected_before_latest_recovered(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("POLYARB_RUNTIME_EVENT_WRITER_TOKEN", "test-token")
+    from polyarb.control_plane import runtime_event_writer
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.outbox_payloads: list[dict[str, object]] = []
+
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, sql, params=()):
+            self.calls.append(sql)
+            if "INSERT INTO m1_alert_outbox" in sql:
+                self.outbox_payloads.append(params[3])
+        def fetchone(self):
+            query_count = sum(not call.startswith("SET LOCAL") for call in self.calls)
+            if query_count == 1:
+                return None
+            if query_count == 2:
+                return {
+                    "incident_key": "runtime-incident-a",
+                    "state": "resolved",
+                    "opened_at": "2030-01-01T00:00:00+00:00",
+                }
+            if query_count == 3:
+                return {"kind": "recovered", "occurred_at": "2030-01-01T00:10:00+00:00"}
+            return None
+
+    cursor = Cursor()
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def cursor(self, **_kwargs): return cursor
+
+    monkeypatch.setattr(
+        runtime_event_writer.psycopg,
+        "connect",
+        lambda *_args, **_kwargs: Connection(),
+    )
+    monkeypatch.setattr(runtime_event_writer, "Jsonb", lambda value: value)
+    app = Starlette(
+        routes=[
+            Route("/runtime-events", runtime_event_writer.append_runtime_event, methods=["POST"])
+        ]
+    )
+    app.state.dsn = "postgresql://not-used"
+    with TestClient(app) as client:
+        response = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "5" * 64},
+            json=_runtime_transition_payload(occurred_at="2030-01-01T00:05:00+00:00"),
+        )
+
+    assert response.status_code == 201
+    assert response.json() == {"status": "noop"}
+    assert not any("SET state='open'" in call for call in cursor.calls)
+    assert cursor.outbox_payloads == []
+
+
+def test_runtime_transition_writer_uses_recovery_started_as_ordering_not_reminder_cursor(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("POLYARB_RUNTIME_EVENT_WRITER_TOKEN", "test-token")
+    from polyarb.control_plane import runtime_event_writer
+
+    class Cursor:
+        def __init__(self, *, occurred_at: str) -> None:
+            self.calls: list[str] = []
+            self.occurred_at = occurred_at
+            self.outbox_payloads: list[dict[str, object]] = []
+
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, sql, params=()):
+            self.calls.append(sql)
+            if "INSERT INTO m1_alert_outbox" in sql:
+                self.outbox_payloads.append(params[3])
+        def fetchone(self):
+            query_count = sum(not call.startswith("SET LOCAL") for call in self.calls)
+            if query_count == 1:
+                return None
+            if query_count == 2:
+                return {
+                    "incident_key": "runtime-incident-a",
+                    "state": "open",
+                    "opened_at": "2030-01-01T00:00:00+00:00",
+                }
+            if query_count == 3:
+                return {"kind": "recovery-started", "occurred_at": "2030-01-01T00:10:00+00:00"}
+            if query_count == 4:
+                return {"kind": "detected", "occurred_at": "2030-01-01T00:00:00+00:00"}
+            return None
+
+    all_cursors = [
+        Cursor(occurred_at="2030-01-01T00:11:00+00:00"),
+        Cursor(occurred_at="2030-01-01T00:15:00+00:00"),
+    ]
+    cursors = list(all_cursors)
+
+    class Connection:
+        def __init__(self, cursor: Cursor) -> None:
+            self._cursor = cursor
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def cursor(self, **_kwargs): return self._cursor
+
+    def connect(_dsn: str, **_kwargs: object) -> Connection:
+        return Connection(cursors.pop(0))
+
+    monkeypatch.setattr(runtime_event_writer.psycopg, "connect", connect)
+    monkeypatch.setattr(runtime_event_writer, "Jsonb", lambda value: value)
+    app = Starlette(
+        routes=[
+            Route("/runtime-events", runtime_event_writer.append_runtime_event, methods=["POST"])
+        ]
+    )
+    app.state.dsn = "postgresql://not-used"
+    with TestClient(app) as client:
+        early = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "6" * 64},
+            json=_runtime_transition_payload(occurred_at=all_cursors[0].occurred_at),
+        )
+        first_reminder = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "7" * 64},
+            json=_runtime_transition_payload(occurred_at=all_cursors[1].occurred_at),
+        )
+
+    assert early.status_code == 201
+    assert first_reminder.status_code == 201
+    assert early.json() == {"status": "noop"}
+    assert first_reminder.json()["transition_payload"]["transition"] == "escalated"
+    assert [len(cursor.outbox_payloads) for cursor in all_cursors] == [0, 2]

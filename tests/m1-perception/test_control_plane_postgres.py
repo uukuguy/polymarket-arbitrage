@@ -248,6 +248,211 @@ def test_runtime_event_writer_concurrent_first_detected_records_one_event_and_tw
         assert "DETECTED" in render_runtime_incident_message(outbox_payload)
 
 
+def test_runtime_event_writer_stale_recovered_does_not_close_newer_detected_incident(
+    postgres_dsn: str, control_plane: PostgresControlPlane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del control_plane
+    monkeypatch.setenv("POLYARB_RUNTIME_EVENT_WRITER_TOKEN", "test-token")
+    app = Starlette(
+        routes=[
+            Route(
+                "/runtime-events",
+                runtime_event_writer.append_runtime_event,
+                methods=["POST"],
+            )
+        ]
+    )
+    app.state.dsn = postgres_dsn
+    payload = {
+        "schema_version": "m1-runtime-incident-transition-v1",
+        "transition": "detected",
+        "incident_id": "runtime-watchdog-incident-a",
+        "incident_key": "runtime-watchdog:independent-runtime-watchdog",
+        "component": "runtime-watchdog",
+        "source": "independent-runtime-watchdog",
+        "job_key": "quote:batch:42",
+        "stage": "quote-fetch",
+        "reason": "control-api:TimeoutError",
+        "action": "restart-machine",
+        "qualification_impact": "invalidated",
+        "dashboard_url": "https://dashboard.example/control-plane",
+        "occurred_at": "2030-01-01T00:10:00+00:00",
+    }
+    stale_recovered = {
+        **payload,
+        "transition": "recovered",
+        "occurred_at": "2030-01-01T00:05:00+00:00",
+    }
+
+    with TestClient(app) as client:
+        detected = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "a" * 64},
+            json=payload,
+        )
+        recovered = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "b" * 64},
+            json=stale_recovered,
+        )
+
+    assert detected.status_code == 201
+    assert detected.json()["status"] == "recorded"
+    assert recovered.status_code == 201
+    assert recovered.json() == {"status": "noop"}
+    with psycopg.connect(postgres_dsn) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_incidents")
+        assert cursor.fetchone() == ("open",)
+        cursor.execute("SELECT kind FROM m1_incident_events ORDER BY occurred_at")
+        assert cursor.fetchall() == [("detected",)]
+        cursor.execute("SELECT count(*) FROM m1_alert_outbox")
+        assert cursor.fetchone() == (2,)
+
+
+def test_runtime_event_writer_stale_detected_does_not_reopen_newer_recovered_incident(
+    postgres_dsn: str, control_plane: PostgresControlPlane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del control_plane
+    monkeypatch.setenv("POLYARB_RUNTIME_EVENT_WRITER_TOKEN", "test-token")
+    app = Starlette(
+        routes=[
+            Route(
+                "/runtime-events",
+                runtime_event_writer.append_runtime_event,
+                methods=["POST"],
+            )
+        ]
+    )
+    app.state.dsn = postgres_dsn
+    payload = {
+        "schema_version": "m1-runtime-incident-transition-v1",
+        "transition": "detected",
+        "incident_id": "runtime-watchdog-incident-a",
+        "incident_key": "runtime-watchdog:independent-runtime-watchdog",
+        "component": "runtime-watchdog",
+        "source": "independent-runtime-watchdog",
+        "job_key": "quote:batch:42",
+        "stage": "quote-fetch",
+        "reason": "control-api:TimeoutError",
+        "action": "restart-machine",
+        "qualification_impact": "invalidated",
+        "dashboard_url": "https://dashboard.example/control-plane",
+        "occurred_at": "2030-01-01T00:00:00+00:00",
+    }
+    recovered_payload = {
+        **payload,
+        "transition": "recovered",
+        "occurred_at": "2030-01-01T00:10:00+00:00",
+    }
+    stale_detected = {**payload, "occurred_at": "2030-01-01T00:05:00+00:00"}
+
+    with TestClient(app) as client:
+        detected = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "c" * 64},
+            json=payload,
+        )
+        recovered = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "d" * 64},
+            json=recovered_payload,
+        )
+        late_detected = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "e" * 64},
+            json=stale_detected,
+        )
+
+    assert detected.status_code == 201
+    assert recovered.status_code == 201
+    assert late_detected.status_code == 201
+    assert late_detected.json() == {"status": "noop"}
+    with psycopg.connect(postgres_dsn) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT state FROM m1_incidents")
+        assert cursor.fetchone() == ("resolved",)
+        cursor.execute("SELECT kind FROM m1_incident_events ORDER BY occurred_at")
+        assert cursor.fetchall() == [("detected",), ("recovered",)]
+        cursor.execute("SELECT count(*) FROM m1_alert_outbox")
+        assert cursor.fetchone() == (4,)
+
+
+def test_runtime_event_writer_recovery_started_does_not_reset_detected_reminder_cadence(
+    postgres_dsn: str, control_plane: PostgresControlPlane, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del control_plane
+    monkeypatch.setenv("POLYARB_RUNTIME_EVENT_WRITER_TOKEN", "test-token")
+    app = Starlette(
+        routes=[
+            Route(
+                "/runtime-events",
+                runtime_event_writer.append_runtime_event,
+                methods=["POST"],
+            )
+        ]
+    )
+    app.state.dsn = postgres_dsn
+    payload = {
+        "schema_version": "m1-runtime-incident-transition-v1",
+        "transition": "detected",
+        "incident_id": "runtime-watchdog-incident-a",
+        "incident_key": "runtime-watchdog:independent-runtime-watchdog",
+        "component": "runtime-watchdog",
+        "source": "independent-runtime-watchdog",
+        "job_key": "quote:batch:42",
+        "stage": "quote-fetch",
+        "reason": "control-api:TimeoutError",
+        "action": "restart-machine",
+        "qualification_impact": "invalidated",
+        "dashboard_url": "https://dashboard.example/control-plane",
+        "occurred_at": "2030-01-01T00:00:00+00:00",
+    }
+
+    with TestClient(app) as client:
+        detected = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "f" * 64},
+            json=payload,
+        )
+    assert detected.status_code == 201
+    incident_key = detected.json()["incident_key"]
+    with psycopg.connect(postgres_dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO m1_incident_events (
+                incident_event_id, incident_key, kind, detail, idempotency_key, occurred_at
+            ) VALUES (
+                gen_random_uuid(), %s, 'recovery-started', '{}'::jsonb,
+                'runtime:recovery-started-cadence', %s
+            )
+            """,
+            (incident_key, datetime(2030, 1, 1, 0, 10, tzinfo=UTC)),
+        )
+
+    early_payload = {**payload, "occurred_at": "2030-01-01T00:11:00+00:00"}
+    reminder_payload = {**payload, "occurred_at": "2030-01-01T00:15:00+00:00"}
+    with TestClient(app) as client:
+        early = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "1" * 64},
+            json=early_payload,
+        )
+        reminder = client.post(
+            "/runtime-events",
+            headers={"Authorization": "Bearer test-token", "Idempotency-Key": "2" * 64},
+            json=reminder_payload,
+        )
+
+    assert early.status_code == 201
+    assert reminder.status_code == 201
+    assert early.json() == {"status": "noop"}
+    assert reminder.json()["transition_payload"]["transition"] == "escalated"
+    with psycopg.connect(postgres_dsn) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT kind FROM m1_incident_events ORDER BY occurred_at")
+        assert cursor.fetchall() == [("detected",), ("recovery-started",), ("escalated",)]
+        cursor.execute("SELECT count(*) FROM m1_alert_outbox")
+        assert cursor.fetchone() == (4,)
+
+
 def test_cloud_usage_budget_refuses_ninety_percent_without_an_artifact_bypass(
     control_plane: PostgresControlPlane,
 ) -> None:
