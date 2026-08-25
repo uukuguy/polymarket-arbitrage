@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Plans 201-204 are locally complete and H-016 is confirmed; next is Plan 205 operator surfaces, with production enablement reserved for Plan 206
-last_updated: "2026-08-25T13:36:48+08:00"
+stopped_at: Plans 201-205 are locally complete and H-017 is confirmed; next is Plan 206 deterministic fault qualification and least-privilege production enablement
+last_updated: "2026-08-25T15:44:29+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -69,14 +69,21 @@ progress:
   monotonic source-ingress ledger, automatic rolling epochs, recovery-period
   observations, immutable reproducible certificates, read-only status/history
   and a guarded sequential qualification service.
-- Climb H-014 cycle 15, H-015 cycle 16 and H-016 cycle 17 scored 100/100 on
-  dedicated local gates. H-016 run `20260825-053507-h-016` covers real
+- Plan `05.6-205` is locally complete through the bounded fail-closed API read
+  model, strict Dashboard decoder, four operator panels, normalized durable
+  Telegram/outbox transitions, restart-safe reminders, authenticated-body
+  smoke and teaching chapter 87. Stale/equal-time observations cannot move the
+  incident ledger backward.
+- Climb H-014 cycle 15 through H-017 cycle 18 scored 100/100 on dedicated local
+  gates. H-016 run `20260825-053507-h-016` covers real
   migration/trust/late-ingress/freshness/recovery-observation behavior plus
-  exact 26-hour restart/replay certificate evidence.
+  exact 26-hour restart/replay certificate evidence; H-017 run
+  `20260825-074318-h-017` covers strict reads, real-PostgreSQL event/outbox
+  chains, API/smoke contracts and restart/ordering behavior.
 - These changes have **not** been deployed and migrations 022/023/024 have not
   been applied to production. The production topology still reflects the
   earlier runtime and must not be described as self-healing until Plans
-  205-206, deployment verification and a new automatic qualification epoch
+  206, deployment verification and a new automatic qualification epoch
   complete.
 
 ## Formal Acceptance
@@ -87,8 +94,9 @@ progress:
   final acceptance.
 - Repeatedly starting another manual 24-hour run is no longer an accepted
   detection/recovery mechanism. Plan `05.6-204` now provides the local automatic
-  epoch/certificate mechanism; Plans 205-206 must add shared operator truth and
-  least-privilege production enablement before a production epoch can start.
+  epoch/certificate mechanism and Plan `05.6-205` now provides shared operator
+  truth. Plan 206 must prove least-privilege production enablement before a
+  production epoch can start.
 - A future production epoch may qualify only after the new runtime facts,
   reconciler, recovery service, alerts and Dashboard are deployed and the
   certificate independently verifies exact 86,400-second coverage.
@@ -101,14 +109,14 @@ progress:
 | Structure/Quote cloud worker migration | three independent fixed-role workers and advancing durable successes | complete |
 | Process-loss recovery | fenced R2-before-receipt takeover evidence for both job classes | complete |
 | Immediate fault visibility | Fly watchdog plus independent Cloudflare supervisor, Telegram and source-aware Dashboard incident/recovery ledger | complete |
-| Continuous final-topology acceptance | rolling epoch + immutable certificate | local mechanism complete; blocked on Plans 205-206 and fresh production enablement |
+| Continuous final-topology acceptance | rolling epoch + immutable certificate | local mechanism and operator surfaces complete; blocked on Plan 206 and fresh production enablement |
 
 ## Resume
 
-1. Execute Plan `05.6-205` Task 1: bounded fail-closed control API read model
-   for runtime, incidents, recovery and qualification.
-2. Complete Plan 205 locally, then use Plan 206 for migration/deployment
-   authority. Do not run local implementation commands against production.
+1. Execute Plan `05.6-206` Task 1: the deterministic local runtime fault matrix.
+2. Continue with Plan 206 least-privilege topology and exact recovery adapter.
+   Do not deploy or inject production faults without the plan's exact separate
+   authorization gate.
 3. After production enablement, let recovery confirmation open a fresh epoch
    automatically; independently verify its immutable certificate before
    marking Phase 05.6 and M1 complete.

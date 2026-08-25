@@ -1669,3 +1669,24 @@ success is not user receipt/read evidence.
   recovering, `last_breaker` comes from the latest breaking recovery observation
   or the previous invalidated epoch; returning `None` would recreate the silent
   failure the operator surface is meant to eliminate.
+
+### §2.30 Operator truth needs task events, absence detection, and monotonic presentation (2026-08-25)
+
+- A timer cannot know a task's exact business result. Task-local terminal and
+  retry paths must atomically create their incident/event/outbox intent; the
+  watchdog observes missing progress, deadline and infrastructure absence.
+  These are complementary clocks, not competing authorities.
+- Notification rendering is downstream of durable intent. The writer decides
+  incident transitions and reminder cadence from persisted rows, then writes
+  event plus Dashboard/Telegram outbox in one transaction. Normal Telegram
+  delivery belongs to the outbox worker; direct watchdog delivery is only a
+  generic one-shot break-glass when the writer itself is unavailable.
+- Arrival order cannot be mistaken for event order. The incident row lock and
+  latest relevant transition form a durable watermark; stale or equal-time
+  detected/recovered observations are no-ops. Reminder timing has a separate
+  detected/escalated cursor so a recovery-started event orders the history
+  without restarting the 15-minute/hourly schedule.
+- Operator surfaces are projections, not controllers. The API validates and
+  bounds facts, the Dashboard decoder fails closed, and authenticated smoke
+  checks real panel content rather than HTTP reachability. Recovery mutation
+  remains behind controller/job/action/attempt/lease fences.

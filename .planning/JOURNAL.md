@@ -10196,3 +10196,35 @@ before production enablement.
 fail-closed control API read model for active tasks, incidents, recovery actions
 and qualification. Do not deploy or apply migration 024 in production before
 Plan 06 grants and verifies least-privilege enablement.
+
+## SESSION 303 — 2026-08-25 (operator truth surfaces and climb H-017 confirmation)
+
+- [IMPLEMENTED] Plan `05.6-205` exposed one bounded fail-closed control API read
+  model for controller state, active tasks, runtime incidents, recovery actions,
+  data-product freshness and rolling qualification. The strict TypeScript
+  decoder rejects malformed or unfenced facts before rendering four focused
+  server-component panels.
+- [TWO DETECTORS] Known task results create incident/event/outbox facts from the
+  task transaction; the independent watchdog submits missing-progress/runtime
+  proposals. The private writer owns durable dedupe plus 15-minute then hourly
+  reminders, and the alert worker is the sole normal Telegram sender.
+- [HARDENED] Independent review reproduced a stale healthy observation closing
+  a newer live failure. Bidirectional persisted transition watermarks now make
+  stale or equal-time detected/recovered observations no-ops. A separate
+  detected/escalated cursor preserves reminder cadence when recovery-started is
+  the latest ordering event. Re-review passed with zero findings.
+- [OPERATOR] `make smoke-control-plane-dashboard` requires a pre-existing
+  cookie/header file, rejects Auth/Login HTML even at HTTP 200, and verifies all
+  four real headings. It is read-only and does not claim freshness, delivery,
+  qualification or production acceptance.
+- [VERIFIED] H-017 cycle 18 run `20260825-074318-h-017` scored 100/100 in
+  planning, unit, real-PostgreSQL integration, CLI/smoke and restart/order gates.
+  No production smoke, deployment, migration, secret change or fault mutation
+  ran.
+- [LEARNING] Added `docs/learning/87-任务自愈与滚动验收.md` with the task-native
+  versus watchdog mental model and explicit read/mutation boundaries.
+
+[NEXT] Continue climb with Plan `05.6-206` Task 1: implement and run the local
+deterministic runtime fault matrix. Then build the least-privilege deployment
+topology and exact Fly recovery adapter. Production deployment and controlled
+fault mutation remain behind Plan 206's exact separate authorization gates.
