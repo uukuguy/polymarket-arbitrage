@@ -89,6 +89,7 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
     assert checklist["expected_database"] == "control_plane_staging"
     assert checklist["runtime_controller_app"] == "polyarb-runtime-controller-staging"
     assert checklist["qualification_worker_app"] == "polyarb-qualification-worker-staging"
+    assert checklist["artifact_version"] == 9
     assert checklist["runtime_recovery_mode"] == "observe-only"
     assert checklist["runtime_recovery_allowed_targets"] == [
         "polyarb-control-worker-staging/fly-control-plane-coordinator",
@@ -97,7 +98,7 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
     assert checklist["rendered_secret_values"] is False
     assert checklist["steps"] == [
         "preflight",
-        "revisions-022-through-024-migration",
+        "revisions-022-through-025-migration",
         "isolated-api-data-worker-alert-worker-runtime-event-writer-runtime-controller-and-qualification-deploy",
         "three-fresh-source-window-structure-quote-shadows",
         "source-and-quote-admitter-worker-loss-circuit-probe-and-api-readability",

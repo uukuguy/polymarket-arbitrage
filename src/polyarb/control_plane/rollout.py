@@ -102,7 +102,7 @@ def render_rollout_artifacts(
             runtime_apps[1],
         )
     checklist = {
-        "artifact_version": 8 if render_runtime_topology else 7,
+        "artifact_version": 9 if render_runtime_topology else 7,
         "api_app": api_app,
         "worker_app": worker_app,
         "alert_app": alert_app,
@@ -110,7 +110,7 @@ def render_rollout_artifacts(
         "expected_database": expected_database,
         "steps": [
             "preflight",
-            "revisions-022-through-024-migration",
+            "revisions-022-through-025-migration",
             (
                 "isolated-api-data-worker-alert-worker-runtime-event-writer-"
                 "runtime-controller-and-qualification-deploy"
