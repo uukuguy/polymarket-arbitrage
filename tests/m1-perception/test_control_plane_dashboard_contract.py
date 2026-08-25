@@ -8,6 +8,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DECODER = ROOT / "dashboard/lib/control-plane.ts"
+CONTROL_PAGE = ROOT / "dashboard/app/control-plane/page.tsx"
+CONTROL_COMPONENT_DIR = ROOT / "dashboard/app/control-plane"
 
 
 def _run_node_case(script: str) -> subprocess.CompletedProcess[str]:
@@ -90,6 +92,24 @@ def test_control_plane_decoder_rejects_malformed_operator_facts() -> None:
                 "artifact_digest": "sha256:" + "a" * 64,
                 "observed_at": "2026-08-25T11:58:00+00:00",
             },
+        },
+        "quote": {
+            "current_pointer": {
+                "generation_key": "quote:current-generation",
+                "published_at": "2026-08-25T11:57:00+00:00",
+                "artifact_key": "quote/current.ndjson",
+                "artifact_digest": "q" * 64,
+                "record_count": 12,
+            }
+        },
+        "structure": {
+            "latest_manifest": {
+                "generation_key": "structure:latest-generation",
+                "published_at": "2026-08-25T11:56:00+00:00",
+                "artifact_key": "structure/latest.ndjson",
+                "artifact_digest": "s" * 64,
+                "record_count": 34,
+            }
         },
         "runtime_controller": {
             "status": "healthy",
@@ -340,6 +360,8 @@ assert.equal(decoded.recovery_actions.items[3].state, "running");
 assert.equal(decoded.recovery_actions.items[4].state, "stale-noop");
 assert.equal(decoded.recovery_actions.items[5].state, "stale-noop");
 assert.equal(decoded.recovery_actions.items[6].state, "failed");
+assert.equal(decoded.quote.current_pointer.published_at, "2026-08-25T11:57:00+00:00");
+assert.equal(decoded.structure.latest_manifest.published_at, "2026-08-25T11:56:00+00:00");
 assert.equal(
   decoded.runtime_incidents.items[0].transitions[0].reason_code,
   "job.lease-expired",
@@ -374,6 +396,10 @@ for (const mutate of [
   (body) => {{ body.runtime_controller.claimed_at = "2026-02-31T11:59:00+00:00"; }},
   (body) => {{ body.cloud_usage.budget_day = "2026-08-25T00:00:00+00:00"; }},
   (body) => {{ body.cloud_usage.budget_day = "2026-02-31"; }},
+  (body) => {{ delete body.quote.current_pointer.published_at; }},
+  (body) => {{ body.quote.current_pointer.record_count = -1; }},
+  (body) => {{ body.structure.latest_manifest.published_at = "2026-08-25T11:56:00"; }},
+  (body) => {{ body.structure.latest_manifest.artifact_digest = 123; }},
   (body) => {{ body.runtime_controller.status = "degraded"; }},
   (body) => {{ body.runtime_controller.lease_active = false; }},
   (body) => {{ body.runtime_controller.lease_overdue_seconds = 1; }},
@@ -523,3 +549,67 @@ assert.equal(decodeControlPlaneRead(fractionalTimestamps).status, "available");
     result = _run_node_case(script)
 
     assert result.returncode == 0, result.stderr
+
+
+def test_control_plane_page_declares_four_operator_panels() -> None:
+    """The control-plane page must render the new self-healing facts explicitly."""
+    expected_components = {
+        "RuntimeOverview.tsx": [
+            "Runtime overview",
+            "Controller state",
+            "Data-product freshness",
+            "quote.current_pointer.published_at",
+            "structure.latest_manifest.published_at",
+            "not healthy or empty",
+        ],
+        "ActiveTasks.tsx": [
+            "Active tasks",
+            "Heartbeat age",
+            "Progress age",
+            "Lease deadline",
+            "Heartbeat deadline",
+            "Progress deadline",
+            "Attempt deadline",
+            "Overdue",
+        ],
+        "IncidentTimeline.tsx": [
+            "Incident timeline",
+            "Transition",
+            "Reason code",
+            "Qualification impact",
+            "Recovery action",
+            "Result",
+        ],
+        "QualificationPanel.tsx": [
+            "Rolling qualification",
+            "Eligible",
+            "Required",
+            "Last breaker",
+            "Policy identity",
+            "Last fact",
+            "certificate-",
+            "Digest",
+        ],
+    }
+
+    for filename, literals in expected_components.items():
+        source = (CONTROL_COMPONENT_DIR / filename).read_text()
+        assert "export function" in source
+        assert "fetch(" not in source
+        for literal in literals:
+            assert literal in source
+
+    page_source = CONTROL_PAGE.read_text()
+    for component in (
+        "RuntimeOverview",
+        "ActiveTasks",
+        "IncidentTimeline",
+        "QualificationPanel",
+    ):
+        assert f"import {{ {component} }}" in page_source
+        assert f"<{component}" in page_source
+
+    assert "Cloud egress budget" in page_source
+    assert "Immutable cloud evidence" in page_source
+    assert "Runtime incident and recovery ledger" in page_source
+    assert "This is not a healthy or empty state." in page_source

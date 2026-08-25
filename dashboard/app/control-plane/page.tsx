@@ -1,4 +1,8 @@
 import { readControlPlane } from "@/lib/control-plane";
+import { ActiveTasks } from "./ActiveTasks";
+import { IncidentTimeline } from "./IncidentTimeline";
+import { QualificationPanel } from "./QualificationPanel";
+import { RuntimeOverview } from "./RuntimeOverview";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -8,18 +12,23 @@ export default async function ControlPlanePage() {
   if (view.status === "unavailable") {
     return <main style={{ padding: 24 }}><h1>M1 control-plane runtime</h1><p style={{ color: "#fecaca" }}>Unavailable: {view.reason}. This is not a healthy or empty state.</p></main>;
   }
-  const active = view.runtime_watchdog.current;
   const evidence = view.soak_evidence;
   const evidenceAge = evidence ? Math.max(0, Math.floor((Date.now() - Date.parse(evidence.latest_observed_at)) / 1000)) : null;
   const usage = view.cloud_usage;
   return <main style={{ padding: 24, maxWidth: 1200 }}>
     <h1>M1 control-plane runtime</h1>
-    <section style={{ padding: 16, border: `1px solid ${active ? "#ef4444" : "#4b5563"}`, background: active ? "#341414" : "#111", borderRadius: 8, marginBottom: 16 }}>
-      <h2 style={{ marginTop: 0 }}>{active ? "Active runtime incident — action required" : "No active runtime-watchdog incident"}</h2>
-      <p>{active?.summary ?? "The independent watchdog currently reports healthy."}</p>
-      {active && <><p><strong>Severity:</strong> {active.severity} · <strong>Observed by:</strong> {active.source}</p><p><strong>Detected:</strong> {active.opened_at} · <strong>Incident:</strong> {active.incident_key}</p><p style={{ color: "#fecaca" }}><strong>Affected checks:</strong> {active.failures.join("; ") || "unclassified runtime failure"}</p></>}
-      <p style={{ color: "#aaa" }}>Durable jobs: {Object.entries(view.job_counts).map(([state, count]) => `${state}=${count}`).join(" · ")}</p>
-    </section>
+    <RuntimeOverview
+      controller={view.runtime_controller}
+      quotePointer={view.quote.current_pointer}
+      structureManifest={view.structure.latest_manifest}
+      jobCounts={view.job_counts}
+    />
+    <ActiveTasks tasks={view.active_tasks.items} total={view.active_tasks.total} />
+    <IncidentTimeline
+      incidents={view.runtime_incidents.items}
+      recoveryActions={view.recovery_actions.items}
+    />
+    <QualificationPanel qualification={view.qualification} />
     <section style={{ padding: 16, border: `1px solid ${usage.threshold_percent >= 90 ? "#ef4444" : usage.threshold_percent >= 75 ? "#f59e0b" : "#4b5563"}`, background: usage.threshold_percent >= 90 ? "#341414" : "#111", borderRadius: 8, marginBottom: 16 }}>
       <h2 style={{ marginTop: 0 }}>Cloud egress budget</h2>
       <p><strong>{usage.used_bytes.toLocaleString()} bytes</strong> / {usage.daily_budget_bytes?.toLocaleString() ?? "not observed"} · {usage.threshold_percent}% · UTC {usage.budget_day}</p>

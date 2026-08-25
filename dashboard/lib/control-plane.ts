@@ -171,6 +171,14 @@ export type QualificationView = {
   } | null;
 };
 
+export type DataProductPointer = {
+  generation_key: string;
+  published_at: string;
+  artifact_key: string;
+  artifact_digest: string;
+  record_count: number;
+};
+
 type CloudUsage = {
   budget_day: string;
   used_bytes: number;
@@ -209,6 +217,8 @@ export type ControlPlaneRead =
       runtime_incidents: { items: RuntimeIncident[]; total: number };
       recovery_actions: { items: RecoveryAction[]; total: number };
       qualification: QualificationView;
+      quote: { current_pointer: DataProductPointer | null };
+      structure: { latest_manifest: DataProductPointer | null };
     };
 
 type RuntimeJobType =
@@ -1043,6 +1053,43 @@ function validateCloudObservation(value: unknown):
   };
 }
 
+function validateDataProductPointer(value: unknown): DataProductPointer | null | undefined {
+  if (value === null) return null;
+  if (!isRecord(value)) return undefined;
+  if (
+    !isString(value.generation_key) ||
+    !isDateString(value.published_at) ||
+    !isString(value.artifact_key) ||
+    !isString(value.artifact_digest) ||
+    !isNonNegativeInteger(value.record_count)
+  ) {
+    return undefined;
+  }
+  return {
+    generation_key: value.generation_key,
+    published_at: value.published_at,
+    artifact_key: value.artifact_key,
+    artifact_digest: value.artifact_digest,
+    record_count: value.record_count,
+  };
+}
+
+function validateQuoteSurface(value: unknown): {
+  current_pointer: DataProductPointer | null;
+} | null {
+  if (!isRecord(value)) return null;
+  const currentPointer = validateDataProductPointer(value.current_pointer);
+  return currentPointer === undefined ? null : { current_pointer: currentPointer };
+}
+
+function validateStructureSurface(value: unknown): {
+  latest_manifest: DataProductPointer | null;
+} | null {
+  if (!isRecord(value)) return null;
+  const latestManifest = validateDataProductPointer(value.latest_manifest);
+  return latestManifest === undefined ? null : { latest_manifest: latestManifest };
+}
+
 export function decodeControlPlaneRead(payload: unknown): ControlPlaneRead {
   if (!isRecord(payload)) return unavailable();
   if (payload.status === "unavailable") {
@@ -1069,6 +1116,8 @@ export function decodeControlPlaneRead(payload: unknown): ControlPlaneRead {
     validateRecoveryAction,
   );
   const qualification = validateQualification(payload.qualification);
+  const quote = validateQuoteSurface(payload.quote);
+  const structure = validateStructureSurface(payload.structure);
 
   if (
     jobCounts === null ||
@@ -1080,7 +1129,9 @@ export function decodeControlPlaneRead(payload: unknown): ControlPlaneRead {
     activeTasks === null ||
     runtimeIncidents === null ||
     recoveryActions === null ||
-    qualification === null
+    qualification === null ||
+    quote === null ||
+    structure === null
   ) {
     return unavailable();
   }
@@ -1097,6 +1148,8 @@ export function decodeControlPlaneRead(payload: unknown): ControlPlaneRead {
     runtime_incidents: runtimeIncidents,
     recovery_actions: recoveryActions,
     qualification,
+    quote,
+    structure,
   };
 }
 
