@@ -15,13 +15,23 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from . import recovery_store as recovery_store_module
+from .fly_recovery import FlyRecoveryResult
 from .postgres import StaleLeaseError
 from .recovery_models import RecoveryActionType
 from .recovery_records import RecoveryActionRecord, RuntimeControllerLease
 
-_CLOSED_RESULT_CODES = frozenset(
+_STORE_CLOSED_RESULT_CODES = frozenset(
     {"succeeded", "failed", "stale-noop", "disabled-action"}
 )
+_MACHINE_STORE_RESULT_BY_OUTCOME = {
+    "restarted": "succeeded",
+    "stale-noop": "stale-noop",
+    "not-confirmed": "failed",
+    "budget-exhausted": "disabled-action",
+    "provider-unavailable": "failed",
+    "disabled-action": "disabled-action",
+}
+_MACHINE_OUTCOMES = frozenset(_MACHINE_STORE_RESULT_BY_OUTCOME)
 
 
 class _RecoveryControlPlane(Protocol):
@@ -35,6 +45,19 @@ class _RecoveryControlPlane(Protocol):
         now: datetime,
         heartbeat_lease_seconds: int,
     ) -> object: ...
+
+
+class _MachineRecoveryAdapter(Protocol):
+    def restart_exact_machine(
+        self,
+        *,
+        app: str,
+        machine_id: str,
+        action: RecoveryActionRecord,
+        controller: RuntimeControllerLease,
+        now: datetime,
+    ) -> FlyRecoveryResult: ...
+
 
 # This is intentionally the complete job-level authority for Plan 03.  Do not
 # add process or Machine methods here: those actions are handled as durable
@@ -120,6 +143,7 @@ class RecoveryExecutor:
         worker_id: str,
         store: _RecoveryStore | Callable[[], Any] | None = None,
         connection_factory: Callable[[], Any] | None = None,
+        machine_recovery_adapter: _MachineRecoveryAdapter | None = None,
         action_lease_seconds: int = 30,
         heartbeat_lease_seconds: int = 30,
     ) -> None:
@@ -144,6 +168,7 @@ class RecoveryExecutor:
         self._controller = controller
         self._worker_id = worker_id
         self._store = selected_store
+        self._machine_recovery_adapter = machine_recovery_adapter
         self._action_lease_seconds = action_lease_seconds
         self._heartbeat_lease_seconds = heartbeat_lease_seconds
 
@@ -167,6 +192,7 @@ class RecoveryExecutor:
         if action.state == "completed":
             return self._result_from_record(action)
 
+        machine_outcomes: list[str] = []
         finished = self._store.execute_claimed_action(
             action_id=action.action_id,
             worker_id=action.worker_id or self._worker_id,
@@ -174,10 +200,22 @@ class RecoveryExecutor:
             controller=self._controller,
             now=now,
             callback=lambda cursor, claimed: self._execute_claimed(
-                cursor, claimed, now=now
+                cursor,
+                claimed,
+                now=now,
+                machine_outcomes=machine_outcomes,
             ),
         )
-        return self._result_from_record(finished)
+        result = self._result_from_record(finished)
+        if machine_outcomes and finished.state == "completed":
+            return RecoveryActionResult(
+                action_id=result.action_id,
+                outcome=machine_outcomes[0],
+                target_id=result.target_id,
+                action_type=result.action_type,
+                detail=result.detail,
+            )
+        return result
 
     def _execute_claimed(
         self,
@@ -185,13 +223,18 @@ class RecoveryExecutor:
         action: RecoveryActionRecord,
         *,
         now: datetime,
+        machine_outcomes: list[str],
     ) -> str:
         """Dispatch inside the store-owned transaction boundary."""
         try:
             action_type = RecoveryActionType(action.action_type)
         except ValueError:
             return "disabled-action"
-        if action_type in _DISABLED_ACTIONS or action_type not in _JOB_ACTIONS:
+        if action_type in _DISABLED_ACTIONS:
+            outcome = self._execute_machine_recovery(action, now=now)
+            machine_outcomes.append(outcome)
+            return _MACHINE_STORE_RESULT_BY_OUTCOME[outcome]
+        if action_type not in _JOB_ACTIONS:
             return "disabled-action"
 
         try:
@@ -204,9 +247,34 @@ class RecoveryExecutor:
         except StaleLeaseError:
             return "stale-noop"
 
-        if not isinstance(result, str) or result not in _CLOSED_RESULT_CODES:
+        if not isinstance(result, str) or result not in _STORE_CLOSED_RESULT_CODES:
             raise ValueError("recovery control-plane method returned an invalid result code")
         return result
+
+    def _execute_machine_recovery(
+        self,
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+    ) -> str:
+        if self._machine_recovery_adapter is None:
+            return "disabled-action"
+        app = action.detail.get("fly_app")
+        machine_id = action.detail.get("fly_machine_id")
+        if not isinstance(app, str) or not app.strip():
+            return "stale-noop"
+        if not isinstance(machine_id, str) or not machine_id.strip():
+            return "stale-noop"
+        result = self._machine_recovery_adapter.restart_exact_machine(
+            app=app,
+            machine_id=machine_id,
+            action=action,
+            controller=self._controller,
+            now=now,
+        )
+        if result.code not in _MACHINE_OUTCOMES:
+            raise ValueError("machine recovery adapter returned an invalid result code")
+        return result.code
 
     @staticmethod
     def _result_from_record(action: RecoveryActionRecord) -> RecoveryActionResult:

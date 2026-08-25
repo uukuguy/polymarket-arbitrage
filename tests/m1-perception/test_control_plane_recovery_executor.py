@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import pytest
 
+from polyarb.control_plane.fly_recovery import FlyRecoveryCode, FlyRecoveryResult
 from polyarb.control_plane.postgres import StaleLeaseError
 from polyarb.control_plane.recovery_executor import RecoveryExecutor
 from polyarb.control_plane.recovery_models import RecoveryActionType
@@ -216,6 +217,32 @@ class FakeControlPlane:
         return self._run("probe", action, now=now)
 
 
+class FakeMachineRecoveryAdapter:
+    def __init__(self, code: FlyRecoveryCode = "restarted") -> None:
+        self.code: FlyRecoveryCode = code
+        self.calls: list[dict[str, object]] = []
+
+    def restart_exact_machine(
+        self,
+        *,
+        app: str,
+        machine_id: str,
+        action: RecoveryActionRecord,
+        controller: RuntimeControllerLease,
+        now: datetime,
+    ) -> FlyRecoveryResult:
+        self.calls.append(
+            {
+                "app": app,
+                "machine_id": machine_id,
+                "action_id": action.action_id,
+                "controller_epoch": controller.lease_epoch,
+                "now": now,
+            }
+        )
+        return FlyRecoveryResult(code=self.code, reason="fake")
+
+
 def _executor(store: FakeStore, control_plane: FakeControlPlane) -> RecoveryExecutor:
     return RecoveryExecutor(
         store=store,
@@ -289,6 +316,131 @@ def test_process_and_machine_actions_are_durable_disabled_noops(
     assert store.finished[0][1] == "disabled-action"
 
 
+@pytest.mark.parametrize(
+    "action_type", (RecoveryActionType.RESTART_WORKER_PROCESS, RecoveryActionType.RESTART_MACHINE)
+)
+def test_process_and_machine_actions_dispatch_to_explicit_machine_adapter(
+    action_type: RecoveryActionType,
+) -> None:
+    action = replace(
+        _action(action_type),
+        target_type="machine",
+        target_id="polyarb-controller/48ed199ba9e148",
+        detail={
+            "component": "runtime-watchdog",
+            "fly_app": "polyarb-controller",
+            "fly_machine_id": "48ed199ba9e148",
+            "reason_code": "job.heartbeat-missing",
+        },
+    )
+    store = FakeStore([action])
+    control_plane = FakeControlPlane()
+    machine_adapter = FakeMachineRecoveryAdapter()
+
+    result = RecoveryExecutor(
+        store=store,
+        control_plane=control_plane,
+        controller=_controller(),
+        worker_id="recovery-worker",
+        action_lease_seconds=5,
+        machine_recovery_adapter=machine_adapter,
+    ).run_once(now=NOW + timedelta(seconds=1))
+
+    assert result is not None
+    assert result.outcome == "restarted"
+    assert machine_adapter.calls == [
+        {
+            "app": "polyarb-controller",
+            "machine_id": "48ed199ba9e148",
+            "action_id": action.action_id,
+            "controller_epoch": 1,
+            "now": NOW + timedelta(seconds=1),
+        }
+    ]
+    assert control_plane.calls == []
+
+
+def test_process_action_preserves_adapter_disabled_result_without_machine_upgrade() -> None:
+    action = replace(
+        _action(RecoveryActionType.RESTART_WORKER_PROCESS),
+        target_type="machine",
+        target_id="polyarb-controller/48ed199ba9e148",
+        detail={
+            "component": "runtime-watchdog",
+            "fly_app": "polyarb-controller",
+            "fly_machine_id": "48ed199ba9e148",
+            "reason_code": "job.heartbeat-missing",
+        },
+    )
+    store = FakeStore([action])
+    machine_adapter = FakeMachineRecoveryAdapter("provider-unavailable")
+
+    result = RecoveryExecutor(
+        store=store,
+        control_plane=FakeControlPlane(),
+        controller=_controller(),
+        worker_id="recovery-worker",
+        action_lease_seconds=5,
+        machine_recovery_adapter=machine_adapter,
+    ).run_once(now=NOW + timedelta(seconds=1))
+
+    assert result is not None
+    assert result.outcome == "provider-unavailable"
+    assert machine_adapter.calls == [
+        {
+            "app": "polyarb-controller",
+            "machine_id": "48ed199ba9e148",
+            "action_id": action.action_id,
+            "controller_epoch": 1,
+            "now": NOW + timedelta(seconds=1),
+        }
+    ]
+    assert store.finished[0][1] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("adapter_code", "ledger_result"),
+    (
+        ("restarted", "succeeded"),
+        ("stale-noop", "stale-noop"),
+        ("not-confirmed", "failed"),
+        ("budget-exhausted", "disabled-action"),
+        ("provider-unavailable", "failed"),
+    ),
+)
+def test_machine_adapter_closed_results_are_reported_without_expanding_store_contract(
+    adapter_code: FlyRecoveryCode,
+    ledger_result: str,
+) -> None:
+    store = FakeStore(
+        [
+            replace(
+                _action(RecoveryActionType.RESTART_MACHINE),
+                target_type="machine",
+                target_id="polyarb-controller/48ed199ba9e148",
+                detail={
+                    "fly_app": "polyarb-controller",
+                    "fly_machine_id": "48ed199ba9e148",
+                },
+            )
+        ]
+    )
+    machine_adapter = FakeMachineRecoveryAdapter(adapter_code)
+
+    result = RecoveryExecutor(
+        store=store,
+        control_plane=FakeControlPlane(),
+        controller=_controller(),
+        worker_id="recovery-worker",
+        action_lease_seconds=5,
+        machine_recovery_adapter=machine_adapter,
+    ).run_once(now=NOW + timedelta(seconds=1))
+
+    assert result is not None
+    assert result.outcome == adapter_code
+    assert store.finished[0][1] == ledger_result
+
+
 def test_duplicate_command_is_completed_once_and_second_turn_is_idle() -> None:
     store = FakeStore([_action(RecoveryActionType.RECLAIM_JOB)])
     control_plane = FakeControlPlane()
@@ -344,6 +496,20 @@ def test_none_adapter_result_is_contract_error_and_not_succeeded() -> None:
 
     with pytest.raises(ValueError, match="invalid result code"):
         _executor(store, control_plane).run_once(now=NOW + timedelta(seconds=1))
+
+    assert store.actions[0].state == "running"
+    assert store.finished == []
+
+
+def test_job_control_plane_cannot_return_machine_recovery_result_code() -> None:
+    class MachineCodeControlPlane(FakeControlPlane):
+        def cancel_stalled_job(self, action: RecoveryActionRecord, *, now: datetime) -> str:
+            return cast(str, "restarted")
+
+    store = FakeStore([_action(RecoveryActionType.CANCEL_JOB)])
+
+    with pytest.raises(ValueError, match="invalid result code"):
+        _executor(store, MachineCodeControlPlane()).run_once(now=NOW + timedelta(seconds=1))
 
     assert store.actions[0].state == "running"
     assert store.finished == []
