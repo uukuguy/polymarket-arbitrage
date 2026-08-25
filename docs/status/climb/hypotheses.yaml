@@ -456,3 +456,17 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-018
+  description: A deterministic real-Postgres runtime fault matrix plus isolated
+    least-privilege services and a capability-limited exact Fly recovery adapter
+    can prove the complete detection, incident, action, operator-surface, and
+    qualification chain before any production mutation.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Replace repeated wall-clock debugging with replayable fault/SLO
+    evidence, while keeping job, process, and Machine recovery independently
+    fenced and default observe-only.
+  cost_h: 10.0
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-25T15:44:29+08:00'
+  results: []
