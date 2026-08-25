@@ -264,6 +264,138 @@ def test_event_driven_runtime_self_healing_profile_uses_local_runtime_gates() ->
     }
 
 
+def test_fenced_deadline_reconciler_profile_uses_exact_local_recovery_gates() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "fenced-deadline-reconciler"}
+    )
+
+    assert commands == {
+        "planning": ["make", "planning-status"],
+        "unit": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_reconciler_classifies_bounded_runtime_recovery_table",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_missing_heartbeat_waits_for_fence_before_reclaim",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_expired_lease_fence_outranks_owner_authority_actions",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_expired_lease_respects_higher_precedence_no_action_safety_branches",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_exact_deadline_boundaries_are_inclusive_at_policy_thresholds",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_deadline_boundaries_are_not_triggered_before_policy_thresholds",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_integrity_auth_schema_credential_and_capacity_are_human_only",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_precedence_fencing_budget_and_safety_outrank_retry_convenience",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_process_and_machine_actions_exist_but_are_not_chosen_automatically",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_recovery_types_reject_naive_times_invalid_types_and_negative_counts",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_recovery_decision_enforces_closed_reason_codes_and_invariants",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_recovery_decision_allows_only_exact_action_reason_pairs",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_recovery_decision_rejects_wrong_action_reason_pairs",
+            "tests/m1-perception/test_control_plane_reconciler.py::test_next_check_at_is_deterministic_from_inputs",
+            "-q",
+        ],
+        "integration": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/alembic/test_023.py::test_023_upgrades_from_022_downgrades_and_reupgrades_with_expected_schema",
+            "tests/m1-perception/test_control_plane_postgres.py::test_controller_claims_are_monotonic_and_only_latest_schedules_recovery_action",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_active_target_race_persists_one_stale_noop",
+            "tests/m1-perception/test_control_plane_postgres.py::test_runtime_controller_status_and_facts_are_read_only",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_stale_controller_does_not_create_budget_or_poison_schedule",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_schedule_is_idempotent_and_conflicting_replay_fails_closed",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_concurrent_exact_schedule_replay_is_atomic",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_persisted_budget_does_not_reset_on_controller_reclaim",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_concurrent_last_budget_unit_is_consumed_once",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_statement_timeout_rolls_back_action_event_incident_and_alert",
+            "tests/m1-perception/test_control_plane_postgres.py::test_action_terminal_uses_db_clock_and_rolls_back_after_worker_lease_expires",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_executor_heartbeats_exact_attempt_without_business_receipt",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_executor_cancel_is_cooperative_retry_and_exactly_fenced",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_executor_reclaims_expired_lease_without_claiming_another_job",
+            "-q",
+        ],
+        "cli": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_cli.py::test_runtime_controller_status_is_read_only_and_bounded",
+            "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_once_requires_enable_before_database_or_controller",
+            "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_once_evaluates_schedules_and_executes_one_action",
+            "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_once_store_conflicts_fail_loud",
+            "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_serve_store_conflicts_exit_current_turn",
+            "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_serve_stops_cleanly_on_signal_and_is_sequential",
+            "tests/m1-perception/test_makefile_contract.py::test_make_runtime_controller_targets_are_wired",
+            "tests/m1-perception/test_makefile_contract.py::test_make_runtime_mutation_target_has_enable_guard",
+            "tests/m1-perception/test_makefile_contract.py::test_make_runtime_status_is_read_only_dry_run",
+            "-q",
+        ],
+        "restart": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_recovery_executor.py::test_executor_crash_leaves_running_action_for_expiry_reclaim",
+            "tests/m1-perception/test_control_plane_recovery_executor.py::test_expired_old_action_worker_cannot_execute_after_reclaim_epoch_bump",
+            "tests/m1-perception/test_control_plane_recovery_executor.py::test_process_and_machine_actions_are_durable_disabled_noops",
+            "tests/m1-perception/test_control_plane_recovery_executor.py::test_recovery_action_result_never_exposes_receipt_or_pointer_postconditions",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_claim_reclaims_expired_worker_lease_and_unwedges_active_index",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_old_worker_cannot_mutate_after_action_lease_reclaim",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_atomic_rollback_keeps_business_and_action_running",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_schedule_is_idempotent_and_conflicting_replay_fails_closed",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_active_target_race_persists_one_stale_noop",
+            "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_concurrent_exact_schedule_replay_is_atomic",
+            "-q",
+        ],
+    }
+
+    flattened = [argument for command in commands.values() for argument in command]
+    assert commands["planning"] == ["make", "planning-status"]
+    pytest_nodes = [argument for argument in flattened if "::test_" in argument]
+    assert len(pytest_nodes) >= 30
+    assert all(
+        argument.rsplit("::", maxsplit=1)[-1].startswith("test_")
+        for argument in pytest_nodes
+    )
+    assert all(
+        any("::test_" in argument for argument in commands[gate])
+        for gate in ("unit", "integration", "cli", "restart")
+    )
+    assert not {
+        argument.lower()
+        for argument in flattened
+        if any(
+            forbidden in argument.lower()
+            for forbidden in (
+                "flyctl",
+                "deploy",
+                "http://",
+                "https://",
+                "production",
+                "dsn",
+                "migrate",
+            )
+        )
+    }
+
+
+def test_fenced_deadline_reconciler_gate_nodes_collect_nonzero() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "fenced-deadline-reconciler"}
+    )
+
+    for gate in ("unit", "integration", "cli", "restart"):
+        command = [argument for argument in commands[gate] if argument != "-q"]
+        command.extend(("--collect-only", "-q"))
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        assert completed.returncode == 0, (
+            f"{gate} collection failed:\n{completed.stdout}\n{completed.stderr}"
+        )
+        assert "collected 0 items" not in completed.stdout
+
+
 def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:
     assert eval_local.gate_commands_for({"paradigm": "repository"}) == GATE_COMMANDS
     assert eval_local.gate_commands_for({"paradigm": "unknown"}) == GATE_COMMANDS
