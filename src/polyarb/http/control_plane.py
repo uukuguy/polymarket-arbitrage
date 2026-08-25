@@ -35,7 +35,7 @@ async def control_plane_status(request: Request) -> JSONResponse:
             ),
             timeout=_READ_TIMEOUT_S,
         )
-    except (TimeoutError, OSError, RuntimeError, psycopg.Error):
+    except (TimeoutError, OSError, RuntimeError, TypeError, ValueError, psycopg.Error):
         return JSONResponse(
             {"status": "unavailable", "reason": "control-plane-read-unavailable"},
             status_code=503,

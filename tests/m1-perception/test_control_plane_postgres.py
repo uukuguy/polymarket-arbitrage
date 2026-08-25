@@ -7518,6 +7518,206 @@ def test_operational_snapshot_reports_retry_age_for_source_and_quote_admission(
     assert snapshot["quote"]["oldest_retryable_admission_age_seconds"] == 45.0
 
 
+def test_runtime_read_model_projects_self_healing_state_bounded_and_read_only(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    first = _seed_claimed_job(
+        control_plane,
+        job_key="runtime-read-model:alpha",
+        job_type="quote-batch",
+        input_identity="runtime-read-model:alpha",
+        now=now - timedelta(seconds=20),
+        lease_seconds=120,
+    )
+    second = _seed_claimed_job(
+        control_plane,
+        job_key="runtime-read-model:beta",
+        job_type="structure-normalize",
+        input_identity="runtime-read-model:beta",
+        now=now - timedelta(seconds=10),
+        lease_seconds=120,
+    )
+    first_progress = control_plane.record_runtime_progress(
+        first,
+        progress=RuntimeProgress(sequence=2, current=7, total=10, stage="upload"),
+        now=now - timedelta(seconds=7),
+        detail={"component": "quote-batch"},
+    )
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="controller-runtime-read-model",
+        lease_seconds=90,
+        now=now - timedelta(seconds=3),
+    )
+    action = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=_recovery_decision(now),
+        incident_key="runtime-read-model:incident",
+        component="quote-batch",
+        target_type="job",
+        target_id=first.job_key,
+        expected_attempt_id=first_progress.attempt_id,
+        expected_lease_epoch=first.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=30,
+        channels=("dashboard",),
+        now=now - timedelta(seconds=6),
+        detail={"secret_token": "must-not-leak", "component": "quote-batch"},
+    )
+    claimed_action = claim_action(
+        control_plane._connection_factory,
+        worker_id="recovery-worker-runtime-read-model",
+        controller=controller,
+        lease_seconds=30,
+        now=now - timedelta(seconds=5),
+    )
+    assert claimed_action is not None
+    finished_action = finish_action(
+        control_plane._connection_factory,
+        action_id=claimed_action.action_id,
+        worker_id=claimed_action.worker_id or "",
+        worker_epoch=claimed_action.worker_epoch,
+        result_code="succeeded",
+        now=now - timedelta(seconds=4),
+        detail={"postcondition": "progress-restored", "secret_token": "must-not-leak"},
+    )
+    assert finished_action.action_id == action.action_id
+    _seed_recovering_qualification_with_breakers(control_plane, now=now)
+
+    before = _read_snapshot_mutation_counts(control_plane)
+    snapshot = cast(dict[str, Any], control_plane.operational_snapshot(now=now, sample_limit=1))
+    after = _read_snapshot_mutation_counts(control_plane)
+
+    assert before == after
+    assert snapshot["runtime_controller"] == {
+        "status": "healthy",
+        "controller_id": "m1-runtime-reconciler",
+        "owner_id": "controller-runtime-read-model",
+        "epoch": controller.lease_epoch,
+        "claimed_at": (now - timedelta(seconds=3)).isoformat(),
+        "last_tick_at": (now - timedelta(seconds=3)).isoformat(),
+        "lease_expires_at": (now + timedelta(seconds=87)).isoformat(),
+        "lease_active": True,
+        "lease_age_seconds": 3.0,
+        "lease_overdue_seconds": 0.0,
+    }
+    assert snapshot["active_tasks"]["total"] == 2
+    assert snapshot["active_tasks"]["items"] == [
+        {
+            "job_key": first.job_key,
+            "attempt_id": first_progress.attempt_id,
+            "job_type": "quote-batch",
+            "worker_id": first.lease_owner,
+            "lease_epoch": first.lease_epoch,
+            "stage": "upload",
+            "recovery_state": "recovering",
+            "progress": {"current": 7, "total": 10},
+            "started_at": (now - timedelta(seconds=20)).isoformat(),
+            "last_heartbeat_at": (now - timedelta(seconds=20)).isoformat(),
+            "last_progress_at": (now - timedelta(seconds=7)).isoformat(),
+            "lease_deadline_at": (now + timedelta(seconds=100)).isoformat(),
+            "heartbeat_deadline_at": (now + timedelta(seconds=10)).isoformat(),
+            "progress_deadline_at": (now + timedelta(seconds=113)).isoformat(),
+            "attempt_deadline_at": (now + timedelta(seconds=1180)).isoformat(),
+            "heartbeat_age_seconds": 20.0,
+            "progress_age_seconds": 7.0,
+            "lease_overdue_seconds": 0.0,
+            "attempt_overdue_seconds": 0.0,
+        }
+    ]
+    assert snapshot["runtime_incidents"]["total"] == 1
+    incident = snapshot["runtime_incidents"]["items"][0]
+    assert incident["incident_key"] == "runtime-read-model:incident"
+    assert incident["transition"] == "recovery-started"
+    assert incident["age_seconds"] == 6.0
+    assert incident["transitions"] == [
+        {
+            "kind": "recovery-started",
+            "occurred_at": (now - timedelta(seconds=6)).isoformat(),
+            "age_seconds": 6.0,
+            "reason_code": "job.lease-expired",
+            "qualification_impact": "breaking",
+        }
+    ]
+    assert snapshot["recovery_actions"]["total"] == 1
+    assert snapshot["recovery_actions"]["items"] == [
+        {
+            "action_id": action.action_id,
+            "incident_key": "runtime-read-model:incident",
+            "target_type": "job",
+            "target_id": first.job_key,
+            "action_type": "reclaim-job",
+            "state": "completed",
+            "result_code": "succeeded",
+            "expected_controller_epoch": controller.lease_epoch,
+            "expected_attempt_id": first_progress.attempt_id,
+            "expected_lease_epoch": first.lease_epoch,
+            "requested_at": (now - timedelta(seconds=6)).isoformat(),
+            "started_at": (now - timedelta(seconds=5)).isoformat(),
+            "finished_at": (now - timedelta(seconds=4)).isoformat(),
+            "next_allowed_at": (now + timedelta(seconds=24)).isoformat(),
+            "worker_id": "recovery-worker-runtime-read-model",
+            "worker_epoch": 1,
+            "worker_lease_expires_at": (now + timedelta(seconds=25)).isoformat(),
+        }
+    ]
+    assert snapshot["qualification"] == {
+        "state": "recovering",
+        "epoch_id": "qualification-runtime-read-current",
+        "started_at": (now - timedelta(seconds=30)).isoformat(),
+        "eligible_seconds": 0,
+        "required_seconds": 86400,
+        "max_gap_seconds": 900,
+        "last_fact_at": (now - timedelta(seconds=5)).isoformat(),
+        "last_fact_age_seconds": 5.0,
+        "last_breaker": {
+            "observed_at": (now - timedelta(seconds=5)).isoformat(),
+            "reason": "integrity.conflict",
+            "fact_id": "fact:runtime-read:2",
+        },
+        "policy_version": "m1-rolling-qualification-v1",
+        "release_id": "release-a",
+        "config_id": "config-a",
+        "role_identity": ["m1", "structure"],
+        "certificate": None,
+    }
+    assert "must-not-leak" not in json.dumps(snapshot, sort_keys=True)
+    assert second.job_key not in json.dumps(snapshot["active_tasks"]["items"])
+
+
+def test_qualification_read_model_rejects_malformed_epoch_json(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = datetime(2026, 8, 25, 12, tzinfo=UTC)
+    _seed_recovering_qualification_with_breakers(control_plane, now=now)
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "ALTER TABLE m1_qualification_epochs "
+            "DROP CONSTRAINT ck_m1_qualification_epochs_fact_records"
+        )
+        cursor.execute(
+            "UPDATE m1_qualification_epochs SET fact_records = %s WHERE epoch_id = %s",
+            (Jsonb({"not": "an-array"}), "qualification-runtime-read-current"),
+        )
+    try:
+        with pytest.raises(ControlPlaneError, match="qualification source is malformed"):
+            control_plane.operational_snapshot(now=now)
+    finally:
+        with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE m1_qualification_epochs SET fact_records = %s WHERE epoch_id = %s",
+                (Jsonb([]), "qualification-runtime-read-current"),
+            )
+            cursor.execute(
+                "ALTER TABLE m1_qualification_epochs "
+                "ADD CONSTRAINT ck_m1_qualification_epochs_fact_records "
+                "CHECK (jsonb_typeof(fact_records) = 'array')"
+            )
+
+
 def test_structure_source_existing_receipt_recovers_terminal_runtime_atomically(
     control_plane: PostgresControlPlane,
     monkeypatch: pytest.MonkeyPatch,
@@ -9478,6 +9678,147 @@ def _qualification_service(
         writer_id="qualification-test",
         batch_size=batch_size,
     )
+
+
+def _seed_recovering_qualification_with_breakers(
+    control_plane: PostgresControlPlane,
+    *,
+    now: datetime,
+) -> None:
+    role_identity = ["m1", "structure"]
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO m1_qualification_epochs (
+                epoch_id, state, version, identity_key, policy_version, release_id,
+                config_id, role_identity, started_at, last_fact_at, invalidated_at,
+                invalidation_reason, previous_epoch_id, coverage_seconds,
+                max_gap_seconds, required_seconds, fact_records
+            ) VALUES (
+                'qualification-runtime-read-previous', 'invalidated', 1,
+                'qualification-runtime-read-identity',
+                'm1-rolling-qualification-v1', 'release-a', 'config-a',
+                %s, %s, %s, %s, 'lease.expired', NULL, 12, 900, 86400, %s
+            )
+            """,
+            (
+                Jsonb(role_identity),
+                now - timedelta(minutes=5),
+                now - timedelta(minutes=4),
+                now - timedelta(seconds=40),
+                Jsonb([]),
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO m1_qualification_epochs (
+                epoch_id, state, version, identity_key, policy_version, release_id,
+                config_id, role_identity, started_at, last_fact_at,
+                previous_epoch_id, coverage_seconds, max_gap_seconds,
+                required_seconds, fact_records
+            ) VALUES (
+                'qualification-runtime-read-current', 'recovering', 1,
+                'qualification-runtime-read-identity:recovering',
+                'm1-rolling-qualification-v1', 'release-a', 'config-a',
+                %s, %s, %s, 'qualification-runtime-read-previous',
+                0, 900, 86400, %s
+            )
+            """,
+            (
+                Jsonb(role_identity),
+                now - timedelta(seconds=30),
+                now - timedelta(seconds=5),
+                Jsonb([]),
+            ),
+        )
+        for index, reason in enumerate(("lease.expired", "integrity.conflict"), start=1):
+            observed_at = now - timedelta(seconds=15 - index * 5)
+            payload = {"fact_id": f"fact:runtime-read:{index}", "reason": reason}
+            cursor.execute(
+                """
+                INSERT INTO m1_qualification_ingress_ledger (
+                    source, source_id, source_version, original_observed_at,
+                    payload, payload_sha256
+                ) VALUES ('runtime', %s, 'v1', %s, %s, %s)
+                RETURNING ingest_seq
+                """,
+                (
+                    f"runtime-read-breaker-{index}",
+                    observed_at,
+                    Jsonb(payload),
+                    sha256(
+                        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest(),
+                ),
+            )
+            ingest_seq_row = cursor.fetchone()
+            assert ingest_seq_row is not None
+            ingest_seq = ingest_seq_row[0]
+            fact_record = {
+                "source": "runtime",
+                "cursor": {
+                    "ingest_seq": ingest_seq,
+                    "observed_at": observed_at.isoformat(),
+                    "source_rank": 10,
+                    "stable_id": f"runtime-read-breaker-{index}",
+                },
+                "fact": {
+                    "fact_id": f"fact:runtime-read:{index}",
+                    "observed_at": observed_at.isoformat(),
+                    "reason": reason,
+                },
+            }
+            cursor.execute(
+                """
+                INSERT INTO m1_qualification_recovery_observations (
+                    observation_id, recovering_epoch_id, ingest_seq, fact_id,
+                    reason, observed_at, fact_record, fact_record_sha256
+                ) VALUES (%s, 'qualification-runtime-read-current', %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    f"qualification-runtime-read-observation-{index}",
+                    ingest_seq,
+                    f"fact:runtime-read:{index}",
+                    reason,
+                    observed_at,
+                    Jsonb(fact_record),
+                    sha256(
+                        json.dumps(fact_record, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest(),
+                ),
+            )
+
+
+def _read_snapshot_mutation_counts(
+    control_plane: PostgresControlPlane,
+) -> dict[str, tuple[int, int | None]]:
+    tables = (
+        "m1_jobs",
+        "m1_job_attempts",
+        "m1_job_runtime_state",
+        "m1_job_runtime_events",
+        "m1_incidents",
+        "m1_incident_events",
+        "m1_alert_outbox",
+        "m1_recovery_actions",
+        "m1_runtime_controller_leases",
+        "m1_qualification_source_cursors",
+        "m1_qualification_epochs",
+        "m1_qualification_recovery_observations",
+    )
+    result: dict[str, tuple[int, int | None]] = {}
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        for table in tables:
+            cursor.execute(
+                sql.SQL("SELECT count(*), max(xmin::text::bigint) FROM {}").format(
+                    sql.Identifier(table)
+                )
+            )
+            count_row = cursor.fetchone()
+            assert count_row is not None
+            count, latest_xid = count_row
+            result[table] = (int(count), None if latest_xid is None else int(latest_xid))
+    return result
 
 
 def _insert_runtime_event(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
 from typing import Any
 from uuid import uuid4
@@ -133,6 +134,18 @@ ConnectionFactory = Callable[[], psycopg.Connection[Any]]
 
 _FENCED_MAX_STATEMENT_TIMEOUT_MS = 5_000
 _FENCED_MAX_LOCK_TIMEOUT_MS = 1_000
+_SNAPSHOT_RUNTIME_STATES = frozenset({"active", "suspect", "recovering", "recovered", "terminal"})
+_SNAPSHOT_INCIDENT_STATES = frozenset({"open", "acknowledged", "resolved"})
+_SNAPSHOT_INCIDENT_TRANSITIONS = frozenset(
+    {"detected", "recovery-started", "recovery-attempted", "recovered", "resolved", "escalated"}
+)
+_SNAPSHOT_ACTION_STATES = frozenset({"pending", "running", "completed"})
+_SNAPSHOT_ACTION_RESULTS = frozenset(
+    {"succeeded", "failed", "stale-noop", "disabled-action"}
+)
+_SNAPSHOT_QUALIFICATION_STATES = frozenset(
+    {"accumulating", "invalidated", "recovering", "qualified"}
+)
 
 
 def _set_structure_read_timeouts(cursor: psycopg.Cursor[Any], *, read_only: bool) -> None:
@@ -180,6 +193,88 @@ def _set_fenced_transaction_timeouts(
         sql.SQL("SET LOCAL lock_timeout = {}").format(sql.Literal(f"{lock_timeout_ms}ms"))
     )
     return statement_timeout_ms, lock_timeout_ms
+
+
+def _set_snapshot_read_timeouts(cursor: psycopg.Cursor[Any]) -> None:
+    cursor.execute("SET TRANSACTION READ ONLY")
+    cursor.execute(
+        sql.SQL("SET LOCAL statement_timeout = {}").format(
+            sql.Literal(f"{_FENCED_MAX_STATEMENT_TIMEOUT_MS}ms")
+        )
+    )
+    cursor.execute(
+        sql.SQL("SET LOCAL lock_timeout = {}").format(
+            sql.Literal(f"{_FENCED_MAX_LOCK_TIMEOUT_MS}ms")
+        )
+    )
+
+
+def _snapshot_aware(value: object, field: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ControlPlaneError(f"{field} is not timezone-aware")
+    return value.astimezone(UTC)
+
+
+def _snapshot_seconds(value: object, field: str) -> float:
+    if value is None:
+        seconds = 0.0
+    elif isinstance(value, int | float | Decimal) and not isinstance(value, bool):
+        seconds = float(value)
+    else:
+        raise ControlPlaneError(f"{field} is malformed")
+    if seconds < 0:
+        raise ControlPlaneError(f"{field} is negative")
+    return seconds
+
+
+def _snapshot_int(value: object, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ControlPlaneError(f"{field} is malformed")
+    result = value
+    if result < 0:
+        raise ControlPlaneError(f"{field} is negative")
+    return result
+
+
+def _snapshot_text(value: object, field: str, *, limit: int = 256) -> str:
+    if type(value) is not str or not value:
+        raise ControlPlaneError(f"{field} is malformed")
+    text = value.replace("\x00", "")
+    text = "".join(character if character.isprintable() else " " for character in text)
+    if any(
+        marker in text.casefold()
+        for marker in ("authorization", "api_key", "apikey", "password", "secret", "token", "dsn")
+    ):
+        return "<redacted>"
+    return text[:limit]
+
+
+def _snapshot_transition_detail(detail: object) -> dict[str, object]:
+    if not isinstance(detail, Mapping):
+        raise ControlPlaneError("incident source is malformed")
+    result: dict[str, object] = {}
+    reason_code = detail.get("reason_code")
+    if isinstance(reason_code, str) and reason_code:
+        result["reason_code"] = _snapshot_text(reason_code, "reason_code")
+    if bool(detail.get("qualification_breaking")):
+        result["qualification_impact"] = "breaking"
+    else:
+        impact = detail.get("qualification_impact")
+        if isinstance(impact, str) and impact in {"breaking", "contained", "qualified", "delayed"}:
+            result["qualification_impact"] = impact
+    return result
+
+
+def _snapshot_role_identity(value: object) -> list[str]:
+    if not isinstance(value, list) or not value or any(type(item) is not str for item in value):
+        raise ControlPlaneError("qualification source is malformed")
+    return [_snapshot_text(item, "role_identity") for item in value]
+
+
+def _snapshot_json_array(value: object, field: str) -> list[object]:
+    if not isinstance(value, list):
+        raise ControlPlaneError("qualification source is malformed")
+    return list(value)
 
 _RUNTIME_COLUMNS: dict[str, dict[str, tuple[str, bool, str | None]]] = {
     "m1_job_runtime_state": {
@@ -5928,8 +6023,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            cursor.execute("SET TRANSACTION READ ONLY")
-            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
+            _set_snapshot_read_timeouts(cursor)
             cursor.execute("SELECT state, count(*) AS count FROM m1_jobs GROUP BY state")
             job_counts = {str(row["state"]): int(row["count"]) for row in cursor.fetchall()}
             cursor.execute(
@@ -6220,6 +6314,177 @@ class PostgresControlPlane:
                 (budget_day,),
             )
             latest_cloud_usage = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT controller_id, owner_id, lease_epoch, lease_expires_at,
+                       claimed_at, updated_at,
+                       EXTRACT(EPOCH FROM (%s - updated_at)) AS lease_age_seconds,
+                       EXTRACT(EPOCH FROM GREATEST(%s - lease_expires_at, INTERVAL '0 seconds'))
+                           AS lease_overdue_seconds
+                FROM m1_runtime_controller_leases
+                ORDER BY updated_at DESC, controller_id DESC
+                LIMIT 1
+                """,
+                (now, now),
+            )
+            runtime_controller_row = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT count(*) AS count
+                FROM m1_job_runtime_state AS runtime
+                JOIN m1_jobs AS job ON job.job_key = runtime.job_key
+                WHERE job.state = 'leased'
+                  AND runtime.recovery_state IN ('active', 'suspect', 'recovering')
+                """
+            )
+            active_task_total = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT job.job_key, runtime.attempt_id, job.job_type, runtime.worker_id,
+                       runtime.lease_epoch, runtime.stage, runtime.recovery_state,
+                       runtime.progress_current, runtime.progress_total,
+                       runtime.started_at, runtime.last_heartbeat_at, runtime.last_progress_at,
+                       runtime.lease_deadline_at, runtime.heartbeat_deadline_at,
+                       runtime.progress_deadline_at, runtime.attempt_deadline_at,
+                       EXTRACT(EPOCH FROM (%s - runtime.last_heartbeat_at))
+                           AS heartbeat_age_seconds,
+                       EXTRACT(EPOCH FROM (%s - runtime.last_progress_at))
+                           AS progress_age_seconds,
+                       EXTRACT(EPOCH FROM GREATEST(%s - runtime.lease_deadline_at,
+                           INTERVAL '0 seconds')) AS lease_overdue_seconds,
+                       EXTRACT(EPOCH FROM GREATEST(%s - runtime.attempt_deadline_at,
+                           INTERVAL '0 seconds')) AS attempt_overdue_seconds
+                FROM m1_job_runtime_state AS runtime
+                JOIN m1_jobs AS job ON job.job_key = runtime.job_key
+                WHERE job.state = 'leased'
+                  AND runtime.recovery_state IN ('active', 'suspect', 'recovering')
+                ORDER BY
+                    CASE runtime.recovery_state
+                        WHEN 'recovering' THEN 0
+                        WHEN 'suspect' THEN 1
+                        ELSE 2
+                    END,
+                    LEAST(runtime.lease_deadline_at, runtime.heartbeat_deadline_at,
+                          runtime.progress_deadline_at, runtime.attempt_deadline_at),
+                    runtime.started_at,
+                    job.job_key
+                LIMIT %s
+                """,
+                (now, now, now, now, sample_limit),
+            )
+            active_task_rows = cursor.fetchall()
+            cursor.execute(
+                """
+                SELECT count(*) AS count
+                FROM m1_incidents
+                WHERE state IN ('open', 'acknowledged')
+                """
+            )
+            runtime_incident_total = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT incident_key, component, severity, state, summary, opened_at, updated_at
+                FROM m1_incidents
+                WHERE state IN ('open', 'acknowledged')
+                ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                         updated_at DESC, incident_key DESC
+                LIMIT %s
+                """,
+                (sample_limit,),
+            )
+            runtime_incident_rows = cursor.fetchall()
+            incident_keys = [str(row["incident_key"]) for row in runtime_incident_rows]
+            if incident_keys:
+                cursor.execute(
+                    """
+                    SELECT incident_key, kind, detail, occurred_at,
+                           EXTRACT(EPOCH FROM (%s - occurred_at)) AS age_seconds
+                    FROM (
+                        SELECT event.*, row_number() OVER (
+                            PARTITION BY incident_key
+                            ORDER BY occurred_at DESC, incident_event_id DESC
+                        ) AS event_rank
+                        FROM m1_incident_events AS event
+                        WHERE incident_key = ANY(%s)
+                    ) AS ranked
+                    WHERE event_rank <= %s
+                    ORDER BY incident_key, occurred_at DESC
+                    """,
+                    (now, incident_keys, sample_limit),
+                )
+                runtime_incident_event_rows = cursor.fetchall()
+            else:
+                runtime_incident_event_rows = []
+            cursor.execute("SELECT count(*) AS count FROM m1_recovery_actions")
+            recovery_action_total = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT action_id, incident_key, target_type, target_id, action_type,
+                       state, result_code, expected_controller_epoch,
+                       expected_attempt_id, expected_lease_epoch, requested_at,
+                       started_at, finished_at, next_allowed_at, worker_id,
+                       worker_epoch, worker_lease_expires_at
+                FROM m1_recovery_actions
+                ORDER BY CASE state WHEN 'pending' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,
+                         COALESCE(finished_at, started_at, requested_at) DESC,
+                         action_id DESC
+                LIMIT %s
+                """,
+                (sample_limit,),
+            )
+            recovery_action_rows = cursor.fetchall()
+            cursor.execute(
+                """
+                SELECT *
+                FROM m1_qualification_epochs
+                ORDER BY CASE WHEN state IN ('accumulating', 'recovering') THEN 0 ELSE 1 END,
+                         updated_at DESC, epoch_id DESC
+                LIMIT 1
+                """
+            )
+            qualification_epoch = cursor.fetchone()
+            qualification_certificate = None
+            qualification_breaker = None
+            if qualification_epoch is not None:
+                cursor.execute(
+                    """
+                    SELECT certificate_id, certificate_digest, evidence_digest,
+                           qualified_at, created_at
+                    FROM m1_qualification_certificates
+                    WHERE epoch_id = %s
+                    ORDER BY created_at DESC, certificate_id DESC
+                    LIMIT 1
+                    """,
+                    (qualification_epoch["epoch_id"],),
+                )
+                qualification_certificate = cursor.fetchone()
+                if qualification_epoch["state"] == "recovering":
+                    cursor.execute(
+                        """
+                        SELECT fact_id, reason, observed_at
+                        FROM m1_qualification_recovery_observations
+                        WHERE recovering_epoch_id = %s
+                          AND reason NOT IN ('healthy', 'recovery.confirmed')
+                        ORDER BY observed_at DESC, ingest_seq DESC
+                        LIMIT 1
+                        """,
+                        (qualification_epoch["epoch_id"],),
+                    )
+                    qualification_breaker = cursor.fetchone()
+                    if (
+                        qualification_breaker is None
+                        and qualification_epoch["previous_epoch_id"] is not None
+                    ):
+                        cursor.execute(
+                            """
+                            SELECT invalidation_reason AS reason, invalidated_at AS observed_at,
+                                   epoch_id AS fact_id
+                            FROM m1_qualification_epochs
+                            WHERE epoch_id = %s AND state = 'invalidated'
+                            """,
+                            (qualification_epoch["previous_epoch_id"],),
+                        )
+                        qualification_breaker = cursor.fetchone()
         age = None if oldest is None else oldest["age_seconds"]
         quote_retry_age = (
             None if retryable_quote_age is None else retryable_quote_age["age_seconds"]
@@ -6235,6 +6500,30 @@ class PostgresControlPlane:
         structure_retry_age = (
             None if retryable_structure_age is None else retryable_structure_age["age_seconds"]
         )
+        runtime_controller = self._runtime_controller_snapshot(
+            runtime_controller_row,
+            now=now,
+        )
+        active_tasks = self._active_tasks_snapshot(
+            active_task_rows,
+            total=0 if active_task_total is None else active_task_total["count"],
+        )
+        runtime_incidents = self._runtime_incidents_snapshot(
+            runtime_incident_rows,
+            runtime_incident_event_rows,
+            total=0 if runtime_incident_total is None else runtime_incident_total["count"],
+            now=now,
+        )
+        recovery_actions = self._recovery_actions_snapshot(
+            recovery_action_rows,
+            total=0 if recovery_action_total is None else recovery_action_total["count"],
+        )
+        qualification = self._qualification_snapshot(
+            qualification_epoch,
+            qualification_certificate,
+            qualification_breaker,
+            now=now,
+        )
         return {
             "job_counts": job_counts,
             "oldest_runnable_age_seconds": None if age is None else float(age),
@@ -6245,6 +6534,11 @@ class PostgresControlPlane:
             "open_circuits": open_circuits,
             "recent_attempts": attempts,
             "open_incidents": incidents,
+            "runtime_controller": runtime_controller,
+            "active_tasks": active_tasks,
+            "runtime_incidents": runtime_incidents,
+            "recovery_actions": recovery_actions,
+            "qualification": qualification,
             "runtime_watchdog": {
                 "current": (
                     None
@@ -6348,6 +6642,322 @@ class PostgresControlPlane:
                     }
                 ),
             },
+        }
+
+    @staticmethod
+    def _runtime_controller_snapshot(
+        row: Mapping[str, object] | None,
+        *,
+        now: datetime,
+    ) -> dict[str, object]:
+        _snapshot_aware(now, "now")
+        if row is None:
+            return {
+                "status": "critical",
+                "controller_id": None,
+                "owner_id": None,
+                "epoch": None,
+                "claimed_at": None,
+                "last_tick_at": None,
+                "lease_expires_at": None,
+                "lease_active": False,
+                "lease_age_seconds": None,
+                "lease_overdue_seconds": None,
+            }
+        lease_epoch = _snapshot_int(row["lease_epoch"], "lease_epoch")
+        if lease_epoch <= 0:
+            raise ControlPlaneError("runtime controller epoch is malformed")
+        lease_expires_at = _snapshot_aware(row["lease_expires_at"], "lease_expires_at")
+        lease_active = lease_expires_at > now
+        return {
+            "status": "healthy" if lease_active else "critical",
+            "controller_id": _snapshot_text(row["controller_id"], "controller_id"),
+            "owner_id": _snapshot_text(row["owner_id"], "owner_id"),
+            "epoch": lease_epoch,
+            "claimed_at": _snapshot_aware(row["claimed_at"], "claimed_at").isoformat(),
+            "last_tick_at": _snapshot_aware(row["updated_at"], "updated_at").isoformat(),
+            "lease_expires_at": lease_expires_at.isoformat(),
+            "lease_active": lease_active,
+            "lease_age_seconds": _snapshot_seconds(
+                row["lease_age_seconds"], "lease_age_seconds"
+            ),
+            "lease_overdue_seconds": _snapshot_seconds(
+                row["lease_overdue_seconds"], "lease_overdue_seconds"
+            ),
+        }
+
+    @staticmethod
+    def _active_tasks_snapshot(
+        rows: Sequence[Mapping[str, object]],
+        *,
+        total: object,
+    ) -> dict[str, object]:
+        items = []
+        for row in rows:
+            recovery_state = _snapshot_text(row["recovery_state"], "recovery_state")
+            if recovery_state not in _SNAPSHOT_RUNTIME_STATES:
+                raise ControlPlaneError("runtime task state is malformed")
+            progress_current = _snapshot_int(row["progress_current"], "progress_current")
+            progress_total = (
+                None
+                if row["progress_total"] is None
+                else _snapshot_int(row["progress_total"], "progress_total")
+            )
+            if progress_total is not None and progress_current > progress_total:
+                raise ControlPlaneError("runtime task progress is malformed")
+            items.append(
+                {
+                    "job_key": _snapshot_text(row["job_key"], "job_key"),
+                    "attempt_id": _snapshot_text(row["attempt_id"], "attempt_id"),
+                    "job_type": _snapshot_text(row["job_type"], "job_type"),
+                    "worker_id": _snapshot_text(row["worker_id"], "worker_id"),
+                    "lease_epoch": _snapshot_int(row["lease_epoch"], "lease_epoch"),
+                    "stage": _snapshot_text(row["stage"], "stage"),
+                    "recovery_state": recovery_state,
+                    "progress": {"current": progress_current, "total": progress_total},
+                    "started_at": _snapshot_aware(row["started_at"], "started_at").isoformat(),
+                    "last_heartbeat_at": _snapshot_aware(
+                        row["last_heartbeat_at"], "last_heartbeat_at"
+                    ).isoformat(),
+                    "last_progress_at": _snapshot_aware(
+                        row["last_progress_at"], "last_progress_at"
+                    ).isoformat(),
+                    "lease_deadline_at": _snapshot_aware(
+                        row["lease_deadline_at"], "lease_deadline_at"
+                    ).isoformat(),
+                    "heartbeat_deadline_at": _snapshot_aware(
+                        row["heartbeat_deadline_at"], "heartbeat_deadline_at"
+                    ).isoformat(),
+                    "progress_deadline_at": _snapshot_aware(
+                        row["progress_deadline_at"], "progress_deadline_at"
+                    ).isoformat(),
+                    "attempt_deadline_at": _snapshot_aware(
+                        row["attempt_deadline_at"], "attempt_deadline_at"
+                    ).isoformat(),
+                    "heartbeat_age_seconds": _snapshot_seconds(
+                        row["heartbeat_age_seconds"], "heartbeat_age_seconds"
+                    ),
+                    "progress_age_seconds": _snapshot_seconds(
+                        row["progress_age_seconds"], "progress_age_seconds"
+                    ),
+                    "lease_overdue_seconds": _snapshot_seconds(
+                        row["lease_overdue_seconds"], "lease_overdue_seconds"
+                    ),
+                    "attempt_overdue_seconds": _snapshot_seconds(
+                        row["attempt_overdue_seconds"], "attempt_overdue_seconds"
+                    ),
+                }
+            )
+        return {"items": items, "total": _snapshot_int(total, "active_tasks.total")}
+
+    @staticmethod
+    def _runtime_incidents_snapshot(
+        rows: Sequence[Mapping[str, object]],
+        event_rows: Sequence[Mapping[str, object]],
+        *,
+        total: object,
+        now: datetime,
+    ) -> dict[str, object]:
+        _snapshot_aware(now, "now")
+        transitions: dict[str, list[dict[str, object]]] = {
+            _snapshot_text(row["incident_key"], "incident_key"): [] for row in rows
+        }
+        for event in event_rows:
+            incident_key = _snapshot_text(event["incident_key"], "incident_key")
+            kind = _snapshot_text(event["kind"], "incident_transition")
+            if kind not in _SNAPSHOT_INCIDENT_TRANSITIONS:
+                raise ControlPlaneError("incident transition is malformed")
+            transitions.setdefault(incident_key, []).append(
+                {
+                    "kind": kind,
+                    "occurred_at": _snapshot_aware(
+                        event["occurred_at"], "occurred_at"
+                    ).isoformat(),
+                    "age_seconds": _snapshot_seconds(event["age_seconds"], "age_seconds"),
+                    **_snapshot_transition_detail(event["detail"]),
+                }
+            )
+        items = []
+        for row in rows:
+            state = _snapshot_text(row["state"], "incident_state")
+            if state not in _SNAPSHOT_INCIDENT_STATES:
+                raise ControlPlaneError("incident state is malformed")
+            incident_key = _snapshot_text(row["incident_key"], "incident_key")
+            incident_transitions = transitions.get(incident_key, [])
+            transition = incident_transitions[0]["kind"] if incident_transitions else None
+            items.append(
+                {
+                    "incident_key": incident_key,
+                    "component": _snapshot_text(row["component"], "component"),
+                    "severity": _snapshot_text(row["severity"], "severity"),
+                    "state": state,
+                    "summary": _snapshot_text(row["summary"], "summary"),
+                    "opened_at": _snapshot_aware(row["opened_at"], "opened_at").isoformat(),
+                    "updated_at": _snapshot_aware(row["updated_at"], "updated_at").isoformat(),
+                    "age_seconds": _snapshot_seconds(
+                        (now - _snapshot_aware(row["opened_at"], "opened_at")).total_seconds(),
+                        "incident_age_seconds",
+                    ),
+                    "transition": transition,
+                    "transitions": incident_transitions,
+                }
+            )
+        return {"items": items, "total": _snapshot_int(total, "runtime_incidents.total")}
+
+    @staticmethod
+    def _recovery_actions_snapshot(
+        rows: Sequence[Mapping[str, object]],
+        *,
+        total: object,
+    ) -> dict[str, object]:
+        items = []
+        for row in rows:
+            state = _snapshot_text(row["state"], "action_state")
+            if state not in _SNAPSHOT_ACTION_STATES:
+                raise ControlPlaneError("recovery action state is malformed")
+            result_code = None
+            if row["result_code"] is not None:
+                result_code = _snapshot_text(row["result_code"], "result_code")
+                if result_code not in _SNAPSHOT_ACTION_RESULTS:
+                    raise ControlPlaneError("recovery action result is malformed")
+            items.append(
+                {
+                    "action_id": _snapshot_text(row["action_id"], "action_id"),
+                    "incident_key": (
+                        None
+                        if row["incident_key"] is None
+                        else _snapshot_text(row["incident_key"], "incident_key")
+                    ),
+                    "target_type": _snapshot_text(row["target_type"], "target_type"),
+                    "target_id": _snapshot_text(row["target_id"], "target_id"),
+                    "action_type": _snapshot_text(row["action_type"], "action_type"),
+                    "state": state,
+                    "result_code": result_code,
+                    "expected_controller_epoch": _snapshot_int(
+                        row["expected_controller_epoch"], "expected_controller_epoch"
+                    ),
+                    "expected_attempt_id": _snapshot_text(
+                        row["expected_attempt_id"], "expected_attempt_id"
+                    ),
+                    "expected_lease_epoch": _snapshot_int(
+                        row["expected_lease_epoch"], "expected_lease_epoch"
+                    ),
+                    "requested_at": _snapshot_aware(row["requested_at"], "requested_at")
+                    .isoformat(),
+                    "started_at": None
+                    if row["started_at"] is None
+                    else _snapshot_aware(row["started_at"], "started_at").isoformat(),
+                    "finished_at": None
+                    if row["finished_at"] is None
+                    else _snapshot_aware(row["finished_at"], "finished_at").isoformat(),
+                    "next_allowed_at": _snapshot_aware(
+                        row["next_allowed_at"], "next_allowed_at"
+                    ).isoformat(),
+                    "worker_id": None
+                    if row["worker_id"] is None
+                    else _snapshot_text(row["worker_id"], "worker_id"),
+                    "worker_epoch": _snapshot_int(row["worker_epoch"], "worker_epoch"),
+                    "worker_lease_expires_at": None
+                    if row["worker_lease_expires_at"] is None
+                    else _snapshot_aware(
+                        row["worker_lease_expires_at"], "worker_lease_expires_at"
+                    ).isoformat(),
+                }
+            )
+        return {"items": items, "total": _snapshot_int(total, "recovery_actions.total")}
+
+    @staticmethod
+    def _qualification_snapshot(
+        epoch: Mapping[str, object] | None,
+        certificate: Mapping[str, object] | None,
+        breaker: Mapping[str, object] | None,
+        *,
+        now: datetime,
+    ) -> dict[str, object]:
+        observed_at = _snapshot_aware(now, "now")
+        if epoch is None:
+            return {
+                "state": "accumulating",
+                "epoch_id": None,
+                "started_at": None,
+                "eligible_seconds": 0,
+                "required_seconds": None,
+                "max_gap_seconds": None,
+                "last_fact_at": None,
+                "last_fact_age_seconds": None,
+                "last_breaker": None,
+                "policy_version": None,
+                "release_id": None,
+                "config_id": None,
+                "role_identity": [],
+                "certificate": None,
+            }
+        state = _snapshot_text(epoch["state"], "qualification_state")
+        if state not in _SNAPSHOT_QUALIFICATION_STATES:
+            raise ControlPlaneError("qualification state is malformed")
+        role_identity = _snapshot_role_identity(epoch["role_identity"])
+        _snapshot_json_array(epoch["fact_records"], "fact_records")
+        started_at = _snapshot_aware(epoch["started_at"], "qualification_started_at")
+        last_fact_at = (
+            None
+            if epoch["last_fact_at"] is None
+            else _snapshot_aware(epoch["last_fact_at"], "last_fact_at")
+        )
+        required_seconds = (
+            None
+            if epoch["required_seconds"] is None
+            else _snapshot_int(epoch["required_seconds"], "required_seconds")
+        )
+        last_breaker = None
+        if breaker is not None and breaker["observed_at"] is not None:
+            last_breaker = {
+                "observed_at": _snapshot_aware(breaker["observed_at"], "breaker_observed_at")
+                .isoformat(),
+                "reason": _snapshot_text(breaker["reason"], "breaker_reason"),
+                "fact_id": _snapshot_text(breaker["fact_id"], "breaker_fact_id"),
+            }
+        certificate_summary = None
+        if certificate is not None:
+            certificate_summary = {
+                "certificate_id": _snapshot_text(certificate["certificate_id"], "certificate_id"),
+                "certificate_digest": _snapshot_text(
+                    certificate["certificate_digest"], "certificate_digest"
+                ),
+                "evidence_digest": _snapshot_text(
+                    certificate["evidence_digest"], "evidence_digest"
+                ),
+                "qualified_at": _snapshot_aware(
+                    certificate["qualified_at"], "certificate_qualified_at"
+                ).isoformat(),
+                "created_at": _snapshot_aware(
+                    certificate["created_at"], "certificate_created_at"
+                ).isoformat(),
+            }
+        eligible_seconds = _snapshot_int(epoch["coverage_seconds"], "coverage_seconds")
+        if state == "accumulating":
+            eligible_seconds = max(
+                eligible_seconds,
+                int((observed_at - started_at).total_seconds()),
+            )
+        return {
+            "state": state,
+            "epoch_id": _snapshot_text(epoch["epoch_id"], "epoch_id"),
+            "started_at": started_at.isoformat(),
+            "eligible_seconds": eligible_seconds,
+            "required_seconds": required_seconds,
+            "max_gap_seconds": _snapshot_int(epoch["max_gap_seconds"], "max_gap_seconds"),
+            "last_fact_at": None if last_fact_at is None else last_fact_at.isoformat(),
+            "last_fact_age_seconds": None
+            if last_fact_at is None
+            else _snapshot_seconds(
+                (observed_at - last_fact_at).total_seconds(), "last_fact_age_seconds"
+            ),
+            "last_breaker": last_breaker,
+            "policy_version": _snapshot_text(epoch["policy_version"], "policy_version"),
+            "release_id": _snapshot_text(epoch["release_id"], "release_id"),
+            "config_id": _snapshot_text(epoch["config_id"], "config_id"),
+            "role_identity": role_identity,
+            "certificate": certificate_summary,
         }
 
     def current_opportunities(self, *, limit: int, after_group_id: str) -> dict[str, object]:

@@ -33,8 +33,44 @@ class _AvailableControlPlane:
             },
             "recent_attempts": [],
             "open_incidents": [],
+            "runtime_controller": {
+                "status": "healthy",
+                "controller_id": "m1-runtime-reconciler",
+                "owner_id": "runtime-controller",
+                "epoch": 4,
+                "claimed_at": "2026-08-25T11:59:00+00:00",
+                "last_tick_at": "2026-08-25T11:59:30+00:00",
+                "lease_expires_at": "2026-08-25T12:00:30+00:00",
+                "lease_active": True,
+                "lease_age_seconds": 30.0,
+                "lease_overdue_seconds": 0.0,
+            },
+            "active_tasks": {"items": [], "total": 0},
+            "runtime_incidents": {"items": [], "total": 0},
+            "recovery_actions": {"items": [], "total": 0},
+            "qualification": {
+                "state": "accumulating",
+                "epoch_id": "qualification-api",
+                "started_at": "2026-08-25T00:00:00+00:00",
+                "eligible_seconds": 3600,
+                "required_seconds": 86400,
+                "max_gap_seconds": 900,
+                "last_fact_at": "2026-08-25T11:59:00+00:00",
+                "last_fact_age_seconds": 60.0,
+                "last_breaker": None,
+                "policy_version": "m1-rolling-qualification-v1",
+                "release_id": "release-a",
+                "config_id": "config-a",
+                "role_identity": ["m1", "structure"],
+                "certificate": None,
+            },
             "pending_alert_outbox": [],
         }
+
+
+class _MalformedControlPlane:
+    def operational_snapshot(self, *, now: datetime, sample_limit: int) -> dict[str, object]:
+        raise ValueError("secret DSN postgres://user:pass@example/control-plane")
 
 
 def test_control_plane_route_returns_durable_operator_snapshot(http_test_client) -> None:
@@ -68,12 +104,55 @@ def test_control_plane_route_returns_durable_operator_snapshot(http_test_client)
         },
         "recent_attempts": [],
         "open_incidents": [],
+        "runtime_controller": {
+            "status": "healthy",
+            "controller_id": "m1-runtime-reconciler",
+            "owner_id": "runtime-controller",
+            "epoch": 4,
+            "claimed_at": "2026-08-25T11:59:00+00:00",
+            "last_tick_at": "2026-08-25T11:59:30+00:00",
+            "lease_expires_at": "2026-08-25T12:00:30+00:00",
+            "lease_active": True,
+            "lease_age_seconds": 30.0,
+            "lease_overdue_seconds": 0.0,
+        },
+        "active_tasks": {"items": [], "total": 0},
+        "runtime_incidents": {"items": [], "total": 0},
+        "recovery_actions": {"items": [], "total": 0},
+        "qualification": {
+            "state": "accumulating",
+            "epoch_id": "qualification-api",
+            "started_at": "2026-08-25T00:00:00+00:00",
+            "eligible_seconds": 3600,
+            "required_seconds": 86400,
+            "max_gap_seconds": 900,
+            "last_fact_at": "2026-08-25T11:59:00+00:00",
+            "last_fact_age_seconds": 60.0,
+            "last_breaker": None,
+            "policy_version": "m1-rolling-qualification-v1",
+            "release_id": "release-a",
+            "config_id": "config-a",
+            "role_identity": ["m1", "structure"],
+            "certificate": None,
+        },
         "pending_alert_outbox": [],
     }
 
 
 def test_control_plane_route_never_reports_missing_dependency_as_empty(http_test_client) -> None:
     http_test_client.app.state.control_plane = None
+
+    response = http_test_client.get("/perception/control-plane")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unavailable",
+        "reason": "control-plane-read-unavailable",
+    }
+
+
+def test_control_plane_route_redacts_malformed_read_model_failures(http_test_client) -> None:
+    http_test_client.app.state.control_plane = _MalformedControlPlane()
 
     response = http_test_client.get("/perception/control-plane")
 
