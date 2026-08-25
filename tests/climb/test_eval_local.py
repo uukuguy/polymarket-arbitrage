@@ -396,6 +396,151 @@ def test_fenced_deadline_reconciler_gate_nodes_collect_nonzero() -> None:
         assert "collected 0 items" not in completed.stdout
 
 
+def test_rolling_qualification_certificates_profile_uses_exact_local_gates() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "rolling-qualification-certificates"}
+    )
+
+    assert commands == {
+        "planning": ["make", "planning-status"],
+        "unit": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_qualification.py::test_contained_retry_keeps_epoch_accumulating",
+            "tests/m1-perception/test_control_plane_qualification.py::test_integrity_or_expired_lease_invalidates_exact_epoch",
+            "tests/m1-perception/test_control_plane_qualification.py::test_recovery_confirmation_opens_new_epoch_automatically",
+            "tests/m1-perception/test_control_plane_qualification.py::test_recovery_confirmation_identity_drift_fails_closed[policy_version-policy-b]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_recovery_confirmation_identity_drift_fails_closed[release_id-release-b]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_recovery_confirmation_identity_drift_fails_closed[config_id-config-b]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_recovery_confirmation_identity_drift_fails_closed[role_identity-value3]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_exact_24_hour_boundary_qualifies_only_with_coverage",
+            "tests/m1-perception/test_control_plane_qualification.py::test_gap_equal_to_limit_is_allowed_but_gap_over_limit_breaks",
+            "tests/m1-perception/test_control_plane_qualification.py::test_breaking_reason_matrix_invalidates[evidence.gap]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_breaking_reason_matrix_invalidates[freshness.structure]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_breaking_reason_matrix_invalidates[integrity.conflict]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_breaking_reason_matrix_invalidates[lease.expired]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_unresolved_p1_and_three_freshness_classes_break",
+            "tests/m1-perception/test_control_plane_qualification.py::test_contained_process_replacement_must_finish_within_slo",
+            "tests/m1-perception/test_control_plane_qualification.py::test_duplicate_fact_is_idempotent_and_conflict_fails_closed",
+            "tests/m1-perception/test_control_plane_qualification.py::test_terminal_epochs_replay_exact_fact_but_reject_new_mutation",
+            "tests/m1-perception/test_control_plane_qualification.py::test_decision_rejects_impossible_four_state_combinations",
+            "tests/m1-perception/test_control_plane_qualification.py::test_invalid_fact_values_are_rejected[fact_kwargs0]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_invalid_fact_values_are_rejected[fact_kwargs1]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_invalid_fact_values_are_rejected[fact_kwargs2]",
+            "tests/m1-perception/test_control_plane_qualification.py::test_out_of_order_fact_is_rejected",
+            "tests/m1-perception/test_control_plane_qualification_service.py::test_virtual_26h_recovery_replay_seals_one_reproducible_certificate",
+            "tests/m1-perception/test_control_plane_qualification_service.py::test_qualified_without_certificate_is_sealed_on_next_tick",
+            "-q",
+        ],
+        "integration": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/alembic/test_024.py::test_024_chains_after_023_and_declares_qualification_tables",
+            "tests/alembic/test_024.py::test_024_schema_declares_state_version_cas_and_certificate_uniqueness",
+            "tests/alembic/test_024.py::test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigger",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_epoch_transition_is_state_version_cas_and_rolls_back_old_writers",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_service_first_tick_initializes_sql_null_cursor",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_ingress_late_runtime_commit_is_consumed_after_cursor",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_recovery_restart_keeps_epoch_fact_history_local",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_same_batch_recovery_keeps_recovering_epoch_empty",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_recovering_observes_second_breaker_status_and_restart",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_freshness_reobserves_same_pointer_and_invalidates_on_aging",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_certificate_is_canonical_idempotent_and_conflict_loud",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_certificate_api_rejects_forged_payload_and_bad_decision_types",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_certificate_db_rejects_direct_forgery_and_app_role_insert",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_certificate_function_privileges_and_derived_ids",
+            "tests/m1-perception/test_control_plane_postgres.py::test_read_qualification_certificate_recomputes_canonical_digest_and_fails_on_tamper",
+            "tests/m1-perception/test_control_plane_postgres.py::test_read_qualification_certificate_rejects_tampered_ids",
+            "-q",
+        ],
+        "cli": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_cli.py::test_qualification_status_uses_scoped_dsn_and_is_read_only",
+            "tests/m1-perception/test_control_plane_cli.py::test_qualification_certificates_reverify_read_only_limit",
+            "tests/m1-perception/test_control_plane_cli.py::test_qualification_serve_requires_enable_before_connect",
+            "tests/m1-perception/test_control_plane_cli.py::test_qualification_serve_stops_on_tick_error_without_overlap",
+            "tests/m1-perception/test_makefile_contract.py::test_make_qualification_read_targets_execute_fake_uv_only[make_args0-expected_argv0]",
+            "tests/m1-perception/test_makefile_contract.py::test_make_qualification_read_targets_execute_fake_uv_only[make_args1-expected_argv1]",
+            "tests/m1-perception/test_makefile_contract.py::test_make_qualification_read_targets_execute_fake_uv_only[make_args2-expected_argv2]",
+            "tests/m1-perception/test_makefile_contract.py::test_make_qualification_serve_requires_enable_before_cli",
+            "tests/m1-perception/test_makefile_contract.py::test_make_qualification_serve_executes_fake_uv_after_enable_guard[make_args0-30]",
+            "tests/m1-perception/test_makefile_contract.py::test_make_qualification_serve_executes_fake_uv_after_enable_guard[make_args1-5]",
+            "-q",
+        ],
+        "restart": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_qualification_service.py::test_tick_cursor_is_total_ordered_and_crash_replay_is_exact",
+            "tests/m1-perception/test_control_plane_qualification_service.py::test_virtual_26h_recovery_replay_seals_one_reproducible_certificate",
+            "tests/m1-perception/test_control_plane_qualification_service.py::test_recovering_nonconfirmation_facts_are_observed_without_entering_epoch",
+            "tests/m1-perception/test_control_plane_qualification_service.py::test_qualified_without_certificate_is_sealed_on_next_tick",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_recovery_restart_keeps_epoch_fact_history_local",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_recovering_observes_second_breaker_status_and_restart",
+            "tests/alembic/test_024.py::test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigger",
+            "-q",
+        ],
+    }
+
+    flattened = [argument for command in commands.values() for argument in command]
+    for gate in ("unit", "integration", "cli", "restart"):
+        assert all(
+            argument in {"uv", "run", "pytest", "-q"} or "::test_" in argument
+            for argument in commands[gate]
+        )
+    assert all(
+        any("::test_" in argument for argument in commands[gate])
+        for gate in ("unit", "integration", "cli", "restart")
+    )
+    mutation_argv = [
+        argument.lower()
+        for argument in flattened
+        if "::test_" not in argument
+        and any(
+            forbidden in argument.lower()
+            for forbidden in (
+                "flyctl",
+                "deploy",
+                "http://",
+                "https://",
+                "production",
+                "dsn",
+                "fly",
+                "r2",
+                "machine",
+                "migrate",
+            )
+        )
+    ]
+    assert mutation_argv == []
+
+
+def test_rolling_qualification_certificates_gate_nodes_collect_nonzero() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "rolling-qualification-certificates"}
+    )
+
+    for gate in ("unit", "integration", "cli", "restart"):
+        command = [argument for argument in commands[gate] if argument != "-q"]
+        command.extend(("--collect-only", "-q"))
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        assert completed.returncode == 0, (
+            f"{gate} collection failed:\n{completed.stdout}\n{completed.stderr}"
+        )
+        assert "collected 0 items" not in completed.stdout
+
+
 def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:
     assert eval_local.gate_commands_for({"paradigm": "repository"}) == GATE_COMMANDS
     assert eval_local.gate_commands_for({"paradigm": "unknown"}) == GATE_COMMANDS
