@@ -194,8 +194,65 @@ def test_control_plane_decoder_rejects_malformed_operator_facts() -> None:
                     "worker_epoch": 0,
                     "worker_lease_expires_at": None,
                 },
+                {
+                    "action_id": "action-3",
+                    "incident_key": "runtime-3",
+                    "target_type": "job",
+                    "target_id": "job-3",
+                    "action_type": "retry-job",
+                    "state": "pending",
+                    "result_code": None,
+                    "expected_controller_epoch": 4,
+                    "expected_attempt_id": "attempt-3",
+                    "expected_lease_epoch": 1,
+                    "requested_at": "2026-08-25T11:57:10+00:00",
+                    "started_at": None,
+                    "finished_at": None,
+                    "next_allowed_at": "2026-08-25T12:07:10+00:00",
+                    "worker_id": None,
+                    "worker_epoch": 0,
+                    "worker_lease_expires_at": None,
+                },
+                {
+                    "action_id": "action-4",
+                    "incident_key": "runtime-4",
+                    "target_type": "machine",
+                    "target_id": "machine-1",
+                    "action_type": "restart-machine",
+                    "state": "running",
+                    "result_code": None,
+                    "expected_controller_epoch": 4,
+                    "expected_attempt_id": "attempt-4",
+                    "expected_lease_epoch": 1,
+                    "requested_at": "2026-08-25T11:56:10+00:00",
+                    "started_at": "2026-08-25T11:56:15+00:00",
+                    "finished_at": None,
+                    "next_allowed_at": "2026-08-25T12:06:10+00:00",
+                    "worker_id": "recovery-worker-1",
+                    "worker_epoch": 1,
+                    "worker_lease_expires_at": "2026-08-25T11:57:15+00:00",
+                },
+                {
+                    "action_id": "action-5",
+                    "incident_key": "runtime-5",
+                    "target_type": "job",
+                    "target_id": "job-5",
+                    "action_type": "reclaim-job",
+                    "state": "completed",
+                    "result_code": "stale-noop",
+                    "expected_controller_epoch": 4,
+                    "expected_attempt_id": "attempt-5",
+                    "expected_lease_epoch": 1,
+                    "requested_at": "2026-08-25T11:55:10+00:00",
+                    "started_at": None,
+                    "finished_at": "2026-08-25T11:55:11+00:00",
+                    "next_allowed_at": "2026-08-25T12:05:10+00:00",
+                    "worker_id": None,
+                    "worker_epoch": 0,
+                    "worker_lease_expires_at": None,
+                },
             ],
-            "total": 2,
+            "total": 5,
         },
         "qualification": {
             "state": "accumulating",
@@ -240,6 +297,9 @@ assert.equal(decoded.recovery_actions.items[0].state, "succeeded");
 assert.equal(decoded.recovery_actions.items[0].raw_state, "completed");
 assert.equal(decoded.recovery_actions.items[1].state, "failed");
 assert.equal(decoded.recovery_actions.items[1].result_code, "disabled-action");
+assert.equal(decoded.recovery_actions.items[2].state, "pending");
+assert.equal(decoded.recovery_actions.items[3].state, "running");
+assert.equal(decoded.recovery_actions.items[4].state, "stale-noop");
 assert.equal(
   decoded.runtime_incidents.items[0].transitions[0].reason_code,
   "job.lease-expired",
@@ -269,6 +329,14 @@ assert.equal(decodeControlPlaneRead(missingController).status, "available");
 for (const mutate of [
   (body) => {{ delete body.active_tasks.items[0].stage; }},
   (body) => {{ body.active_tasks.items[0].lease_deadline_at = 123; }},
+  (body) => {{ body.active_tasks.items[0].lease_epoch = Number.MAX_SAFE_INTEGER + 1; }},
+  (body) => {{ body.runtime_controller.last_tick_at = "2026-08-25T11:59:30"; }},
+  (body) => {{ body.runtime_controller.claimed_at = "2026-02-31T11:59:00+00:00"; }},
+  (body) => {{ body.cloud_usage.budget_day = "2026-08-25T00:00:00+00:00"; }},
+  (body) => {{ body.cloud_usage.budget_day = "2026-02-31"; }},
+  (body) => {{ body.runtime_controller.status = "degraded"; }},
+  (body) => {{ body.runtime_controller.lease_active = false; }},
+  (body) => {{ body.runtime_controller.lease_overdue_seconds = 1; }},
   (body) => {{
     body.runtime_incidents.items[0].transitions[0].kind = "suppressed";
   }},
@@ -315,6 +383,21 @@ for (const mutate of [
     body.recovery_actions.items[0].result_code = "succeeded";
   }},
   (body) => {{
+    body.recovery_actions.items[2].worker_id = "worker";
+  }},
+  (body) => {{
+    body.recovery_actions.items[2].started_at = "2026-08-25T11:57:11+00:00";
+  }},
+  (body) => {{
+    body.recovery_actions.items[3].worker_epoch = 0;
+  }},
+  (body) => {{
+    body.recovery_actions.items[3].finished_at = "2026-08-25T11:57:11+00:00";
+  }},
+  (body) => {{
+    body.recovery_actions.items[0].finished_at = null;
+  }},
+  (body) => {{
     body.runtime_watchdog.recent_events[0].severity = "notice";
   }},
   (body) => {{
@@ -323,11 +406,54 @@ for (const mutate of [
   (body) => {{ body.recovery_actions.items[0].action_type = "shell"; }},
   (body) => {{ delete body.qualification.policy_version; }},
   (body) => {{ body.qualification.role_identity = []; }},
+  (body) => {{
+    body.qualification.state = "qualified";
+    body.qualification.eligible_seconds = 86399;
+    body.qualification.certificate = {{
+      certificate_id: "cert-1",
+      certificate_digest: "sha256:cert",
+      evidence_digest: "sha256:evidence",
+      qualified_at: "2026-08-25T23:59:59+00:00",
+      created_at: "2026-08-26T00:00:00+00:00",
+    }};
+  }},
+  (body) => {{
+    body.qualification.state = "qualified";
+    body.qualification.certificate = null;
+  }},
+  (body) => {{
+    body.qualification.certificate = {{
+      certificate_id: "cert-1",
+      certificate_digest: "sha256:cert",
+      evidence_digest: "sha256:evidence",
+      qualified_at: "2026-08-25T23:59:59+00:00",
+      created_at: "2026-08-26T00:00:00+00:00",
+    }};
+  }},
 ]) {{
   const body = clone(fixture);
   mutate(body);
   unavailable(body);
 }}
+
+const qualified = clone(fixture);
+qualified.qualification.state = "qualified";
+qualified.qualification.eligible_seconds = 86400;
+qualified.qualification.required_seconds = 86400;
+qualified.qualification.certificate = {{
+  certificate_id: "cert-1",
+  certificate_digest: "sha256:cert",
+  evidence_digest: "sha256:evidence",
+  qualified_at: "2026-08-25T23:59:59+00:00",
+  created_at: "2026-08-26T00:00:00+00:00",
+}};
+assert.equal(decodeControlPlaneRead(qualified).status, "available");
+
+const critical = clone(fixture);
+critical.runtime_controller.status = "critical";
+critical.runtime_controller.lease_active = false;
+critical.runtime_controller.lease_overdue_seconds = 1;
+assert.equal(decodeControlPlaneRead(critical).status, "available");
 """
     result = _run_node_case(script)
 

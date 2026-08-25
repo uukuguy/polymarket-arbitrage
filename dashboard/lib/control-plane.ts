@@ -5,6 +5,7 @@ const UNAVAILABLE_REASON = "control-plane-read-unavailable";
 const RUNTIME_CONTROLLER_ID = "m1-runtime-reconciler";
 
 export type RuntimeState = "healthy" | "degraded" | "recovering" | "critical";
+export type RuntimeControllerState = "healthy" | "critical";
 export type ActiveTaskState = "active" | "suspect" | "recovering";
 export type IncidentState = "open" | "acknowledged" | "resolved";
 export type IncidentSeverity = "info" | "warning" | "critical";
@@ -67,7 +68,7 @@ export type RuntimeControllerView =
       lease_overdue_seconds: null;
     }
   | {
-      status: RuntimeState;
+      status: RuntimeControllerState;
       controller_id: typeof RUNTIME_CONTROLLER_ID;
       owner_id: string;
       epoch: number;
@@ -298,6 +299,7 @@ const runtimeStagesByJob: Record<RuntimeJobType, readonly RuntimeStage[]> = {
 };
 
 const runtimeStates = ["healthy", "degraded", "recovering", "critical"] as const;
+const runtimeControllerStates = ["healthy", "critical"] as const;
 const activeTaskStates = ["active", "suspect", "recovering"] as const;
 const incidentStates = ["open", "acknowledged", "resolved"] as const;
 const incidentSeverities = ["info", "warning", "critical"] as const;
@@ -354,15 +356,59 @@ function isNonNegativeNumber(value: unknown): value is number {
 }
 
 function isNonNegativeInteger(value: unknown): value is number {
-  return isNonNegativeNumber(value) && Number.isInteger(value);
+  return isNonNegativeNumber(value) && Number.isSafeInteger(value);
 }
 
 function isPositiveInteger(value: unknown): value is number {
   return isNonNegativeInteger(value) && value > 0;
 }
 
+function isValidCalendarDate(year: number, month: number, day: number): boolean {
+  if (month < 1 || month > 12) return false;
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return day >= 1 && day <= daysInMonth;
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  if (!isString(value)) return false;
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?(Z|[+-]\d{2}:\d{2})$/.exec(
+      value,
+    );
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, , zone] =
+    match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  if (
+    !isValidCalendarDate(year, month, day) ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59
+  ) {
+    return false;
+  }
+  if (zone !== "Z") {
+    const zoneHour = Number(zone.slice(1, 3));
+    const zoneMinute = Number(zone.slice(4, 6));
+    if (zoneHour > 23 || zoneMinute > 59) return false;
+  }
+  return Number.isFinite(Date.parse(value));
+}
+
+function isBudgetDay(value: unknown): value is string {
+  if (!isString(value)) return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  return isValidCalendarDate(Number(match[1]), Number(match[2]), Number(match[3]));
+}
+
 function isDateString(value: unknown): value is string {
-  return isString(value) && Number.isFinite(Date.parse(value));
+  return isIsoTimestamp(value);
 }
 
 function isDateStringOrNull(value: unknown): value is string | null {
@@ -525,7 +571,7 @@ function validateRuntimeController(value: unknown): RuntimeControllerView | null
     };
   }
   if (
-    !isLiteral(value.status, runtimeStates) ||
+    !isLiteral(value.status, runtimeControllerStates) ||
     !isString(value.owner_id) ||
     !isPositiveInteger(value.epoch) ||
     !isDateString(value.claimed_at) ||
@@ -534,6 +580,13 @@ function validateRuntimeController(value: unknown): RuntimeControllerView | null
     typeof value.lease_active !== "boolean" ||
     !isNonNegativeNumber(value.lease_age_seconds) ||
     !isNonNegativeNumber(value.lease_overdue_seconds)
+  ) {
+    return null;
+  }
+  if (
+    (value.status === "healthy" &&
+      (!value.lease_active || value.lease_overdue_seconds !== 0)) ||
+    (value.status === "critical" && value.lease_active)
   ) {
     return null;
   }
@@ -687,6 +740,48 @@ function normalizeRecoveryActionState(
   return resultCode === "disabled-action" ? "failed" : null;
 }
 
+function validateRecoveryActionLifecycle(
+  value: Record<string, unknown>,
+  rawState: RecoveryActionRawState,
+  resultCode: RecoveryActionResult | null,
+): boolean {
+  if (rawState === "pending") {
+    return (
+      resultCode === null &&
+      value.started_at === null &&
+      value.finished_at === null &&
+      value.worker_id === null &&
+      value.worker_epoch === 0 &&
+      value.worker_lease_expires_at === null
+    );
+  }
+  if (rawState === "running") {
+    return (
+      resultCode === null &&
+      isDateString(value.started_at) &&
+      value.finished_at === null &&
+      isString(value.worker_id) &&
+      isPositiveInteger(value.worker_epoch) &&
+      isDateString(value.worker_lease_expires_at)
+    );
+  }
+  if (resultCode === null || !isDateString(value.finished_at)) return false;
+  if (resultCode === "succeeded" || resultCode === "failed") {
+    return (
+      isDateString(value.started_at) &&
+      isString(value.worker_id) &&
+      isPositiveInteger(value.worker_epoch) &&
+      isDateString(value.worker_lease_expires_at)
+    );
+  }
+  return (
+    (value.started_at === null || isDateString(value.started_at)) &&
+    value.worker_id === null &&
+    value.worker_epoch === 0 &&
+    value.worker_lease_expires_at === null
+  );
+}
+
 function validateRecoveryAction(value: unknown): RecoveryAction | null {
   if (!isRecord(value)) return null;
   const resultCode =
@@ -717,7 +812,12 @@ function validateRecoveryAction(value: unknown): RecoveryAction | null {
     return null;
   }
   const state = normalizeRecoveryActionState(value.state, resultCode);
-  if (state === null) return null;
+  if (
+    state === null ||
+    !validateRecoveryActionLifecycle(value, value.state, resultCode)
+  ) {
+    return null;
+  }
   return {
     action_id: value.action_id,
     incident_key: value.incident_key,
@@ -758,6 +858,27 @@ function validateQualification(value: unknown): QualificationView | null {
   }
   const roleIdentity = validateStringArray(value.role_identity);
   if (roleIdentity === null) return null;
+  const lastBreaker = validateLastBreaker(value.last_breaker);
+  const certificate = validateCertificate(value.certificate);
+  if (lastBreaker === undefined || certificate === undefined) return null;
+  if (value.epoch_id === null) {
+    if (
+      value.state !== "accumulating" ||
+      value.started_at !== null ||
+      value.eligible_seconds !== 0 ||
+      value.required_seconds !== null ||
+      value.max_gap_seconds !== null ||
+      value.last_fact_at !== null ||
+      value.last_fact_age_seconds !== null ||
+      value.policy_version !== null ||
+      value.release_id !== null ||
+      value.config_id !== null ||
+      roleIdentity.length !== 0 ||
+      certificate !== null
+    ) {
+      return null;
+    }
+  }
   const hasPolicyIdentity =
     value.policy_version !== null &&
     value.release_id !== null &&
@@ -770,9 +891,19 @@ function validateQualification(value: unknown): QualificationView | null {
   ) {
     return null;
   }
-  const lastBreaker = validateLastBreaker(value.last_breaker);
-  const certificate = validateCertificate(value.certificate);
-  if (lastBreaker === undefined || certificate === undefined) return null;
+  if (value.epoch_id !== null && value.started_at === null) return null;
+  if (value.state === "qualified") {
+    if (
+      value.epoch_id === null ||
+      value.required_seconds === null ||
+      value.eligible_seconds !== value.required_seconds ||
+      certificate === null
+    ) {
+      return null;
+    }
+  } else if (certificate !== null) {
+    return null;
+  }
   return {
     state: value.state,
     epoch_id: value.epoch_id,
@@ -824,6 +955,9 @@ function validateCertificate(value: unknown):
   ) {
     return undefined;
   }
+  if (Date.parse(value.created_at) < Date.parse(value.qualified_at)) {
+    return undefined;
+  }
   return {
     certificate_id: value.certificate_id,
     certificate_digest: value.certificate_digest,
@@ -864,7 +998,7 @@ function validateCloudUsage(value: unknown): CloudUsage | null {
   const latest = validateCloudObservation(value.latest_observation);
   if (
     latest === undefined ||
-    !isDateString(value.budget_day) ||
+    !isBudgetDay(value.budget_day) ||
     !isNonNegativeInteger(value.used_bytes) ||
     !(value.daily_budget_bytes === null || isNonNegativeInteger(value.daily_budget_bytes)) ||
     !isNonNegativeInteger(value.threshold_percent) ||
