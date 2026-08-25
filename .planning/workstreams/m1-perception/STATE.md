@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Plan 206 is locally complete with production gates explicitly NOT RUN; next is H-018 confirmation, then an exact authorized observe-only production release
-last_updated: "2026-08-25T16:55:14+08:00"
+stopped_at: Plan 206 and H-018 are locally confirmed; production gates remain NOT RUN pending an exact authorized observe-only release
+last_updated: "2026-08-25T17:05:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -79,12 +79,15 @@ progress:
   an exact capability-limited Fly recovery adapter, durable observe-only
   decision/idle facts, and a read-only zero-mutation verifier. The production
   observe, job-recovery, and process-recovery gates are explicitly NOT RUN.
-- Climb H-014 cycle 15 through H-017 cycle 18 scored 100/100 on dedicated local
+- Climb H-014 cycle 15 through H-018 cycle 19 scored 100/100 on dedicated local
   gates. H-016 run `20260825-053507-h-016` covers real
   migration/trust/late-ingress/freshness/recovery-observation behavior plus
   exact 26-hour restart/replay certificate evidence; H-017 run
   `20260825-074318-h-017` covers strict reads, real-PostgreSQL event/outbox
-  chains, API/smoke contracts and restart/ordering behavior.
+  chains, API/smoke contracts and restart/ordering behavior. H-018 run
+  `20260825-090136-h-018` covers isolated topology and adapter authority,
+  two canonical real-PostgreSQL matrix runs, observe-only CLI/Make, and
+  restart/idempotency/identity-drift behavior.
 - These changes have **not** been deployed and migrations 022/023/024/025 have not
   been applied to production. The production topology still reflects the
   earlier runtime and must not be described as self-healing until exact
@@ -119,10 +122,9 @@ progress:
 
 ## Resume
 
-1. Run the dedicated climb H-018 local confirmation profile.
-2. Before production, present one exact observe-only authorization package:
+1. Before production, present one exact observe-only authorization package:
    release SHA, six app identities, database, migration 022-025 plan, rollback,
    and evidence directory. Do not infer this authority from generic approval.
-3. After authorized production enablement, let recovery confirmation open a fresh epoch
+2. After authorized production enablement, let recovery confirmation open a fresh epoch
    automatically; independently verify its immutable certificate before
    marking Phase 05.6 and M1 complete.

@@ -231,7 +231,7 @@ one exact process loss. Require independent confirmation, one restart action,
 budget decrement, service freshness preservation or explicit breaker, and
 linked recovery.
 
-- [ ] **Step 4: Final verification and closure**
+- [x] **Step 4: Final local verification and closure; production reads/smoke NOT RUN**
 
 Run `make runtime-fault-matrix`, `make runtime-controller-status`,
 `make qualification-status`, authenticated Dashboard smoke, relevant full
@@ -240,3 +240,8 @@ thread with VERIFIED versus NOT RUN boundaries. The SUMMARY records every plan
 commit and production receipt. Rolling qualification continues automatically;
 do not wait 24 hours to close implementation, and do not claim a certificate
 until one is actually sealed.
+
+Local fault-matrix, pytest, Ruff, docs, build and planning gates passed. The
+production-only controller/status, qualification/status and authenticated
+Dashboard checks remain NOT RUN because no authorized deployment exists to
+read; they are not converted into local passes.

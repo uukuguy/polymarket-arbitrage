@@ -10254,9 +10254,11 @@ fault mutation remain behind Plan 206's exact separate authorization gates.
   025, Ruff, Pyright and wheel build and approved commit `8c45e76b` with zero
   findings.
 - [LEARNING] Added `docs/learning/88-确定性故障矩阵与Observe-Only上线门.md` and
-  architecture §2.31. H-018 now has an exact local gate profile; its final climb
-  cycle is the next action.
+  architecture §2.31.
+- [CLIMB] H-018 cycle 19 run `20260825-090136-h-018` scored 100/100 across
+  planning, adapter/topology unit, two canonical real-PostgreSQL matrix runs,
+  observe-only CLI/Make, and restart/idempotency/identity-drift gates. Verdict:
+  confirmed. The verification artifact records no external submission.
 
-[NEXT] Run `make climb-cycle hypothesis=H-018`. If it confirms locally, prepare
-the exact observe-only production authorization package; do not deploy or inject
-faults from generic approval.
+[NEXT] Prepare and present the exact observe-only production authorization
+package. Do not deploy or inject faults from generic approval.
