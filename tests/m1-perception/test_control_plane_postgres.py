@@ -37,6 +37,22 @@ from polyarb.control_plane.postgres import (
     RuntimeProgressConflictError,
     StaleLeaseError,
 )
+from polyarb.control_plane.qualification import (
+    QualificationDecision,
+    QualificationFact,
+    QualificationState,
+    RollingQualificationPolicy,
+)
+from polyarb.control_plane.qualification_store import (
+    QualificationCertificateConflict,
+    QualificationEpochConflict,
+    canonical_certificate_bytes,
+    certificate_digest,
+    insert_qualification_certificate,
+    read_qualification_epoch,
+    start_qualification_epoch,
+    transition_qualification_epoch,
+)
 from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
@@ -117,6 +133,8 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
 
     with connect() as connection:
         for table in (
+            "m1_qualification_certificates",
+            "m1_qualification_epochs",
             "m1_soak_observations",
             "m1_soak_runs",
             "m1_cloud_usage_observations",
@@ -8748,7 +8766,8 @@ def test_quote_retry_event_injection_rolls_back_circuit_and_job_transition(
         )
         assert cursor.fetchone() == (0,)
         cursor.execute(
-            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s AND kind IN (%s, %s)",
+            "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s "
+            "AND kind IN (%s, %s)",
             (
                 lease.job_key,
                 RuntimeEventKind.RETRYABLE_FAILED.value,
@@ -8756,3 +8775,228 @@ def test_quote_retry_event_injection_rolls_back_circuit_and_job_transition(
             ),
         )
         assert cursor.fetchone() == (0,)
+
+
+def test_qualification_epoch_transition_is_state_version_cas_and_rolls_back_old_writers(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    policy = _qualification_policy()
+    initial = policy.new_epoch(
+        started_at=now,
+        epoch_id="qualification-epoch-cas",
+    )
+    persisted = start_qualification_epoch(control_plane._connection_factory, initial)
+    assert persisted.version == 1
+    breaker = policy.apply(
+        initial,
+        QualificationFact.breaking(
+            "fact-breaker",
+            now + timedelta(hours=1),
+            "lease.expired",
+            policy_version=policy.policy_version,
+            release_id=policy.release_id,
+            config_id=policy.config_id,
+            role_identity=policy.role_identity,
+        ),
+    )
+    barrier = Barrier(2)
+
+    def race(expected_owner: str) -> object:
+        barrier.wait(timeout=10)
+        try:
+            return transition_qualification_epoch(
+                control_plane._connection_factory,
+                expected_epoch_id=initial.epoch_id,
+                expected_state=initial.state,
+                expected_version=1,
+                next_decision=breaker,
+                writer_id=expected_owner,
+            )
+        except BaseException as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(race, ("writer-a", "writer-b")))
+
+    successes = [result for result in results if not isinstance(result, BaseException)]
+    failures = [result for result in results if isinstance(result, BaseException)]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], QualificationEpochConflict)
+
+    after_race = read_qualification_epoch(
+        control_plane._connection_factory,
+        epoch_id=initial.epoch_id,
+    )
+    assert after_race is not None
+    assert after_race.state == "invalidated"
+    assert after_race.version == 2
+    assert after_race.invalidated_at == now + timedelta(hours=1)
+    assert after_race.invalidation_reason == "lease.expired"
+    with pytest.raises(QualificationEpochConflict, match="state/version"):
+        transition_qualification_epoch(
+            control_plane._connection_factory,
+            expected_epoch_id=initial.epoch_id,
+            expected_state=initial.state,
+            expected_version=1,
+            next_decision=breaker,
+            writer_id="stale-writer",
+        )
+    unchanged = read_qualification_epoch(
+        control_plane._connection_factory,
+        epoch_id=initial.epoch_id,
+    )
+    assert unchanged == after_race
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM m1_qualification_certificates")
+        assert cursor.fetchone() == (0,)
+
+
+def test_qualification_certificate_is_canonical_idempotent_and_conflict_loud(
+    control_plane: PostgresControlPlane,
+) -> None:
+    policy = _qualification_policy()
+    started_at = _now()
+    qualified_at = started_at + timedelta(days=1)
+    qualified = QualificationDecision(
+        state=QualificationState.QUALIFIED,
+        epoch_id="qualification-epoch-cert",
+        started_at=started_at,
+        policy_version=policy.policy_version,
+        release_id=policy.release_id,
+        config_id=policy.config_id,
+        role_identity=policy.role_identity,
+        last_fact_at=qualified_at,
+        qualified_at=qualified_at,
+        max_gap_seconds=900,
+        coverage_seconds=86_400,
+        progress_count=12,
+        successful_count=12,
+    )
+    start_qualification_epoch(
+        control_plane._connection_factory,
+        policy.new_epoch(started_at=started_at, epoch_id=qualified.epoch_id),
+    )
+    transition_qualification_epoch(
+        control_plane._connection_factory,
+        expected_epoch_id=qualified.epoch_id,
+        expected_state=QualificationDecision.initial(
+            started_at=started_at,
+            epoch_id=qualified.epoch_id,
+            policy_version=policy.policy_version,
+            release_id=policy.release_id,
+            config_id=policy.config_id,
+            role_identity=policy.role_identity,
+        ).state,
+        expected_version=1,
+        next_decision=qualified,
+        writer_id="qualifier",
+    )
+    payload = _certificate_payload(qualified)
+    assert canonical_certificate_bytes(payload) == (
+        b'{"bounds":{"max_gap_seconds":900,"qualified_at":"2030-01-02T12:00:00+00:00",'
+        b'"required_seconds":86400,"started_at":"2030-01-01T12:00:00+00:00"},'
+        b'"contained_incidents":[],"counts":{"progress_count":12,"successful_count":12},'
+        b'"evidence_digest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",'
+        b'"identity":{"config_id":"config-a","epoch_id":"qualification-epoch-cert",'
+        b'"policy_version":"m1-rolling-qualification-v1","release_id":"release-a",'
+        b'"role_identity":["m1","structure"]},"policy_version":"m1-rolling-qualification-v1",'
+        b'"recovery_actions":[],"slo":{"evidence_gap_seconds":900,"freshness":"pass"}}'
+    )
+    first = insert_qualification_certificate(
+        control_plane._connection_factory,
+        epoch_id=qualified.epoch_id,
+        payload=payload,
+    )
+    replay = insert_qualification_certificate(
+        control_plane._connection_factory,
+        epoch_id=qualified.epoch_id,
+        payload=payload,
+    )
+    assert replay == first
+    assert first.certificate_digest == certificate_digest(payload)
+    assert first.created_at.tzinfo is not None
+    assert first.created_at.utcoffset() == timedelta(0)
+
+    conflict_payload = {
+        **payload,
+        "counts": {"progress_count": 13, "successful_count": 12},
+    }
+    with pytest.raises(QualificationCertificateConflict, match="conflicts"):
+        insert_qualification_certificate(
+            control_plane._connection_factory,
+            epoch_id=qualified.epoch_id,
+            payload=conflict_payload,
+        )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*), min(certificate_digest) FROM m1_qualification_certificates"
+        )
+        assert cursor.fetchone() == (1, first.certificate_digest)
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            cursor.execute(
+                "UPDATE m1_qualification_certificates SET evidence_digest = %s",
+                ("f" * 64,),
+            )
+        connection.rollback()
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            cursor.execute(
+                "DELETE FROM m1_qualification_certificates WHERE certificate_id = %s",
+                (first.certificate_id,),
+            )
+        connection.rollback()
+
+    with pytest.raises(ValueError, match="JSON-safe"):
+        canonical_certificate_bytes(
+            {
+                **payload,
+                "identity": {
+                    **cast(dict[str, object], payload["identity"]),
+                    "role_identity": ("tuple-is-not-canonical-json",),
+                },
+            }
+        )
+    with pytest.raises(ValueError, match="must include"):
+        certificate_digest({"identity": {"epoch_id": qualified.epoch_id}})
+
+
+def _qualification_policy() -> RollingQualificationPolicy:
+    return RollingQualificationPolicy(
+        policy_version="m1-rolling-qualification-v1",
+        release_id="release-a",
+        config_id="config-a",
+        role_identity=("m1", "structure"),
+        max_gap_seconds=900,
+    )
+
+
+def _certificate_payload(decision: QualificationDecision) -> dict[str, object]:
+    assert decision.qualified_at is not None
+    return {
+        "bounds": {
+            "max_gap_seconds": decision.max_gap_seconds,
+            "qualified_at": decision.qualified_at.isoformat(),
+            "required_seconds": 86_400,
+            "started_at": decision.started_at.isoformat(),
+        },
+        "contained_incidents": [],
+        "counts": {
+            "progress_count": decision.progress_count,
+            "successful_count": decision.successful_count,
+        },
+        "evidence_digest": "e" * 64,
+        "identity": {
+            "config_id": decision.config_id,
+            "epoch_id": decision.epoch_id,
+            "policy_version": decision.policy_version,
+            "release_id": decision.release_id,
+            "role_identity": list(decision.role_identity),
+        },
+        "policy_version": decision.policy_version,
+        "recovery_actions": [],
+        "slo": {
+            "evidence_gap_seconds": decision.max_gap_seconds,
+            "freshness": "pass",
+        },
+    }
