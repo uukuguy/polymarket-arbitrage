@@ -19,6 +19,7 @@ from polyarb.control_plane.qualification_service import (
     StaticQualificationFactSource,
     freshness_row_to_fact_record,
     incident_event_row_to_fact_record,
+    ledger_row_to_fact_record,
     recovery_action_row_to_fact_record,
     runtime_event_row_to_fact_record,
 )
@@ -306,6 +307,93 @@ def test_successful_recovery_action_types_map_to_closed_qualification_reasons() 
                 "detail": {},
             }
         )
+
+
+def test_recovery_action_ledger_versions_have_distinct_fact_ids_and_replay() -> None:
+    running = ledger_row_to_fact_record(
+        {
+            "ingest_seq": 1,
+            "source": "recovery",
+            "source_id": "action-same",
+            "source_version": "1",
+            "qualification_observed_at": NOW + timedelta(seconds=1),
+            "payload": {
+                "action_id": "action-same",
+                "action_type": "retry-job",
+                "target_id": "job-a",
+                "state": "running",
+                "result_code": None,
+                "requested_at": NOW,
+                "started_at": NOW + timedelta(seconds=1),
+                "finished_at": None,
+                "detail": {},
+            },
+        }
+    )
+    completed = ledger_row_to_fact_record(
+        {
+            "ingest_seq": 2,
+            "source": "recovery",
+            "source_id": "action-same",
+            "source_version": "2",
+            "qualification_observed_at": NOW + timedelta(seconds=2),
+            "payload": {
+                "action_id": "action-same",
+                "action_type": "retry-job",
+                "target_id": "job-a",
+                "state": "completed",
+                "result_code": "succeeded",
+                "requested_at": NOW,
+                "started_at": NOW + timedelta(seconds=1),
+                "finished_at": NOW + timedelta(seconds=2),
+                "detail": {"reason_code": "retry-job", "recovery_slo_seconds": 60},
+            },
+        }
+    )
+
+    assert running.fact.fact_id != completed.fact.fact_id
+    store = InMemoryQualificationStore()
+    service = QualificationService(
+        policy=_policy(),
+        fact_source=StaticQualificationFactSource((running, completed)),
+        state_store=store,
+        writer_id="test-service",
+        batch_size=2,
+    )
+
+    service.tick(NOW)
+    result = service.tick(NOW + timedelta(seconds=3))
+
+    assert result.applied == 2
+    assert result.state is QualificationState.ACCUMULATING
+    assert [fact.reason for fact in store.current.facts] == ["healthy", "recovery.retry"]
+
+
+def test_recovery_action_exact_version_keeps_same_fact_id_and_digest() -> None:
+    row = {
+        "ingest_seq": 1,
+        "source": "recovery",
+        "source_id": "action-exact",
+        "source_version": "1",
+        "qualification_observed_at": NOW + timedelta(seconds=1),
+        "payload": {
+            "action_id": "action-exact",
+            "action_type": "retry-job",
+            "target_id": "job-a",
+            "state": "completed",
+            "result_code": "succeeded",
+            "requested_at": NOW,
+            "finished_at": NOW + timedelta(seconds=1),
+            "detail": {"reason_code": "retry-job", "recovery_slo_seconds": 60},
+        },
+    }
+    first = ledger_row_to_fact_record(row)
+    replay = ledger_row_to_fact_record(row)
+    direct = recovery_action_row_to_fact_record(row["payload"])
+
+    assert first.fact.fact_id == replay.fact.fact_id
+    assert first.fact.digest == replay.fact.digest
+    assert direct.fact.fact_id == "recovery:job-a:action-exact"
 
 
 def test_retryable_failure_runtime_and_incident_facts_do_not_qualify_or_crash() -> None:

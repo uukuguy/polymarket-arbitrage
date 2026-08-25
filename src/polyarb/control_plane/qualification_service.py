@@ -982,15 +982,16 @@ def recovery_action_row_to_fact_record(row: Mapping[str, object]) -> Qualificati
         reason = "recovery.human-intervention"
     elif state not in {"pending", "running", "completed"}:
         raise ValueError(f"unknown recovery action state: {state}")
+    stable_id = _qualification_stable_id(row, action_id)
     return QualificationFactRecord(
         cursor=FactCursor(
             observed_at,
             _SOURCE_RANK_RECOVERY,
-            _qualification_stable_id(row, action_id),
+            stable_id,
             ingest_seq=_qualification_ingest_seq(row),
         ),
         fact=QualificationFact(
-            fact_id=f"recovery:{target_id}:{action_id}",
+            fact_id=f"recovery:{target_id}:{stable_id}",
             observed_at=observed_at,
             reason=reason,
             **kwargs,
