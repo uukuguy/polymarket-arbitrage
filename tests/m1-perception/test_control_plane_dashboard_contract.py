@@ -423,6 +423,12 @@ for (const mutate of [
     body.recovery_actions.items[0].result_code = "succeeded";
   }},
   (body) => {{
+    body.recovery_actions.items[0].expected_controller_epoch = 0;
+  }},
+  (body) => {{
+    body.recovery_actions.items[0].expected_lease_epoch = 0;
+  }},
+  (body) => {{
     body.recovery_actions.items[2].worker_id = "worker";
   }},
   (body) => {{

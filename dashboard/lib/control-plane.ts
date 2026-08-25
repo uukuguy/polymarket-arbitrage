@@ -799,9 +799,9 @@ function validateRecoveryAction(value: unknown): RecoveryAction | null {
     !isString(value.target_id) ||
     !isLiteral(value.action_type, actionTypes) ||
     !isLiteral(value.state, actionRawStates) ||
-    !isNonNegativeInteger(value.expected_controller_epoch) ||
+    !isPositiveInteger(value.expected_controller_epoch) ||
     !isString(value.expected_attempt_id) ||
-    !isNonNegativeInteger(value.expected_lease_epoch) ||
+    !isPositiveInteger(value.expected_lease_epoch) ||
     !isDateString(value.requested_at) ||
     !isDateStringOrNull(value.started_at) ||
     !isDateStringOrNull(value.finished_at) ||
