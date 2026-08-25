@@ -15,13 +15,26 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from . import recovery_store as recovery_store_module
-from .postgres import PostgresControlPlane, StaleLeaseError
+from .postgres import StaleLeaseError
 from .recovery_models import RecoveryActionType
 from .recovery_records import RecoveryActionRecord, RuntimeControllerLease
 
 _CLOSED_RESULT_CODES = frozenset(
     {"succeeded", "failed", "stale-noop", "disabled-action"}
 )
+
+
+class _RecoveryControlPlane(Protocol):
+    """Minimal atomic adapter surface required by the executor."""
+
+    def _execute_recovery_action_cursor(
+        self,
+        cursor: Any,
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+        heartbeat_lease_seconds: int,
+    ) -> object: ...
 
 # This is intentionally the complete job-level authority for Plan 03.  Do not
 # add process or Machine methods here: those actions are handled as durable
@@ -102,7 +115,7 @@ class RecoveryExecutor:
     def __init__(
         self,
         *,
-        control_plane: PostgresControlPlane,
+        control_plane: _RecoveryControlPlane,
         controller: RuntimeControllerLease,
         worker_id: str,
         store: _RecoveryStore | Callable[[], Any] | None = None,
@@ -181,37 +194,15 @@ class RecoveryExecutor:
         if action_type in _DISABLED_ACTIONS or action_type not in _JOB_ACTIONS:
             return "disabled-action"
 
-        if cursor is not None:
-            atomic_dispatch = getattr(
-                self._control_plane, "execute_recovery_action_cursor", None
+        try:
+            result = self._control_plane._execute_recovery_action_cursor(
+                cursor,
+                action,
+                now=now,
+                heartbeat_lease_seconds=self._heartbeat_lease_seconds,
             )
-            if atomic_dispatch is None:
-                raise RuntimeError("control plane lacks atomic recovery dispatch")
-            try:
-                result = atomic_dispatch(
-                    cursor,
-                    action,
-                    now=now,
-                    heartbeat_lease_seconds=self._heartbeat_lease_seconds,
-                )
-            except StaleLeaseError:
-                return "stale-noop"
-        else:
-            method_name = _JOB_ACTIONS[action_type]
-            method = getattr(self._control_plane, method_name, None)
-            if method is None:
-                raise RuntimeError(f"control plane lacks recovery method {method_name}")
-            try:
-                if action_type is RecoveryActionType.HEARTBEAT_JOB:
-                    result = method(
-                        action,
-                        now=now,
-                        lease_seconds=self._heartbeat_lease_seconds,
-                    )
-                else:
-                    result = method(action, now=now)
-            except StaleLeaseError:
-                return "stale-noop"
+        except StaleLeaseError:
+            return "stale-noop"
 
         if not isinstance(result, str) or result not in _CLOSED_RESULT_CODES:
             raise ValueError("recovery control-plane method returned an invalid result code")

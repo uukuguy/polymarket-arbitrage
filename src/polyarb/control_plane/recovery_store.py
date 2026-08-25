@@ -1035,7 +1035,6 @@ def execute_claimed_action(
                 cursor,
                 action=action,
                 result_code="stale-noop",
-                now=observed_at,
             )
 
         if action.target_type in {"job", "circuit"} and not _action_runtime_fence_current(
@@ -1045,7 +1044,6 @@ def execute_claimed_action(
                 cursor,
                 action=action,
                 result_code="stale-noop",
-                now=observed_at,
             )
 
         raw_result = callback(cursor, action)
@@ -1054,7 +1052,6 @@ def execute_claimed_action(
             cursor,
             action=action,
             result_code=result_code,
-            now=observed_at,
         )
 
 
@@ -1071,7 +1068,6 @@ def _complete_action_cursor(
     *,
     action: RecoveryActionRecord,
     result_code: str,
-    now: datetime,
 ) -> RecoveryActionRecord:
     if result_code not in _CLOSED_RESULT_CODES:
         raise RecoveryStoreError("recovery result code is not in the action contract")
@@ -1079,19 +1075,17 @@ def _complete_action_cursor(
     cursor.execute(
         """
         UPDATE m1_recovery_actions
-        SET state = 'completed', result_code = %s, finished_at = %s, detail = %s
+        SET state = 'completed', result_code = %s, finished_at = clock_timestamp(), detail = %s
         WHERE action_id = %s AND state = 'running'
           AND worker_id = %s AND worker_epoch = %s
-          AND worker_lease_expires_at > %s
+          AND worker_lease_expires_at > clock_timestamp()
         """,
         (
             result_code,
-            now,
             Jsonb(detail),
             action.action_id,
             action.worker_id,
             action.worker_epoch,
-            now,
         ),
     )
     if cursor.rowcount != 1:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -168,6 +168,31 @@ class FakeControlPlane:
             raise RuntimeError("simulated executor crash")
         return "succeeded"
 
+    def _execute_recovery_action_cursor(
+        self,
+        cursor: Any,
+        action: RecoveryActionRecord,
+        *,
+        now: datetime,
+        heartbeat_lease_seconds: int,
+    ) -> object:
+        del cursor
+        if action.action_type == RecoveryActionType.HEARTBEAT_JOB.value:
+            return self.heartbeat_recovering_job(
+                action,
+                now=now,
+                lease_seconds=heartbeat_lease_seconds,
+            )
+        if action.action_type == RecoveryActionType.CANCEL_JOB.value:
+            return self.cancel_stalled_job(action, now=now)
+        if action.action_type == RecoveryActionType.RETRY_JOB.value:
+            return self.release_retryable_job(action, now=now)
+        if action.action_type == RecoveryActionType.RECLAIM_JOB.value:
+            return self.reclaim_expired_job(action, now=now)
+        if action.action_type == RecoveryActionType.PROBE_CIRCUIT.value:
+            return self.release_one_circuit_probe(action, now=now)
+        raise AssertionError(f"unexpected fake action {action.action_type}")
+
     def heartbeat_recovering_job(
         self,
         action: RecoveryActionRecord,
@@ -311,8 +336,8 @@ def test_exhausted_budget_is_not_claimable_and_does_not_mutate_any_business_fact
 
 def test_none_adapter_result_is_contract_error_and_not_succeeded() -> None:
     class NoneControlPlane(FakeControlPlane):
-        def cancel_stalled_job(self, action: RecoveryActionRecord, *, now: datetime) -> None:
-            return None
+        def cancel_stalled_job(self, action: RecoveryActionRecord, *, now: datetime) -> str:
+            return cast(str, None)
 
     store = FakeStore([_action(RecoveryActionType.CANCEL_JOB)])
     control_plane = NoneControlPlane()
