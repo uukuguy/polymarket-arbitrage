@@ -541,6 +541,121 @@ def test_rolling_qualification_certificates_gate_nodes_collect_nonzero() -> None
         assert "collected 0 items" not in completed.stdout
 
 
+def test_bounded_operator_truth_surfaces_profile_uses_exact_local_gates() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "bounded-operator-truth-surfaces"}
+    )
+
+    assert commands == {
+        "planning": ["make", "planning-status"],
+        "unit": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_dashboard_contract.py::test_control_plane_decoder_exports_strict_operator_types",
+            "tests/m1-perception/test_control_plane_dashboard_contract.py::test_control_plane_decoder_rejects_malformed_operator_facts",
+            "tests/m1-perception/test_control_plane_postgres.py::test_runtime_read_model_rejects_unknown_review_vocab_from_postgres",
+            "tests/m1-perception/test_control_plane_postgres.py::test_runtime_read_model_rejects_unknown_active_task_registry_values",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_read_model_rejects_malformed_epoch_json",
+            "-q",
+        ],
+        "integration": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_postgres.py::test_runtime_event_writer_concurrent_first_detected_records_one_event_and_two_outbox",
+            "tests/m1-perception/test_control_plane_postgres.py::test_incident_event_and_alert_outbox_are_one_idempotent_transaction",
+            "tests/m1-perception/test_control_plane_postgres.py::test_retryable_finish_creates_one_durable_incident_and_alert_intent",
+            "tests/m1-perception/test_control_plane_postgres.py::test_operational_snapshot_reads_fenced_work_and_alert_intent",
+            "tests/m1-perception/test_control_plane_postgres.py::test_runtime_read_model_projects_self_healing_state_bounded_and_read_only",
+            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_read_model_uses_persisted_coverage_not_wall_clock",
+            "-q",
+        ],
+        "cli": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_http.py::test_control_plane_route_returns_durable_operator_snapshot",
+            "tests/m1-perception/test_control_plane_http.py::test_control_plane_route_never_reports_missing_dependency_as_empty",
+            "tests/m1-perception/test_control_plane_http.py::test_control_plane_route_redacts_malformed_read_model_failures",
+            "tests/m1-perception/test_makefile_contract.py::test_make_help_lists_control_plane_dashboard_smoke",
+            "tests/m1-perception/test_makefile_contract.py::test_smoke_control_plane_dashboard_requires_authenticated_input_before_curl",
+            "tests/m1-perception/test_makefile_contract.py::test_smoke_control_plane_dashboard_rejects_auth_or_empty_200_page",
+            "tests/m1-perception/test_makefile_contract.py::test_smoke_control_plane_dashboard_accepts_authenticated_operator_body",
+            "-q",
+        ],
+        "restart": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_runtime_event_writer.py::test_runtime_transition_writer_suppresses_restart_duplicate_from_open_incident",
+            "tests/m1-perception/test_runtime_event_writer.py::test_runtime_transition_writer_returns_escalated_payload_after_durable_reminder_gaps",
+            "tests/m1-perception/test_runtime_event_writer.py::test_runtime_transition_writer_records_recovered_once_and_suppresses_replay",
+            "tests/m1-perception/test_runtime_event_writer.py::test_runtime_transition_writer_rejects_stale_recovered_before_latest_detected",
+            "tests/m1-perception/test_runtime_event_writer.py::test_runtime_transition_writer_rejects_stale_detected_before_latest_recovered",
+            "tests/m1-perception/test_runtime_event_writer.py::test_runtime_transition_writer_uses_recovery_started_as_ordering_not_reminder_cursor",
+            "tests/m1-perception/test_control_plane_watchdog.py::test_runtime_transition_watchdog_persists_normalized_payload_before_telegram",
+            "tests/m1-perception/test_control_plane_watchdog.py::test_runtime_transition_watchdog_uses_persisted_duplicate_result_to_skip_delivery",
+            "tests/m1-perception/test_control_plane_watchdog.py::test_runtime_transition_watchdog_delegates_reminder_timing_to_writer",
+            "-q",
+        ],
+    }
+
+    flattened = [argument for command in commands.values() for argument in command]
+    assert commands["planning"] == ["make", "planning-status"]
+    assert all(
+        any("::test_" in argument for argument in commands[gate])
+        for gate in ("unit", "integration", "cli", "restart")
+    )
+    assert all(
+        argument.rsplit("::", maxsplit=1)[-1].startswith("test_")
+        for argument in flattened
+        if "::test_" in argument
+    )
+    forbidden_argv = [
+        argument.lower()
+        for argument in flattened
+        if "::test_" not in argument
+        and any(
+            forbidden in argument.lower()
+            for forbidden in (
+                "flyctl",
+                "deploy",
+                "migrate",
+                "http://",
+                "https://",
+                "production",
+                "dsn",
+                "r2",
+                "machine",
+            )
+        )
+    ]
+    assert forbidden_argv == []
+
+
+def test_bounded_operator_truth_surfaces_gate_nodes_collect_nonzero() -> None:
+    commands = eval_local.gate_commands_for(
+        {"paradigm": "bounded-operator-truth-surfaces"}
+    )
+
+    for gate in ("unit", "integration", "cli", "restart"):
+        command = [argument for argument in commands[gate] if argument != "-q"]
+        command.extend(("--collect-only", "-q"))
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        assert completed.returncode == 0, (
+            f"{gate} collection failed:\n{completed.stdout}\n{completed.stderr}"
+        )
+        assert "collected 0 items" not in completed.stdout
+
+
 def test_unknown_or_missing_paradigm_uses_existing_gate_profile() -> None:
     assert eval_local.gate_commands_for({"paradigm": "repository"}) == GATE_COMMANDS
     assert eval_local.gate_commands_for({"paradigm": "unknown"}) == GATE_COMMANDS
