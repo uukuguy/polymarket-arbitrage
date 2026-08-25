@@ -406,10 +406,27 @@ def verify_runtime_observe_window(
             SELECT COUNT(*)
             FROM m1_recovery_actions
             WHERE controller_id = %s
-              AND requested_at >= %s
-              AND requested_at <= %s
+              AND (
+                  requested_at BETWEEN %s AND %s
+                  OR started_at BETWEEN %s AND %s
+                  OR finished_at BETWEEN %s AND %s
+                  OR (
+                      requested_at < %s
+                      AND (finished_at IS NULL OR finished_at >= %s)
+                  )
+              )
             """,
-            (controller_id, start_at, now),
+            (
+                controller_id,
+                start_at,
+                now,
+                start_at,
+                now,
+                start_at,
+                now,
+                start_at,
+                start_at,
+            ),
         )
         action_row = cursor.fetchone()
         current_candidates = _read_runtime_reconcile_states_in_snapshot(

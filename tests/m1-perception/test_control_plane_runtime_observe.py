@@ -262,6 +262,11 @@ def test_verifier_requires_read_only_window_zero_actions_and_candidate_parity() 
     action_queries = [query for query in connection.sql if "FROM m1_recovery_actions" in query]
     assert len(action_queries) == 1
     assert "controller_id = %s" in action_queries[0]
+    assert "requested_at BETWEEN %s AND %s" in action_queries[0]
+    assert "started_at BETWEEN %s AND %s" in action_queries[0]
+    assert "finished_at BETWEEN %s AND %s" in action_queries[0]
+    assert "requested_at < %s" in action_queries[0]
+    assert "finished_at IS NULL OR finished_at >= %s" in action_queries[0]
     assert "controller_owner_id" not in action_queries[0]
     assert "expected_controller_epoch" not in action_queries[0]
     assert "INSERT" not in sql
@@ -445,6 +450,7 @@ def test_real_postgres_records_idempotent_idle_window_and_verifies_read_only() -
 
     from polyarb.control_plane.runtime_observe import (
         RuntimeObserveError,
+        RuntimeObserveVerificationError,
         build_runtime_observe_idle_record,
         canonical_observe_record_bytes,
         insert_runtime_observe_decision,
@@ -512,6 +518,47 @@ def test_real_postgres_records_idempotent_idle_window_and_verifies_read_only() -
         assert result.recovery_action_count == 0
         assert _observe_row_count(dsn) == 2
         assert _recovery_action_count(dsn, controller_id=CONTROLLER_ID) == 0
+
+        _insert_job_attempt(dsn, attempt_id="attempt-before")
+        _insert_recovery_action(
+            dsn,
+            action_id="action-before-window",
+            attempt_id="attempt-before",
+            requested_at=_now() - timedelta(seconds=240),
+            started_at=_now() - timedelta(seconds=230),
+            finished_at=_now() - timedelta(seconds=200),
+        )
+        result = verify_runtime_observe_window(
+            lambda: psycopg.connect(dsn),
+            controller_id=CONTROLLER_ID,
+            controller_owner_id=CONTROLLER_OWNER_ID,
+            controller_epoch=CONTROLLER_EPOCH,
+            now=_now(),
+            minimum_seconds=120,
+            max_freshness_seconds=30,
+            max_gap_seconds=180,
+        )
+        assert result.recovery_action_count == 0
+
+        _insert_recovery_action(
+            dsn,
+            action_id="action-overlaps-window",
+            attempt_id="attempt-before",
+            requested_at=_now() - timedelta(seconds=180),
+            started_at=_now() - timedelta(seconds=90),
+            finished_at=_now() - timedelta(seconds=30),
+        )
+        with pytest.raises(RuntimeObserveVerificationError, match="recovery actions"):
+            verify_runtime_observe_window(
+                lambda: psycopg.connect(dsn),
+                controller_id=CONTROLLER_ID,
+                controller_owner_id=CONTROLLER_OWNER_ID,
+                controller_epoch=CONTROLLER_EPOCH,
+                now=_now(),
+                minimum_seconds=120,
+                max_freshness_seconds=30,
+                max_gap_seconds=180,
+            )
 
         _advance_controller_lease(
             dsn,
@@ -744,6 +791,73 @@ def _insert_controller_lease(
             ) VALUES (%s, %s, %s, %s, %s, %s)
             """,
             (controller_id, owner_id, lease_epoch, lease_expires_at, _now(), _now()),
+        )
+        connection.commit()
+
+
+def _insert_job_attempt(dsn: str, *, attempt_id: str) -> None:
+    with psycopg.connect(dsn) as connection:
+        connection.execute(
+            """
+            INSERT INTO m1_jobs (
+                job_key, job_type, input_identity, state, lease_epoch,
+                attempt_count, created_at, updated_at
+            ) VALUES (
+                %s, 'quote-batch', %s, 'leased', 7, 1, %s, %s
+            ) ON CONFLICT (job_key) DO NOTHING
+            """,
+            ("quote-batch:active", "quote-batch-input", _now(), _now()),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_job_attempts (
+                attempt_id, job_key, lease_epoch, worker_id, state,
+                started_at, finished_at, error_class, error_detail, recorded_at
+            ) VALUES (
+                %s, 'quote-batch:active', 7, 'worker-1', 'running',
+                %s, NULL, NULL, NULL, %s
+            )
+            """,
+            (attempt_id, _now() - timedelta(seconds=240), _now()),
+        )
+        connection.commit()
+
+
+def _insert_recovery_action(
+    dsn: str,
+    *,
+    action_id: str,
+    attempt_id: str,
+    requested_at: datetime,
+    started_at: datetime,
+    finished_at: datetime,
+) -> None:
+    with psycopg.connect(dsn) as connection:
+        connection.execute(
+            """
+            INSERT INTO m1_recovery_actions (
+                action_id, controller_id, controller_owner_id, incident_key,
+                target_type, target_id, action_type, expected_controller_epoch,
+                expected_attempt_id, expected_lease_epoch, requested_at, started_at,
+                finished_at, state, result_code, next_allowed_at, detail,
+                idempotency_key
+            ) VALUES (
+                %s, %s, %s, NULL, 'job', 'quote-batch:active', 'cancel-job',
+                %s, %s, 7, %s, %s, %s, 'completed', 'succeeded', %s, '{}'::jsonb, %s
+            )
+            """,
+            (
+                action_id,
+                CONTROLLER_ID,
+                CONTROLLER_OWNER_ID,
+                CONTROLLER_EPOCH,
+                attempt_id,
+                requested_at,
+                started_at,
+                finished_at,
+                finished_at + timedelta(seconds=60),
+                f"idempotency:{action_id}",
+            ),
         )
         connection.commit()
 
