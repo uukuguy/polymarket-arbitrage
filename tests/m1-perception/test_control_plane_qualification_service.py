@@ -266,6 +266,44 @@ def test_tick_cursor_is_total_ordered_and_crash_replay_is_exact() -> None:
     )
 
 
+def test_recovering_nonconfirmation_facts_are_observed_without_entering_epoch() -> None:
+    breaker_at = NOW + timedelta(minutes=1)
+    second_breaker_at = NOW + timedelta(minutes=2)
+    confirmed_at = NOW + timedelta(minutes=3)
+    records = (
+        _record("runtime", 1, breaker_at, reason="lease.expired"),
+        _record("runtime", 2, second_breaker_at, reason="lease.expired"),
+        _record(
+            "runtime",
+            3,
+            confirmed_at,
+            reason="recovery.confirmed",
+            recovery_confirmed=True,
+        ),
+    )
+    store = InMemoryQualificationStore()
+    service = QualificationService(
+        policy=_policy(),
+        fact_source=StaticQualificationFactSource(records),
+        state_store=store,
+        writer_id="test-service",
+        batch_size=3,
+    )
+
+    first = service.tick(breaker_at)
+    assert first.state is QualificationState.RECOVERING
+    recovered = service.tick(confirmed_at)
+
+    assert recovered.state is QualificationState.ACCUMULATING
+    assert store.epochs[0].state is QualificationState.INVALIDATED
+    assert store.epochs[0].facts == (records[0].fact,)
+    assert store.epochs[1].state is QualificationState.RECOVERING
+    assert store.epochs[1].facts == ()
+    assert store.epochs[2].facts == (records[2].fact,)
+    assert store.recovery_observations == (records[1],)
+    assert store.cursor == records[2].cursor
+
+
 def test_no_events_require_explicit_freshness_observation_before_qualifying() -> None:
     store = InMemoryQualificationStore()
     service = QualificationService(

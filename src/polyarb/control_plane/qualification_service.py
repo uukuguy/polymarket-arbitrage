@@ -16,6 +16,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .qualification import (
+    BREAKING_REASONS,
     QualificationDecision,
     QualificationFact,
     QualificationState,
@@ -265,6 +266,7 @@ class InMemoryQualificationStore:
         self._epochs: list[QualificationDecision] = []
         self._applied_cursors: list[FactCursor] = []
         self._last_applied_count = 0
+        self._recovery_observations: list[QualificationFactRecord] = []
         self.certificates: list[dict[str, object]] = []
 
     @property
@@ -289,6 +291,10 @@ class InMemoryQualificationStore:
     def last_applied_count(self) -> int:
         return self._last_applied_count
 
+    @property
+    def recovery_observations(self) -> tuple[QualificationFactRecord, ...]:
+        return tuple(self._recovery_observations)
+
     def initialize(self, policy: RollingQualificationPolicy, *, now: datetime) -> None:
         if self._current is None:
             self._current = policy.new_epoch(started_at=now)
@@ -312,6 +318,7 @@ class InMemoryQualificationStore:
         current = self.current
         epochs = list(self._epochs)
         applied = list(self._applied_cursors)
+        observations = list(self._recovery_observations)
         cursor = self._cursor
         applied_count = 0
         for record in sorted(records, key=lambda item: item.cursor):
@@ -319,6 +326,7 @@ class InMemoryQualificationStore:
                 current.state is QualificationState.RECOVERING
                 and not _is_recovery_confirmation_fact(record.fact)
             ):
+                observations.append(record)
                 cursor = record.cursor
                 applied.append(record.cursor)
                 applied_count += 1
@@ -336,6 +344,7 @@ class InMemoryQualificationStore:
         self._cursor = cursor
         self._applied_cursors = applied
         self._last_applied_count = applied_count
+        self._recovery_observations = observations
         if self.fail_after_commit_once:
             self.fail_after_commit_once = False
             raise RuntimeError("injected after commit")
@@ -649,6 +658,11 @@ class PostgresQualificationServiceStore:
                 opened_recovered_epoch = False
                 if current.state is QualificationState.RECOVERING:
                     if not _is_recovery_confirmation_fact(fact_record.fact):
+                        _append_recovery_observation(
+                            cursor,
+                            recovering_epoch_id=current.epoch_id,
+                            fact_record=fact_record,
+                        )
                         source_cursor = fact_record.cursor
                         applied_count += 1
                         _update_source_cursor(
@@ -739,6 +753,8 @@ class PostgresQualificationServiceStore:
                 }
             certificates = list_qualification_certificates(self._connection_factory, limit=1)
             last_fact = _last_fact_projection(_records_from_epoch(record))
+            recovery_status = _recovery_observation_status(cursor, record)
+            last_breaker = recovery_status["last_breaker"] or _epoch_breaker_projection(record)
             return {
                 "epoch": {
                     "epoch_id": record.epoch_id,
@@ -759,16 +775,10 @@ class PostgresQualificationServiceStore:
                 "duration_seconds": max(0, int((observed_at - record.started_at).total_seconds())),
                 "evidence_gap_seconds": record.max_gap_seconds,
                 "last_fact": last_fact,
-                "last_breaker": (
-                    None
-                    if record.invalidation_reason is None
-                    else {
-                        "reason": record.invalidation_reason,
-                        "observed_at": None
-                        if record.invalidated_at is None
-                        else record.invalidated_at.isoformat(),
-                    }
-                ),
+                "last_breaker": last_breaker,
+                "last_recovery_observation": recovery_status["last_observation"],
+                "last_recovery_breaking_observation": recovery_status["last_breaking_observation"],
+                "recovery_observation_count": recovery_status["count"],
                 "contained_recoveries": list(record.contained_recoveries),
                 "certificate": None if not certificates else _certificate_payload(certificates[0]),
             }
@@ -1011,50 +1021,6 @@ def ledger_row_to_fact_record(row: Mapping[str, object]) -> QualificationFactRec
     raise ValueError(f"unknown qualification ingress source: {source}")
 
 
-def _apply_one(
-    policy: RollingQualificationPolicy,
-    current: QualificationDecision,
-    cursor: psycopg.Cursor[dict[str, Any]],
-    fact: QualificationFact,
-    *,
-    writer_id: str,
-) -> QualificationDecision:
-    if current.state is QualificationState.INVALIDATED:
-        current = policy.recovering(current, started_at=current.invalidated_at or fact.observed_at)
-        _insert_epoch_cursor(
-            cursor, current, source_cursor=None, fact_records=(), writer_id=writer_id
-        )
-    next_decision = policy.apply(current, fact)
-    if next_decision.state is QualificationState.INVALIDATED:
-        _update_epoch_cursor(
-            cursor, next_decision, source_cursor=None, fact_records=(), writer_id=writer_id
-        )
-        recovering = policy.recovering(
-            next_decision,
-            started_at=next_decision.invalidated_at or fact.observed_at,
-        )
-        _insert_epoch_cursor(
-            cursor, recovering, source_cursor=None, fact_records=(), writer_id=writer_id
-        )
-        return recovering
-    if (
-        current.state is QualificationState.RECOVERING
-        and next_decision.state is QualificationState.ACCUMULATING
-    ):
-        _insert_epoch_cursor(
-            cursor,
-            next_decision,
-            source_cursor=None,
-            fact_records=(
-                QualificationFactRecord(
-                    FactCursor(fact.observed_at, 0, fact.fact_id), fact, "recovery"
-                ),
-            ),
-            writer_id=writer_id,
-        )
-    return next_decision
-
-
 def _assert_cursor_batch(
     cursor: FactCursor | None,
     records: Sequence[QualificationFactRecord],
@@ -1178,6 +1144,59 @@ def _update_source_cursor(
     )
     if cursor.rowcount != 1:
         raise QualificationCursorConflict("qualification source cursor update failed")
+
+
+def _append_recovery_observation(
+    cursor: psycopg.Cursor[dict[str, Any]],
+    *,
+    recovering_epoch_id: str,
+    fact_record: QualificationFactRecord,
+) -> None:
+    ingest_seq = fact_record.cursor.ingest_seq
+    if ingest_seq is None:
+        raise QualificationServiceError("Postgres recovery observation requires ingest_seq")
+    record_payload = fact_record.to_json()
+    record_digest = _sha256_json(record_payload)
+    observation_id = f"qualification-recovery-observation:{recovering_epoch_id}:{ingest_seq}"
+    cursor.execute(
+        """
+        INSERT INTO m1_qualification_recovery_observations (
+            observation_id, recovering_epoch_id, ingest_seq, fact_id, reason,
+            observed_at, fact_record, fact_record_sha256
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (recovering_epoch_id, ingest_seq) DO NOTHING
+        """,
+        (
+            observation_id,
+            recovering_epoch_id,
+            ingest_seq,
+            fact_record.fact.fact_id,
+            fact_record.fact.reason,
+            fact_record.fact.observed_at,
+            Jsonb(record_payload),
+            record_digest,
+        ),
+    )
+    cursor.execute(
+        """
+        SELECT observation_id, fact_id, reason, observed_at, fact_record_sha256
+        FROM m1_qualification_recovery_observations
+        WHERE recovering_epoch_id = %s AND ingest_seq = %s
+        """,
+        (recovering_epoch_id, ingest_seq),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        raise QualificationServiceError("recovery observation insert returned no row")
+    if (
+        str(row["observation_id"]) != observation_id
+        or str(row["fact_id"]) != fact_record.fact.fact_id
+        or str(row["reason"]) != fact_record.fact.reason
+        or _require_aware(cast(datetime, row["observed_at"]), "observed_at")
+        != fact_record.fact.observed_at
+        or str(row["fact_record_sha256"]) != record_digest
+    ):
+        raise QualificationCursorConflict("recovery observation idempotency conflicts")
 
 
 def _insert_epoch_cursor(
@@ -1419,6 +1438,92 @@ def _last_fact_projection(records: Sequence[QualificationFactRecord]) -> dict[st
         "observed_at": record.fact.observed_at.isoformat(),
         "source": record.source,
         "cursor": record.cursor.to_json(),
+    }
+
+
+def _epoch_breaker_projection(record: QualificationEpochRecord) -> dict[str, object] | None:
+    if record.invalidation_reason is None:
+        return None
+    return {
+        "reason": record.invalidation_reason,
+        "observed_at": None if record.invalidated_at is None else record.invalidated_at.isoformat(),
+    }
+
+
+def _recovery_observation_status(
+    cursor: psycopg.Cursor[dict[str, Any]],
+    record: QualificationEpochRecord,
+) -> dict[str, object]:
+    if record.state != QualificationState.RECOVERING.value:
+        return {
+            "count": 0,
+            "last_observation": None,
+            "last_breaker": None,
+            "last_breaking_observation": None,
+        }
+    cursor.execute(
+        """
+        SELECT count(*) AS observation_count
+        FROM m1_qualification_recovery_observations
+        WHERE recovering_epoch_id = %s
+        """,
+        (record.epoch_id,),
+    )
+    count_row = cursor.fetchone()
+    count = 0 if count_row is None else int(cast(int, count_row["observation_count"]))
+    cursor.execute(
+        """
+        SELECT ingest_seq, fact_id, reason, observed_at
+        FROM m1_qualification_recovery_observations
+        WHERE recovering_epoch_id = %s
+        ORDER BY ingest_seq DESC
+        LIMIT 1
+        """,
+        (record.epoch_id,),
+    )
+    last_row = cursor.fetchone()
+    last_observation = None if last_row is None else _observation_projection(last_row)
+    cursor.execute(
+        """
+        SELECT ingest_seq, fact_id, reason, observed_at
+        FROM m1_qualification_recovery_observations
+        WHERE recovering_epoch_id = %s AND reason = ANY(%s)
+        ORDER BY ingest_seq DESC
+        LIMIT 1
+        """,
+        (record.epoch_id, list(BREAKING_REASONS)),
+    )
+    breaker_row = cursor.fetchone()
+    breaking_observation = None
+    if breaker_row is not None:
+        breaking_observation = _observation_projection(breaker_row)
+        last_breaker: dict[str, object] | None = {
+            "reason": str(breaker_row["reason"]),
+            "observed_at": _require_aware(
+                cast(datetime, breaker_row["observed_at"]), "observed_at"
+            ).isoformat(),
+        }
+    elif record.previous_epoch_id is not None:
+        previous = _fetch_epoch(cursor, record.previous_epoch_id, for_update=False)
+        last_breaker = None if previous is None else _epoch_breaker_projection(previous)
+    else:
+        last_breaker = None
+    return {
+        "count": count,
+        "last_observation": last_observation,
+        "last_breaker": last_breaker,
+        "last_breaking_observation": breaking_observation,
+    }
+
+
+def _observation_projection(row: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "fact_id": str(row["fact_id"]),
+        "ingest_seq": int(cast(int, row["ingest_seq"])),
+        "observed_at": _require_aware(
+            cast(datetime, row["observed_at"]), "observed_at"
+        ).isoformat(),
+        "reason": str(row["reason"]),
     }
 
 

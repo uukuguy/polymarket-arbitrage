@@ -143,6 +143,7 @@ def control_plane(postgres_dsn: str) -> Iterator[PostgresControlPlane]:
     with connect() as connection:
         for table in (
             "m1_qualification_certificates",
+            "m1_qualification_recovery_observations",
             "m1_qualification_epochs",
             "m1_qualification_source_cursors",
             "m1_qualification_ingress_ledger",
@@ -9002,6 +9003,91 @@ def test_qualification_same_batch_recovery_keeps_recovering_epoch_empty(
         rows = cursor.fetchall()
     assert ("recovering", 0) in rows
     assert ("accumulating", 1) in rows
+
+
+def test_qualification_recovering_observes_second_breaker_status_and_restart(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    _seed_freshness_pointers(control_plane, published_at=now)
+    lease = _insert_runtime_event(
+        control_plane,
+        job_key="qualification:review-probe",
+        kind="job.terminal-failed",
+        reason_code="lease.expired",
+        occurred_at=now,
+        sequence=2,
+    )
+    first = _qualification_service(control_plane, batch_size=20).tick(now + timedelta(seconds=1))
+    assert first.state is QualificationState.RECOVERING
+
+    _insert_runtime_event(
+        control_plane,
+        job_key=lease.job_key,
+        kind="job.terminal-failed",
+        reason_code="lease.expired",
+        occurred_at=now + timedelta(seconds=2),
+        sequence=3,
+    )
+    observed = _qualification_service(control_plane, batch_size=20).tick(now + timedelta(seconds=3))
+    assert observed.state is QualificationState.RECOVERING
+    assert observed.cursor is not None
+
+    store = PostgresQualificationServiceStore(control_plane._connection_factory)
+    status = store.status(now=now + timedelta(seconds=3))
+    assert status["last_breaker"] == {
+        "observed_at": (now + timedelta(seconds=3)).isoformat(),
+        "reason": "lease.expired",
+    }
+    assert cast(int, status["recovery_observation_count"]) >= 1
+    assert status["last_recovery_observation"] is not None
+    last_breaking_observation = cast(
+        dict[str, object], status["last_recovery_breaking_observation"]
+    )
+    assert last_breaking_observation["reason"] == "lease.expired"
+
+    _insert_runtime_event(
+        control_plane,
+        job_key=lease.job_key,
+        kind="job.recovered",
+        reason_code="job.recovered",
+        occurred_at=now + timedelta(seconds=4),
+        sequence=4,
+    )
+    recovered = _qualification_service(control_plane, batch_size=20).tick(
+        now + timedelta(seconds=5)
+    )
+    assert recovered.state is QualificationState.ACCUMULATING
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT observation_id, reason
+            FROM m1_qualification_recovery_observations
+            WHERE reason = 'lease.expired'
+            ORDER BY ingest_seq
+            """
+        )
+        observations = cursor.fetchall()
+        assert observations
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            cursor.execute(
+                """
+                UPDATE m1_qualification_recovery_observations
+                SET reason = 'healthy'
+                WHERE observation_id = %s
+                """,
+                (observations[-1][0],),
+            )
+        connection.rollback()
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            cursor.execute(
+                """
+                DELETE FROM m1_qualification_recovery_observations
+                WHERE observation_id = %s
+                """,
+                (observations[-1][0],),
+            )
 
 
 def test_qualification_freshness_reobserves_same_pointer_and_invalidates_on_aging(

@@ -23,8 +23,10 @@ def test_024_chains_after_023_and_declares_qualification_tables() -> None:
     assert '"m1_qualification_certificates"' in text
     assert '"m1_qualification_ingress_ledger"' in text
     assert '"m1_qualification_source_cursors"' in text
+    assert '"m1_qualification_recovery_observations"' in text
     assert "ck_m1_qualification_epochs_state" in text
     assert "m1_qualification_certificates_immutable" in text
+    assert "m1_qualification_recovery_observations_immutable" in text
 
 
 def test_024_schema_declares_state_version_cas_and_certificate_uniqueness() -> None:
@@ -41,6 +43,9 @@ def test_024_schema_declares_state_version_cas_and_certificate_uniqueness() -> N
     assert "m1_qualification_runtime_events_ingress" in text
     assert "m1_qualification_incident_events_ingress" in text
     assert "m1_qualification_recovery_actions_ingress" in text
+    assert "fk_m1_qualification_recovery_observations_epoch" in text
+    assert "fk_m1_qualification_recovery_observations_ingest" in text
+    assert "uq_m1_qualification_recovery_observations_ingest" in text
     assert "version > 0" in text
     assert "ACCUMULATING" not in text
     assert "state IN ('accumulating', 'invalidated', 'recovering', 'qualified')" in text
@@ -109,6 +114,7 @@ def test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigge
             assert _table_exists(connection, "m1_qualification_certificates")
             assert _table_exists(connection, "m1_qualification_ingress_ledger")
             assert _table_exists(connection, "m1_qualification_source_cursors")
+            assert _table_exists(connection, "m1_qualification_recovery_observations")
             assert _check_exists(
                 connection,
                 "m1_qualification_epochs",
@@ -143,6 +149,11 @@ def test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigge
                 connection,
                 "m1_recovery_actions",
                 "m1_qualification_recovery_actions_ingress",
+            )
+            assert _trigger_exists(
+                connection,
+                "m1_qualification_recovery_observations",
+                "m1_qualification_recovery_observations_immutable",
             )
             certificate_id, identity_key = _insert_epoch_and_certificate(connection)
             assert certificate_id.startswith("qualification-certificate:")
@@ -205,6 +216,7 @@ def test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigge
             assert not _table_exists(connection, "m1_qualification_epochs")
             assert not _table_exists(connection, "m1_qualification_ingress_ledger")
             assert not _table_exists(connection, "m1_qualification_source_cursors")
+            assert not _table_exists(connection, "m1_qualification_recovery_observations")
             assert not _trigger_exists(
                 connection,
                 "m1_job_runtime_events",
@@ -216,6 +228,7 @@ def test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigge
         with psycopg.connect(dsn) as connection:
             assert _table_exists(connection, "m1_qualification_epochs")
             assert _table_exists(connection, "m1_qualification_ingress_ledger")
+            assert _table_exists(connection, "m1_qualification_recovery_observations")
             assert _trigger_exists(
                 connection,
                 "m1_qualification_certificates",

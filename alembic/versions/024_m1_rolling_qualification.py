@@ -416,6 +416,78 @@ def upgrade() -> None:
         WHERE state = 'accumulating'
         """
     )
+    op.create_table(
+        "m1_qualification_recovery_observations",
+        sa.Column("observation_id", sa.Text, nullable=False),
+        sa.Column("recovering_epoch_id", sa.Text, nullable=False),
+        sa.Column("ingest_seq", sa.BigInteger, nullable=False),
+        sa.Column("fact_id", sa.Text, nullable=False),
+        sa.Column("reason", sa.Text, nullable=False),
+        sa.Column("observed_at", sa.TIMESTAMP(timezone=True), nullable=False),
+        sa.Column("fact_record", postgresql.JSONB, nullable=False),
+        sa.Column("fact_record_sha256", sa.Text, nullable=False),
+        sa.Column(
+            "created_at",
+            sa.TIMESTAMP(timezone=True),
+            nullable=False,
+            server_default=sa.text("clock_timestamp()"),
+        ),
+        sa.PrimaryKeyConstraint(
+            "observation_id",
+            name="pk_m1_qualification_recovery_observations",
+        ),
+        sa.ForeignKeyConstraint(
+            ["recovering_epoch_id"],
+            ["m1_qualification_epochs.epoch_id"],
+            name="fk_m1_qualification_recovery_observations_epoch",
+        ),
+        sa.ForeignKeyConstraint(
+            ["ingest_seq"],
+            ["m1_qualification_ingress_ledger.ingest_seq"],
+            name="fk_m1_qualification_recovery_observations_ingest",
+        ),
+        sa.UniqueConstraint(
+            "recovering_epoch_id",
+            "ingest_seq",
+            name="uq_m1_qualification_recovery_observations_ingest",
+        ),
+        sa.CheckConstraint(
+            "length(fact_id) > 0 AND length(reason) > 0",
+            name="ck_m1_qualification_recovery_observations_identity",
+        ),
+        sa.CheckConstraint(
+            "jsonb_typeof(fact_record) = 'object'",
+            name="ck_m1_qualification_recovery_observations_record",
+        ),
+        sa.CheckConstraint(
+            "fact_record_sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_m1_qualification_recovery_observations_digest",
+        ),
+    )
+    op.create_index(
+        "m1_qualification_recovery_observations_epoch_seq",
+        "m1_qualification_recovery_observations",
+        ["recovering_epoch_id", "ingest_seq"],
+    )
+    op.execute(
+        """
+        CREATE FUNCTION m1_reject_qualification_recovery_observation_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION 'qualification recovery observations are append-only';
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER m1_qualification_recovery_observations_immutable
+        BEFORE UPDATE OR DELETE ON m1_qualification_recovery_observations
+        FOR EACH ROW
+        EXECUTE FUNCTION m1_reject_qualification_recovery_observation_mutation();
+        """
+    )
 
     op.create_table(
         "m1_qualification_certificates",
@@ -797,6 +869,16 @@ def downgrade() -> None:
     )
     op.drop_table("m1_qualification_certificates")
     op.drop_index("uq_m1_qualification_active_identity", table_name="m1_qualification_epochs")
+    op.execute(
+        "DROP TRIGGER m1_qualification_recovery_observations_immutable "
+        "ON m1_qualification_recovery_observations"
+    )
+    op.execute("DROP FUNCTION m1_reject_qualification_recovery_observation_mutation()")
+    op.drop_index(
+        "m1_qualification_recovery_observations_epoch_seq",
+        table_name="m1_qualification_recovery_observations",
+    )
+    op.drop_table("m1_qualification_recovery_observations")
     op.drop_index(
         "m1_qualification_epochs_identity_started",
         table_name="m1_qualification_epochs",
