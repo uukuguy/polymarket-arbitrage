@@ -613,3 +613,31 @@ def test_control_plane_page_declares_four_operator_panels() -> None:
     assert "Immutable cloud evidence" in page_source
     assert "Runtime incident and recovery ledger" in page_source
     assert "This is not a healthy or empty state." in page_source
+
+
+def test_incident_timeline_keeps_all_recovery_results_visible() -> None:
+    """Completed or unlinked actions must remain visible when no incident is open."""
+    source = (CONTROL_COMPONENT_DIR / "IncidentTimeline.tsx").read_text()
+
+    for literal in (
+        "Recent recovery actions",
+        "recoveryActions.map",
+        "Incident key",
+        "unlinked",
+        "Raw state",
+        "Normalized state",
+        "Result",
+        "Expected fences",
+        "controller",
+        "attempt",
+        "lease",
+        "Requested",
+        "Started",
+        "Finished",
+        "Next allowed",
+        "Worker",
+        "No recent recovery actions returned.",
+    ):
+        assert literal in source
+
+    assert source.index("Recent recovery actions") < source.index("recoveryActions.map")
