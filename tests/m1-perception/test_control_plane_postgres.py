@@ -4626,12 +4626,16 @@ def test_runtime_controller_status_and_facts_are_read_only(
             "SELECT count(*) FROM m1_recovery_actions WHERE controller_id = %s",
             (controller.controller_id,),
         )
-        before_actions = cursor.fetchone()[0]
+        before_actions_row = cursor.fetchone()
+        assert before_actions_row is not None
+        before_actions = before_actions_row[0]
         cursor.execute(
             "SELECT count(*) FROM m1_recovery_target_budgets WHERE controller_id = %s",
             (controller.controller_id,),
         )
-        before_budgets = cursor.fetchone()[0]
+        before_budgets_row = cursor.fetchone()
+        assert before_budgets_row is not None
+        before_budgets = before_budgets_row[0]
 
     status = read_runtime_controller_status(
         control_plane._connection_factory,
@@ -4645,7 +4649,11 @@ def test_runtime_controller_status_and_facts_are_read_only(
         now=now,
         sample_limit=10,
     )
-    assert status["controller"]["lease_epoch"] == controller.lease_epoch
+    status_controller = status.get("controller")
+    assert isinstance(status_controller, dict)
+    status_controller = cast(dict[str, object], status_controller)
+    assert "lease_epoch" in status_controller
+    assert status_controller["lease_epoch"] == controller.lease_epoch
     assert status["actions"] == {"pending": [], "running": [], "recent_completed": []}
     assert facts and facts[0].target_id == lease.job_key
     assert facts[0].runtime_state.owner_is_current is True
@@ -4655,12 +4663,16 @@ def test_runtime_controller_status_and_facts_are_read_only(
             "SELECT count(*) FROM m1_recovery_actions WHERE controller_id = %s",
             (controller.controller_id,),
         )
-        assert cursor.fetchone()[0] == before_actions
+        after_actions_row = cursor.fetchone()
+        assert after_actions_row is not None
+        assert after_actions_row[0] == before_actions
         cursor.execute(
             "SELECT count(*) FROM m1_recovery_target_budgets WHERE controller_id = %s",
             (controller.controller_id,),
         )
-        assert cursor.fetchone()[0] == before_budgets
+        after_budgets_row = cursor.fetchone()
+        assert after_budgets_row is not None
+        assert after_budgets_row[0] == before_budgets
 
 
 def test_recovery_action_stale_controller_does_not_create_budget_or_poison_schedule(
