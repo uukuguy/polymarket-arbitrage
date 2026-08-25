@@ -614,7 +614,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-egress-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-start control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify runtime-policy-replay runtime-fault-matrix runtime-controller-status runtime-reconcile-once runtime-reconcile-serve supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-egress-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-start control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify runtime-policy-replay runtime-fault-matrix runtime-controller-status runtime-observe-verify runtime-reconcile-once runtime-reconcile-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -652,11 +652,11 @@ control-plane-preflight:
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane preflight --expected-database "$(expected_database)" --json
 
-## control-plane-render-rollout: Render local-only isolated API/data-worker/alert/writer Fly configs and checklist. Requires named apps; never contacts cloud resources.
+## control-plane-render-rollout: Render local-only six-app runtime/qualification topology and checklist; never contacts cloud resources.
 control-plane-render-rollout:
-	@test "$(enable)" = "1" || (echo "usage: make control-plane-render-rollout enable=1 api_app=<app> worker_app=<app> alert_app=<app> runtime_event_writer_app=<app> expected_database=<name> output_dir=<empty-dir>" >&2; exit 2)
-	@test -n "$(api_app)" -a -n "$(worker_app)" -a -n "$(alert_app)" -a -n "$(runtime_event_writer_app)" -a -n "$(expected_database)" -a -n "$(output_dir)" || (echo "all app identities, expected_database and output_dir are required" >&2; exit 2)
-	@uv run python -m polyarb.cli_control_plane render-rollout --enable --api-app "$(api_app)" --worker-app "$(worker_app)" --alert-app "$(alert_app)" --runtime-event-writer-app "$(runtime_event_writer_app)" --expected-database "$(expected_database)" --output-dir "$(output_dir)" --json
+	@test "$(enable)" = "1" || (echo "usage: make control-plane-render-rollout enable=1 api_app=<app> worker_app=<app> alert_app=<app> runtime_event_writer_app=<app> runtime_controller_app=<app> qualification_worker_app=<app> expected_database=<name> output_dir=<empty-dir> [runtime_recovery_allowed_targets='app/id ...']" >&2; exit 2)
+	@test -n "$(api_app)" -a -n "$(worker_app)" -a -n "$(alert_app)" -a -n "$(runtime_event_writer_app)" -a -n "$(runtime_controller_app)" -a -n "$(qualification_worker_app)" -a -n "$(expected_database)" -a -n "$(output_dir)" || (echo "all six app identities, expected_database and output_dir are required" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane render-rollout --enable --api-app "$(api_app)" --worker-app "$(worker_app)" --alert-app "$(alert_app)" --runtime-event-writer-app "$(runtime_event_writer_app)" --runtime-controller-app "$(runtime_controller_app)" --qualification-worker-app "$(qualification_worker_app)" $(foreach target,$(runtime_recovery_allowed_targets),--runtime-recovery-allowed-target "$(target)") --expected-database "$(expected_database)" --output-dir "$(output_dir)" --json
 
 ## control-plane-verify-shadow-parity: Verify exactly three local Structure/Quote shadow evidence records. Requires evidence=<json>; never contacts cloud resources.
 control-plane-verify-shadow-parity:
@@ -734,12 +734,16 @@ runtime-fault-matrix:
 runtime-controller-status:
 	@uv run python -m polyarb.cli_control_plane runtime-controller-status --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --limit "$(or $(limit),20)" --json
 
-## runtime-reconcile-once: Evaluate runtime facts and execute at most one fenced recovery action; requires enable=1.
+## runtime-observe-verify: Verify a continuous observe-only decision window against durable runtime facts and zero recovery mutation; read-only.
+runtime-observe-verify:
+	@uv run python -m polyarb.cli_control_plane runtime-observe-verify --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --minimum-seconds "$(or $(minimum_seconds),1800)" --max-freshness-seconds "$(or $(max_freshness_seconds),90)" --max-gap-seconds "$(or $(max_gap_seconds),90)" --limit "$(or $(limit),500)" --json
+
+## runtime-reconcile-once: Evaluate runtime facts in observe-only mode by default; set POLYARB_RUNTIME_RECOVERY_MODE=execute for one fenced recovery action.
 runtime-reconcile-once:
 	@test "$(enable)" = "1" || (echo "usage: make runtime-reconcile-once enable=1 [controller_id=m1-runtime-reconciler]" >&2; exit 2)
 	@uv run python -m polyarb.cli_control_plane runtime-reconcile-once --enable --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --owner-id "$(or $(owner_id),runtime-reconcile-once)" --worker-id "$(or $(worker_id),runtime-recovery-executor)" --limit "$(or $(limit),100)" --json
 
-## runtime-reconcile-serve: Run sequential deadline reconciliation and one-action recovery turns; requires enable=1 and exits on fencing/store failure.
+## runtime-reconcile-serve: Run sequential observe-only reconciliation by default; explicit execute mode allows one-action recovery turns.
 runtime-reconcile-serve:
 	@test "$(enable)" = "1" || (echo "usage: make runtime-reconcile-serve enable=1 [interval_seconds=30]" >&2; exit 2)
 	@uv run python -m polyarb.cli_control_plane runtime-reconcile-serve --enable --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --owner-id "$(or $(owner_id),runtime-reconcile-service)" --worker-id "$(or $(worker_id),runtime-recovery-executor)" --interval-seconds "$(or $(interval_seconds),30)" --limit "$(or $(limit),100)" --json

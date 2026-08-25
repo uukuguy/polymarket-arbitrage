@@ -151,6 +151,10 @@ def test_make_runtime_policy_replay_is_read_only() -> None:
             "uv run python -m polyarb.cli_control_plane runtime-controller-status",
         ),
         (
+            "runtime-observe-verify",
+            "uv run python -m polyarb.cli_control_plane runtime-observe-verify",
+        ),
+        (
             "runtime-reconcile-once",
             "uv run python -m polyarb.cli_control_plane runtime-reconcile-once --enable",
         ),
@@ -199,6 +203,57 @@ def test_make_runtime_status_is_read_only_dry_run() -> None:
     recipe = result.stdout.lower()
     assert "--enable" not in recipe
     assert "claim_controller" not in recipe
+
+
+def test_make_runtime_observe_verify_is_read_only_and_bounded() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "runtime-observe-verify",
+            "minimum_seconds=1800",
+            "max_gap_seconds=90",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    recipe = result.stdout.lower()
+    assert "runtime-observe-verify" in recipe
+    assert '--minimum-seconds "1800"' in recipe
+    assert '--max-gap-seconds "90"' in recipe
+    for forbidden in ("--enable", "flyctl", "deploy", "curl --request"):
+        assert forbidden not in recipe
+
+
+def test_make_render_rollout_exposes_exact_six_app_topology() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "control-plane-render-rollout",
+            "enable=1",
+            "api_app=api-app",
+            "worker_app=worker-app",
+            "alert_app=alert-app",
+            "runtime_event_writer_app=writer-app",
+            "runtime_controller_app=controller-app",
+            "qualification_worker_app=qualification-app",
+            "runtime_recovery_allowed_targets=worker-app/machine-a",
+            "expected_database=control",
+            "output_dir=/tmp/runtime-rollout-contract",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '--runtime-controller-app "controller-app"' in result.stdout
+    assert '--qualification-worker-app "qualification-app"' in result.stdout
+    assert '--runtime-recovery-allowed-target "worker-app/machine-a"' in result.stdout
 
 
 def test_make_help_lists_runtime_fault_matrix() -> None:

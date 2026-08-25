@@ -41,7 +41,7 @@ from polyarb.control_plane.quote_worker import (
 )
 from polyarb.control_plane.reconciler import RuntimeReconciler
 from polyarb.control_plane.recovery_executor import RecoveryActionResult, RecoveryExecutor
-from polyarb.control_plane.recovery_models import RecoveryActionType
+from polyarb.control_plane.recovery_models import RecoveryActionType, RecoveryDecision
 from polyarb.control_plane.recovery_records import RecoveryActionRecord, RuntimeControllerLease
 from polyarb.control_plane.recovery_store import (
     RuntimeReconcileCandidate,
@@ -53,6 +53,12 @@ from polyarb.control_plane.recovery_store import (
 )
 from polyarb.control_plane.rollout import render_rollout_artifacts
 from polyarb.control_plane.runtime_fault_matrix import RuntimeFaultMatrixError, run_fault_matrix
+from polyarb.control_plane.runtime_observe import (
+    build_runtime_observe_decision_record,
+    build_runtime_observe_idle_record,
+    insert_runtime_observe_decision,
+    verify_runtime_observe_window,
+)
 from polyarb.control_plane.runtime_replay import replay_soak_observations
 from polyarb.control_plane.scheduler import TransactionalControlPlaneScheduler
 from polyarb.control_plane.shadow import project_shadow_sources, read_shadow_sources
@@ -269,6 +275,14 @@ def _parser() -> argparse.ArgumentParser:
     render_rollout.add_argument("--worker-app", required=True)
     render_rollout.add_argument("--alert-app", required=True)
     render_rollout.add_argument("--runtime-event-writer-app", required=True)
+    render_rollout.add_argument("--runtime-controller-app")
+    render_rollout.add_argument("--qualification-worker-app")
+    render_rollout.add_argument(
+        "--runtime-recovery-allowed-target",
+        action="append",
+        default=[],
+        help="exact <app>/<machine-or-process> recovery identity; repeatable",
+    )
     render_rollout.add_argument("--expected-database", required=True)
     render_rollout.add_argument("--output-dir", type=Path, required=True)
     render_rollout.add_argument("--json", action="store_true")
@@ -347,6 +361,18 @@ def _parser() -> argparse.ArgumentParser:
     runtime_status.add_argument("--controller-id", default="m1-runtime-reconciler")
     runtime_status.add_argument("--limit", type=int, default=20)
     runtime_status.add_argument("--json", action="store_true")
+    runtime_observe_verify = subcommands.add_parser(
+        "runtime-observe-verify",
+        help="verify durable observe-only decisions and zero recovery mutation",
+    )
+    runtime_observe_verify.add_argument(
+        "--controller-id", default="m1-runtime-reconciler"
+    )
+    runtime_observe_verify.add_argument("--minimum-seconds", type=int, default=1800)
+    runtime_observe_verify.add_argument("--max-freshness-seconds", type=int, default=90)
+    runtime_observe_verify.add_argument("--max-gap-seconds", type=int, default=90)
+    runtime_observe_verify.add_argument("--limit", type=int, default=500)
+    runtime_observe_verify.add_argument("--json", action="store_true")
     runtime_once = subcommands.add_parser(
         "runtime-reconcile-once",
         help="evaluate runtime facts and execute at most one fenced recovery action",
@@ -1219,14 +1245,17 @@ def _runtime_reconcile_once(
     args: argparse.Namespace,
     *,
     controller: RuntimeControllerLease | None = None,
+    recovery_mode: str = "observe-only",
 ) -> dict[str, object]:
-    """Run one bounded evaluate → schedule → execute turn.
+    """Run one bounded evaluate turn, with mutation fenced by recovery mode.
 
-    The executor is deliberately constructed after evaluation and is allowed
-    to claim exactly one action.  Store/fencing exceptions are not swallowed;
-    the top-level CLI turns them into a non-zero operator result, and the
-    service loop exits immediately.
+    Observe-only evaluates and records every bounded candidate, then returns
+    before action scheduling or executor construction. Execute mode preserves
+    the single-action turn. Store/fencing exceptions are not swallowed; the
+    top-level CLI turns them into a non-zero operator result.
     """
+    if recovery_mode not in {"observe-only", "execute"}:
+        raise ValueError("runtime recovery mode must be observe-only or execute")
     if args.lease_seconds <= 0 or args.action_lease_seconds <= 0:
         raise ValueError("lease seconds must be positive")
     if args.heartbeat_lease_seconds <= 0:
@@ -1249,57 +1278,101 @@ def _runtime_reconcile_once(
         sample_limit=args.limit,
     )
     reconciler = RuntimeReconciler()
-    selected: tuple[RuntimeReconcileCandidate, object] | None = None
+    evaluated: list[tuple[RuntimeReconcileCandidate, RecoveryDecision]] = []
+    selected: tuple[RuntimeReconcileCandidate, RecoveryDecision] | None = None
     # Rows are already deterministically ordered by the read projection.  The
     # first actionable fact wins, keeping one turn bounded even with a large
     # incident storm.
     for candidate in candidates:
         decision = reconciler.evaluate(candidate.runtime_state, now=now)
+        evaluated.append((candidate, decision))
         if selected is None:
             selected = (candidate, decision)
-        if getattr(decision, "action", None) is not None:
+            if decision.action is not None and recovery_mode == "execute":
+                break
+            continue
+        if decision.action is not None and selected[1].action is None:
             selected = (candidate, decision)
-            break
+            if recovery_mode == "execute":
+                break
 
     candidate: RuntimeReconcileCandidate | None = None
     decision = None
     scheduled: RecoveryActionRecord | None = None
+    result: RecoveryActionResult | None = None
+    observed_decision_count = 0
     if selected is not None:
         candidate, decision = selected
-        action_type = getattr(decision, "action", None)
-        if isinstance(action_type, RecoveryActionType):
-            scheduled = schedule_action(
+    if recovery_mode == "observe-only":
+        if evaluated:
+            for observed_candidate, observed_decision in evaluated:
+                insert_runtime_observe_decision(
+                    connection_factory,
+                    build_runtime_observe_decision_record(
+                        controller_id=selected_controller.controller_id,
+                        controller_owner_id=selected_controller.owner_id,
+                        controller_epoch=selected_controller.lease_epoch,
+                        observed_at=now,
+                        candidate=observed_candidate,
+                        decision=observed_decision,
+                        observed_by=selected_controller.owner_id,
+                    ),
+                )
+                observed_decision_count += 1
+        else:
+            cadence_seconds = max(1.0, float(getattr(args, "interval_seconds", 30.0)))
+            insert_runtime_observe_decision(
                 connection_factory,
-                controller=selected_controller,
-                decision=decision,
-                incident_key=candidate.incident_key,
-                component=candidate.component,
-                target_type=candidate.target_type,
-                target_id=candidate.target_id,
-                expected_attempt_id=candidate.runtime_state.attempt_id,
-                expected_lease_epoch=candidate.runtime_state.lease_epoch,
-                recovery_budget_remaining=candidate.runtime_state.recovery_budget.remaining_actions,
-                cooldown_seconds=max(0, candidate.cooldown_seconds),
-                channels=candidate.channels,
-                now=now,
-                detail={
-                    "job_type": candidate.job_type,
-                    "job_state": candidate.job_state,
-                },
+                build_runtime_observe_idle_record(
+                    controller_id=selected_controller.controller_id,
+                    controller_owner_id=selected_controller.owner_id,
+                    controller_epoch=selected_controller.lease_epoch,
+                    observed_at=now,
+                    next_check_at=now + timedelta(seconds=cadence_seconds),
+                    observed_by=selected_controller.owner_id,
+                ),
             )
-
-    executor = RecoveryExecutor(
-        control_plane=control_plane,
-        controller=selected_controller,
-        worker_id=args.worker_id,
-        connection_factory=connection_factory,
-        action_lease_seconds=args.action_lease_seconds,
-        heartbeat_lease_seconds=args.heartbeat_lease_seconds,
-    )
-    result = executor.run_once(now=now)
+            observed_decision_count = 1
+    else:
+        if candidate is not None and decision is not None:
+            action_type = getattr(decision, "action", None)
+            if isinstance(action_type, RecoveryActionType):
+                scheduled = schedule_action(
+                    connection_factory,
+                    controller=selected_controller,
+                    decision=decision,
+                    incident_key=candidate.incident_key,
+                    component=candidate.component,
+                    target_type=candidate.target_type,
+                    target_id=candidate.target_id,
+                    expected_attempt_id=candidate.runtime_state.attempt_id,
+                    expected_lease_epoch=candidate.runtime_state.lease_epoch,
+                    recovery_budget_remaining=(
+                        candidate.runtime_state.recovery_budget.remaining_actions
+                    ),
+                    cooldown_seconds=max(0, candidate.cooldown_seconds),
+                    channels=candidate.channels,
+                    now=now,
+                    detail={
+                        "job_type": candidate.job_type,
+                        "job_state": candidate.job_state,
+                    },
+                )
+        executor = RecoveryExecutor(
+            control_plane=control_plane,
+            controller=selected_controller,
+            worker_id=args.worker_id,
+            connection_factory=connection_factory,
+            action_lease_seconds=args.action_lease_seconds,
+            heartbeat_lease_seconds=args.heartbeat_lease_seconds,
+        )
+        result = executor.run_once(now=now)
     decision_action = None if decision is None else getattr(decision, "action", None)
     reason = "runtime.no-active-attempts" if decision is None else decision.reason_code
-    if result is not None:
+    if recovery_mode == "observe-only":
+        state = "observe-only"
+        outcome = "no-mutation"
+    elif result is not None:
         state = "recovery-executed"
         outcome = result.outcome
     elif scheduled is not None and scheduled.result_code is not None:
@@ -1325,6 +1398,8 @@ def _runtime_reconcile_once(
         action_name = scheduled.action_type
     elif result is not None:
         action_name = result.action_type
+    elif recovery_mode == "observe-only" and isinstance(decision_action, RecoveryActionType):
+        action_name = decision_action.value
     budget_remaining = None
     if candidate is not None:
         budget_remaining = candidate.runtime_state.recovery_budget.remaining_actions
@@ -1332,6 +1407,7 @@ def _runtime_reconcile_once(
             budget_remaining = max(0, budget_remaining - 1)
     return {
         "status": "ok",
+        "recovery_mode": recovery_mode,
         "state": state,
         "reason": reason,
         "action": action_name,
@@ -1371,6 +1447,7 @@ def _runtime_reconcile_once(
             else (None if scheduled.finished_at is None else scheduled.finished_at.isoformat()),
         },
         "executor": _runtime_result_payload(result),
+        "observed_decision_count": observed_decision_count,
         "pointer_mutations": 0,
     }
 
@@ -1378,6 +1455,8 @@ def _runtime_reconcile_once(
 async def _run_runtime_reconcile_service(
     control_plane: _RuntimeReconcileControlPlane,
     args: argparse.Namespace,
+    *,
+    recovery_mode: str = "observe-only",
 ) -> dict[str, object]:
     """Run sequential reconciliation turns and fail immediately on store errors."""
     if args.interval_seconds <= 0:
@@ -1410,7 +1489,12 @@ async def _run_runtime_reconcile_service(
                 lease_seconds=args.lease_seconds,
                 now=now,
             )
-        payload = _runtime_reconcile_once(control_plane, args, controller=controller)
+        payload = _runtime_reconcile_once(
+            control_plane,
+            args,
+            controller=controller,
+            recovery_mode=recovery_mode,
+        )
         _write({"event": "runtime-reconcile-turn", **payload}, as_json=args.json)
         turns += 1
         try:
@@ -1448,6 +1532,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 worker_app=args.worker_app,
                 alert_app=args.alert_app,
                 runtime_event_writer_app=args.runtime_event_writer_app,
+                runtime_controller_app=args.runtime_controller_app,
+                qualification_worker_app=args.qualification_worker_app,
+                runtime_recovery_allowed_targets=tuple(
+                    args.runtime_recovery_allowed_target
+                ),
                 expected_database=args.expected_database,
                 output_dir=args.output_dir,
             )
@@ -1675,13 +1764,76 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _write({"status": "available", **status}, as_json=args.json)
             return 0
+        if args.command == "runtime-observe-verify":
+            now = datetime.now(UTC)
+            status = read_runtime_controller_status(
+                control_plane._connection_factory,
+                controller_id=args.controller_id,
+                now=now,
+                sample_limit=1,
+            )
+            controller_status = status.get("controller")
+            if not isinstance(controller_status, Mapping):
+                raise RuntimeError("runtime observe controller identity is unavailable")
+            owner_id = controller_status.get("owner_id")
+            lease_epoch = controller_status.get("lease_epoch")
+            if (
+                not isinstance(owner_id, str)
+                or not owner_id
+                or type(lease_epoch) is not int
+                or lease_epoch <= 0
+                or controller_status.get("lease_active") is not True
+            ):
+                raise RuntimeError("runtime observe controller identity is inactive")
+            verification = verify_runtime_observe_window(
+                control_plane._connection_factory,
+                controller_id=args.controller_id,
+                controller_owner_id=owner_id,
+                controller_epoch=lease_epoch,
+                now=now,
+                minimum_seconds=args.minimum_seconds,
+                max_freshness_seconds=args.max_freshness_seconds,
+                max_gap_seconds=args.max_gap_seconds,
+                sample_limit=args.limit,
+            )
+            _write(
+                {
+                    "status": verification.status,
+                    "controller_id": verification.controller_id,
+                    "controller_owner_id": verification.controller_owner_id,
+                    "controller_epoch": verification.controller_epoch,
+                    "started_at": verification.started_at.astimezone(UTC).isoformat(),
+                    "latest_observed_at": verification.latest_observed_at.astimezone(
+                        UTC
+                    ).isoformat(),
+                    "duration_seconds": verification.duration_seconds,
+                    "decision_count": verification.decision_count,
+                    "idle_count": verification.idle_count,
+                    "recovery_action_count": verification.recovery_action_count,
+                    "current_candidate_count": verification.current_candidate_count,
+                    "max_gap_seconds": verification.max_gap_seconds,
+                    "latest_decision_digest": verification.latest_decision_digest,
+                },
+                as_json=args.json,
+            )
+            return 0
         if args.command == "runtime-reconcile-once":
-            result = _runtime_reconcile_once(control_plane, args)
+            result = _runtime_reconcile_once(
+                control_plane,
+                args,
+                recovery_mode=Settings().runtime_recovery_mode,
+            )
             _write(result, as_json=args.json)
             return 0
         if args.command == "runtime-reconcile-serve":
             try:
-                result = asyncio.run(_run_runtime_reconcile_service(control_plane, args))
+                result = asyncio.run(
+                    _run_runtime_reconcile_service(
+                        control_plane,
+                        args,
+                        recovery_mode=Settings().runtime_recovery_mode,
+                    )
+                )
             except KeyboardInterrupt:
                 _write(
                     {"status": "stopped", "reason": "keyboard-interrupt"},

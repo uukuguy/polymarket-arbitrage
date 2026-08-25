@@ -815,6 +815,105 @@ def test_runtime_controller_status_is_read_only_and_bounded(monkeypatch, capsys)
     assert calls == ["read"]
 
 
+def test_runtime_observe_verify_derives_exact_current_identity_and_never_mutates(
+    monkeypatch, capsys
+) -> None:
+    from datetime import UTC, datetime
+
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.runtime_observe import RuntimeObserveVerification
+
+    now = datetime(2026, 8, 25, 12, 30, tzinfo=UTC)
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("POLYARB_RUNTIME_ROLE", "control-plane")
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator@example.test/control")
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(
+        cli_control_plane,
+        "read_runtime_controller_status",
+        lambda *_args, **_kwargs: {
+            "controller": {
+                "controller_id": "controller-a",
+                "owner_id": "owner-a",
+                "lease_epoch": 4,
+                "lease_active": True,
+            }
+        },
+    )
+
+    def verify(factory, **kwargs):
+        assert factory is ControlPlane._connection_factory
+        captured.update(kwargs)
+        return RuntimeObserveVerification(
+            status="pass",
+            controller_id="controller-a",
+            controller_owner_id="owner-a",
+            controller_epoch=4,
+            started_at=now - timedelta(minutes=30),
+            latest_observed_at=now,
+            duration_seconds=1800,
+            decision_count=61,
+            idle_count=3,
+            recovery_action_count=0,
+            current_candidate_count=2,
+            max_gap_seconds=30,
+            latest_decision_digest="a" * 64,
+        )
+
+    monkeypatch.setattr(
+        cli_control_plane,
+        "verify_runtime_observe_window",
+        verify,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "claim_controller",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("observe verifier must not claim")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "schedule_action",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("observe verifier must not schedule")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "datetime",
+        type("Clock", (), {"now": staticmethod(lambda *_args: now)}),
+    )
+
+    assert (
+        cli_control_plane.main(
+            [
+                "runtime-observe-verify",
+                "--controller-id",
+                "controller-a",
+                "--minimum-seconds",
+                "1800",
+                "--max-freshness-seconds",
+                "90",
+                "--max-gap-seconds",
+                "90",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "pass"
+    assert payload["recovery_action_count"] == 0
+    assert captured["controller_owner_id"] == "owner-a"
+    assert captured["controller_epoch"] == 4
+
+
 def test_runtime_reconcile_once_requires_enable_before_database_or_controller(
     monkeypatch, capsys
 ) -> None:
@@ -916,6 +1015,8 @@ def test_runtime_reconcile_once_evaluates_schedules_and_executes_one_action(
                 outcome="succeeded",
             )
 
+    monkeypatch.setenv("POLYARB_RUNTIME_ROLE", "control-plane")
+    monkeypatch.setenv("POLYARB_RUNTIME_RECOVERY_MODE", "execute")
     monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
     monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
     monkeypatch.setattr(
@@ -954,6 +1055,145 @@ def test_runtime_reconcile_once_evaluates_schedules_and_executes_one_action(
     assert payload["action"] == "heartbeat-job"
     assert payload["outcome"] == "succeeded"
     assert payload["pointer_mutations"] == 0
+
+
+def test_runtime_reconcile_once_observe_only_records_every_candidate_without_recovery_mutation(
+    monkeypatch, capsys
+) -> None:
+    from dataclasses import replace
+    from datetime import UTC, datetime
+
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.recovery_models import RecoveryBudget, RecoveryRuntimeState
+    from polyarb.control_plane.recovery_records import RuntimeControllerLease
+    from polyarb.control_plane.recovery_store import RuntimeReconcileCandidate
+    from polyarb.control_plane.runtime_models import RuntimeDeadlineProfile
+    from polyarb.control_plane.runtime_observe import RuntimeObserveDecisionRecord
+
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    controller = RuntimeControllerLease("controller-a", "owner-a", 1, now + timedelta(seconds=90))
+    state = RecoveryRuntimeState(
+        job_key="job-a",
+        attempt_id="attempt-a",
+        lease_epoch=2,
+        owner_is_current=True,
+        profile=RuntimeDeadlineProfile("test", 30, 10, 20, 60),
+        attempt_started_at=now - timedelta(seconds=25),
+        last_heartbeat_at=now - timedelta(seconds=5),
+        last_progress_at=now - timedelta(seconds=25),
+        lease_expires_at=now + timedelta(seconds=5),
+        retry_count=0,
+        recovery_budget=RecoveryBudget(2),
+    )
+    candidate_a = RuntimeReconcileCandidate(
+        runtime_state=state,
+        job_type="structure-normalize",
+        job_state="leased",
+        worker_id="worker-a",
+        target_type="job",
+        target_id="job-a",
+        component="structure-normalize",
+        incident_key="recovery:job:job-a",
+        channels=("dashboard", "telegram"),
+        cooldown_seconds=15,
+    )
+    candidate_b = replace(
+        candidate_a,
+        runtime_state=replace(state, job_key="job-b", attempt_id="attempt-b"),
+        target_id="job-b",
+        incident_key="recovery:job:job-b",
+    )
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    recorded: list[RuntimeObserveDecisionRecord] = []
+    monkeypatch.setenv("POLYARB_RUNTIME_ROLE", "control-plane")
+    monkeypatch.setenv("POLYARB_RUNTIME_RECOVERY_MODE", "observe-only")
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "read_runtime_reconcile_states",
+        lambda *a, **k: (candidate_a, candidate_b),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "insert_runtime_observe_decision",
+        lambda _factory, record: recorded.append(record) or record,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "schedule_action",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("observe-only must not schedule")),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "RecoveryExecutor",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("observe-only must not construct an executor")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "datetime",
+        type("Clock", (), {"now": staticmethod(lambda *_args: now)}),
+    )
+
+    assert cli_control_plane.main(["runtime-reconcile-once", "--enable", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "observe-only"
+    assert payload["outcome"] == "no-mutation"
+    assert payload["observed_decision_count"] == 2
+    assert {record.target_id for record in recorded} == {"job-a", "job-b"}
+
+
+def test_runtime_reconcile_once_observe_only_records_idle_without_executor(
+    monkeypatch, capsys
+) -> None:
+    from datetime import UTC, datetime
+
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.recovery_records import RuntimeControllerLease
+    from polyarb.control_plane.runtime_observe import RuntimeObserveDecisionRecord
+
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    controller = RuntimeControllerLease("controller-a", "owner-a", 3, now + timedelta(seconds=90))
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    recorded: list[RuntimeObserveDecisionRecord] = []
+    monkeypatch.setenv("POLYARB_RUNTIME_ROLE", "control-plane")
+    monkeypatch.setenv("POLYARB_RUNTIME_RECOVERY_MODE", "observe-only")
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
+    monkeypatch.setattr(cli_control_plane, "read_runtime_reconcile_states", lambda *a, **k: ())
+    monkeypatch.setattr(
+        cli_control_plane,
+        "insert_runtime_observe_decision",
+        lambda _factory, record: recorded.append(record) or record,
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "RecoveryExecutor",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("observe-only idle must not construct an executor")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "datetime",
+        type("Clock", (), {"now": staticmethod(lambda *_args: now)}),
+    )
+
+    assert cli_control_plane.main(["runtime-reconcile-once", "--enable", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "observe-only"
+    assert payload["observed_decision_count"] == 1
+    assert len(recorded) == 1
+    assert recorded[0].decision_kind == "idle"
 
 
 def _install_runtime_reconcile_conflict(monkeypatch, message: str) -> None:
@@ -1018,6 +1258,8 @@ def _install_runtime_reconcile_conflict(monkeypatch, message: str) -> None:
         def run_once(self, *, now):
             return None
 
+    monkeypatch.setenv("POLYARB_RUNTIME_ROLE", "control-plane")
+    monkeypatch.setenv("POLYARB_RUNTIME_RECOVERY_MODE", "execute")
     monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
     monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
     monkeypatch.setattr(
@@ -1388,6 +1630,12 @@ def test_render_rollout_is_explicit_and_never_connects_to_control_plane(
                 "polyarb-control-alert-staging",
                 "--runtime-event-writer-app",
                 "polyarb-control-runtime-event-writer-staging",
+                "--runtime-controller-app",
+                "polyarb-runtime-controller-staging",
+                "--qualification-worker-app",
+                "polyarb-qualification-worker-staging",
+                "--runtime-recovery-allowed-target",
+                "polyarb-control-worker-staging/machine-a",
                 "--expected-database",
                 "control_plane_staging",
                 "--output-dir",
@@ -1400,6 +1648,8 @@ def test_render_rollout_is_explicit_and_never_connects_to_control_plane(
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "rendered-local-only"
     assert Path(result["checklist"]).exists()
+    assert Path(result["runtime_controller_config"]).exists()
+    assert Path(result["qualification_worker_config"]).exists()
 
 
 def test_shadow_parity_verifier_reads_only_local_evidence(monkeypatch, capsys, tmp_path) -> None:
