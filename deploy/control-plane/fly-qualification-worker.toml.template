@@ -1,0 +1,21 @@
+# Private rolling qualification worker. Give this app only the scoped qualification Postgres DSN.
+# It has no Fly token, public HTTP service, R2,
+# Gamma, CLOB, Telegram, sampler, worker, or recovery authority.
+app = "__QUALIFICATION_WORKER_APP__"
+primary_region = "ams"
+
+[env]
+POLYARB_RUNTIME_ROLE = "control-plane"
+
+[build]
+
+[processes]
+qualification = "python -m polyarb.cli_control_plane qualification-serve --enable --interval-seconds 30 --json"
+
+[[restart]]
+policy = "always"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"
+processes = ["qualification"]

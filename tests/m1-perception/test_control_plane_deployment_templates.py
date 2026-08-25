@@ -95,3 +95,87 @@ def test_control_alert_template_is_a_database_independent_runtime_watchdog() -> 
     assert payload["restart"] == [{"policy": "always"}]
     assert "http_service" not in payload
     assert "mounts" not in payload
+
+
+def test_runtime_controller_template_is_private_observe_only_recovery_topology() -> None:
+    template = ROOT / "deploy/control-plane/fly-runtime-controller.toml.template"
+    text = template.read_text()
+    payload = tomllib.loads(text)
+
+    assert payload["app"] == "__RUNTIME_CONTROLLER_APP__"
+    assert payload["env"] == {
+        "POLYARB_RUNTIME_ROLE": "control-plane",
+        "POLYARB_RUNTIME_RECOVERY_ALLOWED_TARGETS": "__RUNTIME_RECOVERY_ALLOWED_TARGETS__",
+        "POLYARB_RUNTIME_RECOVERY_MODE": "observe-only",
+    }
+    assert payload["processes"] == {
+        "controller": (
+            "python -m polyarb.cli_control_plane runtime-reconcile-serve "
+            "--enable --interval-seconds 30 --json"
+        )
+    }
+    assert payload["restart"] == [{"policy": "always"}]
+    assert payload["vm"][0]["processes"] == ["controller"]
+    assert "http_service" not in payload
+    assert "mounts" not in payload
+
+    env_and_process_text = "\n".join(
+        [
+            *(f"{key}={value}" for key, value in payload["env"].items()),
+            *payload["processes"].values(),
+        ]
+    )
+    for forbidden in (
+        "POLYARB_R2",
+        "R2_BUCKET",
+        "GAMMA",
+        "CLOB",
+        "TELEGRAM",
+        "POLYARB_ALERT_CHANNELS",
+        "POLYARB_CONTROL_WORKER",
+        "POLYARB_SOAK",
+    ):
+        assert forbidden not in env_and_process_text
+    assert "FLY_API_TOKEN" not in env_and_process_text
+    assert "scoped runtime-controller Postgres DSN" in text
+    assert "optional exact Fly recovery token" in text
+
+
+def test_qualification_worker_template_has_only_scoped_database_and_no_recovery_authority() -> None:
+    template = ROOT / "deploy/control-plane/fly-qualification-worker.toml.template"
+    text = template.read_text()
+    payload = tomllib.loads(text)
+
+    assert payload["app"] == "__QUALIFICATION_WORKER_APP__"
+    assert payload["env"] == {"POLYARB_RUNTIME_ROLE": "control-plane"}
+    assert payload["processes"] == {
+        "qualification": (
+            "python -m polyarb.cli_control_plane qualification-serve "
+            "--enable --interval-seconds 30 --json"
+        )
+    }
+    assert payload["restart"] == [{"policy": "always"}]
+    assert payload["vm"][0]["processes"] == ["qualification"]
+    assert "http_service" not in payload
+    assert "mounts" not in payload
+
+    env_and_process_text = "\n".join(
+        [
+            *(f"{key}={value}" for key, value in payload["env"].items()),
+            *payload["processes"].values(),
+        ]
+    )
+    for forbidden in (
+        "FLY_API_TOKEN",
+        "POLYARB_R2",
+        "R2_BUCKET",
+        "GAMMA",
+        "CLOB",
+        "TELEGRAM",
+        "POLYARB_ALERT_CHANNELS",
+        "POLYARB_RUNTIME_RECOVERY",
+        "POLYARB_CONTROL_WORKER",
+        "POLYARB_SOAK",
+    ):
+        assert forbidden not in env_and_process_text
+    assert "scoped qualification Postgres DSN" in text
