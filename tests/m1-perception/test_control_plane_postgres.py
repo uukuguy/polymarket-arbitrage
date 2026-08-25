@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import time
@@ -8886,6 +8887,8 @@ def test_qualification_certificate_is_canonical_idempotent_and_conflict_loud(
     )
     assert replay == first
     assert first.certificate_digest == certificate_digest(payload)
+    assert first.certificate_id == f"qualification-certificate:{first.certificate_digest}"
+    assert first.identity_key == _certificate_identity_key_for_test(payload)
     assert first.canonical_payload.encode("utf-8") == canonical_certificate_bytes(payload)
     assert first.created_at.tzinfo is not None
     assert first.created_at.utcoffset() == timedelta(0)
@@ -8999,6 +9002,72 @@ def test_qualification_certificate_db_rejects_direct_forgery_and_app_role_insert
     assert list_qualification_certificates(control_plane._connection_factory) == (legitimate,)
 
 
+def test_qualification_certificate_function_privileges_and_derived_ids(
+    control_plane: PostgresControlPlane,
+) -> None:
+    qualified = _persist_qualified_epoch(
+        control_plane,
+        epoch_id="qualification-epoch-function",
+    )
+    payload = qualification_certificate_payload(qualified)
+    digest = certificate_digest(payload)
+    expected_certificate_id = f"qualification-certificate:{digest}"
+    expected_identity_key = _certificate_identity_key_for_test(payload)
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SET ROLE authenticated")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            _execute_certificate_function(cursor, payload)
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SET ROLE service_role")
+        service_row = _execute_certificate_function(cursor, payload)
+        replay_row = _execute_certificate_function(cursor, payload)
+        assert service_row == replay_row
+        assert service_row == (expected_certificate_id, expected_identity_key, digest)
+        cursor.execute("RESET ROLE")
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        with pytest.raises(psycopg.errors.UndefinedFunction):
+            cursor.execute(
+                """
+                SELECT certificate_id
+                FROM m1_insert_qualification_certificate(
+                    'attacker-certificate', %s, 'attacker-identity',
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    qualified.epoch_id,
+                    qualified.policy_version,
+                    qualified.release_id,
+                    qualified.config_id,
+                    Jsonb(list(qualified.role_identity)),
+                    qualified.started_at,
+                    qualified.qualified_at,
+                    Jsonb(payload),
+                    canonical_certificate_bytes(payload).decode("utf-8"),
+                    digest,
+                    digest,
+                    cast(str, payload["evidence_digest"]),
+                ),
+            )
+        connection.rollback()
+        with pytest.raises(psycopg.errors.RaiseException, match="id"):
+            _execute_direct_certificate_insert(
+                cursor,
+                payload,
+                certificate_id="attacker-certificate",
+                identity_key="attacker-identity",
+            )
+    assert list_qualification_certificates(control_plane._connection_factory)[0] == (
+        read_qualification_certificate(
+            control_plane._connection_factory,
+            certificate_id=expected_certificate_id,
+        )
+    )
+
+
 def test_read_qualification_certificate_recomputes_canonical_digest_and_fails_on_tamper(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -9036,6 +9105,40 @@ def test_read_qualification_certificate_recomputes_canonical_digest_and_fails_on
         )
 
     with pytest.raises(QualificationCertificateConflict, match="digest"):
+        read_qualification_certificate(
+            control_plane._connection_factory,
+            certificate_id=record.certificate_id,
+        )
+
+
+def test_read_qualification_certificate_rejects_tampered_ids(
+    control_plane: PostgresControlPlane,
+) -> None:
+    qualified = _persist_qualified_epoch(
+        control_plane,
+        epoch_id="qualification-epoch-read-ids",
+    )
+    record = insert_qualification_certificate(
+        control_plane._connection_factory,
+        decision=qualified,
+    )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "ALTER TABLE m1_qualification_certificates "
+            "DISABLE TRIGGER m1_qualification_certificates_immutable"
+        )
+        cursor.execute(
+            "UPDATE m1_qualification_certificates SET identity_key = %s "
+            "WHERE certificate_id = %s",
+            ("attacker-identity", record.certificate_id),
+        )
+        cursor.execute(
+            "ALTER TABLE m1_qualification_certificates "
+            "ENABLE TRIGGER m1_qualification_certificates_immutable"
+        )
+
+    with pytest.raises(QualificationCertificateConflict, match="identity key"):
         read_qualification_certificate(
             control_plane._connection_factory,
             certificate_id=record.certificate_id,
@@ -9099,6 +9202,9 @@ def _direct_insert_qualification_certificate(
 def _execute_direct_certificate_insert(
     cursor: psycopg.Cursor[object],
     payload: dict[str, object],
+    *,
+    certificate_id: str | None = None,
+    identity_key: str | None = None,
 ) -> None:
     digest = certificate_digest(payload)
     identity = cast(dict[str, object], payload["identity"])
@@ -9114,9 +9220,9 @@ def _execute_direct_certificate_insert(
         )
         """,
         (
-            f"direct-forged:{digest}",
+            certificate_id or f"qualification-certificate:{digest}",
             cast(str, identity["epoch_id"]),
-            "direct-forged-identity",
+            identity_key or _certificate_identity_key_for_test(payload),
             cast(str, identity["policy_version"]),
             cast(str, identity["release_id"]),
             cast(str, identity["config_id"]),
@@ -9130,3 +9236,52 @@ def _execute_direct_certificate_insert(
             cast(str, payload["evidence_digest"]),
         ),
     )
+
+
+def _execute_certificate_function(
+    cursor: psycopg.Cursor[object],
+    payload: dict[str, object],
+) -> tuple[str, str, str]:
+    digest = certificate_digest(payload)
+    identity = cast(dict[str, object], payload["identity"])
+    bounds = cast(dict[str, object], payload["bounds"])
+    cursor.execute(
+        """
+        SELECT certificate_id, identity_key, certificate_digest
+        FROM m1_insert_qualification_certificate(
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        """,
+        (
+            cast(str, identity["epoch_id"]),
+            cast(str, identity["policy_version"]),
+            cast(str, identity["release_id"]),
+            cast(str, identity["config_id"]),
+            Jsonb(cast(list[object], identity["role_identity"])),
+            cast(str, bounds["started_at"]),
+            cast(str, bounds["qualified_at"]),
+            Jsonb(payload),
+            canonical_certificate_bytes(payload).decode("utf-8"),
+            digest,
+            digest,
+            cast(str, payload["evidence_digest"]),
+        ),
+    )
+    row = cursor.fetchone()
+    assert row is not None
+    return cast(tuple[str, str, str], row)
+
+
+def _certificate_identity_key_for_test(payload: dict[str, object]) -> str:
+    return sha256(
+        json.dumps(
+            {
+                "bounds": payload["bounds"],
+                "identity": payload["identity"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()

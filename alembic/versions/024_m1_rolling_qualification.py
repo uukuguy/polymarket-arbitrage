@@ -225,12 +225,52 @@ def upgrade() -> None:
 
     op.execute(
         """
+        CREATE FUNCTION m1_canonical_jsonb(p_value jsonb) RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        STRICT
+        AS $$
+            SELECT CASE jsonb_typeof(p_value)
+                WHEN 'object' THEN
+                    '{' || COALESCE(
+                        (
+                            SELECT string_agg(
+                                m1_canonical_jsonb(to_jsonb(key)) || ':'
+                                || m1_canonical_jsonb(value),
+                                ',' ORDER BY key
+                            )
+                            FROM jsonb_each(p_value)
+                        ),
+                        ''
+                    ) || '}'
+                WHEN 'array' THEN
+                    '[' || COALESCE(
+                        (
+                            SELECT string_agg(
+                                m1_canonical_jsonb(value),
+                                ',' ORDER BY ordinality
+                            )
+                            FROM jsonb_array_elements(p_value)
+                                 WITH ORDINALITY AS item(value, ordinality)
+                        ),
+                        ''
+                    ) || ']'
+                WHEN 'string' THEN to_jsonb(p_value #>> '{}')::text
+                ELSE p_value::text
+            END
+        $$;
+        """
+    )
+
+    op.execute(
+        """
         CREATE FUNCTION m1_verify_qualification_certificate_insert() RETURNS trigger
         LANGUAGE plpgsql AS $$
         DECLARE
             epoch_row m1_qualification_epochs%ROWTYPE;
             canonical_json jsonb;
             canonical_digest text;
+            canonical_identity_key text;
             payload_started_at timestamptz;
             payload_qualified_at timestamptz;
             payload_required_seconds bigint;
@@ -246,9 +286,33 @@ def upgrade() -> None:
             IF canonical_json <> NEW.payload THEN
                 RAISE EXCEPTION 'qualification certificate payload/canonical mismatch';
             END IF;
+            IF NEW.canonical_payload <> m1_canonical_jsonb(canonical_json) THEN
+                RAISE EXCEPTION 'qualification certificate canonical bytes mismatch';
+            END IF;
             IF NEW.payload_sha256 <> canonical_digest
                OR NEW.certificate_digest <> canonical_digest THEN
                 RAISE EXCEPTION 'qualification certificate digest mismatch';
+            END IF;
+            IF NEW.certificate_id <> 'qualification-certificate:' || canonical_digest THEN
+                RAISE EXCEPTION 'qualification certificate id mismatch';
+            END IF;
+            canonical_identity_key := encode(
+                digest(
+                    convert_to(
+                        m1_canonical_jsonb(
+                            jsonb_build_object(
+                                'bounds', canonical_json -> 'bounds',
+                                'identity', canonical_json -> 'identity'
+                            )
+                        ),
+                        'UTF8'
+                    ),
+                    'sha256'
+                ),
+                'hex'
+            );
+            IF NEW.identity_key <> canonical_identity_key THEN
+                RAISE EXCEPTION 'qualification certificate identity key mismatch';
             END IF;
 
             SELECT * INTO epoch_row
@@ -332,9 +396,7 @@ def upgrade() -> None:
     op.execute(
         """
         CREATE FUNCTION m1_insert_qualification_certificate(
-            p_certificate_id text,
             p_epoch_id text,
-            p_identity_key text,
             p_policy_version text,
             p_release_id text,
             p_config_id text,
@@ -351,13 +413,33 @@ def upgrade() -> None:
         SECURITY DEFINER
         SET search_path = public
         AS $$
+        DECLARE
+            derived_certificate_id text;
+            derived_identity_key text;
         BEGIN
+            derived_certificate_id := 'qualification-certificate:' || p_certificate_digest;
+            derived_identity_key := encode(
+                digest(
+                    convert_to(
+                        m1_canonical_jsonb(
+                            jsonb_build_object(
+                                'bounds', p_payload -> 'bounds',
+                                'identity', p_payload -> 'identity'
+                            )
+                        ),
+                        'UTF8'
+                    ),
+                    'sha256'
+                ),
+                'hex'
+            );
+
             INSERT INTO m1_qualification_certificates (
                 certificate_id, epoch_id, identity_key, policy_version, release_id,
                 config_id, role_identity, started_at, qualified_at, payload,
                 canonical_payload, payload_sha256, certificate_digest, evidence_digest
             ) VALUES (
-                p_certificate_id, p_epoch_id, p_identity_key, p_policy_version,
+                derived_certificate_id, p_epoch_id, derived_identity_key, p_policy_version,
                 p_release_id, p_config_id, p_role_identity, p_started_at,
                 p_qualified_at, p_payload, p_canonical_payload, p_payload_sha256,
                 p_certificate_digest, p_evidence_digest
@@ -367,7 +449,7 @@ def upgrade() -> None:
             RETURN QUERY
             SELECT *
             FROM m1_qualification_certificates
-            WHERE identity_key = p_identity_key;
+            WHERE identity_key = derived_identity_key;
         END;
         $$;
         """
@@ -375,22 +457,42 @@ def upgrade() -> None:
     op.execute("REVOKE ALL ON TABLE m1_qualification_certificates FROM PUBLIC")
     op.execute(
         """
+        REVOKE ALL ON FUNCTION m1_insert_qualification_certificate(
+            text, text, text, text, jsonb, timestamptz, timestamptz,
+            jsonb, text, text, text, text
+        ) FROM PUBLIC
+        """
+    )
+    op.execute(
+        """
         DO $$
         BEGIN
             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
                 REVOKE ALL ON TABLE m1_qualification_certificates FROM anon;
                 GRANT SELECT ON TABLE m1_qualification_certificates TO anon;
+                REVOKE ALL ON FUNCTION m1_insert_qualification_certificate(
+                    text, text, text, text, jsonb, timestamptz, timestamptz,
+                    jsonb, text, text, text, text
+                ) FROM anon;
             END IF;
             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
                 REVOKE ALL ON TABLE m1_qualification_certificates FROM authenticated;
                 GRANT SELECT ON TABLE m1_qualification_certificates TO authenticated;
+                REVOKE ALL ON FUNCTION m1_insert_qualification_certificate(
+                    text, text, text, text, jsonb, timestamptz, timestamptz,
+                    jsonb, text, text, text, text
+                ) FROM authenticated;
             END IF;
             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
                 REVOKE ALL ON TABLE m1_qualification_certificates FROM service_role;
                 GRANT SELECT ON TABLE m1_qualification_certificates TO service_role;
+                REVOKE ALL ON FUNCTION m1_insert_qualification_certificate(
+                    text, text, text, text, jsonb, timestamptz, timestamptz,
+                    jsonb, text, text, text, text
+                ) FROM service_role;
                 GRANT EXECUTE ON FUNCTION m1_insert_qualification_certificate(
-                    text, text, text, text, text, text, jsonb, timestamptz,
-                    timestamptz, jsonb, text, text, text, text
+                    text, text, text, text, jsonb, timestamptz, timestamptz,
+                    jsonb, text, text, text, text
                 ) TO service_role;
             END IF;
         END;
@@ -417,11 +519,12 @@ def downgrade() -> None:
     )
     op.execute(
         "DROP FUNCTION m1_insert_qualification_certificate("
-        "text, text, text, text, text, text, jsonb, timestamptz, "
+        "text, text, text, text, jsonb, timestamptz, "
         "timestamptz, jsonb, text, text, text, text)"
     )
     op.execute("DROP FUNCTION m1_reject_qualification_certificate_mutation()")
     op.execute("DROP FUNCTION m1_verify_qualification_certificate_insert()")
+    op.execute("DROP FUNCTION m1_canonical_jsonb(jsonb)")
     op.drop_index(
         "m1_qualification_certificates_created",
         table_name="m1_qualification_certificates",

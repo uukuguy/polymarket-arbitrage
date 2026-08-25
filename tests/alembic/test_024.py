@@ -39,6 +39,10 @@ def test_024_schema_declares_state_version_cas_and_certificate_uniqueness() -> N
     assert "CREATE EXTENSION IF NOT EXISTS pgcrypto" in text
     assert "m1_verify_qualification_certificate_insert" in text
     assert "m1_insert_qualification_certificate" in text
+    assert "p_certificate_id text" not in text
+    assert "p_identity_key text" not in text
+    assert "REVOKE ALL ON FUNCTION m1_insert_qualification_certificate" in text
+    assert "FROM PUBLIC" in text
     assert "REVOKE ALL ON TABLE m1_qualification_certificates" in text
     assert "clock_timestamp()" in text
 
@@ -111,7 +115,12 @@ def test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigge
                 "m1_qualification_certificates",
                 "m1_qualification_certificates_immutable",
             )
-            _insert_epoch_and_certificate(connection)
+            certificate_id, identity_key = _insert_epoch_and_certificate(connection)
+            assert certificate_id.startswith("qualification-certificate:")
+            assert len(certificate_id) == len("qualification-certificate:") + 64
+            assert identity_key == _sha256(
+                _canonical({"bounds": _bounds(), "identity": _identity()})
+            )
             with pytest.raises(psycopg.errors.RaiseException, match="digest"):
                 connection.execute(
                     """
@@ -125,8 +134,27 @@ def test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigge
                            started_at, qualified_at, payload, canonical_payload,
                            repeat('0', 64), repeat('0', 64), evidence_digest
                     FROM m1_qualification_certificates
-                    WHERE certificate_id = 'certificate-024'
+                    WHERE certificate_id = %s
+                    """,
+                    (certificate_id,),
+                )
+            connection.rollback()
+            with pytest.raises(psycopg.errors.RaiseException, match="id"):
+                connection.execute(
                     """
+                    INSERT INTO m1_qualification_certificates (
+                        certificate_id, epoch_id, identity_key, policy_version, release_id,
+                        config_id, role_identity, started_at, qualified_at, payload,
+                        canonical_payload, payload_sha256, certificate_digest, evidence_digest
+                    )
+                    SELECT 'attacker-chosen-certificate', epoch_id, 'attacker-chosen-identity',
+                           policy_version, release_id, config_id, role_identity,
+                           started_at, qualified_at, payload, canonical_payload,
+                           payload_sha256, certificate_digest, evidence_digest
+                    FROM m1_qualification_certificates
+                    WHERE certificate_id = %s
+                    """,
+                    (certificate_id,),
                 )
             connection.rollback()
             with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
@@ -158,20 +186,30 @@ def test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigge
             )
 
 
-def _insert_epoch_and_certificate(connection: psycopg.Connection[object]) -> None:
-    identity = {
+def _identity() -> dict[str, object]:
+    return {
         "config_id": "config-a",
         "epoch_id": "epoch-024",
         "policy_version": "m1-rolling-qualification-v1",
         "release_id": "release-a",
         "role_identity": ["m1"],
     }
-    bounds = {
+
+
+def _bounds() -> dict[str, object]:
+    return {
         "max_gap_seconds": 900,
         "qualified_at": "2030-01-02T00:00:00+00:00",
         "required_seconds": 86400,
         "started_at": "2030-01-01T00:00:00+00:00",
     }
+
+
+def _insert_epoch_and_certificate(
+    connection: psycopg.Connection[object],
+) -> tuple[str, str]:
+    identity = _identity()
+    bounds = _bounds()
     payload = {
         "bounds": bounds,
         "contained_incidents": [],
@@ -226,12 +264,11 @@ def _insert_epoch_and_certificate(connection: psycopg.Connection[object]) -> Non
             Jsonb([]),
         ),
     )
-    connection.execute(
+    cursor = connection.execute(
         """
-        SELECT certificate_id
+        SELECT certificate_id, identity_key
         FROM m1_insert_qualification_certificate(
-            'certificate-024', 'epoch-024', 'certificate-identity-024',
-            'm1-rolling-qualification-v1', 'release-a', 'config-a', %s,
+            'epoch-024', 'm1-rolling-qualification-v1', 'release-a', 'config-a', %s,
             '2030-01-01T00:00:00+00:00', '2030-01-02T00:00:00+00:00',
             %s, %s, %s, %s, %s
         )
@@ -245,7 +282,10 @@ def _insert_epoch_and_certificate(connection: psycopg.Connection[object]) -> Non
             evidence_digest,
         ),
     )
+    row = cursor.fetchone()
+    assert row is not None
     connection.commit()
+    return cast(tuple[str, str], row)
 
 
 def _canonical(payload: object) -> bytes:

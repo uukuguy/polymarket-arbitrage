@@ -358,7 +358,6 @@ def insert_qualification_certificate(
     canonical_text = canonical.decode("utf-8")
     digest = sha256(canonical).hexdigest()
     identity_key = _certificate_identity_key(normalized)
-    certificate_id = f"qualification-certificate:{digest}"
     evidence_digest = cast(str, normalized["evidence_digest"])
     with connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
         _set_timeouts(cursor)
@@ -383,13 +382,11 @@ def insert_qualification_certificate(
             """
             SELECT *
             FROM m1_insert_qualification_certificate(
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
             (
-                certificate_id,
                 epoch_id,
-                identity_key,
                 cast(str, identity["policy_version"]),
                 cast(str, identity["release_id"]),
                 cast(str, identity["config_id"]),
@@ -789,6 +786,8 @@ def _verify_certificate_record(
     normalized = _validated_certificate_payload(cast(Mapping[str, object], payload))
     canonical_bytes = canonical_certificate_bytes(normalized)
     digest = sha256(canonical_bytes).hexdigest()
+    certificate_id = f"qualification-certificate:{digest}"
+    identity_key = _certificate_identity_key(normalized)
     if record.canonical_payload.encode("utf-8") != canonical_bytes:
         raise QualificationCertificateConflict("qualification certificate canonical bytes conflict")
     if (
@@ -797,6 +796,10 @@ def _verify_certificate_record(
         or record.certificate_digest != digest
     ):
         raise QualificationCertificateConflict("qualification certificate digest conflict")
+    if record.certificate_id != certificate_id:
+        raise QualificationCertificateConflict("qualification certificate id conflict")
+    if record.identity_key != identity_key:
+        raise QualificationCertificateConflict("qualification certificate identity key conflict")
     epoch = _fetch_epoch_cursor(cursor, epoch_id=record.epoch_id, for_update=False)
     if epoch is None:
         raise QualificationCertificateConflict("qualification certificate epoch is missing")
