@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     # This non-secret role keeps scan-secret enforcement on the legacy daemon
     # without distributing it to API, data-worker, or alert-worker processes.
     runtime_role: Literal["legacy-daemon", "control-plane"] = "legacy-daemon"
+    # Runtime recovery is fail-closed unless an operator explicitly selects
+    # execution.  The controller still evaluates and durably records every
+    # candidate in observe-only mode, but it cannot schedule or claim actions.
+    runtime_recovery_mode: Literal["observe-only", "execute"] = "observe-only"
     gamma_url: str = "https://gamma-api.polymarket.com"
     clob_url: str = "https://clob.polymarket.com"
 

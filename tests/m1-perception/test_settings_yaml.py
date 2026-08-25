@@ -70,6 +70,22 @@ def test_control_plane_runtime_role_does_not_require_legacy_scan_secret(
     assert Settings().runtime_role == "control-plane"
 
 
+def test_runtime_recovery_mode_defaults_fail_closed_and_requires_closed_enum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLYARB_ALLOW_EMPTY_SECRET", "1")
+    monkeypatch.delenv("POLYARB_RUNTIME_RECOVERY_MODE", raising=False)
+
+    assert Settings().runtime_recovery_mode == "observe-only"
+
+    monkeypatch.setenv("POLYARB_RUNTIME_RECOVERY_MODE", "execute")
+    assert Settings().runtime_recovery_mode == "execute"
+
+    monkeypatch.setenv("POLYARB_RUNTIME_RECOVERY_MODE", "disabled-ish")
+    with pytest.raises(Exception, match="runtime_recovery_mode"):
+        Settings()
+
+
 def test_legacy_runtime_role_still_requires_scan_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("POLYARB_ALLOW_EMPTY_SECRET", raising=False)
     monkeypatch.delenv("POLYARB_SCAN_SHARED_SECRET", raising=False)
