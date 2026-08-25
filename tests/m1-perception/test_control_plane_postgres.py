@@ -49,6 +49,9 @@ from polyarb.control_plane.qualification_store import (
     canonical_certificate_bytes,
     certificate_digest,
     insert_qualification_certificate,
+    list_qualification_certificates,
+    qualification_certificate_payload,
+    read_qualification_certificate,
     read_qualification_epoch,
     start_qualification_epoch,
     transition_qualification_epoch,
@@ -8856,79 +8859,48 @@ def test_qualification_epoch_transition_is_state_version_cas_and_rolls_back_old_
 def test_qualification_certificate_is_canonical_idempotent_and_conflict_loud(
     control_plane: PostgresControlPlane,
 ) -> None:
-    policy = _qualification_policy()
-    started_at = _now()
-    qualified_at = started_at + timedelta(days=1)
-    qualified = QualificationDecision(
-        state=QualificationState.QUALIFIED,
-        epoch_id="qualification-epoch-cert",
-        started_at=started_at,
-        policy_version=policy.policy_version,
-        release_id=policy.release_id,
-        config_id=policy.config_id,
-        role_identity=policy.role_identity,
-        last_fact_at=qualified_at,
-        qualified_at=qualified_at,
-        max_gap_seconds=900,
-        coverage_seconds=86_400,
-        progress_count=12,
-        successful_count=12,
-    )
-    start_qualification_epoch(
-        control_plane._connection_factory,
-        policy.new_epoch(started_at=started_at, epoch_id=qualified.epoch_id),
-    )
-    transition_qualification_epoch(
-        control_plane._connection_factory,
-        expected_epoch_id=qualified.epoch_id,
-        expected_state=QualificationDecision.initial(
-            started_at=started_at,
-            epoch_id=qualified.epoch_id,
-            policy_version=policy.policy_version,
-            release_id=policy.release_id,
-            config_id=policy.config_id,
-            role_identity=policy.role_identity,
-        ).state,
-        expected_version=1,
-        next_decision=qualified,
-        writer_id="qualifier",
-    )
-    payload = _certificate_payload(qualified)
+    qualified = _persist_qualified_epoch(control_plane, epoch_id="qualification-epoch-cert")
+    payload = qualification_certificate_payload(qualified)
+    evidence_digest = payload["evidence_digest"]
+    assert isinstance(evidence_digest, str)
     assert canonical_certificate_bytes(payload) == (
         b'{"bounds":{"max_gap_seconds":900,"qualified_at":"2030-01-02T12:00:00+00:00",'
         b'"required_seconds":86400,"started_at":"2030-01-01T12:00:00+00:00"},'
         b'"contained_incidents":[],"counts":{"progress_count":12,"successful_count":12},'
-        b'"evidence_digest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",'
+        b'"evidence_digest":"'
+        + evidence_digest.encode("ascii")
+        + b'",'
         b'"identity":{"config_id":"config-a","epoch_id":"qualification-epoch-cert",'
         b'"policy_version":"m1-rolling-qualification-v1","release_id":"release-a",'
         b'"role_identity":["m1","structure"]},"policy_version":"m1-rolling-qualification-v1",'
-        b'"recovery_actions":[],"slo":{"evidence_gap_seconds":900,"freshness":"pass"}}'
+        b'"recovery_actions":[],"slo":{"evidence_gap_seconds":900,"evidence_gap_status":"pass",'
+        b'"freshness":"pass","recovery":"pass","required_seconds":86400}}'
     )
     first = insert_qualification_certificate(
         control_plane._connection_factory,
-        epoch_id=qualified.epoch_id,
-        payload=payload,
+        decision=qualified,
     )
     replay = insert_qualification_certificate(
         control_plane._connection_factory,
-        epoch_id=qualified.epoch_id,
-        payload=payload,
+        decision=qualified,
     )
     assert replay == first
     assert first.certificate_digest == certificate_digest(payload)
+    assert first.canonical_payload.encode("utf-8") == canonical_certificate_bytes(payload)
     assert first.created_at.tzinfo is not None
     assert first.created_at.utcoffset() == timedelta(0)
+    assert read_qualification_certificate(
+        control_plane._connection_factory,
+        certificate_id=first.certificate_id,
+    ) == first
+    assert list_qualification_certificates(control_plane._connection_factory) == (first,)
 
     conflict_payload = {
         **payload,
         "counts": {"progress_count": 13, "successful_count": 12},
     }
-    with pytest.raises(QualificationCertificateConflict, match="conflicts"):
-        insert_qualification_certificate(
-            control_plane._connection_factory,
-            epoch_id=qualified.epoch_id,
-            payload=conflict_payload,
-        )
+    with pytest.raises(psycopg.Error, match="qualification certificate"):
+        _direct_insert_qualification_certificate(control_plane, conflict_payload)
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
             "SELECT count(*), min(certificate_digest) FROM m1_qualification_certificates"
@@ -8944,7 +8916,7 @@ def test_qualification_certificate_is_canonical_idempotent_and_conflict_loud(
             cursor.execute(
                 "DELETE FROM m1_qualification_certificates WHERE certificate_id = %s",
                 (first.certificate_id,),
-            )
+        )
         connection.rollback()
 
     with pytest.raises(ValueError, match="JSON-safe"):
@@ -8961,6 +8933,115 @@ def test_qualification_certificate_is_canonical_idempotent_and_conflict_loud(
         certificate_digest({"identity": {"epoch_id": qualified.epoch_id}})
 
 
+def test_qualification_certificate_api_rejects_forged_payload_and_bad_decision_types(
+    control_plane: PostgresControlPlane,
+) -> None:
+    qualified = _persist_qualified_epoch(control_plane, epoch_id="qualification-epoch-api")
+    payload = qualification_certificate_payload(qualified)
+
+    with pytest.raises(TypeError):
+        cast(Any, insert_qualification_certificate)(
+            control_plane._connection_factory,
+            epoch_id=qualified.epoch_id,
+            payload={**payload, "slo": {"freshness": "forged-pass"}},
+        )
+    with pytest.raises(QualificationCertificateConflict, match="qualified counts"):
+        insert_qualification_certificate(
+            control_plane._connection_factory,
+            decision=QualificationDecision(
+                state=QualificationState.QUALIFIED,
+                epoch_id="qualification-epoch-bad-counts",
+                started_at=_now(),
+                policy_version=qualified.policy_version,
+                release_id=qualified.release_id,
+                config_id=qualified.config_id,
+                role_identity=qualified.role_identity,
+                last_fact_at=_now() + timedelta(days=1),
+                qualified_at=_now() + timedelta(days=1),
+                max_gap_seconds=900,
+                coverage_seconds=86_400,
+                progress_count=None,
+                successful_count=1,
+            ),
+        )
+
+
+def test_qualification_certificate_db_rejects_direct_forgery_and_app_role_insert(
+    control_plane: PostgresControlPlane,
+) -> None:
+    qualified = _persist_qualified_epoch(control_plane, epoch_id="qualification-epoch-db")
+    legitimate = insert_qualification_certificate(
+        control_plane._connection_factory,
+        decision=qualified,
+    )
+    forged = {
+        **qualification_certificate_payload(qualified),
+        "bounds": {
+            **cast(dict[str, object], qualification_certificate_payload(qualified)["bounds"]),
+            "required_seconds": 1,
+        },
+    }
+    with pytest.raises(psycopg.Error, match="qualification certificate"):
+        _direct_insert_qualification_certificate(control_plane, forged)
+
+    app_forged = {
+        **qualification_certificate_payload(qualified),
+        "identity": {
+            **cast(dict[str, object], qualification_certificate_payload(qualified)["identity"]),
+            "epoch_id": "qualification-epoch-db-forged-app",
+        },
+    }
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            cursor.execute("SET ROLE authenticated")
+            _execute_direct_certificate_insert(cursor, app_forged)
+        connection.rollback()
+    assert list_qualification_certificates(control_plane._connection_factory) == (legitimate,)
+
+
+def test_read_qualification_certificate_recomputes_canonical_digest_and_fails_on_tamper(
+    control_plane: PostgresControlPlane,
+) -> None:
+    qualified = _persist_qualified_epoch(control_plane, epoch_id="qualification-epoch-read")
+    record = insert_qualification_certificate(
+        control_plane._connection_factory,
+        decision=qualified,
+    )
+    assert read_qualification_certificate(
+        control_plane._connection_factory,
+        certificate_id=record.certificate_id,
+    ) == record
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "ALTER TABLE m1_qualification_certificates "
+            "DISABLE TRIGGER m1_qualification_certificates_immutable"
+        )
+        cursor.execute(
+            "UPDATE m1_qualification_certificates SET canonical_payload = %s "
+            "WHERE certificate_id = %s",
+            (
+                canonical_certificate_bytes(
+                    {
+                        **record.payload,
+                        "counts": {"progress_count": 999, "successful_count": 12},
+                    }
+                ).decode("utf-8"),
+                record.certificate_id,
+            ),
+        )
+        cursor.execute(
+            "ALTER TABLE m1_qualification_certificates "
+            "ENABLE TRIGGER m1_qualification_certificates_immutable"
+        )
+
+    with pytest.raises(QualificationCertificateConflict, match="digest"):
+        read_qualification_certificate(
+            control_plane._connection_factory,
+            certificate_id=record.certificate_id,
+        )
+
+
 def _qualification_policy() -> RollingQualificationPolicy:
     return RollingQualificationPolicy(
         policy_version="m1-rolling-qualification-v1",
@@ -8971,32 +9052,81 @@ def _qualification_policy() -> RollingQualificationPolicy:
     )
 
 
-def _certificate_payload(decision: QualificationDecision) -> dict[str, object]:
-    assert decision.qualified_at is not None
-    return {
-        "bounds": {
-            "max_gap_seconds": decision.max_gap_seconds,
-            "qualified_at": decision.qualified_at.isoformat(),
-            "required_seconds": 86_400,
-            "started_at": decision.started_at.isoformat(),
-        },
-        "contained_incidents": [],
-        "counts": {
-            "progress_count": decision.progress_count,
-            "successful_count": decision.successful_count,
-        },
-        "evidence_digest": "e" * 64,
-        "identity": {
-            "config_id": decision.config_id,
-            "epoch_id": decision.epoch_id,
-            "policy_version": decision.policy_version,
-            "release_id": decision.release_id,
-            "role_identity": list(decision.role_identity),
-        },
-        "policy_version": decision.policy_version,
-        "recovery_actions": [],
-        "slo": {
-            "evidence_gap_seconds": decision.max_gap_seconds,
-            "freshness": "pass",
-        },
-    }
+def _persist_qualified_epoch(
+    control_plane: PostgresControlPlane,
+    *,
+    epoch_id: str,
+) -> QualificationDecision:
+    policy = _qualification_policy()
+    started_at = _now()
+    qualified_at = started_at + timedelta(days=1)
+    initial = policy.new_epoch(started_at=started_at, epoch_id=epoch_id)
+    qualified = QualificationDecision(
+        state=QualificationState.QUALIFIED,
+        epoch_id=epoch_id,
+        started_at=started_at,
+        policy_version=policy.policy_version,
+        release_id=policy.release_id,
+        config_id=policy.config_id,
+        role_identity=policy.role_identity,
+        last_fact_at=qualified_at,
+        qualified_at=qualified_at,
+        max_gap_seconds=900,
+        coverage_seconds=86_400,
+        progress_count=12,
+        successful_count=12,
+    )
+    start_qualification_epoch(control_plane._connection_factory, initial)
+    transition_qualification_epoch(
+        control_plane._connection_factory,
+        expected_epoch_id=qualified.epoch_id,
+        expected_state=initial.state,
+        expected_version=1,
+        next_decision=qualified,
+        writer_id="qualifier",
+    )
+    return qualified
+
+
+def _direct_insert_qualification_certificate(
+    control_plane: PostgresControlPlane,
+    payload: dict[str, object],
+) -> None:
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        _execute_direct_certificate_insert(cursor, payload)
+
+
+def _execute_direct_certificate_insert(
+    cursor: psycopg.Cursor[object],
+    payload: dict[str, object],
+) -> None:
+    digest = certificate_digest(payload)
+    identity = cast(dict[str, object], payload["identity"])
+    bounds = cast(dict[str, object], payload["bounds"])
+    cursor.execute(
+        """
+        INSERT INTO m1_qualification_certificates (
+            certificate_id, epoch_id, identity_key, policy_version, release_id,
+            config_id, role_identity, started_at, qualified_at, payload,
+            canonical_payload, payload_sha256, certificate_digest, evidence_digest
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        """,
+        (
+            f"direct-forged:{digest}",
+            cast(str, identity["epoch_id"]),
+            "direct-forged-identity",
+            cast(str, identity["policy_version"]),
+            cast(str, identity["release_id"]),
+            cast(str, identity["config_id"]),
+            Jsonb(cast(list[object], identity["role_identity"])),
+            cast(str, bounds["started_at"]),
+            cast(str, bounds["qualified_at"]),
+            Jsonb(payload),
+            canonical_certificate_bytes(payload).decode("utf-8"),
+            digest,
+            digest,
+            cast(str, payload["evidence_digest"]),
+        ),
+    )

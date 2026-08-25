@@ -35,6 +35,11 @@ def test_024_schema_declares_state_version_cas_and_certificate_uniqueness() -> N
     assert "uq_m1_qualification_active_identity" in text
     assert "uq_m1_qualification_certificates_identity" in text
     assert "uq_m1_qualification_certificates_digest" in text
+    assert '"canonical_payload"' in text
+    assert "CREATE EXTENSION IF NOT EXISTS pgcrypto" in text
+    assert "m1_verify_qualification_certificate_insert" in text
+    assert "m1_insert_qualification_certificate" in text
+    assert "REVOKE ALL ON TABLE m1_qualification_certificates" in text
     assert "clock_timestamp()" in text
 
 
@@ -99,9 +104,31 @@ def test_024_upgrades_from_023_downgrades_and_reupgrades_with_append_only_trigge
             assert _trigger_exists(
                 connection,
                 "m1_qualification_certificates",
+                "m1_qualification_certificates_verify_insert",
+            )
+            assert _trigger_exists(
+                connection,
+                "m1_qualification_certificates",
                 "m1_qualification_certificates_immutable",
             )
             _insert_epoch_and_certificate(connection)
+            with pytest.raises(psycopg.errors.RaiseException, match="digest"):
+                connection.execute(
+                    """
+                    INSERT INTO m1_qualification_certificates (
+                        certificate_id, epoch_id, identity_key, policy_version, release_id,
+                        config_id, role_identity, started_at, qualified_at, payload,
+                        canonical_payload, payload_sha256, certificate_digest, evidence_digest
+                    )
+                    SELECT 'certificate-024-forged', epoch_id, 'forged-identity',
+                           policy_version, release_id, config_id, role_identity,
+                           started_at, qualified_at, payload, canonical_payload,
+                           repeat('0', 64), repeat('0', 64), evidence_digest
+                    FROM m1_qualification_certificates
+                    WHERE certificate_id = 'certificate-024'
+                    """
+                )
+            connection.rollback()
             with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
                 connection.execute(
                     "UPDATE m1_qualification_certificates SET evidence_digest = %s",
@@ -149,43 +176,94 @@ def _insert_epoch_and_certificate(connection: psycopg.Connection[object]) -> Non
         "bounds": bounds,
         "contained_incidents": [],
         "counts": {"progress_count": 10, "successful_count": 10},
-        "evidence_digest": "e" * 64,
         "identity": identity,
         "policy_version": "m1-rolling-qualification-v1",
         "recovery_actions": [],
-        "slo": {"freshness": "pass"},
+        "slo": {
+            "evidence_gap_seconds": 900,
+            "evidence_gap_status": "pass",
+            "freshness": "pass",
+            "recovery": "pass",
+            "required_seconds": 86400,
+        },
     }
+    evidence_digest = _sha256(
+        _canonical(
+            {
+                "contained_incidents": [],
+                "epoch_id": "epoch-024",
+                "fact_digests": [],
+                "recovery_actions": [],
+            }
+        )
+    )
+    payload["evidence_digest"] = evidence_digest
+    canonical_payload = _canonical(payload)
+    digest = _sha256(canonical_payload)
     connection.execute(
         """
         INSERT INTO m1_qualification_epochs (
             epoch_id, state, version, identity_key, policy_version, release_id,
             config_id, role_identity, started_at, last_fact_at, qualified_at,
-            fact_digests, contained_recoveries, coverage_seconds, max_gap_seconds
+            fact_digests, contained_recoveries, coverage_seconds, max_gap_seconds,
+            progress_count, successful_count, evidence_digest, required_seconds,
+            slo, contained_incident_details, recovery_action_details
         ) VALUES (
             'epoch-024', 'qualified', 2, 'identity-024',
             'm1-rolling-qualification-v1', 'release-a', 'config-a',
             %s, '2030-01-01T00:00:00+00:00', '2030-01-02T00:00:00+00:00',
-            '2030-01-02T00:00:00+00:00', %s, %s, 86400, 900
+            '2030-01-02T00:00:00+00:00', %s, %s, 86400, 900, 10, 10,
+            %s, 86400, %s, %s, %s
         )
         """,
-        (Jsonb(["m1"]), Jsonb([]), Jsonb([])),
+        (
+            Jsonb(["m1"]),
+            Jsonb([]),
+            Jsonb([]),
+            evidence_digest,
+            Jsonb(payload["slo"]),
+            Jsonb([]),
+            Jsonb([]),
+        ),
     )
     connection.execute(
         """
-        INSERT INTO m1_qualification_certificates (
-            certificate_id, epoch_id, identity_key, policy_version, release_id,
-            config_id, role_identity, started_at, qualified_at, payload,
-            payload_sha256, certificate_digest, evidence_digest
-        ) VALUES (
+        SELECT certificate_id
+        FROM m1_insert_qualification_certificate(
             'certificate-024', 'epoch-024', 'certificate-identity-024',
             'm1-rolling-qualification-v1', 'release-a', 'config-a', %s,
             '2030-01-01T00:00:00+00:00', '2030-01-02T00:00:00+00:00',
-            %s, %s, %s, %s
+            %s, %s, %s, %s, %s
         )
         """,
-        (Jsonb(["m1"]), Jsonb(payload), "a" * 64, "a" * 64, "e" * 64),
+        (
+            Jsonb(["m1"]),
+            Jsonb(payload),
+            canonical_payload.decode("utf-8"),
+            digest,
+            digest,
+            evidence_digest,
+        ),
     )
     connection.commit()
+
+
+def _canonical(payload: object) -> bytes:
+    import json
+
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _sha256(payload: bytes) -> str:
+    from hashlib import sha256
+
+    return sha256(payload).hexdigest()
 
 
 def _table_exists(connection: psycopg.Connection[object], table_name: str) -> bool:

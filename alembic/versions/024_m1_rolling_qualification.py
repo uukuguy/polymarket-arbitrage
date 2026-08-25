@@ -22,6 +22,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
     op.create_table(
         "m1_qualification_epochs",
         sa.Column("epoch_id", sa.Text, nullable=False),
@@ -54,6 +55,26 @@ def upgrade() -> None:
         sa.Column("max_gap_seconds", sa.BigInteger, nullable=False, server_default="0"),
         sa.Column("progress_count", sa.BigInteger, nullable=True),
         sa.Column("successful_count", sa.BigInteger, nullable=True),
+        sa.Column("evidence_digest", sa.Text, nullable=True),
+        sa.Column("required_seconds", sa.BigInteger, nullable=True),
+        sa.Column(
+            "slo",
+            postgresql.JSONB,
+            nullable=False,
+            server_default=sa.text("'{}'::jsonb"),
+        ),
+        sa.Column(
+            "contained_incident_details",
+            postgresql.JSONB,
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+        ),
+        sa.Column(
+            "recovery_action_details",
+            postgresql.JSONB,
+            nullable=False,
+            server_default=sa.text("'[]'::jsonb"),
+        ),
         sa.Column("writer_id", sa.Text, nullable=True),
         sa.Column(
             "created_at",
@@ -90,8 +111,19 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "coverage_seconds >= 0 AND max_gap_seconds >= 0 "
             "AND (progress_count IS NULL OR progress_count >= 0) "
-            "AND (successful_count IS NULL OR successful_count >= 0)",
+            "AND (successful_count IS NULL OR successful_count >= 0) "
+            "AND (required_seconds IS NULL OR required_seconds > 0)",
             name="ck_m1_qualification_epochs_counts",
+        ),
+        sa.CheckConstraint(
+            "evidence_digest IS NULL OR evidence_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_m1_qualification_epochs_evidence_digest",
+        ),
+        sa.CheckConstraint(
+            "jsonb_typeof(slo) = 'object' "
+            "AND jsonb_typeof(contained_incident_details) = 'array' "
+            "AND jsonb_typeof(recovery_action_details) = 'array'",
+            name="ck_m1_qualification_epochs_derived_evidence",
         ),
         sa.CheckConstraint(
             "("
@@ -103,7 +135,9 @@ def upgrade() -> None:
             "AND invalidated_at IS NULL AND invalidation_reason IS NULL "
             "AND qualified_at IS NULL "
             "OR state = 'qualified' AND qualified_at IS NOT NULL "
-            "AND invalidated_at IS NULL AND invalidation_reason IS NULL"
+            "AND invalidated_at IS NULL AND invalidation_reason IS NULL "
+            "AND progress_count IS NOT NULL AND successful_count IS NOT NULL "
+            "AND evidence_digest IS NOT NULL AND required_seconds IS NOT NULL"
             ")",
             name="ck_m1_qualification_epochs_terminal_fields",
         ),
@@ -133,6 +167,7 @@ def upgrade() -> None:
         sa.Column("started_at", sa.TIMESTAMP(timezone=True), nullable=False),
         sa.Column("qualified_at", sa.TIMESTAMP(timezone=True), nullable=False),
         sa.Column("payload", postgresql.JSONB, nullable=False),
+        sa.Column("canonical_payload", sa.Text, nullable=False),
         sa.Column("payload_sha256", sa.Text, nullable=False),
         sa.Column("certificate_digest", sa.Text, nullable=False),
         sa.Column("evidence_digest", sa.Text, nullable=False),
@@ -168,6 +203,10 @@ def upgrade() -> None:
             name="ck_m1_qualification_certificates_payload",
         ),
         sa.CheckConstraint(
+            "octet_length(canonical_payload) > 0",
+            name="ck_m1_qualification_certificates_canonical_payload",
+        ),
+        sa.CheckConstraint(
             "started_at < qualified_at",
             name="ck_m1_qualification_certificates_time_bounds",
         ),
@@ -186,10 +225,174 @@ def upgrade() -> None:
 
     op.execute(
         """
+        CREATE FUNCTION m1_verify_qualification_certificate_insert() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        DECLARE
+            epoch_row m1_qualification_epochs%ROWTYPE;
+            canonical_json jsonb;
+            canonical_digest text;
+            payload_started_at timestamptz;
+            payload_qualified_at timestamptz;
+            payload_required_seconds bigint;
+            payload_max_gap_seconds bigint;
+            payload_progress_count bigint;
+            payload_successful_count bigint;
+        BEGIN
+            canonical_json := NEW.canonical_payload::jsonb;
+            canonical_digest := encode(
+                digest(convert_to(NEW.canonical_payload, 'UTF8'), 'sha256'),
+                'hex'
+            );
+            IF canonical_json <> NEW.payload THEN
+                RAISE EXCEPTION 'qualification certificate payload/canonical mismatch';
+            END IF;
+            IF NEW.payload_sha256 <> canonical_digest
+               OR NEW.certificate_digest <> canonical_digest THEN
+                RAISE EXCEPTION 'qualification certificate digest mismatch';
+            END IF;
+
+            SELECT * INTO epoch_row
+            FROM m1_qualification_epochs
+            WHERE epoch_id = NEW.epoch_id
+            FOR SHARE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'qualification certificate epoch is missing';
+            END IF;
+            IF epoch_row.state <> 'qualified' OR epoch_row.qualified_at IS NULL THEN
+                RAISE EXCEPTION 'qualification certificate epoch is not qualified';
+            END IF;
+
+            IF NEW.policy_version <> epoch_row.policy_version
+               OR NEW.release_id <> epoch_row.release_id
+               OR NEW.config_id <> epoch_row.config_id
+               OR NEW.role_identity <> epoch_row.role_identity
+               OR NEW.started_at <> epoch_row.started_at
+               OR NEW.qualified_at <> epoch_row.qualified_at
+               OR NEW.evidence_digest <> epoch_row.evidence_digest THEN
+                RAISE EXCEPTION 'qualification certificate columns conflict with epoch';
+            END IF;
+
+            IF NEW.payload #>> '{identity,epoch_id}' <> epoch_row.epoch_id
+               OR NEW.payload #>> '{identity,policy_version}' <> epoch_row.policy_version
+               OR NEW.payload #>> '{identity,release_id}' <> epoch_row.release_id
+               OR NEW.payload #>> '{identity,config_id}' <> epoch_row.config_id
+               OR NEW.payload -> 'identity' -> 'role_identity' <> epoch_row.role_identity
+               OR NEW.payload ->> 'policy_version' <> epoch_row.policy_version
+               OR NEW.payload ->> 'evidence_digest' <> epoch_row.evidence_digest THEN
+                RAISE EXCEPTION 'qualification certificate identity conflicts with epoch';
+            END IF;
+
+            IF NEW.payload #>> '{bounds,started_at}' !~ '(Z|\\+00:00)$'
+               OR NEW.payload #>> '{bounds,qualified_at}' !~ '(Z|\\+00:00)$' THEN
+                RAISE EXCEPTION 'qualification certificate bounds must be UTC';
+            END IF;
+            payload_started_at := (NEW.payload #>> '{bounds,started_at}')::timestamptz;
+            payload_qualified_at := (NEW.payload #>> '{bounds,qualified_at}')::timestamptz;
+            payload_required_seconds := (NEW.payload #>> '{bounds,required_seconds}')::bigint;
+            payload_max_gap_seconds := (NEW.payload #>> '{bounds,max_gap_seconds}')::bigint;
+            payload_progress_count := (NEW.payload #>> '{counts,progress_count}')::bigint;
+            payload_successful_count := (NEW.payload #>> '{counts,successful_count}')::bigint;
+
+            IF payload_started_at <> epoch_row.started_at
+               OR payload_qualified_at <> epoch_row.qualified_at
+               OR payload_required_seconds <> epoch_row.required_seconds
+               OR payload_max_gap_seconds <> epoch_row.max_gap_seconds
+               OR payload_progress_count <> epoch_row.progress_count
+               OR payload_successful_count <> epoch_row.successful_count
+               OR NEW.payload -> 'slo' <> epoch_row.slo
+               OR NEW.payload -> 'contained_incidents' <> epoch_row.contained_incident_details
+               OR NEW.payload -> 'recovery_actions' <> epoch_row.recovery_action_details THEN
+                RAISE EXCEPTION 'qualification certificate payload conflicts with epoch';
+            END IF;
+
+            RETURN NEW;
+        END;
+        $$;
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER m1_qualification_certificates_verify_insert
+        BEFORE INSERT ON m1_qualification_certificates
+        FOR EACH ROW EXECUTE FUNCTION m1_verify_qualification_certificate_insert();
+        """
+    )
+
+    op.execute(
+        """
         CREATE FUNCTION m1_reject_qualification_certificate_mutation() RETURNS trigger
         LANGUAGE plpgsql AS $$
         BEGIN
             RAISE EXCEPTION 'qualification certificates are append-only';
+        END;
+        $$;
+        """
+    )
+
+    op.execute(
+        """
+        CREATE FUNCTION m1_insert_qualification_certificate(
+            p_certificate_id text,
+            p_epoch_id text,
+            p_identity_key text,
+            p_policy_version text,
+            p_release_id text,
+            p_config_id text,
+            p_role_identity jsonb,
+            p_started_at timestamptz,
+            p_qualified_at timestamptz,
+            p_payload jsonb,
+            p_canonical_payload text,
+            p_payload_sha256 text,
+            p_certificate_digest text,
+            p_evidence_digest text
+        ) RETURNS SETOF m1_qualification_certificates
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = public
+        AS $$
+        BEGIN
+            INSERT INTO m1_qualification_certificates (
+                certificate_id, epoch_id, identity_key, policy_version, release_id,
+                config_id, role_identity, started_at, qualified_at, payload,
+                canonical_payload, payload_sha256, certificate_digest, evidence_digest
+            ) VALUES (
+                p_certificate_id, p_epoch_id, p_identity_key, p_policy_version,
+                p_release_id, p_config_id, p_role_identity, p_started_at,
+                p_qualified_at, p_payload, p_canonical_payload, p_payload_sha256,
+                p_certificate_digest, p_evidence_digest
+            )
+            ON CONFLICT (identity_key) DO NOTHING;
+
+            RETURN QUERY
+            SELECT *
+            FROM m1_qualification_certificates
+            WHERE identity_key = p_identity_key;
+        END;
+        $$;
+        """
+    )
+    op.execute("REVOKE ALL ON TABLE m1_qualification_certificates FROM PUBLIC")
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+                REVOKE ALL ON TABLE m1_qualification_certificates FROM anon;
+                GRANT SELECT ON TABLE m1_qualification_certificates TO anon;
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+                REVOKE ALL ON TABLE m1_qualification_certificates FROM authenticated;
+                GRANT SELECT ON TABLE m1_qualification_certificates TO authenticated;
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+                REVOKE ALL ON TABLE m1_qualification_certificates FROM service_role;
+                GRANT SELECT ON TABLE m1_qualification_certificates TO service_role;
+                GRANT EXECUTE ON FUNCTION m1_insert_qualification_certificate(
+                    text, text, text, text, text, text, jsonb, timestamptz,
+                    timestamptz, jsonb, text, text, text, text
+                ) TO service_role;
+            END IF;
         END;
         $$;
         """
@@ -208,7 +411,17 @@ def downgrade() -> None:
         "DROP TRIGGER m1_qualification_certificates_immutable "
         "ON m1_qualification_certificates"
     )
+    op.execute(
+        "DROP TRIGGER m1_qualification_certificates_verify_insert "
+        "ON m1_qualification_certificates"
+    )
+    op.execute(
+        "DROP FUNCTION m1_insert_qualification_certificate("
+        "text, text, text, text, text, text, jsonb, timestamptz, "
+        "timestamptz, jsonb, text, text, text, text)"
+    )
     op.execute("DROP FUNCTION m1_reject_qualification_certificate_mutation()")
+    op.execute("DROP FUNCTION m1_verify_qualification_certificate_insert()")
     op.drop_index(
         "m1_qualification_certificates_created",
         table_name="m1_qualification_certificates",
