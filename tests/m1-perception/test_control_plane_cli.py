@@ -5,8 +5,22 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _allow_daemon_database_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setenv("POLYARB_DB_EXPECTED_DATABASE", "control")
+    monkeypatch.setattr(
+        cli_control_plane,
+        "verify_daemon_database_role",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
 
 
 def test_control_plane_connection_factory_bounds_postgres_connect_time(
@@ -345,6 +359,7 @@ def test_control_plane_serve_coordinator_excludes_dedicated_pool_workers(
 
 def test_r2_upload_fault_callback_requires_exact_acknowledgement_and_job_key() -> None:
     from polyarb import cli_control_plane
+    from polyarb.control_plane.models import JobLease
 
     with pytest.raises(ValueError, match="exact staging acknowledgement"):
         cli_control_plane._r2_upload_fault_callback(
@@ -361,13 +376,14 @@ def test_r2_upload_fault_callback_requires_exact_acknowledgement_and_job_key() -
         acknowledgement="staging-r2-upload-before-receipt",
     )
     assert callback is not None
-    callback(type("Lease", (), {"job_key": "structure:other:range:0"})())
+    callback(cast(JobLease, type("Lease", (), {"job_key": "structure:other:range:0"})()))
     with pytest.raises(KeyboardInterrupt, match="verified R2 upload"):
-        callback(type("Lease", (), {"job_key": "structure:one:range:0"})())
+        callback(cast(JobLease, type("Lease", (), {"job_key": "structure:one:range:0"})()))
 
 
 def test_retry_fault_callback_requires_bounded_exact_staging_configuration() -> None:
     from polyarb import cli_control_plane
+    from polyarb.control_plane.models import JobLease
 
     with pytest.raises(ValueError, match="exact staging acknowledgement"):
         cli_control_plane._retry_fault_callback(
@@ -386,12 +402,12 @@ def test_retry_fault_callback_requires_bounded_exact_staging_configuration() -> 
         acknowledgement="staging-retry-before-receipt",
     )
     assert callback is not None
-    callback(type("Lease", (), {"job_key": "structure:other:range:0"})())
+    callback(cast(JobLease, type("Lease", (), {"job_key": "structure:other:range:0"})()))
     with pytest.raises(RuntimeError, match="intentional staging retry"):
-        callback(type("Lease", (), {"job_key": "structure:one:range:0"})())
+        callback(cast(JobLease, type("Lease", (), {"job_key": "structure:one:range:0"})()))
     with pytest.raises(RuntimeError, match="intentional staging retry"):
-        callback(type("Lease", (), {"job_key": "structure:one:range:0"})())
-    callback(type("Lease", (), {"job_key": "structure:one:range:0"})())
+        callback(cast(JobLease, type("Lease", (), {"job_key": "structure:one:range:0"})()))
+    callback(cast(JobLease, type("Lease", (), {"job_key": "structure:one:range:0"})()))
 
 
 def test_quote_control_plane_once_runs_one_batch_then_certifier(monkeypatch, capsys) -> None:
@@ -763,6 +779,8 @@ def test_runtime_controller_status_is_read_only_and_bounded(monkeypatch, capsys)
     class ControlPlane:
         _connection_factory = object()
 
+    monkeypatch.delenv("POLYARB_DB_EXPECTED_DATABASE", raising=False)
+
     def status(factory, *, controller_id, now, sample_limit):
         assert factory is ControlPlane._connection_factory
         assert controller_id == "controller-a"
@@ -829,6 +847,7 @@ def test_runtime_observe_verify_derives_exact_current_identity_and_never_mutates
         _connection_factory = object()
 
     captured: dict[str, object] = {}
+    monkeypatch.delenv("POLYARB_DB_EXPECTED_DATABASE", raising=False)
     monkeypatch.setenv("POLYARB_RUNTIME_ROLE", "control-plane")
     monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://operator@example.test/control")
     monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
@@ -929,6 +948,111 @@ def test_runtime_reconcile_once_requires_enable_before_database_or_controller(
     )
     assert cli_control_plane.main(["runtime-reconcile-once", "--json"]) == 2
     assert "--enable is required" in capsys.readouterr().err
+
+
+def test_runtime_reconcile_once_verifies_database_role_before_claim(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    events: list[str] = []
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    def verify(factory, profile, *, expected_database):
+        assert factory is ControlPlane._connection_factory
+        assert profile == "runtime-controller"
+        assert expected_database == "role_test"
+        events.append("verify")
+
+    def claim(*_args, **_kwargs):
+        events.append("claim")
+        raise RuntimeError("stop-after-claim")
+
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://runtime:secret@example/control")
+    monkeypatch.setenv("POLYARB_DB_EXPECTED_DATABASE", "role_test")
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(cli_control_plane, "verify_daemon_database_role", verify, raising=False)
+    monkeypatch.setattr(cli_control_plane, "claim_controller", claim)
+
+    assert cli_control_plane.main(["runtime-reconcile-once", "--enable", "--json"]) == 1
+    assert events == ["verify", "claim"]
+    assert "postgresql://" not in capsys.readouterr().err
+
+
+def test_runtime_reconcile_serve_verifies_database_role_before_claim(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    events: list[str] = []
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    def verify(factory, profile, *, expected_database):
+        assert factory is ControlPlane._connection_factory
+        assert profile == "runtime-controller"
+        assert expected_database == "role_test"
+        events.append("verify")
+
+    def claim(*_args, **_kwargs):
+        events.append("claim")
+        raise RuntimeError("stop-after-claim")
+
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://runtime:secret@example/control")
+    monkeypatch.setenv("POLYARB_DB_EXPECTED_DATABASE", "role_test")
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(cli_control_plane, "verify_daemon_database_role", verify, raising=False)
+    monkeypatch.setattr(cli_control_plane, "claim_controller", claim)
+
+    assert (
+        cli_control_plane.main(
+            ["runtime-reconcile-serve", "--enable", "--interval-seconds", "0.001", "--json"]
+        )
+        == 1
+    )
+    assert events == ["verify", "claim"]
+    assert "postgresql://" not in capsys.readouterr().err
+
+
+def test_runtime_reconcile_role_contract_failure_stops_before_mutation_and_sanitizes(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.db_role_contract import DatabaseRoleContractError
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    def fail_contract(*_args, **_kwargs):
+        raise DatabaseRoleContractError(
+            "database-role.capability-missing",
+            "m1_runtime_controller_capability",
+        )
+
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://runtime:secret@example/control")
+    monkeypatch.setenv("POLYARB_DB_EXPECTED_DATABASE", "role_test")
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(cli_control_plane, "verify_daemon_database_role", fail_contract)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "claim_controller",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not claim")),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "insert_runtime_observe_decision",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not observe")),
+    )
+
+    assert cli_control_plane.main(["runtime-reconcile-once", "--enable", "--json"]) == 1
+    captured = capsys.readouterr()
+    assert "database-role.capability-missing" in captured.err
+    assert "m1_runtime_controller_capability" in captured.err
+    assert "postgresql://" not in captured.err
+    assert "secret" not in captured.err
 
 
 def test_runtime_reconcile_once_evaluates_schedules_and_executes_one_action(
@@ -1516,6 +1640,7 @@ def test_watchdog_observation_checks_additional_cross_app_targets(monkeypatch) -
 
 def test_structure_source_factory_builds_eight_distinct_lease_lanes(monkeypatch) -> None:
     from polyarb import cli_control_plane
+    from polyarb.control_plane.postgres import PostgresControlPlane
 
     captured: list[dict[str, object]] = []
 
@@ -1538,7 +1663,7 @@ def test_structure_source_factory_builds_eight_distinct_lease_lanes(monkeypatch)
     )
 
     result = cli_control_plane._transactional_structure_source_worker(
-        object(), worker_id="control:source"
+        cast(PostgresControlPlane, object()), worker_id="control:source"
     )
 
     assert isinstance(result, SourcePool)
@@ -1887,6 +2012,7 @@ def test_qualification_status_uses_scoped_dsn_and_is_read_only(monkeypatch, caps
 
     captured: dict[str, object] = {}
     monkeypatch.delenv("POLYARB_SUPABASE_DB_DSN", raising=False)
+    monkeypatch.delenv("POLYARB_DB_EXPECTED_DATABASE", raising=False)
     monkeypatch.setenv(
         "POLYARB_QUALIFICATION_DB_DSN",
         "postgresql://qualification:secret@example.test/control",
@@ -1932,6 +2058,7 @@ def test_qualification_status_uses_scoped_dsn_and_is_read_only(monkeypatch, caps
 def test_qualification_certificates_reverify_read_only_limit(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
+    monkeypatch.delenv("POLYARB_DB_EXPECTED_DATABASE", raising=False)
     monkeypatch.setenv("POLYARB_QUALIFICATION_DB_DSN", "postgresql://qualification@example/control")
 
     class Store:
@@ -1980,6 +2107,97 @@ def test_qualification_serve_requires_enable_before_connect(monkeypatch, capsys)
         cli_control_plane.main(["qualification-serve", "--interval-seconds", "30", "--json"]) == 2
     )
     assert "--enable is required" in capsys.readouterr().err
+
+
+def test_qualification_serve_verifies_database_role_before_service_construction(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    events: list[str] = []
+    connection_factory = object()
+
+    def verify(factory, profile, *, expected_database):
+        assert factory is connection_factory
+        assert profile == "qualification-worker"
+        assert expected_database == "role_test"
+        events.append("verify")
+
+    class Service:
+        def tick(self, now):
+            assert now.tzinfo is not None
+            events.append("tick")
+            raise RuntimeError("stop-after-tick")
+
+    def service_from_env(**_kwargs):
+        events.append("service")
+        return Service()
+
+    monkeypatch.setenv("POLYARB_QUALIFICATION_DB_DSN", "postgresql://qualification@example/control")
+    monkeypatch.setenv("POLYARB_DB_EXPECTED_DATABASE", "role_test")
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_qualification_connection_factory_from_env",
+        lambda: connection_factory,
+    )
+    monkeypatch.setattr(cli_control_plane, "verify_daemon_database_role", verify, raising=False)
+    monkeypatch.setattr(cli_control_plane, "_qualification_service_from_env", service_from_env)
+
+    assert (
+        cli_control_plane.main(
+            ["qualification-serve", "--enable", "--interval-seconds", "0.001", "--json"]
+        )
+        == 1
+    )
+    assert events == ["verify", "service", "tick"]
+    assert "postgresql://" not in capsys.readouterr().err
+
+
+def test_qualification_role_contract_failure_stops_before_service_and_sanitizes(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.db_role_contract import DatabaseRoleContractError
+
+    connection_factory = object()
+    events: list[str] = []
+
+    def fail_contract(*_args, **_kwargs):
+        events.append("verify")
+        raise DatabaseRoleContractError(
+            "database-role.forbidden-privilege-present",
+            "m1_qualification_ingress_ledger:INSERT",
+        )
+
+    monkeypatch.setenv(
+        "POLYARB_QUALIFICATION_DB_DSN",
+        "postgresql://qualification:secret@example/control",
+    )
+    monkeypatch.setenv("POLYARB_DB_EXPECTED_DATABASE", "role_test")
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_qualification_connection_factory_from_env",
+        lambda: connection_factory,
+    )
+    monkeypatch.setattr(cli_control_plane, "verify_daemon_database_role", fail_contract)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_qualification_service_from_env",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not build service")),
+    )
+
+    assert (
+        cli_control_plane.main(
+            ["qualification-serve", "--enable", "--interval-seconds", "0.001", "--json"]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert events == ["verify"]
+    assert "database-role.forbidden-privilege-present" in captured.err
+    assert "m1_qualification_ingress_ledger:INSERT" in captured.err
+    assert "postgresql://" not in captured.err
+    assert "secret" not in captured.err
 
 
 def test_qualification_serve_stops_on_tick_error_without_overlap(monkeypatch, capsys) -> None:

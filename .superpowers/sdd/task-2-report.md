@@ -1,68 +1,105 @@
-# Task 3 final repair report
+# Plan 05.6-207 Task 2 Report
 
 ## Outcome
 
-The opportunity-first Discovery → Candidate handoff now has one durable truth
-chain from current authority through actual watcher entry:
+Implemented the fail-closed daemon database identity contract for the runtime
+controller and qualification worker profiles.
 
-- Candidate source and freshness use the same current-certified authority
-  predicate, including independent pre-Discovery bootstrap authorities. Legacy
-  seeds preserve ordering only and cannot revive invalid,
-  factless, or otherwise authority-free groups. A current certified group with
-  an existing Candidate fact remains actual even when it is not promoted.
-- Admission capacity charges every admitted attempt-start write:
-  `poll + selection + high_burst*(timeout+terminal_write) +
-  capacity*attempt_start_write + (capacity-1)*(timeout+terminal_write)`.
-  All configured durations are rounded up to integer milliseconds. The
-  1/1/10/5/5 second counterexample admits capacity 2 (42s) and rejects
-  capacity 3 (62s > 60s).
-- Scheduler selection carries an immutable admission context into
-  `CandidateWatcher.run_once`. The watcher's first durable operation validates
-  group/event/membership/promotion/deadline against current certified authority
-  and records actual `started_at`. No scheduler control thread can create an
-  orphan start receipt.
-- Cancellation during the start transaction waits for SQLite convergence
-  before cancellation propagates. Cancellation before coroutine entry creates
-  no receipt. A late restart writes the unavailable breach fact and admits the
-  next group in the same transaction, then skips Structure and book I/O.
-- Attempt receipts retain group/event/membership/promotion/max-wait/deadline.
-  Status validates every receipt and requires matching durable breach evidence.
-- Every historical batch sample retains event/membership/quality/reason,
-  validates its historical revision existed by batch completion, enforces a
-  finite nonnegative liquidity value, and checks quality/reason/promotion
-  semantics. Count-preserving forged historical rows fail closed.
+- Added `src/polyarb/control_plane/db_role_contract.py` with immutable
+  `runtime-controller` and `qualification-worker` profiles, exact revision-026
+  capability role names, exact login role names, explicit table/function
+  allowlists, positive privilege checks, forbidden privilege checks, database
+  identity checks, unsafe role-attribute checks, cross-role checks, and
+  sanitized `DatabaseRoleContractError` surfaces.
+- Gated `runtime-reconcile-once`, `runtime-reconcile-serve`, and
+  `qualification-serve` after connection-factory creation and before claim,
+  service construction, observe/freshness/epoch writes, or service-loop work.
+- Kept `runtime-controller-status`, `runtime-observe-verify`,
+  `qualification-status`, and `qualification-certificates` usable without
+  `POLYARB_DB_EXPECTED_DATABASE`.
 
-## Verification
+## RED
 
-Focused behavior and regression:
+Command:
 
 ```text
-uv run pytest tests/perception/test_discovery.py \
-  tests/perception/test_discovery_status.py \
-  tests/perception/test_candidate_watcher.py \
-  tests/m1-perception/test_l1_quote_worker_wiring.py -q
-110 passed
+uv run pytest tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_cli.py -q
 ```
 
-Full repository (2477 collected):
+Output summary:
 
 ```text
-uv run pytest -q
-100% passed (one expected xfail, one skip)
+FFFFFFFFF.........................FFF..........................FF.       [100%]
+14 failed, 52 passed
 ```
 
-Static checks:
+Expected failures observed:
+
+- `ModuleNotFoundError: No module named 'polyarb.control_plane.db_role_contract'`
+  for the new verifier contract tests and role-contract CLI failure tests.
+- Runtime reconcile once/serve ordering tests saw `events == ["claim"]` instead
+  of `["verify", "claim"]`.
+- Qualification serve ordering test saw `events == ["service", "tick"]` instead
+  of `["verify", "service", "tick"]`.
+
+## GREEN / Verification
+
+Focused behavior and runtime observe regression:
 
 ```text
-uv run ruff check <all changed Python files>
+uv run pytest tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_cli.py tests/m1-perception/test_control_plane_runtime_observe.py -q
+........................................................................ [100%]
+```
+
+Lint:
+
+```text
+uv run ruff check src/polyarb/control_plane/db_role_contract.py src/polyarb/cli_control_plane.py tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_cli.py
 All checks passed!
-
-git diff --check
-exit 0
 ```
 
-## Scope and remaining boundary
+Syntax:
 
-This repair does not deploy, trade, or claim Task 4 production qualification.
-Process-level kill isolation remains outside Task 3. The implementation does
-not mutate admission policy during generic schema initialization.
+```text
+uv run python -m py_compile src/polyarb/control_plane/db_role_contract.py src/polyarb/cli_control_plane.py tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_cli.py
+```
+
+Pyright:
+
+```text
+uv run pyright src/polyarb/control_plane/db_role_contract.py src/polyarb/cli_control_plane.py tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_cli.py
+0 errors, 0 warnings, 0 informations
+```
+
+Diff check:
+
+```text
+git diff --check -- src/polyarb/control_plane/db_role_contract.py src/polyarb/cli_control_plane.py tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_cli.py
+```
+
+Exit status: `0`.
+
+## Self-Review
+
+- Verified every contract rejection path uses fake read-only connections and
+  records zero write-shaped SQL.
+- Verified daemon gates run before runtime lease claim and qualification
+  service construction.
+- Verified role-contract CLI errors expose only reason code plus object
+  identifier, and do not expose connection strings or credential material.
+- Verified the verifier uses a transaction plus `SET TRANSACTION READ ONLY`.
+- Checked `git diff --check` and searched modified files for debug leftovers.
+
+## Commit
+
+Committed with subject:
+
+```text
+feat(05.6-207): fail closed on daemon database identity
+```
+
+## Concerns
+
+- No production database was connected to or mutated.
+- `.superpowers/sdd/progress.md` had a pre-existing unstaged modification and
+  was not staged.

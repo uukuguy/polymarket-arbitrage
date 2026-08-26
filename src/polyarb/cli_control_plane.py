@@ -22,6 +22,10 @@ from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
 from polyarb.control_plane.alert_delivery import TransactionalAlertDeliveryWorker
+from polyarb.control_plane.db_role_contract import (
+    DatabaseRoleContractError,
+    verify_daemon_database_role,
+)
 from polyarb.control_plane.fault_soak import verify_fault_soak
 from polyarb.control_plane.faults import IntentionalStagingRetryFault
 from polyarb.control_plane.models import JobLease
@@ -435,6 +439,13 @@ def _qualification_connection_factory_from_env() -> Callable[[], psycopg.Connect
     if not dsn:
         return None
     return lambda: psycopg.connect(dsn, connect_timeout=5)
+
+
+def _required_expected_database_from_env() -> str:
+    expected_database = os.environ.get("POLYARB_DB_EXPECTED_DATABASE", "").strip()
+    if not expected_database:
+        raise ValueError("POLYARB_DB_EXPECTED_DATABASE is required")
+    return expected_database
 
 
 def _qualification_policy_from_env() -> RollingQualificationPolicy:
@@ -1690,6 +1701,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.interval_seconds <= 0 or args.batch_size <= 0:
                 print("--interval-seconds and --batch-size must be positive", file=sys.stderr)
                 return 2
+            verify_daemon_database_role(
+                connection_factory,
+                "qualification-worker",
+                expected_database=_required_expected_database_from_env(),
+            )
             service = _qualification_service_from_env(
                 batch_size=args.batch_size,
                 writer_id=args.writer_id,
@@ -1706,6 +1722,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _write(result, as_json=args.json)
             return 0
+        except DatabaseRoleContractError as error:
+            print(f"qualification service unavailable: {error}", file=sys.stderr)
+            return 1
         except (OSError, RuntimeError, ValueError, psycopg.Error) as error:
             print(f"qualification service unavailable: {error}", file=sys.stderr)
             return 1
@@ -1818,6 +1837,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if args.command == "runtime-reconcile-once":
+            verify_daemon_database_role(
+                control_plane._connection_factory,
+                "runtime-controller",
+                expected_database=_required_expected_database_from_env(),
+            )
             result = _runtime_reconcile_once(
                 control_plane,
                 args,
@@ -1826,6 +1850,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write(result, as_json=args.json)
             return 0
         if args.command == "runtime-reconcile-serve":
+            verify_daemon_database_role(
+                control_plane._connection_factory,
+                "runtime-controller",
+                expected_database=_required_expected_database_from_env(),
+            )
             try:
                 result = asyncio.run(
                     _run_runtime_reconcile_service(
@@ -2111,6 +2140,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         _write({"status": "ok", **snapshot}, as_json=args.json)
         return 0
+    except DatabaseRoleContractError as error:
+        if args.command in {"runtime-reconcile-once", "runtime-reconcile-serve"}:
+            print(f"runtime reconciliation unavailable: {error}", file=sys.stderr)
+        else:
+            print(f"control-plane command unavailable: {error}", file=sys.stderr)
+        return 1
     except (OSError, RuntimeError, ValueError, psycopg.Error) as error:
         if args.command in {"runtime-reconcile-once", "runtime-reconcile-serve"}:
             detail = _runtime_safe_text(error)
