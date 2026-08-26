@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Plan 207 local closure is complete; production revision 026 and observe-only gates remain NOT RUN pending a fresh exact authorization package
-last_updated: "2026-08-26T18:55:00+08:00"
+stopped_at: Plan 207 final-rereview local closure is complete; production revision 026 and observe-only gates remain NOT RUN pending a fresh exact authorization package
+last_updated: "2026-08-26T22:04:28+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -79,18 +79,23 @@ progress:
   an exact capability-limited Fly recovery adapter, durable observe-only
   decision/idle facts, and a read-only zero-mutation verifier. The production
   observe, job-recovery, and process-recovery gates are explicitly NOT RUN.
-- Plan `05.6-207` is locally complete after final-review remediation. Corrected
-  application release `8e3d9a1b` catalog-enumerates a closed effective authority
-  envelope across all `public` relations, sequences, schema CREATE, ownership,
-  SECURITY DEFINER routines, and exact membership. It also uses the canonical
-  app-scoped DSNs, restores revision-024 function ACLs on downgrade, redacts
-  qualification failures, and keeps the deterministic scoped-DSN fault matrix.
+- Plan `05.6-207` is locally complete after final-rereview remediation. Corrected
+  executable release `d050c8290c52e07acb72c8db7fe3fb02072d126c`
+  schema-qualifies both daemon paths and catalog-enumerates a closed effective
+  authority envelope across every non-system namespace, relation, sequence,
+  ownership, SECURITY DEFINER routine, database CREATE, search-path setting and
+  exact PostgreSQL 16 membership option. `TEMPORARY` remains an explicit
+  compatibility allowance under the controlled namespace contract.
+- Operator mutations use only `POLYARB_CONTROL_PLANE_DB_ADMIN_DSN`; runtime and
+  qualification verification retain their distinct app-scoped DSNs. The
+  disable path reconnects as admin after scoped verification, and neither app
+  receives the admin or the other app's secret.
 - Plan `05.6-207` is registered into `make planning-status` through the
   explicit `plan-source` anchor in `05.6-207-SUMMARY.md`; that gate also
   recomputes reviewed template hashes. `.githooks/pre-commit` protects staged
   SUMMARY content and `.githooks/commit-msg` reliably enforces plan-scoped
   subjects from the real message file.
-- Climb H-014 cycle 15 through H-018 cycle 20 scored 100/100 on dedicated local
+- Climb H-014 cycle 15 through H-018 cycle 21 scored 100/100 on dedicated local
   gates. H-016 run `20260825-053507-h-016` covers real
   migration/trust/late-ingress/freshness/recovery-observation behavior plus
   exact 26-hour restart/replay certificate evidence; H-017 run
@@ -98,8 +103,9 @@ progress:
   chains, API/smoke contracts and restart/ordering behavior. Fresh H-018 run
   `20260826-114829-h-018` covers isolated topology and adapter authority,
   both scoped daemon nodes, qualification identity digest, zero recovery
-  actions, and restart behavior at verification HEAD
-  `ae8332b5a05e03e67aac7287db9d9964e002d6fd`.
+  actions, and restart behavior. Append-only cycle 21 run
+  `20260826-135855-h-018` binds to exact executable commit
+  `d050c8290c52e07acb72c8db7fe3fb02072d126c`.
 - Production truth boundary as of the 2026-08-25 audit: production database is
   `postgres`; revisions 022/023/024/025 are applied and post-migration worker
   health passed; `m1_qualification_ingress_ledger` had 1643 incident ingress
@@ -138,7 +144,8 @@ progress:
 ## Resume
 
 1. Before production, present one exact observe-only authorization package:
-   corrected application release `8e3d9a1b`, production database `postgres`, revision 026,
+   corrected application release `d050c8290c52e07acb72c8db7fe3fb02072d126c`,
+   production database `postgres`, revision 026,
    the two scoped login roles, the two new private apps, observe-only mode,
    empty recovery allowlist, rollback, and evidence directory. Do not infer
    this authority from generic approval.

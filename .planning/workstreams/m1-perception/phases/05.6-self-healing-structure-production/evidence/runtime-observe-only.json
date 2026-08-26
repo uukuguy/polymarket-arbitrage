@@ -2,10 +2,10 @@
   "artifact_version": 2,
   "gate": "runtime-observe-only-production",
   "status": "not-run",
-  "recorded_at": "2026-08-26T18:18:45+08:00",
-  "reason": "Exact production deployment authorization has not yet been prepared or granted for corrected local executable release 8e3d9a1b, revision 026, the two scoped login roles, the two new private apps, observe-only mode, empty recovery allowlist, rollback, and this evidence directory.",
+  "recorded_at": "2026-08-26T22:04:28+08:00",
+  "reason": "Exact production deployment authorization has not yet been prepared or granted for corrected local executable release d050c8290c52e07acb72c8db7fe3fb02072d126c, revision 026, the two scoped login roles, the two new private apps, observe-only mode, empty recovery allowlist, rollback, and this evidence directory.",
   "local_implementation": {
-    "observe_only_commit": "8e3d9a1b",
+    "observe_only_commit": "d050c8290c52e07acb72c8db7fe3fb02072d126c",
     "required_migration_revisions": ["022", "023", "024", "025", "026"],
     "reviewed_artifacts": [
       {
@@ -37,7 +37,7 @@
     "fault_mutation": false
   },
   "authorization_required": {
-    "release_sha": "8e3d9a1b",
+    "release_sha": "d050c8290c52e07acb72c8db7fe3fb02072d126c",
     "database_revision": "026",
     "scoped_login_roles": [
       "m1_runtime_controller_login",

@@ -10328,3 +10328,42 @@ package. Do not deploy or inject faults from generic approval.
 authorization package for corrected application release `8e3d9a1b`, revision
 026, both scoped roles/apps, observe-only mode, empty recovery allowlist,
 rollback, and the 05.6 evidence directory.
+
+## SESSION 306 — 2026-08-26 (Plan 05.6-207 final-rereview closure)
+
+- [NAMESPACE] Commit `d050c829` schema-qualified every runtime-controller and
+  qualification-worker application query. Migration, admin preflight and daemon
+  startup now fail closed over all non-system namespace authority/ownership,
+  database CREATE, unsafe active/role/database search path, DSN overrides and
+  exact PostgreSQL 16 membership options. `TEMPORARY` is explicitly allowed for
+  old-app compatibility under controlled `pg_catalog,public` resolution.
+- [HANDOFF] Admin preflight/provision/disable now consume only
+  `POLYARB_CONTROL_PLANE_DB_ADMIN_DSN`; runtime verification uses
+  `POLYARB_SUPABASE_DB_DSN`, qualification verification uses
+  `POLYARB_QUALIFICATION_DB_DSN`. Real PG16 handoff proves admin provision,
+  scoped verification and admin reconnect disable without credential leakage.
+- [LIFECYCLE] Commit `ab0238eb` makes repeated numeric phase resolution
+  deterministic and fail-closed in real commit-msg lifecycle tests. The
+  planning gate now requires the registered runtime evidence file to be valid
+  JSON with a non-empty typed reviewed-artifact list before verifying hashes.
+- [VERIFIED] The original Plan 207 gate passed 315/315; all modified Plan 207
+  Python files passed Pyright, Ruff and py_compile; `uv build` passed. The local
+  12-case PG16 matrix produced 77 facts, 12 observe decisions and zero recovery
+  actions twice with byte-identical SHA256
+  `d4acee8edaa795adfd8d8e530f5140a97c52c71422ffcad6200de0adc60b173b`;
+  database/role/secret leakage checks were empty.
+- [CLIMB] Fresh append-only H-018 cycle 21 run
+  `20260826-135855-h-018` scored 100/100 across all nine nodes, including the
+  four scoped nodes, and binds exactly to executable commit
+  `d050c8290c52e07acb72c8db7fe3fb02072d126c`. External submission is false.
+- [PRODUCTION NOT RUN] No production connection, migration 026, role/secret
+  mutation, Fly deploy/app creation, recovery enablement, fault injection,
+  restart or downgrade ran. Production remains `postgres` at revisions
+  022/023/024/025 with the original four apps and observe-only status NOT RUN.
+
+[NEXT] Start with `/gsd-resume-work --ws m1-perception` and
+`make planning-status`; prepare, but do not execute, a fresh exact production
+authorization package for executable release
+`d050c8290c52e07acb72c8db7fe3fb02072d126c`, revision 026, both scoped
+roles/apps, observe-only mode, empty recovery allowlist, rollback, and the 05.6
+evidence directory.

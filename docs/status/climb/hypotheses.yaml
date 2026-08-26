@@ -500,3 +500,20 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 21
+    run: 20260826-135855-h-018
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed

@@ -21,8 +21,9 @@ owner and must be proven at startup. The model is:
 
 - LOGIN role = connection identity, password rotation, and emergency `NOLOGIN`.
 - Capability role = reviewed database authority bundle.
-- Startup contract = read-only proof that effective authority is neither
-  missing nor broader than expected across the complete catalog envelope.
+- Startup contract = read-only proof that effective authority and namespace
+  resolution are neither missing nor broader than expected across the complete
+  catalog envelope.
 
 For M1 self-healing this creates two scoped pairs:
 `m1_runtime_controller_login` inherits only
@@ -34,29 +35,32 @@ qualification worker can read qualification/publication truth and call bounded
 freshness/certificate functions, but it cannot directly insert the qualification
 ingress ledger or use its identity sequence.
 
-“Exact” means catalog enumeration, not a handful of negative probes. Both the
-migration assertion and daemon/operator checks compare every `public` relation
-privilege, every sequence privilege, schema CREATE, public object ownership,
-every SECURITY DEFINER routine EXECUTE privilege, and incoming/outgoing role
-membership against closed allowlists. Thus an unrelated table grant,
-`l3_retention_cleanup` execute, PUBLIC schema CREATE, an extra capability member,
-or a capability-owned application object cannot hide outside the named profile.
+“Exact” means catalog enumeration plus deterministic object resolution, not a
+handful of negative probes. Both daemon SQL paths use schema-qualified
+application objects. Migration and daemon/operator checks compare every
+non-system namespace/object authority and ownership, database CREATE,
+active/role/database search path, every SECURITY DEFINER routine, and complete
+PG16 membership option tuples against closed allowlists. Thus shadow schemas,
+non-public grants, path overrides or role delegation options cannot hide outside
+the named profile. `TEMPORARY` remains an explicit compatibility allowance only
+under this controlled namespace proof.
 
 Production boundary after local closure: production database `postgres` has
 revisions 022/023/024/025 applied, revision 026 is not applied, the original
 four apps are running, and the new runtime-controller/qualification-worker apps
 plus scoped production logins/secrets do not exist. The next action is an exact
-authorization package for corrected application release `8e3d9a1b`, revision 026, the two login roles, two
-new private apps, observe-only mode, empty recovery allowlist, rollback, and the
-05.6 evidence directory. It is not direct migration or deployment.
+authorization package for corrected application release
+`d050c8290c52e07acb72c8db7fe3fb02072d126c`, revision 026, the two login roles,
+two new private apps, observe-only mode, empty recovery allowlist, rollback, and
+the 05.6 evidence directory. It is not direct migration or deployment.
 
 Planning hygiene boundary: external Plan 05.6-207 is audited through the
 `plan-source` frontmatter in `05.6-207-SUMMARY.md`; a missing plan-side anchor
 or stale reviewed-template SHA256 is drift. `.githooks/pre-commit` remains a
 staged SUMMARY safety layer, while `.githooks/commit-msg` enforces plan-scoped
 subjects from Git's actual message file. Fresh local H-018 run
-`20260826-114829-h-018` binds the corrected executable state to
-`ae8332b5a05e03e67aac7287db9d9964e002d6fd` with all four scoped nodes passing.
+`20260826-135855-h-018` binds the corrected executable state to
+`d050c8290c52e07acb72c8db7fe3fb02072d126c` with all four scoped nodes passing.
 
 See `docs/learning/89-数据库能力角色与进程身份.md` for the teaching version.
 
@@ -1762,3 +1766,27 @@ success is not user receipt/read evidence.
   job fault and process/Machine fault each need an exact release/target/fault/
   maximum-effect/rollback/evidence authorization. Until then the evidence must
   say NOT RUN, not pending-pass or implied approval.
+
+### §2.32 Least privilege includes namespace resolution and credential lifecycle (2026-08-26)
+
+- A table-level ACL can be exact while an unqualified query resolves to an
+  attacker-owned same-name table. Runtime authority therefore needs both
+  schema-qualified application SQL and a startup proof over active, role and
+  database search paths plus every non-system schema/object owner and grant.
+- `CREATE ON DATABASE` is a namespace-creation capability, not harmless
+  metadata. It must be denied to scoped roles. `TEMPORARY` is intentionally
+  retained for original-app compatibility, but only with controlled
+  `pg_catalog,public` resolution and schema-qualified persistent objects.
+- PostgreSQL 16 membership is a tuple, not just two role names. `admin_option`,
+  `inherit_option` and `set_option` belong in the exact allowlist; otherwise a
+  role can delegate or switch authority while a name-only comparison stays
+  green.
+- Migration/provision/disable authority must not share an environment variable
+  with a daemon login. The operator path uses
+  `POLYARB_CONTROL_PLANE_DB_ADMIN_DSN`, then verifies the two app-specific DSNs,
+  then reconnects with the admin DSN for disable. Neither app receives the
+  admin credential or its peer's DSN.
+- Durable evidence gates must fail on missing structure before checking bytes.
+  A missing/invalid evidence file or empty artifact list is drift, and repeated
+  numeric phase names in Git hooks require an unambiguous staged workstream
+  path rather than first-match selection.
