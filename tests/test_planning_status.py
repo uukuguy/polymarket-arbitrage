@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import subprocess
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -148,4 +150,38 @@ def test_registered_external_plan_summary_drifts_when_anchor_is_missing(
 
     assert [(row.phase, row.plan, row.verdict) for row in rows] == [
         ("05.6", "207", "DRIFT")
+    ]
+
+
+def test_evidence_hash_gate_recomputes_named_artifacts_and_rejects_stale_bytes(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "deploy/control-plane/runtime.toml.template"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("version = 1\n")
+    evidence = tmp_path / ".planning/evidence/runtime-observe-only.json"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text(
+        json.dumps(
+            {
+                "status": "not-run",
+                "local_implementation": {
+                    "reviewed_artifacts": [
+                        {
+                            "path": "deploy/control-plane/runtime.toml.template",
+                            "sha256": sha256(artifact.read_bytes()).hexdigest(),
+                        }
+                    ]
+                },
+            }
+        )
+    )
+
+    assert planning_status.verify_evidence_hashes(tmp_path, (evidence,)) == []
+
+    artifact.write_text("version = 2\n")
+
+    assert planning_status.verify_evidence_hashes(tmp_path, (evidence,)) == [
+        ".planning/evidence/runtime-observe-only.json: stale SHA256 for "
+        "deploy/control-plane/runtime.toml.template"
     ]

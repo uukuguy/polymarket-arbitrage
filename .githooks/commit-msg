@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# commit-msg hook — require the durable SUMMARY for plan-scoped commits.
+
+set -euo pipefail
+
+COMMIT_MSG_FILE="${1:?commit message file is required}"
+SUBJECT=$(head -n1 "$COMMIT_MSG_FILE")
+PHASE_PLAN=$(printf '%s\n' "$SUBJECT" \
+  | grep -oE '^(feat|fix|refactor|test|perf|docs)\(([0-9]+\.?[0-9]*)-([0-9]+)\)' \
+  | head -n1 \
+  | sed -E 's/^[a-z]+\(([0-9]+\.?[0-9]*)-([0-9]+)\)/\1 \2/' \
+  || true)
+
+if [ -z "$PHASE_PLAN" ]; then
+  exit 0
+fi
+
+PHASE=$(printf '%s' "$PHASE_PLAN" | awk '{print $1}')
+PLAN=$(printf '%s' "$PHASE_PLAN" | awk '{print $2}')
+PHASE_DIR=$(find .planning/workstreams -type d -name "${PHASE}-*" 2>/dev/null | head -n1 || true)
+if [ -z "$PHASE_DIR" ]; then
+  PHASE_DIR=$(find .planning/phases -maxdepth 1 -type d -name "${PHASE}-*" 2>/dev/null | head -n1 || true)
+fi
+
+if [ -z "$PHASE_DIR" ]; then
+  printf '\n\033[31m✗ commit-msg BLOCKED\033[0m\n' >&2
+  printf '  No phase directory exists for plan-scoped subject: %s\n\n' "$SUBJECT" >&2
+  exit 1
+fi
+
+SUMMARY_CANDIDATES=(
+  "${PHASE_DIR}/${PHASE}-${PLAN}-SUMMARY.md"
+  "${PHASE_DIR}/${PHASE}-$(printf '%02d' "$((10#$PLAN))")-SUMMARY.md"
+)
+
+SUMMARY_FOUND=""
+for candidate in "${SUMMARY_CANDIDATES[@]}"; do
+  if git cat-file -e ":$candidate" 2>/dev/null || git cat-file -e "HEAD:$candidate" 2>/dev/null; then
+    SUMMARY_FOUND="$candidate"
+    break
+  fi
+done
+
+if [ -z "$SUMMARY_FOUND" ]; then
+  printf '\n\033[31m✗ commit-msg BLOCKED\033[0m\n' >&2
+  printf '  Commit subject: %s\n' "$SUBJECT" >&2
+  printf '  A plan-scoped commit requires its tracked or staged SUMMARY.\n' >&2
+  printf '  Looked for: %s\n\n' "${SUMMARY_CANDIDATES[*]}" >&2
+  exit 1
+fi
+
+printf '\033[32m✓ commit-msg: SUMMARY check passed (%s)\033[0m\n' "$SUMMARY_FOUND" >&2
+exit 0

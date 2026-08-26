@@ -34,7 +34,7 @@
    - 这会自动加载 `.planning/PROJECT.md`、`workstreams/<active>/STATE.md`、`workstreams/<active>/ROADMAP.md`
 2. 读取 `.planning/JOURNAL.md` 看时间线（gsd-resume-work 不读它，但里面的 [NEXT] 块给当前任务上下文）
 3. **跑 `make planning-status`** — 暴露任何"代码已落但 SUMMARY 缺失"的漂移；有 DRIFT 先补再开新工作
-4. 检查 `git config --get core.hooksPath` 是否指向 `.githooks`；不是则跑 `git config core.hooksPath .githooks`（pre-commit SUMMARY 守门员）
+4. 检查 `git config --get core.hooksPath` 是否指向 `.githooks`；不是则跑 `git config core.hooksPath .githooks`（pre-commit staged-content 安全层 + commit-msg SUMMARY 守门员）
 5. 按当前工作主题预读相关 `.planning/threads/*.md`（如做策略相关 → `market-microstructure.md`）
 6. **明确告知用户**：上次到哪、本次该做什么、第一条命令是什么
 
@@ -129,7 +129,7 @@ agent 并行执行会让用户的"理解曲线"被代码进度甩开。**每次 
 1. 立即创建 `{phase}-{plan}-SUMMARY.md`（模板：`~/.claude/get-shit-done/templates/summary.md`）
 2. 用 `/gsd-quick` / `/gsd-fast` / 手工 commit 绕过 execute-plan 时**也要补**
 3. 进下一个 plan 之前，先 `make planning-status` 确认上一个 plan 状态 OK
-4. pre-commit hook（`.githooks/pre-commit`）会强制阻断缺 SUMMARY 的 plan-scoped commit
+4. pre-commit hook（`.githooks/pre-commit`）守 staged/manual/SUMMARY 内容安全；commit-msg hook（`.githooks/commit-msg`）按真实 subject 阻断缺 SUMMARY 的 plan-scoped commit
 
 **为什么必须**：plan SUMMARY 是项目"可检索不失忆"的锚点。代码落地但 SUMMARY 缺失 = 知识蒸发（先例：phase 01.1 plan 04/05/06 的 5-09 漂移事故，5-10 才发现并补救）。
 
@@ -203,7 +203,7 @@ CLAUDE.md 是**契约**，状态在别处：
 - ❌ 会话结束不更新 JOURNAL
 - ❌ 假装我"上次已经知道"某事 — 没读 JOURNAL 就不知道
 - ❌ 实现新命令但忘记在 Makefile 中加入口（详见命令入口约定）
-- ❌ plan 代码 commit 落地但不写 SUMMARY（pre-commit hook 会拦，不要 `--no-verify` 绕）
+- ❌ plan 代码 commit 落地但不写 SUMMARY（commit-msg hook 会拦，pre-commit 同时守 staged SUMMARY；不要 `--no-verify` 绕）
 - ❌ 看到 `make planning-status` 显示 DRIFT 还推进新工作（先补窟窿）
 
 ## 命令入口约定（Makefile 强制）

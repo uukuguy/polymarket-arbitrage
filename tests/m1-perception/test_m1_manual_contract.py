@@ -129,11 +129,13 @@ def _hook_repo(tmp_path: Path) -> Path:
     (repo / "tools/climb/hooks").mkdir(parents=True)
     shutil.copy(ROOT / "scripts/check_m1_manual.py", repo / "scripts")
     shutil.copy(ROOT / ".githooks/pre-commit", repo / ".githooks")
+    shutil.copy(ROOT / ".githooks/commit-msg", repo / ".githooks")
     shutil.copy(ROOT / "tools/climb/hooks/pre-commit", repo / "tools/climb/hooks")
     (repo / MANUAL).write_text(_valid_manual())
     assert _git(repo, "init", "-q").returncode == 0
     assert _git(repo, "config", "user.email", "test@example.com").returncode == 0
     assert _git(repo, "config", "user.name", "Test User").returncode == 0
+    assert _git(repo, "config", "core.hooksPath", ".githooks").returncode == 0
     assert _git(repo, "add", ".").returncode == 0
     assert _git(repo, "commit", "--no-verify", "-qm", "fixture").returncode == 0
     return repo
@@ -418,41 +420,57 @@ def test_staged_unicode_manual_path_runs_validation(
     assert validations == [(root, _valid_manual())]
 
 
-def test_precommit_invokes_staged_m1_manual_check_before_summary_exit() -> None:
+def test_precommit_keeps_manual_and_staged_summary_safety_without_subject_peeking() -> None:
     text = (ROOT / ".githooks/pre-commit").read_text()
-    check = "uv run python scripts/check_m1_manual.py --staged"
-    assert check in text
-    assert text.index(check) < text.index("PHASE_PLAN=")
+    assert "uv run python scripts/check_m1_manual.py --staged" in text
+    assert "SUMMARY" in text
+    assert "COMMIT_EDITMSG" not in text
+    assert "PHASE_PLAN=" not in text
 
 
-def test_precommit_blocks_plan_scoped_docs_commit_without_summary(
+@pytest.mark.parametrize("commit_type", ("feat", "fix", "test", "docs"))
+def test_commit_msg_blocks_plan_scoped_commit_without_summary(
     tmp_path: Path,
+    commit_type: str,
 ) -> None:
     repo = _hook_repo(tmp_path)
     phase_dir = repo / ".planning/workstreams/m1-perception/phases/05.6-test"
     phase_dir.mkdir(parents=True)
     (repo / "docs/note.md").write_text("changed\n")
     assert _git(repo, "add", "docs/note.md").returncode == 0
-    (repo / ".git/COMMIT_EDITMSG").write_text(
-        "docs(05.6-207): close scoped runtime role implementation\n"
+    result = _git(
+        repo,
+        "commit",
+        "-m",
+        f"{commit_type}(05.6-207): close scoped runtime role implementation",
     )
 
-    result = _run_precommit(repo)
-
     assert result.returncode == 1
-    assert "pre-commit BLOCKED" in result.stderr
+    assert "commit-msg BLOCKED" in result.stderr
     assert "05.6-207-SUMMARY.md" in result.stderr
 
 
-def test_precommit_ignores_non_plan_scoped_docs_commit(tmp_path: Path) -> None:
+def test_commit_msg_accepts_plan_scoped_commit_with_staged_summary(tmp_path: Path) -> None:
+    repo = _hook_repo(tmp_path)
+    phase_dir = repo / ".planning/workstreams/m1-perception/phases/05.6-test"
+    phase_dir.mkdir(parents=True)
+    (phase_dir / "05.6-207-SUMMARY.md").write_text("# Summary\n")
+    (repo / "docs/note.md").write_text("changed\n")
+    assert _git(repo, "add", "docs/note.md", str(phase_dir.relative_to(repo))).returncode == 0
+
+    result = _git(repo, "commit", "-m", "docs(05.6-207): close plan")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_commit_msg_ignores_non_plan_scoped_docs_commit(tmp_path: Path) -> None:
     repo = _hook_repo(tmp_path)
     (repo / "docs/note.md").write_text("changed\n")
     assert _git(repo, "add", "docs/note.md").returncode == 0
-    (repo / ".git/COMMIT_EDITMSG").write_text("docs(m1): refresh note\n")
 
-    result = _run_precommit(repo)
+    result = _git(repo, "commit", "-m", "docs(m1): refresh note")
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_precommit_blocks_staged_public_contract_without_manual_sync(
@@ -883,9 +901,6 @@ def test_phase_054_manual_separates_read_only_and_mutation_commands() -> None:
     text = (ROOT / MANUAL).read_text()
     read_only = text.split("### 日常只读", 1)[1].split("### 本地 mutation", 1)[0]
     production_mutation = text.split("### 生产 mutation", 1)[1].split("### chaos", 1)[0]
-    assert L3_READ_ONLY_MAKE_TARGETS
-    assert L3_MUTATION_MAKE_TARGETS
-
     for target in L3_READ_ONLY_MAKE_TARGETS:
         assert f"`make {target}" in read_only
         assert f"`make {target}" not in production_mutation

@@ -3,12 +3,20 @@
   "gate": "runtime-observe-only-production",
   "status": "not-run",
   "recorded_at": "2026-08-26T18:18:45+08:00",
-  "reason": "Exact production deployment authorization has not yet been prepared or granted for final release e3c1fc83, revision 026, the two scoped login roles, the two new private apps, observe-only mode, empty recovery allowlist, rollback, and this evidence directory.",
+  "reason": "Exact production deployment authorization has not yet been prepared or granted for corrected local executable release 8e3d9a1b, revision 026, the two scoped login roles, the two new private apps, observe-only mode, empty recovery allowlist, rollback, and this evidence directory.",
   "local_implementation": {
-    "observe_only_commit": "e3c1fc83",
+    "observe_only_commit": "8e3d9a1b",
     "required_migration_revisions": ["022", "023", "024", "025", "026"],
-    "runtime_controller_template_sha256": "a639ccdf733a3138c8735d51a4bd03fbe0944e35ba0b321916debbcd4449f831",
-    "qualification_worker_template_sha256": "a9e5e6efbb5748f211f07e9332b58641f259f8ac0c3d45ac3a8a13c041838ff4",
+    "reviewed_artifacts": [
+      {
+        "path": "deploy/control-plane/fly-runtime-controller.toml.template",
+        "sha256": "795c6684dcd24041ae965f7a924c2c908c27bb8ebf79524b20a5a06d79f5bf91"
+      },
+      {
+        "path": "deploy/control-plane/fly-qualification-worker.toml.template",
+        "sha256": "a2637fcb6da1e1f271de8adb821cac388f25b72b58d63ed24d48daa1384a6628"
+      }
+    ],
     "default_recovery_mode": "observe-only",
     "local_fault_matrix": "pass",
     "production_decision_window_seconds": 0
@@ -29,7 +37,7 @@
     "fault_mutation": false
   },
   "authorization_required": {
-    "release_sha": "e3c1fc83",
+    "release_sha": "8e3d9a1b",
     "database_revision": "026",
     "scoped_login_roles": [
       "m1_runtime_controller_login",

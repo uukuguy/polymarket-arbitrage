@@ -15,11 +15,14 @@ file-system inconsistency is invisible until someone explicitly looks.
 """
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
+from typing import Any, cast
 
 PLANNING_ROOT = Path(".planning")
 
@@ -257,6 +260,71 @@ def collect() -> list[PlanRow]:
     return rows
 
 
+def verify_evidence_hashes(
+    project_root: Path = Path("."),
+    evidence_files: tuple[Path, ...] | None = None,
+) -> list[str]:
+    """Recompute every explicitly named evidence artifact SHA256."""
+
+    root = project_root.resolve()
+    files = evidence_files
+    if files is None:
+        files = tuple(
+            sorted(
+                root.glob(
+                    ".planning/workstreams/*/phases/*/evidence/*.json"
+                )
+            )
+        )
+    errors: list[str] = []
+    for evidence_file in files:
+        evidence_path = evidence_file if evidence_file.is_absolute() else root / evidence_file
+        try:
+            payload = cast(dict[str, Any], json.loads(evidence_path.read_text()))
+        except (OSError, json.JSONDecodeError):
+            continue
+        local = payload.get("local_implementation")
+        if not isinstance(local, dict):
+            continue
+        reviewed = local.get("reviewed_artifacts")
+        if reviewed is None:
+            continue
+        evidence_label = _project_label(root, evidence_path)
+        if not isinstance(reviewed, list):
+            errors.append(f"{evidence_label}: reviewed_artifacts must be a list")
+            continue
+        for entry in reviewed:
+            if not isinstance(entry, dict):
+                errors.append(f"{evidence_label}: invalid reviewed artifact entry")
+                continue
+            named_path = entry.get("path")
+            expected_hash = entry.get("sha256")
+            if not isinstance(named_path, str) or not isinstance(expected_hash, str):
+                errors.append(f"{evidence_label}: invalid reviewed artifact entry")
+                continue
+            relative_path = Path(named_path)
+            if relative_path.is_absolute() or ".." in relative_path.parts:
+                errors.append(f"{evidence_label}: non-canonical artifact path {named_path}")
+                continue
+            artifact_path = (root / relative_path).resolve()
+            try:
+                artifact_path.relative_to(root)
+                actual_hash = sha256(artifact_path.read_bytes()).hexdigest()
+            except (OSError, ValueError):
+                errors.append(f"{evidence_label}: missing artifact {named_path}")
+                continue
+            if actual_hash != expected_hash:
+                errors.append(f"{evidence_label}: stale SHA256 for {named_path}")
+    return errors
+
+
+def _project_label(root: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
 def render(rows: list[PlanRow]) -> int:
     if not rows:
         print("No PLAN.md files found under .planning/")
@@ -304,7 +372,17 @@ def render(rows: list[PlanRow]) -> int:
 
 
 def main() -> int:
-    return render(collect())
+    plan_status = render(collect())
+    hash_errors = verify_evidence_hashes()
+    if hash_errors:
+        print(red(f"⚠ {len(hash_errors)} stale or invalid evidence artifact hash(es)."))
+        for error in hash_errors:
+            print(red(f"  {error}"))
+        print()
+        return 1
+    print(green("✓ reviewed evidence artifact hashes match current bytes."))
+    print()
+    return plan_status
 
 
 if __name__ == "__main__":
