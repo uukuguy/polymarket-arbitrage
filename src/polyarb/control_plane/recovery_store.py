@@ -42,9 +42,7 @@ ConnectionFactory = Callable[[], psycopg.Connection[Any]]
 
 _RECOVERY_STATEMENT_TIMEOUT_MS = 2_000
 _RECOVERY_LOCK_TIMEOUT_MS = 1_000
-_CLOSED_RESULT_CODES = frozenset(
-    {"succeeded", "failed", "stale-noop", "disabled-action"}
-)
+_CLOSED_RESULT_CODES = frozenset({"succeeded", "failed", "stale-noop", "disabled-action"})
 RecoveryActionCallback = Callable[[Cursor[Any], RecoveryActionRecord], object]
 
 
@@ -146,14 +144,10 @@ def _set_recovery_timeouts(
         statement_timeout_ms = min(statement_timeout_ms, max(1, remaining_ms - 1))
     lock_timeout_ms = min(_RECOVERY_LOCK_TIMEOUT_MS, statement_timeout_ms)
     cursor.execute(
-        sql.SQL("SET LOCAL statement_timeout = {}").format(
-            sql.Literal(f"{statement_timeout_ms}ms")
-        )
+        sql.SQL("SET LOCAL statement_timeout = {}").format(sql.Literal(f"{statement_timeout_ms}ms"))
     )
     cursor.execute(
-        sql.SQL("SET LOCAL lock_timeout = {}").format(
-            sql.Literal(f"{lock_timeout_ms}ms")
-        )
+        sql.SQL("SET LOCAL lock_timeout = {}").format(sql.Literal(f"{lock_timeout_ms}ms"))
     )
 
 
@@ -164,7 +158,7 @@ def _fetch_action_by_idempotency(
     for_update: bool = False,
 ) -> RecoveryActionRecord | None:
     cursor.execute(
-        f"SELECT {_ACTION_COLUMNS} FROM m1_recovery_actions WHERE idempotency_key = %s"
+        f"SELECT {_ACTION_COLUMNS} FROM public.m1_recovery_actions WHERE idempotency_key = %s"
         + (" FOR UPDATE" if for_update else ""),
         (idempotency_key,),
     )
@@ -179,7 +173,7 @@ def _fetch_action_by_id(
     for_update: bool = False,
 ) -> RecoveryActionRecord | None:
     cursor.execute(
-        f"SELECT {_ACTION_COLUMNS} FROM m1_recovery_actions WHERE action_id = %s"
+        f"SELECT {_ACTION_COLUMNS} FROM public.m1_recovery_actions WHERE action_id = %s"
         + (" FOR UPDATE" if for_update else ""),
         (action_id,),
     )
@@ -209,12 +203,12 @@ def claim_controller(
         _set_recovery_timeouts(cursor)
         cursor.execute(
             """
-            INSERT INTO m1_runtime_controller_leases (
+            INSERT INTO public.m1_runtime_controller_leases AS lease (
                 controller_id, owner_id, lease_epoch, lease_expires_at, claimed_at, updated_at
             ) VALUES (%s, %s, 1, %s, %s, %s)
             ON CONFLICT (controller_id) DO UPDATE
             SET owner_id = EXCLUDED.owner_id,
-                lease_epoch = m1_runtime_controller_leases.lease_epoch + 1,
+                lease_epoch = lease.lease_epoch + 1,
                 lease_expires_at = EXCLUDED.lease_expires_at,
                 claimed_at = EXCLUDED.claimed_at,
                 updated_at = EXCLUDED.updated_at
@@ -257,7 +251,7 @@ def renew_controller(
         _set_recovery_timeouts(cursor)
         cursor.execute(
             """
-            UPDATE m1_runtime_controller_leases
+            UPDATE public.m1_runtime_controller_leases
             SET lease_expires_at = %s, updated_at = %s
             WHERE controller_id = %s AND owner_id = %s AND lease_epoch = %s
               AND lease_expires_at > %s
@@ -292,7 +286,7 @@ def _controller_is_current(
     cursor.execute(
         """
         SELECT owner_id, lease_epoch, lease_expires_at
-        FROM m1_runtime_controller_leases
+        FROM public.m1_runtime_controller_leases
         WHERE controller_id = %s
         FOR UPDATE
         """,
@@ -409,7 +403,7 @@ def read_runtime_controller_status(
             """
             SELECT controller_id, owner_id, lease_epoch, lease_expires_at,
                    claimed_at, updated_at
-            FROM m1_runtime_controller_leases
+            FROM public.m1_runtime_controller_leases
             WHERE controller_id = %s
             """,
             (controller_id,),
@@ -437,7 +431,7 @@ def read_runtime_controller_status(
             """
             SELECT incident_key, component, severity, state, summary,
                    opened_at, updated_at
-            FROM m1_incidents
+            FROM public.m1_incidents
             WHERE state IN ('open', 'acknowledged')
               AND (component LIKE 'runtime%%' OR component LIKE 'recovery%%'
                    OR incident_key LIKE 'recovery:%%')
@@ -463,7 +457,7 @@ def read_runtime_controller_status(
             """
             SELECT target_type, target_id, max_actions, remaining_actions,
                    last_next_allowed_at, updated_at
-            FROM m1_recovery_target_budgets
+            FROM public.m1_recovery_target_budgets
             WHERE controller_id = %s
             ORDER BY updated_at DESC, target_type, target_id
             LIMIT %s
@@ -487,7 +481,7 @@ def read_runtime_controller_status(
         cursor.execute(
             f"""
             SELECT {_ACTION_COLUMNS}
-            FROM m1_recovery_actions
+            FROM public.m1_recovery_actions
             WHERE controller_id = %s AND state IN ('pending', 'running')
             ORDER BY requested_at ASC, action_id ASC
             LIMIT %s
@@ -499,7 +493,7 @@ def read_runtime_controller_status(
         cursor.execute(
             f"""
             SELECT {_ACTION_COLUMNS}
-            FROM m1_recovery_actions
+            FROM public.m1_recovery_actions
             WHERE controller_id = %s AND state = 'completed'
             ORDER BY finished_at DESC NULLS LAST, action_id DESC
             LIMIT %s
@@ -530,11 +524,13 @@ def read_runtime_controller_status(
             "recovery_budget": budgets,
             "actions": {
                 "pending": [
-                    view for action, view in zip(active_actions, action_views, strict=True)
+                    view
+                    for action, view in zip(active_actions, action_views, strict=True)
                     if action.state == "pending"
                 ],
                 "running": [
-                    view for action, view in zip(active_actions, action_views, strict=True)
+                    view
+                    for action, view in zip(active_actions, action_views, strict=True)
                     if action.state == "running"
                 ],
                 "recent_completed": completed_views,
@@ -556,13 +552,9 @@ def _runtime_failure_class(value: object) -> RecoveryFailureClass | None:
 
 def _runtime_deadline_profile(row: Mapping[str, object]) -> RuntimeDeadlineProfile:
     started_at = _require_aware(cast(datetime, row["started_at"]), "started_at")
-    heartbeat_at = _require_aware(
-        cast(datetime, row["last_heartbeat_at"]), "last_heartbeat_at"
-    )
+    heartbeat_at = _require_aware(cast(datetime, row["last_heartbeat_at"]), "last_heartbeat_at")
     progress_at = _require_aware(cast(datetime, row["last_progress_at"]), "last_progress_at")
-    lease_deadline = _require_aware(
-        cast(datetime, row["lease_deadline_at"]), "lease_deadline_at"
-    )
+    lease_deadline = _require_aware(cast(datetime, row["lease_deadline_at"]), "lease_deadline_at")
     heartbeat_deadline = _require_aware(
         cast(datetime, row["heartbeat_deadline_at"]), "heartbeat_deadline_at"
     )
@@ -618,11 +610,11 @@ def read_runtime_reconcile_states(
                    c.next_probe_at AS circuit_next_probe_at,
                    a.error_class AS attempt_error_class,
                    b.remaining_actions
-            FROM m1_job_runtime_state AS r
-            JOIN m1_jobs AS j ON j.job_key = r.job_key
-            LEFT JOIN m1_job_circuits AS c ON c.job_key = j.job_key
-            LEFT JOIN m1_job_attempts AS a ON a.attempt_id = r.attempt_id
-            LEFT JOIN m1_recovery_target_budgets AS b
+            FROM public.m1_job_runtime_state AS r
+            JOIN public.m1_jobs AS j ON j.job_key = r.job_key
+            LEFT JOIN public.m1_job_circuits AS c ON c.job_key = j.job_key
+            LEFT JOIN public.m1_job_attempts AS a ON a.attempt_id = r.attempt_id
+            LEFT JOIN public.m1_recovery_target_budgets AS b
               ON b.controller_id = %s
              AND b.target_type = CASE WHEN c.state = 'open' THEN 'circuit' ELSE 'job' END
              AND b.target_id = j.job_key
@@ -674,12 +666,8 @@ def read_runtime_reconcile_states(
                     owner_is_current=owner_is_current,
                     profile=_runtime_deadline_profile(row),
                     attempt_started_at=_require_aware(row["started_at"], "started_at"),
-                    last_heartbeat_at=_require_aware(
-                        row["last_heartbeat_at"], "last_heartbeat_at"
-                    ),
-                    last_progress_at=_require_aware(
-                        row["last_progress_at"], "last_progress_at"
-                    ),
+                    last_heartbeat_at=_require_aware(row["last_heartbeat_at"], "last_heartbeat_at"),
+                    last_progress_at=_require_aware(row["last_progress_at"], "last_progress_at"),
                     lease_expires_at=_require_aware(row["lease_deadline_at"], "lease_deadline_at"),
                     retry_count=max(0, int(row["attempt_count"])),
                     recovery_budget=RecoveryBudget(max(0, remaining)),
@@ -723,7 +711,7 @@ def _lock_target_budget(
 ) -> BudgetState:
     cursor.execute(
         """
-        INSERT INTO m1_recovery_target_budgets (
+        INSERT INTO public.m1_recovery_target_budgets (
             controller_id, target_type, target_id, max_actions, remaining_actions,
             last_next_allowed_at, created_at, updated_at
         ) VALUES (%s, %s, %s, %s, %s, NULL, %s, %s)
@@ -742,7 +730,7 @@ def _lock_target_budget(
     cursor.execute(
         """
         SELECT max_actions, remaining_actions, last_next_allowed_at
-        FROM m1_recovery_target_budgets
+        FROM public.m1_recovery_target_budgets
         WHERE controller_id = %s AND target_type = %s AND target_id = %s
         FOR UPDATE
         """,
@@ -773,7 +761,7 @@ def _consume_budget_and_cooldown(
 ) -> None:
     cursor.execute(
         """
-        UPDATE m1_recovery_target_budgets
+        UPDATE public.m1_recovery_target_budgets
         SET remaining_actions = remaining_actions - 1,
             last_next_allowed_at = GREATEST(
                 COALESCE(last_next_allowed_at, '-infinity'::timestamptz),
@@ -896,7 +884,7 @@ def _lock_runtime_fence(
     cursor.execute(
         """
         SELECT attempt_id, lease_epoch, worker_id, stage
-        FROM m1_job_runtime_state
+        FROM public.m1_job_runtime_state
         WHERE job_key = %s
         FOR UPDATE
         """,
@@ -923,7 +911,7 @@ def _fetch_active_action_for_target(
     cursor.execute(
         f"""
         SELECT {_ACTION_COLUMNS}
-        FROM m1_recovery_actions
+        FROM public.m1_recovery_actions
         WHERE target_type = %s AND target_id = %s
           AND state IN ('pending', 'running')
         ORDER BY requested_at, action_id
@@ -956,7 +944,7 @@ def _insert_action_once(
 ) -> RecoveryActionRecord | None:
     cursor.execute(
         """
-        INSERT INTO m1_recovery_actions (
+        INSERT INTO public.m1_recovery_actions (
             action_id, controller_id, controller_owner_id, incident_key,
             target_type, target_id, action_type, expected_controller_epoch,
             expected_attempt_id, expected_lease_epoch, requested_at, state,
@@ -1010,9 +998,7 @@ def _existing_replay_or_conflict(
     if existing is None:
         raise RecoveryActionConflict("recovery action idempotency raced without a row")
     expected_incident_key = (
-        None
-        if existing.result_code in {"stale-noop", "disabled-action"}
-        else incident_key
+        None if existing.result_code in {"stale-noop", "disabled-action"} else incident_key
     )
     if not _same_scheduled_action(
         existing,
@@ -1050,7 +1036,7 @@ def _append_recovery_started_event(
     cursor.execute(
         """
         SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
-        FROM m1_job_runtime_events
+        FROM public.m1_job_runtime_events
         WHERE attempt_id = %s
         """,
         (runtime.attempt_id,),
@@ -1061,7 +1047,7 @@ def _append_recovery_started_event(
     event_sequence = int(sequence["next_sequence"])
     cursor.execute(
         """
-        INSERT INTO m1_job_runtime_events (
+        INSERT INTO public.m1_job_runtime_events (
             event_id, job_key, attempt_id, lease_epoch, worker_id,
             event_sequence, kind, stage, progress_sequence, progress_current,
             progress_total, detail, occurred_at, idempotency_key
@@ -1083,7 +1069,7 @@ def _append_recovery_started_event(
     )
     cursor.execute(
         """
-        UPDATE m1_job_runtime_state
+        UPDATE public.m1_job_runtime_state
         SET recovery_state = 'recovering', updated_at = %s
         WHERE job_key = %s AND attempt_id = %s AND lease_epoch = %s
         """,
@@ -1109,7 +1095,7 @@ def _record_recovery_incident(
 ) -> None:
     cursor.execute(
         """
-        INSERT INTO m1_incidents (
+        INSERT INTO public.m1_incidents (
             incident_key, dedupe_key, component, severity, state, summary,
             opened_at, updated_at
         ) VALUES (%s, %s, %s, %s, 'open', %s, %s, %s)
@@ -1135,7 +1121,7 @@ def _record_recovery_incident(
     event_id = str(uuid4())
     cursor.execute(
         """
-        INSERT INTO m1_incident_events (
+        INSERT INTO public.m1_incident_events (
             incident_event_id, incident_key, kind, detail, idempotency_key, occurred_at
         ) VALUES (%s, %s, 'recovery-started', %s, %s, %s)
         ON CONFLICT (idempotency_key) DO NOTHING
@@ -1166,7 +1152,7 @@ def _record_recovery_incident(
         cursor.execute(
             """
             SELECT incident_event_id
-            FROM m1_incident_events
+            FROM public.m1_incident_events
             WHERE idempotency_key = %s
             """,
             (f"{idempotency_key}:incident-event",),
@@ -1193,7 +1179,7 @@ def _record_recovery_incident(
     for channel in channels:
         cursor.execute(
             """
-            INSERT INTO m1_alert_outbox (
+            INSERT INTO public.m1_alert_outbox (
                 outbox_id, incident_event_id, channel, payload, state,
                 next_attempt_at, created_at
             ) VALUES (%s, %s, %s, %s, 'pending', %s, %s)
@@ -1275,9 +1261,7 @@ def schedule_action(
         existing = _fetch_action_by_idempotency(cursor, idempotency_key, for_update=True)
         if existing is not None:
             replay_incident_key = (
-                None
-                if existing.result_code in {"stale-noop", "disabled-action"}
-                else incident_key
+                None if existing.result_code in {"stale-noop", "disabled-action"} else incident_key
             )
             if not _same_scheduled_action(
                 existing,
@@ -1476,7 +1460,7 @@ def claim_action(
         cursor.execute(
             f"""
             SELECT {_ACTION_COLUMNS}
-            FROM m1_recovery_actions
+            FROM public.m1_recovery_actions
             WHERE controller_id = %s
               AND expected_controller_epoch = %s
               AND (
@@ -1496,7 +1480,7 @@ def claim_action(
         worker_epoch = action.worker_epoch + 1
         cursor.execute(
             """
-            UPDATE m1_recovery_actions
+            UPDATE public.m1_recovery_actions
             SET state = 'running', started_at = %s, worker_id = %s,
                 worker_epoch = %s, worker_lease_expires_at = %s
             WHERE action_id = %s
@@ -1555,7 +1539,7 @@ def finish_action(
             return action
         cursor.execute(
             """
-            UPDATE m1_recovery_actions
+            UPDATE public.m1_recovery_actions
             SET state = 'completed', result_code = %s, finished_at = %s,
                 detail = %s
             WHERE action_id = %s AND state = 'running'
@@ -1677,7 +1661,7 @@ def _complete_action_cursor(
     detail = _bounded_detail({"postcondition": result_code})
     cursor.execute(
         """
-        UPDATE m1_recovery_actions
+        UPDATE public.m1_recovery_actions
         SET state = 'completed', result_code = %s, finished_at = clock_timestamp(), detail = %s
         WHERE action_id = %s AND state = 'running'
           AND worker_id = %s AND worker_epoch = %s
@@ -1709,8 +1693,8 @@ def _action_runtime_fence_current(
         """
         SELECT j.state, j.lease_owner, j.lease_epoch, j.lease_expires_at,
                r.attempt_id, r.lease_epoch AS runtime_epoch
-        FROM m1_jobs AS j
-        JOIN m1_job_runtime_state AS r ON r.job_key = j.job_key
+        FROM public.m1_jobs AS j
+        JOIN public.m1_job_runtime_state AS r ON r.job_key = j.job_key
         WHERE j.job_key = %s
         FOR UPDATE
         """,
@@ -1721,9 +1705,10 @@ def _action_runtime_fence_current(
         return False
     assert action.worker_lease_expires_at is not None
     deadlines: list[datetime] = [action.worker_lease_expires_at]
-    if row["lease_expires_at"] is not None and _require_aware(
-        row["lease_expires_at"], "lease_expires_at"
-    ) > now:
+    if (
+        row["lease_expires_at"] is not None
+        and _require_aware(row["lease_expires_at"], "lease_expires_at") > now
+    ):
         deadlines.append(_require_aware(row["lease_expires_at"], "lease_expires_at"))
     _set_recovery_timeouts(cursor, now=now, deadlines=tuple(deadlines))
     if (

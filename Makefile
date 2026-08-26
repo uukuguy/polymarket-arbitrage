@@ -655,11 +655,13 @@ control-plane-preflight:
 ## control-plane-db-role-preflight: Read-only check that revision 026 capability roles are safe; no login/secret mutation.
 control-plane-db-role-preflight:
 	@test -n "$(expected_database)" || (echo "usage: make control-plane-db-role-preflight expected_database=<name>" >&2; exit 2)
+	@test -n "$$POLYARB_CONTROL_PLANE_DB_ADMIN_DSN" || (echo "ERROR: POLYARB_CONTROL_PLANE_DB_ADMIN_DSN is required" >&2; exit 2)
 	@uv run python -m polyarb.control_plane.db_role_admin preflight --expected-database "$(expected_database)" --json
 
 ## control-plane-db-role-provision: Explicitly create/rotate the two scoped DB logins; requires enable=1 and password env vars; never contacts Fly.
 control-plane-db-role-provision:
 	@test "$(enable)" = "1" -a -n "$(expected_database)" || (echo "usage: make control-plane-db-role-provision enable=1 expected_database=<name>" >&2; exit 2)
+	@test -n "$$POLYARB_CONTROL_PLANE_DB_ADMIN_DSN" || (echo "ERROR: POLYARB_CONTROL_PLANE_DB_ADMIN_DSN is required" >&2; exit 2)
 	@uv run python -m polyarb.control_plane.db_role_admin provision --enable --expected-database "$(expected_database)" --json
 
 ## control-plane-db-role-verify: Read-only effective-permission proof for profile=runtime-controller|qualification-worker.
@@ -670,6 +672,7 @@ control-plane-db-role-verify:
 ## control-plane-db-role-disable: Disable both scoped logins after both apps are stopped; requires enable=1; never downgrades schema.
 control-plane-db-role-disable:
 	@test "$(enable)" = "1" -a -n "$(expected_database)" || (echo "usage: make control-plane-db-role-disable enable=1 expected_database=<name>" >&2; exit 2)
+	@test -n "$$POLYARB_CONTROL_PLANE_DB_ADMIN_DSN" || (echo "ERROR: POLYARB_CONTROL_PLANE_DB_ADMIN_DSN is required" >&2; exit 2)
 	@uv run python -m polyarb.control_plane.db_role_admin disable --enable --expected-database "$(expected_database)" --json
 
 ## control-plane-render-rollout: Render local-only six-app runtime/qualification topology and checklist; usage enable=1 release_id=<40-char-lowercase-git-sha>; never contacts cloud resources.

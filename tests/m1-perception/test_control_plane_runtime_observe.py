@@ -152,7 +152,7 @@ def test_insert_decision_is_idempotent_and_never_writes_recovery_actions() -> No
     sql = "\n".join(connection.sql)
     assert "SELECT owner_id, lease_epoch, lease_expires_at" in sql
     assert "FOR SHARE" in sql
-    assert "INSERT INTO m1_runtime_observe_decisions" in sql
+    assert "INSERT INTO public.m1_runtime_observe_decisions" in sql
     assert "ON CONFLICT (idempotency_key) DO NOTHING" in sql
     assert "m1_recovery_actions" not in sql
     assert any(query == "SET TRANSACTION READ WRITE" for query in connection.sql)
@@ -259,7 +259,9 @@ def test_verifier_requires_read_only_window_zero_actions_and_candidate_parity() 
     assert "controller_owner_id = %s" in sql
     assert "m1_job_runtime_state" in sql
     assert "COUNT(*)" in sql and "m1_recovery_actions" in sql
-    action_queries = [query for query in connection.sql if "FROM m1_recovery_actions" in query]
+    action_queries = [
+        query for query in connection.sql if "FROM public.m1_recovery_actions" in query
+    ]
     assert len(action_queries) == 1
     assert "controller_id = %s" in action_queries[0]
     assert "requested_at BETWEEN %s AND %s" in action_queries[0]
@@ -412,9 +414,7 @@ def test_verifier_fails_on_gap_recovery_mutation_mixed_identity_or_replay_mismat
         "action_type": None,
         "reason_code": "job.healthy",
     }
-    stale_digest = sha256(
-        runtime_observe.canonical_observe_record_bytes(stale_payload)
-    ).hexdigest()
+    stale_digest = sha256(runtime_observe.canonical_observe_record_bytes(stale_payload)).hexdigest()
     stale_decision = replace(
         boundary_record,
         decision_id=f"runtime-observe:{stale_digest}",
@@ -660,7 +660,7 @@ class FakeCursor:
         normalized = " ".join(str(query).split())
         self.connection.sql.append(normalized)
         self.connection.params.append(params)
-        if normalized.startswith("INSERT INTO m1_runtime_observe_decisions"):
+        if normalized.startswith("INSERT INTO public.m1_runtime_observe_decisions"):
             inserted = params
             assert isinstance(inserted, tuple)
             self.connection.pending_return = (
@@ -674,20 +674,20 @@ class FakeCursor:
             )
 
     def fetchall(self) -> list[dict[str, Any]]:
-        if self.connection.sql[-1].find("FROM m1_job_runtime_state") >= 0:
+        if self.connection.sql[-1].find("FROM public.m1_job_runtime_state") >= 0:
             return self.connection.current_candidate_rows
         return self.connection.rows
 
     def fetchone(self) -> tuple[Any, ...] | None:
         last_sql = self.connection.sql[-1]
-        if "FROM m1_runtime_observe_decisions" in last_sql:
+        if "FROM public.m1_runtime_observe_decisions" in last_sql:
             if self.connection.pending_return is not None:
                 row = self.connection.pending_return
                 self.connection.existing_row = row
                 self.connection.pending_return = None
                 return row
             return self.connection.existing_row
-        if "FROM m1_runtime_controller_leases" in last_sql:
+        if "FROM public.m1_runtime_controller_leases" in last_sql:
             if self.connection.lease_owner_id is None:
                 return None
             return (
@@ -695,7 +695,7 @@ class FakeCursor:
                 self.connection.lease_epoch,
                 self.connection.lease_expires_at,
             )
-        if "FROM m1_recovery_actions" in last_sql:
+        if "FROM public.m1_recovery_actions" in last_sql:
             return (self.connection.recovery_action_count,)
         return None
 

@@ -54,15 +54,13 @@ QUALIFICATION_UPDATE_TABLES = (
 )
 
 CAPABILITY_ATTRIBUTES = (
-    "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-    "NOINHERIT NOREPLICATION NOBYPASSRLS"
+    "NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
 )
 RUNTIME_ROLE = "m1_runtime_controller_capability"
 QUALIFICATION_ROLE = "m1_qualification_worker_capability"
 SUPABASE_ROLES = ("anon", "authenticated", "service_role")
 CERTIFICATE_FUNCTION_SIGNATURE = (
-    "text, text, text, text, jsonb, timestamptz, timestamptz, "
-    "jsonb, text, text, text, text"
+    "text, text, text, text, jsonb, timestamptz, timestamptz, jsonb, text, text, text, text"
 )
 HARDENED_TRIGGER_FUNCTION_SIGNATURES = (
     "public.m1_project_runtime_qualification_ingress()",
@@ -124,7 +122,7 @@ def _ensure_capability_role(role: str) -> None:
             existing record;
         BEGIN
             SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit,
-                   rolreplication, rolbypassrls
+                   rolreplication, rolbypassrls, rolconfig
             INTO existing
             FROM pg_catalog.pg_roles
             WHERE rolname = '{role}';
@@ -140,7 +138,11 @@ def _ensure_capability_role(role: str) -> None:
                OR existing.rolcreaterole
                OR existing.rolinherit
                OR existing.rolreplication
-               OR existing.rolbypassrls THEN
+               OR existing.rolbypassrls
+               OR EXISTS (
+                   SELECT 1 FROM unnest(COALESCE(existing.rolconfig, ARRAY[]::text[])) AS setting
+                   WHERE split_part(setting, '=', 1) = 'search_path'
+               ) THEN
                 RAISE EXCEPTION '{role} exists with unsafe attributes';
             END IF;
 
@@ -153,7 +155,9 @@ def _ensure_capability_role(role: str) -> None:
                    SELECT 1
                    FROM pg_catalog.pg_namespace AS namespace
                    JOIN pg_catalog.pg_roles AS owner ON owner.oid = namespace.nspowner
-                   WHERE namespace.nspname = 'public' AND owner.rolname = '{role}'
+                   WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                     AND owner.rolname = '{role}'
                )
                OR EXISTS (
                    SELECT 1
@@ -161,7 +165,9 @@ def _ensure_capability_role(role: str) -> None:
                    JOIN pg_catalog.pg_namespace AS namespace
                      ON namespace.oid = relation.relnamespace
                    JOIN pg_catalog.pg_roles AS owner ON owner.oid = relation.relowner
-                   WHERE namespace.nspname = 'public' AND owner.rolname = '{role}'
+                   WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                     AND owner.rolname = '{role}'
                )
                OR EXISTS (
                    SELECT 1
@@ -169,7 +175,9 @@ def _ensure_capability_role(role: str) -> None:
                    JOIN pg_catalog.pg_namespace AS namespace
                      ON namespace.oid = routine.pronamespace
                    JOIN pg_catalog.pg_roles AS owner ON owner.oid = routine.proowner
-                   WHERE namespace.nspname = 'public' AND owner.rolname = '{role}'
+                   WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                     AND owner.rolname = '{role}'
                )
                OR EXISTS (
                    SELECT 1
@@ -188,7 +196,9 @@ def _ensure_capability_role(role: str) -> None:
                        COALESCE(namespace.nspacl, pg_catalog.acldefault('n', namespace.nspowner))
                    ) AS acl
                    JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
-                   WHERE namespace.nspname = 'public' AND grantee.rolname = '{role}'
+                   WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                     AND grantee.rolname = '{role}'
                )
                OR EXISTS (
                    SELECT 1
@@ -206,7 +216,9 @@ def _ensure_capability_role(role: str) -> None:
                        )
                    ) AS acl
                    JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
-                   WHERE namespace.nspname = 'public' AND grantee.rolname = '{role}'
+                   WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                     AND grantee.rolname = '{role}'
                )
                OR EXISTS (
                    SELECT 1
@@ -217,7 +229,32 @@ def _ensure_capability_role(role: str) -> None:
                        COALESCE(routine.proacl, pg_catalog.acldefault('f', routine.proowner))
                    ) AS acl
                    JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
-                   WHERE namespace.nspname = 'public' AND grantee.rolname = '{role}'
+                   WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                     AND grantee.rolname = '{role}'
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_db_role_setting AS role_setting
+                   LEFT JOIN pg_catalog.pg_roles AS configured_role
+                     ON configured_role.oid = role_setting.setrole
+                   LEFT JOIN pg_catalog.pg_database AS configured_database
+                     ON configured_database.oid = role_setting.setdatabase
+                   WHERE (
+                           (role_setting.setrole = 0
+                            AND configured_database.datname = pg_catalog.current_database())
+                           OR (
+                               configured_role.rolname = '{role}'
+                               AND (
+                                   role_setting.setdatabase = 0
+                                   OR configured_database.datname = pg_catalog.current_database()
+                               )
+                           )
+                         )
+                     AND EXISTS (
+                         SELECT 1 FROM unnest(role_setting.setconfig) AS setting
+                         WHERE split_part(setting, '=', 1) = 'search_path'
+                     )
                )
                OR EXISTS (
                    SELECT 1
@@ -260,15 +297,12 @@ def _assert_closed_effective_authority(
         f"pg_catalog.to_regprocedure('{signature}')"
         for signature in allowed_security_definer_functions
     )
-    function_condition = (
-        f"routine.oid IN ({allowed_functions})"
-        if allowed_functions
-        else "FALSE"
-    )
+    function_condition = f"routine.oid IN ({allowed_functions})" if allowed_functions else "FALSE"
     op.execute(
         f"""
         DO $$
         DECLARE
+            schema_record record;
             relation record;
             routine record;
             sequence record;
@@ -280,16 +314,51 @@ def _assert_closed_effective_authority(
                        '{role}', pg_catalog.current_database(), 'CONNECT'
                    )
                OR NOT pg_catalog.has_schema_privilege('{role}', 'public', 'USAGE')
-               OR pg_catalog.has_schema_privilege('{role}', 'public', 'CREATE') THEN
+               OR pg_catalog.has_schema_privilege('{role}', 'public', 'CREATE')
+               OR pg_catalog.has_database_privilege(
+                      '{role}', pg_catalog.current_database(), 'CREATE'
+                  ) THEN
                 RAISE EXCEPTION '{role} authority envelope is not exact';
             END IF;
 
+            -- TEMPORARY is explicitly allowed for compatibility with the
+            -- original four applications; qualified SQL closes its namespace.
+            effective := pg_catalog.has_database_privilege(
+                '{role}', pg_catalog.current_database(), 'TEMPORARY'
+            );
+
+            FOR schema_record IN
+                SELECT namespace.nspname
+                FROM pg_catalog.pg_namespace AS namespace
+                WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+            LOOP
+                IF schema_record.nspname = 'public' THEN
+                    IF NOT pg_catalog.has_schema_privilege(
+                               '{role}', schema_record.nspname, 'USAGE'
+                           )
+                       OR pg_catalog.has_schema_privilege(
+                              '{role}', schema_record.nspname, 'CREATE'
+                          ) THEN
+                        RAISE EXCEPTION '{role} authority envelope is not exact';
+                    END IF;
+                ELSIF pg_catalog.has_schema_privilege(
+                          '{role}', schema_record.nspname, 'USAGE'
+                      )
+                      OR pg_catalog.has_schema_privilege(
+                          '{role}', schema_record.nspname, 'CREATE'
+                      ) THEN
+                    RAISE EXCEPTION '{role} authority envelope is not exact';
+                END IF;
+            END LOOP;
+
             FOR relation IN
-                SELECT object.oid, object.relname
+                SELECT object.oid, object.relname, namespace.nspname
                 FROM pg_catalog.pg_class AS object
                 JOIN pg_catalog.pg_namespace AS namespace
                   ON namespace.oid = object.relnamespace
-                WHERE namespace.nspname = 'public'
+                WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
                   AND object.relkind IN ('r', 'p', 'v', 'm', 'f')
             LOOP
                 FOREACH privilege IN ARRAY ARRAY[
@@ -299,7 +368,8 @@ def _assert_closed_effective_authority(
                     SELECT EXISTS (
                         SELECT 1
                         FROM (VALUES {allowed_relations}) AS allowed(relname, privilege_name)
-                        WHERE allowed.relname = relation.relname
+                        WHERE relation.nspname = 'public'
+                          AND allowed.relname = relation.relname
                           AND allowed.privilege_name = privilege
                     ) INTO expected;
                     SELECT pg_catalog.has_table_privilege('{role}', relation.oid, privilege)
@@ -315,7 +385,9 @@ def _assert_closed_effective_authority(
                 FROM pg_catalog.pg_class AS object
                 JOIN pg_catalog.pg_namespace AS namespace
                   ON namespace.oid = object.relnamespace
-                WHERE namespace.nspname = 'public' AND object.relkind = 'S'
+                WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                  AND object.relkind = 'S'
             LOOP
                 FOREACH privilege IN ARRAY ARRAY['USAGE', 'SELECT', 'UPDATE'] LOOP
                     IF pg_catalog.has_sequence_privilege('{role}', sequence.oid, privilege) THEN
@@ -329,7 +401,9 @@ def _assert_closed_effective_authority(
                 FROM pg_catalog.pg_proc AS object
                 JOIN pg_catalog.pg_namespace AS namespace
                   ON namespace.oid = object.pronamespace
-                WHERE namespace.nspname = 'public' AND object.prosecdef
+                WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                  AND object.prosecdef
             LOOP
                 expected := {function_condition};
                 effective := pg_catalog.has_function_privilege(
@@ -347,18 +421,52 @@ def _assert_closed_effective_authority(
                    WHERE member.rolname = '{role}' OR granted.rolname = '{role}'
                )
                OR EXISTS (
+                   SELECT 1 FROM pg_catalog.pg_namespace AS namespace
+                   JOIN pg_catalog.pg_roles AS owner ON owner.oid = namespace.nspowner
+                   WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                     AND owner.rolname = '{role}'
+               )
+               OR EXISTS (
                    SELECT 1 FROM pg_catalog.pg_class AS object
                    JOIN pg_catalog.pg_namespace AS namespace
                      ON namespace.oid = object.relnamespace
                    JOIN pg_catalog.pg_roles AS owner ON owner.oid = object.relowner
-                   WHERE namespace.nspname = 'public' AND owner.rolname = '{role}'
+                   WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                     AND owner.rolname = '{role}'
                )
                OR EXISTS (
                    SELECT 1 FROM pg_catalog.pg_proc AS object
                    JOIN pg_catalog.pg_namespace AS namespace
                      ON namespace.oid = object.pronamespace
                    JOIN pg_catalog.pg_roles AS owner ON owner.oid = object.proowner
-                   WHERE namespace.nspname = 'public' AND owner.rolname = '{role}'
+                   WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+                     AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                     AND owner.rolname = '{role}'
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_db_role_setting AS role_setting
+                   LEFT JOIN pg_catalog.pg_roles AS configured_role
+                     ON configured_role.oid = role_setting.setrole
+                   LEFT JOIN pg_catalog.pg_database AS configured_database
+                     ON configured_database.oid = role_setting.setdatabase
+                   WHERE (
+                           (role_setting.setrole = 0
+                            AND configured_database.datname = pg_catalog.current_database())
+                           OR (
+                               configured_role.rolname = '{role}'
+                               AND (
+                                   role_setting.setdatabase = 0
+                                   OR configured_database.datname = pg_catalog.current_database()
+                               )
+                           )
+                         )
+                     AND EXISTS (
+                         SELECT 1 FROM unnest(role_setting.setconfig) AS setting
+                         WHERE split_part(setting, '=', 1) = 'search_path'
+                     )
                ) THEN
                 RAISE EXCEPTION '{role} authority envelope is not exact';
             END IF;
@@ -375,9 +483,7 @@ def _grant_runtime_controller() -> None:
         op.execute(f"GRANT SELECT ON TABLE public.{table} TO {RUNTIME_ROLE}")
     for table in RUNTIME_CONTROLLER_WRITE_TABLES:
         op.execute(f"GRANT INSERT ON TABLE public.{table} TO {RUNTIME_ROLE}")
-    op.execute(
-        f"GRANT UPDATE ON TABLE public.m1_runtime_controller_leases TO {RUNTIME_ROLE}"
-    )
+    op.execute(f"GRANT UPDATE ON TABLE public.m1_runtime_controller_leases TO {RUNTIME_ROLE}")
     _revoke_general_recorder_execute(RUNTIME_ROLE)
 
 

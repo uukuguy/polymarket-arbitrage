@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
+import re
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -92,10 +95,24 @@ class FakeRoleFactory:
     def answer(self, sql: str, params: object) -> object:
         if sql == "set transaction read only":
             return None
+        if "select current_setting('search_path')" in sql:
+            return ("pg_catalog,public", ["pg_catalog", "public"])
+        if "from pg_catalog.pg_db_role_setting" in sql:
+            if self.authority_failure == "database-search-path":
+                return [(["search_path=evil, public"],)]
+            return []
+        if "select namespace.nspname" in sql and "from pg_catalog.pg_namespace" in sql:
+            names = ["public"]
+            if self.authority_failure == "nonpublic-schema":
+                names.append("evil")
+            return [(name,) for name in names]
         if "as relation_name" in sql and "pg_catalog.pg_class" in sql:
             names = list(_allowed_table_names(self.profile))
             names.append("unrelated_authority")
-            return [(f"public.{name}", name) for name in sorted(names)]
+            rows = [(f"public.{name}", name, "public") for name in sorted(names)]
+            if self.authority_failure == "nonpublic-relation":
+                rows.append(("evil.shadow", "shadow", "evil"))
+            return rows
         if "routine.prosecdef" in sql and "pg_catalog.pg_proc" in sql:
             return [
                 (signature,)
@@ -107,10 +124,8 @@ class FakeRoleFactory:
                     "public.m1_project_incident_qualification_ingress()",
                     "public.m1_project_recovery_qualification_ingress()",
                     "public.m1_project_runtime_qualification_ingress()",
-                    "public.m1_record_qualification_freshness_ingress("
-                    "text,text,timestamptz,jsonb)",
-                    "public.m1_record_qualification_ingress("
-                    "text,text,text,timestamptz,jsonb)",
+                    "public.m1_record_qualification_freshness_ingress(text,text,timestamptz,jsonb)",
+                    "public.m1_record_qualification_ingress(text,text,text,timestamptz,jsonb)",
                     "public.m1_verify_qualification_certificate_insert()",
                 )
             ]
@@ -150,7 +165,22 @@ class FakeRoleFactory:
                 and role_name == self.capability_role
             ):
                 unsafe = True
-            return (role_name, can_login, unsafe, False, False, inherits, False, False)
+            settings = (
+                ["search_path=evil, public"]
+                if self.authority_failure == "role-search-path" and role_name == self.session_user
+                else None
+            )
+            return (
+                role_name,
+                can_login,
+                unsafe,
+                False,
+                False,
+                inherits,
+                False,
+                False,
+                settings,
+            )
         if "from pg_catalog.pg_roles as role" in sql:
             database = (
                 "wrong_database"
@@ -179,9 +209,15 @@ class FakeRoleFactory:
             return None
         if "from pg_catalog.pg_auth_members" in sql:
             if "where granted.rolname = %s" in sql:
-                rows = [(self.session_user,)]
+                row = (
+                    self.session_user,
+                    self.authority_failure == "membership-options",
+                    True,
+                    True,
+                )
+                rows = [row]
                 if self.authority_failure == "unexpected-member":
-                    rows.append(("unexpected_member",))
+                    rows.append(("unexpected_member", False, True, True))
                 return rows
             if "where member.rolname = %s" in sql:
                 return []
@@ -191,9 +227,15 @@ class FakeRoleFactory:
                 return (self.failure_code != "database-role.capability-missing",)
             return (self.failure_code == "database-role.cross-capability",)
         if "has_database_privilege" in sql:
+            privilege = str(_param(params, 2)).upper()
+            if privilege == "CREATE":
+                return (self.authority_failure == "database-create",)
             return (True,)
         if "has_schema_privilege" in sql:
+            schema = str(_param(params, 1))
             privilege = str(_param(params, 2))
+            if schema != "public":
+                return (self.authority_failure == "nonpublic-schema" and privilege == "USAGE",)
             if privilege == "CREATE":
                 return (self.authority_failure == "schema-create",)
             return (True,)
@@ -201,6 +243,8 @@ class FakeRoleFactory:
             privilege = str(_param(params, 2))
             table = str(_param(params, 1)).removeprefix("public.")
             allowed = privilege in _allowed_table_privileges(self.profile, table)
+            if str(_param(params, 1)).startswith("evil."):
+                allowed = self.authority_failure == "nonpublic-relation" and privilege == "SELECT"
             if table == "unrelated_authority" and privilege == "SELECT":
                 allowed = self.authority_failure == "unrelated-relation"
             if self.failure_code == "database-role.required-privilege-missing" and allowed:
@@ -473,7 +517,7 @@ def test_runtime_sequence_denial_uses_public_catalog_enumeration() -> None:
             expected_database="role_test",
         )
 
-    assert "public-sequence" in str(exc_info.value)
+    assert "application-sequence" in str(exc_info.value)
     assert factory.write_count == 0
     sequence_queries = [
         call for call in factory.calls if "pg_catalog.pg_class as sequence" in call[0]
@@ -515,16 +559,23 @@ def test_database_role_contract_rejects_role_attribute_violations(
 
 
 @pytest.mark.parametrize(
-    "authority_failure",
+    "authority_failure,reason_code",
     (
-        "unrelated-relation",
-        "security-definer-execute",
-        "schema-create",
-        "owned-object",
+        ("unrelated-relation", "database-role.forbidden-privilege-present"),
+        ("security-definer-execute", "database-role.forbidden-privilege-present"),
+        ("schema-create", "database-role.forbidden-privilege-present"),
+        ("owned-object", "database-role.forbidden-privilege-present"),
+        ("database-create", "database-role.forbidden-privilege-present"),
+        ("nonpublic-schema", "database-role.forbidden-privilege-present"),
+        ("nonpublic-relation", "database-role.forbidden-privilege-present"),
+        ("membership-options", "database-role.forbidden-privilege-present"),
+        ("role-search-path", "database-role.namespace-unsafe"),
+        ("database-search-path", "database-role.namespace-unsafe"),
     ),
 )
 def test_database_role_contract_rejects_uncatalogued_effective_authority(
     authority_failure: str,
+    reason_code: str,
 ) -> None:
     from polyarb.control_plane.db_role_contract import (
         ConnectionFactory,
@@ -536,7 +587,7 @@ def test_database_role_contract_rejects_uncatalogued_effective_authority(
 
     with pytest.raises(
         DatabaseRoleContractError,
-        match="database-role.forbidden-privilege-present",
+        match=reason_code,
     ):
         verify_daemon_database_role(
             cast(ConnectionFactory, factory),
@@ -545,3 +596,130 @@ def test_database_role_contract_rejects_uncatalogued_effective_authority(
         )
 
     assert factory.write_count == 0
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    (
+        "postgresql://runtime:secret@example.test/role_test?options=-csearch_path%3Devil",
+        "postgresql://runtime:secret@example.test/role_test?search_path=evil,public",
+        "host=example.test dbname=role_test user=runtime options='-c search_path=evil'",
+    ),
+)
+def test_scoped_connection_factory_rejects_dsn_namespace_override_before_connect(
+    monkeypatch: pytest.MonkeyPatch,
+    dsn: str,
+) -> None:
+    from polyarb.control_plane import db_role_contract
+
+    calls: list[object] = []
+    monkeypatch.setattr(
+        db_role_contract.psycopg,
+        "connect",
+        lambda *args, **kwargs: calls.append(args),
+    )
+
+    with pytest.raises(
+        db_role_contract.DatabaseRoleContractError,
+        match="database-role.dsn-override",
+    ):
+        db_role_contract.scoped_connection_factory(dsn)
+
+    assert calls == []
+
+
+def test_scoped_connection_factory_binds_controlled_search_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.control_plane import db_role_contract
+
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    sentinel = object()
+
+    def connect(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        return sentinel
+
+    monkeypatch.setattr(db_role_contract.psycopg, "connect", connect)
+    factory = db_role_contract.scoped_connection_factory(
+        "postgresql://runtime:secret@example.test/role_test"
+    )
+
+    assert factory() is sentinel
+    assert calls == [
+        (
+            ("postgresql://runtime:secret@example.test/role_test",),
+            {
+                "connect_timeout": 5,
+                "options": "-csearch_path=pg_catalog,public",
+            },
+        )
+    ]
+
+
+def test_database_role_contract_declares_namespace_and_pg16_membership_closure() -> None:
+    source = Path("src/polyarb/control_plane/db_role_contract.py").read_text()
+    for fragment in (
+        "pg_db_role_setting",
+        "rolconfig",
+        "admin_option",
+        "inherit_option",
+        "set_option",
+        "has_database_privilege",
+        "TEMPORARY",
+    ):
+        assert fragment in source
+
+
+def test_daemon_database_sql_is_public_schema_qualified() -> None:
+    unqualified = re.compile(
+        r"(?im)\b(?:FROM|JOIN|INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|"
+        r"TABLE|FUNCTION)\s+(?!public\.)(?:m1_|l3_)"
+    )
+    paths = (
+        Path("src/polyarb/control_plane/runtime_observe.py"),
+        Path("src/polyarb/control_plane/recovery_store.py"),
+        Path("src/polyarb/control_plane/runtime_store.py"),
+        Path("src/polyarb/control_plane/qualification_service.py"),
+        Path("src/polyarb/control_plane/qualification_store.py"),
+    )
+    bare_application_identifier = re.compile(r"(?<!public\.)\bm1_[a-z0-9_]+")
+    failures = {
+        path.as_posix(): sorted(
+            set(match.group(0) for match in unqualified.finditer(path.read_text()))
+        )
+        for path in paths
+        if unqualified.search(path.read_text())
+    }
+    assert failures == {}
+    bare_failures = {
+        path.as_posix(): sorted(
+            set(match.group(0) for match in bare_application_identifier.finditer(path.read_text()))
+        )
+        for path in paths
+        if bare_application_identifier.search(path.read_text())
+    }
+    assert bare_failures == {}
+
+    from polyarb.control_plane.postgres import PostgresControlPlane
+
+    scoped_source = "\n".join(
+        inspect.getsource(getattr(PostgresControlPlane, method))
+        for method in (
+            "_append_retry_runtime_events_cursor",
+            "_recovery_job_lease_cursor",
+            "_finish_retryable_with_incident_cursor",
+            "_heartbeat_recovering_job_cursor",
+            "_cancel_stalled_job_cursor",
+            "_release_retryable_job_cursor",
+            "_reclaim_expired_job_cursor",
+            "_release_one_circuit_probe_cursor",
+            "_execute_recovery_action_cursor",
+            "_record_incident_event",
+        )
+    )
+    assert sorted(set(match.group(0) for match in unqualified.finditer(scoped_source))) == []
+    assert (
+        sorted(set(match.group(0) for match in bare_application_identifier.finditer(scoped_source)))
+        == []
+    )

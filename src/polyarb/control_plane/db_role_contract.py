@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
 TABLE_PRIVILEGES = (
@@ -19,6 +22,12 @@ TABLE_PRIVILEGES = (
     "TRIGGER",
 )
 SEQUENCE_PRIVILEGES = ("USAGE", "SELECT", "UPDATE")
+CONTROLLED_SEARCH_PATH = ("pg_catalog", "public")
+CONTROLLED_CONNECTION_OPTIONS = "-csearch_path=pg_catalog,public"
+# TEMPORARY is intentionally allowed. PostgreSQL grants it to PUBLIC by default;
+# revoking it globally would change the original four applications. Namespace
+# safety instead comes from qualified daemon SQL plus this controlled path.
+TEMPORARY_POSTURE = "allowed"
 
 RUNTIME_ALLOWED = {
     "m1_runtime_controller_leases": frozenset({"SELECT", "INSERT", "UPDATE"}),
@@ -52,9 +61,7 @@ QUALIFICATION_ALLOWED = {
 }
 QUALIFICATION_SEQUENCE_COLUMNS = (("m1_qualification_ingress_ledger", "ingest_seq"),)
 
-FRESHNESS_FUNCTION = (
-    "public.m1_record_qualification_freshness_ingress(text,text,timestamptz,jsonb)"
-)
+FRESHNESS_FUNCTION = "public.m1_record_qualification_freshness_ingress(text,text,timestamptz,jsonb)"
 CERTIFICATE_FUNCTION = (
     "public.m1_insert_qualification_certificate("
     "text,text,text,text,jsonb,timestamptz,timestamptz,jsonb,text,text,text,text)"
@@ -102,6 +109,7 @@ class _RoleAttributes:
     inherits: bool
     replication: bool
     bypass_rls: bool
+    settings: tuple[str, ...]
 
 
 class DatabaseRoleContractError(RuntimeError):
@@ -111,6 +119,45 @@ class DatabaseRoleContractError(RuntimeError):
         self.reason_code = reason_code
         self.object_identifier = object_identifier
         super().__init__(f"{reason_code}: {object_identifier}")
+
+
+def scoped_connection_factory(dsn: str) -> ConnectionFactory:
+    """Return a connection factory with a non-overridable application namespace."""
+
+    _reject_dsn_namespace_override(dsn)
+    return lambda: psycopg.connect(
+        dsn,
+        connect_timeout=5,
+        options=CONTROLLED_CONNECTION_OPTIONS,
+    )
+
+
+def _reject_dsn_namespace_override(dsn: str) -> None:
+    normalized = dsn.strip()
+    if not normalized:
+        raise DatabaseRoleContractError("database-role.dsn-invalid", "connection")
+    override = False
+    try:
+        split = urlsplit(normalized)
+        if split.scheme:
+            override = any(
+                key.lower() in {"options", "search_path"}
+                for key, _value in parse_qsl(split.query, keep_blank_values=True)
+            )
+        else:
+            override = bool(re.search(r"(?:^|\s)(?:options|search_path)\s*=", normalized, re.I))
+        parsed = conninfo_to_dict(normalized)
+    except Exception as exc:
+        if re.search(r"(?:[?&]|^|\s)(?:options|search_path)(?:=|%3d)", normalized, re.I):
+            override = True
+        if not override:
+            raise DatabaseRoleContractError(
+                "database-role.dsn-invalid",
+                "connection",
+            ) from exc
+        parsed = {}
+    if override or any(key.lower() in {"options", "search_path"} for key in parsed):
+        raise DatabaseRoleContractError("database-role.dsn-override", "namespace")
 
 
 def _table_contract(
@@ -199,6 +246,7 @@ def verify_daemon_database_role(
                 if any((rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls)):
                     _fail("database-role.unsafe-attribute", contract.login_role)
                 _verify_role_attributes(cursor, contract)
+                _verify_namespace_settings(cursor, contract, normalized_database)
                 _require_role(cursor, session_user, contract.capability_role)
                 for capability_role in _CAPABILITY_ROLES:
                     if capability_role != contract.capability_role:
@@ -283,7 +331,7 @@ def _role_attributes(cursor: Any, role_name: str, *, missing_reason_code: str) -
         """
         SELECT role.rolname, role.rolcanlogin, role.rolsuper,
                role.rolcreatedb, role.rolcreaterole, role.rolinherit,
-               role.rolreplication, role.rolbypassrls
+               role.rolreplication, role.rolbypassrls, role.rolconfig
         FROM pg_catalog.pg_roles AS role
         WHERE role.rolname = %s
         """,
@@ -302,6 +350,7 @@ def _role_attributes(cursor: Any, role_name: str, *, missing_reason_code: str) -
         inherits=bool(values[5]),
         replication=bool(values[6]),
         bypass_rls=bool(values[7]),
+        settings=_settings_tuple(values[8]),
     )
 
 
@@ -314,6 +363,7 @@ _ROLE_COLUMNS = (
     "rolinherit",
     "rolreplication",
     "rolbypassrls",
+    "rolconfig",
 )
 
 
@@ -342,6 +392,8 @@ def _verify_role_attributes(cursor: Any, contract: DatabaseRoleContract) -> None
         )
     ):
         _fail("database-role.login-attribute", contract.login_role)
+    if _has_search_path_setting(login.settings):
+        _fail("database-role.namespace-unsafe", contract.login_role)
     if capability.role_name != contract.capability_role:
         _fail("database-role.capability-attribute", capability.role_name)
     if capability.can_login or capability.inherits:
@@ -356,6 +408,61 @@ def _verify_role_attributes(cursor: Any, contract: DatabaseRoleContract) -> None
         )
     ):
         _fail("database-role.capability-attribute", contract.capability_role)
+    if _has_search_path_setting(capability.settings):
+        _fail("database-role.namespace-unsafe", contract.capability_role)
+
+
+def _has_search_path_setting(settings: tuple[str, ...]) -> bool:
+    return any(setting.partition("=")[0].strip().lower() == "search_path" for setting in settings)
+
+
+def _settings_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(setting) for setting in value)
+
+
+def _verify_namespace_settings(
+    cursor: Any,
+    contract: DatabaseRoleContract,
+    expected_database: str,
+) -> None:
+    cursor.execute("SELECT current_setting('search_path'), current_schemas(false)")
+    row = cursor.fetchone()
+    if row is None:
+        _fail("database-role.namespace-unsafe", "active-search-path")
+    active_setting = str(_row_value(row, 0, "current_setting"))
+    active_schemas_value = _row_value(row, 1, "current_schemas")
+    if isinstance(active_schemas_value, str):
+        active_schemas = tuple(
+            part.strip().strip('"')
+            for part in active_schemas_value.strip("{}").split(",")
+            if part.strip()
+        )
+    else:
+        active_schemas = tuple(str(value) for value in active_schemas_value)  # type: ignore[union-attr]
+    configured = tuple(
+        part.strip().strip('"') for part in active_setting.split(",") if part.strip()
+    )
+    if configured != CONTROLLED_SEARCH_PATH or active_schemas != CONTROLLED_SEARCH_PATH:
+        _fail("database-role.namespace-unsafe", "active-search-path")
+
+    cursor.execute(
+        """
+        SELECT setting.setconfig
+        FROM pg_catalog.pg_db_role_setting AS setting
+        LEFT JOIN pg_catalog.pg_roles AS role ON role.oid = setting.setrole
+        LEFT JOIN pg_catalog.pg_database AS database ON database.oid = setting.setdatabase
+        WHERE (setting.setrole = 0 OR role.rolname IN (%s, %s))
+          AND (setting.setdatabase = 0 OR database.datname = %s)
+        ORDER BY setting.setdatabase, setting.setrole
+        """,
+        (contract.login_role, contract.capability_role, expected_database),
+    )
+    for setting_row in cursor.fetchall():
+        values = _settings_tuple(_row_value(setting_row, 0, "setconfig"))
+        if _has_search_path_setting(values):
+            _fail("database-role.namespace-unsafe", "configured-search-path")
 
 
 def _check_privilege(cursor: Any, function_name: str, params: tuple[str, ...]) -> bool:
@@ -419,7 +526,8 @@ def _verify_exact_capability_membership(
 ) -> None:
     cursor.execute(
         """
-        SELECT member.rolname
+        SELECT member.rolname, membership.admin_option,
+               membership.inherit_option, membership.set_option
         FROM pg_catalog.pg_auth_members AS membership
         JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
         JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
@@ -429,13 +537,20 @@ def _verify_exact_capability_membership(
         (contract.capability_role,),
     )
     incoming = frozenset(
-        str(_row_value(row, 0, "rolname")) for row in cursor.fetchall()
+        (
+            str(_row_value(row, 0, "rolname")),
+            bool(_row_value(row, 1, "admin_option")),
+            bool(_row_value(row, 2, "inherit_option")),
+            bool(_row_value(row, 3, "set_option")),
+        )
+        for row in cursor.fetchall()
     )
-    if incoming != frozenset({contract.login_role}):
+    if incoming != frozenset({(contract.login_role, False, True, True)}):
         _fail("database-role.forbidden-privilege-present", "capability-membership")
     cursor.execute(
         """
-        SELECT granted.rolname
+        SELECT granted.rolname, membership.admin_option,
+               membership.inherit_option, membership.set_option
         FROM pg_catalog.pg_auth_members AS membership
         JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
         JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
@@ -455,7 +570,11 @@ def verify_effective_database_role_authority(
     subject_role: str,
     expected_database: str,
 ) -> None:
-    """Compare all effective public-schema authority to a closed allowlist."""
+    """Compare all effective application authority to a closed allowlist.
+
+    TEMPORARY remains explicitly allowed for compatibility with the original
+    applications; CREATE and every non-system namespace capability are closed.
+    """
 
     _require_privilege(
         cursor,
@@ -464,23 +583,59 @@ def verify_effective_database_role_authority(
         (subject_role, expected_database, "CONNECT"),
         f"database:{expected_database}:CONNECT",
     )
-    _require_privilege(
-        cursor,
-        "has_schema_privilege",
-        "database-role.required-privilege-missing",
-        (subject_role, "public", "USAGE"),
-        "schema:public:USAGE",
-    )
     if _check_privilege(
         cursor,
-        "has_schema_privilege",
-        (subject_role, "public", "CREATE"),
+        "has_database_privilege",
+        (subject_role, expected_database, "CREATE"),
     ):
-        _fail("database-role.forbidden-privilege-present", "schema:public:CREATE")
+        _fail(
+            "database-role.forbidden-privilege-present",
+            f"database:{expected_database}:CREATE",
+        )
+    # TEMPORARY is an explicit compatibility allowance, not a requirement.
+    _check_privilege(
+        cursor,
+        "has_database_privilege",
+        (subject_role, expected_database, "TEMPORARY"),
+    )
+    _verify_application_schema_privileges(cursor, subject_role)
     _verify_public_relation_privileges(cursor, contract, subject_role)
     _verify_public_sequence_privileges(cursor, subject_role)
     _verify_security_definer_execute(cursor, contract, subject_role)
     _reject_public_object_ownership(cursor, subject_role)
+
+
+def _verify_application_schema_privileges(cursor: Any, subject_role: str) -> None:
+    cursor.execute(
+        """
+        SELECT namespace.nspname
+        FROM pg_catalog.pg_namespace AS namespace
+        WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+        ORDER BY namespace.nspname
+        """
+    )
+    seen_public = False
+    for row in cursor.fetchall():
+        schema_name = str(_row_value(row, 0, "nspname"))
+        if schema_name == "public":
+            seen_public = True
+        for privilege in ("USAGE", "CREATE"):
+            effective = _check_privilege(
+                cursor,
+                "has_schema_privilege",
+                (subject_role, schema_name, privilege),
+            )
+            expected = schema_name == "public" and privilege == "USAGE"
+            if effective and not expected:
+                _fail("database-role.forbidden-privilege-present", "application-schema")
+            if not effective and expected:
+                _fail(
+                    "database-role.required-privilege-missing",
+                    "schema:public:USAGE",
+                )
+    if not seen_public:
+        _fail("database-role.required-privilege-missing", "schema:public")
 
 
 def _allowed_tables(contract: DatabaseRoleContract) -> Mapping[str, frozenset[str]]:
@@ -498,13 +653,15 @@ def _verify_public_relation_privileges(
         """
         SELECT pg_catalog.format('%I.%I', namespace.nspname, relation.relname)
                    AS relation_name,
-               relation.relname
+               relation.relname,
+               namespace.nspname
         FROM pg_catalog.pg_class AS relation
         JOIN pg_catalog.pg_namespace AS namespace
           ON namespace.oid = relation.relnamespace
-        WHERE namespace.nspname = 'public'
+        WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
           AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
-        ORDER BY relation.relname
+        ORDER BY namespace.nspname, relation.relname
         """
     )
     allowed_tables = _allowed_tables(contract)
@@ -512,8 +669,12 @@ def _verify_public_relation_privileges(
     for row in cursor.fetchall():
         relation_name = str(_row_value(row, 0, "relation_name"))
         table_name = str(_row_value(row, 1, "relname"))
-        seen.add(table_name)
-        expected = allowed_tables.get(table_name, frozenset())
+        schema_name = str(_row_value(row, 2, "nspname"))
+        if schema_name == "public":
+            seen.add(table_name)
+        expected = (
+            allowed_tables.get(table_name, frozenset()) if schema_name == "public" else frozenset()
+        )
         for privilege in TABLE_PRIVILEGES:
             effective = _check_privilege(
                 cursor,
@@ -521,7 +682,7 @@ def _verify_public_relation_privileges(
                 (subject_role, relation_name, privilege),
             )
             if effective and privilege not in expected:
-                _fail("database-role.forbidden-privilege-present", "public-relation")
+                _fail("database-role.forbidden-privilege-present", "application-relation")
             if not effective and privilege in expected:
                 _fail(
                     "database-role.required-privilege-missing",
@@ -540,9 +701,10 @@ def _verify_public_sequence_privileges(cursor: Any, subject_role: str) -> None:
         FROM pg_catalog.pg_class AS sequence
         JOIN pg_catalog.pg_namespace AS namespace
           ON namespace.oid = sequence.relnamespace
-        WHERE namespace.nspname = 'public'
+        WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
           AND sequence.relkind = 'S'
-        ORDER BY sequence.relname
+        ORDER BY namespace.nspname, sequence.relname
         """
     )
     for row in cursor.fetchall():
@@ -553,7 +715,7 @@ def _verify_public_sequence_privileges(cursor: Any, subject_role: str) -> None:
                 "has_sequence_privilege",
                 (subject_role, sequence_name, privilege),
             ):
-                _fail("database-role.forbidden-privilege-present", "public-sequence")
+                _fail("database-role.forbidden-privilege-present", "application-sequence")
 
 
 def _verify_security_definer_execute(
@@ -570,7 +732,8 @@ def _verify_security_definer_execute(
         FROM pg_catalog.pg_proc AS routine
         JOIN pg_catalog.pg_namespace AS namespace
           ON namespace.oid = routine.pronamespace
-        WHERE namespace.nspname = 'public'
+        WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
           AND routine.prosecdef
         ORDER BY function_signature
         """
@@ -614,24 +777,30 @@ def _reject_public_object_ownership(cursor: Any, subject_role: str) -> None:
         """
         SELECT owned_object
         FROM (
-            SELECT 'schema:public' AS owned_object
+            SELECT pg_catalog.format('schema:%%I', namespace.nspname) AS owned_object
             FROM pg_catalog.pg_namespace AS namespace
             JOIN pg_catalog.pg_roles AS owner ON owner.oid = namespace.nspowner
-            WHERE namespace.nspname = 'public' AND owner.rolname = %s
+            WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+              AND owner.rolname = %s
             UNION ALL
-            SELECT 'relation:public'
+            SELECT pg_catalog.format('relation:%%I.%%I', namespace.nspname, relation.relname)
             FROM pg_catalog.pg_class AS relation
             JOIN pg_catalog.pg_namespace AS namespace
               ON namespace.oid = relation.relnamespace
             JOIN pg_catalog.pg_roles AS owner ON owner.oid = relation.relowner
-            WHERE namespace.nspname = 'public' AND owner.rolname = %s
+            WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+              AND owner.rolname = %s
             UNION ALL
-            SELECT 'routine:public'
+            SELECT pg_catalog.format('routine:%%I.%%I', namespace.nspname, routine.proname)
             FROM pg_catalog.pg_proc AS routine
             JOIN pg_catalog.pg_namespace AS namespace
               ON namespace.oid = routine.pronamespace
             JOIN pg_catalog.pg_roles AS owner ON owner.oid = routine.proowner
-            WHERE namespace.nspname = 'public' AND owner.rolname = %s
+            WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+              AND owner.rolname = %s
         ) AS owned
         ORDER BY owned_object
         LIMIT 1
@@ -639,7 +808,7 @@ def _reject_public_object_ownership(cursor: Any, subject_role: str) -> None:
         (subject_role, subject_role, subject_role),
     )
     if cursor.fetchone() is not None:
-        _fail("database-role.forbidden-privilege-present", "public-object-owner")
+        _fail("database-role.forbidden-privilege-present", "application-object-owner")
 
 
 def _require_table_privilege(
@@ -749,12 +918,16 @@ def _fail(reason_code: str, object_identifier: str) -> None:
 
 
 __all__ = [
+    "CONTROLLED_CONNECTION_OPTIONS",
+    "CONTROLLED_SEARCH_PATH",
     "ConnectionFactory",
     "DatabaseRoleContract",
     "DatabaseRoleContractError",
     "DatabaseRoleVerification",
     "SEQUENCE_PRIVILEGES",
     "TABLE_PRIVILEGES",
+    "TEMPORARY_POSTURE",
+    "scoped_connection_factory",
     "verify_effective_database_role_authority",
     "verify_daemon_database_role",
 ]

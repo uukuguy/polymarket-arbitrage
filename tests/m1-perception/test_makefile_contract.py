@@ -134,8 +134,7 @@ def test_make_runtime_policy_replay_is_read_only() -> None:
     )
     assert result.returncode == 0, f"make -n failed: {result.stderr}"
     assert (
-        'uv run python -m polyarb.cli_control_plane runtime-policy-replay '
-        '--run-id "run-a" --json'
+        'uv run python -m polyarb.cli_control_plane runtime-policy-replay --run-id "run-a" --json'
     ) in result.stdout
 
     recipe = result.stdout.lower()
@@ -436,6 +435,8 @@ def test_make_control_plane_db_role_targets_execute_fake_uv_only(
     expected_argv: list[str],
 ) -> None:
     env, log_path = _fake_uv_env(tmp_path)
+    if target != "control-plane-db-role-verify":
+        env["POLYARB_CONTROL_PLANE_DB_ADMIN_DSN"] = "postgresql://admin@example.test/control"
     result = subprocess.run(
         ["make", target, *make_args],
         capture_output=True,
@@ -909,9 +910,7 @@ def test_make_snapshot_markets_full_dry_run_recipe() -> None:
         ("archive-markets-local", "--product archive"),
     ],
 )
-def test_make_explicit_data_product_targets_are_wired(
-    target: str, expected: str
-) -> None:
+def test_make_explicit_data_product_targets_are_wired(target: str, expected: str) -> None:
     """Operators must not need to reconstruct product-selection flags by hand."""
     result = subprocess.run(
         ["make", "-n", target],
@@ -937,9 +936,7 @@ def test_make_explicit_data_product_targets_are_wired(
         ("structure-generation-cleanup", "structure-generation-cleanup"),
     ],
 )
-def test_make_structure_generation_operator_surfaces_are_wired(
-    target: str, expected: str
-) -> None:
+def test_make_structure_generation_operator_surfaces_are_wired(target: str, expected: str) -> None:
     result = subprocess.run(
         ["make", "-n", target],
         capture_output=True,

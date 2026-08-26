@@ -185,7 +185,7 @@ def start_qualification_epoch(
         _set_timeouts(cursor)
         cursor.execute(
             """
-            INSERT INTO m1_qualification_epochs (
+            INSERT INTO public.m1_qualification_epochs (
                 epoch_id, state, version, identity_key, policy_version, release_id,
                 config_id, role_identity, started_at, last_fact_at, invalidated_at,
                 invalidation_reason, qualified_at, previous_epoch_id, fact_digests,
@@ -262,7 +262,7 @@ def transition_qualification_epoch(
         _set_timeouts(cursor)
         cursor.execute(
             """
-            UPDATE m1_qualification_epochs
+            UPDATE public.m1_qualification_epochs
             SET state = %s,
                 version = version + 1,
                 identity_key = %s,
@@ -390,7 +390,7 @@ def insert_qualification_certificate(
         cursor.execute(
             """
             SELECT *
-            FROM m1_insert_qualification_certificate(
+            FROM public.m1_insert_qualification_certificate(
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
@@ -436,7 +436,7 @@ def read_qualification_certificate(
         cursor.execute("SET TRANSACTION READ ONLY")
         _set_timeouts(cursor)
         cursor.execute(
-            "SELECT * FROM m1_qualification_certificates WHERE certificate_id = %s",
+            "SELECT * FROM public.m1_qualification_certificates WHERE certificate_id = %s",
             (certificate_id,),
         )
         row = cursor.fetchone()
@@ -462,7 +462,7 @@ def list_qualification_certificates(
         cursor.execute(
             """
             SELECT *
-            FROM m1_qualification_certificates
+            FROM public.m1_qualification_certificates
             ORDER BY created_at DESC, certificate_id DESC
             LIMIT %s
             """,
@@ -865,7 +865,7 @@ def _fetch_epoch_cursor(
     for_update: bool,
 ) -> QualificationEpochRecord | None:
     cursor.execute(
-        "SELECT * FROM m1_qualification_epochs WHERE epoch_id = %s"
+        "SELECT * FROM public.m1_qualification_epochs WHERE epoch_id = %s"
         + (" FOR UPDATE" if for_update else ""),
         (epoch_id,),
     )
@@ -879,7 +879,7 @@ def _fetch_certificate_by_identity_cursor(
     identity_key: str,
 ) -> QualificationCertificateRecord | None:
     cursor.execute(
-        "SELECT * FROM m1_qualification_certificates WHERE identity_key = %s FOR UPDATE",
+        "SELECT * FROM public.m1_qualification_certificates WHERE identity_key = %s FOR UPDATE",
         (identity_key,),
     )
     row = cursor.fetchone()

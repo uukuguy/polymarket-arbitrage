@@ -24,6 +24,7 @@ logs, screenshots, or command transcripts.
 
 The provision command reads exactly these environment variables:
 
+- `POLYARB_CONTROL_PLANE_DB_ADMIN_DSN` (operator-only; never install in an app)
 - `POLYARB_RUNTIME_CONTROLLER_DB_PASSWORD`
 - `POLYARB_QUALIFICATION_WORKER_DB_PASSWORD`
 
@@ -42,17 +43,19 @@ Do not share one scoped DSN between both apps.
 
 1. Confirm the target database is non-production, or confirm the production
    authorization boundary above is satisfied.
-2. Export only the admin DSN required for the selected database:
-   `POLYARB_SUPABASE_DB_DSN`.
+2. Export the operator-only admin DSN required for the selected database as
+   `POLYARB_CONTROL_PLANE_DB_ADMIN_DSN`. Never reuse either app-scoped variable
+   for admin authority.
 3. Run the read-only capability-role gate:
    `make control-plane-db-role-preflight expected_database=<database-name>`.
 4. Retrieve the two independent passwords from Keychain into environment
    variables without echoing them.
 5. Create or rotate both login roles in one transaction:
    `make control-plane-db-role-provision enable=1 expected_database=<database-name>`.
-6. Build each scoped DSN locally. Replace the admin value of
-   `POLYARB_SUPABASE_DB_DSN` with the runtime-controller scoped DSN, and export
-   the qualification-worker scoped DSN only as `POLYARB_QUALIFICATION_DB_DSN`.
+6. Build each scoped DSN locally. Keep the admin value in
+   `POLYARB_CONTROL_PLANE_DB_ADMIN_DSN`; export the runtime-controller scoped DSN
+   only as `POLYARB_SUPABASE_DB_DSN`, and the qualification-worker scoped DSN
+   only as `POLYARB_QUALIFICATION_DB_DSN`.
    Verify each profile before using it in an app:
    `make control-plane-db-role-verify profile=runtime-controller expected_database=<database-name>`
    and
@@ -66,9 +69,26 @@ Do not share one scoped DSN between both apps.
 ## Disable Flow
 
 Stop both dependent apps before disabling logins. The runtime controller and
-qualification worker must be stopped first, then the admin operator may run:
+qualification worker must be stopped first. Confirm that
+`POLYARB_CONTROL_PLANE_DB_ADMIN_DSN` is still present (or reacquire it from the
+approved secret manager), then the admin operator may run:
 
 `make control-plane-db-role-disable enable=1 expected_database=<database-name>`.
 
 Disable uses `NOLOGIN` only. It does not revoke capability memberships, drop
 roles, modify schema, touch Fly, or alter production app state.
+
+## Namespace and TEMPORARY Posture
+
+Both daemon readers reject DSNs containing `options` or `search_path` overrides,
+connect with the fixed path `pg_catalog,public`, and use `public.`-qualified
+application relation/routine names. Startup verification rejects role/database
+search-path settings, database `CREATE`, non-system-schema authority or
+ownership, and non-exact PostgreSQL 16 membership options before any daemon
+mutation.
+
+Database `TEMPORARY` remains explicitly allowed because PostgreSQL grants it to
+`PUBLIC` by default and a global revoke could break the original four apps. It
+does not grant persistent namespace authority; daemon SQL remains qualified and
+the controlled active path is verified. The scoped roles still cannot create a
+database schema because database `CREATE` is forbidden.

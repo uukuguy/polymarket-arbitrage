@@ -24,6 +24,7 @@ from polyarb.config import Settings
 from polyarb.control_plane.alert_delivery import TransactionalAlertDeliveryWorker
 from polyarb.control_plane.db_role_contract import (
     DatabaseRoleContractError,
+    scoped_connection_factory,
     verify_daemon_database_role,
 )
 from polyarb.control_plane.fault_soak import verify_fault_soak
@@ -374,9 +375,7 @@ def _parser() -> argparse.ArgumentParser:
         "runtime-observe-verify",
         help="verify durable observe-only decisions and zero recovery mutation",
     )
-    runtime_observe_verify.add_argument(
-        "--controller-id", default="m1-runtime-reconciler"
-    )
+    runtime_observe_verify.add_argument("--controller-id", default="m1-runtime-reconciler")
     runtime_observe_verify.add_argument("--minimum-seconds", type=int, default=1800)
     runtime_observe_verify.add_argument("--max-freshness-seconds", type=int, default=90)
     runtime_observe_verify.add_argument("--max-gap-seconds", type=int, default=90)
@@ -436,14 +435,14 @@ def _control_plane_from_env() -> PostgresControlPlane | None:
     dsn = os.environ.get("POLYARB_SUPABASE_DB_DSN", "").strip()
     if not dsn:
         return None
-    return PostgresControlPlane(lambda: psycopg.connect(dsn, connect_timeout=5))
+    return PostgresControlPlane(scoped_connection_factory(dsn))
 
 
 def _qualification_connection_factory_from_env() -> Callable[[], psycopg.Connection[Any]] | None:
     dsn = os.environ.get("POLYARB_QUALIFICATION_DB_DSN", "").strip()
     if not dsn:
         return None
-    return lambda: psycopg.connect(dsn, connect_timeout=5)
+    return scoped_connection_factory(dsn)
 
 
 def _required_expected_database_from_env() -> str:
@@ -1545,9 +1544,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 release_id=args.release_id,
                 runtime_controller_app=args.runtime_controller_app,
                 qualification_worker_app=args.qualification_worker_app,
-                runtime_recovery_allowed_targets=tuple(
-                    args.runtime_recovery_allowed_target
-                ),
+                runtime_recovery_allowed_targets=tuple(args.runtime_recovery_allowed_target),
                 expected_database=args.expected_database,
                 output_dir=args.output_dir,
             )
@@ -1676,7 +1673,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "qualification-certificates",
         "qualification-serve",
     }:
-        connection_factory = _qualification_connection_factory_from_env()
+        try:
+            connection_factory = _qualification_connection_factory_from_env()
+        except DatabaseRoleContractError as error:
+            print(f"qualification service unavailable: {error}", file=sys.stderr)
+            return 1
         if connection_factory is None:
             print("POLYARB_QUALIFICATION_DB_DSN is required", file=sys.stderr)
             return 2
@@ -1735,7 +1736,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (OSError, RuntimeError, ValueError, psycopg.Error):
             print(f"qualification service unavailable: {failure_reason}", file=sys.stderr)
             return 1
-    control_plane = _control_plane_from_env()
+    try:
+        control_plane = _control_plane_from_env()
+    except DatabaseRoleContractError as error:
+        if args.command in {"runtime-reconcile-once", "runtime-reconcile-serve"}:
+            print(f"runtime reconciliation unavailable: {error}", file=sys.stderr)
+        else:
+            print(f"control-plane command unavailable: {error}", file=sys.stderr)
+        return 1
     if control_plane is None:
         print("POLYARB_SUPABASE_DB_DSN is required", file=sys.stderr)
         return 2

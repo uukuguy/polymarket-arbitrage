@@ -89,6 +89,7 @@ class FakeAdminFactory:
                 "inherits": False,
                 "replication": False,
                 "bypass_rls": False,
+                "settings": [],
                 "memberships": set(),
                 "password": None,
             },
@@ -100,19 +101,16 @@ class FakeAdminFactory:
                 "inherits": False,
                 "replication": False,
                 "bypass_rls": False,
+                "settings": [],
                 "memberships": set(),
                 "password": None,
             },
         }
         self.calls: list[tuple[str, object]] = []
-        self.owned_objects: dict[str, set[str]] = {
-            role: set() for role in self.roles
-        }
+        self.owned_objects: dict[str, set[str]] = {role: set() for role in self.roles}
         self.direct_privileges: dict[str, set[str]] = {
             RUNTIME_CAPABILITY: _fake_expected_direct("runtime-controller", self.database),
-            QUALIFICATION_CAPABILITY: _fake_expected_direct(
-                "qualification-worker", self.database
-            ),
+            QUALIFICATION_CAPABILITY: _fake_expected_direct("qualification-worker", self.database),
         }
         self.commits = 0
         self.password_changes = 0
@@ -159,6 +157,7 @@ class FakeAdminFactory:
             "inherits": True,
             "replication": False,
             "bypass_rls": False,
+            "settings": [],
             "memberships": memberships,
             "password": password,
         }
@@ -170,11 +169,18 @@ class FakeAdminFactory:
             return None
         if "select current_database()" in normalized:
             return (self.database,)
-        if "select version_num from alembic_version" in normalized:
+        if "select version_num from public.alembic_version" in normalized:
             return (self.revision,)
+        if "from pg_catalog.pg_db_role_setting" in normalized:
+            return []
+        if (
+            "select namespace.nspname" in normalized
+            and "from pg_catalog.pg_namespace" in normalized
+        ):
+            return [("public",)]
         if "as relation_name" in normalized and "pg_catalog.pg_class" in normalized:
             names = set(RUNTIME_ALLOWED) | set(QUALIFICATION_ALLOWED)
-            return [(f"public.{name}", name) for name in sorted(names)]
+            return [(f"public.{name}", name, "public") for name in sorted(names)]
         if "routine.prosecdef" in normalized and "pg_catalog.pg_proc" in normalized:
             return [
                 (signature,)
@@ -186,9 +192,7 @@ class FakeAdminFactory:
             ]
         if "select owner.rolname as owner_role" in normalized:
             return sorted(
-                (role, item)
-                for role, items in self.owned_objects.items()
-                for item in items
+                (role, item) for role, items in self.owned_objects.items() for item in items
             )
         if "with target_roles as" in normalized:
             return sorted(
@@ -212,23 +216,26 @@ class FakeAdminFactory:
                     attrs["inherits"],
                     attrs["replication"],
                     attrs["bypass_rls"],
+                    attrs["settings"],
                 )
                 for name, attrs in sorted(self.roles.items())
                 if name in names
             ]
         if "from pg_catalog.pg_auth_members" in normalized:
-            rows: list[tuple[str, str]] = []
+            rows: list[tuple[str, str, bool, bool, bool]] = []
             for member, attrs in self.roles.items():
-                rows.extend((member, role) for role in cast(set[str], attrs["memberships"]))
+                rows.extend(
+                    (member, role, False, True, True)
+                    for role in cast(set[str], attrs["memberships"])
+                )
             if "where member.rolname = %s" in normalized:
                 requested = str(_param_tuple(params)[0])
                 return sorted(row for row in rows if row[0] == requested)
             requested = set(_param_tuple(params))
-            return sorted(
-                row for row in rows if row[0] in requested or row[1] in requested
-            )
+            return sorted(row for row in rows if row[0] in requested or row[1] in requested)
         if "has_database_privilege" in normalized:
-            return (True,)
+            privilege = str(_param_tuple(params)[2]).upper()
+            return (privilege != "CREATE",)
         if "has_schema_privilege" in normalized:
             privilege = str(_param_tuple(params)[2]).upper()
             return (self.public_schema_create if privilege == "CREATE" else True,)
@@ -260,6 +267,7 @@ class FakeAdminFactory:
                 "inherits": True,
                 "replication": False,
                 "bypass_rls": False,
+                "settings": [],
                 "memberships": set(),
                 "password": _literal_password(normalized),
             }
@@ -438,9 +446,7 @@ def test_preflight_rejects_every_unexpected_capability_authority(
     elif mutation == "owned-object":
         factory.owned_objects[RUNTIME_CAPABILITY].add("relation:public.unrelated")
     elif mutation == "direct-grant":
-        factory.direct_privileges[RUNTIME_CAPABILITY].add(
-            "relation:public.unrelated:SELECT"
-        )
+        factory.direct_privileges[RUNTIME_CAPABILITY].add("relation:public.unrelated:SELECT")
     else:
         factory.public_schema_create = True
 
@@ -711,20 +717,17 @@ def test_cli_requires_enable_and_reads_passwords_from_exact_env(
         return {"database": expected_database, "status": "provisioned"}
 
     monkeypatch.setattr(db_role_admin, "provision_login_roles", provision)
-    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://admin:secret@example/role_test")
+    monkeypatch.setenv(
+        "POLYARB_CONTROL_PLANE_DB_ADMIN_DSN",
+        "postgresql://admin:secret@example/role_test",
+    )
     monkeypatch.setenv("POLYARB_RUNTIME_CONTROLLER_DB_PASSWORD", "runtime-env-secret")
     monkeypatch.setenv("POLYARB_QUALIFICATION_WORKER_DB_PASSWORD", "qualification-env-secret")
     monkeypatch.setenv("POLYARB_RUNTIME_PASSWORD", "wrong-env-secret")
 
-    assert (
-        db_role_admin.main(["provision", "--expected-database", "role_test", "--json"])
-        == 2
-    )
+    assert db_role_admin.main(["provision", "--expected-database", "role_test", "--json"]) == 2
     assert calls == []
-    assert (
-        db_role_admin.main(["disable", "--expected-database", "role_test", "--json"])
-        == 2
-    )
+    assert db_role_admin.main(["disable", "--expected-database", "role_test", "--json"]) == 2
     assert calls == []
 
     assert (
@@ -746,6 +749,148 @@ def test_cli_requires_enable_and_reads_passwords_from_exact_env(
     assert "runtime-env-secret" not in captured.out + captured.err
     assert "qualification-env-secret" not in captured.out + captured.err
     assert "postgresql://" not in captured.out + captured.err
+
+
+def test_admin_and_daemon_dsn_constants_are_distinct() -> None:
+    from polyarb.control_plane import db_role_admin
+
+    assert db_role_admin.ADMIN_DSN_ENV == "POLYARB_CONTROL_PLANE_DB_ADMIN_DSN"
+    assert db_role_admin.RUNTIME_DSN_ENV == "POLYARB_SUPABASE_DB_DSN"
+    assert db_role_admin.QUALIFICATION_DSN_ENV == "POLYARB_QUALIFICATION_DB_DSN"
+    assert (
+        len(
+            {
+                db_role_admin.ADMIN_DSN_ENV,
+                db_role_admin.RUNTIME_DSN_ENV,
+                db_role_admin.QUALIFICATION_DSN_ENV,
+            }
+        )
+        == 3
+    )
+
+
+def test_cli_admin_to_scoped_handoff_reconnects_admin_for_disable_without_leaks(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from polyarb.control_plane import db_role_admin
+
+    admin_dsn = "postgresql://admin:admin-secret@example.test/role_test"
+    runtime_dsn = "postgresql://runtime:runtime-secret@example.test/role_test"
+    qualification_dsn = "postgresql://qualification:qualification-secret@example.test/role_test"
+    factories: dict[str, object] = {}
+    connected: list[str] = []
+    operations: list[tuple[str, object, str | None]] = []
+
+    def connection_factory(dsn: str) -> object:
+        connected.append(dsn)
+        return factories.setdefault(dsn, object())
+
+    def preflight(factory: object, *, expected_database: str) -> dict[str, str]:
+        operations.append(("preflight", factory, None))
+        return {"database": expected_database, "status": "ready"}
+
+    def provision(
+        factory: object,
+        *,
+        expected_database: str,
+        runtime_password: str,
+        qualification_password: str,
+    ) -> dict[str, str]:
+        assert runtime_password == "runtime-password"
+        assert qualification_password == "qualification-password"
+        operations.append(("provision", factory, None))
+        return {"database": expected_database, "status": "provisioned"}
+
+    def verify(
+        factory: object,
+        profile: str,
+        *,
+        expected_database: str,
+    ) -> db_role_admin.DatabaseRoleVerification:
+        operations.append(("verify", factory, profile))
+        return db_role_admin.DatabaseRoleVerification(
+            profile=profile,
+            session_user=f"{profile}-login",
+            capability_role=f"{profile}-capability",
+            database_name=expected_database,
+        )
+
+    def disable(factory: object, *, expected_database: str) -> dict[str, str]:
+        operations.append(("disable", factory, None))
+        return {"database": expected_database, "status": "disabled"}
+
+    monkeypatch.setattr(db_role_admin, "_connection_factory_from_dsn", connection_factory)
+    monkeypatch.setattr(db_role_admin, "preflight_capability_roles", preflight)
+    monkeypatch.setattr(db_role_admin, "provision_login_roles", provision)
+    monkeypatch.setattr(db_role_admin, "verify_daemon_database_role", verify)
+    monkeypatch.setattr(db_role_admin, "disable_login_roles", disable)
+    monkeypatch.setenv("POLYARB_CONTROL_PLANE_DB_ADMIN_DSN", admin_dsn)
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", runtime_dsn)
+    monkeypatch.setenv("POLYARB_QUALIFICATION_DB_DSN", qualification_dsn)
+    monkeypatch.setenv("POLYARB_RUNTIME_CONTROLLER_DB_PASSWORD", "runtime-password")
+    monkeypatch.setenv("POLYARB_QUALIFICATION_WORKER_DB_PASSWORD", "qualification-password")
+
+    invocations = (
+        ["preflight", "--expected-database", "role_test", "--json"],
+        ["provision", "--enable", "--expected-database", "role_test", "--json"],
+        [
+            "verify",
+            "--profile",
+            "runtime-controller",
+            "--expected-database",
+            "role_test",
+            "--json",
+        ],
+        [
+            "verify",
+            "--profile",
+            "qualification-worker",
+            "--expected-database",
+            "role_test",
+            "--json",
+        ],
+        ["disable", "--enable", "--expected-database", "role_test", "--json"],
+    )
+    assert [db_role_admin.main(args) for args in invocations] == [0, 0, 0, 0, 0]
+
+    assert connected == [admin_dsn, admin_dsn, runtime_dsn, qualification_dsn, admin_dsn]
+    assert [operation[0] for operation in operations] == [
+        "preflight",
+        "provision",
+        "verify",
+        "verify",
+        "disable",
+    ]
+    assert operations[0][1] is factories[admin_dsn]
+    assert operations[1][1] is factories[admin_dsn]
+    assert operations[2][1] is factories[runtime_dsn]
+    assert operations[3][1] is factories[qualification_dsn]
+    assert operations[4][1] is factories[admin_dsn]
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    for secret in (admin_dsn, runtime_dsn, qualification_dsn, "password"):
+        assert secret not in output
+
+
+def test_runbook_and_templates_keep_admin_dsn_out_of_app_secrets() -> None:
+    runbook = (PROJECT_ROOT / "docs/dev/control-plane-runbook.md").read_text()
+    runtime = (
+        PROJECT_ROOT / "deploy/control-plane/fly-runtime-controller.toml.template"
+    ).read_text()
+    qualification = (
+        PROJECT_ROOT / "deploy/control-plane/fly-qualification-worker.toml.template"
+    ).read_text()
+
+    assert "POLYARB_CONTROL_PLANE_DB_ADMIN_DSN" in runbook
+    assert "POLYARB_SUPABASE_DB_DSN" in runbook
+    assert "POLYARB_QUALIFICATION_DB_DSN" in runbook
+    assert "POLYARB_CONTROL_PLANE_DB_ADMIN_DSN" not in runtime
+    assert "POLYARB_CONTROL_PLANE_DB_ADMIN_DSN" not in qualification
+    assert "POLYARB_SUPABASE_DB_DSN" in runtime
+    assert "POLYARB_QUALIFICATION_DB_DSN" not in runtime
+    assert "POLYARB_QUALIFICATION_DB_DSN" in qualification
+    assert "POLYARB_SUPABASE_DB_DSN" not in qualification
 
 
 def test_cli_verify_selects_profile_scoped_dsn_and_delegates(
@@ -843,7 +988,10 @@ def test_real_postgres_provisions_verifies_rotates_and_disables_roles(
         disable_login_roles,
         provision_login_roles,
     )
-    from polyarb.control_plane.db_role_contract import verify_daemon_database_role
+    from polyarb.control_plane.db_role_contract import (
+        scoped_connection_factory,
+        verify_daemon_database_role,
+    )
 
     def admin_factory() -> psycopg.Connection[object]:
         return psycopg.connect(postgres_026_dsn)
@@ -863,7 +1011,7 @@ def test_real_postgres_provisions_verifies_rotates_and_disables_roles(
     )
     assert (
         verify_daemon_database_role(
-            lambda: psycopg.connect(runtime_dsn),
+            scoped_connection_factory(runtime_dsn),
             "runtime-controller",
             expected_database="test",
         ).status
@@ -871,7 +1019,7 @@ def test_real_postgres_provisions_verifies_rotates_and_disables_roles(
     )
     assert (
         verify_daemon_database_role(
-            lambda: psycopg.connect(qualification_dsn),
+            scoped_connection_factory(qualification_dsn),
             "qualification-worker",
             expected_database="test",
         ).status
@@ -883,7 +1031,6 @@ def test_real_postgres_provisions_verifies_rotates_and_disables_roles(
         assert _role_attributes(admin, QUALIFICATION_LOGIN) == (True, False, False, False, True)
         assert _memberships(admin, RUNTIME_LOGIN) == [RUNTIME_CAPABILITY]
         assert _memberships(admin, QUALIFICATION_LOGIN) == [QUALIFICATION_CAPABILITY]
-
     provision_login_roles(
         admin_factory,
         expected_database="test",
@@ -895,7 +1042,7 @@ def test_real_postgres_provisions_verifies_rotates_and_disables_roles(
         psycopg.connect(runtime_dsn).close()
     assert (
         verify_daemon_database_role(
-            lambda: psycopg.connect(
+            scoped_connection_factory(
                 _role_dsn(postgres_026_dsn, RUNTIME_LOGIN, "runtime-real-secret-b")
             ),
             "runtime-controller",
@@ -911,9 +1058,7 @@ def test_real_postgres_provisions_verifies_rotates_and_disables_roles(
         assert _role_attributes(admin, RUNTIME_LOGIN)[0] is False
         assert _role_attributes(admin, QUALIFICATION_LOGIN)[0] is False
     with pytest.raises(psycopg.OperationalError):
-        psycopg.connect(
-            _role_dsn(postgres_026_dsn, RUNTIME_LOGIN, "runtime-real-secret-b")
-        ).close()
+        psycopg.connect(_role_dsn(postgres_026_dsn, RUNTIME_LOGIN, "runtime-real-secret-b")).close()
     with pytest.raises(psycopg.OperationalError):
         psycopg.connect(qualification_dsn).close()
 
@@ -938,7 +1083,7 @@ def test_real_postgres_provisions_verifies_rotates_and_disables_roles(
     )
     assert (
         verify_daemon_database_role(
-            lambda: psycopg.connect(restored_runtime_dsn),
+            scoped_connection_factory(restored_runtime_dsn),
             "runtime-controller",
             expected_database="test",
         ).status
@@ -946,7 +1091,7 @@ def test_real_postgres_provisions_verifies_rotates_and_disables_roles(
     )
     assert (
         verify_daemon_database_role(
-            lambda: psycopg.connect(restored_qualification_dsn),
+            scoped_connection_factory(restored_qualification_dsn),
             "qualification-worker",
             expected_database="test",
         ).status
@@ -957,6 +1102,67 @@ def test_real_postgres_provisions_verifies_rotates_and_disables_roles(
         assert _role_attributes(admin, QUALIFICATION_LOGIN) == (True, False, False, False, True)
         assert _memberships(admin, RUNTIME_LOGIN) == [RUNTIME_CAPABILITY]
         assert _memberships(admin, QUALIFICATION_LOGIN) == [QUALIFICATION_CAPABILITY]
+
+
+def test_real_cli_admin_scoped_verify_admin_disable_handoff(
+    postgres_026_dsn: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from polyarb.control_plane import db_role_admin
+
+    runtime_password = "runtime-real-cli-secret"
+    qualification_password = "qualification-real-cli-secret"
+    admin_dsn = postgres_026_dsn
+    runtime_dsn = _role_dsn(postgres_026_dsn, RUNTIME_LOGIN, runtime_password)
+    qualification_dsn = _role_dsn(
+        postgres_026_dsn,
+        QUALIFICATION_LOGIN,
+        qualification_password,
+    )
+    monkeypatch.setenv("POLYARB_CONTROL_PLANE_DB_ADMIN_DSN", admin_dsn)
+    monkeypatch.setenv("POLYARB_RUNTIME_CONTROLLER_DB_PASSWORD", runtime_password)
+    monkeypatch.setenv(
+        "POLYARB_QUALIFICATION_WORKER_DB_PASSWORD",
+        qualification_password,
+    )
+
+    assert db_role_admin.main(["preflight", "--expected-database", "test", "--json"]) == 0
+    assert (
+        db_role_admin.main(["provision", "--enable", "--expected-database", "test", "--json"]) == 0
+    )
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", runtime_dsn)
+    monkeypatch.setenv("POLYARB_QUALIFICATION_DB_DSN", qualification_dsn)
+    for profile in ("runtime-controller", "qualification-worker"):
+        assert (
+            db_role_admin.main(
+                [
+                    "verify",
+                    "--profile",
+                    profile,
+                    "--expected-database",
+                    "test",
+                    "--json",
+                ]
+            )
+            == 0
+        )
+    assert db_role_admin.main(["disable", "--enable", "--expected-database", "test", "--json"]) == 0
+
+    with pytest.raises(psycopg.OperationalError):
+        psycopg.connect(runtime_dsn).close()
+    with pytest.raises(psycopg.OperationalError):
+        psycopg.connect(qualification_dsn).close()
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    for secret in (
+        admin_dsn,
+        runtime_dsn,
+        qualification_dsn,
+        runtime_password,
+        qualification_password,
+    ):
+        assert secret not in output
 
 
 @pytest.fixture(scope="module")
@@ -993,9 +1199,7 @@ def _normalize_dsn(dsn: str) -> str:
 def _create_supabase_roles(dsn: str) -> None:
     with psycopg.connect(dsn, autocommit=True) as connection:
         for role in ("anon", "authenticated", "service_role"):
-            connection.execute(
-                sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role))
-            )
+            connection.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role)))
 
 
 def _run_alembic(dsn: str, *args: str) -> None:

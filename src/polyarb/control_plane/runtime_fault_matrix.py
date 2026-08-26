@@ -24,7 +24,11 @@ from psycopg.rows import dict_row
 from alembic import command
 
 from .db_role_admin import provision_login_roles
-from .db_role_contract import ROLE_CONTRACTS, verify_daemon_database_role
+from .db_role_contract import (
+    ROLE_CONTRACTS,
+    scoped_connection_factory,
+    verify_daemon_database_role,
+)
 from .postgres import (
     PostgresControlPlane,
     RuntimeEventConflictError,
@@ -177,9 +181,7 @@ def run_fault_matrix() -> dict[str, object]:
                 qualification_fact_count = sum(
                     outcome.qualification_fact_count for outcome in outcomes
                 )
-                observe_decision_count = sum(
-                    outcome.observe_decision_count for outcome in outcomes
-                )
+                observe_decision_count = sum(outcome.observe_decision_count for outcome in outcomes)
                 recovery_actions_created = sum(
                     outcome.recovery_actions_created for outcome in outcomes
                 )
@@ -465,9 +467,7 @@ def _drop_disposable_login_roles_if_safe(maintenance: psycopg.Connection[Any]) -
             """,
             (contract.login_role,),
         ).fetchall()
-        if tuple(str(membership[0]) for membership in memberships) != (
-            contract.capability_role,
-        ):
+        if tuple(str(membership[0]) for membership in memberships) != (contract.capability_role,):
             raise RuntimeFaultMatrixError(
                 f"refusing to clean unsafe disposable login membership {contract.login_role!r}"
             )
@@ -500,8 +500,8 @@ def _context(
     return _RuntimeContext(
         admin_dsn=dsn,
         admin_factory=admin_factory,
-        runtime_controller_factory=_connection_factory(runtime_dsn),
-        qualification_factory=_connection_factory(qualification_dsn),
+        runtime_controller_factory=scoped_connection_factory(runtime_dsn),
+        qualification_factory=scoped_connection_factory(qualification_dsn),
         control_plane=PostgresControlPlane(admin_factory),
     )
 
@@ -1086,8 +1086,8 @@ def _claim_and_complete(
 
 
 def _decision(action: RecoveryActionType, reason_code: str, now: datetime) -> RecoveryDecision:
-    severity = "critical" if reason_code in {"job.lease-expired", "job.heartbeat-missing"} else (
-        "warning"
+    severity = (
+        "critical" if reason_code in {"job.lease-expired", "job.heartbeat-missing"} else ("warning")
     )
     breaking = reason_code in {"job.lease-expired", "job.heartbeat-missing"}
     return RecoveryDecision(

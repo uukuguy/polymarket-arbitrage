@@ -66,6 +66,20 @@ def test_026_declares_exact_capability_roles_and_chain() -> None:
         assert attribute in text
 
 
+def test_026_closes_all_application_namespaces_and_database_creation() -> None:
+    text = MIGRATION_PATH.read_text()
+    for fragment in (
+        "rolconfig",
+        "pg_db_role_setting",
+        "has_database_privilege",
+        "'CREATE'",
+        "'TEMPORARY'",
+        "namespace.nspname NOT IN ('pg_catalog', 'information_schema')",
+        "namespace.nspname !~ '^pg_(toast|temp)(_|$)'",
+    ):
+        assert fragment in text
+
+
 def test_026_keeps_observe_role_out_of_recovery_mutation() -> None:
     text = MIGRATION_PATH.read_text()
     assert "m1_runtime_observe_decisions" in text
@@ -145,9 +159,7 @@ def test_026_rejects_unsafe_or_authorized_preexisting_capability_roles() -> None
         _create_supabase_roles(dsn)
         _run_alembic(dsn, "upgrade", "025")
         with psycopg.connect(dsn, autocommit=True) as admin:
-            admin.execute(
-                sql.SQL("CREATE ROLE {} LOGIN").format(sql.Identifier(RUNTIME_ROLE))
-            )
+            admin.execute(sql.SQL("CREATE ROLE {} LOGIN").format(sql.Identifier(RUNTIME_ROLE)))
 
         result = _run_alembic_result(dsn, "upgrade", "026")
 
@@ -159,6 +171,7 @@ def test_026_rejects_unsafe_or_authorized_preexisting_capability_roles() -> None
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(RUNTIME_ROLE)))
             admin.execute("CREATE ROLE m1_collision_peer NOLOGIN")
+            admin.execute("CREATE SCHEMA m1_collision_namespace")
 
         collision_setups = (
             (
@@ -172,21 +185,13 @@ def test_026_rejects_unsafe_or_authorized_preexisting_capability_roles() -> None
             ),
             (
                 "incoming-member",
-                sql.SQL("GRANT {} TO m1_collision_peer").format(
-                    sql.Identifier(RUNTIME_ROLE)
-                ),
-                sql.SQL("REVOKE {} FROM m1_collision_peer").format(
-                    sql.Identifier(RUNTIME_ROLE)
-                ),
+                sql.SQL("GRANT {} TO m1_collision_peer").format(sql.Identifier(RUNTIME_ROLE)),
+                sql.SQL("REVOKE {} FROM m1_collision_peer").format(sql.Identifier(RUNTIME_ROLE)),
             ),
             (
                 "outgoing-member",
-                sql.SQL("GRANT m1_collision_peer TO {}").format(
-                    sql.Identifier(RUNTIME_ROLE)
-                ),
-                sql.SQL("REVOKE m1_collision_peer FROM {}").format(
-                    sql.Identifier(RUNTIME_ROLE)
-                ),
+                sql.SQL("GRANT m1_collision_peer TO {}").format(sql.Identifier(RUNTIME_ROLE)),
+                sql.SQL("REVOKE m1_collision_peer FROM {}").format(sql.Identifier(RUNTIME_ROLE)),
             ),
             (
                 "owned-object",
@@ -197,13 +202,46 @@ def test_026_rejects_unsafe_or_authorized_preexisting_capability_roles() -> None
                     sql.Identifier(RUNTIME_ROLE)
                 ),
             ),
+            (
+                "database-create",
+                sql.SQL("GRANT CREATE ON DATABASE test TO {}").format(sql.Identifier(RUNTIME_ROLE)),
+                sql.SQL("REVOKE CREATE ON DATABASE test FROM {}").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+            ),
+            (
+                "role-search-path",
+                sql.SQL("ALTER ROLE {} SET search_path = evil, public").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+                sql.SQL("ALTER ROLE {} RESET search_path").format(sql.Identifier(RUNTIME_ROLE)),
+            ),
+            (
+                "database-search-path",
+                sql.SQL("ALTER DATABASE test SET search_path = evil, public"),
+                sql.SQL("ALTER DATABASE test RESET search_path"),
+            ),
+            (
+                "nonpublic-grant",
+                sql.SQL("GRANT USAGE ON SCHEMA m1_collision_namespace TO {}").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+                sql.SQL("REVOKE USAGE ON SCHEMA m1_collision_namespace FROM {}").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+            ),
+            (
+                "nonpublic-owner",
+                sql.SQL("ALTER SCHEMA m1_collision_namespace OWNER TO {}").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+                sql.SQL("ALTER SCHEMA m1_collision_namespace OWNER TO CURRENT_USER"),
+            ),
         )
         for case, setup, cleanup in collision_setups:
             with psycopg.connect(dsn, autocommit=True) as admin:
                 admin.execute(
-                    sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(
-                        sql.Identifier(RUNTIME_ROLE)
-                    )
+                    sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(sql.Identifier(RUNTIME_ROLE))
                 )
                 admin.execute(setup)
             result = _run_alembic_result(dsn, "upgrade", "026")
@@ -216,6 +254,7 @@ def test_026_rejects_unsafe_or_authorized_preexisting_capability_roles() -> None
                 admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(RUNTIME_ROLE)))
 
         with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute("DROP SCHEMA m1_collision_namespace")
             admin.execute("DROP ROLE m1_collision_peer")
         _run_alembic(dsn, "upgrade", "026")
         assert _current_revision(dsn) == "026"
@@ -271,14 +310,15 @@ def test_026_scoped_roles_harden_ingress_and_replay_across_downgrade() -> None:
                 runtime.execute("UPDATE m1_recovery_actions SET state = state WHERE false")
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             with psycopg.connect(runtime_dsn) as runtime:
-                runtime.execute("SELECT public.m1_record_qualification_freshness_ingress("
-                                "%s, %s, %s, %s)",
-                                (
-                                    "freshness:structure:runtime",
-                                    "structure",
-                                    NOW,
-                                    Jsonb(_freshness_payload("structure")),
-                                ))
+                runtime.execute(
+                    "SELECT public.m1_record_qualification_freshness_ingress(%s, %s, %s, %s)",
+                    (
+                        "freshness:structure:runtime",
+                        "structure",
+                        NOW,
+                        Jsonb(_freshness_payload("structure")),
+                    ),
+                )
 
         _exercise_source_projection_ingress(source_dsn, dsn)
         _assert_plain_login_cannot_spoof_trigger_ingress(plain_dsn, dsn)
@@ -325,6 +365,7 @@ def test_026_real_pg16_exact_authority_adversarial_matrix() -> None:
     )
     from polyarb.control_plane.db_role_contract import (
         DatabaseRoleContractError,
+        scoped_connection_factory,
         verify_daemon_database_role,
     )
 
@@ -342,9 +383,7 @@ def test_026_real_pg16_exact_authority_adversarial_matrix() -> None:
             runtime_password="runtime-matrix-secret",
             qualification_password="qualification-matrix-secret",
         )
-        runtime_dsn = _role_dsn(
-            dsn, "m1_runtime_controller_login", "runtime-matrix-secret"
-        )
+        runtime_dsn = _role_dsn(dsn, "m1_runtime_controller_login", "runtime-matrix-secret")
         qualification_dsn = _role_dsn(
             dsn, "m1_qualification_worker_login", "qualification-matrix-secret"
         )
@@ -359,7 +398,7 @@ def test_026_real_pg16_exact_authority_adversarial_matrix() -> None:
         for profile, role_dsn in profiles.items():
             assert (
                 verify_daemon_database_role(
-                    lambda role_dsn=role_dsn: psycopg.connect(role_dsn),
+                    scoped_connection_factory(role_dsn),
                     profile,
                     expected_database="test",
                 ).status
@@ -367,9 +406,10 @@ def test_026_real_pg16_exact_authority_adversarial_matrix() -> None:
             )
 
         def assert_rejected(profile: str) -> None:
+            before = _scoped_daemon_mutation_counts(dsn)
             with pytest.raises(DatabaseRoleContractError) as daemon_error:
                 verify_daemon_database_role(
-                    lambda: psycopg.connect(profiles[profile]),
+                    scoped_connection_factory(profiles[profile]),
                     profile,
                     expected_database="test",
                 )
@@ -380,6 +420,7 @@ def test_026_real_pg16_exact_authority_adversarial_matrix() -> None:
                 assert len(rendered) <= 256
                 assert "postgresql://" not in rendered
                 assert "matrix-secret" not in rendered
+            assert _scoped_daemon_mutation_counts(dsn) == before
 
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute("CREATE TABLE public.m1_unrelated_authority(id bigint)")
@@ -438,18 +479,130 @@ def test_026_real_pg16_exact_authority_adversarial_matrix() -> None:
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute("DROP TABLE public.m1_unrelated_authority")
 
+            admin.execute(
+                sql.SQL("CREATE SCHEMA {} AUTHORIZATION {}").format(
+                    sql.Identifier("m1_runtime_controller_login"),
+                    sql.Identifier("m1_runtime_controller_login"),
+                )
+            )
+        assert_rejected("runtime-controller")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(
+                    sql.Identifier("m1_runtime_controller_login")
+                )
+            )
+
+            admin.execute("ALTER ROLE m1_runtime_controller_login SET search_path = evil, public")
+        assert_rejected("runtime-controller")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute("ALTER ROLE m1_runtime_controller_login RESET search_path")
+
+            admin.execute("ALTER DATABASE test SET search_path = evil, public")
+        assert_rejected("runtime-controller")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute("ALTER DATABASE test RESET search_path")
+
+            admin.execute("GRANT CREATE ON DATABASE test TO m1_runtime_controller_login")
+        assert_rejected("runtime-controller")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute("REVOKE CREATE ON DATABASE test FROM m1_runtime_controller_login")
+
+            admin.execute("CREATE SCHEMA m1_unrelated_namespace")
+            admin.execute("CREATE TABLE m1_unrelated_namespace.shadow(id bigint)")
+            admin.execute(
+                "GRANT USAGE ON SCHEMA m1_unrelated_namespace TO m1_qualification_worker_login"
+            )
+            admin.execute(
+                "GRANT SELECT ON TABLE m1_unrelated_namespace.shadow "
+                "TO m1_qualification_worker_login"
+            )
+        assert_rejected("qualification-worker")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(
+                "REVOKE SELECT ON TABLE m1_unrelated_namespace.shadow "
+                "FROM m1_qualification_worker_login"
+            )
+            admin.execute(
+                "REVOKE USAGE ON SCHEMA m1_unrelated_namespace FROM m1_qualification_worker_login"
+            )
+            admin.execute("DROP SCHEMA m1_unrelated_namespace CASCADE")
+
+        membership_options = (
+            "WITH ADMIN TRUE, INHERIT TRUE, SET TRUE",
+            "WITH ADMIN FALSE, INHERIT FALSE, SET TRUE",
+            "WITH ADMIN FALSE, INHERIT TRUE, SET FALSE",
+        )
+        for options in membership_options:
+            with psycopg.connect(dsn, autocommit=True) as admin:
+                admin.execute(
+                    "REVOKE m1_runtime_controller_capability FROM m1_runtime_controller_login"
+                )
+                admin.execute(
+                    "GRANT m1_runtime_controller_capability "
+                    f"TO m1_runtime_controller_login {options}"
+                )
+            assert_rejected("runtime-controller")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(
+                "REVOKE m1_runtime_controller_capability FROM m1_runtime_controller_login"
+            )
+            admin.execute(
+                "GRANT m1_runtime_controller_capability "
+                "TO m1_runtime_controller_login "
+                "WITH ADMIN FALSE, INHERIT TRUE, SET TRUE"
+            )
+
+        unsafe_runtime_dsn = runtime_dsn + "?options=-csearch_path%3Devil"
+        before = _scoped_daemon_mutation_counts(dsn)
+        with pytest.raises(DatabaseRoleContractError, match="database-role.dsn-override"):
+            scoped_connection_factory(unsafe_runtime_dsn)
+        assert _scoped_daemon_mutation_counts(dsn) == before
+
         assert preflight_capability_roles(admin_factory, expected_database="test")["status"] == (
             "ready"
         )
         for profile, role_dsn in profiles.items():
             assert (
                 verify_daemon_database_role(
-                    lambda role_dsn=role_dsn: psycopg.connect(role_dsn),
+                    scoped_connection_factory(role_dsn),
                     profile,
                     expected_database="test",
                 ).status
                 == "pass"
             )
+        with psycopg.connect(dsn) as admin:
+            temporary_row = admin.execute(
+                "SELECT has_database_privilege(%s, current_database(), 'TEMPORARY')",
+                ("m1_runtime_controller_login",),
+            ).fetchone()
+            assert temporary_row is not None
+            assert bool(_row_value(temporary_row, 0, "has_database_privilege"))
+            assert {
+                str(row[0])
+                for row in admin.execute(
+                    "SELECT rolname FROM pg_catalog.pg_roles "
+                    "WHERE rolname IN ('anon', 'authenticated', 'service_role')"
+                ).fetchall()
+            } == {"anon", "authenticated", "service_role"}
+
+
+def _scoped_daemon_mutation_counts(dsn: str) -> tuple[int, ...]:
+    with psycopg.connect(dsn) as connection:
+        row = connection.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM public.m1_runtime_controller_leases),
+              (SELECT COUNT(*) FROM public.m1_runtime_observe_decisions),
+              (SELECT COUNT(*) FROM public.m1_qualification_source_cursors),
+              (SELECT COUNT(*) FROM public.m1_qualification_epochs),
+              (SELECT COUNT(*) FROM public.m1_qualification_recovery_observations),
+              (SELECT COUNT(*) FROM public.m1_qualification_certificates)
+            """
+        ).fetchone()
+    assert row is not None
+    values = cast(Sequence[object], row)
+    return tuple(int(str(value)) for value in values)
 
 
 def _runtime_write_table_tuple(text: str) -> tuple[str, ...]:
@@ -516,9 +669,7 @@ def _current_revision(dsn: str) -> str:
 def _create_supabase_roles(dsn: str) -> None:
     with psycopg.connect(dsn, autocommit=True) as connection:
         for role in ("anon", "authenticated", "service_role"):
-            connection.execute(
-                sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role))
-            )
+            connection.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role)))
 
 
 def _role_dsn(dsn: str, username: str, password: str) -> str:
@@ -593,9 +744,7 @@ def _grant_plain_login_permissions(admin: psycopg.Connection[object]) -> None:
             sql.Identifier(PLAIN_LOGIN),
         )
     )
-    admin.execute(
-        sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(PLAIN_LOGIN))
-    )
+    admin.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(PLAIN_LOGIN)))
 
 
 def _assert_role_attributes(admin: psycopg.Connection[object], role_name: str) -> None:
@@ -1257,9 +1406,7 @@ def _assert_append_only_triggers(connection: psycopg.Connection[object]) -> None
         connection.execute("DELETE FROM m1_qualification_certificates")
     connection.rollback()
     with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
-        connection.execute(
-            "UPDATE m1_qualification_recovery_observations SET reason = reason"
-        )
+        connection.execute("UPDATE m1_qualification_recovery_observations SET reason = reason")
     connection.rollback()
     with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
         connection.execute("DELETE FROM m1_qualification_recovery_observations")
@@ -1270,7 +1417,7 @@ def _assert_revision_024_function_security_restored(
     connection: psycopg.Connection[object],
 ) -> None:
     raw_rows = connection.execute(
-            """
+        """
             SELECT p.proname, p.prosecdef
             FROM pg_catalog.pg_proc AS p
             JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
@@ -1284,7 +1431,7 @@ def _assert_revision_024_function_security_restored(
                   'm1_insert_qualification_certificate'
               )
             """
-        ).fetchall()
+    ).fetchall()
     rows = {
         str(_row_value(row, 0, "proname")): bool(_row_value(row, 1, "prosecdef"))
         for row in raw_rows
@@ -1365,8 +1512,7 @@ def _revision_024_function_projection(
             bool(_row_value(row, 1, "prosecdef")),
             tuple(str(item) for item in cast(Sequence[object], _row_value(row, 2, "proconfig"))),
             tuple(
-                str(item)
-                for item in cast(Sequence[object], _row_value(row, 3, "acl_projection"))
+                str(item) for item in cast(Sequence[object], _row_value(row, 3, "acl_projection"))
             ),
         )
         for row in rows
@@ -1378,9 +1524,9 @@ def _exercise_source_projection_after_downgrade(source_dsn: str, admin_dsn: str)
         _create_test_login(admin, SOURCE_LOGIN, "source-test")
         _grant_source_projection_permissions(admin)
         admin.execute(
-            sql.SQL(
-                "GRANT SELECT, INSERT ON TABLE m1_qualification_ingress_ledger TO {}"
-            ).format(sql.Identifier(SOURCE_LOGIN))
+            sql.SQL("GRANT SELECT, INSERT ON TABLE m1_qualification_ingress_ledger TO {}").format(
+                sql.Identifier(SOURCE_LOGIN)
+            )
         )
         admin.execute(
             sql.SQL("GRANT USAGE ON SEQUENCE {} TO {}").format(

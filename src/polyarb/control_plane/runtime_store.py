@@ -130,7 +130,8 @@ def _event_from_row(row: object) -> RuntimeEvent:
         progress=progress,
         detail=dict(_row_value(row, "detail", 11)),  # type: ignore[arg-type]
         occurred_at=_require_aware(
-            _row_value(row, "occurred_at", 12), "persisted occurred_at"  # type: ignore[arg-type]
+            _row_value(row, "occurred_at", 12),
+            "persisted occurred_at",  # type: ignore[arg-type]
         ),
         idempotency_key=str(_row_value(row, "idempotency_key", 13)),
     )
@@ -169,9 +170,10 @@ def _current_runtime_state(
                progress_sequence, progress_current, progress_total,
                lease_deadline_at, heartbeat_deadline_at, progress_deadline_at,
                attempt_deadline_at, recovery_state, updated_at
-        FROM m1_job_runtime_state
+        FROM public.m1_job_runtime_state
         WHERE job_key = %s
-        """ + (" FOR UPDATE" if for_update else ""),
+        """
+        + (" FOR UPDATE" if for_update else ""),
         (job_key,),
     )
     row = cursor.fetchone()
@@ -198,7 +200,7 @@ def _assert_current_job_lease(
     cursor.execute(
         """
         SELECT lease_owner, lease_epoch, lease_expires_at, state
-        FROM m1_jobs
+        FROM public.m1_jobs
         WHERE job_key = %s
         FOR UPDATE
         """,
@@ -226,16 +228,14 @@ def _existing_event_by_idempotency(
     cursor: Cursor[Any], idempotency_key: str
 ) -> RuntimeEvent | None:
     cursor.execute(
-        f"SELECT {_EVENT_COLUMNS} FROM m1_job_runtime_events WHERE idempotency_key = %s",
+        f"SELECT {_EVENT_COLUMNS} FROM public.m1_job_runtime_events WHERE idempotency_key = %s",
         (idempotency_key,),
     )
     row = cursor.fetchone()
     return None if row is None else _event_from_row(row)
 
 
-def append_runtime_event_cursor(
-    cursor: Cursor[Any], event: RuntimeEvent
-) -> RuntimeEvent:
+def append_runtime_event_cursor(cursor: Cursor[Any], event: RuntimeEvent) -> RuntimeEvent:
     """Append one event, returning the exact persisted row on replay.
 
     The current runtime fence is checked only for a new event.  This permits a
@@ -267,7 +267,7 @@ def append_runtime_event_cursor(
         worker_id=normalized.worker_id,
     )
     cursor.execute(
-        f"SELECT {_EVENT_COLUMNS} FROM m1_job_runtime_events "
+        f"SELECT {_EVENT_COLUMNS} FROM public.m1_job_runtime_events "
         "WHERE attempt_id = %s AND event_sequence = %s",
         (normalized.attempt_id, normalized.event_sequence),
     )
@@ -286,7 +286,7 @@ def append_runtime_event_cursor(
     progress_total = None if normalized.progress is None else normalized.progress.total
     cursor.execute(
         """
-        INSERT INTO m1_job_runtime_events (
+        INSERT INTO public.m1_job_runtime_events (
             event_id, job_key, attempt_id, lease_epoch, worker_id,
             event_sequence, kind, stage, progress_sequence, progress_current,
             progress_total, detail, occurred_at, idempotency_key
@@ -365,7 +365,7 @@ def start_runtime_attempt_cursor(
     attempt_deadline = started + timedelta(seconds=selected_profile.attempt_seconds)
     cursor.execute(
         """
-        INSERT INTO m1_job_runtime_state (
+        INSERT INTO public.m1_job_runtime_state (
             job_key, attempt_id, lease_epoch, worker_id, stage,
             started_at, last_heartbeat_at, last_progress_at,
             progress_sequence, progress_current, progress_total,
@@ -458,7 +458,8 @@ def update_runtime_heartbeat_cursor(
         worker_id=worker_id,
     )
     attempt_deadline = _require_aware(
-        _row_value(state, "attempt_deadline_at", 14), "attempt_deadline_at"  # type: ignore[arg-type]
+        _row_value(state, "attempt_deadline_at", 14),
+        "attempt_deadline_at",  # type: ignore[arg-type]
     )
     if observed_at >= attempt_deadline:
         raise RuntimeFenceError(f"attempt deadline has elapsed for {job_key}")
@@ -470,7 +471,7 @@ def update_runtime_heartbeat_cursor(
     )
     cursor.execute(
         """
-        UPDATE m1_jobs
+        UPDATE public.m1_jobs
         SET lease_expires_at = %s, updated_at = %s
         WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
           AND state = 'leased' AND lease_expires_at > %s
@@ -488,7 +489,7 @@ def update_runtime_heartbeat_cursor(
         raise RuntimeFenceError(f"job lease is no longer current for {job_key}")
     cursor.execute(
         """
-        UPDATE m1_job_runtime_state
+        UPDATE public.m1_job_runtime_state
         SET last_heartbeat_at = %s, heartbeat_deadline_at = %s,
             lease_deadline_at = %s, updated_at = %s
         WHERE job_key = %s AND attempt_id = %s AND lease_epoch = %s AND worker_id = %s
@@ -553,12 +554,10 @@ def update_runtime_progress_cursor(
     )
     previous_sequence = int(_row_value(state, "progress_sequence", 8))
     if progress.sequence <= previous_sequence:
-        raise RuntimeProgressConflict(
-            "runtime progress sequence must increase strictly"
-        )
+        raise RuntimeProgressConflict("runtime progress sequence must increase strictly")
     cursor.execute(
         "SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence "
-        "FROM m1_job_runtime_events "
+        "FROM public.m1_job_runtime_events "
         "WHERE attempt_id = %s",
         (normalized.attempt_id,),
     )
@@ -568,15 +567,18 @@ def update_runtime_progress_cursor(
     next_event_sequence = int(_row_value(sequence_row, "next_sequence", 0))
     normalized = _event_with(normalized, event_sequence=next_event_sequence)
     attempt_deadline = _require_aware(
-        _row_value(state, "attempt_deadline_at", 14), "attempt_deadline_at"  # type: ignore[arg-type]
+        _row_value(state, "attempt_deadline_at", 14),
+        "attempt_deadline_at",  # type: ignore[arg-type]
     )
     if observed_at >= attempt_deadline:
         raise RuntimeFenceError(f"attempt deadline has elapsed for {normalized.job_key}")
     previous_progress_at = _require_aware(
-        _row_value(state, "last_progress_at", 7), "last_progress_at"  # type: ignore[arg-type]
+        _row_value(state, "last_progress_at", 7),
+        "last_progress_at",  # type: ignore[arg-type]
     )
     previous_progress_deadline = _require_aware(
-        _row_value(state, "progress_deadline_at", 13), "progress_deadline_at"  # type: ignore[arg-type]
+        _row_value(state, "progress_deadline_at", 13),
+        "progress_deadline_at",  # type: ignore[arg-type]
     )
     configured_progress_window = max(
         1, int((previous_progress_deadline - previous_progress_at).total_seconds())
@@ -587,7 +589,7 @@ def update_runtime_progress_cursor(
     )
     cursor.execute(
         """
-        UPDATE m1_job_runtime_state
+        UPDATE public.m1_job_runtime_state
         SET stage = %s, last_progress_at = %s,
             progress_sequence = %s, progress_current = %s, progress_total = %s,
             progress_deadline_at = %s, updated_at = %s

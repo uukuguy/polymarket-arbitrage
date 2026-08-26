@@ -103,9 +103,10 @@ unexpected role membership; it does not silently absorb a pre-existing broad
 role.
 
 Passwords are stored in the operator's macOS Keychain and as separate Fly
-secrets. The runtime controller receives `POLYARB_SUPABASE_DB_DSN`; the
-qualification worker receives `POLYARB_QUALIFICATION_DB_DSN`. Neither app
-receives the other DSN.
+secrets. Admin preflight, provisioning, and disablement use the operator-only
+`POLYARB_CONTROL_PLANE_DB_ADMIN_DSN`; it is never installed in either app. The
+runtime controller receives `POLYARB_SUPABASE_DB_DSN`; the qualification worker
+receives `POLYARB_QUALIFICATION_DB_DSN`. Neither app receives the other DSN.
 
 ## Exact permission matrix
 
@@ -229,9 +230,20 @@ identity check:
 - `session_user` is the exact expected login role;
 - the login is a member of only the expected application capability among the
   two new capabilities;
+- that PostgreSQL 16 membership is exactly `ADMIN FALSE, INHERIT TRUE, SET TRUE`;
 - it is not superuser and cannot bypass RLS;
+- its DSN contains no `options` or `search_path` override, its active path is
+  exactly `pg_catalog,public`, and neither role nor database config supplies a
+  competing path;
 - required effective privileges are present;
-- explicitly forbidden effective privileges are absent.
+- explicitly forbidden effective privileges are absent across every non-system
+  schema, including database/schema `CREATE`, object ownership, relation and
+  sequence authority, and SECURITY DEFINER execution.
+
+Every application relation and routine used by either daemon is explicitly
+qualified with `public.`. Database `TEMPORARY` remains allowed for compatibility
+with the original four applications and PostgreSQL's default PUBLIC posture;
+it is not persistent schema authority, while database `CREATE` is forbidden.
 
 A failed identity or permission check exits non-zero before the first lease,
 observe decision, freshness fact, epoch, or certificate write. The health/log
@@ -253,10 +265,11 @@ Provisioning is separate from migration so the same schema can be promoted
 without carrying environment credentials in Git or Alembic logs.
 
 The collision policy is fail closed. Capability-role attributes, login-role
-attributes, memberships, database name, schema revision, and effective grants
-must match exactly before a Fly secret may be installed. An unexpected broad
-grant through `PUBLIC` or another inherited role fails verification even if the
-explicit grants look correct.
+attributes, membership option columns, database name, schema revision,
+configured namespace, application-object ownership, and effective grants must
+match exactly before a Fly secret may be installed. An unexpected broad grant
+through `PUBLIC`, another inherited role, or a non-public application schema
+fails verification even if the explicit public grants look correct.
 
 ## Verification
 

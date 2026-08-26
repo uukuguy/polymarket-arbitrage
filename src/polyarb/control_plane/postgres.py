@@ -159,9 +159,7 @@ _SNAPSHOT_ACTION_TYPES = frozenset(
     }
 )
 _SNAPSHOT_ACTION_STATES = frozenset({"pending", "running", "completed"})
-_SNAPSHOT_ACTION_RESULTS = frozenset(
-    {"succeeded", "failed", "stale-noop", "disabled-action"}
-)
+_SNAPSHOT_ACTION_RESULTS = frozenset({"succeeded", "failed", "stale-noop", "disabled-action"})
 _SNAPSHOT_QUALIFICATION_STATES = frozenset(
     {"accumulating", "invalidated", "recovering", "qualified"}
 )
@@ -206,9 +204,7 @@ def _alert_transition(kind: str) -> str:
 
 
 def _alert_action(kind: str, detail: Mapping[str, object]) -> str:
-    action = _safe_alert_text(detail.get("action_type")) or _safe_alert_text(
-        detail.get("action")
-    )
+    action = _safe_alert_text(detail.get("action_type")) or _safe_alert_text(detail.get("action"))
     if action in _ALERT_ACTIONS:
         return action
     if kind == "recovered":
@@ -310,9 +306,7 @@ def _set_fenced_transaction_timeouts(
     statement_timeout_ms = min(_FENCED_MAX_STATEMENT_TIMEOUT_MS, remaining_ms - 1)
     lock_timeout_ms = min(_FENCED_MAX_LOCK_TIMEOUT_MS, statement_timeout_ms)
     cursor.execute(
-        sql.SQL("SET LOCAL statement_timeout = {}").format(
-            sql.Literal(f"{statement_timeout_ms}ms")
-        )
+        sql.SQL("SET LOCAL statement_timeout = {}").format(sql.Literal(f"{statement_timeout_ms}ms"))
     )
     cursor.execute(
         sql.SQL("SET LOCAL lock_timeout = {}").format(sql.Literal(f"{lock_timeout_ms}ms"))
@@ -401,6 +395,7 @@ def _snapshot_json_array(value: object, field: str) -> list[object]:
     if not isinstance(value, list):
         raise ControlPlaneError("qualification source is malformed")
     return list(value)
+
 
 _RUNTIME_COLUMNS: dict[str, dict[str, tuple[str, bool, str | None]]] = {
     "m1_job_runtime_state": {
@@ -496,9 +491,7 @@ _RUNTIME_CONSTRAINTS = {
     ),
 }
 _RUNTIME_CHECK_CONSTRAINTS = {
-    ("m1_job_runtime_state", "ck_m1_runtime_state_epoch"): (
-        "CHECK (lease_epoch > 0)"
-    ),
+    ("m1_job_runtime_state", "ck_m1_runtime_state_epoch"): ("CHECK (lease_epoch > 0)"),
     ("m1_job_runtime_state", "ck_m1_runtime_state_progress"): (
         "CHECK (progress_sequence >= 0 AND progress_current >= 0 AND "
         "(progress_total IS NULL OR progress_total >= 0 AND "
@@ -512,9 +505,7 @@ _RUNTIME_CHECK_CONSTRAINTS = {
         "CHECK (jsonb_typeof(detail) = 'object'::text AND "
         "octet_length(detail::text) <= 4096 AND pg_column_size(detail) <= 4096)"
     ),
-    ("m1_job_runtime_events", "ck_m1_runtime_events_epoch"): (
-        "CHECK (lease_epoch > 0)"
-    ),
+    ("m1_job_runtime_events", "ck_m1_runtime_events_epoch"): ("CHECK (lease_epoch > 0)"),
     ("m1_job_runtime_events", "ck_m1_runtime_events_kind"): (
         "CHECK (kind = ANY (ARRAY['job.started'::text, "
         "'job.stage-changed'::text, 'job.lease-at-risk'::text, "
@@ -536,9 +527,7 @@ _RUNTIME_CHECK_CONSTRAINTS = {
         "CHECK (progress_total IS NULL OR progress_total >= 0 AND "
         "progress_current IS NOT NULL AND progress_current <= progress_total)"
     ),
-    ("m1_job_runtime_events", "ck_m1_runtime_events_sequence"): (
-        "CHECK (event_sequence > 0)"
-    ),
+    ("m1_job_runtime_events", "ck_m1_runtime_events_sequence"): ("CHECK (event_sequence > 0)"),
 }
 _RUNTIME_INDEXES = {
     ("m1_job_runtime_state", "m1_job_runtime_state_deadlines"): (
@@ -692,9 +681,7 @@ def _runtime_check_constraint_fingerprint(
         ),
     )
     return {
-        (str(row["table_name"]), str(row["constraint_name"])): str(
-            row["constraint_definition"]
-        )
+        (str(row["table_name"]), str(row["constraint_name"])): str(row["constraint_definition"])
         for row in cursor.fetchall()
     }
 
@@ -746,9 +733,7 @@ class PostgresControlPlane:
     def __init__(self, connection_factory: ConnectionFactory) -> None:
         self._connection_factory = connection_factory
 
-    def start_soak_run(
-        self, *, run_id: str, baseline_record: Mapping[str, object]
-    ) -> None:
+    def start_soak_run(self, *, run_id: str, baseline_record: Mapping[str, object]) -> None:
         """Create one immutable cloud soak run, or prove its exact replay."""
         if not run_id:
             raise ValueError("run_id must be non-empty")
@@ -812,9 +797,7 @@ class PostgresControlPlane:
             if baseline_observation is None or baseline_observation["snapshot_sha256"] != digest:
                 raise SoakEvidenceConflictError("cloud soak baseline conflicts")
 
-    def append_soak_observation(
-        self, *, run_id: str, record: Mapping[str, object]
-    ) -> None:
+    def append_soak_observation(self, *, run_id: str, record: Mapping[str, object]) -> None:
         """Append one canonical observation; exact retransmission is harmless."""
         observation = _validated(record)
         if observation["kind"] != "m1-transactional-soak-v2":
@@ -833,9 +816,11 @@ class PostgresControlPlane:
             )
             run = cursor.fetchone()
             machine_ids = sorted(str(machine_id) for machine_id in observation["machine_states"])
-            if run is None or run["control_api_url"] != observation["control_api_url"] or run[
-                "machine_ids"
-            ] != machine_ids:
+            if (
+                run is None
+                or run["control_api_url"] != observation["control_api_url"]
+                or run["machine_ids"] != machine_ids
+            ):
                 raise SoakEvidenceConflictError("cloud soak observation identity conflicts")
             cursor.execute(
                 """
@@ -936,9 +921,7 @@ class PostgresControlPlane:
             )
             found = {str(row["relname"]) for row in cursor.fetchall()}
             if found != set(required_tables):
-                raise ControlPlaneError(
-                    "control-plane revision 022 runtime schema is incomplete"
-                )
+                raise ControlPlaneError("control-plane revision 022 runtime schema is incomplete")
             cursor.execute(
                 """
                 SELECT attname FROM pg_catalog.pg_attribute
@@ -996,9 +979,11 @@ class PostgresControlPlane:
                 "unique_attempt_event_sequence",
                 "unique_idempotency_key",
             ]
-            if function_row is not None and sha256(
-                str(function_row["source"]).encode()
-            ).hexdigest() == _RUNTIME_APPEND_ONLY_FUNCTION_SOURCE_SHA256:
+            if (
+                function_row is not None
+                and sha256(str(function_row["source"]).encode()).hexdigest()
+                == _RUNTIME_APPEND_ONLY_FUNCTION_SOURCE_SHA256
+            ):
                 found_runtime_invariants.append("append_only_function")
             cursor.execute(
                 """
@@ -1146,7 +1131,9 @@ class PostgresControlPlane:
                 """
             )
             structure_unfinished = cursor.fetchone()
-            if int(structure_unfinished["count"]) >= structure_high_water:
+            if structure_unfinished is None:
+                raise RuntimeError("structure backlog count was not returned")
+            if int(str(structure_unfinished["count"])) >= structure_high_water:
                 return SourceAdmissionDecision(state="backpressured:structure", job_key=None)
             cursor.execute(
                 """
@@ -1156,7 +1143,9 @@ class PostgresControlPlane:
                 """
             )
             quote_unfinished = cursor.fetchone()
-            if int(quote_unfinished["count"]) >= quote_high_water:
+            if quote_unfinished is None:
+                raise RuntimeError("quote backlog count was not returned")
+            if int(str(quote_unfinished["count"])) >= quote_high_water:
                 return SourceAdmissionDecision(state="backpressured:quote", job_key=None)
             cursor.execute(
                 """
@@ -1351,9 +1340,7 @@ class PostgresControlPlane:
             connection.cursor(row_factory=dict_row) as cursor,
         ):
             _set_structure_read_timeouts(cursor, read_only=True)
-            self._structure_source_window_digest_cursor(
-                cursor, window_key, lock_window=False
-            )
+            self._structure_source_window_digest_cursor(cursor, window_key, lock_window=False)
             cursor.execute(
                 """
                 SELECT input.window_key, input.stream, input.ordinal, input.requested_cursor,
@@ -1765,9 +1752,7 @@ class PostgresControlPlane:
                     cursor, spec=spec, next_cursor=next_cursor, completed=completed
                 )
                 if successor is not None:
-                    self._enqueue_structure_source_page_cursor(
-                        cursor, spec=successor, now=now
-                    )
+                    self._enqueue_structure_source_page_cursor(cursor, spec=successor, now=now)
                 return successor
             _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             self._append_job_succeeded_cursor(
@@ -1853,6 +1838,8 @@ class PostgresControlPlane:
             )
             embedded_event_completion = spec.stream == "events" and event_embedded_markets
             if scoped_market_admission:
+                if normalized_market_batches is None:
+                    raise RuntimeError("scoped market admission is missing normalized batches")
                 successor = self._admit_scoped_market_batches_cursor(
                     cursor, event_spec=spec, market_batches=normalized_market_batches, now=now
                 )
@@ -2317,7 +2304,7 @@ class PostgresControlPlane:
             """
             SELECT attempt_id, lease_epoch, worker_id, progress_sequence,
                    progress_current, progress_total
-            FROM m1_job_runtime_state
+            FROM public.m1_job_runtime_state
             WHERE job_key = %s
             FOR UPDATE
             """,
@@ -2349,11 +2336,7 @@ class PostgresControlPlane:
             else RuntimeProgress(
                 sequence=progress_sequence,
                 current=int(state["progress_current"]),
-                total=(
-                    None
-                    if state["progress_total"] is None
-                    else int(state["progress_total"])
-                ),
+                total=(None if state["progress_total"] is None else int(state["progress_total"])),
                 stage=stage,
             )
         )
@@ -2448,11 +2431,7 @@ class PostgresControlPlane:
             else RuntimeProgress(
                 sequence=progress_sequence,
                 current=int(state["progress_current"]),
-                total=(
-                    None
-                    if state["progress_total"] is None
-                    else int(state["progress_total"])
-                ),
+                total=(None if state["progress_total"] is None else int(state["progress_total"])),
                 stage=stage,
             )
         )
@@ -2528,9 +2507,7 @@ class PostgresControlPlane:
                 or int(attempt["lease_epoch"]) != lease.lease_epoch
                 or str(attempt["worker_id"]) != lease.lease_owner
             ):
-                raise StaleLeaseError(
-                    f"durable attempt is no longer current for {lease.job_key}"
-                )
+                raise StaleLeaseError(f"durable attempt is no longer current for {lease.job_key}")
             cursor.execute(
                 """
                 SELECT attempt_id, lease_epoch, worker_id, progress_sequence,
@@ -2548,9 +2525,7 @@ class PostgresControlPlane:
                 or int(runtime_state["lease_epoch"]) != lease.lease_epoch
                 or str(runtime_state["worker_id"]) != lease.lease_owner
             ):
-                raise StaleLeaseError(
-                    f"runtime attempt is no longer current for {lease.job_key}"
-                )
+                raise StaleLeaseError(f"runtime attempt is no longer current for {lease.job_key}")
             cursor.execute(
                 """
                 SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
@@ -2668,9 +2643,7 @@ class PostgresControlPlane:
         )
         existing = cursor.fetchone()
         if existing is not None:
-            expected_progress_sequence = (
-                None if event.progress is None else event.progress.sequence
-            )
+            expected_progress_sequence = None if event.progress is None else event.progress.sequence
             expected_progress_current = None if event.progress is None else event.progress.current
             expected_progress_total = None if event.progress is None else event.progress.total
             if (
@@ -2693,11 +2666,7 @@ class PostgresControlPlane:
                     else int(existing["progress_current"])
                 )
                 != expected_progress_current
-                or (
-                    None
-                    if existing["progress_total"] is None
-                    else int(existing["progress_total"])
-                )
+                or (None if existing["progress_total"] is None else int(existing["progress_total"]))
                 != expected_progress_total
                 or dict(existing["detail"]) != dict(event.detail)
                 or str(existing["idempotency_key"]) != event.idempotency_key
@@ -2791,7 +2760,7 @@ class PostgresControlPlane:
             """
             SELECT attempt_id, lease_epoch, worker_id, stage, progress_sequence,
                    progress_current, progress_total
-            FROM m1_job_runtime_state
+            FROM public.m1_job_runtime_state
             WHERE job_key = %s
             FOR UPDATE
             """,
@@ -2813,7 +2782,7 @@ class PostgresControlPlane:
         # the temporary transition back with every other effect.
         cursor.execute(
             """
-            UPDATE m1_jobs SET state = 'leased'
+            UPDATE public.m1_jobs SET state = 'leased'
             WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
               AND state = 'checkpointed'
             """,
@@ -2827,11 +2796,7 @@ class PostgresControlPlane:
             else RuntimeProgress(
                 sequence=progress_sequence,
                 current=int(state["progress_current"]),
-                total=(
-                    None
-                    if state["progress_total"] is None
-                    else int(state["progress_total"])
-                ),
+                total=(None if state["progress_total"] is None else int(state["progress_total"])),
                 stage=stage,
             )
         )
@@ -2849,7 +2814,7 @@ class PostgresControlPlane:
         cursor.execute(
             """
             SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
-            FROM m1_job_runtime_events
+            FROM public.m1_job_runtime_events
             WHERE attempt_id = %s
             """,
             (attempt_id,),
@@ -4132,6 +4097,10 @@ class PostgresControlPlane:
                 (generation_key,),
             )
             generation = cursor.fetchone()
+            if generation is None:
+                raise IncompleteStructureGenerationError(
+                    "Structure generation is missing its frozen input"
+                )
             try:
                 component_counts = generation["identity"]["component_counts"]
                 expected_counts = {
@@ -4349,7 +4318,9 @@ class PostgresControlPlane:
                     for row in ordered_receipts
                 ).encode()
             ).hexdigest()
-            record_count = sum(int(row["successful_response_count"]) for row in ordered_receipts)
+            record_count = sum(
+                int(str(row["successful_response_count"])) for row in ordered_receipts
+            )
             self._append_job_succeeded_cursor(
                 cursor,
                 lease=lease,
@@ -4779,8 +4750,8 @@ class PostgresControlPlane:
             SELECT j.job_key, j.job_type, j.input_identity, j.lease_owner,
                    j.lease_epoch, j.lease_expires_at, j.checkpoint_cursor,
                    j.checkpoint_digest, j.state
-            FROM m1_jobs AS j
-            JOIN m1_job_runtime_state AS r ON r.job_key = j.job_key
+            FROM public.m1_jobs AS j
+            JOIN public.m1_job_runtime_state AS r ON r.job_key = j.job_key
             WHERE j.job_key = %s
               AND r.attempt_id = %s
               AND r.lease_epoch = %s
@@ -4851,7 +4822,7 @@ class PostgresControlPlane:
         cursor.execute(
             """
             SELECT consecutive_failures, state, opened_at
-            FROM m1_job_circuits WHERE job_key = %s FOR UPDATE
+            FROM public.m1_job_circuits WHERE job_key = %s FOR UPDATE
             """,
             (lease.job_key,),
         )
@@ -4863,7 +4834,7 @@ class PostgresControlPlane:
         opened_at = now if failures == 3 else (None if circuit is None else circuit["opened_at"])
         cursor.execute(
             """
-            INSERT INTO m1_job_circuits (
+            INSERT INTO public.m1_job_circuits (
                 job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at
             ) VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (job_key) DO UPDATE
@@ -4885,7 +4856,7 @@ class PostgresControlPlane:
         )
         cursor.execute(
             """
-            UPDATE m1_jobs
+            UPDATE public.m1_jobs
             SET state = 'retryable', next_attempt_at = %s, last_error_class = %s,
                 lease_owner = NULL, lease_expires_at = NULL, updated_at = %s
             WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
@@ -4904,7 +4875,7 @@ class PostgresControlPlane:
             raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
         cursor.execute(
             """
-            UPDATE m1_job_attempts
+            UPDATE public.m1_job_attempts
             SET state = 'retryable', finished_at = %s, error_class = %s
             WHERE job_key = %s AND lease_epoch = %s
             """,
@@ -4982,9 +4953,7 @@ class PostgresControlPlane:
             summary=f"{self._recovery_component(action)} recovery cancelled stalled job",
             detail={
                 "action_id": action.action_id,
-                "reason_code": action.detail.get(
-                    "reason_code", "job.progress-stalled"
-                ),
+                "reason_code": action.detail.get("reason_code", "job.progress-stalled"),
                 "recovery_action": action.action_type,
             },
             channels=self._recovery_channels(action),
@@ -5009,8 +4978,8 @@ class PostgresControlPlane:
             """
             SELECT j.state, j.lease_owner, j.lease_epoch, j.lease_expires_at,
                    r.attempt_id, r.lease_epoch AS runtime_epoch
-            FROM m1_jobs AS j
-            JOIN m1_job_runtime_state AS r ON r.job_key = j.job_key
+            FROM public.m1_jobs AS j
+            JOIN public.m1_job_runtime_state AS r ON r.job_key = j.job_key
             WHERE j.job_key = %s
               AND r.attempt_id = %s
               AND r.lease_epoch = %s
@@ -5030,7 +4999,7 @@ class PostgresControlPlane:
         if row["state"] == JobState.RETRYABLE.value:
             cursor.execute(
                 """
-                UPDATE m1_jobs
+                UPDATE public.m1_jobs
                 SET next_attempt_at = %s, updated_at = %s
                 WHERE job_key = %s AND state = 'retryable'
                 """,
@@ -5078,7 +5047,7 @@ class PostgresControlPlane:
         event_idempotency = f"{action.idempotency_key}:reclaimed"
         cursor.execute(
             """
-            SELECT event_id FROM m1_job_runtime_events
+            SELECT event_id FROM public.m1_job_runtime_events
             WHERE idempotency_key = %s
             """,
             (event_idempotency,),
@@ -5090,8 +5059,8 @@ class PostgresControlPlane:
                    j.lease_expires_at, j.attempt_count,
                    r.attempt_id, r.worker_id, r.lease_epoch AS runtime_epoch,
                    r.stage
-            FROM m1_jobs AS j
-            JOIN m1_job_runtime_state AS r ON r.job_key = j.job_key
+            FROM public.m1_jobs AS j
+            JOIN public.m1_job_runtime_state AS r ON r.job_key = j.job_key
             WHERE j.job_key = %s
             FOR UPDATE
             """,
@@ -5120,7 +5089,7 @@ class PostgresControlPlane:
             raise StaleLeaseError(f"job lease is not expired for {action.target_id}")
         cursor.execute(
             """
-            UPDATE m1_jobs
+            UPDATE public.m1_jobs
             SET state = 'retryable', next_attempt_at = %s,
                 last_error_class = 'RecoveryLeaseExpired', lease_owner = NULL,
                 lease_expires_at = NULL, updated_at = %s
@@ -5139,7 +5108,7 @@ class PostgresControlPlane:
             raise StaleLeaseError(f"job changed during reclaim for {action.target_id}")
         cursor.execute(
             """
-            UPDATE m1_job_attempts
+            UPDATE public.m1_job_attempts
             SET state = 'retryable', finished_at = %s,
                 error_class = 'RecoveryLeaseExpired'
             WHERE attempt_id = %s AND job_key = %s AND lease_epoch = %s
@@ -5151,7 +5120,7 @@ class PostgresControlPlane:
             raise StaleLeaseError(f"attempt changed during reclaim for {action.target_id}")
         cursor.execute(
             """
-            UPDATE m1_job_runtime_state
+            UPDATE public.m1_job_runtime_state
             SET recovery_state = 'recovered', updated_at = %s
             WHERE job_key = %s AND attempt_id = %s AND lease_epoch = %s
             """,
@@ -5162,7 +5131,7 @@ class PostgresControlPlane:
         cursor.execute(
             """
             SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
-            FROM m1_job_runtime_events
+            FROM public.m1_job_runtime_events
             WHERE attempt_id = %s
             """,
             (action.expected_attempt_id,),
@@ -5172,7 +5141,7 @@ class PostgresControlPlane:
             raise RuntimeError("reclaim event sequence query returned no row")
         cursor.execute(
             """
-            INSERT INTO m1_job_runtime_events (
+            INSERT INTO public.m1_job_runtime_events (
                 event_id, job_key, attempt_id, lease_epoch, worker_id,
                 event_sequence, kind, stage, progress_sequence, progress_current,
                 progress_total, detail, occurred_at, idempotency_key
@@ -5220,9 +5189,9 @@ class PostgresControlPlane:
                    j.state AS job_state, j.lease_epoch,
                    r.attempt_id, r.lease_epoch AS runtime_epoch,
                    r.worker_id, r.stage
-            FROM m1_job_circuits AS c
-            JOIN m1_jobs AS j ON j.job_key = c.job_key
-            JOIN m1_job_runtime_state AS r ON r.job_key = c.job_key
+            FROM public.m1_job_circuits AS c
+            JOIN public.m1_jobs AS j ON j.job_key = c.job_key
+            JOIN public.m1_job_runtime_state AS r ON r.job_key = c.job_key
             WHERE c.job_key = %s
               AND r.attempt_id = %s
               AND r.lease_epoch = %s
@@ -5247,7 +5216,7 @@ class PostgresControlPlane:
             raise StaleLeaseError(f"circuit target is not retryable for {action.target_id}")
         cursor.execute(
             """
-            SELECT event_id FROM m1_job_runtime_events
+            SELECT event_id FROM public.m1_job_runtime_events
             WHERE idempotency_key = %s
             """,
             (event_idempotency,),
@@ -5256,7 +5225,7 @@ class PostgresControlPlane:
             return "succeeded"
         cursor.execute(
             """
-            UPDATE m1_jobs
+            UPDATE public.m1_jobs
             SET state = 'retryable', next_attempt_at = %s, updated_at = %s
             WHERE job_key = %s AND lease_epoch = %s
               AND state IN ('retryable', 'runnable')
@@ -5267,7 +5236,7 @@ class PostgresControlPlane:
             raise StaleLeaseError(f"circuit target changed for {action.target_id}")
         cursor.execute(
             """
-            UPDATE m1_job_circuits
+            UPDATE public.m1_job_circuits
             SET next_probe_at = %s, updated_at = %s
             WHERE job_key = %s AND state = 'open'
             """,
@@ -5278,7 +5247,7 @@ class PostgresControlPlane:
         cursor.execute(
             """
             SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
-            FROM m1_job_runtime_events
+            FROM public.m1_job_runtime_events
             WHERE attempt_id = %s
             """,
             (action.expected_attempt_id,),
@@ -5288,7 +5257,7 @@ class PostgresControlPlane:
             raise RuntimeError("probe event sequence query returned no row")
         cursor.execute(
             """
-            INSERT INTO m1_job_runtime_events (
+            INSERT INTO public.m1_job_runtime_events (
                 event_id, job_key, attempt_id, lease_epoch, worker_id,
                 event_sequence, kind, stage, progress_sequence, progress_current,
                 progress_total, detail, occurred_at, idempotency_key
@@ -6011,7 +5980,7 @@ class PostgresControlPlane:
     ) -> str:
         cursor.execute(
             """
-            INSERT INTO m1_incidents (
+            INSERT INTO public.m1_incidents (
                 incident_key, dedupe_key, component, severity, state, summary,
                 opened_at, updated_at
             ) VALUES (%s, %s, %s, %s, 'open', %s, %s, %s)
@@ -6019,12 +5988,15 @@ class PostgresControlPlane:
             """,
             (incident_key, dedupe_key, component, severity, summary, now, now),
         )
-        cursor.execute("SELECT incident_key FROM m1_incidents WHERE dedupe_key = %s", (dedupe_key,))
+        cursor.execute(
+            "SELECT incident_key FROM public.m1_incidents WHERE dedupe_key = %s",
+            (dedupe_key,),
+        )
         incident = cursor.fetchone()
         if incident is None or incident["incident_key"] != incident_key:
             raise JobIdentityConflict(f"dedupe key {dedupe_key!r} names another incident")
         cursor.execute(
-            "SELECT incident_event_id FROM m1_incident_events WHERE idempotency_key = %s",
+            "SELECT incident_event_id FROM public.m1_incident_events WHERE idempotency_key = %s",
             (idempotency_key,),
         )
         existing = cursor.fetchone()
@@ -6040,7 +6012,7 @@ class PostgresControlPlane:
         )
         cursor.execute(
             """
-            INSERT INTO m1_incident_events (
+            INSERT INTO public.m1_incident_events (
                 incident_event_id, incident_key, kind, detail, idempotency_key, occurred_at
             ) VALUES (%s, %s, %s, %s, %s, %s)
             """,
@@ -6049,7 +6021,7 @@ class PostgresControlPlane:
         for channel in channels:
             cursor.execute(
                 """
-                INSERT INTO m1_alert_outbox (
+                INSERT INTO public.m1_alert_outbox (
                     outbox_id, incident_event_id, channel, payload, state,
                     next_attempt_at, created_at
                 ) VALUES (%s, %s, %s, %s, 'pending', %s, %s)
@@ -6119,7 +6091,10 @@ class PostgresControlPlane:
                 "FROM m1_cloud_usage_observations WHERE budget_day=%s",
                 (budget_day,),
             )
-            used = int(cursor.fetchone()["used"])
+            usage_total = cursor.fetchone()
+            if usage_total is None:
+                raise RuntimeError("cloud usage total was not returned")
+            used = int(str(usage_total["used"]))
             ratio = used * 100 // daily_budget_bytes
             threshold = 90 if ratio >= 90 else 75 if ratio >= 75 else 50 if ratio >= 50 else 0
             if threshold:
@@ -6446,6 +6421,8 @@ class PostgresControlPlane:
                 (budget_day,),
             )
             cloud_usage = cursor.fetchone()
+            if cloud_usage is None:
+                raise RuntimeError("cloud usage aggregate was not returned")
             cursor.execute(
                 """SELECT observation_id, source, operation, bytes_received, item_count,
                           artifact_key, artifact_digest, observed_at
@@ -6724,7 +6701,9 @@ class PostgresControlPlane:
                     )
                 ),
                 "latest_observation": (
-                    None if latest_cloud_usage is None else {
+                    None
+                    if latest_cloud_usage is None
+                    else {
                         "observation_id": str(latest_cloud_usage["observation_id"]),
                         "source": str(latest_cloud_usage["source"]),
                         "operation": str(latest_cloud_usage["operation"]),
@@ -6821,9 +6800,7 @@ class PostgresControlPlane:
             "last_tick_at": _snapshot_aware(row["updated_at"], "updated_at").isoformat(),
             "lease_expires_at": lease_expires_at.isoformat(),
             "lease_active": lease_active,
-            "lease_age_seconds": _snapshot_seconds(
-                row["lease_age_seconds"], "lease_age_seconds"
-            ),
+            "lease_age_seconds": _snapshot_seconds(row["lease_age_seconds"], "lease_age_seconds"),
             "lease_overdue_seconds": _snapshot_seconds(
                 row["lease_overdue_seconds"], "lease_overdue_seconds"
             ),
@@ -6922,9 +6899,7 @@ class PostgresControlPlane:
             transitions.setdefault(incident_key, []).append(
                 {
                     "kind": kind,
-                    "occurred_at": _snapshot_aware(
-                        event["occurred_at"], "occurred_at"
-                    ).isoformat(),
+                    "occurred_at": _snapshot_aware(event["occurred_at"], "occurred_at").isoformat(),
                     "age_seconds": _snapshot_seconds(event["age_seconds"], "age_seconds"),
                     **_snapshot_transition_detail(event["detail"]),
                 }
@@ -7003,8 +6978,9 @@ class PostgresControlPlane:
                     "expected_lease_epoch": _snapshot_int(
                         row["expected_lease_epoch"], "expected_lease_epoch"
                     ),
-                    "requested_at": _snapshot_aware(row["requested_at"], "requested_at")
-                    .isoformat(),
+                    "requested_at": _snapshot_aware(
+                        row["requested_at"], "requested_at"
+                    ).isoformat(),
                     "started_at": None
                     if row["started_at"] is None
                     else _snapshot_aware(row["started_at"], "started_at").isoformat(),
@@ -7066,9 +7042,7 @@ class PostgresControlPlane:
             if epoch["last_fact_at"] is None
             else _snapshot_aware(epoch["last_fact_at"], "last_fact_at")
         )
-        if last_fact_at is not None and (
-            last_fact_at < started_at or last_fact_at > observed_at
-        ):
+        if last_fact_at is not None and (last_fact_at < started_at or last_fact_at > observed_at):
             raise ControlPlaneError("qualification time source is malformed")
         required_seconds = (
             None
@@ -7078,8 +7052,9 @@ class PostgresControlPlane:
         last_breaker = None
         if breaker is not None and breaker["observed_at"] is not None:
             last_breaker = {
-                "observed_at": _snapshot_aware(breaker["observed_at"], "breaker_observed_at")
-                .isoformat(),
+                "observed_at": _snapshot_aware(
+                    breaker["observed_at"], "breaker_observed_at"
+                ).isoformat(),
                 "reason": _snapshot_text(breaker["reason"], "breaker_reason"),
                 "fact_id": _snapshot_text(breaker["fact_id"], "breaker_fact_id"),
             }
@@ -7329,7 +7304,8 @@ class PostgresControlPlane:
                 "WHERE generation_key=%s",
                 (quote_generation_key,),
             )
-            if int(cursor.fetchone()["count"]) != len(normalized):
+            projection_count = cursor.fetchone()
+            if projection_count is None or int(str(projection_count["count"])) != len(normalized):
                 raise CheckpointConflictError("opportunity projection rows conflict")
             cursor.execute(
                 """INSERT INTO m1_opportunity_publication_pointers

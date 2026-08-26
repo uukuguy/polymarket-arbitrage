@@ -45,7 +45,10 @@ def test_control_plane_connection_factory_bounds_postgres_connect_time(
     assert control_plane._connection_factory() is not None
     assert captured == {
         "dsn": "postgresql://operator:secret@example.test/control",
-        "kwargs": {"connect_timeout": 5},
+        "kwargs": {
+            "connect_timeout": 5,
+            "options": "-csearch_path=pg_catalog,public",
+        },
     }
 
 
@@ -686,9 +689,7 @@ def test_alert_serve_leaves_acceptance_scope_unset_for_production_claims(
 
     monkeypatch.setattr(cli_control_plane, "_run_alert_service", run_alert_service)
     assert (
-        cli_control_plane.main(
-            ["alert-serve", "--enable", "--interval-seconds", "7.5", "--json"]
-        )
+        cli_control_plane.main(["alert-serve", "--enable", "--interval-seconds", "7.5", "--json"])
         == 0
     )
     assert captured["acceptance_run_id"] is None
@@ -950,9 +951,7 @@ def test_runtime_reconcile_once_requires_enable_before_database_or_controller(
     assert "--enable is required" in capsys.readouterr().err
 
 
-def test_runtime_reconcile_once_verifies_database_role_before_claim(
-    monkeypatch, capsys
-) -> None:
+def test_runtime_reconcile_once_verifies_database_role_before_claim(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
     events: list[str] = []
@@ -981,9 +980,7 @@ def test_runtime_reconcile_once_verifies_database_role_before_claim(
     assert "postgresql://" not in capsys.readouterr().err
 
 
-def test_runtime_reconcile_serve_verifies_database_role_before_claim(
-    monkeypatch, capsys
-) -> None:
+def test_runtime_reconcile_serve_verifies_database_role_before_claim(monkeypatch, capsys) -> None:
     from polyarb import cli_control_plane
 
     events: list[str] = []
@@ -2096,9 +2093,57 @@ def test_qualification_status_uses_scoped_dsn_and_is_read_only(monkeypatch, caps
     assert cli_control_plane.main(["qualification-status", "--json"]) == 0
     assert captured == {
         "dsn": "postgresql://qualification:secret@example.test/control",
-        "kwargs": {"connect_timeout": 5},
+        "kwargs": {
+            "connect_timeout": 5,
+            "options": "-csearch_path=pg_catalog,public",
+        },
     }
     assert json.loads(capsys.readouterr().out)["epoch"]["epoch_id"] == "epoch-a"
+
+
+@pytest.mark.parametrize(
+    "command,dsn_env",
+    (
+        ("runtime-reconcile-once", "POLYARB_SUPABASE_DB_DSN"),
+        ("qualification-serve", "POLYARB_QUALIFICATION_DB_DSN"),
+    ),
+)
+def test_daemons_reject_dsn_search_path_override_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    dsn_env: str,
+) -> None:
+    from polyarb import cli_control_plane
+
+    secret = "namespace-secret"
+    monkeypatch.setenv(
+        dsn_env,
+        f"postgresql://scoped:{secret}@example.test/control?options=-csearch_path%3Devil",
+    )
+    monkeypatch.setenv("POLYARB_DB_EXPECTED_DATABASE", "control")
+    mutations: list[str] = []
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_runtime_reconcile_once",
+        lambda *_args, **_kwargs: mutations.append("runtime") or {},
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "run_qualification_service",
+        lambda *_args, **_kwargs: mutations.append("qualification") or {},
+    )
+
+    argv = [command, "--enable", "--json"]
+    result = cli_control_plane.main(argv)
+
+    assert result == 1
+    assert mutations == []
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert "database-role.dsn-override" in output
+    assert secret not in output
+    assert "postgresql://" not in output
 
 
 def test_qualification_certificates_reverify_read_only_limit(monkeypatch, capsys) -> None:

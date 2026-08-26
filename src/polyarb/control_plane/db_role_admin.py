@@ -10,7 +10,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, NoReturn
 
-import psycopg
 from psycopg import sql
 
 from polyarb.control_plane.db_role_contract import (
@@ -18,6 +17,7 @@ from polyarb.control_plane.db_role_contract import (
     ConnectionFactory,
     DatabaseRoleContractError,
     DatabaseRoleVerification,
+    scoped_connection_factory,
     verify_daemon_database_role,
     verify_effective_database_role_authority,
 )
@@ -25,7 +25,7 @@ from polyarb.control_plane.db_role_contract import (
 RUNTIME_PROFILE = "runtime-controller"
 QUALIFICATION_PROFILE = "qualification-worker"
 EXPECTED_REVISION = "026"
-ADMIN_DSN_ENV = "POLYARB_SUPABASE_DB_DSN"
+ADMIN_DSN_ENV = "POLYARB_CONTROL_PLANE_DB_ADMIN_DSN"
 RUNTIME_PASSWORD_ENV = "POLYARB_RUNTIME_CONTROLLER_DB_PASSWORD"
 QUALIFICATION_PASSWORD_ENV = "POLYARB_QUALIFICATION_WORKER_DB_PASSWORD"
 RUNTIME_DSN_ENV = "POLYARB_SUPABASE_DB_DSN"
@@ -55,6 +55,7 @@ class RoleAttributes:
     inherits: bool
     replication: bool
     bypass_rls: bool
+    settings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +67,13 @@ class AdminRoleSnapshot:
     incoming_members: Mapping[str, frozenset[str]] = field(default_factory=dict)
     owned_objects: Mapping[str, frozenset[str]] = field(default_factory=dict)
     direct_privileges: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    membership_options: Mapping[str, frozenset[tuple[str, bool, bool, bool]]] = field(
+        default_factory=dict
+    )
+    incoming_membership_options: Mapping[str, frozenset[tuple[str, bool, bool, bool]]] = field(
+        default_factory=dict
+    )
+    configured_search_paths: frozenset[str] = frozenset()
 
 
 class DatabaseRoleAdminError(RuntimeError):
@@ -87,6 +95,7 @@ def preflight_capability_roles(
         snapshot = _read_admin_role_snapshot(cursor)
         _require_database_and_revision(snapshot, expected_database, EXPECTED_REVISION)
         _require_capability_roles_safe(snapshot)
+        _require_login_roles_safe(snapshot)
         _require_effective_capability_authority(cursor, snapshot)
     return {"database": expected_database, "status": "ready"}
 
@@ -164,7 +173,7 @@ def _read_admin_role_snapshot(cursor: Any) -> AdminRoleSnapshot:
     if database_row is None:
         _fail("database-role-admin.database-unavailable", "current_database")
 
-    cursor.execute("SELECT version_num FROM alembic_version")
+    cursor.execute("SELECT version_num FROM public.alembic_version")
     revision_row = cursor.fetchone()
     if revision_row is None:
         _fail("database-role-admin.revision-missing", "alembic_version")
@@ -173,7 +182,7 @@ def _read_admin_role_snapshot(cursor: Any) -> AdminRoleSnapshot:
         """
         SELECT role.rolname, role.rolcanlogin, role.rolsuper,
                role.rolcreatedb, role.rolcreaterole, role.rolinherit,
-               role.rolreplication, role.rolbypassrls
+               role.rolreplication, role.rolbypassrls, role.rolconfig
         FROM pg_catalog.pg_roles AS role
         WHERE role.rolname = ANY(%s)
         ORDER BY role.rolname
@@ -187,7 +196,9 @@ def _read_admin_role_snapshot(cursor: Any) -> AdminRoleSnapshot:
 
     cursor.execute(
         """
-        SELECT member.rolname AS member_role, granted.rolname AS granted_role
+        SELECT member.rolname AS member_role, granted.rolname AS granted_role,
+               membership.admin_option, membership.inherit_option,
+               membership.set_option
         FROM pg_catalog.pg_auth_members AS membership
         JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
         JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
@@ -198,21 +209,36 @@ def _read_admin_role_snapshot(cursor: Any) -> AdminRoleSnapshot:
     )
     mutable_memberships: dict[str, set[str]] = {role: set() for role in ALL_ROLES}
     mutable_incoming: dict[str, set[str]] = {role: set() for role in ALL_ROLES}
+    mutable_membership_options: dict[str, set[tuple[str, bool, bool, bool]]] = {
+        role: set() for role in ALL_ROLES
+    }
+    mutable_incoming_options: dict[str, set[tuple[str, bool, bool, bool]]] = {
+        role: set() for role in ALL_ROLES
+    }
     for row in cursor.fetchall():
         member_role = str(_row_value(row, 0, "member_role"))
         granted_role = str(_row_value(row, 1, "granted_role"))
         mutable_memberships.setdefault(member_role, set()).add(granted_role)
         mutable_incoming.setdefault(granted_role, set()).add(member_role)
-    memberships = {
-        role: frozenset(grants) for role, grants in mutable_memberships.items()
-    }
+        admin_option = bool(_row_value(row, 2, "admin_option"))
+        inherit_option = bool(_row_value(row, 3, "inherit_option"))
+        set_option = bool(_row_value(row, 4, "set_option"))
+        mutable_membership_options.setdefault(member_role, set()).add(
+            (granted_role, admin_option, inherit_option, set_option)
+        )
+        mutable_incoming_options.setdefault(granted_role, set()).add(
+            (member_role, admin_option, inherit_option, set_option)
+        )
+    memberships = {role: frozenset(grants) for role, grants in mutable_memberships.items()}
     cursor.execute(
         """
         SELECT owner.rolname AS owner_role, owned_object
         FROM (
-            SELECT namespace.nspowner AS owner_oid, 'schema:public' AS owned_object
+            SELECT namespace.nspowner AS owner_oid,
+                   pg_catalog.format('schema:%%I', namespace.nspname) AS owned_object
             FROM pg_catalog.pg_namespace AS namespace
-            WHERE namespace.nspname = 'public'
+            WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
             UNION ALL
             SELECT relation.relowner,
                    pg_catalog.format(
@@ -225,7 +251,8 @@ def _read_admin_role_snapshot(cursor: Any) -> AdminRoleSnapshot:
             FROM pg_catalog.pg_class AS relation
             JOIN pg_catalog.pg_namespace AS namespace
               ON namespace.oid = relation.relnamespace
-            WHERE namespace.nspname = 'public'
+            WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
             UNION ALL
             SELECT routine.proowner,
                    pg_catalog.format(
@@ -235,7 +262,8 @@ def _read_admin_role_snapshot(cursor: Any) -> AdminRoleSnapshot:
             FROM pg_catalog.pg_proc AS routine
             JOIN pg_catalog.pg_namespace AS namespace
               ON namespace.oid = routine.pronamespace
-            WHERE namespace.nspname = 'public'
+            WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
         ) AS owned
         JOIN pg_catalog.pg_roles AS owner ON owner.oid = owned.owner_oid
         WHERE owner.rolname = ANY(%s)
@@ -272,7 +300,8 @@ def _read_admin_role_snapshot(cursor: Any) -> AdminRoleSnapshot:
             CROSS JOIN LATERAL pg_catalog.aclexplode(
                 COALESCE(namespace.nspacl, pg_catalog.acldefault('n', namespace.nspowner))
             ) AS acl
-            WHERE namespace.nspname = 'public'
+            WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
             UNION ALL
             SELECT acl.grantee,
                    pg_catalog.format(
@@ -295,7 +324,8 @@ def _read_admin_role_snapshot(cursor: Any) -> AdminRoleSnapshot:
                     )
                 )
             ) AS acl
-            WHERE namespace.nspname = 'public'
+            WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
             UNION ALL
             SELECT acl.grantee,
                    pg_catalog.format(
@@ -309,7 +339,8 @@ def _read_admin_role_snapshot(cursor: Any) -> AdminRoleSnapshot:
             CROSS JOIN LATERAL pg_catalog.aclexplode(
                 COALESCE(routine.proacl, pg_catalog.acldefault('f', routine.proowner))
             ) AS acl
-            WHERE namespace.nspname = 'public'
+            WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
             UNION ALL
             SELECT acl.grantee,
                    pg_catalog.format(
@@ -333,21 +364,43 @@ def _read_admin_role_snapshot(cursor: Any) -> AdminRoleSnapshot:
             str(_row_value(row, 1, "object_identifier"))
         )
         privilege = str(_row_value(row, 2, "privilege_type")).upper()
-        mutable_direct.setdefault(role_name, set()).add(
-            f"{object_identifier}:{privilege}"
-        )
+        mutable_direct.setdefault(role_name, set()).add(f"{object_identifier}:{privilege}")
+    cursor.execute(
+        """
+        SELECT COALESCE(role.rolname, 'DATABASE') AS setting_role,
+               setting.setconfig
+        FROM pg_catalog.pg_db_role_setting AS setting
+        LEFT JOIN pg_catalog.pg_roles AS role ON role.oid = setting.setrole
+        LEFT JOIN pg_catalog.pg_database AS database ON database.oid = setting.setdatabase
+        WHERE (setting.setrole = 0 OR role.rolname = ANY(%s))
+          AND (setting.setdatabase = 0 OR database.datname = pg_catalog.current_database())
+        ORDER BY setting.setdatabase, setting.setrole
+        """,
+        (list(ALL_ROLES),),
+    )
+    configured_search_paths: set[str] = set()
+    for row in cursor.fetchall():
+        setting_role = str(_row_value(row, 0, "setting_role"))
+        values = _settings_tuple(_row_value(row, 1, "setconfig"))
+        for value in values:
+            setting = str(value)
+            if setting.partition("=")[0].strip().lower() == "search_path":
+                configured_search_paths.add(setting_role)
     return AdminRoleSnapshot(
         database_name=str(_row_value(database_row, 0, "current_database")),
         revision=str(_row_value(revision_row, 0, "version_num")),
         roles=roles,
         memberships=memberships,
-        incoming_members={
-            role: frozenset(members) for role, members in mutable_incoming.items()
-        },
+        incoming_members={role: frozenset(members) for role, members in mutable_incoming.items()},
         owned_objects={role: frozenset(items) for role, items in mutable_owned.items()},
-        direct_privileges={
-            role: frozenset(items) for role, items in mutable_direct.items()
+        direct_privileges={role: frozenset(items) for role, items in mutable_direct.items()},
+        membership_options={
+            role: frozenset(items) for role, items in mutable_membership_options.items()
         },
+        incoming_membership_options={
+            role: frozenset(items) for role, items in mutable_incoming_options.items()
+        },
+        configured_search_paths=frozenset(configured_search_paths),
     )
 
 
@@ -376,6 +429,8 @@ def _require_capability_roles_safe(
             _fail("database-role-admin.capability-missing", role_name)
         if attributes.can_login or attributes.inherits or _has_elevated_attribute(attributes):
             _fail("database-role-admin.capability-unsafe", role_name)
+        if _has_search_path_setting(attributes.settings):
+            _fail("database-role-admin.namespace-unsafe", role_name)
         if snapshot.memberships.get(role_name, frozenset()):
             _fail("database-role-admin.membership-unsafe", role_name)
         expected_incoming = (
@@ -385,6 +440,15 @@ def _require_capability_roles_safe(
         )
         if snapshot.incoming_members.get(role_name, frozenset()) != expected_incoming:
             _fail("database-role-admin.membership-unsafe", role_name)
+        expected_incoming_options = (
+            frozenset({(login_role, False, True, True)})
+            if login_role in snapshot.roles or require_provisioned
+            else frozenset()
+        )
+        if snapshot.incoming_membership_options.get(
+            role_name, frozenset()
+        ) != expected_incoming_options or snapshot.membership_options.get(role_name, frozenset()):
+            _fail("database-role-admin.membership-unsafe", role_name)
         if snapshot.owned_objects.get(role_name, frozenset()):
             _fail("database-role-admin.ownership-unsafe", role_name)
         if snapshot.direct_privileges.get(role_name, frozenset()) != _expected_direct_privileges(
@@ -392,6 +456,8 @@ def _require_capability_roles_safe(
             role_name,
         ):
             _fail("database-role-admin.direct-privilege-unsafe", role_name)
+    if snapshot.configured_search_paths:
+        _fail("database-role-admin.namespace-unsafe", "configured-search-path")
 
 
 def _require_login_roles_safe(snapshot: AdminRoleSnapshot) -> None:
@@ -401,8 +467,14 @@ def _require_login_roles_safe(snapshot: AdminRoleSnapshot) -> None:
             continue
         if not attributes.inherits or _has_elevated_attribute(attributes):
             _fail("database-role-admin.login-unsafe", login_role)
+        if _has_search_path_setting(attributes.settings):
+            _fail("database-role-admin.namespace-unsafe", login_role)
         memberships = snapshot.memberships.get(login_role, frozenset())
         if memberships != frozenset({capability_role}):
+            _fail("database-role-admin.membership-unsafe", login_role)
+        if snapshot.membership_options.get(login_role, frozenset()) != frozenset(
+            {(capability_role, False, True, True)}
+        ):
             _fail("database-role-admin.membership-unsafe", login_role)
         if snapshot.incoming_members.get(login_role, frozenset()):
             _fail("database-role-admin.membership-unsafe", login_role)
@@ -410,6 +482,16 @@ def _require_login_roles_safe(snapshot: AdminRoleSnapshot) -> None:
             _fail("database-role-admin.ownership-unsafe", login_role)
         if snapshot.direct_privileges.get(login_role, frozenset()):
             _fail("database-role-admin.direct-privilege-unsafe", login_role)
+
+
+def _has_search_path_setting(settings: tuple[str, ...]) -> bool:
+    return any(setting.partition("=")[0].strip().lower() == "search_path" for setting in settings)
+
+
+def _settings_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(setting) for setting in value)
 
 
 def _expected_direct_privileges(
@@ -507,7 +589,7 @@ def _create_or_rotate_login(
             ).format(sql.Identifier(login_role), sql.Literal(password))
         )
     cursor.execute(
-        sql.SQL("GRANT {} TO {}").format(
+        sql.SQL("GRANT {} TO {} WITH ADMIN FALSE, INHERIT TRUE, SET TRUE").format(
             sql.Identifier(capability_role),
             sql.Identifier(login_role),
         )
@@ -515,7 +597,13 @@ def _create_or_rotate_login(
 
 
 def _connection_factory_from_dsn(dsn: str) -> ConnectionFactory:
-    return lambda: psycopg.connect(dsn)
+    try:
+        return scoped_connection_factory(dsn)
+    except DatabaseRoleContractError as exc:
+        raise DatabaseRoleAdminError(
+            "database-role-admin.dsn-unsafe",
+            "namespace",
+        ) from exc
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -604,12 +692,12 @@ def _required_env(name: str) -> str:
 def _read_single_login_snapshot(
     cursor: Any,
     login_role: str,
-) -> tuple[RoleAttributes, frozenset[str]] | None:
+) -> tuple[RoleAttributes, frozenset[tuple[str, bool, bool, bool]]] | None:
     cursor.execute(
         """
         SELECT role.rolname, role.rolcanlogin, role.rolsuper,
                role.rolcreatedb, role.rolcreaterole, role.rolinherit,
-               role.rolreplication, role.rolbypassrls
+               role.rolreplication, role.rolbypassrls, role.rolconfig
         FROM pg_catalog.pg_roles AS role
         WHERE role.rolname = %s
         """,
@@ -620,7 +708,9 @@ def _read_single_login_snapshot(
         return None
     cursor.execute(
         """
-        SELECT member.rolname AS member_role, granted.rolname AS granted_role
+        SELECT member.rolname AS member_role, granted.rolname AS granted_role,
+               membership.admin_option, membership.inherit_option,
+               membership.set_option
         FROM pg_catalog.pg_auth_members AS membership
         JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
         JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
@@ -630,13 +720,18 @@ def _read_single_login_snapshot(
         (login_role,),
     )
     return _role_attributes_from_row(row), frozenset(
-        str(_row_value(membership, 1, "granted_role"))
+        (
+            str(_row_value(membership, 1, "granted_role")),
+            bool(_row_value(membership, 2, "admin_option")),
+            bool(_row_value(membership, 3, "inherit_option")),
+            bool(_row_value(membership, 4, "set_option")),
+        )
         for membership in cursor.fetchall()
     )
 
 
 def _require_single_login_safe(
-    snapshot: tuple[RoleAttributes, frozenset[str]],
+    snapshot: tuple[RoleAttributes, frozenset[tuple[str, bool, bool, bool]]],
     login_role: str,
     capability_role: str,
 ) -> None:
@@ -645,8 +740,10 @@ def _require_single_login_safe(
         _fail("database-role-admin.login-unsafe", attributes.role_name)
     if not attributes.inherits or _has_elevated_attribute(attributes):
         _fail("database-role-admin.login-unsafe", login_role)
-    if memberships != frozenset({capability_role}):
+    if memberships != frozenset({(capability_role, False, True, True)}):
         _fail("database-role-admin.membership-unsafe", login_role)
+    if _has_search_path_setting(attributes.settings):
+        _fail("database-role-admin.namespace-unsafe", login_role)
 
 
 def _require_login_roles_present(snapshot: AdminRoleSnapshot) -> None:
@@ -665,6 +762,7 @@ def _role_attributes_from_row(row: object) -> RoleAttributes:
         inherits=bool(_row_value(row, 5, "rolinherit")),
         replication=bool(_row_value(row, 6, "rolreplication")),
         bypass_rls=bool(_row_value(row, 7, "rolbypassrls")),
+        settings=_settings_tuple(_row_value(row, 8, "rolconfig")),
     )
 
 

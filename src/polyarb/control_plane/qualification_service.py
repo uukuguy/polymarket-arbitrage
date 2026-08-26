@@ -83,9 +83,7 @@ _INCIDENT_KINDS = frozenset(
     }
 )
 _INCIDENT_RECOVERY_KINDS = frozenset({"recovered", "resolved"})
-_INCIDENT_BREAKING_KINDS = frozenset(
-    {"circuit-opened", "circuit-probe-failed", "escalated"}
-)
+_INCIDENT_BREAKING_KINDS = frozenset({"circuit-opened", "circuit-probe-failed", "escalated"})
 _INCIDENT_RECOVERY_STARTED_KINDS = frozenset({"attempt-failed", "recovery-started"})
 _INCIDENT_SEVERITIES = frozenset({"info", "warning", "critical"})
 _INCIDENT_STATES = frozenset({"open", "acknowledged", "resolved"})
@@ -497,7 +495,7 @@ class PostgresQualificationFactSource:
                 SELECT ingest_seq, ingested_at, source, source_id, source_version,
                        original_observed_at, payload, payload_sha256,
                        %s::timestamptz AS qualification_observed_at
-                FROM m1_qualification_ingress_ledger
+                FROM public.m1_qualification_ingress_ledger
                 WHERE ingest_seq > %s
                 ORDER BY ingest_seq
                 LIMIT %s
@@ -524,8 +522,8 @@ class PostgresQualificationFactSource:
                        900::bigint AS freshness_slo_seconds,
                        manifest.record_count AS progress_count,
                        manifest.record_count AS successful_count
-                FROM m1_publication_pointers AS pointer
-                JOIN m1_generation_manifests AS manifest
+                FROM public.m1_publication_pointers AS pointer
+                JOIN public.m1_generation_manifests AS manifest
                   ON manifest.generation_key = pointer.generation_key
                 WHERE pointer.pointer_key = 'structure:current'
                 ORDER BY manifest.published_at DESC
@@ -543,8 +541,8 @@ class PostgresQualificationFactSource:
                        900::bigint AS freshness_slo_seconds,
                        manifest.record_count AS progress_count,
                        manifest.record_count AS successful_count
-                FROM m1_publication_pointers AS pointer
-                JOIN m1_generation_manifests AS manifest
+                FROM public.m1_publication_pointers AS pointer
+                JOIN public.m1_generation_manifests AS manifest
                   ON manifest.generation_key = pointer.generation_key
                 WHERE pointer.pointer_key = 'quote:current'
                 ORDER BY manifest.published_at DESC
@@ -562,8 +560,8 @@ class PostgresQualificationFactSource:
                        900::bigint AS freshness_slo_seconds,
                        projection.record_count AS progress_count,
                        projection.record_count AS successful_count
-                FROM m1_opportunity_publication_pointers AS pointer
-                JOIN m1_opportunity_projections AS projection
+                FROM public.m1_opportunity_publication_pointers AS pointer
+                JOIN public.m1_opportunity_projections AS projection
                   ON projection.generation_key = pointer.generation_key
                 WHERE pointer.pointer_key = 'opportunity:current'
                 ORDER BY projection.certified_at DESC
@@ -1090,11 +1088,11 @@ def _fetch_current_epoch(
 ) -> QualificationEpochRecord | None:
     identity_key = _identity_key(policy)
     cursor.execute(
-        "SELECT * FROM m1_qualification_epochs WHERE identity_key = %s "
+        "SELECT * FROM public.m1_qualification_epochs AS epoch WHERE identity_key = %s "
         "AND (state IN ('accumulating', 'recovering') "
         "OR (state = 'qualified' AND NOT EXISTS ("
-        "SELECT 1 FROM m1_qualification_certificates AS certificate "
-        "WHERE certificate.epoch_id = m1_qualification_epochs.epoch_id))) "
+        "SELECT 1 FROM public.m1_qualification_certificates AS certificate "
+        "WHERE certificate.epoch_id = epoch.epoch_id))) "
         "ORDER BY started_at DESC, epoch_id DESC LIMIT 1" + (" FOR UPDATE" if for_update else ""),
         (identity_key,),
     )
@@ -1104,7 +1102,8 @@ def _fetch_current_epoch(
 
 def _fetch_latest_epoch(cursor: psycopg.Cursor[dict[str, Any]]) -> QualificationEpochRecord | None:
     cursor.execute(
-        "SELECT * FROM m1_qualification_epochs ORDER BY updated_at DESC, epoch_id DESC LIMIT 1"
+        "SELECT * FROM public.m1_qualification_epochs "
+        "ORDER BY updated_at DESC, epoch_id DESC LIMIT 1"
     )
     row = cursor.fetchone()
     return None if row is None else _epoch_from_row(row)
@@ -1114,7 +1113,7 @@ def _fetch_epoch(
     cursor: psycopg.Cursor[dict[str, Any]], epoch_id: str, *, for_update: bool
 ) -> QualificationEpochRecord | None:
     cursor.execute(
-        "SELECT * FROM m1_qualification_epochs WHERE epoch_id = %s"
+        "SELECT * FROM public.m1_qualification_epochs WHERE epoch_id = %s"
         + (" FOR UPDATE" if for_update else ""),
         (epoch_id,),
     )
@@ -1132,7 +1131,7 @@ def _ensure_source_cursor_row(
     identity_key = _identity_key(policy)
     cursor.execute(
         """
-        INSERT INTO m1_qualification_source_cursors (
+        INSERT INTO public.m1_qualification_source_cursors (
             identity_key, policy_version, release_id, config_id,
             role_identity, source_cursor, writer_id
         ) VALUES (%s, %s, %s, %s, %s, NULL, %s)
@@ -1150,7 +1149,7 @@ def _ensure_source_cursor_row(
     cursor.execute(
         """
         SELECT identity_key, source_cursor
-        FROM m1_qualification_source_cursors
+        FROM public.m1_qualification_source_cursors
         WHERE identity_key = %s
         """
         + (" FOR UPDATE" if for_update else ""),
@@ -1171,7 +1170,7 @@ def _update_source_cursor(
 ) -> None:
     cursor.execute(
         """
-        UPDATE m1_qualification_source_cursors
+        UPDATE public.m1_qualification_source_cursors
         SET source_cursor = %s, writer_id = %s, updated_at = clock_timestamp()
         WHERE identity_key = %s
         """,
@@ -1195,7 +1194,7 @@ def _append_recovery_observation(
     observation_id = f"qualification-recovery-observation:{recovering_epoch_id}:{ingest_seq}"
     cursor.execute(
         """
-        INSERT INTO m1_qualification_recovery_observations (
+        INSERT INTO public.m1_qualification_recovery_observations (
             observation_id, recovering_epoch_id, ingest_seq, fact_id, reason,
             observed_at, fact_record, fact_record_sha256
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -1215,7 +1214,7 @@ def _append_recovery_observation(
     cursor.execute(
         """
         SELECT observation_id, fact_id, reason, observed_at, fact_record_sha256
-        FROM m1_qualification_recovery_observations
+        FROM public.m1_qualification_recovery_observations
         WHERE recovering_epoch_id = %s AND ingest_seq = %s
         """,
         (recovering_epoch_id, ingest_seq),
@@ -1244,7 +1243,7 @@ def _insert_epoch_cursor(
 ) -> None:
     cursor.execute(
         """
-        INSERT INTO m1_qualification_epochs (
+        INSERT INTO public.m1_qualification_epochs (
             epoch_id, state, version, identity_key, policy_version, release_id,
             config_id, role_identity, started_at, last_fact_at, invalidated_at,
             invalidation_reason, qualified_at, previous_epoch_id, fact_digests,
@@ -1277,7 +1276,7 @@ def _update_epoch_cursor(
     )
     cursor.execute(
         """
-        UPDATE m1_qualification_epochs
+        UPDATE public.m1_qualification_epochs
         SET state = %s, version = version + 1, identity_key = %s,
             policy_version = %s, release_id = %s, config_id = %s,
             role_identity = %s, started_at = %s, last_fact_at = %s,
@@ -1499,7 +1498,7 @@ def _recovery_observation_status(
     cursor.execute(
         """
         SELECT count(*) AS observation_count
-        FROM m1_qualification_recovery_observations
+        FROM public.m1_qualification_recovery_observations
         WHERE recovering_epoch_id = %s
         """,
         (record.epoch_id,),
@@ -1509,7 +1508,7 @@ def _recovery_observation_status(
     cursor.execute(
         """
         SELECT ingest_seq, fact_id, reason, observed_at
-        FROM m1_qualification_recovery_observations
+        FROM public.m1_qualification_recovery_observations
         WHERE recovering_epoch_id = %s
         ORDER BY ingest_seq DESC
         LIMIT 1
@@ -1521,7 +1520,7 @@ def _recovery_observation_status(
     cursor.execute(
         """
         SELECT ingest_seq, fact_id, reason, observed_at
-        FROM m1_qualification_recovery_observations
+        FROM public.m1_qualification_recovery_observations
         WHERE recovering_epoch_id = %s AND reason = ANY(%s)
         ORDER BY ingest_seq DESC
         LIMIT 1

@@ -293,7 +293,7 @@ def insert_runtime_observe_decision(
         )
         cursor.execute(
             """
-            INSERT INTO m1_runtime_observe_decisions (
+            INSERT INTO public.m1_runtime_observe_decisions (
                 decision_id, idempotency_key, controller_id, controller_owner_id,
                 controller_epoch, observed_at, decision_kind, target_type, target_id,
                 action_type, reason_code, incident_severity, qualification_breaking,
@@ -388,7 +388,7 @@ def verify_runtime_observe_window(
                        action_type, reason_code, incident_severity,
                        qualification_breaking, next_check_at, runtime_state_digest,
                        decision_digest, payload, payload_sha256
-                FROM m1_runtime_observe_decisions
+                FROM public.m1_runtime_observe_decisions
                 WHERE controller_id = %s
                   AND controller_owner_id = %s
                   AND controller_epoch = %s
@@ -404,7 +404,7 @@ def verify_runtime_observe_window(
         cursor.execute(
             """
             SELECT COUNT(*)
-            FROM m1_recovery_actions
+            FROM public.m1_recovery_actions
             WHERE controller_id = %s
               AND (
                   requested_at BETWEEN %s AND %s
@@ -496,7 +496,7 @@ def _compare_existing_observe_row(cursor: Any, record: RuntimeObserveDecisionRec
         """
         SELECT decision_id, controller_id, controller_owner_id, controller_epoch,
                payload, payload_sha256, decision_digest
-        FROM m1_runtime_observe_decisions
+        FROM public.m1_runtime_observe_decisions
         WHERE idempotency_key = %s
         """,
         (record.idempotency_key,),
@@ -520,7 +520,7 @@ def _require_current_controller_lease(
     cursor.execute(
         f"""
         SELECT owner_id, lease_epoch, lease_expires_at
-        FROM m1_runtime_controller_leases
+        FROM public.m1_runtime_controller_leases
         WHERE controller_id = %s
         {"FOR SHARE" if lock else ""}
         """,
@@ -535,10 +535,7 @@ def _require_current_controller_lease(
         lease_expires_at = row["lease_expires_at"]
     else:
         owner_id, lease_epoch, lease_expires_at = row
-    if (
-        str(owner_id) != controller_owner_id
-        or _object_to_int(lease_epoch) != controller_epoch
-    ):
+    if str(owner_id) != controller_owner_id or _object_to_int(lease_epoch) != controller_epoch:
         raise RuntimeObserveError("runtime observe controller lease identity is stale")
     if _aware(lease_expires_at, "lease_expires_at") < observed_at:
         raise RuntimeObserveError("runtime observe controller lease is expired")
@@ -649,11 +646,11 @@ def _read_runtime_reconcile_states_in_snapshot(
                c.next_probe_at AS circuit_next_probe_at,
                a.error_class AS attempt_error_class,
                b.remaining_actions
-        FROM m1_job_runtime_state AS r
-        JOIN m1_jobs AS j ON j.job_key = r.job_key
-        LEFT JOIN m1_job_circuits AS c ON c.job_key = j.job_key
-        LEFT JOIN m1_job_attempts AS a ON a.attempt_id = r.attempt_id
-        LEFT JOIN m1_recovery_target_budgets AS b
+        FROM public.m1_job_runtime_state AS r
+        JOIN public.m1_jobs AS j ON j.job_key = r.job_key
+        LEFT JOIN public.m1_job_circuits AS c ON c.job_key = j.job_key
+        LEFT JOIN public.m1_job_attempts AS a ON a.attempt_id = r.attempt_id
+        LEFT JOIN public.m1_recovery_target_budgets AS b
           ON b.controller_id = %s
          AND b.target_type = CASE WHEN c.state = 'open' THEN 'circuit' ELSE 'job' END
          AND b.target_id = j.job_key
