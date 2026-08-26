@@ -828,7 +828,10 @@ def disable_login_roles(
 ```
 
 Use `psycopg.sql.Identifier` for role names and `psycopg.sql.Literal` for
-passwords inside the database call. Never interpolate or print either. Before
+passwords inside the database call. PostgreSQL 16 rejects `ALTER ROLE ...
+PASSWORD %s` at `$1`; this safely escaped literal is an explicitly approved
+exception to bind-parameter use. Never interpolate, log the composed SQL, or
+print either value. Before
 CREATE/ALTER, check current database, Alembic `026`, capability attributes,
 login attributes, and exact memberships. Provision both roles in one
 transaction; on any mismatch, neither role/password/membership is changed.

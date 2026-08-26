@@ -94,8 +94,11 @@ Production uses two independent logins:
 Each login is `LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
 NOBYPASSRLS`, belongs to exactly its matching capability role, and has an
 independent randomly generated password. The provisioning command reads
-passwords from process input, uses parameterized SQL, and never prints the
-password or DSN. It fails if an existing login has unsafe attributes or an
+passwords from process input, composes role names with `psycopg.sql.Identifier`
+and password literals with `psycopg.sql.Literal`, and never prints the SQL,
+password, or DSN. PostgreSQL 16 rejects a bind parameter in `ALTER ROLE ...
+PASSWORD $1`, so the safely escaped literal is the approved grammar-compatible
+exception to the normal bind-parameter rule. It fails if an existing login has unsafe attributes or an
 unexpected role membership; it does not silently absorb a pre-existing broad
 role.
 
