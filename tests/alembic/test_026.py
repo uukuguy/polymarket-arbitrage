@@ -34,6 +34,13 @@ QUALIFICATION_ROLE = "m1_qualification_worker_capability"
 RUNTIME_LOGIN = "m1_runtime_controller_test"
 QUALIFICATION_LOGIN = "m1_qualification_worker_test"
 SOURCE_LOGIN = "m1_source_projection_test"
+PLAIN_LOGIN = "m1_plain_login_test"
+HARDENED_TRIGGER_FUNCTIONS = (
+    "public.m1_project_runtime_qualification_ingress()",
+    "public.m1_project_incident_qualification_ingress()",
+    "public.m1_project_recovery_qualification_ingress()",
+    "public.m1_verify_qualification_certificate_insert()",
+)
 
 
 def test_026_declares_exact_capability_roles_and_chain() -> None:
@@ -162,18 +169,22 @@ def test_026_scoped_roles_harden_ingress_and_replay_across_downgrade() -> None:
         runtime_dsn = _role_dsn(dsn, RUNTIME_LOGIN, "runtime-test")
         qualification_dsn = _role_dsn(dsn, QUALIFICATION_LOGIN, "qualification-test")
         source_dsn = _role_dsn(dsn, SOURCE_LOGIN, "source-test")
+        plain_dsn = _role_dsn(dsn, PLAIN_LOGIN, "plain-test")
         with psycopg.connect(dsn, autocommit=True) as admin:
             _create_test_login(admin, RUNTIME_LOGIN, "runtime-test")
             _create_test_login(admin, QUALIFICATION_LOGIN, "qualification-test")
             _create_test_login(admin, SOURCE_LOGIN, "source-test")
+            _create_test_login(admin, PLAIN_LOGIN, "plain-test")
             admin.execute(f"GRANT {RUNTIME_ROLE} TO {RUNTIME_LOGIN}")
             admin.execute(f"GRANT {QUALIFICATION_ROLE} TO {QUALIFICATION_LOGIN}")
             _grant_source_projection_permissions(admin)
+            _grant_plain_login_permissions(admin)
             _assert_role_attributes(admin, RUNTIME_ROLE)
             _assert_role_attributes(admin, QUALIFICATION_ROLE)
             _assert_runtime_permissions(admin)
             _assert_qualification_permissions(admin)
             _assert_source_projection_cannot_touch_ledger(admin)
+            _assert_hardened_trigger_functions_not_executable(admin)
 
         _exercise_runtime_controller(runtime_dsn)
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
@@ -191,6 +202,7 @@ def test_026_scoped_roles_harden_ingress_and_replay_across_downgrade() -> None:
                                 ))
 
         _exercise_source_projection_ingress(source_dsn, dsn)
+        _assert_plain_login_cannot_spoof_trigger_ingress(plain_dsn, dsn)
         _exercise_qualification_worker(qualification_dsn, dsn)
 
         with psycopg.connect(dsn) as admin:
@@ -200,6 +212,7 @@ def test_026_scoped_roles_harden_ingress_and_replay_across_downgrade() -> None:
             _drop_test_login(admin, RUNTIME_LOGIN)
             _drop_test_login(admin, QUALIFICATION_LOGIN)
             _drop_test_login(admin, SOURCE_LOGIN)
+            _drop_test_login(admin, PLAIN_LOGIN)
         _run_alembic(dsn, "downgrade", "025")
         assert _current_revision(dsn) == "025"
         with psycopg.connect(dsn) as admin:
@@ -316,6 +329,11 @@ def _grant_source_projection_permissions(admin: psycopg.Connection[object]) -> N
     admin.execute(f"GRANT INSERT, UPDATE ON TABLE m1_recovery_actions TO {SOURCE_LOGIN}")
 
 
+def _grant_plain_login_permissions(admin: psycopg.Connection[object]) -> None:
+    admin.execute(f"GRANT CONNECT ON DATABASE {admin.info.dbname} TO {PLAIN_LOGIN}")
+    admin.execute(f"GRANT USAGE ON SCHEMA public TO {PLAIN_LOGIN}")
+
+
 def _assert_role_attributes(admin: psycopg.Connection[object], role_name: str) -> None:
     row = admin.execute(
         """
@@ -403,6 +421,23 @@ def _assert_source_projection_cannot_touch_ledger(admin: psycopg.Connection[obje
     assert not _has_sequence(admin, SOURCE_LOGIN, _ledger_sequence(admin), "USAGE")
 
 
+def _assert_hardened_trigger_functions_not_executable(
+    admin: psycopg.Connection[object],
+) -> None:
+    for function_signature in HARDENED_TRIGGER_FUNCTIONS:
+        assert not _public_has_function(admin, function_signature)
+    for grantee in (
+        "anon",
+        "authenticated",
+        "service_role",
+        RUNTIME_ROLE,
+        QUALIFICATION_ROLE,
+        PLAIN_LOGIN,
+    ):
+        for function_signature in HARDENED_TRIGGER_FUNCTIONS:
+            assert not _has_function(admin, grantee, function_signature)
+
+
 def _has_table(
     connection: psycopg.Connection[object],
     grantee: str,
@@ -437,6 +472,28 @@ def _has_function(
     row = connection.execute(
         "SELECT has_function_privilege(%s, %s, 'EXECUTE')",
         (grantee, function_signature),
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def _public_has_function(
+    connection: psycopg.Connection[object],
+    function_signature: str,
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_catalog.pg_proc AS p
+            CROSS JOIN LATERAL pg_catalog.aclexplode(
+                COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))
+            ) AS acl
+            WHERE p.oid = %s::regprocedure
+              AND acl.grantee = 0
+              AND acl.privilege_type = 'EXECUTE'
+        )
+        """,
+        (function_signature,),
     ).fetchone()
     return bool(row and row[0])
 
@@ -536,6 +593,108 @@ def _exercise_source_projection_ingress(source_dsn: str, admin_dsn: str) -> None
             """
         ).fetchone()
     assert row == (["incident", "recovery", "runtime"],)
+
+
+def _assert_plain_login_cannot_spoof_trigger_ingress(plain_dsn: str, admin_dsn: str) -> None:
+    _seed_spoof_incident(admin_dsn)
+    for attack in (
+        _attempt_runtime_trigger_spoof,
+        _attempt_incident_trigger_spoof,
+        _attempt_recovery_trigger_spoof,
+    ):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            with psycopg.connect(plain_dsn) as plain:
+                attack(plain)
+
+    with psycopg.connect(admin_dsn) as admin:
+        row = admin.execute(
+            """
+            SELECT COUNT(*)
+            FROM m1_qualification_ingress_ledger
+            WHERE source_id IN (
+                'spoof-runtime-via-temp-trigger',
+                'spoof-incident-via-temp-trigger',
+                'spoof-recovery-via-temp-trigger'
+            )
+            """
+        ).fetchone()
+    assert row == (0,)
+
+
+def _attempt_runtime_trigger_spoof(connection: psycopg.Connection[object]) -> None:
+    connection.execute("CREATE TEMP TABLE spoof_runtime(event_id text, occurred_at timestamptz)")
+    connection.execute(
+        """
+        CREATE TRIGGER spoof_runtime_ingress
+        AFTER INSERT ON spoof_runtime
+        FOR EACH ROW EXECUTE FUNCTION public.m1_project_runtime_qualification_ingress()
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO spoof_runtime(event_id, occurred_at)
+        VALUES ('spoof-runtime-via-temp-trigger', %s)
+        """,
+        (NOW,),
+    )
+
+
+def _attempt_incident_trigger_spoof(connection: psycopg.Connection[object]) -> None:
+    connection.execute(
+        """
+        CREATE TEMP TABLE spoof_incident(
+            incident_event_id text,
+            incident_key text,
+            occurred_at timestamptz
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER spoof_incident_ingress
+        AFTER INSERT ON spoof_incident
+        FOR EACH ROW EXECUTE FUNCTION public.m1_project_incident_qualification_ingress()
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO spoof_incident(incident_event_id, incident_key, occurred_at)
+        VALUES ('spoof-incident-via-temp-trigger', 'incident-spoof-026', %s)
+        """,
+        (NOW,),
+    )
+
+
+def _attempt_recovery_trigger_spoof(connection: psycopg.Connection[object]) -> None:
+    connection.execute(
+        """
+        CREATE TEMP TABLE spoof_recovery(
+            action_id text,
+            state text,
+            result_code text,
+            finished_at timestamptz,
+            started_at timestamptz,
+            requested_at timestamptz
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER spoof_recovery_ingress
+        AFTER INSERT ON spoof_recovery
+        FOR EACH ROW EXECUTE FUNCTION public.m1_project_recovery_qualification_ingress()
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO spoof_recovery(
+            action_id, state, result_code, finished_at, started_at, requested_at
+        ) VALUES (
+            'spoof-recovery-via-temp-trigger', 'completed', 'succeeded', %s, %s, %s
+        )
+        """,
+        (NOW + timedelta(seconds=2), NOW + timedelta(seconds=1), NOW),
+    )
 
 
 def _exercise_qualification_worker(qualification_dsn: str, admin_dsn: str) -> None:
@@ -802,6 +961,22 @@ def _seed_required_job_facts(dsn: str) -> None:
             ) VALUES (
                 'incident-source-026', 'incident-source-026', 'm1', 'critical',
                 'open', 'source projection test', %s, %s, %s
+            )
+            """,
+            (Jsonb({}), NOW, NOW),
+        )
+
+
+def _seed_spoof_incident(dsn: str) -> None:
+    with psycopg.connect(dsn) as admin:
+        admin.execute(
+            """
+            INSERT INTO m1_incidents (
+                incident_key, dedupe_key, component, severity, state, summary,
+                diagnosis, opened_at, updated_at
+            ) VALUES (
+                'incident-spoof-026', 'incident-spoof-026', 'm1', 'critical',
+                'open', 'spoof trigger test', %s, %s, %s
             )
             """,
             (Jsonb({}), NOW, NOW),

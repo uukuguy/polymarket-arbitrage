@@ -64,6 +64,12 @@ CERTIFICATE_FUNCTION_SIGNATURE = (
     "text, text, text, text, jsonb, timestamptz, timestamptz, "
     "jsonb, text, text, text, text"
 )
+HARDENED_TRIGGER_FUNCTION_SIGNATURES = (
+    "public.m1_project_runtime_qualification_ingress()",
+    "public.m1_project_incident_qualification_ingress()",
+    "public.m1_project_recovery_qualification_ingress()",
+    "public.m1_verify_qualification_certificate_insert()",
+)
 
 
 def upgrade() -> None:
@@ -210,6 +216,11 @@ def _revoke_general_recorder_execute(grantee: str) -> None:
     )
 
 
+def _revoke_hardened_trigger_execute(grantee: str) -> None:
+    for function_signature in HARDENED_TRIGGER_FUNCTION_SIGNATURES:
+        op.execute(f"REVOKE EXECUTE ON FUNCTION {function_signature} FROM {grantee}")
+
+
 def _grant_current_database_connect(role: str) -> None:
     op.execute(
         f"""
@@ -245,6 +256,8 @@ def _harden_qualification_functions() -> None:
     _create_canonical_jsonb(search_path="pg_catalog", schema_qualified_recursion=True)
     _create_certificate_verifier(security_definer=True, search_path="pg_catalog")
     _create_certificate_inserter(search_path="pg_catalog")
+    for grantee in ("PUBLIC", *SUPABASE_ROLES, RUNTIME_ROLE, QUALIFICATION_ROLE):
+        _revoke_hardened_trigger_execute(grantee)
     for grantee in ("PUBLIC", *SUPABASE_ROLES, RUNTIME_ROLE, QUALIFICATION_ROLE):
         _revoke_general_recorder_execute(grantee)
     op.execute(

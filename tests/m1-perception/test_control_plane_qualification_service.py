@@ -14,9 +14,9 @@ from polyarb.control_plane.qualification import (
 from polyarb.control_plane.qualification_service import (
     FactCursor,
     InMemoryQualificationStore,
+    PostgresQualificationFactSource,
     QualificationFactRecord,
     QualificationService,
-    PostgresQualificationFactSource,
     StaticQualificationFactSource,
     freshness_row_to_fact_record,
     incident_event_row_to_fact_record,
