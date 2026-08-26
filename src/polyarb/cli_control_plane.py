@@ -32,7 +32,10 @@ from polyarb.control_plane.models import JobLease
 from polyarb.control_plane.opportunity_worker import TransactionalOpportunityCertifier
 from polyarb.control_plane.postgres import PostgresControlPlane
 from polyarb.control_plane.qualification import RollingQualificationPolicy
-from polyarb.control_plane.qualification_identity import qualification_identity_from_env
+from polyarb.control_plane.qualification_identity import (
+    QualificationIdentityError,
+    qualification_identity_from_env,
+)
 from polyarb.control_plane.qualification_service import (
     PostgresQualificationFactSource,
     PostgresQualificationServiceStore,
@@ -1677,6 +1680,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if connection_factory is None:
             print("POLYARB_QUALIFICATION_DB_DSN is required", file=sys.stderr)
             return 2
+        failure_reason = "qualification-service.read-failed"
         try:
             if args.command == "qualification-status":
                 store = PostgresQualificationServiceStore(connection_factory)
@@ -1703,11 +1707,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "qualification-worker",
                 expected_database=_required_expected_database_from_env(),
             )
+            failure_reason = "qualification-service.startup-failed"
             service = _qualification_service_from_env(
                 batch_size=args.batch_size,
                 interval_seconds=args.interval_seconds,
                 writer_id=args.writer_id,
             )
+            failure_reason = "qualification-service.tick-failed"
             result = asyncio.run(
                 run_qualification_service(
                     service,
@@ -1723,8 +1729,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         except DatabaseRoleContractError as error:
             print(f"qualification service unavailable: {error}", file=sys.stderr)
             return 1
-        except (OSError, RuntimeError, ValueError, psycopg.Error) as error:
+        except QualificationIdentityError as error:
             print(f"qualification service unavailable: {error}", file=sys.stderr)
+            return 1
+        except (OSError, RuntimeError, ValueError, psycopg.Error):
+            print(f"qualification service unavailable: {failure_reason}", file=sys.stderr)
             return 1
     control_plane = _control_plane_from_env()
     if control_plane is None:

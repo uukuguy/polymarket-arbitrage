@@ -7,7 +7,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, NoReturn
 
 import psycopg
@@ -16,8 +16,10 @@ from psycopg import sql
 from polyarb.control_plane.db_role_contract import (
     ROLE_CONTRACTS,
     ConnectionFactory,
+    DatabaseRoleContractError,
     DatabaseRoleVerification,
     verify_daemon_database_role,
+    verify_effective_database_role_authority,
 )
 
 RUNTIME_PROFILE = "runtime-controller"
@@ -26,8 +28,8 @@ EXPECTED_REVISION = "026"
 ADMIN_DSN_ENV = "POLYARB_SUPABASE_DB_DSN"
 RUNTIME_PASSWORD_ENV = "POLYARB_RUNTIME_CONTROLLER_DB_PASSWORD"
 QUALIFICATION_PASSWORD_ENV = "POLYARB_QUALIFICATION_WORKER_DB_PASSWORD"
-RUNTIME_DSN_ENV = "POLYARB_RUNTIME_CONTROLLER_DB_DSN"
-QUALIFICATION_DSN_ENV = "POLYARB_QUALIFICATION_WORKER_DB_DSN"
+RUNTIME_DSN_ENV = "POLYARB_SUPABASE_DB_DSN"
+QUALIFICATION_DSN_ENV = "POLYARB_QUALIFICATION_DB_DSN"
 PROFILE_DSN_ENV = {
     RUNTIME_PROFILE: RUNTIME_DSN_ENV,
     QUALIFICATION_PROFILE: QUALIFICATION_DSN_ENV,
@@ -61,6 +63,9 @@ class AdminRoleSnapshot:
     revision: str
     roles: Mapping[str, RoleAttributes]
     memberships: Mapping[str, frozenset[str]]
+    incoming_members: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    owned_objects: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    direct_privileges: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
 
 class DatabaseRoleAdminError(RuntimeError):
@@ -82,6 +87,7 @@ def preflight_capability_roles(
         snapshot = _read_admin_role_snapshot(cursor)
         _require_database_and_revision(snapshot, expected_database, EXPECTED_REVISION)
         _require_capability_roles_safe(snapshot)
+        _require_effective_capability_authority(cursor, snapshot)
     return {"database": expected_database, "status": "ready"}
 
 
@@ -98,6 +104,7 @@ def provision_login_roles(
         _require_database_and_revision(snapshot, expected_database, EXPECTED_REVISION)
         _require_capability_roles_safe(snapshot)
         _require_login_roles_safe(snapshot)
+        _require_effective_capability_authority(cursor, snapshot)
         _create_or_rotate_login(
             cursor,
             login_role=ROLE_CONTRACTS[RUNTIME_PROFILE].login_role,
@@ -110,6 +117,11 @@ def provision_login_roles(
             capability_role=ROLE_CONTRACTS[QUALIFICATION_PROFILE].capability_role,
             password=qualification_password,
         )
+        provisioned = _read_admin_role_snapshot(cursor)
+        _require_database_and_revision(provisioned, expected_database, EXPECTED_REVISION)
+        _require_capability_roles_safe(provisioned, require_provisioned=True)
+        _require_login_roles_safe(provisioned)
+        _require_effective_capability_authority(cursor, provisioned)
         connection.commit()
     return {"database": expected_database, "status": "provisioned"}
 
@@ -139,6 +151,7 @@ def disable_login_roles(
         _require_capability_roles_safe(snapshot)
         _require_login_roles_safe(snapshot)
         _require_login_roles_present(snapshot)
+        _require_effective_capability_authority(cursor, snapshot)
         for role_name in LOGIN_ROLES:
             cursor.execute(sql.SQL("ALTER ROLE {} NOLOGIN").format(sql.Identifier(role_name)))
         connection.commit()
@@ -178,24 +191,163 @@ def _read_admin_role_snapshot(cursor: Any) -> AdminRoleSnapshot:
         FROM pg_catalog.pg_auth_members AS membership
         JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
         JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
-        WHERE member.rolname = ANY(%s)
+        WHERE member.rolname = ANY(%s) OR granted.rolname = ANY(%s)
         ORDER BY member.rolname, granted.rolname
         """,
-        (list(LOGIN_ROLES),),
+        (list(ALL_ROLES), list(ALL_ROLES)),
     )
-    mutable_memberships: dict[str, set[str]] = {role: set() for role in LOGIN_ROLES}
+    mutable_memberships: dict[str, set[str]] = {role: set() for role in ALL_ROLES}
+    mutable_incoming: dict[str, set[str]] = {role: set() for role in ALL_ROLES}
     for row in cursor.fetchall():
-        mutable_memberships.setdefault(str(_row_value(row, 0, "member_role")), set()).add(
-            str(_row_value(row, 1, "granted_role"))
-        )
+        member_role = str(_row_value(row, 0, "member_role"))
+        granted_role = str(_row_value(row, 1, "granted_role"))
+        mutable_memberships.setdefault(member_role, set()).add(granted_role)
+        mutable_incoming.setdefault(granted_role, set()).add(member_role)
     memberships = {
         role: frozenset(grants) for role, grants in mutable_memberships.items()
     }
+    cursor.execute(
+        """
+        SELECT owner.rolname AS owner_role, owned_object
+        FROM (
+            SELECT namespace.nspowner AS owner_oid, 'schema:public' AS owned_object
+            FROM pg_catalog.pg_namespace AS namespace
+            WHERE namespace.nspname = 'public'
+            UNION ALL
+            SELECT relation.relowner,
+                   pg_catalog.format(
+                       '%%s:%%I.%%I',
+                       CASE WHEN relation.relkind = 'S' THEN 'sequence'
+                            ELSE 'relation' END,
+                       namespace.nspname,
+                       relation.relname
+                   )
+            FROM pg_catalog.pg_class AS relation
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            WHERE namespace.nspname = 'public'
+            UNION ALL
+            SELECT routine.proowner,
+                   pg_catalog.format(
+                       'routine:%%I.%%I(%%s)', namespace.nspname, routine.proname,
+                       pg_catalog.oidvectortypes(routine.proargtypes)
+                   )
+            FROM pg_catalog.pg_proc AS routine
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = routine.pronamespace
+            WHERE namespace.nspname = 'public'
+        ) AS owned
+        JOIN pg_catalog.pg_roles AS owner ON owner.oid = owned.owner_oid
+        WHERE owner.rolname = ANY(%s)
+        ORDER BY owner.rolname, owned_object
+        """,
+        (list(ALL_ROLES),),
+    )
+    mutable_owned: dict[str, set[str]] = {role: set() for role in ALL_ROLES}
+    for row in cursor.fetchall():
+        mutable_owned.setdefault(str(_row_value(row, 0, "owner_role")), set()).add(
+            _normalize_object_identifier(str(_row_value(row, 1, "owned_object")))
+        )
+
+    cursor.execute(
+        """
+        WITH target_roles AS (
+            SELECT oid, rolname FROM pg_catalog.pg_roles WHERE rolname = ANY(%s)
+        )
+        SELECT target.rolname AS grantee_role, object_identifier, privilege_type
+        FROM (
+            SELECT acl.grantee,
+                   pg_catalog.format('database:%%I', database.datname) AS object_identifier,
+                   acl.privilege_type
+            FROM pg_catalog.pg_database AS database
+            CROSS JOIN LATERAL pg_catalog.aclexplode(
+                COALESCE(database.datacl, pg_catalog.acldefault('d', database.datdba))
+            ) AS acl
+            WHERE database.datname = pg_catalog.current_database()
+            UNION ALL
+            SELECT acl.grantee,
+                   pg_catalog.format('schema:%%I', namespace.nspname),
+                   acl.privilege_type
+            FROM pg_catalog.pg_namespace AS namespace
+            CROSS JOIN LATERAL pg_catalog.aclexplode(
+                COALESCE(namespace.nspacl, pg_catalog.acldefault('n', namespace.nspowner))
+            ) AS acl
+            WHERE namespace.nspname = 'public'
+            UNION ALL
+            SELECT acl.grantee,
+                   pg_catalog.format(
+                       '%%s:%%I.%%I',
+                       CASE WHEN relation.relkind = 'S' THEN 'sequence'
+                            ELSE 'relation' END,
+                       namespace.nspname,
+                       relation.relname
+                   ),
+                   acl.privilege_type
+            FROM pg_catalog.pg_class AS relation
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            CROSS JOIN LATERAL pg_catalog.aclexplode(
+                COALESCE(
+                    relation.relacl,
+                    pg_catalog.acldefault(
+                        CASE WHEN relation.relkind = 'S' THEN 's'::"char" ELSE 'r'::"char" END,
+                        relation.relowner
+                    )
+                )
+            ) AS acl
+            WHERE namespace.nspname = 'public'
+            UNION ALL
+            SELECT acl.grantee,
+                   pg_catalog.format(
+                       'routine:%%I.%%I(%%s)', namespace.nspname, routine.proname,
+                       pg_catalog.oidvectortypes(routine.proargtypes)
+                   ),
+                   acl.privilege_type
+            FROM pg_catalog.pg_proc AS routine
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = routine.pronamespace
+            CROSS JOIN LATERAL pg_catalog.aclexplode(
+                COALESCE(routine.proacl, pg_catalog.acldefault('f', routine.proowner))
+            ) AS acl
+            WHERE namespace.nspname = 'public'
+            UNION ALL
+            SELECT acl.grantee,
+                   pg_catalog.format(
+                       'default-acl:%%s:%%s:%%s', defaults.defaclrole,
+                       COALESCE(defaults.defaclnamespace::text, 'global'),
+                       defaults.defaclobjtype
+                   ),
+                   acl.privilege_type
+            FROM pg_catalog.pg_default_acl AS defaults
+            CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) AS acl
+        ) AS direct_acl
+        JOIN target_roles AS target ON target.oid = direct_acl.grantee
+        ORDER BY target.rolname, object_identifier, privilege_type
+        """,
+        (list(ALL_ROLES),),
+    )
+    mutable_direct: dict[str, set[str]] = {role: set() for role in ALL_ROLES}
+    for row in cursor.fetchall():
+        role_name = str(_row_value(row, 0, "grantee_role"))
+        object_identifier = _normalize_object_identifier(
+            str(_row_value(row, 1, "object_identifier"))
+        )
+        privilege = str(_row_value(row, 2, "privilege_type")).upper()
+        mutable_direct.setdefault(role_name, set()).add(
+            f"{object_identifier}:{privilege}"
+        )
     return AdminRoleSnapshot(
         database_name=str(_row_value(database_row, 0, "current_database")),
         revision=str(_row_value(revision_row, 0, "version_num")),
         roles=roles,
         memberships=memberships,
+        incoming_members={
+            role: frozenset(members) for role, members in mutable_incoming.items()
+        },
+        owned_objects={role: frozenset(items) for role, items in mutable_owned.items()},
+        direct_privileges={
+            role: frozenset(items) for role, items in mutable_direct.items()
+        },
     )
 
 
@@ -213,13 +365,33 @@ def _require_database_and_revision(
         _fail("database-role-admin.revision-mismatch", f"revision:{snapshot.revision}")
 
 
-def _require_capability_roles_safe(snapshot: AdminRoleSnapshot) -> None:
-    for role_name in CAPABILITY_ROLES:
+def _require_capability_roles_safe(
+    snapshot: AdminRoleSnapshot,
+    *,
+    require_provisioned: bool = False,
+) -> None:
+    for login_role, role_name in LOGIN_ROLE_CAPABILITY.items():
         attributes = snapshot.roles.get(role_name)
         if attributes is None:
             _fail("database-role-admin.capability-missing", role_name)
         if attributes.can_login or attributes.inherits or _has_elevated_attribute(attributes):
             _fail("database-role-admin.capability-unsafe", role_name)
+        if snapshot.memberships.get(role_name, frozenset()):
+            _fail("database-role-admin.membership-unsafe", role_name)
+        expected_incoming = (
+            frozenset({login_role})
+            if login_role in snapshot.roles or require_provisioned
+            else frozenset()
+        )
+        if snapshot.incoming_members.get(role_name, frozenset()) != expected_incoming:
+            _fail("database-role-admin.membership-unsafe", role_name)
+        if snapshot.owned_objects.get(role_name, frozenset()):
+            _fail("database-role-admin.ownership-unsafe", role_name)
+        if snapshot.direct_privileges.get(role_name, frozenset()) != _expected_direct_privileges(
+            snapshot,
+            role_name,
+        ):
+            _fail("database-role-admin.direct-privilege-unsafe", role_name)
 
 
 def _require_login_roles_safe(snapshot: AdminRoleSnapshot) -> None:
@@ -232,6 +404,67 @@ def _require_login_roles_safe(snapshot: AdminRoleSnapshot) -> None:
         memberships = snapshot.memberships.get(login_role, frozenset())
         if memberships != frozenset({capability_role}):
             _fail("database-role-admin.membership-unsafe", login_role)
+        if snapshot.incoming_members.get(login_role, frozenset()):
+            _fail("database-role-admin.membership-unsafe", login_role)
+        if snapshot.owned_objects.get(login_role, frozenset()):
+            _fail("database-role-admin.ownership-unsafe", login_role)
+        if snapshot.direct_privileges.get(login_role, frozenset()):
+            _fail("database-role-admin.direct-privilege-unsafe", login_role)
+
+
+def _expected_direct_privileges(
+    snapshot: AdminRoleSnapshot,
+    capability_role: str,
+) -> frozenset[str]:
+    contract = next(
+        contract
+        for contract in ROLE_CONTRACTS.values()
+        if contract.capability_role == capability_role
+    )
+    expected = {
+        f"database:{snapshot.database_name}:CONNECT",
+        "schema:public:USAGE",
+    }
+    expected.update(
+        f"relation:public.{table}:{privilege}"
+        for table, privilege in contract.required_table_privileges
+    )
+    expected.update(
+        f"routine:{_normalize_signature(signature)}:EXECUTE"
+        for signature in contract.required_function_privileges
+    )
+    return frozenset(expected)
+
+
+def _require_effective_capability_authority(
+    cursor: Any,
+    snapshot: AdminRoleSnapshot,
+) -> None:
+    for contract in ROLE_CONTRACTS.values():
+        try:
+            verify_effective_database_role_authority(
+                cursor,
+                contract,
+                subject_role=contract.capability_role,
+                expected_database=snapshot.database_name,
+            )
+        except DatabaseRoleContractError as exc:
+            raise DatabaseRoleAdminError(
+                "database-role-admin.authority-unsafe",
+                contract.profile,
+            ) from exc
+
+
+def _normalize_signature(signature: str) -> str:
+    canonical = signature.replace("timestamp with time zone", "timestamptz")
+    canonical = canonical.replace("timestamp without time zone", "timestamp")
+    return "".join(canonical.split())
+
+
+def _normalize_object_identifier(identifier: str) -> str:
+    if identifier.startswith("routine:"):
+        return "routine:" + _normalize_signature(identifier.removeprefix("routine:"))
+    return identifier
 
 
 def _require_independent_passwords(

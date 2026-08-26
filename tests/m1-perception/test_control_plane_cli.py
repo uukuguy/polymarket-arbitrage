@@ -2324,7 +2324,10 @@ def test_qualification_serve_stops_on_tick_error_without_overlap(monkeypatch, ca
         def tick(self, now):
             assert now.tzinfo is not None
             calls.append("tick")
-            raise RuntimeError("source query timeout")
+            raise RuntimeError(
+                "source query timeout host=db.internal query=SELECT secret "
+                "config=/etc/polyarb.env dsn=postgresql://operator:password@example/control"
+            )
 
     monkeypatch.setattr(
         cli_control_plane,
@@ -2340,4 +2343,14 @@ def test_qualification_serve_stops_on_tick_error_without_overlap(monkeypatch, ca
     )
     captured = capsys.readouterr()
     assert calls == ["tick"]
-    assert "source query timeout" in captured.err
+    assert "qualification-service.tick-failed" in captured.err
+    for leaked in (
+        "source query timeout",
+        "db.internal",
+        "SELECT secret",
+        "/etc/polyarb.env",
+        "postgresql://",
+        "operator",
+        "password",
+    ):
+        assert leaked not in captured.err

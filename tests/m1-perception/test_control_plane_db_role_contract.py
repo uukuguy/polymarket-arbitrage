@@ -62,11 +62,13 @@ class FakeRoleFactory:
         profile: str = "runtime-controller",
         role_attribute_failure: str | None = None,
         sequence_privilege_source: str | None = None,
+        authority_failure: str | None = None,
     ):
         self.failure_code = failure_code
         self.profile = profile
         self.role_attribute_failure = role_attribute_failure
         self.sequence_privilege_source = sequence_privilege_source
+        self.authority_failure = authority_failure
         self.write_count = 0
         self.calls: list[tuple[str, object]] = []
         self.transactions: list[dict[str, object]] = []
@@ -90,10 +92,33 @@ class FakeRoleFactory:
     def answer(self, sql: str, params: object) -> object:
         if sql == "set transaction read only":
             return None
+        if "as relation_name" in sql and "pg_catalog.pg_class" in sql:
+            names = list(_allowed_table_names(self.profile))
+            names.append("unrelated_authority")
+            return [(f"public.{name}", name) for name in sorted(names)]
+        if "routine.prosecdef" in sql and "pg_catalog.pg_proc" in sql:
+            return [
+                (signature,)
+                for signature in (
+                    "public.l3_retention_cleanup(timestamptz,timestamptz,timestamptz)",
+                    "public.m1_insert_qualification_certificate("
+                    "text,text,text,text,jsonb,timestamptz,timestamptz,jsonb,"
+                    "text,text,text,text)",
+                    "public.m1_project_incident_qualification_ingress()",
+                    "public.m1_project_recovery_qualification_ingress()",
+                    "public.m1_project_runtime_qualification_ingress()",
+                    "public.m1_record_qualification_freshness_ingress("
+                    "text,text,timestamptz,jsonb)",
+                    "public.m1_record_qualification_ingress("
+                    "text,text,text,timestamptz,jsonb)",
+                    "public.m1_verify_qualification_certificate_insert()",
+                )
+            ]
+        if "owner.rolname" in sql and "pg_catalog.pg_namespace" in sql:
+            if self.authority_failure == "owned-object":
+                return [("table:public.unrelated_owned",)]
+            return []
         if "from pg_catalog.pg_class as sequence" in sql:
-            schema = str(_param(params, 0))
-            if schema != "public":
-                return []
             return [("public.m1_qualification_ingress_ledger_ingest_seq",)]
         if "select pg_get_serial_sequence" in sql:
             table = str(_param(params, 0))
@@ -152,17 +177,32 @@ class FakeRoleFactory:
             if self.failure_code == "database-role.cross-capability":
                 return (self.other_capability_role,)
             return None
+        if "from pg_catalog.pg_auth_members" in sql:
+            if "where granted.rolname = %s" in sql:
+                rows = [(self.session_user,)]
+                if self.authority_failure == "unexpected-member":
+                    rows.append(("unexpected_member",))
+                return rows
+            if "where member.rolname = %s" in sql:
+                return []
         if "pg_has_role" in sql:
             role = _param(params, 1)
             if role == self.capability_role:
                 return (self.failure_code != "database-role.capability-missing",)
             return (self.failure_code == "database-role.cross-capability",)
-        if "has_database_privilege" in sql or "has_schema_privilege" in sql:
+        if "has_database_privilege" in sql:
+            return (True,)
+        if "has_schema_privilege" in sql:
+            privilege = str(_param(params, 2))
+            if privilege == "CREATE":
+                return (self.authority_failure == "schema-create",)
             return (True,)
         if "has_table_privilege" in sql:
             privilege = str(_param(params, 2))
             table = str(_param(params, 1)).removeprefix("public.")
             allowed = privilege in _allowed_table_privileges(self.profile, table)
+            if table == "unrelated_authority" and privilege == "SELECT":
+                allowed = self.authority_failure == "unrelated-relation"
             if self.failure_code == "database-role.required-privilege-missing" and allowed:
                 return (False,)
             if self.failure_code == "database-role.forbidden-privilege-present" and not allowed:
@@ -171,6 +211,8 @@ class FakeRoleFactory:
         if "has_function_privilege" in sql:
             function_signature = str(_param(params, 1))
             allowed = function_signature in _allowed_functions(self.profile)
+            if function_signature.startswith("public.l3_retention_cleanup"):
+                allowed = self.authority_failure == "security-definer-execute"
             if self.failure_code == "database-role.required-privilege-missing" and allowed:
                 return (False,)
             if self.failure_code == "database-role.forbidden-privilege-present" and not allowed:
@@ -223,7 +265,41 @@ def _allowed_table_privileges(profile: str, table: str) -> frozenset[str]:
             "m1_alert_outbox": frozenset(),
         },
     }
-    return allowed[profile][table]
+    return allowed[profile].get(table, frozenset())
+
+
+def _allowed_table_names(profile: str) -> Iterable[str]:
+    if profile == "runtime-controller":
+        return (
+            "m1_runtime_controller_leases",
+            "m1_runtime_observe_decisions",
+            "m1_job_runtime_state",
+            "m1_jobs",
+            "m1_job_circuits",
+            "m1_job_attempts",
+            "m1_recovery_target_budgets",
+            "m1_recovery_actions",
+            "m1_job_runtime_events",
+            "m1_incidents",
+            "m1_incident_events",
+            "m1_alert_outbox",
+        )
+    return (
+        "m1_qualification_ingress_ledger",
+        "m1_qualification_source_cursors",
+        "m1_qualification_epochs",
+        "m1_qualification_recovery_observations",
+        "m1_qualification_certificates",
+        "m1_publication_pointers",
+        "m1_generation_manifests",
+        "m1_opportunity_publication_pointers",
+        "m1_opportunity_projections",
+        "m1_job_runtime_events",
+        "m1_incidents",
+        "m1_incident_events",
+        "m1_recovery_actions",
+        "m1_alert_outbox",
+    )
 
 
 def _allowed_functions(profile: str) -> Iterable[str]:
@@ -397,13 +473,13 @@ def test_runtime_sequence_denial_uses_public_catalog_enumeration() -> None:
             expected_database="role_test",
         )
 
-    assert "public.m1_qualification_ingress_ledger_ingest_seq:USAGE" in str(exc_info.value)
+    assert "public-sequence" in str(exc_info.value)
     assert factory.write_count == 0
     sequence_queries = [
         call for call in factory.calls if "pg_catalog.pg_class as sequence" in call[0]
     ]
     assert len(sequence_queries) == 1
-    assert sequence_queries[0][1] == ("public",)
+    assert sequence_queries[0][1] == ()
 
 
 @pytest.mark.parametrize(
@@ -429,6 +505,39 @@ def test_database_role_contract_rejects_role_attribute_violations(
     factory = FakeRoleFactory(role_attribute_failure=role_attribute_failure)
 
     with pytest.raises(DatabaseRoleContractError, match=reason_code):
+        verify_daemon_database_role(
+            cast(ConnectionFactory, factory),
+            "runtime-controller",
+            expected_database="role_test",
+        )
+
+    assert factory.write_count == 0
+
+
+@pytest.mark.parametrize(
+    "authority_failure",
+    (
+        "unrelated-relation",
+        "security-definer-execute",
+        "schema-create",
+        "owned-object",
+    ),
+)
+def test_database_role_contract_rejects_uncatalogued_effective_authority(
+    authority_failure: str,
+) -> None:
+    from polyarb.control_plane.db_role_contract import (
+        ConnectionFactory,
+        DatabaseRoleContractError,
+        verify_daemon_database_role,
+    )
+
+    factory = FakeRoleFactory(authority_failure=authority_failure)
+
+    with pytest.raises(
+        DatabaseRoleContractError,
+        match="database-role.forbidden-privilege-present",
+    ):
         verify_daemon_database_role(
             cast(ConnectionFactory, factory),
             "runtime-controller",

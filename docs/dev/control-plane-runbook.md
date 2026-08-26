@@ -33,8 +33,8 @@ the tooling.
 After local provision succeeds, install the resulting scoped DSNs as independent
 Fly secrets for the two apps through the approved Fly secret workflow:
 
-- runtime controller app: `POLYARB_RUNTIME_CONTROLLER_DB_DSN`
-- qualification worker app: `POLYARB_QUALIFICATION_WORKER_DB_DSN`
+- runtime controller app: `POLYARB_SUPABASE_DB_DSN`
+- qualification worker app: `POLYARB_QUALIFICATION_DB_DSN`
 
 Do not share one scoped DSN between both apps.
 
@@ -50,14 +50,18 @@ Do not share one scoped DSN between both apps.
    variables without echoing them.
 5. Create or rotate both login roles in one transaction:
    `make control-plane-db-role-provision enable=1 expected_database=<database-name>`.
-6. Build each scoped DSN locally and verify each profile before using it in an
-   app:
+6. Build each scoped DSN locally. Replace the admin value of
+   `POLYARB_SUPABASE_DB_DSN` with the runtime-controller scoped DSN, and export
+   the qualification-worker scoped DSN only as `POLYARB_QUALIFICATION_DB_DSN`.
+   Verify each profile before using it in an app:
    `make control-plane-db-role-verify profile=runtime-controller expected_database=<database-name>`
    and
    `make control-plane-db-role-verify profile=qualification-worker expected_database=<database-name>`.
 7. Install the runtime-controller and qualification-worker DSNs as independent Fly
    secrets only after verification passes and only within the authorized
-   environment.
+   environment. Install `POLYARB_SUPABASE_DB_DSN` only in the runtime-controller
+   app and `POLYARB_QUALIFICATION_DB_DSN` only in the qualification-worker app;
+   do not install aliases or cross-install either value.
 
 ## Disable Flow
 

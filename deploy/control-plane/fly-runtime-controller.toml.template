@@ -1,4 +1,5 @@
-# Private runtime recovery controller. Give this app only the scoped runtime-controller Postgres DSN.
+# Private runtime recovery controller. Install only its scoped runtime-controller Postgres DSN as
+# POLYARB_SUPABASE_DB_DSN; never install the qualification DSN in this app.
 # An optional exact Fly recovery token may be
 # installed as a secret only when recovery mode is explicitly changed away from
 # observe-only and the rendered allowlist names the exact app/machine targets.

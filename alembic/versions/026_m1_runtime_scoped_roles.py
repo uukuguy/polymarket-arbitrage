@@ -70,6 +70,11 @@ HARDENED_TRIGGER_FUNCTION_SIGNATURES = (
     "public.m1_project_recovery_qualification_ingress()",
     "public.m1_verify_qualification_certificate_insert()",
 )
+REVISION_024_PUBLIC_FUNCTION_SIGNATURES = (
+    "public.m1_record_qualification_ingress(text,text,text,timestamptz,jsonb)",
+    *HARDENED_TRIGGER_FUNCTION_SIGNATURES,
+    "public.m1_canonical_jsonb(jsonb)",
+)
 
 
 def upgrade() -> None:
@@ -78,6 +83,20 @@ def upgrade() -> None:
     _harden_qualification_functions()
     _grant_runtime_controller()
     _grant_qualification_worker()
+    _assert_closed_effective_authority(
+        RUNTIME_ROLE,
+        _runtime_allowed_pairs(),
+        (),
+    )
+    _assert_closed_effective_authority(
+        QUALIFICATION_ROLE,
+        _qualification_allowed_pairs(),
+        (
+            "public.m1_record_qualification_freshness_ingress(text,text,timestamptz,jsonb)",
+            "public.m1_insert_qualification_certificate("
+            "text,text,text,text,jsonb,timestamptz,timestamptz,jsonb,text,text,text,text)",
+        ),
+    )
 
 
 def downgrade() -> None:
@@ -123,6 +142,225 @@ def _ensure_capability_role(role: str) -> None:
                OR existing.rolreplication
                OR existing.rolbypassrls THEN
                 RAISE EXCEPTION '{role} exists with unsafe attributes';
+            END IF;
+
+            IF EXISTS (
+                   SELECT 1 FROM pg_catalog.pg_auth_members
+                   WHERE roleid = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = '{role}')
+                      OR member = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = '{role}')
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_namespace AS namespace
+                   JOIN pg_catalog.pg_roles AS owner ON owner.oid = namespace.nspowner
+                   WHERE namespace.nspname = 'public' AND owner.rolname = '{role}'
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_class AS relation
+                   JOIN pg_catalog.pg_namespace AS namespace
+                     ON namespace.oid = relation.relnamespace
+                   JOIN pg_catalog.pg_roles AS owner ON owner.oid = relation.relowner
+                   WHERE namespace.nspname = 'public' AND owner.rolname = '{role}'
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_proc AS routine
+                   JOIN pg_catalog.pg_namespace AS namespace
+                     ON namespace.oid = routine.pronamespace
+                   JOIN pg_catalog.pg_roles AS owner ON owner.oid = routine.proowner
+                   WHERE namespace.nspname = 'public' AND owner.rolname = '{role}'
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_database AS database
+                   CROSS JOIN LATERAL pg_catalog.aclexplode(
+                       COALESCE(database.datacl, pg_catalog.acldefault('d', database.datdba))
+                   ) AS acl
+                   JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
+                   WHERE database.datname = pg_catalog.current_database()
+                     AND grantee.rolname = '{role}'
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_namespace AS namespace
+                   CROSS JOIN LATERAL pg_catalog.aclexplode(
+                       COALESCE(namespace.nspacl, pg_catalog.acldefault('n', namespace.nspowner))
+                   ) AS acl
+                   JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
+                   WHERE namespace.nspname = 'public' AND grantee.rolname = '{role}'
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_class AS relation
+                   JOIN pg_catalog.pg_namespace AS namespace
+                     ON namespace.oid = relation.relnamespace
+                   CROSS JOIN LATERAL pg_catalog.aclexplode(
+                       COALESCE(
+                           relation.relacl,
+                           pg_catalog.acldefault(
+                               CASE WHEN relation.relkind = 'S'
+                                    THEN 's'::"char" ELSE 'r'::"char" END,
+                               relation.relowner
+                           )
+                       )
+                   ) AS acl
+                   JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
+                   WHERE namespace.nspname = 'public' AND grantee.rolname = '{role}'
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_proc AS routine
+                   JOIN pg_catalog.pg_namespace AS namespace
+                     ON namespace.oid = routine.pronamespace
+                   CROSS JOIN LATERAL pg_catalog.aclexplode(
+                       COALESCE(routine.proacl, pg_catalog.acldefault('f', routine.proowner))
+                   ) AS acl
+                   JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
+                   WHERE namespace.nspname = 'public' AND grantee.rolname = '{role}'
+               )
+               OR EXISTS (
+                   SELECT 1
+                   FROM pg_catalog.pg_default_acl AS defaults
+                   CROSS JOIN LATERAL pg_catalog.aclexplode(defaults.defaclacl) AS acl
+                   JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
+                   WHERE grantee.rolname = '{role}'
+               ) THEN
+                RAISE EXCEPTION '{role} exists with unexpected authority';
+            END IF;
+        END;
+        $$;
+        """
+    )
+
+
+def _runtime_allowed_pairs() -> tuple[tuple[str, str], ...]:
+    pairs = [(table, "SELECT") for table in RUNTIME_CONTROLLER_READ_TABLES]
+    pairs.extend((table, "INSERT") for table in RUNTIME_CONTROLLER_WRITE_TABLES)
+    pairs.append(("m1_runtime_controller_leases", "UPDATE"))
+    return tuple(pairs)
+
+
+def _qualification_allowed_pairs() -> tuple[tuple[str, str], ...]:
+    pairs = [(table, "SELECT") for table in QUALIFICATION_READ_TABLES]
+    pairs.extend((table, "INSERT") for table in QUALIFICATION_INSERT_TABLES)
+    pairs.extend((table, "UPDATE") for table in QUALIFICATION_UPDATE_TABLES)
+    return tuple(pairs)
+
+
+def _assert_closed_effective_authority(
+    role: str,
+    allowed_pairs: tuple[tuple[str, str], ...],
+    allowed_security_definer_functions: tuple[str, ...],
+) -> None:
+    allowed_relations = ",\n".join(
+        f"('{table}', '{privilege}')" for table, privilege in allowed_pairs
+    )
+    allowed_functions = ",\n".join(
+        f"pg_catalog.to_regprocedure('{signature}')"
+        for signature in allowed_security_definer_functions
+    )
+    function_condition = (
+        f"routine.oid IN ({allowed_functions})"
+        if allowed_functions
+        else "FALSE"
+    )
+    op.execute(
+        f"""
+        DO $$
+        DECLARE
+            relation record;
+            routine record;
+            sequence record;
+            privilege text;
+            expected boolean;
+            effective boolean;
+        BEGIN
+            IF NOT pg_catalog.has_database_privilege(
+                       '{role}', pg_catalog.current_database(), 'CONNECT'
+                   )
+               OR NOT pg_catalog.has_schema_privilege('{role}', 'public', 'USAGE')
+               OR pg_catalog.has_schema_privilege('{role}', 'public', 'CREATE') THEN
+                RAISE EXCEPTION '{role} authority envelope is not exact';
+            END IF;
+
+            FOR relation IN
+                SELECT object.oid, object.relname
+                FROM pg_catalog.pg_class AS object
+                JOIN pg_catalog.pg_namespace AS namespace
+                  ON namespace.oid = object.relnamespace
+                WHERE namespace.nspname = 'public'
+                  AND object.relkind IN ('r', 'p', 'v', 'm', 'f')
+            LOOP
+                FOREACH privilege IN ARRAY ARRAY[
+                    'SELECT', 'INSERT', 'UPDATE', 'DELETE',
+                    'TRUNCATE', 'REFERENCES', 'TRIGGER'
+                ] LOOP
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM (VALUES {allowed_relations}) AS allowed(relname, privilege_name)
+                        WHERE allowed.relname = relation.relname
+                          AND allowed.privilege_name = privilege
+                    ) INTO expected;
+                    SELECT pg_catalog.has_table_privilege('{role}', relation.oid, privilege)
+                    INTO effective;
+                    IF effective IS DISTINCT FROM expected THEN
+                        RAISE EXCEPTION '{role} authority envelope is not exact';
+                    END IF;
+                END LOOP;
+            END LOOP;
+
+            FOR sequence IN
+                SELECT object.oid
+                FROM pg_catalog.pg_class AS object
+                JOIN pg_catalog.pg_namespace AS namespace
+                  ON namespace.oid = object.relnamespace
+                WHERE namespace.nspname = 'public' AND object.relkind = 'S'
+            LOOP
+                FOREACH privilege IN ARRAY ARRAY['USAGE', 'SELECT', 'UPDATE'] LOOP
+                    IF pg_catalog.has_sequence_privilege('{role}', sequence.oid, privilege) THEN
+                        RAISE EXCEPTION '{role} authority envelope is not exact';
+                    END IF;
+                END LOOP;
+            END LOOP;
+
+            FOR routine IN
+                SELECT object.oid
+                FROM pg_catalog.pg_proc AS object
+                JOIN pg_catalog.pg_namespace AS namespace
+                  ON namespace.oid = object.pronamespace
+                WHERE namespace.nspname = 'public' AND object.prosecdef
+            LOOP
+                expected := {function_condition};
+                effective := pg_catalog.has_function_privilege(
+                    '{role}', routine.oid, 'EXECUTE'
+                );
+                IF effective IS DISTINCT FROM expected THEN
+                    RAISE EXCEPTION '{role} authority envelope is not exact';
+                END IF;
+            END LOOP;
+
+            IF EXISTS (
+                   SELECT 1 FROM pg_catalog.pg_auth_members AS membership
+                   JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+                   JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
+                   WHERE member.rolname = '{role}' OR granted.rolname = '{role}'
+               )
+               OR EXISTS (
+                   SELECT 1 FROM pg_catalog.pg_class AS object
+                   JOIN pg_catalog.pg_namespace AS namespace
+                     ON namespace.oid = object.relnamespace
+                   JOIN pg_catalog.pg_roles AS owner ON owner.oid = object.relowner
+                   WHERE namespace.nspname = 'public' AND owner.rolname = '{role}'
+               )
+               OR EXISTS (
+                   SELECT 1 FROM pg_catalog.pg_proc AS object
+                   JOIN pg_catalog.pg_namespace AS namespace
+                     ON namespace.oid = object.pronamespace
+                   JOIN pg_catalog.pg_roles AS owner ON owner.oid = object.proowner
+                   WHERE namespace.nspname = 'public' AND owner.rolname = '{role}'
+               ) THEN
+                RAISE EXCEPTION '{role} authority envelope is not exact';
             END IF;
         END;
         $$;
@@ -307,6 +545,8 @@ def _restore_revision_024_function_security() -> None:
     _create_canonical_jsonb(search_path=None, schema_qualified_recursion=False)
     _create_certificate_verifier(security_definer=False, search_path=None)
     _create_certificate_inserter(search_path="public")
+    for function_signature in REVISION_024_PUBLIC_FUNCTION_SIGNATURES:
+        op.execute(f"GRANT EXECUTE ON FUNCTION {function_signature} TO PUBLIC")
     op.execute(
         """
         REVOKE ALL ON FUNCTION public.m1_insert_qualification_certificate(

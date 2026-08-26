@@ -6,14 +6,16 @@ import ast
 import json
 import os
 import subprocess
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import psycopg
 import pytest
+from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from polyarb.control_plane.qualification_store import (
@@ -132,7 +134,7 @@ def test_026_declares_exact_permission_matrix_and_function_hardening() -> None:
     assert "DROP ROLE IF EXISTS m1_qualification_worker_capability" in text
 
 
-def test_026_rejects_unsafe_preexisting_capability_roles() -> None:
+def test_026_rejects_unsafe_or_authorized_preexisting_capability_roles() -> None:
     if not _docker_available():
         pytest.fail("Docker daemon unavailable; cannot prove real 026 role guard")
 
@@ -143,7 +145,9 @@ def test_026_rejects_unsafe_preexisting_capability_roles() -> None:
         _create_supabase_roles(dsn)
         _run_alembic(dsn, "upgrade", "025")
         with psycopg.connect(dsn, autocommit=True) as admin:
-            admin.execute(f"CREATE ROLE {RUNTIME_ROLE} LOGIN")
+            admin.execute(
+                sql.SQL("CREATE ROLE {} LOGIN").format(sql.Identifier(RUNTIME_ROLE))
+            )
 
         result = _run_alembic_result(dsn, "upgrade", "026")
 
@@ -151,6 +155,70 @@ def test_026_rejects_unsafe_preexisting_capability_roles() -> None:
         assert "m1_runtime_controller_capability exists with unsafe attributes" in (
             result.stderr + result.stdout
         )
+
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(RUNTIME_ROLE)))
+            admin.execute("CREATE ROLE m1_collision_peer NOLOGIN")
+
+        collision_setups = (
+            (
+                "direct-grant",
+                sql.SQL("GRANT SELECT ON TABLE public.m1_jobs TO {}").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+                sql.SQL("REVOKE SELECT ON TABLE public.m1_jobs FROM {}").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+            ),
+            (
+                "incoming-member",
+                sql.SQL("GRANT {} TO m1_collision_peer").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+                sql.SQL("REVOKE {} FROM m1_collision_peer").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+            ),
+            (
+                "outgoing-member",
+                sql.SQL("GRANT m1_collision_peer TO {}").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+                sql.SQL("REVOKE m1_collision_peer FROM {}").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+            ),
+            (
+                "owned-object",
+                sql.SQL("ALTER TABLE public.m1_jobs OWNER TO {}").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+                sql.SQL("REASSIGN OWNED BY {} TO CURRENT_USER").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                ),
+            ),
+        )
+        for case, setup, cleanup in collision_setups:
+            with psycopg.connect(dsn, autocommit=True) as admin:
+                admin.execute(
+                    sql.SQL("CREATE ROLE {} NOLOGIN NOINHERIT").format(
+                        sql.Identifier(RUNTIME_ROLE)
+                    )
+                )
+                admin.execute(setup)
+            result = _run_alembic_result(dsn, "upgrade", "026")
+            assert result.returncode != 0, case
+            assert "m1_runtime_controller_capability exists with unexpected authority" in (
+                result.stderr + result.stdout
+            )
+            with psycopg.connect(dsn, autocommit=True) as admin:
+                admin.execute(cleanup)
+                admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(RUNTIME_ROLE)))
+
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute("DROP ROLE m1_collision_peer")
+        _run_alembic(dsn, "upgrade", "026")
+        assert _current_revision(dsn) == "026"
 
 
 def test_026_scoped_roles_harden_ingress_and_replay_across_downgrade() -> None:
@@ -163,6 +231,7 @@ def test_026_scoped_roles_harden_ingress_and_replay_across_downgrade() -> None:
         dsn = _normalize_dsn(postgres.get_connection_url())
         _create_supabase_roles(dsn)
         _run_alembic(dsn, "upgrade", "025")
+        revision_024_function_projection = _revision_024_function_projection(dsn)
         _run_alembic(dsn, "upgrade", "026")
         assert _current_revision(dsn) == "026"
 
@@ -175,8 +244,18 @@ def test_026_scoped_roles_harden_ingress_and_replay_across_downgrade() -> None:
             _create_test_login(admin, QUALIFICATION_LOGIN, "qualification-test")
             _create_test_login(admin, SOURCE_LOGIN, "source-test")
             _create_test_login(admin, PLAIN_LOGIN, "plain-test")
-            admin.execute(f"GRANT {RUNTIME_ROLE} TO {RUNTIME_LOGIN}")
-            admin.execute(f"GRANT {QUALIFICATION_ROLE} TO {QUALIFICATION_LOGIN}")
+            admin.execute(
+                sql.SQL("GRANT {} TO {}").format(
+                    sql.Identifier(RUNTIME_ROLE),
+                    sql.Identifier(RUNTIME_LOGIN),
+                )
+            )
+            admin.execute(
+                sql.SQL("GRANT {} TO {}").format(
+                    sql.Identifier(QUALIFICATION_ROLE),
+                    sql.Identifier(QUALIFICATION_LOGIN),
+                )
+            )
             _grant_source_projection_permissions(admin)
             _grant_plain_login_permissions(admin)
             _assert_role_attributes(admin, RUNTIME_ROLE)
@@ -219,6 +298,11 @@ def test_026_scoped_roles_harden_ingress_and_replay_across_downgrade() -> None:
             assert not _role_exists(admin, RUNTIME_ROLE)
             assert not _role_exists(admin, QUALIFICATION_ROLE)
             _assert_revision_024_function_security_restored(admin)
+        assert _revision_024_function_projection(dsn) == revision_024_function_projection
+        _exercise_source_projection_after_downgrade(source_dsn, dsn)
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(SOURCE_LOGIN)))
+            admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(SOURCE_LOGIN)))
         _run_alembic(dsn, "upgrade", "026")
         assert _current_revision(dsn) == "026"
         with psycopg.connect(dsn) as admin:
@@ -226,6 +310,146 @@ def test_026_scoped_roles_harden_ingress_and_replay_across_downgrade() -> None:
             _assert_role_attributes(admin, QUALIFICATION_ROLE)
             _assert_runtime_permissions(admin)
             _assert_qualification_permissions(admin)
+
+
+def test_026_real_pg16_exact_authority_adversarial_matrix() -> None:
+    if not _docker_available():
+        pytest.fail("Docker daemon unavailable; cannot prove exact authority matrix")
+
+    from testcontainers.postgres import PostgresContainer
+
+    from polyarb.control_plane.db_role_admin import (
+        DatabaseRoleAdminError,
+        preflight_capability_roles,
+        provision_login_roles,
+    )
+    from polyarb.control_plane.db_role_contract import (
+        DatabaseRoleContractError,
+        verify_daemon_database_role,
+    )
+
+    with PostgresContainer("postgres:16-alpine") as postgres:
+        dsn = _normalize_dsn(postgres.get_connection_url())
+        _create_supabase_roles(dsn)
+        _run_alembic(dsn, "upgrade", "026")
+
+        def admin_factory() -> psycopg.Connection[Any]:
+            return psycopg.connect(dsn)
+
+        provision_login_roles(
+            admin_factory,
+            expected_database="test",
+            runtime_password="runtime-matrix-secret",
+            qualification_password="qualification-matrix-secret",
+        )
+        runtime_dsn = _role_dsn(
+            dsn, "m1_runtime_controller_login", "runtime-matrix-secret"
+        )
+        qualification_dsn = _role_dsn(
+            dsn, "m1_qualification_worker_login", "qualification-matrix-secret"
+        )
+
+        profiles = {
+            "runtime-controller": runtime_dsn,
+            "qualification-worker": qualification_dsn,
+        }
+        assert preflight_capability_roles(admin_factory, expected_database="test")["status"] == (
+            "ready"
+        )
+        for profile, role_dsn in profiles.items():
+            assert (
+                verify_daemon_database_role(
+                    lambda role_dsn=role_dsn: psycopg.connect(role_dsn),
+                    profile,
+                    expected_database="test",
+                ).status
+                == "pass"
+            )
+
+        def assert_rejected(profile: str) -> None:
+            with pytest.raises(DatabaseRoleContractError) as daemon_error:
+                verify_daemon_database_role(
+                    lambda: psycopg.connect(profiles[profile]),
+                    profile,
+                    expected_database="test",
+                )
+            with pytest.raises(DatabaseRoleAdminError) as admin_error:
+                preflight_capability_roles(admin_factory, expected_database="test")
+            for error in (daemon_error.value, admin_error.value):
+                rendered = str(error)
+                assert len(rendered) <= 256
+                assert "postgresql://" not in rendered
+                assert "matrix-secret" not in rendered
+
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute("CREATE TABLE public.m1_unrelated_authority(id bigint)")
+            admin.execute(
+                sql.SQL("GRANT SELECT ON TABLE public.m1_unrelated_authority TO {}").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                )
+            )
+        assert_rejected("runtime-controller")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("REVOKE SELECT ON TABLE public.m1_unrelated_authority FROM {}").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                )
+            )
+
+            admin.execute(
+                sql.SQL(
+                    "GRANT EXECUTE ON FUNCTION public.l3_retention_cleanup("
+                    "timestamptz,timestamptz,timestamptz) TO {}"
+                ).format(sql.Identifier(QUALIFICATION_ROLE))
+            )
+        assert_rejected("qualification-worker")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL(
+                    "REVOKE EXECUTE ON FUNCTION public.l3_retention_cleanup("
+                    "timestamptz,timestamptz,timestamptz) FROM {}"
+                ).format(sql.Identifier(QUALIFICATION_ROLE))
+            )
+
+            admin.execute("GRANT CREATE ON SCHEMA public TO PUBLIC")
+        assert_rejected("runtime-controller")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+            admin.execute("CREATE ROLE m1_unexpected_capability_member NOLOGIN")
+            admin.execute(
+                sql.SQL("GRANT {} TO m1_unexpected_capability_member").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                )
+            )
+        assert_rejected("runtime-controller")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("REVOKE {} FROM m1_unexpected_capability_member").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                )
+            )
+            admin.execute("DROP ROLE m1_unexpected_capability_member")
+            admin.execute(
+                sql.SQL("ALTER TABLE public.m1_unrelated_authority OWNER TO {}").format(
+                    sql.Identifier(RUNTIME_ROLE)
+                )
+            )
+        assert_rejected("runtime-controller")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute("DROP TABLE public.m1_unrelated_authority")
+
+        assert preflight_capability_roles(admin_factory, expected_database="test")["status"] == (
+            "ready"
+        )
+        for profile, role_dsn in profiles.items():
+            assert (
+                verify_daemon_database_role(
+                    lambda role_dsn=role_dsn: psycopg.connect(role_dsn),
+                    profile,
+                    expected_database="test",
+                ).status
+                == "pass"
+            )
 
 
 def _runtime_write_table_tuple(text: str) -> tuple[str, ...]:
@@ -241,6 +465,13 @@ def _literal_tuple(text: str, name: str) -> tuple[str, ...]:
                 assert isinstance(value, tuple)
                 return tuple(cast(tuple[str, ...], value))
     raise AssertionError(f"{name} assignment not found")
+
+
+def _row_value(row: object, index: int, name: str) -> object:
+    if isinstance(row, Mapping):
+        return row[name]
+    values = cast(Sequence[object], row)
+    return values[index]
 
 
 def _docker_available() -> bool:
@@ -279,13 +510,15 @@ def _current_revision(dsn: str) -> str:
     with psycopg.connect(dsn) as connection:
         row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
     assert row is not None
-    return str(row[0])
+    return str(_row_value(row, 0, "version_num"))
 
 
 def _create_supabase_roles(dsn: str) -> None:
     with psycopg.connect(dsn, autocommit=True) as connection:
         for role in ("anon", "authenticated", "service_role"):
-            connection.execute(f"CREATE ROLE {role} NOLOGIN")
+            connection.execute(
+                sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role))
+            )
 
 
 def _role_dsn(dsn: str, username: str, password: str) -> str:
@@ -310,28 +543,59 @@ def _create_test_login(
     password: str,
 ) -> None:
     admin.execute(
-        f"CREATE ROLE {role_name} LOGIN INHERIT PASSWORD '{password}'"
+        sql.SQL("CREATE ROLE {} LOGIN INHERIT PASSWORD {}").format(
+            sql.Identifier(role_name),
+            sql.Literal(password),
+        )
     )
 
 
 def _drop_test_login(admin: psycopg.Connection[object], role_name: str) -> None:
-    admin.execute(f"REVOKE {RUNTIME_ROLE} FROM {role_name}")
-    admin.execute(f"REVOKE {QUALIFICATION_ROLE} FROM {role_name}")
-    admin.execute(f"DROP OWNED BY {role_name}")
-    admin.execute(f"DROP ROLE {role_name}")
+    for capability in (RUNTIME_ROLE, QUALIFICATION_ROLE):
+        admin.execute(
+            sql.SQL("REVOKE {} FROM {}").format(
+                sql.Identifier(capability),
+                sql.Identifier(role_name),
+            )
+        )
+    admin.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role_name)))
+    admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role_name)))
 
 
 def _grant_source_projection_permissions(admin: psycopg.Connection[object]) -> None:
-    admin.execute(f"GRANT CONNECT ON DATABASE {admin.info.dbname} TO {SOURCE_LOGIN}")
-    admin.execute(f"GRANT USAGE ON SCHEMA public TO {SOURCE_LOGIN}")
-    admin.execute(f"GRANT INSERT ON TABLE m1_job_runtime_events TO {SOURCE_LOGIN}")
-    admin.execute(f"GRANT INSERT ON TABLE m1_incident_events TO {SOURCE_LOGIN}")
-    admin.execute(f"GRANT INSERT, UPDATE ON TABLE m1_recovery_actions TO {SOURCE_LOGIN}")
+    admin.execute(
+        sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+            sql.Identifier(admin.info.dbname),
+            sql.Identifier(SOURCE_LOGIN),
+        )
+    )
+    admin.execute(
+        sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(SOURCE_LOGIN))
+    )
+    for table_name in ("m1_job_runtime_events", "m1_incident_events"):
+        admin.execute(
+            sql.SQL("GRANT INSERT ON TABLE {} TO {}").format(
+                sql.Identifier(table_name),
+                sql.Identifier(SOURCE_LOGIN),
+            )
+        )
+    admin.execute(
+        sql.SQL("GRANT INSERT, UPDATE ON TABLE m1_recovery_actions TO {}").format(
+            sql.Identifier(SOURCE_LOGIN)
+        )
+    )
 
 
 def _grant_plain_login_permissions(admin: psycopg.Connection[object]) -> None:
-    admin.execute(f"GRANT CONNECT ON DATABASE {admin.info.dbname} TO {PLAIN_LOGIN}")
-    admin.execute(f"GRANT USAGE ON SCHEMA public TO {PLAIN_LOGIN}")
+    admin.execute(
+        sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
+            sql.Identifier(admin.info.dbname),
+            sql.Identifier(PLAIN_LOGIN),
+        )
+    )
+    admin.execute(
+        sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(PLAIN_LOGIN))
+    )
 
 
 def _assert_role_attributes(admin: psycopg.Connection[object], role_name: str) -> None:
@@ -448,7 +712,7 @@ def _has_table(
         "SELECT has_table_privilege(%s, %s, %s)",
         (grantee, f"public.{table}", privilege),
     ).fetchone()
-    return bool(row and row[0])
+    return bool(row and _row_value(row, 0, "has_table_privilege"))
 
 
 def _has_sequence(
@@ -461,7 +725,7 @@ def _has_sequence(
         "SELECT has_sequence_privilege(%s, %s, %s)",
         (grantee, sequence, privilege),
     ).fetchone()
-    return bool(row and row[0])
+    return bool(row and _row_value(row, 0, "has_sequence_privilege"))
 
 
 def _has_function(
@@ -473,7 +737,7 @@ def _has_function(
         "SELECT has_function_privilege(%s, %s, 'EXECUTE')",
         (grantee, function_signature),
     ).fetchone()
-    return bool(row and row[0])
+    return bool(row and _row_value(row, 0, "has_function_privilege"))
 
 
 def _public_has_function(
@@ -495,7 +759,7 @@ def _public_has_function(
         """,
         (function_signature,),
     ).fetchone()
-    return bool(row and row[0])
+    return bool(row and _row_value(row, 0, "exists"))
 
 
 def _ledger_sequence(connection: psycopg.Connection[object]) -> str:
@@ -503,7 +767,7 @@ def _ledger_sequence(connection: psycopg.Connection[object]) -> str:
         "SELECT pg_get_serial_sequence('public.m1_qualification_ingress_ledger', 'ingest_seq')"
     ).fetchone()
     assert row is not None
-    return str(row[0])
+    return str(_row_value(row, 0, "pg_get_serial_sequence"))
 
 
 def _exercise_runtime_controller(runtime_dsn: str) -> None:
@@ -1005,8 +1269,7 @@ def _assert_append_only_triggers(connection: psycopg.Connection[object]) -> None
 def _assert_revision_024_function_security_restored(
     connection: psycopg.Connection[object],
 ) -> None:
-    rows = dict(
-        connection.execute(
+    raw_rows = connection.execute(
             """
             SELECT p.proname, p.prosecdef
             FROM pg_catalog.pg_proc AS p
@@ -1022,13 +1285,134 @@ def _assert_revision_024_function_security_restored(
               )
             """
         ).fetchall()
-    )
+    rows = {
+        str(_row_value(row, 0, "proname")): bool(_row_value(row, 1, "prosecdef"))
+        for row in raw_rows
+    }
     assert rows["m1_record_qualification_ingress"] is False
     assert rows["m1_project_runtime_qualification_ingress"] is False
     assert rows["m1_project_incident_qualification_ingress"] is False
     assert rows["m1_project_recovery_qualification_ingress"] is False
     assert rows["m1_verify_qualification_certificate_insert"] is False
     assert rows["m1_insert_qualification_certificate"] is True
+
+    public_execute_functions = (
+        "public.m1_record_qualification_ingress(text,text,text,timestamptz,jsonb)",
+        "public.m1_project_runtime_qualification_ingress()",
+        "public.m1_project_incident_qualification_ingress()",
+        "public.m1_project_recovery_qualification_ingress()",
+        "public.m1_canonical_jsonb(jsonb)",
+        "public.m1_verify_qualification_certificate_insert()",
+    )
+    for function_signature in public_execute_functions:
+        assert _public_has_function(connection, function_signature)
+    certificate_function = (
+        "public.m1_insert_qualification_certificate("
+        "text,text,text,text,jsonb,timestamptz,timestamptz,jsonb,text,text,text,text)"
+    )
+    assert not _public_has_function(connection, certificate_function)
+    assert _has_function(connection, "service_role", certificate_function)
+
+
+def _revision_024_function_projection(
+    dsn: str,
+) -> dict[str, tuple[bool, tuple[str, ...], tuple[str, ...]]]:
+    with psycopg.connect(dsn) as connection:
+        rows = connection.execute(
+            """
+            SELECT pg_catalog.format(
+                       '%I.%I(%s)', namespace.nspname, routine.proname,
+                       pg_catalog.pg_get_function_identity_arguments(routine.oid)
+                   ) AS signature,
+                   routine.prosecdef,
+                   COALESCE(routine.proconfig, ARRAY[]::text[]) AS proconfig,
+                   ARRAY(
+                       SELECT pg_catalog.format(
+                                  '%%s:%%s:%%s',
+                                  CASE WHEN acl.grantee = 0 THEN 'PUBLIC'
+                                       ELSE grantee.rolname END,
+                                  acl.privilege_type,
+                                  acl.is_grantable
+                              )
+                       FROM pg_catalog.aclexplode(
+                           COALESCE(
+                               routine.proacl,
+                               pg_catalog.acldefault('f', routine.proowner)
+                           )
+                       ) AS acl
+                       LEFT JOIN pg_catalog.pg_roles AS grantee
+                         ON grantee.oid = acl.grantee
+                       ORDER BY 1
+                   ) AS acl_projection
+            FROM pg_catalog.pg_proc AS routine
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = routine.pronamespace
+            WHERE namespace.nspname = 'public'
+              AND routine.proname IN (
+                  'm1_record_qualification_ingress',
+                  'm1_project_runtime_qualification_ingress',
+                  'm1_project_incident_qualification_ingress',
+                  'm1_project_recovery_qualification_ingress',
+                  'm1_canonical_jsonb',
+                  'm1_verify_qualification_certificate_insert',
+                  'm1_insert_qualification_certificate'
+              )
+            ORDER BY signature
+            """
+        ).fetchall()
+    return {
+        str(_row_value(row, 0, "signature")): (
+            bool(_row_value(row, 1, "prosecdef")),
+            tuple(str(item) for item in cast(Sequence[object], _row_value(row, 2, "proconfig"))),
+            tuple(
+                str(item)
+                for item in cast(Sequence[object], _row_value(row, 3, "acl_projection"))
+            ),
+        )
+        for row in rows
+    }
+
+
+def _exercise_source_projection_after_downgrade(source_dsn: str, admin_dsn: str) -> None:
+    with psycopg.connect(admin_dsn, autocommit=True) as admin:
+        _create_test_login(admin, SOURCE_LOGIN, "source-test")
+        _grant_source_projection_permissions(admin)
+        admin.execute(
+            sql.SQL(
+                "GRANT SELECT, INSERT ON TABLE m1_qualification_ingress_ledger TO {}"
+            ).format(sql.Identifier(SOURCE_LOGIN))
+        )
+        admin.execute(
+            sql.SQL("GRANT USAGE ON SEQUENCE {} TO {}").format(
+                sql.Identifier(_ledger_sequence(admin).split(".")[-1]),
+                sql.Identifier(SOURCE_LOGIN),
+            )
+        )
+    with psycopg.connect(source_dsn) as source:
+        source.execute(
+            """
+            INSERT INTO m1_job_runtime_events (
+                event_id, job_key, attempt_id, lease_epoch, worker_id,
+                event_sequence, kind, stage, progress_sequence, progress_current,
+                progress_total, detail, occurred_at, idempotency_key
+            ) VALUES (
+                'runtime-source-after-026-downgrade', 'job-source-026',
+                'attempt-source-026', 1, 'worker-source-026', 2, 'job.stage-changed',
+                'after-downgrade', 2, 1, 1, %s, %s,
+                'runtime-source-after-026-downgrade'
+            )
+            """,
+            (Jsonb({"reason_code": "after-downgrade"}), NOW + timedelta(seconds=3)),
+        )
+    with psycopg.connect(admin_dsn) as admin:
+        row = admin.execute(
+            """
+            SELECT COUNT(*) FROM m1_qualification_ingress_ledger
+            WHERE source = 'runtime'
+              AND source_id = 'runtime-source-after-026-downgrade'
+            """
+        ).fetchone()
+    assert row == (1,)
 
 
 def _role_exists(connection: psycopg.Connection[object], role_name: str) -> bool:

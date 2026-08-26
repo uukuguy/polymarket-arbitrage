@@ -14,7 +14,12 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from polyarb.control_plane.db_role_contract import ConnectionFactory
+from polyarb.control_plane.db_role_contract import (
+    QUALIFICATION_ALLOWED,
+    ROLE_CONTRACTS,
+    RUNTIME_ALLOWED,
+    ConnectionFactory,
+)
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
 RUNTIME_LOGIN = "m1_runtime_controller_login"
@@ -100,9 +105,19 @@ class FakeAdminFactory:
             },
         }
         self.calls: list[tuple[str, object]] = []
+        self.owned_objects: dict[str, set[str]] = {
+            role: set() for role in self.roles
+        }
+        self.direct_privileges: dict[str, set[str]] = {
+            RUNTIME_CAPABILITY: _fake_expected_direct("runtime-controller", self.database),
+            QUALIFICATION_CAPABILITY: _fake_expected_direct(
+                "qualification-worker", self.database
+            ),
+        }
         self.commits = 0
         self.password_changes = 0
         self.fail_after_first_password_change = False
+        self.public_schema_create = False
         self._transaction_backup: dict[str, dict[str, Any]] | None = None
 
     def __call__(self) -> FakeConnection:
@@ -147,6 +162,8 @@ class FakeAdminFactory:
             "memberships": memberships,
             "password": password,
         }
+        self.owned_objects.setdefault(role, set())
+        self.direct_privileges.setdefault(role, set())
 
     def answer(self, normalized: str, params: object) -> object:
         if normalized == "set transaction read only":
@@ -155,6 +172,34 @@ class FakeAdminFactory:
             return (self.database,)
         if "select version_num from alembic_version" in normalized:
             return (self.revision,)
+        if "as relation_name" in normalized and "pg_catalog.pg_class" in normalized:
+            names = set(RUNTIME_ALLOWED) | set(QUALIFICATION_ALLOWED)
+            return [(f"public.{name}", name) for name in sorted(names)]
+        if "routine.prosecdef" in normalized and "pg_catalog.pg_proc" in normalized:
+            return [
+                (signature,)
+                for signature in (
+                    "public.l3_retention_cleanup(timestamptz,timestamptz,timestamptz)",
+                    *ROLE_CONTRACTS["qualification-worker"].required_function_privileges,
+                    *ROLE_CONTRACTS["runtime-controller"].forbidden_function_privileges,
+                )
+            ]
+        if "select owner.rolname as owner_role" in normalized:
+            return sorted(
+                (role, item)
+                for role, items in self.owned_objects.items()
+                for item in items
+            )
+        if "with target_roles as" in normalized:
+            return sorted(
+                (role, privilege.rsplit(":", 1)[0], privilege.rsplit(":", 1)[1])
+                for role, privileges in self.direct_privileges.items()
+                for privilege in privileges
+            )
+        if "select owned_object from" in normalized:
+            subject = str(_param_tuple(params)[0])
+            items = sorted(self.owned_objects.get(subject, set()))
+            return [(items[0],)] if items else []
         if "from pg_catalog.pg_roles as role" in normalized:
             names = _param_tuple(params)
             return [
@@ -174,10 +219,37 @@ class FakeAdminFactory:
         if "from pg_catalog.pg_auth_members" in normalized:
             rows: list[tuple[str, str]] = []
             for member, attrs in self.roles.items():
-                if member not in _param_tuple(params):
-                    continue
                 rows.extend((member, role) for role in cast(set[str], attrs["memberships"]))
-            return sorted(rows)
+            if "where member.rolname = %s" in normalized:
+                requested = str(_param_tuple(params)[0])
+                return sorted(row for row in rows if row[0] == requested)
+            requested = set(_param_tuple(params))
+            return sorted(
+                row for row in rows if row[0] in requested or row[1] in requested
+            )
+        if "has_database_privilege" in normalized:
+            return (True,)
+        if "has_schema_privilege" in normalized:
+            privilege = str(_param_tuple(params)[2]).upper()
+            return (self.public_schema_create if privilege == "CREATE" else True,)
+        if "has_table_privilege" in normalized:
+            subject, relation_name, privilege = _param_tuple(params)
+            profile = _profile_for_role(subject)
+            allowed = RUNTIME_ALLOWED if profile == "runtime-controller" else QUALIFICATION_ALLOWED
+            table_name = relation_name.removeprefix("public.")
+            return (privilege in allowed.get(table_name, frozenset()),)
+        if "as sequence_name" in normalized and "pg_catalog.pg_class" in normalized:
+            return []
+        if "has_sequence_privilege" in normalized:
+            return (False,)
+        if "has_function_privilege" in normalized:
+            subject, signature, _privilege = _param_tuple(params)
+            profile = _profile_for_role(subject)
+            allowed = {
+                "".join(item.split())
+                for item in ROLE_CONTRACTS[profile].required_function_privileges
+            }
+            return ("".join(signature.split()) in allowed,)
         if normalized.startswith("create role "):
             role = _identifier_after(rendered=normalized, keyword="create role")
             self.roles[role] = {
@@ -191,6 +263,8 @@ class FakeAdminFactory:
                 "memberships": set(),
                 "password": _literal_password(normalized),
             }
+            self.owned_objects.setdefault(role, set())
+            self.direct_privileges.setdefault(role, set())
             self.password_changes += 1
             return None
         if normalized.startswith("alter role ") and " password " in normalized:
@@ -218,7 +292,33 @@ def _param_tuple(params: object) -> tuple[str, ...]:
     assert isinstance(params, tuple)
     if len(params) == 1 and isinstance(params[0], (list, tuple)):
         return tuple(str(value) for value in params[0])
-    return tuple(str(value) for value in params)
+    values: list[str] = []
+    for value in params:
+        if isinstance(value, (list, tuple)):
+            values.extend(str(item) for item in value)
+        else:
+            values.append(str(value))
+    return tuple(values)
+
+
+def _profile_for_role(role: str) -> str:
+    if "qualification" in role:
+        return "qualification-worker"
+    return "runtime-controller"
+
+
+def _fake_expected_direct(profile: str, database: str) -> set[str]:
+    contract = ROLE_CONTRACTS[profile]
+    expected = {f"database:{database}:CONNECT", "schema:public:USAGE"}
+    expected.update(
+        f"relation:public.{table}:{privilege}"
+        for table, privilege in contract.required_table_privileges
+    )
+    expected.update(
+        f"routine:{''.join(signature.split())}:EXECUTE"
+        for signature in contract.required_function_privileges
+    )
+    return expected
 
 
 def _render_for_fake(statement: object) -> str:
@@ -302,6 +402,53 @@ def test_preflight_rejects_unsafe_capability_role_attributes() -> None:
 
     with pytest.raises(DatabaseRoleAdminError, match="database-role-admin.capability-unsafe"):
         preflight_capability_roles(_as_connection_factory(factory), expected_database="role_test")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason_code"),
+    (
+        ("unexpected-member", "database-role-admin.membership-unsafe"),
+        ("owned-object", "database-role-admin.ownership-unsafe"),
+        ("direct-grant", "database-role-admin.direct-privilege-unsafe"),
+        ("public-schema-create", "database-role-admin.authority-unsafe"),
+    ),
+)
+def test_preflight_rejects_every_unexpected_capability_authority(
+    mutation: str,
+    reason_code: str,
+) -> None:
+    from polyarb.control_plane.db_role_admin import (
+        DatabaseRoleAdminError,
+        preflight_capability_roles,
+    )
+
+    factory = FakeAdminFactory()
+    if mutation == "unexpected-member":
+        factory.roles["unrelated_member"] = {
+            "can_login": False,
+            "superuser": False,
+            "create_db": False,
+            "create_role": False,
+            "inherits": False,
+            "replication": False,
+            "bypass_rls": False,
+            "memberships": {RUNTIME_CAPABILITY},
+            "password": None,
+        }
+    elif mutation == "owned-object":
+        factory.owned_objects[RUNTIME_CAPABILITY].add("relation:public.unrelated")
+    elif mutation == "direct-grant":
+        factory.direct_privileges[RUNTIME_CAPABILITY].add(
+            "relation:public.unrelated:SELECT"
+        )
+    else:
+        factory.public_schema_create = True
+
+    with pytest.raises(DatabaseRoleAdminError, match=reason_code):
+        preflight_capability_roles(
+            _as_connection_factory(factory),
+            expected_database="role_test",
+        )
 
 
 def test_provision_rejects_empty_or_equal_passwords() -> None:
@@ -629,9 +776,9 @@ def test_cli_verify_selects_profile_scoped_dsn_and_delegates(
 
     monkeypatch.setattr(db_role_admin, "_connection_factory_from_dsn", connection_factory)
     monkeypatch.setattr(db_role_admin, "verify_daemon_database_role", verify)
-    monkeypatch.setenv("POLYARB_RUNTIME_CONTROLLER_DB_DSN", "postgresql://runtime:secret@example/db")
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://runtime:secret@example/db")
     monkeypatch.setenv(
-        "POLYARB_QUALIFICATION_WORKER_DB_DSN",
+        "POLYARB_QUALIFICATION_DB_DSN",
         "postgresql://qualification:secret@example/db",
     )
 
@@ -653,6 +800,40 @@ def test_cli_verify_selects_profile_scoped_dsn_and_delegates(
     captured = capsys.readouterr()
     assert "postgresql://" not in captured.out + captured.err
     assert json.loads(captured.out)["status"] == "pass"
+
+
+def test_cli_verify_rejects_deprecated_daemon_dsn_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from polyarb.control_plane import db_role_admin
+
+    monkeypatch.delenv("POLYARB_SUPABASE_DB_DSN", raising=False)
+    monkeypatch.delenv("POLYARB_QUALIFICATION_DB_DSN", raising=False)
+    monkeypatch.setenv(
+        "POLYARB_RUNTIME_CONTROLLER_DB_DSN",
+        "postgresql://deprecated-runtime:secret@example/db",
+    )
+    monkeypatch.setenv(
+        "POLYARB_QUALIFICATION_WORKER_DB_DSN",
+        "postgresql://deprecated-qualification:secret@example/db",
+    )
+
+    assert (
+        db_role_admin.main(
+            [
+                "verify",
+                "--profile",
+                "qualification-worker",
+                "--expected-database",
+                "role_test",
+            ]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "POLYARB_QUALIFICATION_DB_DSN" in captured.err
+    assert "postgresql://" not in captured.err
 
 
 def test_real_postgres_provisions_verifies_rotates_and_disables_roles(

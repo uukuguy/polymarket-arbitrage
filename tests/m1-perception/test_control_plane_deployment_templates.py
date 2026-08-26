@@ -3,6 +3,8 @@
 import tomllib
 from pathlib import Path
 
+from polyarb.control_plane.db_role_admin import PROFILE_DSN_ENV
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -190,3 +192,39 @@ def test_qualification_worker_template_has_only_scoped_database_and_no_recovery_
     ):
         assert forbidden not in env_and_process_text
     assert "scoped qualification Postgres DSN" in text
+
+
+def test_daemon_dsn_names_are_one_source_across_cli_templates_and_runbook() -> None:
+    runtime_name = "POLYARB_SUPABASE_DB_DSN"
+    qualification_name = "POLYARB_QUALIFICATION_DB_DSN"
+    deprecated_names = {
+        "POLYARB_RUNTIME_CONTROLLER_DB_DSN",
+        "POLYARB_QUALIFICATION_WORKER_DB_DSN",
+    }
+
+    assert PROFILE_DSN_ENV == {
+        "runtime-controller": runtime_name,
+        "qualification-worker": qualification_name,
+    }
+
+    cli_source = (ROOT / "src/polyarb/cli_control_plane.py").read_text()
+    runtime_template = (
+        ROOT / "deploy/control-plane/fly-runtime-controller.toml.template"
+    ).read_text()
+    qualification_template = (
+        ROOT / "deploy/control-plane/fly-qualification-worker.toml.template"
+    ).read_text()
+    runbook = (ROOT / "docs/dev/control-plane-runbook.md").read_text()
+
+    assert f'os.environ.get("{runtime_name}"' in cli_source
+    assert f'os.environ.get("{qualification_name}"' in cli_source
+    assert runtime_name in runtime_template
+    assert qualification_name not in runtime_template
+    assert qualification_name in qualification_template
+    assert runtime_name not in qualification_template
+    assert runtime_name in runbook
+    assert qualification_name in runbook
+    for deprecated in deprecated_names:
+        assert deprecated not in runtime_template
+        assert deprecated not in qualification_template
+        assert deprecated not in runbook

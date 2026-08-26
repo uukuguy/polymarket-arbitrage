@@ -199,37 +199,18 @@ def verify_daemon_database_role(
                 if any((rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls)):
                     _fail("database-role.unsafe-attribute", contract.login_role)
                 _verify_role_attributes(cursor, contract)
-                _require_privilege(
-                    cursor,
-                    "has_database_privilege",
-                    "database-role.required-privilege-missing",
-                    (session_user, normalized_database, "CONNECT"),
-                    f"database:{normalized_database}:CONNECT",
-                )
-                _require_privilege(
-                    cursor,
-                    "has_schema_privilege",
-                    "database-role.required-privilege-missing",
-                    (session_user, "public", "USAGE"),
-                    "schema:public:USAGE",
-                )
                 _require_role(cursor, session_user, contract.capability_role)
                 for capability_role in _CAPABILITY_ROLES:
                     if capability_role != contract.capability_role:
                         _reject_role(cursor, session_user, capability_role)
                 _reject_unapproved_inherited_role(cursor, contract, session_user)
-                for table, privilege in contract.required_table_privileges:
-                    _require_table_privilege(cursor, session_user, table, privilege)
-                for table, privilege in contract.forbidden_table_privileges:
-                    _reject_table_privilege(cursor, session_user, table, privilege)
-                for function_signature in contract.required_function_privileges:
-                    _require_function_privilege(cursor, session_user, function_signature)
-                for function_signature in contract.forbidden_function_privileges:
-                    _reject_function_privilege(cursor, session_user, function_signature)
-                for schema in contract.forbidden_sequence_schemas:
-                    _reject_schema_sequence_privileges(cursor, session_user, schema)
-                for table, column in contract.forbidden_sequence_columns:
-                    _reject_sequence_privileges(cursor, session_user, table, column)
+                _verify_exact_capability_membership(cursor, contract)
+                verify_effective_database_role_authority(
+                    cursor,
+                    contract,
+                    subject_role=session_user,
+                    expected_database=normalized_database,
+                )
     except DatabaseRoleContractError:
         raise
     except Exception as exc:
@@ -432,6 +413,235 @@ def _reject_unapproved_inherited_role(
         _fail("database-role.cross-capability", str(_row_value(row, 0, "rolname")))
 
 
+def _verify_exact_capability_membership(
+    cursor: Any,
+    contract: DatabaseRoleContract,
+) -> None:
+    cursor.execute(
+        """
+        SELECT member.rolname
+        FROM pg_catalog.pg_auth_members AS membership
+        JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+        JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
+        WHERE granted.rolname = %s
+        ORDER BY member.rolname
+        """,
+        (contract.capability_role,),
+    )
+    incoming = frozenset(
+        str(_row_value(row, 0, "rolname")) for row in cursor.fetchall()
+    )
+    if incoming != frozenset({contract.login_role}):
+        _fail("database-role.forbidden-privilege-present", "capability-membership")
+    cursor.execute(
+        """
+        SELECT granted.rolname
+        FROM pg_catalog.pg_auth_members AS membership
+        JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+        JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
+        WHERE member.rolname = %s
+        ORDER BY granted.rolname
+        """,
+        (contract.capability_role,),
+    )
+    if cursor.fetchone() is not None:
+        _fail("database-role.forbidden-privilege-present", "capability-membership")
+
+
+def verify_effective_database_role_authority(
+    cursor: Any,
+    contract: DatabaseRoleContract,
+    *,
+    subject_role: str,
+    expected_database: str,
+) -> None:
+    """Compare all effective public-schema authority to a closed allowlist."""
+
+    _require_privilege(
+        cursor,
+        "has_database_privilege",
+        "database-role.required-privilege-missing",
+        (subject_role, expected_database, "CONNECT"),
+        f"database:{expected_database}:CONNECT",
+    )
+    _require_privilege(
+        cursor,
+        "has_schema_privilege",
+        "database-role.required-privilege-missing",
+        (subject_role, "public", "USAGE"),
+        "schema:public:USAGE",
+    )
+    if _check_privilege(
+        cursor,
+        "has_schema_privilege",
+        (subject_role, "public", "CREATE"),
+    ):
+        _fail("database-role.forbidden-privilege-present", "schema:public:CREATE")
+    _verify_public_relation_privileges(cursor, contract, subject_role)
+    _verify_public_sequence_privileges(cursor, subject_role)
+    _verify_security_definer_execute(cursor, contract, subject_role)
+    _reject_public_object_ownership(cursor, subject_role)
+
+
+def _allowed_tables(contract: DatabaseRoleContract) -> Mapping[str, frozenset[str]]:
+    if contract.profile == "runtime-controller":
+        return RUNTIME_ALLOWED
+    return QUALIFICATION_ALLOWED
+
+
+def _verify_public_relation_privileges(
+    cursor: Any,
+    contract: DatabaseRoleContract,
+    subject_role: str,
+) -> None:
+    cursor.execute(
+        """
+        SELECT pg_catalog.format('%I.%I', namespace.nspname, relation.relname)
+                   AS relation_name,
+               relation.relname
+        FROM pg_catalog.pg_class AS relation
+        JOIN pg_catalog.pg_namespace AS namespace
+          ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+        ORDER BY relation.relname
+        """
+    )
+    allowed_tables = _allowed_tables(contract)
+    seen: set[str] = set()
+    for row in cursor.fetchall():
+        relation_name = str(_row_value(row, 0, "relation_name"))
+        table_name = str(_row_value(row, 1, "relname"))
+        seen.add(table_name)
+        expected = allowed_tables.get(table_name, frozenset())
+        for privilege in TABLE_PRIVILEGES:
+            effective = _check_privilege(
+                cursor,
+                "has_table_privilege",
+                (subject_role, relation_name, privilege),
+            )
+            if effective and privilege not in expected:
+                _fail("database-role.forbidden-privilege-present", "public-relation")
+            if not effective and privilege in expected:
+                _fail(
+                    "database-role.required-privilege-missing",
+                    f"public.{table_name}:{privilege}",
+                )
+    for table_name, expected in allowed_tables.items():
+        if expected and table_name not in seen:
+            _fail("database-role.required-privilege-missing", f"public.{table_name}")
+
+
+def _verify_public_sequence_privileges(cursor: Any, subject_role: str) -> None:
+    cursor.execute(
+        """
+        SELECT pg_catalog.format('%I.%I', namespace.nspname, sequence.relname)
+                   AS sequence_name
+        FROM pg_catalog.pg_class AS sequence
+        JOIN pg_catalog.pg_namespace AS namespace
+          ON namespace.oid = sequence.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND sequence.relkind = 'S'
+        ORDER BY sequence.relname
+        """
+    )
+    for row in cursor.fetchall():
+        sequence_name = str(_row_value(row, 0, "sequence_name"))
+        for privilege in SEQUENCE_PRIVILEGES:
+            if _check_privilege(
+                cursor,
+                "has_sequence_privilege",
+                (subject_role, sequence_name, privilege),
+            ):
+                _fail("database-role.forbidden-privilege-present", "public-sequence")
+
+
+def _verify_security_definer_execute(
+    cursor: Any,
+    contract: DatabaseRoleContract,
+    subject_role: str,
+) -> None:
+    cursor.execute(
+        """
+        SELECT pg_catalog.format(
+                   '%I.%I(%s)', namespace.nspname, routine.proname,
+                   pg_catalog.oidvectortypes(routine.proargtypes)
+               ) AS function_signature
+        FROM pg_catalog.pg_proc AS routine
+        JOIN pg_catalog.pg_namespace AS namespace
+          ON namespace.oid = routine.pronamespace
+        WHERE namespace.nspname = 'public'
+          AND routine.prosecdef
+        ORDER BY function_signature
+        """
+    )
+    expected = {
+        _normalize_function_signature(signature)
+        for signature in contract.required_function_privileges
+    }
+    seen: set[str] = set()
+    for row in cursor.fetchall():
+        function_signature = str(_row_value(row, 0, "function_signature"))
+        normalized = _normalize_function_signature(function_signature)
+        seen.add(normalized)
+        effective = _check_privilege(
+            cursor,
+            "has_function_privilege",
+            (subject_role, function_signature, "EXECUTE"),
+        )
+        if effective and normalized not in expected:
+            _fail(
+                "database-role.forbidden-privilege-present",
+                "security-definer-routine",
+            )
+        if not effective and normalized in expected:
+            _fail(
+                "database-role.required-privilege-missing",
+                "security-definer-routine",
+            )
+    if expected - seen:
+        _fail("database-role.required-privilege-missing", "security-definer-routine")
+
+
+def _normalize_function_signature(signature: str) -> str:
+    canonical = signature.replace("timestamp with time zone", "timestamptz")
+    canonical = canonical.replace("timestamp without time zone", "timestamp")
+    return "".join(canonical.split())
+
+
+def _reject_public_object_ownership(cursor: Any, subject_role: str) -> None:
+    cursor.execute(
+        """
+        SELECT owned_object
+        FROM (
+            SELECT 'schema:public' AS owned_object
+            FROM pg_catalog.pg_namespace AS namespace
+            JOIN pg_catalog.pg_roles AS owner ON owner.oid = namespace.nspowner
+            WHERE namespace.nspname = 'public' AND owner.rolname = %s
+            UNION ALL
+            SELECT 'relation:public'
+            FROM pg_catalog.pg_class AS relation
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = relation.relnamespace
+            JOIN pg_catalog.pg_roles AS owner ON owner.oid = relation.relowner
+            WHERE namespace.nspname = 'public' AND owner.rolname = %s
+            UNION ALL
+            SELECT 'routine:public'
+            FROM pg_catalog.pg_proc AS routine
+            JOIN pg_catalog.pg_namespace AS namespace
+              ON namespace.oid = routine.pronamespace
+            JOIN pg_catalog.pg_roles AS owner ON owner.oid = routine.proowner
+            WHERE namespace.nspname = 'public' AND owner.rolname = %s
+        ) AS owned
+        ORDER BY owned_object
+        LIMIT 1
+        """,
+        (subject_role, subject_role, subject_role),
+    )
+    if cursor.fetchone() is not None:
+        _fail("database-role.forbidden-privilege-present", "public-object-owner")
+
+
 def _require_table_privilege(
     cursor: Any,
     session_user: str,
@@ -545,5 +755,6 @@ __all__ = [
     "DatabaseRoleVerification",
     "SEQUENCE_PRIVILEGES",
     "TABLE_PRIVILEGES",
+    "verify_effective_database_role_authority",
     "verify_daemon_database_role",
 ]
