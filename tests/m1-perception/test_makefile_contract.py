@@ -348,6 +348,130 @@ def test_make_render_rollout_forwards_exact_release_id_to_cli(tmp_path: Path) ->
     ]
 
 
+def test_make_help_lists_control_plane_db_role_targets() -> None:
+    result = subprocess.run(
+        ["make", "help"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, f"make help failed: {result.stderr}"
+    assert "control-plane-db-role-preflight:" in result.stdout
+    assert "control-plane-db-role-provision:" in result.stdout
+    assert "control-plane-db-role-verify:" in result.stdout
+    assert "control-plane-db-role-disable:" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("target", "make_args", "expected_argv"),
+    [
+        (
+            "control-plane-db-role-preflight",
+            ("expected_database=control",),
+            [
+                "run",
+                "python",
+                "-m",
+                "polyarb.control_plane.db_role_admin",
+                "preflight",
+                "--expected-database",
+                "control",
+                "--json",
+            ],
+        ),
+        (
+            "control-plane-db-role-provision",
+            ("enable=1", "expected_database=control"),
+            [
+                "run",
+                "python",
+                "-m",
+                "polyarb.control_plane.db_role_admin",
+                "provision",
+                "--enable",
+                "--expected-database",
+                "control",
+                "--json",
+            ],
+        ),
+        (
+            "control-plane-db-role-verify",
+            ("profile=runtime-controller", "expected_database=control"),
+            [
+                "run",
+                "python",
+                "-m",
+                "polyarb.control_plane.db_role_admin",
+                "verify",
+                "--profile",
+                "runtime-controller",
+                "--expected-database",
+                "control",
+                "--json",
+            ],
+        ),
+        (
+            "control-plane-db-role-disable",
+            ("enable=1", "expected_database=control"),
+            [
+                "run",
+                "python",
+                "-m",
+                "polyarb.control_plane.db_role_admin",
+                "disable",
+                "--enable",
+                "--expected-database",
+                "control",
+                "--json",
+            ],
+        ),
+    ],
+)
+def test_make_control_plane_db_role_targets_execute_fake_uv_only(
+    tmp_path: Path,
+    target: str,
+    make_args: tuple[str, ...],
+    expected_argv: list[str],
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    result = subprocess.run(
+        ["make", target, *make_args],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _fake_uv_calls(log_path) == [expected_argv]
+
+
+@pytest.mark.parametrize(
+    "target",
+    ("control-plane-db-role-provision", "control-plane-db-role-disable"),
+)
+def test_make_control_plane_db_role_mutations_require_enable_before_fake_uv(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    result = subprocess.run(
+        ["make", target, "expected_database=control"],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert "enable=1" in result.stderr
+    assert _fake_uv_calls(log_path) == []
+
+
 def test_make_help_lists_runtime_fault_matrix() -> None:
     result = subprocess.run(
         ["make", "help"],

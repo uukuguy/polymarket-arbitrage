@@ -1,0 +1,762 @@
+"""Operator-side admin tooling for scoped control-plane login roles."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any, cast
+from urllib.parse import quote, urlsplit, urlunsplit
+
+import psycopg
+import pytest
+from psycopg import sql
+
+from polyarb.control_plane.db_role_contract import ConnectionFactory
+
+PROJECT_ROOT = Path(__file__).parent.parent.parent.resolve()
+RUNTIME_LOGIN = "m1_runtime_controller_login"
+QUALIFICATION_LOGIN = "m1_qualification_worker_login"
+RUNTIME_CAPABILITY = "m1_runtime_controller_capability"
+QUALIFICATION_CAPABILITY = "m1_qualification_worker_capability"
+
+
+class FakeCursor:
+    def __init__(self, factory: FakeAdminFactory) -> None:
+        self.factory = factory
+        self.rows: list[Any] = []
+
+    def __enter__(self) -> FakeCursor:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def execute(self, statement: object, params: object = ()) -> FakeCursor:
+        rendered = _render_for_fake(statement)
+        normalized = " ".join(rendered.lower().split())
+        self.factory.calls.append((normalized, params))
+        if self.factory.fail_after_first_password_change and self.factory.password_changes == 1:
+            raise RuntimeError("simulated second role failure")
+        answer = self.factory.answer(normalized, params)
+        self.rows = answer if isinstance(answer, list) else [answer]
+        return self
+
+    def fetchone(self) -> Any:
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self) -> list[Any]:
+        return self.rows
+
+
+class FakeConnection:
+    def __init__(self, factory: FakeAdminFactory) -> None:
+        self.factory = factory
+
+    def __enter__(self) -> FakeConnection:
+        self.factory.begin()
+        return self
+
+    def __exit__(self, exc_type: object, *_exc: object) -> None:
+        if exc_type is not None:
+            self.factory.rollback()
+
+    def cursor(self) -> FakeCursor:
+        return FakeCursor(self.factory)
+
+    def commit(self) -> None:
+        self.factory.commits += 1
+        self.factory.commit()
+
+
+class FakeAdminFactory:
+    def __init__(self) -> None:
+        self.database = "role_test"
+        self.revision = "026"
+        self.roles: dict[str, dict[str, Any]] = {
+            RUNTIME_CAPABILITY: {
+                "can_login": False,
+                "superuser": False,
+                "create_db": False,
+                "create_role": False,
+                "inherits": False,
+                "replication": False,
+                "bypass_rls": False,
+                "memberships": set(),
+                "password": None,
+            },
+            QUALIFICATION_CAPABILITY: {
+                "can_login": False,
+                "superuser": False,
+                "create_db": False,
+                "create_role": False,
+                "inherits": False,
+                "replication": False,
+                "bypass_rls": False,
+                "memberships": set(),
+                "password": None,
+            },
+        }
+        self.calls: list[tuple[str, object]] = []
+        self.commits = 0
+        self.password_changes = 0
+        self.fail_after_first_password_change = False
+        self._transaction_backup: dict[str, dict[str, Any]] | None = None
+
+    def __call__(self) -> FakeConnection:
+        return FakeConnection(self)
+
+    def begin(self) -> None:
+        self._transaction_backup = {
+            role: {
+                **attrs,
+                "memberships": set(cast(set[str], attrs["memberships"])),
+            }
+            for role, attrs in self.roles.items()
+        }
+
+    def commit(self) -> None:
+        self._transaction_backup = None
+
+    def rollback(self) -> None:
+        assert self._transaction_backup is not None
+        self.roles = self._transaction_backup
+        self._transaction_backup = None
+
+    def add_login(
+        self,
+        role: str,
+        *,
+        capability: str,
+        password: str,
+        extra_membership: str | None = None,
+    ) -> None:
+        memberships = {capability}
+        if extra_membership is not None:
+            memberships.add(extra_membership)
+        self.roles[role] = {
+            "can_login": True,
+            "superuser": False,
+            "create_db": False,
+            "create_role": False,
+            "inherits": True,
+            "replication": False,
+            "bypass_rls": False,
+            "memberships": memberships,
+            "password": password,
+        }
+
+    def answer(self, normalized: str, params: object) -> object:
+        if normalized == "set transaction read only":
+            return None
+        if "select current_database()" in normalized:
+            return (self.database,)
+        if "select version_num from alembic_version" in normalized:
+            return (self.revision,)
+        if "from pg_catalog.pg_roles as role" in normalized:
+            names = _param_tuple(params)
+            return [
+                (
+                    name,
+                    attrs["can_login"],
+                    attrs["superuser"],
+                    attrs["create_db"],
+                    attrs["create_role"],
+                    attrs["inherits"],
+                    attrs["replication"],
+                    attrs["bypass_rls"],
+                )
+                for name, attrs in sorted(self.roles.items())
+                if name in names
+            ]
+        if "from pg_catalog.pg_auth_members" in normalized:
+            rows: list[tuple[str, str]] = []
+            for member, attrs in self.roles.items():
+                if member not in _param_tuple(params):
+                    continue
+                rows.extend((member, role) for role in cast(set[str], attrs["memberships"]))
+            return sorted(rows)
+        if normalized.startswith("create role "):
+            role = _identifier_after(rendered=normalized, keyword="create role")
+            self.roles[role] = {
+                "can_login": True,
+                "superuser": False,
+                "create_db": False,
+                "create_role": False,
+                "inherits": True,
+                "replication": False,
+                "bypass_rls": False,
+                "memberships": set(),
+                "password": _literal_password(normalized),
+            }
+            self.password_changes += 1
+            return None
+        if normalized.startswith("alter role ") and " password " in normalized:
+            role = _identifier_after(rendered=normalized, keyword="alter role")
+            self.roles[role]["password"] = _literal_password(normalized)
+            self.password_changes += 1
+            return None
+        if normalized.startswith("alter role ") and normalized.endswith(" nologin"):
+            role = _identifier_after(rendered=normalized, keyword="alter role")
+            self.roles[role]["can_login"] = False
+            return None
+        if normalized.startswith("grant "):
+            capability, login = normalized.removeprefix("grant ").split(" to ", 1)
+            cast(set[str], self.roles[login]["memberships"]).add(capability)
+            return None
+        raise AssertionError(f"unexpected admin query: {normalized}")
+
+
+def _as_connection_factory(factory: FakeAdminFactory) -> ConnectionFactory:
+    return cast(ConnectionFactory, factory)
+
+
+def _param_tuple(params: object) -> tuple[str, ...]:
+    assert isinstance(params, tuple)
+    if len(params) == 1 and isinstance(params[0], (list, tuple)):
+        return tuple(str(value) for value in params[0])
+    return tuple(str(value) for value in params)
+
+
+def _render_for_fake(statement: object) -> str:
+    rendered = str(statement)
+    if not rendered.startswith("Composed("):
+        return rendered
+    if "CREATE ROLE" in rendered:
+        return _render_role_statement(rendered, "CREATE ROLE")
+    if "ALTER ROLE" in rendered and "NOLOGIN" in rendered and "PASSWORD" not in rendered:
+        role = _first_composed_value(rendered, "Identifier")
+        return f"ALTER ROLE {role} NOLOGIN"
+    if "ALTER ROLE" in rendered:
+        return _render_role_statement(rendered, "ALTER ROLE")
+    if "GRANT" in rendered:
+        capability, login = _composed_values(rendered, "Identifier")[:2]
+        return f"GRANT {capability} TO {login}"
+    return rendered
+
+
+def _render_role_statement(rendered: str, command: str) -> str:
+    role = _first_composed_value(rendered, "Identifier")
+    password = _first_composed_value(rendered, "Literal")
+    return (
+        f"{command} {role} "
+        "LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS "
+        f"PASSWORD '{password}'"
+    )
+
+
+def _first_composed_value(rendered: str, constructor: str) -> str:
+    return _composed_values(rendered, constructor)[0]
+
+
+def _composed_values(rendered: str, constructor: str) -> list[str]:
+    prefix = f"{constructor}('"
+    values: list[str] = []
+    start = 0
+    while True:
+        index = rendered.find(prefix, start)
+        if index == -1:
+            return values
+        value_start = index + len(prefix)
+        value_end = rendered.find("')", value_start)
+        values.append(rendered[value_start:value_end])
+        start = value_end + 2
+
+
+def _identifier_after(*, rendered: str, keyword: str) -> str:
+    return rendered.removeprefix(keyword).strip().split()[0].strip('"')
+
+
+def _literal_password(rendered: str) -> str:
+    return rendered.rsplit(" password ", 1)[1].strip().strip("'")
+
+
+def test_preflight_rejects_wrong_database_and_wrong_revision() -> None:
+    from polyarb.control_plane.db_role_admin import (
+        DatabaseRoleAdminError,
+        preflight_capability_roles,
+    )
+
+    factory = FakeAdminFactory()
+    factory.database = "wrong_database"
+    with pytest.raises(DatabaseRoleAdminError, match="database-role-admin.database-mismatch"):
+        preflight_capability_roles(_as_connection_factory(factory), expected_database="role_test")
+
+    factory = FakeAdminFactory()
+    factory.revision = "025"
+    with pytest.raises(DatabaseRoleAdminError, match="database-role-admin.revision-mismatch"):
+        preflight_capability_roles(_as_connection_factory(factory), expected_database="role_test")
+
+
+def test_preflight_rejects_unsafe_capability_role_attributes() -> None:
+    from polyarb.control_plane.db_role_admin import (
+        DatabaseRoleAdminError,
+        preflight_capability_roles,
+    )
+
+    factory = FakeAdminFactory()
+    factory.roles[RUNTIME_CAPABILITY]["can_login"] = True
+
+    with pytest.raises(DatabaseRoleAdminError, match="database-role-admin.capability-unsafe"):
+        preflight_capability_roles(_as_connection_factory(factory), expected_database="role_test")
+
+
+def test_provision_rejects_empty_or_equal_passwords() -> None:
+    from polyarb.control_plane.db_role_admin import (
+        DatabaseRoleAdminError,
+        provision_login_roles,
+    )
+
+    with pytest.raises(DatabaseRoleAdminError, match="password-missing"):
+        provision_login_roles(
+            _as_connection_factory(FakeAdminFactory()),
+            expected_database="role_test",
+            runtime_password="",
+            qualification_password="qualification-secret",
+        )
+    with pytest.raises(DatabaseRoleAdminError, match="passwords-not-independent"):
+        provision_login_roles(
+            _as_connection_factory(FakeAdminFactory()),
+            expected_database="role_test",
+            runtime_password="same-secret",
+            qualification_password="same-secret",
+        )
+
+
+def test_provision_rejects_unsafe_login_attributes_and_unexpected_membership() -> None:
+    from polyarb.control_plane.db_role_admin import (
+        DatabaseRoleAdminError,
+        provision_login_roles,
+    )
+
+    factory = FakeAdminFactory()
+    factory.add_login(
+        RUNTIME_LOGIN,
+        capability=RUNTIME_CAPABILITY,
+        password="old-runtime",
+    )
+    factory.roles[RUNTIME_LOGIN]["superuser"] = True
+    with pytest.raises(DatabaseRoleAdminError, match="database-role-admin.login-unsafe"):
+        provision_login_roles(
+            _as_connection_factory(factory),
+            expected_database="role_test",
+            runtime_password="new-runtime",
+            qualification_password="new-qualification",
+        )
+
+    factory = FakeAdminFactory()
+    factory.roles["other_role"] = {
+        "can_login": False,
+        "superuser": False,
+        "create_db": False,
+        "create_role": False,
+        "inherits": False,
+        "replication": False,
+        "bypass_rls": False,
+        "memberships": set(),
+        "password": None,
+    }
+    factory.add_login(
+        RUNTIME_LOGIN,
+        capability=RUNTIME_CAPABILITY,
+        password="old-runtime",
+        extra_membership="other_role",
+    )
+    with pytest.raises(DatabaseRoleAdminError, match="database-role-admin.membership-unsafe"):
+        provision_login_roles(
+            _as_connection_factory(factory),
+            expected_database="role_test",
+            runtime_password="new-runtime",
+            qualification_password="new-qualification",
+        )
+
+
+def test_provision_success_idempotent_rotation_and_no_secret_output(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from polyarb.control_plane.db_role_admin import provision_login_roles
+
+    factory = FakeAdminFactory()
+    runtime_secret = "runtime-password-that-must-not-appear"
+    result = provision_login_roles(
+        _as_connection_factory(factory),
+        expected_database="role_test",
+        runtime_password=runtime_secret,
+        qualification_password="independent-qualification-password",
+    )
+
+    captured = capsys.readouterr()
+    assert result == {"database": "role_test", "status": "provisioned"}
+    assert runtime_secret not in captured.out + captured.err
+    assert factory.roles[RUNTIME_LOGIN]["password"] == runtime_secret
+    assert factory.roles[QUALIFICATION_LOGIN]["password"] == "independent-qualification-password"
+    assert factory.roles[RUNTIME_LOGIN]["memberships"] == {RUNTIME_CAPABILITY}
+    assert factory.roles[QUALIFICATION_LOGIN]["memberships"] == {QUALIFICATION_CAPABILITY}
+
+    provision_login_roles(
+        _as_connection_factory(factory),
+        expected_database="role_test",
+        runtime_password="rotated-runtime-password",
+        qualification_password="independent-qualification-password",
+    )
+
+    assert factory.roles[RUNTIME_LOGIN]["password"] == "rotated-runtime-password"
+    assert factory.roles[QUALIFICATION_LOGIN]["password"] == "independent-qualification-password"
+    assert factory.roles[RUNTIME_LOGIN]["memberships"] == {RUNTIME_CAPABILITY}
+    assert factory.roles[QUALIFICATION_LOGIN]["memberships"] == {QUALIFICATION_CAPABILITY}
+
+
+def test_provision_rolls_back_all_role_mutations_on_any_failure() -> None:
+    from polyarb.control_plane.db_role_admin import provision_login_roles
+
+    factory = FakeAdminFactory()
+    factory.add_login(
+        RUNTIME_LOGIN,
+        capability=RUNTIME_CAPABILITY,
+        password="old-runtime-password",
+    )
+    factory.add_login(
+        QUALIFICATION_LOGIN,
+        capability=QUALIFICATION_CAPABILITY,
+        password="old-qualification-password",
+    )
+    factory.fail_after_first_password_change = True
+
+    with pytest.raises(RuntimeError, match="simulated second role failure"):
+        provision_login_roles(
+            _as_connection_factory(factory),
+            expected_database="role_test",
+            runtime_password="new-runtime-password",
+            qualification_password="new-qualification-password",
+        )
+
+    assert factory.roles[RUNTIME_LOGIN]["password"] == "old-runtime-password"
+    assert factory.roles[QUALIFICATION_LOGIN]["password"] == "old-qualification-password"
+    assert factory.roles[RUNTIME_LOGIN]["memberships"] == {RUNTIME_CAPABILITY}
+    assert factory.roles[QUALIFICATION_LOGIN]["memberships"] == {QUALIFICATION_CAPABILITY}
+    assert factory.commits == 0
+
+
+def test_disable_marks_both_login_roles_nologin() -> None:
+    from polyarb.control_plane.db_role_admin import disable_login_roles
+
+    factory = FakeAdminFactory()
+    factory.add_login(
+        RUNTIME_LOGIN,
+        capability=RUNTIME_CAPABILITY,
+        password="runtime-password",
+    )
+    factory.add_login(
+        QUALIFICATION_LOGIN,
+        capability=QUALIFICATION_CAPABILITY,
+        password="qualification-password",
+    )
+
+    result = disable_login_roles(_as_connection_factory(factory), expected_database="role_test")
+
+    assert result == {"database": "role_test", "status": "disabled"}
+    assert factory.roles[RUNTIME_LOGIN]["can_login"] is False
+    assert factory.roles[QUALIFICATION_LOGIN]["can_login"] is False
+    assert factory.roles[RUNTIME_LOGIN]["memberships"] == {RUNTIME_CAPABILITY}
+    assert factory.roles[QUALIFICATION_LOGIN]["memberships"] == {QUALIFICATION_CAPABILITY}
+
+
+def test_cli_requires_enable_and_reads_passwords_from_exact_env(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from polyarb.control_plane import db_role_admin
+
+    calls: list[tuple[str, str, str]] = []
+
+    def provision(
+        _factory: object,
+        *,
+        expected_database: str,
+        runtime_password: str,
+        qualification_password: str,
+    ) -> dict[str, str]:
+        calls.append((expected_database, runtime_password, qualification_password))
+        return {"database": expected_database, "status": "provisioned"}
+
+    monkeypatch.setattr(db_role_admin, "provision_login_roles", provision)
+    monkeypatch.setenv("POLYARB_SUPABASE_DB_DSN", "postgresql://admin:secret@example/role_test")
+    monkeypatch.setenv("POLYARB_RUNTIME_CONTROLLER_DB_PASSWORD", "runtime-env-secret")
+    monkeypatch.setenv("POLYARB_QUALIFICATION_WORKER_DB_PASSWORD", "qualification-env-secret")
+    monkeypatch.setenv("POLYARB_RUNTIME_PASSWORD", "wrong-env-secret")
+
+    assert (
+        db_role_admin.main(["provision", "--expected-database", "role_test", "--json"])
+        == 2
+    )
+    assert calls == []
+    assert (
+        db_role_admin.main(["disable", "--expected-database", "role_test", "--json"])
+        == 2
+    )
+    assert calls == []
+
+    assert (
+        db_role_admin.main(
+            [
+                "provision",
+                "--enable",
+                "--expected-database",
+                "role_test",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    assert calls == [("role_test", "runtime-env-secret", "qualification-env-secret")]
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"database": "role_test", "status": "provisioned"}
+    assert "runtime-env-secret" not in captured.out + captured.err
+    assert "qualification-env-secret" not in captured.out + captured.err
+    assert "postgresql://" not in captured.out + captured.err
+
+
+def test_cli_verify_selects_profile_scoped_dsn_and_delegates(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from polyarb.control_plane import db_role_admin
+
+    runtime_factory = object()
+    qualification_factory = object()
+    calls: list[tuple[object, str, str]] = []
+
+    def connection_factory(dsn: str):
+        if "runtime" in dsn:
+            return runtime_factory
+        if "qualification" in dsn:
+            return qualification_factory
+        raise AssertionError(f"unexpected DSN: {dsn}")
+
+    def verify(factory: object, profile: str, *, expected_database: str):
+        calls.append((factory, profile, expected_database))
+        return db_role_admin.DatabaseRoleVerification(
+            profile=profile,
+            session_user=f"{profile}-login",
+            capability_role=f"{profile}-capability",
+            database_name=expected_database,
+        )
+
+    monkeypatch.setattr(db_role_admin, "_connection_factory_from_dsn", connection_factory)
+    monkeypatch.setattr(db_role_admin, "verify_daemon_database_role", verify)
+    monkeypatch.setenv("POLYARB_RUNTIME_CONTROLLER_DB_DSN", "postgresql://runtime:secret@example/db")
+    monkeypatch.setenv(
+        "POLYARB_QUALIFICATION_WORKER_DB_DSN",
+        "postgresql://qualification:secret@example/db",
+    )
+
+    assert (
+        db_role_admin.main(
+            [
+                "verify",
+                "--profile",
+                "qualification-worker",
+                "--expected-database",
+                "role_test",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    assert calls == [(qualification_factory, "qualification-worker", "role_test")]
+    captured = capsys.readouterr()
+    assert "postgresql://" not in captured.out + captured.err
+    assert json.loads(captured.out)["status"] == "pass"
+
+
+def test_real_postgres_provisions_verifies_rotates_and_disables_roles(
+    postgres_026_dsn: str,
+) -> None:
+    from polyarb.control_plane.db_role_admin import (
+        disable_login_roles,
+        provision_login_roles,
+    )
+    from polyarb.control_plane.db_role_contract import verify_daemon_database_role
+
+    def admin_factory() -> psycopg.Connection[object]:
+        return psycopg.connect(postgres_026_dsn)
+
+    provision_login_roles(
+        admin_factory,
+        expected_database="test",
+        runtime_password="runtime-real-secret-a",
+        qualification_password="qualification-real-secret-a",
+    )
+
+    runtime_dsn = _role_dsn(postgres_026_dsn, RUNTIME_LOGIN, "runtime-real-secret-a")
+    qualification_dsn = _role_dsn(
+        postgres_026_dsn,
+        QUALIFICATION_LOGIN,
+        "qualification-real-secret-a",
+    )
+    assert (
+        verify_daemon_database_role(
+            lambda: psycopg.connect(runtime_dsn),
+            "runtime-controller",
+            expected_database="test",
+        ).status
+        == "pass"
+    )
+    assert (
+        verify_daemon_database_role(
+            lambda: psycopg.connect(qualification_dsn),
+            "qualification-worker",
+            expected_database="test",
+        ).status
+        == "pass"
+    )
+
+    with psycopg.connect(postgres_026_dsn) as admin:
+        assert _role_attributes(admin, RUNTIME_LOGIN) == (True, False, False, False, True)
+        assert _role_attributes(admin, QUALIFICATION_LOGIN) == (True, False, False, False, True)
+        assert _memberships(admin, RUNTIME_LOGIN) == [RUNTIME_CAPABILITY]
+        assert _memberships(admin, QUALIFICATION_LOGIN) == [QUALIFICATION_CAPABILITY]
+
+    provision_login_roles(
+        admin_factory,
+        expected_database="test",
+        runtime_password="runtime-real-secret-b",
+        qualification_password="qualification-real-secret-a",
+    )
+
+    with pytest.raises(psycopg.OperationalError):
+        psycopg.connect(runtime_dsn).close()
+    assert (
+        verify_daemon_database_role(
+            lambda: psycopg.connect(
+                _role_dsn(postgres_026_dsn, RUNTIME_LOGIN, "runtime-real-secret-b")
+            ),
+            "runtime-controller",
+            expected_database="test",
+        ).status
+        == "pass"
+    )
+    assert psycopg.connect(qualification_dsn).close() is None
+
+    disable_login_roles(admin_factory, expected_database="test")
+
+    with psycopg.connect(postgres_026_dsn) as admin:
+        assert _role_attributes(admin, RUNTIME_LOGIN)[0] is False
+        assert _role_attributes(admin, QUALIFICATION_LOGIN)[0] is False
+    with pytest.raises(psycopg.OperationalError):
+        psycopg.connect(
+            _role_dsn(postgres_026_dsn, RUNTIME_LOGIN, "runtime-real-secret-b")
+        ).close()
+    with pytest.raises(psycopg.OperationalError):
+        psycopg.connect(qualification_dsn).close()
+
+
+@pytest.fixture(scope="module")
+def postgres_026_dsn() -> Iterator[str]:
+    if not _docker_available():
+        pytest.fail("Docker daemon unavailable; cannot prove real admin role operations")
+
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as postgres:
+        dsn = _normalize_dsn(postgres.get_connection_url())
+        _create_supabase_roles(dsn)
+        _run_alembic(dsn, "upgrade", "026")
+        yield dsn
+
+
+def _docker_available() -> bool:
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _normalize_dsn(dsn: str) -> str:
+    return dsn.replace("postgresql+psycopg2://", "postgresql://")
+
+
+def _create_supabase_roles(dsn: str) -> None:
+    with psycopg.connect(dsn, autocommit=True) as connection:
+        for role in ("anon", "authenticated", "service_role"):
+            connection.execute(
+                sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role))
+            )
+
+
+def _run_alembic(dsn: str, *args: str) -> None:
+    result = subprocess.run(
+        ["uv", "run", "alembic", *args],
+        cwd=PROJECT_ROOT,
+        env={**os.environ, "POLYARB_SUPABASE_DB_DSN": dsn},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _role_dsn(dsn: str, username: str, password: str) -> str:
+    parts = urlsplit(dsn)
+    host = parts.hostname or ""
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    return urlunsplit(
+        (
+            parts.scheme,
+            f"{quote(username)}:{quote(password)}@{host}",
+            parts.path,
+            parts.query,
+            parts.fragment,
+        )
+    )
+
+
+def _role_attributes(
+    connection: psycopg.Connection[object],
+    role: str,
+) -> tuple[bool, bool, bool, bool, bool]:
+    row = connection.execute(
+        """
+        SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolinherit
+        FROM pg_catalog.pg_roles
+        WHERE rolname = %s
+        """,
+        (role,),
+    ).fetchone()
+    assert row is not None
+    values = cast(tuple[object, ...], row)
+    return (
+        bool(values[0]),
+        bool(values[1]),
+        bool(values[2]),
+        bool(values[3]),
+        bool(values[4]),
+    )
+
+
+def _memberships(connection: psycopg.Connection[object], role: str) -> list[str]:
+    return [
+        str(cast(tuple[object, ...], row)[0])
+        for row in connection.execute(
+            """
+            SELECT granted.rolname
+            FROM pg_catalog.pg_auth_members AS membership
+            JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
+            JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+            WHERE member.rolname = %s
+            ORDER BY granted.rolname
+            """,
+            (role,),
+        ).fetchall()
+    ]

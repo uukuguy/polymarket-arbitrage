@@ -509,7 +509,7 @@ def _reject_sequence_privileges(
 def _reject_schema_sequence_privileges(cursor: Any, session_user: str, schema: str) -> None:
     cursor.execute(
         """
-        SELECT pg_catalog.format('%I.%I', namespace.nspname, sequence.relname)
+        SELECT pg_catalog.format('%%I.%%I', namespace.nspname, sequence.relname)
                AS sequence_name
         FROM pg_catalog.pg_class AS sequence
         JOIN pg_catalog.pg_namespace AS namespace
