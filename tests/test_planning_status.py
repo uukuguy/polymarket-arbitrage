@@ -6,6 +6,8 @@ from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from scripts import planning_status
 from scripts.planning_status import _git_log_for
 
@@ -72,9 +74,7 @@ def test_plan_without_summary_is_reported_as_drift(
 
     rows = planning_status.collect()
 
-    assert [(row.phase, row.plan, row.verdict) for row in rows] == [
-        ("05.6", "207", "DRIFT")
-    ]
+    assert [(row.phase, row.plan, row.verdict) for row in rows] == [("05.6", "207", "DRIFT")]
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -123,9 +123,7 @@ def test_registered_external_plan_summary_is_audited(
 
     rows = planning_status.collect()
 
-    assert [(row.phase, row.plan, row.verdict) for row in rows] == [
-        ("05.6", "207", "OK")
-    ]
+    assert [(row.phase, row.plan, row.verdict) for row in rows] == [("05.6", "207", "OK")]
 
 
 def test_registered_external_plan_summary_drifts_when_anchor_is_missing(
@@ -148,9 +146,7 @@ def test_registered_external_plan_summary_drifts_when_anchor_is_missing(
 
     rows = planning_status.collect()
 
-    assert [(row.phase, row.plan, row.verdict) for row in rows] == [
-        ("05.6", "207", "DRIFT")
-    ]
+    assert [(row.phase, row.plan, row.verdict) for row in rows] == [("05.6", "207", "DRIFT")]
 
 
 def test_evidence_hash_gate_recomputes_named_artifacts_and_rejects_stale_bytes(
@@ -185,3 +181,71 @@ def test_evidence_hash_gate_recomputes_named_artifacts_and_rejects_stale_bytes(
         ".planning/evidence/runtime-observe-only.json: stale SHA256 for "
         "deploy/control-plane/runtime.toml.template"
     ]
+
+
+def _required_runtime_evidence(tmp_path: Path) -> Path:
+    return tmp_path / planning_status.REQUIRED_RUNTIME_OBSERVE_EVIDENCE
+
+
+@pytest.mark.parametrize(
+    "contents,expected_detail",
+    (
+        ("not-json\n", "invalid JSON"),
+        (json.dumps({"local_implementation": []}), "local_implementation must be an object"),
+        (json.dumps({"local_implementation": {}}), "reviewed_artifacts must be a non-empty list"),
+        (
+            json.dumps({"local_implementation": {"reviewed_artifacts": []}}),
+            "reviewed_artifacts must be a non-empty list",
+        ),
+        (
+            json.dumps({"local_implementation": {"reviewed_artifacts": ["bad"]}}),
+            "invalid reviewed artifact entry",
+        ),
+        (
+            json.dumps({"local_implementation": {"reviewed_artifacts": [{"path": 7}]}}),
+            "invalid reviewed artifact entry",
+        ),
+    ),
+)
+def test_required_runtime_evidence_fails_closed_on_invalid_structure(
+    tmp_path: Path,
+    contents: str,
+    expected_detail: str,
+) -> None:
+    evidence = _required_runtime_evidence(tmp_path)
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text(contents)
+
+    errors = planning_status.verify_evidence_hashes(tmp_path)
+
+    assert errors == [f"{planning_status.REQUIRED_RUNTIME_OBSERVE_EVIDENCE}: {expected_detail}"]
+
+
+def test_required_runtime_evidence_fails_closed_when_missing(tmp_path: Path) -> None:
+    assert planning_status.verify_evidence_hashes(tmp_path) == [
+        f"{planning_status.REQUIRED_RUNTIME_OBSERVE_EVIDENCE}: required evidence missing"
+    ]
+
+
+def test_required_runtime_evidence_accepts_current_registered_artifact(tmp_path: Path) -> None:
+    artifact = tmp_path / "deploy/control-plane/runtime.toml.template"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("version = 1\n")
+    evidence = _required_runtime_evidence(tmp_path)
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text(
+        json.dumps(
+            {
+                "local_implementation": {
+                    "reviewed_artifacts": [
+                        {
+                            "path": "deploy/control-plane/runtime.toml.template",
+                            "sha256": sha256(artifact.read_bytes()).hexdigest(),
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    assert planning_status.verify_evidence_hashes(tmp_path) == []

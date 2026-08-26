@@ -13,6 +13,7 @@ Run as `make planning-status` (entry added to Makefile separately).
 This script is read-only — it never writes files. It exists because
 file-system inconsistency is invisible until someone explicitly looks.
 """
+
 from __future__ import annotations
 
 import json
@@ -22,9 +23,13 @@ import sys
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 PLANNING_ROOT = Path(".planning")
+REQUIRED_RUNTIME_OBSERVE_EVIDENCE = Path(
+    ".planning/workstreams/m1-perception/phases/"
+    "05.6-self-healing-structure-production/evidence/runtime-observe-only.json"
+)
 
 # Match a plan filename like 01.1-04-PLAN.md or 02-3-PLAN.md
 PLAN_RX = re.compile(r"^(?P<phase>\d+(?:\.\d+)?)-(?P<plan>\d+)-PLAN\.md$")
@@ -70,8 +75,7 @@ class PlanRow:
         # Any feat/fix/refactor/test/perf scoped commit means code shipped.
         # `subj` is the bare subject line (no hash prefix).
         return any(
-            re.match(r"^(?:feat|fix|refactor|test|perf)\(", subj)
-            for _, subj in self.commits
+            re.match(r"^(?:feat|fix|refactor|test|perf)\(", subj) for _, subj in self.commits
         )
 
     @property
@@ -267,31 +271,32 @@ def verify_evidence_hashes(
     """Recompute every explicitly named evidence artifact SHA256."""
 
     root = project_root.resolve()
-    files = evidence_files
-    if files is None:
-        files = tuple(
-            sorted(
-                root.glob(
-                    ".planning/workstreams/*/phases/*/evidence/*.json"
-                )
-            )
-        )
+    files = evidence_files or (REQUIRED_RUNTIME_OBSERVE_EVIDENCE,)
     errors: list[str] = []
     for evidence_file in files:
         evidence_path = evidence_file if evidence_file.is_absolute() else root / evidence_file
+        evidence_label = _project_label(root, evidence_path)
         try:
-            payload = cast(dict[str, Any], json.loads(evidence_path.read_text()))
-        except (OSError, json.JSONDecodeError):
+            payload: Any = json.loads(evidence_path.read_text())
+        except FileNotFoundError:
+            errors.append(f"{evidence_label}: required evidence missing")
+            continue
+        except OSError:
+            errors.append(f"{evidence_label}: required evidence unreadable")
+            continue
+        except json.JSONDecodeError:
+            errors.append(f"{evidence_label}: invalid JSON")
+            continue
+        if not isinstance(payload, dict):
+            errors.append(f"{evidence_label}: evidence must be an object")
             continue
         local = payload.get("local_implementation")
         if not isinstance(local, dict):
+            errors.append(f"{evidence_label}: local_implementation must be an object")
             continue
         reviewed = local.get("reviewed_artifacts")
-        if reviewed is None:
-            continue
-        evidence_label = _project_label(root, evidence_path)
-        if not isinstance(reviewed, list):
-            errors.append(f"{evidence_label}: reviewed_artifacts must be a list")
+        if not isinstance(reviewed, list) or not reviewed:
+            errors.append(f"{evidence_label}: reviewed_artifacts must be a non-empty list")
             continue
         for entry in reviewed:
             if not isinstance(entry, dict):
@@ -332,8 +337,12 @@ def render(rows: list[PlanRow]) -> int:
 
     drift_count = sum(1 for r in rows if r.verdict == "DRIFT")
     print()
-    print(bold(f"Planning status — {len(rows)} plans across "
-               f"{len({r.workstream for r in rows})} workstreams"))
+    print(
+        bold(
+            f"Planning status — {len(rows)} plans across "
+            f"{len({r.workstream for r in rows})} workstreams"
+        )
+    )
     print()
 
     current_ws = None
@@ -361,8 +370,12 @@ def render(rows: list[PlanRow]) -> int:
                 print(f"        {dim(h)} {subj[:80]}")
     print()
     if drift_count:
-        print(red(f"⚠ {drift_count} plan{'s' if drift_count != 1 else ''} in DRIFT — "
-                  "code shipped but SUMMARY missing."))
+        print(
+            red(
+                f"⚠ {drift_count} plan{'s' if drift_count != 1 else ''} in DRIFT — "
+                "code shipped but SUMMARY missing."
+            )
+        )
         print(red("  Fix: write the SUMMARY, then commit."))
         print()
         return 1

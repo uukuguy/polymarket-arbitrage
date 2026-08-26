@@ -4,34 +4,66 @@
 set -euo pipefail
 
 COMMIT_MSG_FILE="${1:?commit message file is required}"
-SUBJECT=$(head -n1 "$COMMIT_MSG_FILE")
-PHASE_PLAN=$(printf '%s\n' "$SUBJECT" \
-  | grep -oE '^(feat|fix|refactor|test|perf|docs)\(([0-9]+\.?[0-9]*)-([0-9]+)\)' \
-  | head -n1 \
-  | sed -E 's/^[a-z]+\(([0-9]+\.?[0-9]*)-([0-9]+)\)/\1 \2/' \
-  || true)
+SUBJECT=""
+IFS= read -r SUBJECT < "$COMMIT_MSG_FILE" || true
 
-if [ -z "$PHASE_PLAN" ]; then
+if [[ ! "$SUBJECT" =~ ^(feat|fix|refactor|test|perf|docs)\(([0-9]+\.?[0-9]*)-([0-9]+)\) ]]; then
   exit 0
 fi
+PHASE="${BASH_REMATCH[2]}"
+PLAN="${BASH_REMATCH[3]}"
 
-PHASE=$(printf '%s' "$PHASE_PLAN" | awk '{print $1}')
-PLAN=$(printf '%s' "$PHASE_PLAN" | awk '{print $2}')
-PHASE_DIR=$(find .planning/workstreams -type d -name "${PHASE}-*" 2>/dev/null | head -n1 || true)
-if [ -z "$PHASE_DIR" ]; then
-  PHASE_DIR=$(find .planning/phases -maxdepth 1 -type d -name "${PHASE}-*" 2>/dev/null | head -n1 || true)
+PHASE_DIRS=()
+while IFS= read -r phase_dir; do
+  [ -n "$phase_dir" ] && PHASE_DIRS+=("$phase_dir")
+done < <(find .planning/workstreams -type d -name "${PHASE}-*" -print 2>/dev/null | LC_ALL=C sort)
+if [ "${#PHASE_DIRS[@]}" -eq 0 ]; then
+  while IFS= read -r phase_dir; do
+    [ -n "$phase_dir" ] && PHASE_DIRS+=("$phase_dir")
+  done < <(find .planning/phases -maxdepth 1 -type d -name "${PHASE}-*" -print 2>/dev/null | LC_ALL=C sort)
 fi
 
-if [ -z "$PHASE_DIR" ]; then
+if [ "${#PHASE_DIRS[@]}" -eq 0 ]; then
   printf '\n\033[31m✗ commit-msg BLOCKED\033[0m\n' >&2
   printf '  No phase directory exists for plan-scoped subject: %s\n\n' "$SUBJECT" >&2
   exit 1
 fi
 
-SUMMARY_CANDIDATES=(
-  "${PHASE_DIR}/${PHASE}-${PLAN}-SUMMARY.md"
-  "${PHASE_DIR}/${PHASE}-$(printf '%02d' "$((10#$PLAN))")-SUMMARY.md"
-)
+PHASE_DIR=""
+if [ "${#PHASE_DIRS[@]}" -eq 1 ]; then
+  PHASE_DIR="${PHASE_DIRS[0]}"
+else
+  STAGED_PHASE_DIRS=()
+  while IFS= read -r -d '' staged_path; do
+    for candidate in "${PHASE_DIRS[@]}"; do
+      case "$staged_path" in
+        "${candidate#./}"|"${candidate#./}"/*)
+          already_present=false
+          for selected in "${STAGED_PHASE_DIRS[@]-}"; do
+            [ "$selected" = "$candidate" ] && already_present=true
+          done
+          "$already_present" || STAGED_PHASE_DIRS+=("$candidate")
+          ;;
+      esac
+    done
+  done < <(git diff --cached --name-only -z --diff-filter=ACMR)
+  if [ "${#STAGED_PHASE_DIRS[@]}" -eq 1 ]; then
+    PHASE_DIR="${STAGED_PHASE_DIRS[0]}"
+  else
+    printf '\n\033[31m✗ commit-msg BLOCKED\033[0m\n' >&2
+    printf '  Commit subject has ambiguous phase %s across workstreams.\n' "$PHASE" >&2
+    printf '  Stage a workstream-qualified plan/SUMMARY path; candidates:\n' >&2
+    printf '    %s\n' "${PHASE_DIRS[@]}" >&2
+    printf '\n' >&2
+    exit 1
+  fi
+fi
+
+PADDED_PLAN=$(printf '%02d' "$((10#$PLAN))")
+SUMMARY_CANDIDATES=("${PHASE_DIR}/${PHASE}-${PLAN}-SUMMARY.md")
+if [ "$PADDED_PLAN" != "$PLAN" ]; then
+  SUMMARY_CANDIDATES+=("${PHASE_DIR}/${PHASE}-${PADDED_PLAN}-SUMMARY.md")
+fi
 
 SUMMARY_FOUND=""
 for candidate in "${SUMMARY_CANDIDATES[@]}"; do

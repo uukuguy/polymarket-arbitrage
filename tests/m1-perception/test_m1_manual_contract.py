@@ -174,9 +174,7 @@ def test_manual_documents_generation_rollout_rollback_and_bounded_cleanup() -> N
     assert "50,000" in manual
 
     read_only = manual.split("### 日常只读", 1)[1].split("### 本地 mutation", 1)[0]
-    local_mutation = manual.split("### 本地 mutation", 1)[1].split(
-        "### 生产 mutation", 1
-    )[0]
+    local_mutation = manual.split("### 本地 mutation", 1)[1].split("### 生产 mutation", 1)[0]
     assert "make structure-generation-status" in read_only
     assert "make structure-generation-compare" in read_only
     assert "make structure-generation-backfill" in local_mutation
@@ -428,6 +426,11 @@ def test_precommit_keeps_manual_and_staged_summary_safety_without_subject_peekin
     assert "PHASE_PLAN=" not in text
 
 
+def test_commit_msg_does_not_sample_subject_or_phase_with_head() -> None:
+    text = (ROOT / ".githooks/commit-msg").read_text()
+    assert "head -n1" not in text
+
+
 @pytest.mark.parametrize("commit_type", ("feat", "fix", "test", "docs"))
 def test_commit_msg_blocks_plan_scoped_commit_without_summary(
     tmp_path: Path,
@@ -471,6 +474,68 @@ def test_commit_msg_ignores_non_plan_scoped_docs_commit(tmp_path: Path) -> None:
     result = _git(repo, "commit", "-m", "docs(m1): refresh note")
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_commit_msg_resolves_repeated_phase_from_staged_workstream_summary(
+    tmp_path: Path,
+) -> None:
+    repo = _hook_repo(tmp_path)
+    first = repo / ".planning/workstreams/m1-perception/phases/03-alpha"
+    second = repo / ".planning/workstreams/m2-combinatorial/phases/03-beta"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (second / "03-02-SUMMARY.md").write_text("# M2 summary\n")
+    (repo / "docs/note.md").write_text("changed\n")
+    assert _git(repo, "add", "docs/note.md", str(second.relative_to(repo))).returncode == 0
+
+    result = _git(repo, "commit", "-m", "docs(03-02): close M2 plan")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_commit_msg_rejects_ambiguous_repeated_phase_without_staged_resolution(
+    tmp_path: Path,
+) -> None:
+    repo = _hook_repo(tmp_path)
+    first = repo / ".planning/workstreams/m1-perception/phases/03-alpha"
+    second = repo / ".planning/workstreams/m2-combinatorial/phases/03-beta"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "03-02-SUMMARY.md").write_text("# M1 summary\n")
+    assert _git(repo, "add", str(first.relative_to(repo))).returncode == 0
+    assert _git(repo, "commit", "--no-verify", "-qm", "fixture summary").returncode == 0
+    (repo / "docs/note.md").write_text("changed\n")
+    assert _git(repo, "add", "docs/note.md").returncode == 0
+
+    result = _git(repo, "commit", "-m", "docs(03-02): ambiguous plan")
+
+    assert result.returncode == 1
+    assert "ambiguous phase" in result.stderr
+    assert "m1-perception" in result.stderr
+    assert "m2-combinatorial" in result.stderr
+
+
+def test_commit_msg_does_not_use_other_workstream_summary_for_staged_phase(
+    tmp_path: Path,
+) -> None:
+    repo = _hook_repo(tmp_path)
+    first = repo / ".planning/workstreams/m1-perception/phases/03-alpha"
+    second = repo / ".planning/workstreams/m2-combinatorial/phases/03-beta"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "03-02-SUMMARY.md").write_text("# M1 summary\n")
+    (second / "03-02-PLAN.md").write_text("# M2 plan\n")
+    (repo / "docs/note.md").write_text("changed\n")
+    assert _git(repo, "add", "docs/note.md", str(first.relative_to(repo))).returncode == 0
+    assert _git(repo, "commit", "--no-verify", "-qm", "fixture summary").returncode == 0
+    (second / "03-02-PLAN.md").write_text("# M2 plan changed\n")
+    assert _git(repo, "add", str(second.relative_to(repo))).returncode == 0
+
+    result = _git(repo, "commit", "-m", "docs(03-02): incomplete M2 plan")
+
+    assert result.returncode == 1
+    assert "03-02-SUMMARY.md" in result.stderr
+    assert "m2-combinatorial" in result.stderr
 
 
 def test_precommit_blocks_staged_public_contract_without_manual_sync(
