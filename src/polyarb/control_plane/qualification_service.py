@@ -581,12 +581,8 @@ class PostgresQualificationFactSource:
             )
             cursor.execute(
                 """
-                SELECT m1_record_qualification_ingress(
-                    'freshness',
-                    %s,
-                    %s,
-                    %s,
-                    %s
+                SELECT public.m1_record_qualification_freshness_ingress(
+                    %s, %s, %s, %s
                 )
                 """,
                 (

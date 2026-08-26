@@ -16,6 +16,7 @@ from polyarb.control_plane.qualification_service import (
     InMemoryQualificationStore,
     QualificationFactRecord,
     QualificationService,
+    PostgresQualificationFactSource,
     StaticQualificationFactSource,
     freshness_row_to_fact_record,
     incident_event_row_to_fact_record,
@@ -627,6 +628,49 @@ def test_no_events_require_explicit_freshness_observation_before_qualifying() ->
     assert not store.certificates
 
 
+def test_postgres_freshness_observations_use_bounded_wrapper() -> None:
+    cursor = _FreshnessCursor(
+        [
+            {
+                "fact_id": "freshness:structure:cursor:structure:current",
+                "data_product": "structure",
+                "observed_at": NOW,
+                "freshness_seconds": 3,
+                "freshness_slo_seconds": 900,
+                "progress_count": 4,
+                "successful_count": 4,
+            },
+            None,
+            {
+                "fact_id": "freshness:opportunity:cursor:opportunity:current",
+                "data_product": "opportunity",
+                "observed_at": NOW,
+                "freshness_seconds": 7,
+                "freshness_slo_seconds": 900,
+                "progress_count": 2,
+                "successful_count": 2,
+            },
+        ]
+    )
+    source = PostgresQualificationFactSource(lambda: cast(Any, None))
+
+    source._insert_freshness_observations(cast(Any, cursor), now=NOW)
+
+    writes = [
+        statement
+        for statement, _params in cursor.calls
+        if "m1_record_qualification" in statement
+    ]
+    assert len(writes) == 3
+    assert all("public.m1_record_qualification_freshness_ingress" in call for call in writes)
+    assert all("m1_record_qualification_ingress(" not in call for call in writes)
+    assert [params[1] for _statement, params in cursor.calls if len(params) == 4] == [
+        "structure",
+        "quote",
+        "opportunity",
+    ]
+
+
 def test_qualified_without_certificate_is_sealed_on_next_tick() -> None:
     records = tuple(
         _record(
@@ -655,3 +699,17 @@ def test_qualified_without_certificate_is_sealed_on_next_tick() -> None:
 
     assert sealed.applied == 0
     assert sealed.certificate_digest == store.certificates[0]["digest"]
+
+
+class _FreshnessCursor:
+    def __init__(self, rows: list[Mapping[str, object] | None]) -> None:
+        self._rows = rows
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def execute(self, statement: object, params: tuple[object, ...]) -> None:
+        self.calls.append((str(statement), params))
+
+    def fetchone(self) -> Mapping[str, object] | None:
+        if not self._rows:
+            return None
+        return self._rows.pop(0)
