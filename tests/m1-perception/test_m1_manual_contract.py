@@ -425,6 +425,36 @@ def test_precommit_invokes_staged_m1_manual_check_before_summary_exit() -> None:
     assert text.index(check) < text.index("PHASE_PLAN=")
 
 
+def test_precommit_blocks_plan_scoped_docs_commit_without_summary(
+    tmp_path: Path,
+) -> None:
+    repo = _hook_repo(tmp_path)
+    phase_dir = repo / ".planning/workstreams/m1-perception/phases/05.6-test"
+    phase_dir.mkdir(parents=True)
+    (repo / "docs/note.md").write_text("changed\n")
+    assert _git(repo, "add", "docs/note.md").returncode == 0
+    (repo / ".git/COMMIT_EDITMSG").write_text(
+        "docs(05.6-207): close scoped runtime role implementation\n"
+    )
+
+    result = _run_precommit(repo)
+
+    assert result.returncode == 1
+    assert "pre-commit BLOCKED" in result.stderr
+    assert "05.6-207-SUMMARY.md" in result.stderr
+
+
+def test_precommit_ignores_non_plan_scoped_docs_commit(tmp_path: Path) -> None:
+    repo = _hook_repo(tmp_path)
+    (repo / "docs/note.md").write_text("changed\n")
+    assert _git(repo, "add", "docs/note.md").returncode == 0
+    (repo / ".git/COMMIT_EDITMSG").write_text("docs(m1): refresh note\n")
+
+    result = _run_precommit(repo)
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_precommit_blocks_staged_public_contract_without_manual_sync(
     tmp_path: Path,
 ) -> None:

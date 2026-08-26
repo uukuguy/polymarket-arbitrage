@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Plan 206 and H-018 are locally confirmed; production gates remain NOT RUN pending an exact authorized observe-only release
-last_updated: "2026-08-26T18:18:45+08:00"
+stopped_at: Plan 207 local closure is complete; production revision 026 and observe-only gates remain NOT RUN pending a fresh exact authorization package
+last_updated: "2026-08-26T18:55:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -85,6 +85,9 @@ progress:
   operator tooling, exact release/config identity, private runtime-controller
   and qualification-worker templates, and a deterministic scoped-DSN fault
   matrix. Independent reviews for Tasks 1-5 are clean after follow-up fixes.
+- Plan `05.6-207` is registered into `make planning-status` through the
+  explicit `plan-source` anchor in `05.6-207-SUMMARY.md`; docs-scoped closure
+  commits such as `docs(05.6-207)` are covered by the SUMMARY pre-commit guard.
 - Climb H-014 cycle 15 through H-018 cycle 19 scored 100/100 on dedicated local
   gates. H-016 run `20260825-053507-h-016` covers real
   migration/trust/late-ingress/freshness/recovery-observation behavior plus

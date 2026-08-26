@@ -86,6 +86,7 @@ M1_MAKE_TARGETS = {
     "smoke-l3-dashboard",
     "smoke-perception-dashboard",
     "smoke-operator-console",
+    "smoke-control-plane-dashboard",
     "polywatch-healthz-dry",
     "polywatch-healthz",
     "polywatch-resident-status",

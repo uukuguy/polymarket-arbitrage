@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # pre-commit hook — enforce planning hygiene
 #
-# Rule: any commit whose subject matches `feat(NN.N-MM)` or `feat(NN-MM)`
-# must have the corresponding SUMMARY.md present in the working tree
-# (either added in this same commit, or already on disk).
+# Rule: any plan-scoped implementation or closure commit, such as
+# `feat(NN.N-MM)`, `fix(NN.N-MM)`, or `docs(NN.N-MM)`, must have the
+# corresponding SUMMARY.md present in the working tree (either added in this
+# same commit, or already on disk).
 #
 # Why: code-vs-doc drift kills the project's "可检索不失忆" property.
 # Plan 04/05/06 of phase 01.1 shipped without SUMMARY because the executor
@@ -39,11 +40,12 @@ fi
 
 # Extract phase/plan from subject like:
 #   feat(01.1-04): xxx     → phase=01.1 plan=04
+#   docs(05.6-207): xxx    → phase=05.6 plan=207
 #   feat(01-3):  xxx       → phase=01   plan=3
 #   chore(01.1): xxx       → no plan, skip
 #   feat: xxx              → no scope,  skip
 PHASE_PLAN=$(printf '%s\n' "$SUBJECT" \
-  | grep -oE '^(feat|fix|refactor|test|perf)\(([0-9]+\.?[0-9]*)-([0-9]+)\)' \
+  | grep -oE '^(feat|fix|refactor|test|perf|docs)\(([0-9]+\.?[0-9]*)-([0-9]+)\)' \
   | head -n1 \
   | sed -E 's/^[a-z]+\(([0-9]+\.?[0-9]*)-([0-9]+)\)/\1 \2/' \
   || true)
@@ -104,7 +106,7 @@ if [ -z "$SUMMARY_FOUND" ]; then
   printf '  Phase dir:       %s\n' "$PHASE_DIR" >&2
   printf '  Looked for:      %s\n' "${SUMMARY_CANDIDATES[*]}" >&2
   printf '\n  Reason:\n' >&2
-  printf '    A plan-scoped commit (feat/fix/refactor/test/perf with NN.N-MM scope)\n' >&2
+  printf '    A plan-scoped commit (feat/fix/refactor/test/perf/docs with NN.N-MM scope)\n' >&2
   printf '    must have a corresponding SUMMARY.md — either already on disk or\n' >&2
   printf '    staged in this same commit.\n' >&2
   printf '\n  Why this rule exists:\n' >&2

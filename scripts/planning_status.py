@@ -2,7 +2,8 @@
 """planning_status — index of .planning/ vs git reality.
 
 Surfaces the "code shipped but doc didn't follow" class of drift.
-For every PLAN.md under .planning/workstreams/*/phases/, reports:
+For every PLAN.md under .planning/workstreams/*/phases/, plus explicitly
+registered external-plan summaries, reports:
   - Whether SUMMARY.md exists
   - Which commits in `git log --grep` reference this plan's scope (feat/fix/refactor)
   - Consistency verdict: OK / NO-SUMMARY / NO-CODE / OK-NO-COMMITS
@@ -24,6 +25,7 @@ PLANNING_ROOT = Path(".planning")
 
 # Match a plan filename like 01.1-04-PLAN.md or 02-3-PLAN.md
 PLAN_RX = re.compile(r"^(?P<phase>\d+(?:\.\d+)?)-(?P<plan>\d+)-PLAN\.md$")
+SUMMARY_RX = re.compile(r"^(?P<phase>\d+(?:\.\d+)?)-(?P<plan>\d+)-SUMMARY\.md$")
 SUMMARY_TPL = "{phase}-{plan}-SUMMARY.md"
 
 # Match commit subject scope like feat(01.1-04) / fix(02-3) — tolerates leading
@@ -58,6 +60,7 @@ class PlanRow:
     summary_md: Path
     summary_exists: bool
     commits: list[tuple[str, str]]  # [(short_hash, subject), ...]
+    anchor_exists: bool = True
 
     @property
     def has_code_commit(self) -> bool:
@@ -70,6 +73,8 @@ class PlanRow:
 
     @property
     def verdict(self) -> str:
+        if not self.anchor_exists:
+            return "DRIFT"  # registered external SUMMARY points at no plan-side anchor
         if self.summary_exists and self.has_code_commit:
             return "OK"
         if self.summary_exists and not self.has_code_commit:
@@ -94,6 +99,7 @@ def _git_log_for(
     phase: str,
     plan: str,
     plan_md: Path,
+    summary_md: Path | None = None,
 ) -> list[tuple[str, str]]:
     """Return scoped commits inside this exact plan's documented lifetime.
 
@@ -126,10 +132,10 @@ def _git_log_for(
         plan_creation_sha = creation_sha(plan_md)
         if plan_creation_sha is None:
             return []
-        summary_md = plan_md.with_name(
+        effective_summary_md = summary_md or plan_md.with_name(
             SUMMARY_TPL.format(phase=phase, plan=plan)
         )
-        summary_creation_sha = creation_sha(summary_md)
+        summary_creation_sha = creation_sha(effective_summary_md)
         upper_bound = summary_creation_sha or "HEAD"
         out = subprocess.check_output(
             [
@@ -155,6 +161,28 @@ def _git_log_for(
     return rows
 
 
+def _registered_external_plan_source(summary_md: Path) -> Path | None:
+    """Return an explicit external plan anchor from SUMMARY frontmatter."""
+
+    try:
+        lines = summary_md.read_text().splitlines()
+    except OSError:
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:80]:
+        stripped = line.strip()
+        if stripped == "---":
+            return None
+        if not stripped.startswith("plan-source:"):
+            continue
+        value = stripped.removeprefix("plan-source:").strip().strip("'\"")
+        if not value:
+            return None
+        return Path(value)
+    return None
+
+
 def collect() -> list[PlanRow]:
     rows: list[PlanRow] = []
     if not PLANNING_ROOT.exists():
@@ -172,6 +200,7 @@ def collect() -> list[PlanRow]:
     if legacy_phases.exists():
         search_roots.append(("(legacy)", legacy_phases))
 
+    seen: set[tuple[Path, str, str]] = set()
     for ws_name, phases_dir in search_roots:
         for phase_dir in sorted(phases_dir.iterdir()):
             if not phase_dir.is_dir():
@@ -183,6 +212,7 @@ def collect() -> list[PlanRow]:
                 phase = m.group("phase")
                 plan = m.group("plan")
                 summary_md = phase_dir / SUMMARY_TPL.format(phase=phase, plan=plan)
+                seen.add((phase_dir, phase, plan))
                 rows.append(
                     PlanRow(
                         workstream=ws_name,
@@ -193,6 +223,35 @@ def collect() -> list[PlanRow]:
                         summary_md=summary_md,
                         summary_exists=summary_md.exists(),
                         commits=_git_log_for(phase, plan, plan_md),
+                    )
+                )
+            for summary_md in sorted(phase_dir.iterdir()):
+                m = SUMMARY_RX.match(summary_md.name)
+                if not m:
+                    continue
+                phase = m.group("phase")
+                plan = m.group("plan")
+                if (phase_dir, phase, plan) in seen:
+                    continue
+                plan_source = _registered_external_plan_source(summary_md)
+                if plan_source is None:
+                    continue
+                anchor_exists = plan_source.exists()
+                rows.append(
+                    PlanRow(
+                        workstream=ws_name,
+                        phase_dir=phase_dir,
+                        phase=phase,
+                        plan=plan,
+                        plan_md=plan_source,
+                        summary_md=summary_md,
+                        summary_exists=True,
+                        commits=(
+                            _git_log_for(phase, plan, plan_source, summary_md)
+                            if anchor_exists
+                            else []
+                        ),
+                        anchor_exists=anchor_exists,
                     )
                 )
     return rows

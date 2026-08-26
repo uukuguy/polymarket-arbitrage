@@ -42,6 +42,11 @@ authorization package for SHA `e3c1fc83`, revision 026, the two login roles, two
 new private apps, observe-only mode, empty recovery allowlist, rollback, and the
 05.6 evidence directory. It is not direct migration or deployment.
 
+Planning hygiene boundary: external Plan 05.6-207 is audited through the
+`plan-source` frontmatter in `05.6-207-SUMMARY.md`; a missing plan-side anchor
+is drift, and `docs(05.6-207)` closure commits are covered by the SUMMARY
+pre-commit guard.
+
 See `docs/learning/89-数据库能力角色与进程身份.md` for the teaching version.
 
 ## 0.3 失败事实与已发布事实必须分离（2026-07-27）

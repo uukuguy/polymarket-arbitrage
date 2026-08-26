@@ -31,6 +31,11 @@
   two new private apps, observe-only mode, empty recovery allowlist, rollback,
   and the 05.6 evidence directory. Do not run production migration/deploy from a
   generic approval.
+- [REVIEW FIX] `.planning/CURRENT.md` has been refreshed to the same Plan
+  05.6-207 truth boundary. `make planning-status` now audits Plan 05.6-207 via
+  an explicit `plan-source` summary anchor, and `.githooks/pre-commit` applies
+  the SUMMARY guard to `docs(<phase-plan>)` closure commits without affecting
+  non-plan-scoped docs commits.
 
 ## 2026-08-19 — formal runtime recovery, IPv4 pooler, and evidence dashboard
 
