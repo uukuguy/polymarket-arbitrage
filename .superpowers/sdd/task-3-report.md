@@ -107,3 +107,125 @@ feat(05.6-207): bind qualification to release identity
 ## Concerns
 
 - None.
+
+## Review Fix: Makefile Release Pass-through
+
+### RED
+
+Command:
+
+```bash
+uv run pytest tests/m1-perception/test_makefile_contract.py -q -k "render_rollout"
+```
+
+Output:
+
+```text
+FFF                                                                      [100%]
+FAILED tests/m1-perception/test_makefile_contract.py::test_make_render_rollout_exposes_exact_six_app_topology
+FAILED tests/m1-perception/test_makefile_contract.py::test_make_render_rollout_rejects_missing_release_id_before_uv
+FAILED tests/m1-perception/test_makefile_contract.py::test_make_render_rollout_forwards_exact_release_id_to_cli
+```
+
+Expected failure: Makefile `control-plane-render-rollout` did not guard `release_id` before invoking `uv`, did not include `release_id=<40-char-lowercase-git-sha>` in usage/help, and did not pass `--release-id` to the CLI.
+
+### GREEN
+
+Command:
+
+```bash
+uv run pytest tests/m1-perception/test_makefile_contract.py -q -k "render_rollout"
+```
+
+Output:
+
+```text
+...                                                                      [100%]
+```
+
+Command:
+
+```bash
+make help | grep 'control-plane-render-rollout'
+```
+
+Output:
+
+```text
+  control-plane-render-rollout: Render local-only six-app runtime/qualification topology and checklist; usage enable=1 release_id=<40-char-lowercase-git-sha>; never contacts cloud resources.
+```
+
+### Final Verification
+
+Command:
+
+```bash
+uv run pytest tests/m1-perception/test_control_plane_qualification_identity.py tests/m1-perception/test_control_plane_rollout.py tests/m1-perception/test_control_plane_deployment_templates.py tests/m1-perception/test_control_plane_cli.py tests/m1-perception/test_makefile_contract.py -q
+```
+
+Output:
+
+```text
+........................................................................ [ 36%]
+........................................................................ [ 73%]
+....................................................                     [100%]
+```
+
+Command:
+
+```bash
+uv run ruff check src/polyarb/control_plane/qualification_identity.py src/polyarb/control_plane/rollout.py src/polyarb/cli_control_plane.py tests/m1-perception/test_control_plane_qualification_identity.py tests/m1-perception/test_control_plane_rollout.py tests/m1-perception/test_control_plane_deployment_templates.py tests/m1-perception/test_control_plane_cli.py tests/m1-perception/test_makefile_contract.py
+```
+
+Output:
+
+```text
+All checks passed!
+```
+
+Command:
+
+```bash
+uv run python -m py_compile src/polyarb/control_plane/qualification_identity.py src/polyarb/control_plane/rollout.py src/polyarb/cli_control_plane.py tests/m1-perception/test_control_plane_qualification_identity.py tests/m1-perception/test_control_plane_rollout.py tests/m1-perception/test_control_plane_deployment_templates.py tests/m1-perception/test_control_plane_cli.py tests/m1-perception/test_makefile_contract.py
+```
+
+Output: no stdout/stderr, exit 0.
+
+Command:
+
+```bash
+uv run pyright src/polyarb/control_plane/qualification_identity.py src/polyarb/control_plane/rollout.py src/polyarb/cli_control_plane.py tests/m1-perception/test_control_plane_qualification_identity.py tests/m1-perception/test_control_plane_rollout.py tests/m1-perception/test_control_plane_deployment_templates.py tests/m1-perception/test_control_plane_cli.py tests/m1-perception/test_makefile_contract.py
+```
+
+Output:
+
+```text
+0 errors, 0 warnings, 0 informations
+```
+
+Command:
+
+```bash
+git diff --check -- Makefile src/polyarb/control_plane/qualification_identity.py src/polyarb/control_plane/rollout.py src/polyarb/cli_control_plane.py deploy/control-plane/fly-runtime-controller.toml.template deploy/control-plane/fly-qualification-worker.toml.template tests/m1-perception/test_control_plane_qualification_identity.py tests/m1-perception/test_control_plane_rollout.py tests/m1-perception/test_control_plane_deployment_templates.py tests/m1-perception/test_control_plane_cli.py tests/m1-perception/test_makefile_contract.py .superpowers/sdd/task-3-report.md
+```
+
+Output: no stdout/stderr, exit 0.
+
+### Review Fix Changes
+
+- `Makefile` `control-plane-render-rollout` usage/help now includes `release_id=<40-char-lowercase-git-sha>`.
+- The target now rejects missing or non-lowercase-40-hex `release_id` before invoking `uv` or the CLI.
+- The target now forwards `--release-id "$(release_id)"` to `python -m polyarb.cli_control_plane render-rollout`.
+- `tests/m1-perception/test_makefile_contract.py` now covers dry-run pass-through plus real local-only make invocations with fake `uv` for both missing and valid release IDs.
+
+### Review Fix Commit
+
+Subject:
+
+```text
+fix(05.6-207): pass rollout release through Make
+```
+
+### Review Fix Concerns
+
+- None.

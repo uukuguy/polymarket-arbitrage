@@ -151,10 +151,10 @@ def test_qualification_identity_from_env_rejects_unknown_or_mismatched_values(
     message: str,
 ) -> None:
     from polyarb.control_plane.qualification_identity import (
+        QualificationIdentityError,
         qualification_config_id,
         qualification_config_payload,
         qualification_identity_from_env,
-        QualificationIdentityError,
     )
 
     payload = qualification_config_payload(
@@ -185,10 +185,10 @@ def test_qualification_identity_from_env_rejects_non_integral_cadence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from polyarb.control_plane.qualification_identity import (
+        QualificationIdentityError,
         qualification_config_id,
         qualification_config_payload,
         qualification_identity_from_env,
-        QualificationIdentityError,
     )
 
     payload = qualification_config_payload(
@@ -218,8 +218,8 @@ def test_qualification_identity_from_env_rejects_config_digest_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from polyarb.control_plane.qualification_identity import (
-        qualification_identity_from_env,
         QualificationIdentityError,
+        qualification_identity_from_env,
     )
 
     monkeypatch.setenv(

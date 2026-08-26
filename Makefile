@@ -652,11 +652,12 @@ control-plane-preflight:
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane preflight --expected-database "$(expected_database)" --json
 
-## control-plane-render-rollout: Render local-only six-app runtime/qualification topology and checklist; never contacts cloud resources.
+## control-plane-render-rollout: Render local-only six-app runtime/qualification topology and checklist; usage enable=1 release_id=<40-char-lowercase-git-sha>; never contacts cloud resources.
 control-plane-render-rollout:
-	@test "$(enable)" = "1" || (echo "usage: make control-plane-render-rollout enable=1 api_app=<app> worker_app=<app> alert_app=<app> runtime_event_writer_app=<app> runtime_controller_app=<app> qualification_worker_app=<app> expected_database=<name> output_dir=<empty-dir> [runtime_recovery_allowed_targets='app/id ...']" >&2; exit 2)
-	@test -n "$(api_app)" -a -n "$(worker_app)" -a -n "$(alert_app)" -a -n "$(runtime_event_writer_app)" -a -n "$(runtime_controller_app)" -a -n "$(qualification_worker_app)" -a -n "$(expected_database)" -a -n "$(output_dir)" || (echo "all six app identities, expected_database and output_dir are required" >&2; exit 2)
-	@uv run python -m polyarb.cli_control_plane render-rollout --enable --api-app "$(api_app)" --worker-app "$(worker_app)" --alert-app "$(alert_app)" --runtime-event-writer-app "$(runtime_event_writer_app)" --runtime-controller-app "$(runtime_controller_app)" --qualification-worker-app "$(qualification_worker_app)" $(foreach target,$(runtime_recovery_allowed_targets),--runtime-recovery-allowed-target "$(target)") --expected-database "$(expected_database)" --output-dir "$(output_dir)" --json
+	@test "$(enable)" = "1" || (echo "usage: make control-plane-render-rollout enable=1 api_app=<app> worker_app=<app> alert_app=<app> runtime_event_writer_app=<app> runtime_controller_app=<app> qualification_worker_app=<app> release_id=<40-char-lowercase-git-sha> expected_database=<name> output_dir=<empty-dir> [runtime_recovery_allowed_targets='app/id ...']" >&2; exit 2)
+	@test -n "$(api_app)" -a -n "$(worker_app)" -a -n "$(alert_app)" -a -n "$(runtime_event_writer_app)" -a -n "$(runtime_controller_app)" -a -n "$(qualification_worker_app)" -a -n "$(release_id)" -a -n "$(expected_database)" -a -n "$(output_dir)" || (echo "all six app identities, release_id=<40-char-lowercase-git-sha>, expected_database and output_dir are required" >&2; exit 2)
+	@printf '%s\n' "$(release_id)" | grep -Eq '^[0-9a-f]{40}$$' || (echo "release_id=<40-char-lowercase-git-sha> is required" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane render-rollout --enable --api-app "$(api_app)" --worker-app "$(worker_app)" --alert-app "$(alert_app)" --runtime-event-writer-app "$(runtime_event_writer_app)" --runtime-controller-app "$(runtime_controller_app)" --qualification-worker-app "$(qualification_worker_app)" --release-id "$(release_id)" $(foreach target,$(runtime_recovery_allowed_targets),--runtime-recovery-allowed-target "$(target)") --expected-database "$(expected_database)" --output-dir "$(output_dir)" --json
 
 ## control-plane-verify-shadow-parity: Verify exactly three local Structure/Quote shadow evidence records. Requires evidence=<json>; never contacts cloud resources.
 control-plane-verify-shadow-parity:

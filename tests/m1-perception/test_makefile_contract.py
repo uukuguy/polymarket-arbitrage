@@ -229,6 +229,7 @@ def test_make_runtime_observe_verify_is_read_only_and_bounded() -> None:
 
 
 def test_make_render_rollout_exposes_exact_six_app_topology() -> None:
+    release_id = "0123456789abcdef0123456789abcdef01234567"
     result = subprocess.run(
         [
             "make",
@@ -241,6 +242,7 @@ def test_make_render_rollout_exposes_exact_six_app_topology() -> None:
             "runtime_event_writer_app=writer-app",
             "runtime_controller_app=controller-app",
             "qualification_worker_app=qualification-app",
+            f"release_id={release_id}",
             "runtime_recovery_allowed_targets=worker-app/machine-a",
             "expected_database=control",
             "output_dir=/tmp/runtime-rollout-contract",
@@ -253,7 +255,97 @@ def test_make_render_rollout_exposes_exact_six_app_topology() -> None:
     assert result.returncode == 0, result.stderr
     assert '--runtime-controller-app "controller-app"' in result.stdout
     assert '--qualification-worker-app "qualification-app"' in result.stdout
+    assert f'--release-id "{release_id}"' in result.stdout
     assert '--runtime-recovery-allowed-target "worker-app/machine-a"' in result.stdout
+
+
+def test_make_render_rollout_rejects_missing_release_id_before_uv(
+    tmp_path: Path,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+
+    result = subprocess.run(
+        [
+            "make",
+            "control-plane-render-rollout",
+            "enable=1",
+            "api_app=api-app",
+            "worker_app=worker-app",
+            "alert_app=alert-app",
+            "runtime_event_writer_app=writer-app",
+            "runtime_controller_app=controller-app",
+            "qualification_worker_app=qualification-app",
+            "expected_database=control",
+            "output_dir=/tmp/runtime-rollout-contract",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert "release_id=<40-char-lowercase-git-sha>" in result.stderr
+    assert _fake_uv_calls(log_path) == []
+
+
+def test_make_render_rollout_forwards_exact_release_id_to_cli(tmp_path: Path) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    release_id = "0123456789abcdef0123456789abcdef01234567"
+
+    result = subprocess.run(
+        [
+            "make",
+            "control-plane-render-rollout",
+            "enable=1",
+            "api_app=api-app",
+            "worker_app=worker-app",
+            "alert_app=alert-app",
+            "runtime_event_writer_app=writer-app",
+            "runtime_controller_app=controller-app",
+            "qualification_worker_app=qualification-app",
+            f"release_id={release_id}",
+            "expected_database=control",
+            "output_dir=/tmp/runtime-rollout-contract",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _fake_uv_calls(log_path) == [
+        [
+            "run",
+            "python",
+            "-m",
+            "polyarb.cli_control_plane",
+            "render-rollout",
+            "--enable",
+            "--api-app",
+            "api-app",
+            "--worker-app",
+            "worker-app",
+            "--alert-app",
+            "alert-app",
+            "--runtime-event-writer-app",
+            "writer-app",
+            "--runtime-controller-app",
+            "controller-app",
+            "--qualification-worker-app",
+            "qualification-app",
+            "--release-id",
+            release_id,
+            "--expected-database",
+            "control",
+            "--output-dir",
+            "/tmp/runtime-rollout-contract",
+            "--json",
+        ]
+    ]
 
 
 def test_make_help_lists_runtime_fault_matrix() -> None:
