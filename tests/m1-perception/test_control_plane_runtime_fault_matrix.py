@@ -6,12 +6,15 @@ import json
 import os
 import subprocess
 from collections.abc import Iterator
+from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from polyarb import cli_control_plane
 from polyarb.control_plane import runtime_fault_matrix as matrix_module
+from polyarb.control_plane.db_role_admin import provision_login_roles
 from polyarb.control_plane.runtime_fault_matrix import (
     RuntimeFaultMatrixError,
     canonical_fault_matrix_bytes,
@@ -104,7 +107,26 @@ def test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database(
     assert canonical_fault_matrix_bytes(first) == canonical_fault_matrix_bytes(second)
     assert first == second
     assert first["status"] == "pass"
-    assert first["schema_version"] == "m1-runtime-fault-matrix-v1"
+    assert first["schema_version"] == "m1-runtime-fault-matrix-v2"
+    assert first["scoped_roles"] == {
+        "qualification_worker": {
+            "facts_consumed": first["qualification_fact_count"],
+            "profile": "qualification-worker",
+            "status": "pass",
+        },
+        "runtime_controller": {
+            "observe_decisions": first["observe_decision_count"],
+            "profile": "runtime-controller",
+            "recovery_actions_created": 0,
+            "status": "pass",
+        },
+    }
+    qualification_fact_count = first["qualification_fact_count"]
+    observe_decision_count = first["observe_decision_count"]
+    assert isinstance(qualification_fact_count, int)
+    assert isinstance(observe_decision_count, int)
+    assert qualification_fact_count >= len(FAULT_CLASSES)
+    assert observe_decision_count >= 1
     cases = first["cases"]
     assert isinstance(cases, list)
     assert [case["fault_class"] for case in cases] == list(FAULT_CLASSES)
@@ -183,7 +205,22 @@ def test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database(
         rows = connection.execute(
             "SELECT datname FROM pg_database WHERE datname LIKE 'runtime_fault_matrix_%'"
         ).fetchall()
+        roles = connection.execute(
+            """
+            SELECT rolname FROM pg_roles
+            WHERE rolname IN (
+                'l3_evidence_daemon',
+                'l3_retention_operator',
+                'm1_runtime_controller_capability',
+                'm1_qualification_worker_capability',
+                'm1_runtime_controller_login',
+                'm1_qualification_worker_login'
+            )
+            ORDER BY rolname
+            """
+        ).fetchall()
     assert rows == []
+    assert roles == []
 
 
 def test_runtime_fault_matrix_cleans_database_when_alembic_upgrade_fails(
@@ -209,19 +246,30 @@ def test_runtime_fault_matrix_cleans_database_when_alembic_upgrade_fails(
     assert rows == []
 
 
-def test_runtime_fault_matrix_refuses_preexisting_l3_capability_roles(
+@pytest.mark.parametrize(
+    "role_name",
+    (
+        "l3_evidence_daemon",
+        "m1_runtime_controller_capability",
+        "m1_qualification_worker_capability",
+    ),
+)
+def test_runtime_fault_matrix_refuses_preexisting_migration_capability_roles(
     monkeypatch: pytest.MonkeyPatch,
     control_plane_test_dsn: str,
+    role_name: str,
 ) -> None:
     monkeypatch.setenv("POLYARB_CONTROL_PLANE_TEST_DSN", control_plane_test_dsn)
     with psycopg.connect(control_plane_test_dsn, autocommit=True) as connection:
-        connection.execute("CREATE ROLE l3_evidence_daemon LOGIN SUPERUSER")
+        connection.execute(
+            sql.SQL("CREATE ROLE {} LOGIN SUPERUSER").format(sql.Identifier(role_name))
+        )
     try:
         with pytest.raises(RuntimeFaultMatrixError, match="pre-existing cluster role"):
             run_fault_matrix()
     finally:
         with psycopg.connect(control_plane_test_dsn, autocommit=True) as connection:
-            connection.execute("DROP ROLE l3_evidence_daemon")
+            connection.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role_name)))
 
     with psycopg.connect(control_plane_test_dsn) as connection:
         leaked = connection.execute(
@@ -230,7 +278,7 @@ def test_runtime_fault_matrix_refuses_preexisting_l3_capability_roles(
     assert leaked == []
 
 
-def test_runtime_fault_matrix_cleans_migration_created_l3_roles_for_replay(
+def test_runtime_fault_matrix_cleans_migration_created_roles_for_replay(
     monkeypatch: pytest.MonkeyPatch,
     control_plane_test_dsn: str,
 ) -> None:
@@ -241,8 +289,16 @@ def test_runtime_fault_matrix_cleans_migration_created_l3_roles_for_replay(
     with psycopg.connect(control_plane_test_dsn) as connection:
         roles = connection.execute(
             """
-            SELECT 1 FROM pg_roles
-            WHERE rolname IN ('l3_evidence_daemon','l3_retention_operator')
+            SELECT rolname FROM pg_roles
+            WHERE rolname IN (
+                'l3_evidence_daemon',
+                'l3_retention_operator',
+                'm1_runtime_controller_capability',
+                'm1_qualification_worker_capability',
+                'm1_runtime_controller_login',
+                'm1_qualification_worker_login'
+            )
+            ORDER BY rolname
             """
         ).fetchall()
     assert roles == []
@@ -252,8 +308,16 @@ def test_runtime_fault_matrix_cleans_migration_created_l3_roles_for_replay(
     with psycopg.connect(control_plane_test_dsn) as connection:
         roles = connection.execute(
             """
-            SELECT 1 FROM pg_roles
-            WHERE rolname IN ('l3_evidence_daemon','l3_retention_operator')
+            SELECT rolname FROM pg_roles
+            WHERE rolname IN (
+                'l3_evidence_daemon',
+                'l3_retention_operator',
+                'm1_runtime_controller_capability',
+                'm1_qualification_worker_capability',
+                'm1_runtime_controller_login',
+                'm1_qualification_worker_login'
+            )
+            ORDER BY rolname
             """
         ).fetchall()
     assert roles == []
@@ -292,7 +356,19 @@ def test_runtime_fault_matrix_exercises_real_migrated_authority_paths(
         assert fk_count is not None and int(fk_count[0]) > 0
         assert unique_index_count is not None and int(unique_index_count[0]) > 0
 
-        context = matrix_module._context(matrix_dsn)
+        runtime_password = f"runtime-controller-{uuid4().hex}"
+        qualification_password = f"qualification-worker-{uuid4().hex}"
+        provision_login_roles(
+            lambda: psycopg.connect(matrix_dsn),
+            expected_database=database_name,
+            runtime_password=runtime_password,
+            qualification_password=qualification_password,
+        )
+        context = matrix_module._context(
+            matrix_dsn,
+            runtime_password=runtime_password,
+            qualification_password=qualification_password,
+        )
         for index, fault_class in enumerate(
             (
                 "task-exception",
@@ -303,7 +379,7 @@ def test_runtime_fault_matrix_exercises_real_migrated_authority_paths(
                 "stale-action",
             )
         ):
-            result = matrix_module._run_case(context, index, fault_class)
+            result = matrix_module._run_case(context, index, fault_class).case
             assert result["status"] == "pass"
 
         with psycopg.connect(matrix_dsn) as connection:
@@ -325,11 +401,13 @@ def test_runtime_fault_matrix_exercises_real_migrated_authority_paths(
         assert recovery_actions >= 2
         assert outbox >= 1
     finally:
-        matrix_module._drop_isolated_database_if_exists(control_plane_test_dsn, database_name)
         maintenance_dsn = matrix_module._dsn_with_database_unchecked(
             control_plane_test_dsn,
             "postgres",
         )
+        with psycopg.connect(maintenance_dsn, autocommit=True) as connection:
+            matrix_module._drop_disposable_login_roles_if_safe(connection)
+        matrix_module._drop_isolated_database_if_exists(control_plane_test_dsn, database_name)
         with psycopg.connect(maintenance_dsn, autocommit=True) as connection:
             matrix_module._lock_runtime_fault_matrix_cluster(connection)
             try:
@@ -366,7 +444,22 @@ def test_runtime_fault_matrix_cli_emits_canonical_json(
     payload = {
         "case_count": 0,
         "cases": [],
-        "schema_version": "m1-runtime-fault-matrix-v1",
+        "observe_decision_count": 0,
+        "qualification_fact_count": 0,
+        "schema_version": "m1-runtime-fault-matrix-v2",
+        "scoped_roles": {
+            "qualification_worker": {
+                "facts_consumed": 0,
+                "profile": "qualification-worker",
+                "status": "pass",
+            },
+            "runtime_controller": {
+                "observe_decisions": 0,
+                "profile": "runtime-controller",
+                "recovery_actions_created": 0,
+                "status": "pass",
+            },
+        },
         "status": "pass",
     }
     monkeypatch.setenv("POLYARB_CONTROL_PLANE_TEST_DSN", "postgresql://localhost/test")

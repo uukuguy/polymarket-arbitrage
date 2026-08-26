@@ -676,6 +676,10 @@ def test_deterministic_runtime_production_enablement_profile_uses_exact_local_ga
             "uv",
             "run",
             "pytest",
+            "tests/alembic/test_026.py",
+            "tests/m1-perception/test_control_plane_db_role_contract.py",
+            "tests/m1-perception/test_control_plane_db_role_admin.py",
+            "tests/m1-perception/test_control_plane_qualification_identity.py",
             "tests/m1-perception/test_control_plane_runtime_fault_matrix.py::test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database",
             "tests/m1-perception/test_control_plane_runtime_fault_matrix.py::test_runtime_fault_matrix_exercises_real_migrated_authority_paths",
             "-q",
@@ -702,9 +706,59 @@ def test_deterministic_runtime_production_enablement_profile_uses_exact_local_ga
             "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_serve_store_conflicts_exit_current_turn",
             "-q",
         ],
+        "scoped-runtime-controller": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_db_role_contract.py",
+            "tests/m1-perception/test_control_plane_db_role_admin.py",
+            "tests/m1-perception/test_control_plane_runtime_fault_matrix.py",
+            "-q",
+        ],
+        "scoped-qualification-worker": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_db_role_contract.py",
+            "tests/m1-perception/test_control_plane_db_role_admin.py",
+            "tests/m1-perception/test_control_plane_qualification_identity.py",
+            "tests/m1-perception/test_control_plane_runtime_fault_matrix.py",
+            "-q",
+        ],
+        "zero-recovery-actions": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_runtime_fault_matrix.py::test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database",
+            "tests/m1-perception/test_control_plane_runtime_observe.py::test_real_postgres_records_idempotent_idle_window_and_verifies_read_only",
+            "-q",
+        ],
+        "qualification-identity-digest": [
+            "uv",
+            "run",
+            "pytest",
+            "tests/m1-perception/test_control_plane_qualification_identity.py",
+            "tests/m1-perception/test_control_plane_runtime_fault_matrix.py::test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database",
+            "-q",
+        ],
     }
 
     flattened = [argument for command in commands.values() for argument in command]
+    for output_node in (
+        "scoped-runtime-controller",
+        "scoped-qualification-worker",
+        "zero-recovery-actions",
+        "qualification-identity-digest",
+    ):
+        assert output_node in commands
+    for required_file in (
+        "tests/alembic/test_026.py",
+        "tests/m1-perception/test_control_plane_db_role_contract.py",
+        "tests/m1-perception/test_control_plane_db_role_admin.py",
+        "tests/m1-perception/test_control_plane_qualification_identity.py",
+        "tests/m1-perception/test_control_plane_runtime_fault_matrix.py",
+    ):
+        assert any(argument.startswith(required_file) for argument in flattened)
     assert all(
         any("::test_" in argument for argument in commands[gate])
         for gate in ("integration", "cli", "restart")
@@ -722,7 +776,16 @@ def test_deterministic_runtime_production_enablement_gate_nodes_collect_nonzero(
         {"paradigm": "deterministic-runtime-production-enablement"}
     )
 
-    for gate in ("unit", "integration", "cli", "restart"):
+    for gate in (
+        "unit",
+        "integration",
+        "cli",
+        "restart",
+        "scoped-runtime-controller",
+        "scoped-qualification-worker",
+        "zero-recovery-actions",
+        "qualification-identity-digest",
+    ):
         command = [argument for argument in commands[gate] if argument != "-q"]
         command.extend(("--collect-only", "-q"))
         completed = subprocess.run(

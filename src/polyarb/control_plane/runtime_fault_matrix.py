@@ -7,13 +7,13 @@ import json
 import os
 import re
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Final, cast
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 import psycopg
@@ -23,6 +23,8 @@ from psycopg.rows import dict_row
 
 from alembic import command
 
+from .db_role_admin import provision_login_roles
+from .db_role_contract import ROLE_CONTRACTS, verify_daemon_database_role
 from .postgres import (
     PostgresControlPlane,
     RuntimeEventConflictError,
@@ -34,11 +36,18 @@ from .qualification import (
     QualificationState,
     RollingQualificationPolicy,
 )
-from .qualification_service import QualificationFactRecord, ledger_row_to_fact_record
+from .qualification_service import (
+    PostgresQualificationFactSource,
+    PostgresQualificationServiceStore,
+    QualificationFactRecord,
+    QualificationService,
+    ledger_row_to_fact_record,
+)
 from .reconciler import RuntimeReconciler
 from .recovery_models import RecoveryActionType, RecoveryDecision
 from .recovery_records import RecoveryActionRecord
 from .recovery_store import (
+    ConnectionFactory,
     claim_action,
     claim_controller,
     finish_action,
@@ -46,15 +55,26 @@ from .recovery_store import (
     schedule_action,
 )
 from .runtime_models import RuntimeProgress
+from .runtime_observe import (
+    build_runtime_observe_decision_record,
+    build_runtime_observe_idle_record,
+    insert_runtime_observe_decision,
+)
 
 _ENV_NAME: Final[str] = "POLYARB_CONTROL_PLANE_TEST_DSN"
 _DATABASE_RE: Final[re.Pattern[str]] = re.compile(r"^runtime_fault_matrix_[0-9a-f]{32}$")
 _BASE_NOW: Final[datetime] = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 _CLUSTER_LOCK_KEY: Final[int] = 56062061
-_MIGRATION_CLUSTER_ROLES: Final[tuple[str, str]] = (
+_MIGRATION_CLUSTER_ROLES: Final[tuple[str, ...]] = (
     "l3_evidence_daemon",
     "l3_retention_operator",
+    ROLE_CONTRACTS["runtime-controller"].capability_role,
+    ROLE_CONTRACTS["qualification-worker"].capability_role,
+)
+_DISPOSABLE_LOGIN_ROLES: Final[tuple[str, ...]] = (
+    ROLE_CONTRACTS["runtime-controller"].login_role,
+    ROLE_CONTRACTS["qualification-worker"].login_role,
 )
 _FAULT_CLASSES: Final[tuple[str, ...]] = (
     "task-exception",
@@ -70,6 +90,8 @@ _FAULT_CLASSES: Final[tuple[str, ...]] = (
     "duplicate-delivery",
     "stale-action",
 )
+_OBSERVE_CONTROLLER_ID: Final[str] = "matrix-observe-controller"
+_OBSERVE_CONTROLLER_OWNER_ID: Final[str] = "matrix-observe-owner"
 
 
 class RuntimeFaultMatrixError(RuntimeError):
@@ -78,9 +100,19 @@ class RuntimeFaultMatrixError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class _RuntimeContext:
-    dsn: str
-    connection_factory: Callable[[], psycopg.Connection[Any]]
+    admin_dsn: str
+    admin_factory: ConnectionFactory
+    runtime_controller_factory: ConnectionFactory
+    qualification_factory: ConnectionFactory
     control_plane: PostgresControlPlane
+
+
+@dataclass(frozen=True, slots=True)
+class _CaseOutcome:
+    case: dict[str, object]
+    qualification_fact_count: int
+    observe_decision_count: int
+    recovery_actions_created: int
 
 
 def canonical_fault_matrix_bytes(result: Mapping[str, object]) -> bytes:
@@ -114,20 +146,74 @@ def run_fault_matrix() -> dict[str, object]:
                 created = True
                 _run_alembic_upgrade(matrix_dsn)
                 _verify_migrated_authority(matrix_dsn)
-                context = _context(matrix_dsn)
-                cases = [
+                admin_factory = _connection_factory(matrix_dsn)
+                runtime_password = f"runtime-controller-{uuid4().hex}"
+                qualification_password = f"qualification-worker-{uuid4().hex}"
+                provision_login_roles(
+                    admin_factory,
+                    expected_database=database_name,
+                    runtime_password=runtime_password,
+                    qualification_password=qualification_password,
+                )
+                context = _context(
+                    matrix_dsn,
+                    runtime_password=runtime_password,
+                    qualification_password=qualification_password,
+                )
+                runtime_verification = verify_daemon_database_role(
+                    context.runtime_controller_factory,
+                    "runtime-controller",
+                    expected_database=database_name,
+                )
+                qualification_verification = verify_daemon_database_role(
+                    context.qualification_factory,
+                    "qualification-worker",
+                    expected_database=database_name,
+                )
+                outcomes = [
                     _run_case(context, index, fault) for index, fault in enumerate(_FAULT_CLASSES)
                 ]
+                cases = [outcome.case for outcome in outcomes]
+                qualification_fact_count = sum(
+                    outcome.qualification_fact_count for outcome in outcomes
+                )
+                observe_decision_count = sum(
+                    outcome.observe_decision_count for outcome in outcomes
+                )
+                recovery_actions_created = sum(
+                    outcome.recovery_actions_created for outcome in outcomes
+                )
+                if recovery_actions_created != 0:
+                    raise RuntimeFaultMatrixError(
+                        "observe-only runtime controller created recovery actions"
+                    )
                 result: dict[str, object] = {
                     "case_count": len(cases),
                     "cases": cases,
                     "database_scope": "temporary-migrated-test-database",
-                    "schema_version": "m1-runtime-fault-matrix-v1",
+                    "observe_decision_count": observe_decision_count,
+                    "qualification_fact_count": qualification_fact_count,
+                    "qualification_identity_digest": _qualification_identity_digest(),
+                    "schema_version": "m1-runtime-fault-matrix-v2",
+                    "scoped_roles": {
+                        "qualification_worker": {
+                            "facts_consumed": qualification_fact_count,
+                            "profile": qualification_verification.profile,
+                            "status": qualification_verification.status,
+                        },
+                        "runtime_controller": {
+                            "observe_decisions": observe_decision_count,
+                            "profile": runtime_verification.profile,
+                            "recovery_actions_created": recovery_actions_created,
+                            "status": runtime_verification.status,
+                        },
+                    },
                     "status": "pass",
                 }
                 result["matrix_sha256"] = sha256(canonical_fault_matrix_bytes(result)).hexdigest()
                 return result
             finally:
+                _drop_disposable_login_roles_if_safe(maintenance)
                 if created:
                     _drop_isolated_database_with_connection(maintenance, database_name)
                 _drop_migration_created_cluster_roles_if_safe(maintenance)
@@ -339,18 +425,104 @@ def _drop_migration_created_cluster_roles_if_safe(
         maintenance.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role_name)))
 
 
-def _context(dsn: str) -> _RuntimeContext:
-    def connect() -> psycopg.Connection[Any]:
-        return psycopg.connect(dsn, connect_timeout=5)
+def _drop_disposable_login_roles_if_safe(maintenance: psycopg.Connection[Any]) -> None:
+    rows = maintenance.execute(
+        """
+        SELECT
+            roles.rolname,
+            roles.rolcanlogin,
+            roles.rolsuper,
+            roles.rolcreatedb,
+            roles.rolcreaterole,
+            roles.rolinherit,
+            roles.rolreplication,
+            roles.rolbypassrls
+        FROM pg_roles roles
+        WHERE roles.rolname = ANY(%s)
+        ORDER BY roles.rolname
+        """,
+        (list(_DISPOSABLE_LOGIN_ROLES),),
+    ).fetchall()
+    by_name = {str(row[0]): row for row in rows}
+    for profile in ("runtime-controller", "qualification-worker"):
+        contract = ROLE_CONTRACTS[profile]
+        row = by_name.get(contract.login_role)
+        if row is None:
+            continue
+        unsafe = any(bool(value) for value in (row[2], row[3], row[4], row[6], row[7]))
+        if unsafe or not bool(row[1]) or not bool(row[5]):
+            raise RuntimeFaultMatrixError(
+                f"refusing to clean unsafe disposable login role {contract.login_role!r}"
+            )
+        memberships = maintenance.execute(
+            """
+            SELECT granted.rolname
+            FROM pg_auth_members membership
+            JOIN pg_roles granted ON granted.oid = membership.roleid
+            JOIN pg_roles member ON member.oid = membership.member
+            WHERE member.rolname = %s
+            ORDER BY granted.rolname
+            """,
+            (contract.login_role,),
+        ).fetchall()
+        if tuple(str(membership[0]) for membership in memberships) != (
+            contract.capability_role,
+        ):
+            raise RuntimeFaultMatrixError(
+                f"refusing to clean unsafe disposable login membership {contract.login_role!r}"
+            )
+        maintenance.execute(
+            sql.SQL("REVOKE {} FROM {}").format(
+                sql.Identifier(contract.capability_role),
+                sql.Identifier(contract.login_role),
+            )
+        )
+        maintenance.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(contract.login_role)))
 
+
+def _context(
+    dsn: str,
+    *,
+    runtime_password: str,
+    qualification_password: str,
+) -> _RuntimeContext:
+    runtime_dsn = _dsn_with_login(
+        dsn,
+        ROLE_CONTRACTS["runtime-controller"].login_role,
+        runtime_password,
+    )
+    qualification_dsn = _dsn_with_login(
+        dsn,
+        ROLE_CONTRACTS["qualification-worker"].login_role,
+        qualification_password,
+    )
+    admin_factory = _connection_factory(dsn)
     return _RuntimeContext(
-        dsn=dsn,
-        connection_factory=connect,
-        control_plane=PostgresControlPlane(connect),
+        admin_dsn=dsn,
+        admin_factory=admin_factory,
+        runtime_controller_factory=_connection_factory(runtime_dsn),
+        qualification_factory=_connection_factory(qualification_dsn),
+        control_plane=PostgresControlPlane(admin_factory),
     )
 
 
-def _run_case(context: _RuntimeContext, index: int, fault_class: str) -> dict[str, object]:
+def _connection_factory(dsn: str) -> ConnectionFactory:
+    return lambda: psycopg.connect(dsn, connect_timeout=5)
+
+
+def _dsn_with_login(dsn: str, username: str, password: str) -> str:
+    parsed = urlparse(dsn)
+    if not parsed.hostname:
+        raise RuntimeFaultMatrixError("runtime fault matrix requires a PostgreSQL test DSN")
+    host = parsed.hostname
+    host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    if parsed.port is not None:
+        host_part = f"{host_part}:{parsed.port}"
+    netloc = f"{quote(username, safe='')}:{quote(password, safe='')}@{host_part}"
+    return parsed._replace(netloc=netloc).geturl()
+
+
+def _run_case(context: _RuntimeContext, index: int, fault_class: str) -> _CaseOutcome:
     now = _BASE_NOW + timedelta(minutes=index * 10)
     before_ingest_seq = _ingress_high_water(context)
     if fault_class in {"task-exception", "r2-timeout-hang"}:
@@ -367,12 +539,29 @@ def _run_case(context: _RuntimeContext, index: int, fault_class: str) -> dict[st
         case = _stale_action_case(context, now=now)
     else:
         case = _reconciler_case(context, fault_class=fault_class, now=now)
-    return _attach_qualification_projection(
+    case = _attach_qualification_projection(
         context,
         case,
         before_ingest_seq=before_ingest_seq,
         started_at=now,
         now=now + timedelta(seconds=9),
+    )
+    qualification_fact_count = _advance_qualification_cursor(
+        context,
+        now=now + timedelta(seconds=10),
+    )
+    before_observe_recovery_actions = _recovery_action_count(context)
+    observe_decision_count = _run_observe_only_reconciliation(
+        context,
+        fault_class=fault_class,
+        now=now + timedelta(seconds=11),
+    )
+    after_recovery_actions = _recovery_action_count(context)
+    return _CaseOutcome(
+        case=case,
+        qualification_fact_count=qualification_fact_count,
+        observe_decision_count=observe_decision_count,
+        recovery_actions_created=after_recovery_actions - before_observe_recovery_actions,
     )
 
 
@@ -609,14 +798,14 @@ def _reconciler_case(
         _open_circuit(context, lease.job_key, now=now)
 
     controller = claim_controller(
-        context.connection_factory,
+        context.admin_factory,
         controller_id=f"matrix-controller-{fault_class}",
         owner_id=f"matrix-owner-{fault_class}",
         lease_seconds=120,
         now=now,
     )
     candidate = read_runtime_reconcile_states(
-        context.connection_factory,
+        context.admin_factory,
         controller_id=controller.controller_id,
         now=now + timedelta(seconds=2),
         sample_limit=1,
@@ -626,7 +815,7 @@ def _reconciler_case(
         now=now + timedelta(seconds=2),
     )
     action = schedule_action(
-        context.connection_factory,
+        context.admin_factory,
         controller=controller,
         decision=decision,
         incident_key=candidate.incident_key,
@@ -665,14 +854,14 @@ def _stale_owner_case(
     now: datetime,
 ) -> dict[str, object]:
     stale_controller = claim_controller(
-        context.connection_factory,
+        context.admin_factory,
         controller_id="matrix-controller-stale-owner",
         owner_id="stale-owner-a",
         lease_seconds=120,
         now=now,
     )
     claim_controller(
-        context.connection_factory,
+        context.admin_factory,
         controller_id=stale_controller.controller_id,
         owner_id="stale-owner-b",
         lease_seconds=120,
@@ -680,7 +869,7 @@ def _stale_owner_case(
     )
     attempt_id = _attempt_id(context, lease_job_key)
     action = schedule_action(
-        context.connection_factory,
+        context.admin_factory,
         controller=stale_controller,
         decision=_decision(RecoveryActionType.RECLAIM_JOB, "job.lease-expired", now),
         incident_key=f"recovery:job:{lease_job_key}",
@@ -732,7 +921,7 @@ def _schedule_recovery(
         if replacement is None:
             raise RuntimeFaultMatrixError("stale action replacement lease was not created")
     controller = claim_controller(
-        context.connection_factory,
+        context.admin_factory,
         controller_id=f"matrix-controller-{fault_class}",
         owner_id=f"matrix-owner-{fault_class}",
         lease_seconds=60,
@@ -740,7 +929,7 @@ def _schedule_recovery(
     )
     scheduled_at = now + timedelta(seconds=4 if stale else 1)
     action = schedule_action(
-        context.connection_factory,
+        context.admin_factory,
         controller=controller,
         decision=decision,
         incident_key=f"recovery:job:{lease.job_key}",
@@ -755,7 +944,7 @@ def _schedule_recovery(
         now=scheduled_at,
     )
     replay = schedule_action(
-        context.connection_factory,
+        context.admin_factory,
         controller=controller,
         decision=decision,
         incident_key=f"recovery:job:{lease.job_key}",
@@ -806,7 +995,7 @@ def _age_runtime(
     progress_seconds: int = 0,
     lease_seconds: int = 60,
 ) -> None:
-    with context.connection_factory() as connection, connection.cursor() as cursor:
+    with context.admin_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
             UPDATE m1_jobs
@@ -841,7 +1030,7 @@ def _age_runtime(
 
 
 def _open_circuit(context: _RuntimeContext, job_key: str, *, now: datetime) -> None:
-    with context.connection_factory() as connection, connection.cursor() as cursor:
+    with context.admin_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
             INSERT INTO m1_job_circuits (
@@ -861,7 +1050,7 @@ def _open_circuit(context: _RuntimeContext, job_key: str, *, now: datetime) -> N
 
 
 def _attempt_id(context: _RuntimeContext, job_key: str) -> str:
-    with context.connection_factory() as connection, connection.cursor() as cursor:
+    with context.admin_factory() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT attempt_id FROM m1_job_runtime_state WHERE job_key = %s", (job_key,))
         row = cursor.fetchone()
     if row is None:
@@ -877,7 +1066,7 @@ def _claim_and_complete(
     now: datetime,
 ) -> RecoveryActionRecord:
     claim = claim_action(
-        context.connection_factory,
+        context.admin_factory,
         worker_id="matrix-recovery-worker",
         controller=controller,
         lease_seconds=30,
@@ -886,7 +1075,7 @@ def _claim_and_complete(
     if claim is None:
         raise RuntimeFaultMatrixError(f"matrix action was not claimable: {action.action_id}")
     return finish_action(
-        context.connection_factory,
+        context.admin_factory,
         action_id=claim.action_id,
         worker_id=cast(str, claim.worker_id),
         worker_epoch=claim.worker_epoch,
@@ -934,15 +1123,86 @@ def _outbox_total(snapshot: Mapping[str, Any]) -> int:
     return len(pending)
 
 
+def _advance_qualification_cursor(context: _RuntimeContext, *, now: datetime) -> int:
+    service = QualificationService(
+        policy=_qualification_policy(),
+        fact_source=PostgresQualificationFactSource(context.qualification_factory),
+        state_store=PostgresQualificationServiceStore(context.qualification_factory),
+        writer_id="runtime-fault-matrix-qualification-worker",
+        batch_size=100,
+    )
+    return service.tick(now).applied
+
+
+def _run_observe_only_reconciliation(
+    context: _RuntimeContext,
+    *,
+    fault_class: str,
+    now: datetime,
+) -> int:
+    controller = claim_controller(
+        context.runtime_controller_factory,
+        controller_id=_OBSERVE_CONTROLLER_ID,
+        owner_id=_OBSERVE_CONTROLLER_OWNER_ID,
+        lease_seconds=120,
+        now=now,
+    )
+    candidates = read_runtime_reconcile_states(
+        context.runtime_controller_factory,
+        controller_id=controller.controller_id,
+        now=now,
+        sample_limit=100,
+    )
+    if not candidates:
+        insert_runtime_observe_decision(
+            context.runtime_controller_factory,
+            build_runtime_observe_idle_record(
+                controller_id=controller.controller_id,
+                controller_owner_id=controller.owner_id,
+                controller_epoch=controller.lease_epoch,
+                observed_at=now,
+                next_check_at=now + timedelta(seconds=30),
+                observed_by=controller.owner_id,
+            ),
+        )
+        return 1
+    count = 0
+    for candidate in candidates:
+        decision = RuntimeReconciler().evaluate(candidate.runtime_state, now=now)
+        insert_runtime_observe_decision(
+            context.runtime_controller_factory,
+            build_runtime_observe_decision_record(
+                controller_id=controller.controller_id,
+                controller_owner_id=controller.owner_id,
+                controller_epoch=controller.lease_epoch,
+                observed_at=now,
+                candidate=candidate,
+                decision=decision,
+                observed_by=controller.owner_id,
+            ),
+        )
+        count += 1
+    if count <= 0:
+        raise RuntimeFaultMatrixError(f"observe-only reconciliation was empty for {fault_class}")
+    return count
+
+
 def _event_count(context: _RuntimeContext) -> int:
-    with context.connection_factory() as connection, connection.cursor() as cursor:
+    with context.admin_factory() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT count(*) FROM m1_job_runtime_events")
         row = cursor.fetchone()
     return 0 if row is None else int(row[0])
 
 
+def _recovery_action_count(context: _RuntimeContext) -> int:
+    with context.admin_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM m1_recovery_actions")
+        row = cursor.fetchone()
+    return 0 if row is None else int(row[0])
+
+
 def _ingress_high_water(context: _RuntimeContext) -> int:
-    with context.connection_factory() as connection, connection.cursor() as cursor:
+    with context.qualification_factory() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT COALESCE(max(ingest_seq), 0) FROM m1_qualification_ingress_ledger")
         row = cursor.fetchone()
     return 0 if row is None else int(row[0])
@@ -1012,7 +1272,7 @@ def _read_qualification_ingress_rows(
     before_ingest_seq: int,
 ) -> tuple[Mapping[str, object], ...]:
     with (
-        context.connection_factory() as connection,
+        context.qualification_factory() as connection,
         connection.cursor(row_factory=dict_row) as cursor,
     ):
         cursor.execute(
@@ -1052,13 +1312,7 @@ def _qualification_impact_from_records(
     started_at: datetime,
     now: datetime,
 ) -> str:
-    policy = RollingQualificationPolicy(
-        release_id="runtime-fault-matrix",
-        config_id="local",
-        role_identity=("m1", "runtime"),
-        required_seconds=60,
-        max_gap_seconds=600,
-    )
+    policy = _qualification_policy()
     decision = policy.new_epoch(started_at=started_at, epoch_id="qualification:runtime-matrix")
     impact = "none"
     for record in records:
@@ -1078,6 +1332,29 @@ def _qualification_impact_from_records(
     if decision.qualified_at is not None and decision.qualified_at <= now:
         return "qualified"
     return impact
+
+
+def _qualification_policy() -> RollingQualificationPolicy:
+    return RollingQualificationPolicy(
+        release_id="runtime-fault-matrix",
+        config_id="local",
+        role_identity=("m1", "runtime"),
+        required_seconds=60,
+        max_gap_seconds=600,
+    )
+
+
+def _qualification_identity_digest() -> str:
+    policy = _qualification_policy()
+    payload = {
+        "config_id": policy.config_id,
+        "max_gap_seconds": policy.max_gap_seconds,
+        "policy_version": policy.policy_version,
+        "release_id": policy.release_id,
+        "required_seconds": policy.required_seconds,
+        "role_identity": list(policy.role_identity),
+    }
+    return sha256(canonical_fault_matrix_bytes(payload)).hexdigest()
 
 
 def _case_result(
