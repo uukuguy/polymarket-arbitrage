@@ -10292,3 +10292,39 @@ fault mutation remain behind Plan 206's exact separate authorization gates.
 
 [NEXT] Prepare and present the exact observe-only production authorization
 package. Do not deploy or inject faults from generic approval.
+
+## SESSION 305 — 2026-08-26 (Plan 05.6-207 final-review remediation)
+
+- [SECURITY] Corrected revision 026, admin preflight, and daemon startup so
+  authority is a catalog-enumerated closed envelope over every `public`
+  relation/sequence privilege, schema CREATE, public object ownership, every
+  SECURITY DEFINER routine, and exact incoming/outgoing membership. Real PG16
+  adversarial cases cover unrelated grants, ambient CREATE, definer EXECUTE,
+  unexpected members, ownership, collision safety, and exact success.
+- [CONTRACT] Runtime-controller now consistently consumes only
+  `POLYARB_SUPABASE_DB_DSN`; qualification-worker consumes only
+  `POLYARB_QUALIFICATION_DB_DSN`. CLI/admin readers, Fly templates/processes,
+  tests, and runbook share that mapping without Fly aliases.
+- [LIFECYCLE] `.githooks/pre-commit` retains staged/manual SUMMARY checks;
+  `.githooks/commit-msg` supplies reliable subject enforcement from the actual
+  message file. `make planning-status` recomputes each canonical reviewed
+  template SHA256 recorded by the NOT-RUN evidence.
+- [CORRECTNESS] Revision 026 downgrade restores the exact revision-024 function
+  ACL/security projection. Qualification generic exceptions now use bounded
+  stable reason codes, and `tests/alembic/test_026.py` is Pyright-clean.
+- [COMMITS] Corrected application executable release is `8e3d9a1b`; hook and
+  evidence lifecycle commit is `ae8332b5`.
+- [CLIMB] Fresh append-only H-018 cycle 20 run
+  `20260826-114829-h-018` scored 100/100 across nine nodes, including the four
+  scoped authority/identity/zero-action nodes. Its manifest binds to
+  `ae8332b5a05e03e67aac7287db9d9964e002d6fd`; external submission is false.
+- [PRODUCTION NOT RUN] Production remains database `postgres` at revisions
+  022/023/024/025, revision 026 NOT APPLIED, original four apps running, new
+  two apps absent, no scoped roles/secrets/deploy/fault/recovery/restart/
+  downgrade, and observe-only status NOT RUN.
+
+[NEXT] Start with `/gsd-resume-work --ws m1-perception` and
+`make planning-status`; prepare, but do not execute, a new exact production
+authorization package for corrected application release `8e3d9a1b`, revision
+026, both scoped roles/apps, observe-only mode, empty recovery allowlist,
+rollback, and the 05.6 evidence directory.

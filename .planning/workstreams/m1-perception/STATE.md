@@ -79,24 +79,27 @@ progress:
   an exact capability-limited Fly recovery adapter, durable observe-only
   decision/idle facts, and a read-only zero-mutation verifier. The production
   observe, job-recovery, and process-recovery gates are explicitly NOT RUN.
-- Plan `05.6-207` is locally complete at final Task-5 SHA `e3c1fc83` through
-  additive revision 026, scoped runtime-controller and qualification-worker
-  capability roles, fail-closed daemon startup identity checks, safe login-role
-  operator tooling, exact release/config identity, private runtime-controller
-  and qualification-worker templates, and a deterministic scoped-DSN fault
-  matrix. Independent reviews for Tasks 1-5 are clean after follow-up fixes.
+- Plan `05.6-207` is locally complete after final-review remediation. Corrected
+  application release `8e3d9a1b` catalog-enumerates a closed effective authority
+  envelope across all `public` relations, sequences, schema CREATE, ownership,
+  SECURITY DEFINER routines, and exact membership. It also uses the canonical
+  app-scoped DSNs, restores revision-024 function ACLs on downgrade, redacts
+  qualification failures, and keeps the deterministic scoped-DSN fault matrix.
 - Plan `05.6-207` is registered into `make planning-status` through the
-  explicit `plan-source` anchor in `05.6-207-SUMMARY.md`; docs-scoped closure
-  commits such as `docs(05.6-207)` are covered by the SUMMARY pre-commit guard.
-- Climb H-014 cycle 15 through H-018 cycle 19 scored 100/100 on dedicated local
+  explicit `plan-source` anchor in `05.6-207-SUMMARY.md`; that gate also
+  recomputes reviewed template hashes. `.githooks/pre-commit` protects staged
+  SUMMARY content and `.githooks/commit-msg` reliably enforces plan-scoped
+  subjects from the real message file.
+- Climb H-014 cycle 15 through H-018 cycle 20 scored 100/100 on dedicated local
   gates. H-016 run `20260825-053507-h-016` covers real
   migration/trust/late-ingress/freshness/recovery-observation behavior plus
   exact 26-hour restart/replay certificate evidence; H-017 run
   `20260825-074318-h-017` covers strict reads, real-PostgreSQL event/outbox
-  chains, API/smoke contracts and restart/ordering behavior. H-018 run
-  `20260825-090136-h-018` covers isolated topology and adapter authority,
-  two canonical real-PostgreSQL matrix runs, observe-only CLI/Make, and
-  restart/idempotency/identity-drift behavior.
+  chains, API/smoke contracts and restart/ordering behavior. Fresh H-018 run
+  `20260826-114829-h-018` covers isolated topology and adapter authority,
+  both scoped daemon nodes, qualification identity digest, zero recovery
+  actions, and restart behavior at verification HEAD
+  `ae8332b5a05e03e67aac7287db9d9964e002d6fd`.
 - Production truth boundary as of the 2026-08-25 audit: production database is
   `postgres`; revisions 022/023/024/025 are applied and post-migration worker
   health passed; `m1_qualification_ingress_ledger` had 1643 incident ingress
@@ -135,7 +138,7 @@ progress:
 ## Resume
 
 1. Before production, present one exact observe-only authorization package:
-   final Task-5 SHA `e3c1fc83`, production database `postgres`, revision 026,
+   corrected application release `8e3d9a1b`, production database `postgres`, revision 026,
    the two scoped login roles, the two new private apps, observe-only mode,
    empty recovery allowlist, rollback, and evidence directory. Do not infer
    this authority from generic approval.
