@@ -195,6 +195,7 @@ class FakeAdminFactory:
             return None
         if normalized.startswith("alter role ") and " password " in normalized:
             role = _identifier_after(rendered=normalized, keyword="alter role")
+            self.roles[role]["can_login"] = True
             self.roles[role]["password"] = _literal_password(normalized)
             self.password_changes += 1
             return None
@@ -463,6 +464,87 @@ def test_disable_marks_both_login_roles_nologin() -> None:
     assert factory.roles[QUALIFICATION_LOGIN]["memberships"] == {QUALIFICATION_CAPABILITY}
 
 
+def test_disable_is_repeatable_when_both_roles_are_already_nologin() -> None:
+    from polyarb.control_plane.db_role_admin import disable_login_roles
+
+    factory = FakeAdminFactory()
+    factory.add_login(
+        RUNTIME_LOGIN,
+        capability=RUNTIME_CAPABILITY,
+        password="runtime-password",
+    )
+    factory.add_login(
+        QUALIFICATION_LOGIN,
+        capability=QUALIFICATION_CAPABILITY,
+        password="qualification-password",
+    )
+
+    disable_login_roles(_as_connection_factory(factory), expected_database="role_test")
+    result = disable_login_roles(_as_connection_factory(factory), expected_database="role_test")
+
+    assert result == {"database": "role_test", "status": "disabled"}
+    assert factory.roles[RUNTIME_LOGIN]["can_login"] is False
+    assert factory.roles[QUALIFICATION_LOGIN]["can_login"] is False
+    assert factory.roles[RUNTIME_LOGIN]["memberships"] == {RUNTIME_CAPABILITY}
+    assert factory.roles[QUALIFICATION_LOGIN]["memberships"] == {QUALIFICATION_CAPABILITY}
+
+
+def test_disable_accepts_one_role_already_nologin_and_disables_the_other() -> None:
+    from polyarb.control_plane.db_role_admin import disable_login_roles
+
+    factory = FakeAdminFactory()
+    factory.add_login(
+        RUNTIME_LOGIN,
+        capability=RUNTIME_CAPABILITY,
+        password="runtime-password",
+    )
+    factory.add_login(
+        QUALIFICATION_LOGIN,
+        capability=QUALIFICATION_CAPABILITY,
+        password="qualification-password",
+    )
+    factory.roles[RUNTIME_LOGIN]["can_login"] = False
+
+    result = disable_login_roles(_as_connection_factory(factory), expected_database="role_test")
+
+    assert result == {"database": "role_test", "status": "disabled"}
+    assert factory.roles[RUNTIME_LOGIN]["can_login"] is False
+    assert factory.roles[QUALIFICATION_LOGIN]["can_login"] is False
+
+
+def test_provision_accepts_clean_nologin_roles_and_restores_login() -> None:
+    from polyarb.control_plane.db_role_admin import provision_login_roles
+
+    factory = FakeAdminFactory()
+    factory.add_login(
+        RUNTIME_LOGIN,
+        capability=RUNTIME_CAPABILITY,
+        password="old-runtime-password",
+    )
+    factory.add_login(
+        QUALIFICATION_LOGIN,
+        capability=QUALIFICATION_CAPABILITY,
+        password="old-qualification-password",
+    )
+    factory.roles[RUNTIME_LOGIN]["can_login"] = False
+    factory.roles[QUALIFICATION_LOGIN]["can_login"] = False
+
+    result = provision_login_roles(
+        _as_connection_factory(factory),
+        expected_database="role_test",
+        runtime_password="new-runtime-password",
+        qualification_password="new-qualification-password",
+    )
+
+    assert result == {"database": "role_test", "status": "provisioned"}
+    assert factory.roles[RUNTIME_LOGIN]["can_login"] is True
+    assert factory.roles[QUALIFICATION_LOGIN]["can_login"] is True
+    assert factory.roles[RUNTIME_LOGIN]["password"] == "new-runtime-password"
+    assert factory.roles[QUALIFICATION_LOGIN]["password"] == "new-qualification-password"
+    assert factory.roles[RUNTIME_LOGIN]["memberships"] == {RUNTIME_CAPABILITY}
+    assert factory.roles[QUALIFICATION_LOGIN]["memberships"] == {QUALIFICATION_CAPABILITY}
+
+
 def test_cli_requires_enable_and_reads_passwords_from_exact_env(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -653,6 +735,47 @@ def test_real_postgres_provisions_verifies_rotates_and_disables_roles(
         ).close()
     with pytest.raises(psycopg.OperationalError):
         psycopg.connect(qualification_dsn).close()
+
+    disable_login_roles(admin_factory, expected_database="test")
+
+    provision_login_roles(
+        admin_factory,
+        expected_database="test",
+        runtime_password="runtime-real-secret-c",
+        qualification_password="qualification-real-secret-c",
+    )
+
+    restored_runtime_dsn = _role_dsn(
+        postgres_026_dsn,
+        RUNTIME_LOGIN,
+        "runtime-real-secret-c",
+    )
+    restored_qualification_dsn = _role_dsn(
+        postgres_026_dsn,
+        QUALIFICATION_LOGIN,
+        "qualification-real-secret-c",
+    )
+    assert (
+        verify_daemon_database_role(
+            lambda: psycopg.connect(restored_runtime_dsn),
+            "runtime-controller",
+            expected_database="test",
+        ).status
+        == "pass"
+    )
+    assert (
+        verify_daemon_database_role(
+            lambda: psycopg.connect(restored_qualification_dsn),
+            "qualification-worker",
+            expected_database="test",
+        ).status
+        == "pass"
+    )
+    with psycopg.connect(postgres_026_dsn) as admin:
+        assert _role_attributes(admin, RUNTIME_LOGIN) == (True, False, False, False, True)
+        assert _role_attributes(admin, QUALIFICATION_LOGIN) == (True, False, False, False, True)
+        assert _memberships(admin, RUNTIME_LOGIN) == [RUNTIME_CAPABILITY]
+        assert _memberships(admin, QUALIFICATION_LOGIN) == [QUALIFICATION_CAPABILITY]
 
 
 @pytest.fixture(scope="module")

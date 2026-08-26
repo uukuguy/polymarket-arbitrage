@@ -227,11 +227,7 @@ def _require_login_roles_safe(snapshot: AdminRoleSnapshot) -> None:
         attributes = snapshot.roles.get(login_role)
         if attributes is None:
             continue
-        if (
-            not attributes.can_login
-            or not attributes.inherits
-            or _has_elevated_attribute(attributes)
-        ):
+        if not attributes.inherits or _has_elevated_attribute(attributes):
             _fail("database-role-admin.login-unsafe", login_role)
         memberships = snapshot.memberships.get(login_role, frozenset())
         if memberships != frozenset({capability_role}):
@@ -414,11 +410,7 @@ def _require_single_login_safe(
     attributes, memberships = snapshot
     if attributes.role_name != login_role:
         _fail("database-role-admin.login-unsafe", attributes.role_name)
-    if (
-        not attributes.can_login
-        or not attributes.inherits
-        or _has_elevated_attribute(attributes)
-    ):
+    if not attributes.inherits or _has_elevated_attribute(attributes):
         _fail("database-role-admin.login-unsafe", login_role)
     if memberships != frozenset({capability_role}):
         _fail("database-role-admin.membership-unsafe", login_role)

@@ -168,3 +168,110 @@ feat(05.6-207): add scoped database role operations
 - `disable` intentionally fails closed if either login is already `NOLOGIN`,
   because the safety helper treats non-login login roles as an unexpected manual
   state before mutation.
+
+## Review Fix: Recoverable scoped login disable/provision
+
+### RED
+
+Command:
+
+```bash
+tmp_review_fix=$(mktemp -d)
+mkdir -p "$tmp_review_fix/src"
+cp -R src/polyarb "$tmp_review_fix/src/"
+git show 95e047a9:src/polyarb/control_plane/db_role_admin.py > "$tmp_review_fix/src/polyarb/control_plane/db_role_admin.py"
+PYTHONPATH="$tmp_review_fix/src" uv run pytest tests/m1-perception/test_control_plane_db_role_admin.py::test_disable_is_repeatable_when_both_roles_are_already_nologin tests/m1-perception/test_control_plane_db_role_admin.py::test_disable_accepts_one_role_already_nologin_and_disables_the_other tests/m1-perception/test_control_plane_db_role_admin.py::test_provision_accepts_clean_nologin_roles_and_restores_login -q
+```
+
+Output:
+
+```text
+FFF                                                                      [100%]
+=================================== FAILURES ===================================
+________ test_disable_is_repeatable_when_both_roles_are_already_nologin ________
+
+E       polyarb.control_plane.db_role_admin.DatabaseRoleAdminError: database-role-admin.login-unsafe: m1_runtime_controller_login
+
+_____ test_disable_accepts_one_role_already_nologin_and_disables_the_other _____
+
+E       polyarb.control_plane.db_role_admin.DatabaseRoleAdminError: database-role-admin.login-unsafe: m1_runtime_controller_login
+
+________ test_provision_accepts_clean_nologin_roles_and_restores_login _________
+
+E       polyarb.control_plane.db_role_admin.DatabaseRoleAdminError: database-role-admin.login-unsafe: m1_runtime_controller_login
+
+=========================== short test summary info ============================
+FAILED tests/m1-perception/test_control_plane_db_role_admin.py::test_disable_is_repeatable_when_both_roles_are_already_nologin
+FAILED tests/m1-perception/test_control_plane_db_role_admin.py::test_disable_accepts_one_role_already_nologin_and_disables_the_other
+FAILED tests/m1-perception/test_control_plane_db_role_admin.py::test_provision_accepts_clean_nologin_roles_and_restores_login
+```
+
+### GREEN / Verification
+
+Command:
+
+```bash
+uv run pytest tests/m1-perception/test_control_plane_db_role_admin.py tests/m1-perception/test_makefile_contract.py -q
+```
+
+Output:
+
+```text
+............................................ [ 54%]
+...........................................................              [100%]
+```
+
+Command:
+
+```bash
+uv run ruff check src/polyarb/control_plane/db_role_admin.py tests/m1-perception/test_control_plane_db_role_admin.py tests/m1-perception/test_makefile_contract.py
+```
+
+Output:
+
+```text
+All checks passed!
+```
+
+Command:
+
+```bash
+uv run pyright src/polyarb/control_plane/db_role_admin.py tests/m1-perception/test_control_plane_db_role_admin.py tests/m1-perception/test_makefile_contract.py
+```
+
+Output:
+
+```text
+0 errors, 0 warnings, 0 informations
+```
+
+Command:
+
+```bash
+uv run python -m py_compile src/polyarb/control_plane/db_role_admin.py tests/m1-perception/test_control_plane_db_role_admin.py tests/m1-perception/test_makefile_contract.py
+```
+
+Output: no output; exit code `0`.
+
+Command:
+
+```bash
+git diff --check -- src/polyarb/control_plane/db_role_admin.py tests/m1-perception/test_control_plane_db_role_admin.py tests/m1-perception/test_makefile_contract.py
+```
+
+Output: no output; exit code `0`.
+
+### Review-fix changes
+
+- Decoupled exact safe role attrs/membership checks from `rolcanlogin` so clean
+  `NOLOGIN` login roles are still considered operator-safe.
+- Made repeated `disable_login_roles()` idempotent and allowed mixed
+  `LOGIN`/`NOLOGIN` exact-membership states to converge to both roles disabled
+  in one transaction.
+- Allowed `provision_login_roles()` to restore/rotate previously disabled exact
+  roles, with fake and real PostgreSQL coverage proving both scoped DSNs connect
+  after reprovision.
+
+### Remaining concerns
+
+- None for this review item.
