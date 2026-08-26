@@ -50,20 +50,6 @@ QUALIFICATION_ALLOWED = {
     "m1_recovery_actions": frozenset(),
     "m1_alert_outbox": frozenset(),
 }
-RUNTIME_SEQUENCE_COLUMNS = (
-    ("m1_runtime_controller_leases", "controller_id"),
-    ("m1_runtime_observe_decisions", "decision_id"),
-    ("m1_job_runtime_state", "job_key"),
-    ("m1_jobs", "job_key"),
-    ("m1_job_circuits", "job_key"),
-    ("m1_job_attempts", "attempt_id"),
-    ("m1_recovery_target_budgets", "controller_id"),
-    ("m1_recovery_actions", "action_id"),
-    ("m1_job_runtime_events", "event_id"),
-    ("m1_incidents", "incident_key"),
-    ("m1_incident_events", "incident_event_id"),
-    ("m1_alert_outbox", "outbox_id"),
-)
 QUALIFICATION_SEQUENCE_COLUMNS = (("m1_qualification_ingress_ledger", "ingest_seq"),)
 
 FRESHNESS_FUNCTION = (
@@ -94,6 +80,7 @@ class DatabaseRoleContract:
     required_function_privileges: tuple[str, ...] = ()
     forbidden_function_privileges: tuple[str, ...] = ()
     forbidden_sequence_columns: tuple[tuple[str, str], ...] = ()
+    forbidden_sequence_schemas: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +140,7 @@ ROLE_CONTRACTS = {
             CERTIFICATE_FUNCTION,
             *HARDENED_TRIGGER_FUNCTIONS,
         ),
-        forbidden_sequence_columns=RUNTIME_SEQUENCE_COLUMNS,
+        forbidden_sequence_schemas=("public",),
     ),
     "qualification-worker": DatabaseRoleContract(
         profile="qualification-worker",
@@ -239,6 +226,8 @@ def verify_daemon_database_role(
                     _require_function_privilege(cursor, session_user, function_signature)
                 for function_signature in contract.forbidden_function_privileges:
                     _reject_function_privilege(cursor, session_user, function_signature)
+                for schema in contract.forbidden_sequence_schemas:
+                    _reject_schema_sequence_privileges(cursor, session_user, schema)
                 for table, column in contract.forbidden_sequence_columns:
                     _reject_sequence_privileges(cursor, session_user, table, column)
     except DatabaseRoleContractError:
@@ -515,6 +504,34 @@ def _reject_sequence_privileges(
             (session_user, sequence_name, privilege),
         ):
             _fail("database-role.forbidden-privilege-present", f"{sequence_name}:{privilege}")
+
+
+def _reject_schema_sequence_privileges(cursor: Any, session_user: str, schema: str) -> None:
+    cursor.execute(
+        """
+        SELECT pg_catalog.format('%I.%I', namespace.nspname, sequence.relname)
+               AS sequence_name
+        FROM pg_catalog.pg_class AS sequence
+        JOIN pg_catalog.pg_namespace AS namespace
+          ON namespace.oid = sequence.relnamespace
+        WHERE sequence.relkind = 'S'
+          AND namespace.nspname = %s
+        ORDER BY namespace.nspname, sequence.relname
+        """,
+        (schema,),
+    )
+    for row in cursor.fetchall():
+        sequence_name = str(_row_value(row, 0, "sequence_name"))
+        for privilege in SEQUENCE_PRIVILEGES:
+            if _check_privilege(
+                cursor,
+                "has_sequence_privilege",
+                (session_user, sequence_name, privilege),
+            ):
+                _fail(
+                    "database-role.forbidden-privilege-present",
+                    f"{sequence_name}:{privilege}",
+                )
 
 
 def _fail(reason_code: str, object_identifier: str) -> None:

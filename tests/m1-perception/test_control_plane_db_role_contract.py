@@ -25,11 +25,15 @@ class FakeCursor:
         if normalized.startswith(("insert ", "update ", "delete ", "truncate ", "alter ")):
             self._factory.write_count += 1
         self._factory.calls.append((normalized, params))
-        self._rows = [self._factory.answer(normalized, params)]
+        answer = self._factory.answer(normalized, params)
+        self._rows = answer if isinstance(answer, list) else [answer]
         return self
 
     def fetchone(self) -> Any:
         return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[Any]:
+        return self._rows
 
 
 class FakeConnection:
@@ -86,13 +90,16 @@ class FakeRoleFactory:
     def answer(self, sql: str, params: object) -> object:
         if sql == "set transaction read only":
             return None
+        if "from pg_catalog.pg_class as sequence" in sql:
+            schema = str(_param(params, 0))
+            if schema != "public":
+                return []
+            return [("public.m1_qualification_ingress_ledger_ingest_seq",)]
         if "select pg_get_serial_sequence" in sql:
             table = str(_param(params, 0))
             column = str(_param(params, 1))
             if (table, column) == ("public.m1_qualification_ingress_ledger", "ingest_seq"):
                 return ("public.m1_qualification_ingress_ledger_ingest_seq",)
-            if (table, column) == ("public.m1_runtime_observe_decisions", "decision_id"):
-                return ("public.m1_runtime_observe_decisions_decision_id_seq",)
             return (None,)
         if "where role.rolname = %s" in sql:
             role_name = str(_param(params, 0))
@@ -230,9 +237,7 @@ def _allowed_functions(profile: str) -> Iterable[str]:
 
 
 def _forbidden_sequences(profile: str) -> frozenset[str]:
-    if profile == "qualification-worker":
-        return frozenset({"public.m1_qualification_ingress_ledger_ingest_seq"})
-    return frozenset({"public.m1_runtime_observe_decisions_decision_id_seq"})
+    return frozenset({"public.m1_qualification_ingress_ledger_ingest_seq"})
 
 
 def test_database_role_contract_accepts_exact_runtime_controller_identity() -> None:
@@ -368,6 +373,37 @@ def test_database_role_contract_rejects_forbidden_sequence_privilege(
 
     assert factory.write_count == 0
     assert any("has_sequence_privilege" in call[0] for call in factory.calls)
+
+
+def test_runtime_sequence_denial_uses_public_catalog_enumeration() -> None:
+    from polyarb.control_plane.db_role_contract import (
+        ConnectionFactory,
+        DatabaseRoleContractError,
+        verify_daemon_database_role,
+    )
+
+    factory = FakeRoleFactory(
+        profile="runtime-controller",
+        sequence_privilege_source="public",
+    )
+
+    with pytest.raises(
+        DatabaseRoleContractError,
+        match="database-role.forbidden-privilege-present",
+    ) as exc_info:
+        verify_daemon_database_role(
+            cast(ConnectionFactory, factory),
+            "runtime-controller",
+            expected_database="role_test",
+        )
+
+    assert "public.m1_qualification_ingress_ledger_ingest_seq:USAGE" in str(exc_info.value)
+    assert factory.write_count == 0
+    sequence_queries = [
+        call for call in factory.calls if "pg_catalog.pg_class as sequence" in call[0]
+    ]
+    assert len(sequence_queries) == 1
+    assert sequence_queries[0][1] == ("public",)
 
 
 @pytest.mark.parametrize(

@@ -206,3 +206,102 @@ Exit status: `0`.
 ```text
 fix(05.6-207): verify complete database role envelope
 ```
+
+## Rereview Fix: Runtime Public Sequence Enumeration
+
+Addressed the remaining Important finding from
+`.superpowers/sdd/task-2-rereview.md`.
+
+- Replaced runtime-controller column-to-sequence probing with a `pg_catalog`
+  enumeration of every sequence in schema `public`.
+- Runtime-controller now rejects effective `USAGE`, `SELECT`, or `UPDATE` on
+  each discovered public sequence, including privileges amplified through
+  PUBLIC or inherited roles.
+- Kept qualification-worker's explicit ledger identity-sequence denial and did
+  not add any allowed sequence privileges.
+
+### RED
+
+Command:
+
+```text
+uv run pytest tests/m1-perception/test_control_plane_db_role_contract.py -q
+```
+
+Output:
+
+```text
+.........FF..F.....                                                      [100%]
+=================================== FAILURES ===================================
+FAILED tests/m1-perception/test_control_plane_db_role_contract.py::test_database_role_contract_rejects_forbidden_sequence_privilege[runtime-controller-public]
+FAILED tests/m1-perception/test_control_plane_db_role_contract.py::test_database_role_contract_rejects_forbidden_sequence_privilege[runtime-controller-inherited]
+FAILED tests/m1-perception/test_control_plane_db_role_contract.py::test_runtime_sequence_denial_uses_public_catalog_enumeration
+3 failed, 16 passed
+```
+
+Each failure was `Failed: DID NOT RAISE`, confirming the previous runtime
+verifier did not enumerate public sequences.
+
+### GREEN / Verification
+
+Focused contract tests:
+
+```text
+uv run pytest tests/m1-perception/test_control_plane_db_role_contract.py -q
+...................                                                      [100%]
+```
+
+Focused behavior and runtime observe regression:
+
+```text
+uv run pytest tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_cli.py tests/m1-perception/test_control_plane_runtime_observe.py -q
+........................................................................ [ 87%]
+..........                                                               [100%]
+```
+
+Lint:
+
+```text
+uv run ruff check src/polyarb/control_plane/db_role_contract.py src/polyarb/cli_control_plane.py tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_cli.py
+All checks passed!
+```
+
+Pyright:
+
+```text
+uv run pyright src/polyarb/control_plane/db_role_contract.py src/polyarb/cli_control_plane.py tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_cli.py
+0 errors, 0 warnings, 0 informations
+WARNING: there is a new pyright version available (v1.1.408 -> v1.1.411).
+Please install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`
+```
+
+Syntax:
+
+```text
+uv run python -m py_compile src/polyarb/control_plane/db_role_contract.py src/polyarb/cli_control_plane.py tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_cli.py
+```
+
+Diff check:
+
+```text
+git diff --check -- src/polyarb/control_plane/db_role_contract.py src/polyarb/cli_control_plane.py tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_cli.py .superpowers/sdd/task-2-report.md
+```
+
+Exit status: `0`.
+
+### Rereview Self-Review
+
+- Runtime sequence deny is bounded to schema `public` with a parameterized
+  catalog query inside the existing read-only verification transaction.
+- Error output remains closed: reason code plus schema-qualified sequence and
+  privilege only.
+- Runtime tests now use the real-schema qualification ledger sequence returned
+  by public sequence enumeration; the misleading fake runtime serial-column path
+  was removed.
+- Zero-mutation assertions remain on the sequence-denial failure paths.
+
+### Rereview Commit
+
+```text
+fix(05.6-207): deny runtime access to all app sequences
+```
