@@ -32,6 +32,7 @@ from polyarb.control_plane.models import JobLease
 from polyarb.control_plane.opportunity_worker import TransactionalOpportunityCertifier
 from polyarb.control_plane.postgres import PostgresControlPlane
 from polyarb.control_plane.qualification import RollingQualificationPolicy
+from polyarb.control_plane.qualification_identity import qualification_identity_from_env
 from polyarb.control_plane.qualification_service import (
     PostgresQualificationFactSource,
     PostgresQualificationServiceStore,
@@ -281,6 +282,7 @@ def _parser() -> argparse.ArgumentParser:
     render_rollout.add_argument("--runtime-event-writer-app", required=True)
     render_rollout.add_argument("--runtime-controller-app")
     render_rollout.add_argument("--qualification-worker-app")
+    render_rollout.add_argument("--release-id", required=True)
     render_rollout.add_argument(
         "--runtime-recovery-allowed-target",
         action="append",
@@ -448,32 +450,26 @@ def _required_expected_database_from_env() -> str:
     return expected_database
 
 
-def _qualification_policy_from_env() -> RollingQualificationPolicy:
-    roles = tuple(
-        role.strip()
-        for role in os.environ.get(
-            "POLYARB_QUALIFICATION_ROLE_IDENTITY",
-            "opportunity,quote,structure",
-        ).split(",")
-        if role.strip()
-    )
-    return RollingQualificationPolicy(
-        release_id=os.environ.get("POLYARB_QUALIFICATION_RELEASE_ID", "release-unknown"),
-        config_id=os.environ.get("POLYARB_QUALIFICATION_CONFIG_ID", "config-unknown"),
-        role_identity=roles or ("opportunity", "quote", "structure"),
-    )
-
-
 def _qualification_service_from_env(
     *,
-    batch_size: int = 100,
-    writer_id: str = "qualification-service",
+    batch_size: int,
+    interval_seconds: float,
+    writer_id: str,
 ) -> QualificationService:
     connection_factory = _qualification_connection_factory_from_env()
     if connection_factory is None:
         raise ValueError("POLYARB_QUALIFICATION_DB_DSN is required")
+    identity = qualification_identity_from_env(
+        interval_seconds=interval_seconds,
+        batch_size=batch_size,
+    )
+    policy = RollingQualificationPolicy(
+        release_id=identity.release_id,
+        config_id=identity.config_id,
+        role_identity=identity.role_identity,
+    )
     return QualificationService(
-        policy=_qualification_policy_from_env(),
+        policy=policy,
         fact_source=PostgresQualificationFactSource(connection_factory),
         state_store=PostgresQualificationServiceStore(connection_factory),
         writer_id=writer_id,
@@ -1543,6 +1539,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 worker_app=args.worker_app,
                 alert_app=args.alert_app,
                 runtime_event_writer_app=args.runtime_event_writer_app,
+                release_id=args.release_id,
                 runtime_controller_app=args.runtime_controller_app,
                 qualification_worker_app=args.qualification_worker_app,
                 runtime_recovery_allowed_targets=tuple(
@@ -1708,6 +1705,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             service = _qualification_service_from_env(
                 batch_size=args.batch_size,
+                interval_seconds=args.interval_seconds,
                 writer_id=args.writer_id,
             )
             result = asyncio.run(

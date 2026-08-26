@@ -5,12 +5,18 @@ app = "__QUALIFICATION_WORKER_APP__"
 primary_region = "ams"
 
 [env]
+POLYARB_DB_EXPECTED_DATABASE = "__EXPECTED_DATABASE__"
+POLYARB_QUALIFICATION_RELEASE_ID = "__QUALIFICATION_RELEASE_ID__"
+POLYARB_QUALIFICATION_CONFIG_ID = "__QUALIFICATION_CONFIG_ID__"
+POLYARB_QUALIFICATION_ROLE_IDENTITY = "opportunity,quote,structure"
+POLYARB_QUALIFICATION_RUNTIME_RECOVERY_MODE = "observe-only"
+POLYARB_QUALIFICATION_RUNTIME_RECOVERY_ALLOWED_TARGETS = "__RUNTIME_RECOVERY_ALLOWED_TARGETS__"
 POLYARB_RUNTIME_ROLE = "control-plane"
 
 [build]
 
 [processes]
-qualification = "python -m polyarb.cli_control_plane qualification-serve --enable --interval-seconds 30 --json"
+qualification = "python -m polyarb.cli_control_plane qualification-serve --enable --interval-seconds 30 --batch-size 100 --json"
 
 [[restart]]
 policy = "always"

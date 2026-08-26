@@ -9,8 +9,13 @@ import pytest
 
 
 def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path: Path) -> None:
+    from polyarb.control_plane.qualification_identity import (
+        qualification_config_id,
+        qualification_config_payload,
+    )
     from polyarb.control_plane.rollout import render_rollout_artifacts
 
+    release_id = "0123456789abcdef0123456789abcdef01234567"
     rendered = render_rollout_artifacts(
         api_app="polyarb-control-api-staging",
         worker_app="polyarb-control-worker-staging",
@@ -18,6 +23,7 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
         runtime_event_writer_app="polyarb-control-runtime-event-writer-staging",
         runtime_controller_app="polyarb-runtime-controller-staging",
         qualification_worker_app="polyarb-qualification-worker-staging",
+        release_id=release_id,
         runtime_recovery_allowed_targets=(
             "polyarb-control-worker-staging/fly-control-plane-coordinator",
             "polyarb-control-worker-staging/fly-control-plane-quote-batch",
@@ -50,6 +56,8 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
     qualification_config = (tmp_path / "fly-qualification-worker.toml").read_text()
     assert 'app = "polyarb-runtime-controller-staging"' in runtime_controller_config
     assert 'app = "polyarb-qualification-worker-staging"' in qualification_config
+    assert 'POLYARB_DB_EXPECTED_DATABASE = "control_plane_staging"' in runtime_controller_config
+    assert 'POLYARB_DB_EXPECTED_DATABASE = "control_plane_staging"' in qualification_config
     assert 'POLYARB_RUNTIME_RECOVERY_MODE = "observe-only"' in runtime_controller_config
     assert (
         'POLYARB_RUNTIME_RECOVERY_ALLOWED_TARGETS = '
@@ -57,6 +65,35 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
         'polyarb-control-worker-staging/fly-control-plane-quote-batch"'
         in runtime_controller_config
     )
+    config_payload = qualification_config_payload(
+        interval_seconds=30,
+        batch_size=100,
+        role_identity=("opportunity", "quote", "structure"),
+        runtime_recovery_mode="observe-only",
+        runtime_recovery_allowed_targets=(
+            "polyarb-control-worker-staging/fly-control-plane-coordinator",
+            "polyarb-control-worker-staging/fly-control-plane-quote-batch",
+        ),
+    )
+    config_id = qualification_config_id(config_payload)
+    assert f'POLYARB_QUALIFICATION_RELEASE_ID = "{release_id}"' in qualification_config
+    assert f'POLYARB_QUALIFICATION_CONFIG_ID = "{config_id}"' in qualification_config
+    assert (
+        'POLYARB_QUALIFICATION_ROLE_IDENTITY = "opportunity,quote,structure"'
+        in qualification_config
+    )
+    assert (
+        'POLYARB_QUALIFICATION_RUNTIME_RECOVERY_MODE = "observe-only"'
+        in qualification_config
+    )
+    assert (
+        'POLYARB_QUALIFICATION_RUNTIME_RECOVERY_ALLOWED_TARGETS = '
+        '"polyarb-control-worker-staging/fly-control-plane-coordinator,'
+        'polyarb-control-worker-staging/fly-control-plane-quote-batch"'
+        in qualification_config
+    )
+    for rendered_text in (runtime_controller_config, qualification_config):
+        assert "__" not in rendered_text
     assert "FLY_API_TOKEN" not in qualification_config
     assert "http_service" not in runtime_controller_config
     assert "http_service" not in qualification_config
@@ -89,16 +126,24 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
     assert checklist["expected_database"] == "control_plane_staging"
     assert checklist["runtime_controller_app"] == "polyarb-runtime-controller-staging"
     assert checklist["qualification_worker_app"] == "polyarb-qualification-worker-staging"
-    assert checklist["artifact_version"] == 9
+    assert checklist["artifact_version"] == 10
     assert checklist["runtime_recovery_mode"] == "observe-only"
     assert checklist["runtime_recovery_allowed_targets"] == [
         "polyarb-control-worker-staging/fly-control-plane-coordinator",
         "polyarb-control-worker-staging/fly-control-plane-quote-batch",
     ]
+    assert checklist["qualification_release_id"] == release_id
+    assert checklist["qualification_role_identity"] == ["opportunity", "quote", "structure"]
+    assert checklist["qualification_config_payload"] == config_payload
+    assert checklist["qualification_config_id"] == config_id
+    assert checklist["qualification_database_role"] == "qualification_worker"
+    assert checklist["runtime_controller_database_role"] == "runtime_controller"
+    assert checklist["database_revision"] == "026"
     assert checklist["rendered_secret_values"] is False
+    assert checklist["cloud_actions_performed"] is False
     assert checklist["steps"] == [
         "preflight",
-        "revisions-022-through-025-migration",
+        "revisions-022-through-026-migration",
         "isolated-api-data-worker-alert-worker-runtime-event-writer-runtime-controller-and-qualification-deploy",
         "three-fresh-source-window-structure-quote-shadows",
         "source-and-quote-admitter-worker-loss-circuit-probe-and-api-readability",
@@ -143,6 +188,7 @@ def test_rollout_renderer_rejects_legacy_app_reuse(
             runtime_event_writer_app=runtime_event_writer_app,
             runtime_controller_app=runtime_controller_app,
             qualification_worker_app=qualification_worker_app,
+            release_id="0123456789abcdef0123456789abcdef01234567",
             expected_database="control_plane_staging",
             output_dir=tmp_path,
         )
@@ -161,6 +207,7 @@ def test_rollout_renderer_rejects_app_reuse_for_runtime_controller_and_qualifica
             runtime_event_writer_app="writer",
             runtime_controller_app="worker",
             qualification_worker_app="qualification",
+            release_id="0123456789abcdef0123456789abcdef01234567",
             expected_database="control_plane_staging",
             output_dir=tmp_path,
         )
@@ -173,6 +220,46 @@ def test_rollout_renderer_rejects_app_reuse_for_runtime_controller_and_qualifica
             runtime_event_writer_app="writer",
             runtime_controller_app="controller",
             qualification_worker_app="controller",
+            release_id="0123456789abcdef0123456789abcdef01234567",
             expected_database="control_plane_staging",
             output_dir=tmp_path,
         )
+
+
+def test_rollout_renderer_rejects_non_exact_release_id(tmp_path: Path) -> None:
+    from polyarb.control_plane.rollout import RolloutArtifactError, render_rollout_artifacts
+
+    with pytest.raises(RolloutArtifactError, match="release_id"):
+        render_rollout_artifacts(
+            api_app="api",
+            worker_app="worker",
+            alert_app="alert",
+            runtime_event_writer_app="writer",
+            runtime_controller_app="controller",
+            qualification_worker_app="qualification",
+            release_id="release-unknown",
+            expected_database="control_plane_staging",
+            output_dir=tmp_path,
+        )
+
+
+def test_rollout_renderer_keeps_production_recovery_allowlist_empty(tmp_path: Path) -> None:
+    from polyarb.control_plane.rollout import render_rollout_artifacts
+
+    render_rollout_artifacts(
+        api_app="api",
+        worker_app="worker",
+        alert_app="alert",
+        runtime_event_writer_app="writer",
+        runtime_controller_app="controller",
+        qualification_worker_app="qualification",
+        release_id="0123456789abcdef0123456789abcdef01234567",
+        expected_database="control_plane_staging",
+        output_dir=tmp_path,
+    )
+
+    assert 'POLYARB_RUNTIME_RECOVERY_ALLOWED_TARGETS = ""' in (
+        tmp_path / "fly-runtime-controller.toml"
+    ).read_text()
+    qualification_config = (tmp_path / "fly-qualification-worker.toml").read_text()
+    assert 'POLYARB_QUALIFICATION_RUNTIME_RECOVERY_ALLOWED_TARGETS = ""' in qualification_config

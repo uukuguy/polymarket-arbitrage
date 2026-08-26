@@ -7,12 +7,15 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
+from .qualification_identity import qualification_config_id, qualification_config_payload
+
 
 class RolloutArtifactError(ValueError):
     """An operator supplied an ambiguous or unsafe rollout identity."""
 
 
 _APP_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
+_RELEASE_ID = re.compile(r"^[0-9a-f]{40}$")
 _RECOVERY_TARGET = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _LEGACY_APP = "polyarb-l1"
 _ROOT = Path(__file__).resolve().parents[3]
@@ -25,6 +28,7 @@ def render_rollout_artifacts(
     worker_app: str,
     alert_app: str,
     runtime_event_writer_app: str,
+    release_id: str,
     runtime_controller_app: str | None = None,
     qualification_worker_app: str | None = None,
     runtime_recovery_allowed_targets: Sequence[str] = (),
@@ -66,6 +70,16 @@ def render_rollout_artifacts(
         "runtime_event_writer_config": output_dir / "fly-runtime-event-writer.toml",
         "checklist": output_dir / "rollout-checklist.json",
     }
+    if _RELEASE_ID.fullmatch(release_id) is None:
+        raise RolloutArtifactError("release_id must be a 40-character lowercase Git SHA")
+    qualification_payload = qualification_config_payload(
+        interval_seconds=30,
+        batch_size=100,
+        role_identity=("opportunity", "quote", "structure"),
+        runtime_recovery_mode="observe-only",
+        runtime_recovery_allowed_targets=allowed_targets,
+    )
+    qualification_digest = qualification_config_id(qualification_payload)
     if render_runtime_topology:
         destinations["runtime_controller_config"] = output_dir / "fly-runtime-controller.toml"
         destinations["qualification_worker_config"] = output_dir / "fly-qualification-worker.toml"
@@ -93,6 +107,7 @@ def render_rollout_artifacts(
             "__RUNTIME_CONTROLLER_APP__",
             runtime_apps[0],
             replacements={
+                "__EXPECTED_DATABASE__": expected_database.strip(),
                 "__RUNTIME_RECOVERY_ALLOWED_TARGETS__": ",".join(allowed_targets),
             },
         )
@@ -100,9 +115,15 @@ def render_rollout_artifacts(
             "fly-qualification-worker.toml.template",
             "__QUALIFICATION_WORKER_APP__",
             runtime_apps[1],
+            replacements={
+                "__EXPECTED_DATABASE__": expected_database.strip(),
+                "__QUALIFICATION_RELEASE_ID__": release_id,
+                "__QUALIFICATION_CONFIG_ID__": qualification_digest,
+                "__RUNTIME_RECOVERY_ALLOWED_TARGETS__": ",".join(allowed_targets),
+            },
         )
     checklist = {
-        "artifact_version": 9 if render_runtime_topology else 7,
+        "artifact_version": 10 if render_runtime_topology else 7,
         "api_app": api_app,
         "worker_app": worker_app,
         "alert_app": alert_app,
@@ -110,7 +131,11 @@ def render_rollout_artifacts(
         "expected_database": expected_database,
         "steps": [
             "preflight",
-            "revisions-022-through-025-migration",
+            (
+                "revisions-022-through-026-migration"
+                if render_runtime_topology
+                else "revisions-022-through-025-migration"
+            ),
             (
                 "isolated-api-data-worker-alert-worker-runtime-event-writer-"
                 "runtime-controller-and-qualification-deploy"
@@ -141,6 +166,13 @@ def render_rollout_artifacts(
                 "qualification_worker_app": runtime_apps[1],
                 "runtime_recovery_mode": "observe-only",
                 "runtime_recovery_allowed_targets": list(allowed_targets),
+                "database_revision": "026",
+                "runtime_controller_database_role": "runtime_controller",
+                "qualification_database_role": "qualification_worker",
+                "qualification_release_id": release_id,
+                "qualification_config_id": qualification_digest,
+                "qualification_config_payload": qualification_payload,
+                "qualification_role_identity": ["opportunity", "quote", "structure"],
             }
         )
     destinations["api_config"].write_text(api_config)
@@ -173,9 +205,7 @@ def _validate_recovery_targets(targets: Sequence[str]) -> tuple[str, ...]:
                 "runtime recovery targets must not contain environment placeholders"
             )
         normalized.append(target)
-    if len(set(normalized)) != len(normalized):
-        raise RolloutArtifactError("runtime recovery targets must be unique")
-    return tuple(normalized)
+    return tuple(sorted(set(normalized)))
 
 
 def _render_template(
@@ -188,8 +218,6 @@ def _render_template(
     rendered = (_TEMPLATE_DIR / template_name).read_text().replace(placeholder, app_name)
     for key, value in (replacements or {}).items():
         rendered = rendered.replace(key, value)
-    if placeholder in rendered or "__CONTROL_PLANE_" in rendered:
-        raise RolloutArtifactError("rollout template contains an unresolved identity")
-    if "__RUNTIME_" in rendered or "__QUALIFICATION_" in rendered:
+    if re.search(r"__[A-Z0-9_]+__", rendered) is not None:
         raise RolloutArtifactError("rollout template contains an unresolved identity")
     return rendered

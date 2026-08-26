@@ -1759,6 +1759,8 @@ def test_render_rollout_is_explicit_and_never_connects_to_control_plane(
                 "polyarb-runtime-controller-staging",
                 "--qualification-worker-app",
                 "polyarb-qualification-worker-staging",
+                "--release-id",
+                "0123456789abcdef0123456789abcdef01234567",
                 "--runtime-recovery-allowed-target",
                 "polyarb-control-worker-staging/machine-a",
                 "--expected-database",
@@ -1775,6 +1777,50 @@ def test_render_rollout_is_explicit_and_never_connects_to_control_plane(
     assert Path(result["checklist"]).exists()
     assert Path(result["runtime_controller_config"]).exists()
     assert Path(result["qualification_worker_config"]).exists()
+
+
+def test_render_rollout_requires_exact_release_id_without_printing_supplied_value(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_control_plane_from_env",
+        lambda: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    assert (
+        cli_control_plane.main(
+            [
+                "render-rollout",
+                "--enable",
+                "--api-app",
+                "polyarb-control-api-staging",
+                "--worker-app",
+                "polyarb-control-worker-staging",
+                "--alert-app",
+                "polyarb-control-alert-staging",
+                "--runtime-event-writer-app",
+                "polyarb-control-runtime-event-writer-staging",
+                "--runtime-controller-app",
+                "polyarb-runtime-controller-staging",
+                "--qualification-worker-app",
+                "polyarb-qualification-worker-staging",
+                "--release-id",
+                "INVALID-RELEASE-VALUE",
+                "--expected-database",
+                "control_plane_staging",
+                "--output-dir",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert "rollout artifact rendering unavailable: RolloutArtifactError" in captured.err
+    assert "INVALID-RELEASE-VALUE" not in captured.err
 
 
 def test_shadow_parity_verifier_reads_only_local_evidence(monkeypatch, capsys, tmp_path) -> None:
@@ -2151,6 +2197,72 @@ def test_qualification_serve_verifies_database_role_before_service_construction(
     )
     assert events == ["verify", "service", "tick"]
     assert "postgresql://" not in capsys.readouterr().err
+
+
+def test_qualification_serve_validates_identity_before_service_construction_and_sanitizes(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    connection_factory = object()
+    events: list[str] = []
+    bad_release = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+
+    def verify(factory, profile, *, expected_database):
+        assert factory is connection_factory
+        assert profile == "qualification-worker"
+        assert expected_database == "role_test"
+        events.append("verify")
+
+    monkeypatch.setenv("POLYARB_QUALIFICATION_DB_DSN", "postgresql://qualification@example/control")
+    monkeypatch.setenv("POLYARB_DB_EXPECTED_DATABASE", "role_test")
+    monkeypatch.setenv("POLYARB_QUALIFICATION_RELEASE_ID", bad_release)
+    monkeypatch.setenv("POLYARB_QUALIFICATION_CONFIG_ID", "sha256:" + "0" * 64)
+    monkeypatch.setenv(
+        "POLYARB_QUALIFICATION_ROLE_IDENTITY",
+        "opportunity,quote,structure",
+    )
+    monkeypatch.setenv("POLYARB_QUALIFICATION_RUNTIME_RECOVERY_MODE", "observe-only")
+    monkeypatch.setenv("POLYARB_QUALIFICATION_RUNTIME_RECOVERY_ALLOWED_TARGETS", "")
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_qualification_connection_factory_from_env",
+        lambda: connection_factory,
+    )
+    monkeypatch.setattr(cli_control_plane, "verify_daemon_database_role", verify, raising=False)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "RollingQualificationPolicy",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must not construct policy")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "PostgresQualificationFactSource",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must not construct fact source")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "PostgresQualificationServiceStore",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("must not construct state store")
+        ),
+    )
+
+    assert (
+        cli_control_plane.main(
+            ["qualification-serve", "--enable", "--interval-seconds", "30.0", "--json"]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert events == ["verify"]
+    assert "qualification.identity.release-invalid" in captured.err
+    assert bad_release not in captured.err
+    assert "postgresql://" not in captured.err
 
 
 def test_qualification_role_contract_failure_stops_before_service_and_sanitizes(

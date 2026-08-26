@@ -104,6 +104,7 @@ def test_runtime_controller_template_is_private_observe_only_recovery_topology()
 
     assert payload["app"] == "__RUNTIME_CONTROLLER_APP__"
     assert payload["env"] == {
+        "POLYARB_DB_EXPECTED_DATABASE": "__EXPECTED_DATABASE__",
         "POLYARB_RUNTIME_ROLE": "control-plane",
         "POLYARB_RUNTIME_RECOVERY_ALLOWED_TARGETS": "__RUNTIME_RECOVERY_ALLOWED_TARGETS__",
         "POLYARB_RUNTIME_RECOVERY_MODE": "observe-only",
@@ -147,11 +148,21 @@ def test_qualification_worker_template_has_only_scoped_database_and_no_recovery_
     payload = tomllib.loads(text)
 
     assert payload["app"] == "__QUALIFICATION_WORKER_APP__"
-    assert payload["env"] == {"POLYARB_RUNTIME_ROLE": "control-plane"}
+    assert payload["env"] == {
+        "POLYARB_DB_EXPECTED_DATABASE": "__EXPECTED_DATABASE__",
+        "POLYARB_QUALIFICATION_CONFIG_ID": "__QUALIFICATION_CONFIG_ID__",
+        "POLYARB_QUALIFICATION_RELEASE_ID": "__QUALIFICATION_RELEASE_ID__",
+        "POLYARB_QUALIFICATION_ROLE_IDENTITY": "opportunity,quote,structure",
+        "POLYARB_QUALIFICATION_RUNTIME_RECOVERY_ALLOWED_TARGETS": (
+            "__RUNTIME_RECOVERY_ALLOWED_TARGETS__"
+        ),
+        "POLYARB_QUALIFICATION_RUNTIME_RECOVERY_MODE": "observe-only",
+        "POLYARB_RUNTIME_ROLE": "control-plane",
+    }
     assert payload["processes"] == {
         "qualification": (
             "python -m polyarb.cli_control_plane qualification-serve "
-            "--enable --interval-seconds 30 --json"
+            "--enable --interval-seconds 30 --batch-size 100 --json"
         )
     }
     assert payload["restart"] == [{"policy": "always"}]
