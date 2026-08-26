@@ -51,9 +51,18 @@ class FakeConnection:
 
 
 class FakeRoleFactory:
-    def __init__(self, *, failure_code: str | None = None, profile: str = "runtime-controller"):
+    def __init__(
+        self,
+        *,
+        failure_code: str | None = None,
+        profile: str = "runtime-controller",
+        role_attribute_failure: str | None = None,
+        sequence_privilege_source: str | None = None,
+    ):
         self.failure_code = failure_code
         self.profile = profile
+        self.role_attribute_failure = role_attribute_failure
+        self.sequence_privilege_source = sequence_privilege_source
         self.write_count = 0
         self.calls: list[tuple[str, object]] = []
         self.transactions: list[dict[str, object]] = []
@@ -77,6 +86,39 @@ class FakeRoleFactory:
     def answer(self, sql: str, params: object) -> object:
         if sql == "set transaction read only":
             return None
+        if "select pg_get_serial_sequence" in sql:
+            table = str(_param(params, 0))
+            column = str(_param(params, 1))
+            if (table, column) == ("public.m1_qualification_ingress_ledger", "ingest_seq"):
+                return ("public.m1_qualification_ingress_ledger_ingest_seq",)
+            if (table, column) == ("public.m1_runtime_observe_decisions", "decision_id"):
+                return ("public.m1_runtime_observe_decisions_decision_id_seq",)
+            return (None,)
+        if "where role.rolname = %s" in sql:
+            role_name = str(_param(params, 0))
+            can_login = role_name == self.session_user
+            inherits = role_name == self.session_user
+            unsafe = False
+            if self.role_attribute_failure == "login-nologin" and role_name == self.session_user:
+                can_login = False
+            if self.role_attribute_failure == "login-noinherit" and role_name == self.session_user:
+                inherits = False
+            if (
+                self.role_attribute_failure == "capability-login"
+                and role_name == self.capability_role
+            ):
+                can_login = True
+            if (
+                self.role_attribute_failure == "capability-inherit"
+                and role_name == self.capability_role
+            ):
+                inherits = True
+            if (
+                self.role_attribute_failure == "capability-unsafe"
+                and role_name == self.capability_role
+            ):
+                unsafe = True
+            return (role_name, can_login, unsafe, False, False, inherits, False, False)
         if "from pg_catalog.pg_roles as role" in sql:
             database = (
                 "wrong_database"
@@ -127,6 +169,12 @@ class FakeRoleFactory:
             if self.failure_code == "database-role.forbidden-privilege-present" and not allowed:
                 return (True,)
             return (allowed,)
+        if "has_sequence_privilege" in sql:
+            sequence = str(_param(params, 1))
+            privilege = str(_param(params, 2))
+            if self.sequence_privilege_source and privilege == "USAGE":
+                return (sequence in _forbidden_sequences(self.profile),)
+            return (False,)
         raise AssertionError(f"unexpected verifier query: {sql}")
 
 
@@ -179,6 +227,12 @@ def _allowed_functions(profile: str) -> Iterable[str]:
         "public.m1_insert_qualification_certificate("
         "text,text,text,text,jsonb,timestamptz,timestamptz,jsonb,text,text,text,text)",
     )
+
+
+def _forbidden_sequences(profile: str) -> frozenset[str]:
+    if profile == "qualification-worker":
+        return frozenset({"public.m1_qualification_ingress_ledger_ingest_seq"})
+    return frozenset({"public.m1_runtime_observe_decisions_decision_id_seq"})
 
 
 def test_database_role_contract_accepts_exact_runtime_controller_identity() -> None:
@@ -279,3 +333,70 @@ def test_database_role_contract_sanitizes_database_errors() -> None:
     assert "database-role.unavailable" in message
     assert "postgresql://" not in message
     assert "secret" not in message
+
+
+@pytest.mark.parametrize(
+    "profile,source",
+    (
+        ("runtime-controller", "public"),
+        ("runtime-controller", "inherited"),
+        ("qualification-worker", "public"),
+        ("qualification-worker", "inherited"),
+    ),
+)
+def test_database_role_contract_rejects_forbidden_sequence_privilege(
+    profile: str,
+    source: str,
+) -> None:
+    from polyarb.control_plane.db_role_contract import (
+        ConnectionFactory,
+        DatabaseRoleContractError,
+        verify_daemon_database_role,
+    )
+
+    factory = FakeRoleFactory(profile=profile, sequence_privilege_source=source)
+
+    with pytest.raises(
+        DatabaseRoleContractError,
+        match="database-role.forbidden-privilege-present",
+    ):
+        verify_daemon_database_role(
+            cast(ConnectionFactory, factory),
+            profile,
+            expected_database="role_test",
+        )
+
+    assert factory.write_count == 0
+    assert any("has_sequence_privilege" in call[0] for call in factory.calls)
+
+
+@pytest.mark.parametrize(
+    "role_attribute_failure,reason_code",
+    (
+        ("login-nologin", "database-role.login-attribute"),
+        ("login-noinherit", "database-role.login-attribute"),
+        ("capability-login", "database-role.capability-attribute"),
+        ("capability-inherit", "database-role.capability-attribute"),
+        ("capability-unsafe", "database-role.capability-attribute"),
+    ),
+)
+def test_database_role_contract_rejects_role_attribute_violations(
+    role_attribute_failure: str,
+    reason_code: str,
+) -> None:
+    from polyarb.control_plane.db_role_contract import (
+        ConnectionFactory,
+        DatabaseRoleContractError,
+        verify_daemon_database_role,
+    )
+
+    factory = FakeRoleFactory(role_attribute_failure=role_attribute_failure)
+
+    with pytest.raises(DatabaseRoleContractError, match=reason_code):
+        verify_daemon_database_role(
+            cast(ConnectionFactory, factory),
+            "runtime-controller",
+            expected_database="role_test",
+        )
+
+    assert factory.write_count == 0

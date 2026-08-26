@@ -18,6 +18,7 @@ TABLE_PRIVILEGES = (
     "REFERENCES",
     "TRIGGER",
 )
+SEQUENCE_PRIVILEGES = ("USAGE", "SELECT", "UPDATE")
 
 RUNTIME_ALLOWED = {
     "m1_runtime_controller_leases": frozenset({"SELECT", "INSERT", "UPDATE"}),
@@ -49,6 +50,21 @@ QUALIFICATION_ALLOWED = {
     "m1_recovery_actions": frozenset(),
     "m1_alert_outbox": frozenset(),
 }
+RUNTIME_SEQUENCE_COLUMNS = (
+    ("m1_runtime_controller_leases", "controller_id"),
+    ("m1_runtime_observe_decisions", "decision_id"),
+    ("m1_job_runtime_state", "job_key"),
+    ("m1_jobs", "job_key"),
+    ("m1_job_circuits", "job_key"),
+    ("m1_job_attempts", "attempt_id"),
+    ("m1_recovery_target_budgets", "controller_id"),
+    ("m1_recovery_actions", "action_id"),
+    ("m1_job_runtime_events", "event_id"),
+    ("m1_incidents", "incident_key"),
+    ("m1_incident_events", "incident_event_id"),
+    ("m1_alert_outbox", "outbox_id"),
+)
+QUALIFICATION_SEQUENCE_COLUMNS = (("m1_qualification_ingress_ledger", "ingest_seq"),)
 
 FRESHNESS_FUNCTION = (
     "public.m1_record_qualification_freshness_ingress(text,text,timestamptz,jsonb)"
@@ -77,6 +93,7 @@ class DatabaseRoleContract:
     forbidden_table_privileges: tuple[tuple[str, str], ...]
     required_function_privileges: tuple[str, ...] = ()
     forbidden_function_privileges: tuple[str, ...] = ()
+    forbidden_sequence_columns: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +103,18 @@ class DatabaseRoleVerification:
     capability_role: str
     database_name: str
     status: str = "pass"
+
+
+@dataclass(frozen=True, slots=True)
+class _RoleAttributes:
+    role_name: str
+    can_login: bool
+    superuser: bool
+    create_db: bool
+    create_role: bool
+    inherits: bool
+    replication: bool
+    bypass_rls: bool
 
 
 class DatabaseRoleContractError(RuntimeError):
@@ -124,6 +153,7 @@ ROLE_CONTRACTS = {
             CERTIFICATE_FUNCTION,
             *HARDENED_TRIGGER_FUNCTIONS,
         ),
+        forbidden_sequence_columns=RUNTIME_SEQUENCE_COLUMNS,
     ),
     "qualification-worker": DatabaseRoleContract(
         profile="qualification-worker",
@@ -136,6 +166,7 @@ ROLE_CONTRACTS = {
             GENERAL_INGRESS_FUNCTION,
             *HARDENED_TRIGGER_FUNCTIONS,
         ),
+        forbidden_sequence_columns=QUALIFICATION_SEQUENCE_COLUMNS,
     ),
 }
 _CAPABILITY_ROLES = tuple(contract.capability_role for contract in ROLE_CONTRACTS.values())
@@ -180,6 +211,7 @@ def verify_daemon_database_role(
                     _fail("database-role.login-mismatch", f"current_user:{current_user}")
                 if any((rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls)):
                     _fail("database-role.unsafe-attribute", contract.login_role)
+                _verify_role_attributes(cursor, contract)
                 _require_privilege(
                     cursor,
                     "has_database_privilege",
@@ -207,6 +239,8 @@ def verify_daemon_database_role(
                     _require_function_privilege(cursor, session_user, function_signature)
                 for function_signature in contract.forbidden_function_privileges:
                     _reject_function_privilege(cursor, session_user, function_signature)
+                for table, column in contract.forbidden_sequence_columns:
+                    _reject_sequence_privileges(cursor, session_user, table, column)
     except DatabaseRoleContractError:
         raise
     except Exception as exc:
@@ -272,6 +306,86 @@ def _scalar_bool(row: object) -> bool:
     if isinstance(row, Mapping):
         return bool(next(iter(row.values())))
     return bool(row[0])  # type: ignore[index]
+
+
+def _role_attributes(cursor: Any, role_name: str, *, missing_reason_code: str) -> _RoleAttributes:
+    cursor.execute(
+        """
+        SELECT role.rolname, role.rolcanlogin, role.rolsuper,
+               role.rolcreatedb, role.rolcreaterole, role.rolinherit,
+               role.rolreplication, role.rolbypassrls
+        FROM pg_catalog.pg_roles AS role
+        WHERE role.rolname = %s
+        """,
+        (role_name,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        _fail(missing_reason_code, role_name)
+    values = tuple(_row_value(row, index, name) for index, name in enumerate(_ROLE_COLUMNS))
+    return _RoleAttributes(
+        role_name=str(values[0]),
+        can_login=bool(values[1]),
+        superuser=bool(values[2]),
+        create_db=bool(values[3]),
+        create_role=bool(values[4]),
+        inherits=bool(values[5]),
+        replication=bool(values[6]),
+        bypass_rls=bool(values[7]),
+    )
+
+
+_ROLE_COLUMNS = (
+    "rolname",
+    "rolcanlogin",
+    "rolsuper",
+    "rolcreatedb",
+    "rolcreaterole",
+    "rolinherit",
+    "rolreplication",
+    "rolbypassrls",
+)
+
+
+def _verify_role_attributes(cursor: Any, contract: DatabaseRoleContract) -> None:
+    login = _role_attributes(
+        cursor,
+        contract.login_role,
+        missing_reason_code="database-role.login-attribute",
+    )
+    capability = _role_attributes(
+        cursor,
+        contract.capability_role,
+        missing_reason_code="database-role.capability-attribute",
+    )
+    if login.role_name != contract.login_role:
+        _fail("database-role.login-attribute", login.role_name)
+    if not login.can_login or not login.inherits:
+        _fail("database-role.login-attribute", contract.login_role)
+    if any(
+        (
+            login.superuser,
+            login.create_db,
+            login.create_role,
+            login.replication,
+            login.bypass_rls,
+        )
+    ):
+        _fail("database-role.login-attribute", contract.login_role)
+    if capability.role_name != contract.capability_role:
+        _fail("database-role.capability-attribute", capability.role_name)
+    if capability.can_login or capability.inherits:
+        _fail("database-role.capability-attribute", contract.capability_role)
+    if any(
+        (
+            capability.superuser,
+            capability.create_db,
+            capability.create_role,
+            capability.replication,
+            capability.bypass_rls,
+        )
+    ):
+        _fail("database-role.capability-attribute", contract.capability_role)
 
 
 def _check_privilege(cursor: Any, function_name: str, params: tuple[str, ...]) -> bool:
@@ -377,6 +491,32 @@ def _reject_function_privilege(cursor: Any, session_user: str, function_signatur
         _fail("database-role.forbidden-privilege-present", f"{function_signature}:EXECUTE")
 
 
+def _reject_sequence_privileges(
+    cursor: Any,
+    session_user: str,
+    table: str,
+    column: str,
+) -> None:
+    cursor.execute(
+        "SELECT pg_get_serial_sequence(%s, %s)",
+        (f"public.{table}", column),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return
+    sequence = _row_value(row, 0, "pg_get_serial_sequence")
+    if sequence is None or str(sequence) == "":
+        return
+    sequence_name = str(sequence)
+    for privilege in SEQUENCE_PRIVILEGES:
+        if _check_privilege(
+            cursor,
+            "has_sequence_privilege",
+            (session_user, sequence_name, privilege),
+        ):
+            _fail("database-role.forbidden-privilege-present", f"{sequence_name}:{privilege}")
+
+
 def _fail(reason_code: str, object_identifier: str) -> None:
     raise DatabaseRoleContractError(reason_code, object_identifier)
 
@@ -386,6 +526,7 @@ __all__ = [
     "DatabaseRoleContract",
     "DatabaseRoleContractError",
     "DatabaseRoleVerification",
+    "SEQUENCE_PRIVILEGES",
     "TABLE_PRIVILEGES",
     "verify_daemon_database_role",
 ]
