@@ -294,8 +294,9 @@ def _diff_by_path(paths: list[str], diff: str) -> dict[str, str]:
     for line in diff.splitlines(keepends=True):
         header = DIFF_HEADER_RE.match(line.rstrip("\n"))
         if header:
-            current_path = header.group(2)
-            chunks.setdefault(current_path, [])
+            path = header.group(2)
+            current_path = path
+            chunks.setdefault(path, [])
         elif current_path is not None:
             chunks[current_path].append(line)
     if not chunks and len(paths) == 1:
