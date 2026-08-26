@@ -13,6 +13,37 @@ updated: 2026-05-10
 >
 > 跨能力线永久存活。任何观察 / 抓取 / 数据落库相关讨论应预读本文。
 
+## 0.5 进程身份不能等同于数据库能力（2026-08-26）
+
+Plan 05.6-207 adds a fourth production-readiness boundary before self-healing
+can be enabled: the runtime process identity must be narrower than the schema
+owner and must be proven at startup. The model is:
+
+- LOGIN role = connection identity, password rotation, and emergency `NOLOGIN`.
+- Capability role = reviewed database authority bundle.
+- Startup contract = read-only proof that effective authority is neither
+  missing nor broader than expected.
+
+For M1 self-healing this creates two scoped pairs:
+`m1_runtime_controller_login` inherits only
+`m1_runtime_controller_capability`, and `m1_qualification_worker_login`
+inherits only `m1_qualification_worker_capability`. The runtime controller can
+read runtime/job state and write observe decisions, but it cannot mutate
+recovery actions in observe-only mode and cannot access public sequences. The
+qualification worker can read qualification/publication truth and call bounded
+freshness/certificate functions, but it cannot directly insert the qualification
+ingress ledger or use its identity sequence.
+
+Production boundary after local closure: production database `postgres` has
+revisions 022/023/024/025 applied, revision 026 is not applied, the original
+four apps are running, and the new runtime-controller/qualification-worker apps
+plus scoped production logins/secrets do not exist. The next action is an exact
+authorization package for SHA `e3c1fc83`, revision 026, the two login roles, two
+new private apps, observe-only mode, empty recovery allowlist, rollback, and the
+05.6 evidence directory. It is not direct migration or deployment.
+
+See `docs/learning/89-数据库能力角色与进程身份.md` for the teaching version.
+
 ## 0.3 失败事实与已发布事实必须分离（2026-07-27）
 
 `snapshots` / `market_view_published` 说明最近一版可读市场事实；`snapshot_attempts` 说明

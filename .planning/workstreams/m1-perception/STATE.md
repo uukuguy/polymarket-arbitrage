@@ -5,7 +5,7 @@ milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
 stopped_at: Plan 206 and H-018 are locally confirmed; production gates remain NOT RUN pending an exact authorized observe-only release
-last_updated: "2026-08-25T17:05:00+08:00"
+last_updated: "2026-08-26T18:18:45+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -79,6 +79,12 @@ progress:
   an exact capability-limited Fly recovery adapter, durable observe-only
   decision/idle facts, and a read-only zero-mutation verifier. The production
   observe, job-recovery, and process-recovery gates are explicitly NOT RUN.
+- Plan `05.6-207` is locally complete at final Task-5 SHA `e3c1fc83` through
+  additive revision 026, scoped runtime-controller and qualification-worker
+  capability roles, fail-closed daemon startup identity checks, safe login-role
+  operator tooling, exact release/config identity, private runtime-controller
+  and qualification-worker templates, and a deterministic scoped-DSN fault
+  matrix. Independent reviews for Tasks 1-5 are clean after follow-up fixes.
 - Climb H-014 cycle 15 through H-018 cycle 19 scored 100/100 on dedicated local
   gates. H-016 run `20260825-053507-h-016` covers real
   migration/trust/late-ingress/freshness/recovery-observation behavior plus
@@ -88,11 +94,14 @@ progress:
   `20260825-090136-h-018` covers isolated topology and adapter authority,
   two canonical real-PostgreSQL matrix runs, observe-only CLI/Make, and
   restart/idempotency/identity-drift behavior.
-- These changes have **not** been deployed and migrations 022/023/024/025 have not
-  been applied to production. The production topology still reflects the
-  earlier runtime and must not be described as self-healing until exact
-  deployment verification and a new automatic qualification epoch
-  complete.
+- Production truth boundary as of the 2026-08-25 audit: production database is
+  `postgres`; revisions 022/023/024/025 are applied and post-migration worker
+  health passed; `m1_qualification_ingress_ledger` had 1643 incident ingress
+  rows at audit. Revision 026 is **not** applied in production. The original
+  four apps are running; the new runtime-controller and qualification-worker
+  apps do not exist. No scoped production login changes, new secrets, recovery
+  enablement, fault mutation, observe-only window, job recovery gate, or process
+  recovery gate has run.
 
 ## Formal Acceptance
 
@@ -123,8 +132,10 @@ progress:
 ## Resume
 
 1. Before production, present one exact observe-only authorization package:
-   release SHA, six app identities, database, migration 022-025 plan, rollback,
-   and evidence directory. Do not infer this authority from generic approval.
+   final Task-5 SHA `e3c1fc83`, production database `postgres`, revision 026,
+   the two scoped login roles, the two new private apps, observe-only mode,
+   empty recovery allowlist, rollback, and evidence directory. Do not infer
+   this authority from generic approval.
 2. After authorized production enablement, let recovery confirmation open a fresh epoch
    automatically; independently verify its immutable certificate before
    marking Phase 05.6 and M1 complete.

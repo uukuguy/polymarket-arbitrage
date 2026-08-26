@@ -1,29 +1,46 @@
 {
-  "artifact_version": 1,
+  "artifact_version": 2,
   "gate": "runtime-observe-only-production",
   "status": "not-run",
-  "recorded_at": "2026-08-25T16:55:14+08:00",
-  "reason": "Exact production deployment authorization was not granted for a named release and six-app target topology.",
+  "recorded_at": "2026-08-26T18:18:45+08:00",
+  "reason": "Exact production deployment authorization has not yet been prepared or granted for final release e3c1fc83, revision 026, the two scoped login roles, the two new private apps, observe-only mode, empty recovery allowlist, rollback, and this evidence directory.",
   "local_implementation": {
-    "observe_only_commit": "8c45e76b",
-    "required_migration_revisions": ["022", "023", "024", "025"],
+    "observe_only_commit": "e3c1fc83",
+    "required_migration_revisions": ["022", "023", "024", "025", "026"],
     "runtime_controller_template_sha256": "a639ccdf733a3138c8735d51a4bd03fbe0944e35ba0b321916debbcd4449f831",
     "qualification_worker_template_sha256": "a9e5e6efbb5748f211f07e9332b58641f259f8ac0c3d45ac3a8a13c041838ff4",
     "default_recovery_mode": "observe-only",
     "local_fault_matrix": "pass",
     "production_decision_window_seconds": 0
   },
+  "production_database": {
+    "database": "postgres",
+    "applied_revisions": ["022", "023", "024", "025"],
+    "revision_026_applied": false,
+    "post_migration_worker_health": "pass",
+    "qualification_incident_ingress_rows_at_audit": 1643
+  },
   "production_operations": {
-    "migration": false,
-    "deployment": false,
-    "secret_or_role_change": false,
+    "migration_022_through_025": true,
+    "migration_026": false,
+    "new_app_deployment": false,
+    "scoped_login_role_change": false,
     "recovery_action_enablement": false,
     "fault_mutation": false
   },
   "authorization_required": {
-    "release_sha": true,
-    "six_app_identities": true,
-    "expected_database": true,
+    "release_sha": "e3c1fc83",
+    "database_revision": "026",
+    "scoped_login_roles": [
+      "m1_runtime_controller_login",
+      "m1_qualification_worker_login"
+    ],
+    "new_private_apps": [
+      "runtime-controller",
+      "qualification-worker"
+    ],
+    "observe_only_mode": true,
+    "empty_recovery_allowlist": true,
     "rollback": true,
     "evidence_directory": true
   }

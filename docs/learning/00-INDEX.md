@@ -100,6 +100,7 @@
 | 86 | [滚动资格证书与自动重开](86-滚动资格证书与自动重开.md) | contained 与 breaking 如何决定 epoch 命运 / ingest_seq cursor 为什么不丢迟到事实 / freshness 双视角 / certificate read+reverify trust 边界 / Make 入口权限 |
 | 87 | [任务自愈与滚动验收](87-任务自愈与滚动验收.md) | 任务本身事件触发与 watchdog 兜底如何汇合 / control-plane Dashboard 四面板如何读 / Telegram 与 outbox 边界 / smoke 为什么必须用已认证正文 |
 | 88 | [确定性故障矩阵与 Observe-Only 上线门](88-确定性故障矩阵与Observe-Only上线门.md) | 12 类真实 PostgreSQL 故障如何压缩验证反馈 / decision 与 idle 证据 / observe-only 零 mutation 窗口 / 精确 Fly recovery capability 边界 |
+| 89 | [数据库能力角色与进程身份](89-数据库能力角色与进程身份.md) | LOGIN role 与 capability role 如何分工 / daemon startup contract 如何拒绝权限漂移 / SECURITY DEFINER + search_path 威胁边界 / release/config identity 与生产授权顺序 |
 
 ## Phase 02.1 教学增量（2026-05）
 

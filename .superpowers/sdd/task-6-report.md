@@ -1,178 +1,187 @@
-# Structure Task 6 Report — Rollout Health and Bounded Evidence Cleanup
+# Task 6 Report: Truthful Evidence, Teaching, and Plan 207 Closure
 
 ## Status
 
-Implemented and locally verified with TDD. This task did not deploy, change the
-production read mode, touch credentials, or introduce wallet/order authority.
+Task 6 closure implemented in `.worktrees/m1-self-healing` with HEAD verified
+as `e3c1fc83` before edits.
 
-## Delivered
+No production connection or mutation was performed. No Fly deploy, app
+creation, secret installation, production login provisioning, recovery
+enablement, fault injection, restart, or downgrade was performed.
 
-- Added strict generation health for publication stage/cursor/checkpoint age,
-  pointer identity and authenticated count/hash agreement, comparison
-  receipt/progress, Quote-priority defer visibility, and retained evidence
-  pressure/cleanup blockage.
-- Added stable JSON operator commands and Make targets:
-  `structure-generation-status`, `structure-generation-backfill`,
-  `structure-generation-compare`, and `structure-generation-cleanup`.
-  Status/compare are read-only; backfill advances one `max_rows` chunk; no
-  command changes `structure_generation_read_mode`.
-- Added durable bounded cleanup progress. Candidate ownership is fixed under
-  `BEGIN IMMEDIATE` only after it is outside the current+rollback floor and its
-  immutable publication/comparison proof authenticates. Each invocation
-  deletes at most `max_rows` from exactly one component phase and can resume
-  after store/process reopen.
-- Frozen generation DELETE triggers permit only a matching active cleanup
-  progress row. INSERT/UPDATE remain frozen. After all six bulk components are
-  empty, cleanup atomically seals an append-only digest-bound receipt and
-  removes progress. It never deletes the publication, comparison receipt,
-  snapshot, sync window, or legacy proof skeleton.
-- Exact generation reads reject both active cleanup and reclaimed generations,
-  preventing an old reclaimed identity from being treated as a rollback target.
-  Generic snapshot purge remains separate and never performs generation-chain
-  reclamation.
-- Updated the living M1 manual with the exact schema deploy → bounded backfill
-  → compare PASS → generation mode → natural publication rollout, pointer
-  switch semantics, explicit legacy rollback, health interpretation, and the
-  bounded cleanup command.
+## Changed Docs / Evidence
 
-## TDD evidence
+- `docs/learning/89-数据库能力角色与进程身份.md` - new teaching chapter covering
+  LOGIN role vs capability role, startup contract, positive/negative
+  permissions, `SECURITY DEFINER`/`search_path`, release/config identity,
+  operator sequence, five adversarial checks, and FAQ.
+- `docs/learning/00-INDEX.md` - indexed chapter 89.
+- `.planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/evidence/runtime-observe-only.json`
+  - bumped to artifact version 2 and recorded the audited production boundary.
+- `.planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/05.6-207-SUMMARY.md`
+  - created Plan 207 closure summary.
+- `.planning/workstreams/m1-perception/STATE.md` - updated local Plan 207
+  closure and production boundary.
+- `.planning/JOURNAL.md` - appended the session closure and next command.
+- `.planning/threads/market-observation-architecture.md` - added the process
+  identity/capability role architecture note.
 
-Observed RED before implementation for missing store cleanup/status APIs, all
-four Make/CLI surfaces, generation health projection, stable unavailable compare
-JSON, and manual rollout/cleanup contracts.
+## Task 1-5 Evidence Used
 
-GREEN evidence:
+- Task 1: `e3293cbf..06388e2b` (`2ea4e6f4`, `06388e2b`), review clean after
+  the hardened trigger EXECUTE fix.
+- Task 2: `06388e2b..61762332` (`6ab5cb5f`, `9e9fb2a2`, `61762332`),
+  rereview clean after full role-attribute and public sequence-denial fixes.
+- Task 3: `61762332..504c188f` (`3faae36e`, `504c188f`), rereview clean after
+  Makefile `release_id` pass-through.
+- Task 4: `504c188f..ae9fe081` (`95e047a9`, `ae9fe081`), rereview approved
+  after repeat disable / reprovision semantics were fixed.
+- Task 5: `ae9fe081..e3c1fc83` (`e3c1fc83`), review clean.
 
-- Required health/Make/manual suites: all passed.
-- Expanded generation publication/readers/store migration/schema/operator
-  regression: 281 tests passed.
-- Full M1 gate: **2984 passed, 1 skipped, 1 xfailed** in 668.83 seconds.
-- `uv run ruff check src tests/m1-perception`: passed.
-- `make docs-m1-check`: passed.
-- `make planning-status`: no drift.
-- `git diff --check`: passed.
+Task review inputs read:
 
-## Remaining risk / Task 7 handoff
+- `.superpowers/sdd/task-2-review.md`
+- `.superpowers/sdd/task-2-rereview.md`
+- `.superpowers/sdd/task-3-review.md`
+- `.superpowers/sdd/task-3-rereview.md`
+- `.superpowers/sdd/task-4-review.md`
+- `.superpowers/sdd/task-4-rereview.md`
+- `.superpowers/sdd/task-5-review.md`
+- `.superpowers/sdd/progress.md` Plan 07 ledger
 
-- No production schema migration, backfill, compare, read-mode switch, natural
-  generation, cleanup, or rollback was run here. Task 7 owns exact-SHA production
-  qualification.
-- Cleanup intentionally preserves immutable proof skeleton metadata. Capacity
-  health measures unreclaimed bulk generations; SQLite file shrink/VACUUM is a
-  separate operator concern and is not performed automatically.
+## Local Matrix Evidence
 
-## Review hardening
+Task 5 matrix evidence is local-only. It used a disposable PostgreSQL
+16/testcontainers loopback path because `POLYARB_CONTROL_PLANE_TEST_DSN` was
+unset in that shell.
 
-The first independent review found no Critical issues and requested six related
-root-cause corrections. They are now implemented as one coherent authority and
-boundedness refinement:
+Recorded facts:
 
-- Status no longer shares the schema-initializing writer helper. It opens
-  SQLite with `mode=ro` plus `query_only`; compare was already read-only. Trace
-  contracts reject DDL/DML/repair, and a missing DB parent is not created.
-- Health fails Quote-priority defer or active comparison progress beyond the
-  Structure SLA. Status prefers next-generation active comparison progress over
-  the sealed current receipt, while still fully authenticating the current
-  pointer-bound receipt digest and identity.
-- Initial cleanup authentication failures append an immutable digest-bound
-  blocked observation without creating deletion authority. A later authenticated
-  start appends an authorized observation, so health sees one stable latest
-  state rather than a transient return value.
-- Cleanup progress is single-slot, composite-bound to
-  `(snapshot_id, publication_id)`, and receipt-digest authorized. Component
-  DELETE triggers require that same pair, the exact component phase, no blocked
-  reason, sealed receipt digest, complete count contract, validation hash, and
-  accepted certification marker. Forged cross-publication, wrong-phase, and
-  blocked rows cannot delete bulk evidence even through direct SQL.
-- Published history uses partial composite indexes. Pressure is a bounded
-  `fail_threshold + 1` probe with explicit lower-bound/exact semantics; retention
-  floor and oldest candidate queries are index searches. EXPLAIN contracts reject
-  table scans and temporary sort B-trees.
-- First backfill no longer performs six source `COUNT(*)` scans or generation
-  recounts after each chunk. Durable committed counts increment by each keyset
-  chunk; each component seals its exact expected count only at cursor exhaustion;
-  all six exhausted components then enter the existing bounded certification and
-  comparison chain. Trace tests run the complete `max_rows=1` backfill and find
-  no COUNT statement.
-- The manual now classifies status/compare under daily read-only and
-  backfill/cleanup under local mutation.
+- schema version: `m1-runtime-fault-matrix-v2`
+- cases: 12
+- qualification facts: 77
+- observe decisions: 12
+- recovery actions: 0
+- database leaks: 0
+- role leaks: 0
+- repeated canonical matrix output: `cmp` exit 0
+- secret scan: no runtime-controller password, qualification-worker password,
+  or `password` matches
+- qualification identity digest:
+  `f1f4abe704d859409d01ba1e060839abf47b039a5b5cd4898aed76110c6b860c`
 
-Review-fix verification:
+This is not production evidence.
 
-- Reviewer reproducer and focused/expanded suites: all passed.
-- Full M1 gate: **2997 passed, 1 skipped, 1 xfailed** in 522.59 seconds.
-- Ruff, docs contract, planning no-drift, and diff checks passed.
+## Production Truth Boundary
 
-## Second review hardening
+- Production database: `postgres`.
+- Applied production revisions: `022`, `023`, `024`, `025`.
+- Revision 026: NOT APPLIED in production.
+- 2026-08-25 audit: `qualification_incident_ingress_rows_at_audit = 1643`.
+- 2026-08-25 post-migration worker health: pass.
+- Original four apps are running.
+- New runtime-controller app: does not exist.
+- New qualification-worker app: does not exist.
+- Scoped production login role changes: none.
+- New production secrets: none.
+- Recovery action enablement: none.
+- Fault mutation: none.
+- Observe-only window: NOT RUN.
 
-The second review identified four Important authority/recovery gaps. They are
-closed without deploying or changing production read mode:
+The next production action is to prepare a fresh exact authorization package for
+final Task-5 SHA `e3c1fc83`, production database `postgres`, revision 026, the
+two scoped login roles, the two new private apps, observe-only mode, empty
+recovery allowlist, rollback, and this evidence directory. It is not direct
+migration or deploy.
 
-- A missing comparison receipt is recoverable only for the exact pre-Task5
-  state: the current pointer receipt digest is NULL, its validation hash/counts/
-  certification facts still agree with the publication, and that same
-  generation has active bounded comparison progress. Health warns only while
-  that repair checkpoint is inside the Structure SLA and fails after it; digest
-  or identity mismatches remain fail-closed.
-- Cleanup retention is now a database invariant, not only an API selection
-  rule. A progress INSERT rejects the current generation and either member of
-  the fixed current+rollback floor. Every component DELETE independently
-  rechecks the same invariant, including two newer complete, certified,
-  unreclaimed publications, so authorization cannot outlive a later floor
-  change.
-- Active comparison lookup has a partial checkpoint/publication index and a
-  bounded non-negative checkpoint predicate. Its EXPLAIN contract is an index
-  SEARCH with no table scan or temporary B-tree.
-- The pre-composite cleanup migration no longer silently drops diagnostics.
-  Existing blocked progress becomes an append-only blocked observation with
-  its original reason; invalid snapshot/publication binding becomes an explicit
-  `cleanup-progress-migration-invalid-binding` observation. Only the newest
-  valid unblocked row can acquire the single progress slot.
+## Verification Commands / Output
 
-Second-review verification:
+Command:
 
-- Focused four-gap regression: 7 tests passed.
-- Expanded publication/readers/health/migration/schema regression: passed.
-- Full M1 gate: **3003 passed, 1 skipped, 1 xfailed** in 508.59 seconds.
+```bash
+uv run pytest tests/alembic/test_024.py tests/alembic/test_025.py tests/alembic/test_026.py tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_db_role_admin.py tests/m1-perception/test_control_plane_qualification_identity.py tests/m1-perception/test_control_plane_rollout.py tests/m1-perception/test_control_plane_deployment_templates.py tests/m1-perception/test_control_plane_cli.py tests/m1-perception/test_control_plane_runtime_fault_matrix.py tests/m1-perception/test_makefile_contract.py tests/climb/test_eval_local.py -q
+```
 
-## Final identity-binding review
+Output:
 
-The final narrow review found that the pre-Task5 missing-receipt exception
-looked up repair progress by generation alone. It is now fail-closed unless one
-indexed lookup matches both the current pointer's `generation_snapshot_id` and
-`publication_id`. The same O(1) check also proves that the serialized SHA-256
-state and phase cursor are parseable and structurally resumable, including all
-prior phase hashes required by the active phase. A valid publication belonging
-to another generation cannot authorize a warning.
+```text
+..........................................
+.............................. [ 25%]
+........................................................................ [ 50%]
+........................................................................ [ 75%]
+.....................................................................    [100%]
+```
 
-Final-review verification:
+Exit code: 0.
 
-- Exact wrong-publication tamper reproduced RED, then passed GREEN.
-- Malformed digest-state and cursor-state cases fail closed; the valid same-pair
-  case remains warn inside SLA and fail after SLA.
-- Pointer-repair EXPLAIN uses an index SEARCH with no scan or temporary B-tree.
-- Focused and expanded generation/health/migration/schema suites passed.
-- Full M1 gate: **3006 passed, 1 skipped, 1 xfailed** in 507.89 seconds.
-- Ruff, docs contract, planning no-drift, and diff checks passed.
+Command:
 
-## Final resumability-field review
+```bash
+uv run ruff check alembic/versions/026_m1_runtime_scoped_roles.py src/polyarb/control_plane src/polyarb/cli_control_plane.py tests/alembic/test_026.py tests/m1-perception tools/climb/eval_local.py
+```
 
-The remaining two persisted field families are now part of the same fail-closed
-repair authority. `phase_row_count` must be an actual non-negative Python
-integer as returned by SQLite integer storage; booleans, floats, strings, and
-negative integers are rejected. The indexed pointer-repair query also reads its
-pinned legacy snapshot id, taken/finished timestamps, and market count. Inside
-one explicit read-only transaction, that tuple must exactly equal the current
-eligible legacy identity. Parse failure or drift disables the recoverable
-missing-receipt exception, so health fails while the next backfill still exposes
-the underlying error instead of being masked by a warning.
+Output:
 
-Resumability-field verification:
+```text
+All checks passed!
+```
 
-- Exact `phase_row_count='oops'` and `legacy_taken_at_ms=9999` tampers reproduced
-  RED, then passed GREEN while their next backfill attempts still raised.
-- Bool/float/string/negative count variants fail the resumability predicate.
-- Valid repair, SLA warn/fail behavior, and indexed SEARCH/no-temp-sort query
-  plan remain green.
-- Focused and expanded generation/health/migration/schema suites passed.
-- Full M1 gate: **3013 passed, 1 skipped, 1 xfailed** in 510.64 seconds.
+Command:
+
+```bash
+uv run pyright src/polyarb/control_plane/db_role_contract.py src/polyarb/control_plane/db_role_admin.py src/polyarb/control_plane/qualification_identity.py src/polyarb/cli_control_plane.py
+```
+
+Output:
+
+```text
+0 errors, 0 warnings, 0 informations
+WARNING: there is a new pyright version available (v1.1.408 -> v1.1.411).
+Please install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`
+```
+
+Command:
+
+```bash
+uv build
+```
+
+Output:
+
+```text
+Building source distribution...
+Building wheel from source distribution...
+Successfully built dist/polyarb-0.1.0.tar.gz
+Successfully built dist/polyarb-0.1.0-py3-none-any.whl
+```
+
+Command:
+
+```bash
+make planning-status
+```
+
+Output ended with:
+
+```text
+✓ no drift detected — every shipped plan has a SUMMARY.
+```
+
+Command:
+
+```bash
+python -m json.tool .planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/evidence/runtime-observe-only.json >/dev/null
+```
+
+Output: no stdout/stderr; exit code 0.
+
+`lsp_diagnostics` was not available in this tool context; `tool_search` for
+`lsp diagnostics` returned zero tools. The modified Python files relevant to
+Plan 207 were checked with the required Pyright command.
+
+## Scope Notes
+
+- `.superpowers/sdd/progress.md` was pre-existing dirty state and was not staged.
+- `.superpowers/sdd/task-5-report.md` was pre-existing dirty state and was not
+  staged.
+- `dist/` build artifacts are ignored and not staged.

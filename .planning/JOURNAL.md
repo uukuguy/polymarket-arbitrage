@@ -7,6 +7,31 @@
 > 每次会话结尾：Claude 主动追加本次进展
 > 格式：`[TYPE] 内容`，TYPE ∈ {SESSION, DECISION, LEARNING, BLOCKER, NEXT, NOTE}
 
+## 2026-08-26 — runtime scoped database role closure
+
+- [SESSION] Closed Plan 05.6-207 Task 6 in the `m1-self-healing` worktree at
+  final Task-5 SHA `e3c1fc83`: updated observe-only evidence to artifact
+  version 2, wrote teaching doc 89, indexed it, updated M1 STATE and this
+  architecture thread, and created `05.6-207-SUMMARY.md`.
+- [DECISION] Production truth boundary is explicit: production database is
+  `postgres`; revisions 022/023/024/025 are applied; revision 026 is NOT
+  APPLIED; 2026-08-25 audit saw 1643 qualification incident ingress rows and
+  post-migration worker health pass. The original four apps are running; the
+  new runtime-controller and qualification-worker apps do not exist.
+- [DECISION] No scoped production login role change, new secret, recovery
+  enablement, fault mutation, Fly deploy/app creation, restart, downgrade, or
+  observe-only window was run in this closure.
+- [LEARNING] The new mental model is split into three identities: LOGIN role
+  controls connection/password/disable lifecycle; capability role is the
+  reviewed permission bundle; startup contract proves the effective authority
+  is neither missing nor broader than expected.
+- [NEXT] Next session starts with `/gsd-resume-work --ws m1-perception`, then
+  prepares a fresh exact authorization package for final SHA `e3c1fc83`,
+  production database `postgres`, revision 026, the two scoped login roles, the
+  two new private apps, observe-only mode, empty recovery allowlist, rollback,
+  and the 05.6 evidence directory. Do not run production migration/deploy from a
+  generic approval.
+
 ## 2026-08-19 — formal runtime recovery, IPv4 pooler, and evidence dashboard
 
 - [SESSION / READ-ONLY VERIFICATION] The sole active run `m1-formal-20260818T1655Z` passed the cloud-resident fail-closed verifier at 1,530 seconds: seven immutable samples, three exact started worker identities, no counter regression, and 1,762 successful jobs. The independent exact-Machine watchdog gate also passed for all three workers, the evidence sampler, and the isolated runtime-ledger writer.
