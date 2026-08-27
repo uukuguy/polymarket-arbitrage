@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Revision 026 applied; login-creator-aware ad8a123f remaining rollout package awaits exact authorization
-last_updated: "2026-08-27T18:47:09+08:00"
+stopped_at: Revision 026 applied; ad8a123f remaining rollout explicitly authorized and fresh preflight is next
+last_updated: "2026-08-27T19:14:31+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
