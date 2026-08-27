@@ -10645,3 +10645,44 @@ forbidden.
 
 [NEXT] Repeat immediate read-only DB/Fly preflights, then execute the bounded
 rotation→both active verifies→two-app hidden-secret staging operator.
+
+### SESSION 313 — 2026-08-27 (observe-only live; qualification pgcrypto fail-closed)
+
+- [ROLLOUT] Both scoped LOGINs passed active namespace/authority verification.
+  The two authorized private apps were created with one hidden scoped DSN each.
+  Runtime Machine `6e82036dce4958` is started in observe-only mode with an empty
+  recovery allowlist; qualification Machine `876077f0274598` is retained but
+  stopped after its first tick failed closed.
+- [RACE CONTAINED] Two remote Fly deploy commands completed concurrently after
+  the first command output was truncated, briefly creating stateless runtime
+  Machine `08046d9c944dd8`. It had no mount/volume, was stopped and destroyed,
+  and the exact eight-Machine/secret-name audit now passes. No original Machine
+  changed.
+- [RUNTIME GATE] Stable controller epoch 3 passed the 1800-second read-only
+  observe verifier: 1806 seconds, 59 idle decisions, max gap 31 seconds, zero
+  current candidates, and zero recovery actions.
+- [ROOT CAUSE] Qualification created its release-bound epoch/cursor, then every
+  freshness write failed SQLSTATE `42883`. Production catalogs prove pgcrypto
+  is `extensions.digest(bytea,text)` and `public.digest` is absent, while
+  revision 026 hard-codes four `public.digest` calls across three SECURITY
+  DEFINER functions.
+- [TDD FIX] Executable migration release
+  `657174dbc73d0a6ac330e008260fd47279dbdc35` adds revision 027. It resolves
+  `pg_extension.extnamespace`, verifies the exact digest routine, rewrites only
+  expected token counts, and preserves owner/ACL/SECURITY/proconfig. A PG16
+  production analogue proves 026 RED, 027 GREEN, authority equality, and
+  027→026→027 round-trip; migration, focused qualification/role/CLI, Ruff,
+  format, climb-check and planning gates pass.
+- [EXACT REQUEST] Prepared function-only repair request
+  `evidence/authorization-657174db-pgcrypto-repair/authorization-request.json`,
+  original SHA256
+  `9d432bc674409d8fd2c3217ef2b3eb4add21c89296cd2498e1d2fb3bf22c1a69`.
+  It permits only 026→027, bounded before/after proof, one scoped freshness
+  call, and starting the existing qualification Machine. Credential, secret,
+  app/image/config, runtime-controller, original-Machine, recovery, fault and
+  trading changes remain forbidden.
+
+[NEXT] Obtain explicit approval for the exact request SHA above inside its
+window. Then repeat its immediate read-only preflights, apply only revision
+027, verify the bounded function/authority projection and scoped freshness
+call, and start only qualification Machine `876077f0274598`.

@@ -1,0 +1,87 @@
+{
+  "artifact_version": 1,
+  "prepared_at": "2026-08-27T21:55:34+08:00",
+  "status": "requested",
+  "authorization_granted": false,
+  "approved_by": null,
+  "approved_at": null,
+  "approval_text": null,
+  "authorized_request_sha256": null,
+  "requested_window": {
+    "not_before": "2026-08-27T21:55:34+08:00",
+    "not_after": "2026-08-28T03:55:34+08:00"
+  },
+  "operator": "Codex",
+  "migration_release_sha": "657174dbc73d0a6ac330e008260fd47279dbdc35",
+  "currently_deployed_application_release_sha": "6ae40683fc096a57d616b4dc774f507ad94917ae",
+  "production_database": "postgres",
+  "current_database_revision": "026",
+  "target_database_revision": "027",
+  "root_cause": "revision 026 hard-codes public.digest(bytea,text), while production pgcrypto is installed at extensions.digest(bytea,text)",
+  "local_gate_evidence": {
+    "path": "local-gates.json",
+    "sha256": "0d93e31b0f212573db7037ca74f87e645eedd683ab21827dd22979caca0907a0"
+  },
+  "production_read_only_preflight": {
+    "path": "production-read-only-preflight.json",
+    "sha256": "4678617607c73f78917e1caf5498675234008cc920a54fb0b458f0f95b6ac987"
+  },
+  "prior_failed_closed_rollout_evidence": {
+    "path": "../authorization-6ae40683-observe-only/rollout-partial-result-pgcrypto-failed-closed.json",
+    "sha256": "958bcbc1abeddc9557b074f875a34cf1134a9af2715a54689c404df2cb888226"
+  },
+  "exact_existing_targets": {
+    "runtime_controller": "polyarb-runtime-controller-m1/6e82036dce4958",
+    "qualification_worker": "polyarb-qualification-worker-m1/876077f0274598"
+  },
+  "exact_function_rewrites": [
+    {
+      "signature": "public.m1_record_qualification_ingress(text,text,text,timestamp with time zone,jsonb)",
+      "expected_digest_token_count": 1
+    },
+    {
+      "signature": "public.m1_verify_qualification_certificate_insert()",
+      "expected_digest_token_count": 2
+    },
+    {
+      "signature": "public.m1_insert_qualification_certificate(text,text,text,text,jsonb,timestamp with time zone,timestamp with time zone,jsonb,text,text,text,text)",
+      "expected_digest_token_count": 1
+    }
+  ],
+  "prerequisites": [
+    "explicit approval of this exact request hash inside its requested window",
+    "re-run revision, pgcrypto namespace, function definition, function authority, topology, hidden-secret-name, and runtime observe-only preflights immediately before mutation",
+    "require production revision exactly 026 and pgcrypto digest exactly extensions.digest(bytea,text) with public.digest absent",
+    "require the three function definitions to contain exactly 1, 2, and 1 public.digest tokens and match the recorded authority projections",
+    "require runtime controller Machine 6e82036dce4958 started, qualification Machine 876077f0274598 stopped, and all original six Machines unchanged",
+    "require the runtime controller 1800-second observe-only gate to pass with zero recovery actions before migration"
+  ],
+  "maximum_effect": [
+    "apply only Alembic revision 027 to production database postgres",
+    "rewrite exactly four public.digest tokens across the three named existing functions to the pgcrypto extension namespace discovered from pg_extension.extnamespace",
+    "preserve each rewritten function owner, ACL, SECURITY mode, and proconfig byte-for-byte in the bounded authority projection",
+    "execute one bounded active freshness recorder proof through the existing m1_qualification_worker_login scoped DSN",
+    "start only existing qualification Machine 876077f0274598 after all database verification passes",
+    "record qualification ticks and retain the existing epoch append-only",
+    "leave runtime controller Machine 6e82036dce4958 running in observe-only mode with an empty recovery allowlist"
+  ],
+  "forbidden_effects": [
+    "no database role creation, alteration, credential rotation, grant, revoke, ownership change, or search-path change",
+    "no table, column, index, trigger, sequence, row-policy, or extension creation, alteration, movement, or deletion",
+    "no Fly app creation, deletion, deploy, image change, config change, secret change, or public IP",
+    "no stop, restart, update, or replacement of runtime controller Machine 6e82036dce4958 or any original Machine",
+    "no job, process, Machine, or pointer recovery action",
+    "no fault injection",
+    "no wallet, signing, order, balance, or trade action"
+  ],
+  "rollback": [
+    "stop qualification Machine 876077f0274598 if any post-migration or first-tick gate fails",
+    "downgrade only revision 027 back to 026 if the function definition or authority projection differs from the exact contract",
+    "verify the three revision-026 function projections, runtime controller observe-only continuity, zero recovery actions, and original six Machine health",
+    "retain the initialized qualification epoch, all failed facts, logs, and evidence append-only"
+  ],
+  "schema_mutation_already_completed": false,
+  "cloud_actions_performed_by_this_request": false,
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}

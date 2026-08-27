@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: 6ae40683 session-bootstrap rollout explicitly authorized; immediate preflight is next
-last_updated: "2026-08-27T20:30:27+08:00"
+stopped_at: 657174db revision-027 repair request prepared; exact approval is next
+last_updated: "2026-08-27T22:02:59+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -55,6 +55,15 @@ progress:
   roles use hidden secrets and the Supabase IPv4 Session Pooler, not the
   unreachable direct IPv6 database endpoint.
 
+- **Observe-only production rollout:** `polyarb-runtime-controller-m1`
+  Machine `6e82036dce4958` is started with an empty recovery allowlist. Its
+  1800-second verifier passed with 59/59 idle decisions, max gap 31 seconds,
+  zero current candidates, and zero recovery actions. Existing
+  `polyarb-qualification-worker-m1/876077f0274598` is stopped after its first
+  tick failed closed at the revision-026 pgcrypto namespace boundary; both new
+  app-scoped hidden DSNs remain installed and no ordinary credential env key is
+  present.
+
 ## Local Event-Driven Recovery Closure (2026-08-25)
 
 - Plans `05.6-201` and `05.6-202` now make all eight transactional task
@@ -80,7 +89,7 @@ progress:
   decision/idle facts, and a read-only zero-mutation verifier. The production
   observe, job-recovery, and process-recovery gates are explicitly NOT RUN.
 - Plan `05.6-207` is locally complete after production-boundary remediation. Corrected
-  executable release `ff4c8093d55a6363f7dcb26f6ffe2113e260a9ba`
+  executable release `657174dbc73d0a6ac330e008260fd47279dbdc35`
   schema-qualifies both daemon paths and catalog-enumerates a closed effective
   authority envelope across every non-system namespace, relation, sequence,
   ownership, SECURITY DEFINER routine, database CREATE, search-path setting and
@@ -125,6 +134,19 @@ progress:
   connection, and closes on bootstrap failure. A real pooler probe returned
   exactly `pg_catalog,public` and `[pg_catalog, public]`. H-024 cycle 27 run
   `20260827-121528-h-024` scored 100/100 across all nine nodes.
+- The authorized `6ae40683` rollout actively verified both scoped identities,
+  created both private apps, installed exactly one hidden scoped DSN per app,
+  and deployed one Machine per app. A concurrent late deploy briefly created a
+  second stateless runtime controller; it was stopped and destroyed, restoring
+  the exact topology. Runtime then passed the 1806-second zero-action gate.
+- Qualification initialization committed one epoch/cursor, but its first
+  freshness write failed with SQLSTATE `42883`: revision 026 calls
+  `public.digest`, while production pgcrypto is installed in `extensions`.
+  Revision 027 at `657174db` dynamically resolves `pg_extension.extnamespace`
+  and rewrites exactly four tokens across three functions without changing
+  owner, ACL, SECURITY mode, or proconfig. The production-like PG16
+  `extensions` test and 027→026→027 round trip pass. Production remains 026
+  until the new exact request is approved.
 - Climb H-020 cycle 23 run `20260827-085048-h-020` scored 100/100 and introduced
   `make control-plane-fly-topology-audit`. Its read-only production proof shows
   all original Machines started, no credential-bearing ordinary env key on the
@@ -154,18 +176,19 @@ progress:
   nine-node production-enablement profile and confirms the immutable exact
   observe-only authorization envelope. It performs no external submission or
   production mutation.
-- Production truth boundary as of the 2026-08-27 19:49 +08:00 audit: production database is
-  `postgres`; revision 026 is applied with exactly two NOLOGIN capability roles
-  and two safe scoped LOGIN roles. The full admin authority preflight is ready,
-  successful attempts reached 92111, the control API health endpoint is 200,
-  and all six original Machines are started. The new runtime-controller and
-  qualification-worker apps do not exist. No new-app secret, recovery
-  enablement, fault mutation, observe-only window, job recovery gate, or process
-  recovery gate has run.
+- Production truth boundary as of `2026-08-27T22:02:59+08:00`: database
+  `postgres` remains revision 026; the original six Machines and runtime
+  controller are started; qualification Machine is stopped; all required
+  hidden secret names and the exact eight-Machine topology audit pass. Runtime
+  observe-only has 1806 seconds of continuous zero-action evidence. No recovery
+  enablement, recovery action, fault mutation, wallet, signing, order, balance,
+  or trade action has run.
 
 ## Formal Acceptance
 
-- **Active qualifying run:** none. `m1-formal-20260823T1335Z` is immutable
+- **Active qualifying run:** the release-bound production epoch was initialized
+  at `2026-08-27T13:35:42Z`, but qualification is stopped at the pgcrypto
+  namespace boundary and has no accepted facts yet. `m1-formal-20260823T1335Z` is immutable
   historical evidence; replay found the first breaking `lease.expired` fact at
   `2026-08-23T16:22:21Z`, so its earlier 338-second liveness pass cannot become
   final acceptance.
@@ -187,23 +210,20 @@ progress:
 | Structure/Quote cloud worker migration | three independent fixed-role workers and advancing durable successes | complete |
 | Process-loss recovery | fenced R2-before-receipt takeover evidence for both job classes | complete |
 | Immediate fault visibility | Fly watchdog plus independent Cloudflare supervisor, Telegram and source-aware Dashboard incident/recovery ledger | complete |
-| Continuous final-topology acceptance | rolling epoch + immutable certificate | local mechanism plus deterministic enablement complete; blocked on exact authorized production enablement |
+| Continuous final-topology acceptance | rolling epoch + immutable certificate | runtime 1800-second observe gate passed; blocked on exact 027 authorization, worker restart, and 86,400-second certificate |
 
 ## Resume
 
-1. Obtain explicit approval for the fresh exact remaining observe-only rollout package:
-   corrected application release `6ae40683fc096a57d616b4dc774f507ad94917ae`,
-   production database `postgres`, revision 026,
-   minimal password rotation for the two existing scoped LOGIN roles, active
-   identity verification, the two new private apps, observe-only mode,
-   empty recovery allowlist, rollback, and evidence directory. Do not infer
-   this authority from generic approval.
-2. Treat `d050c829`, `db51b21d`, `03a2deee`, `ad8a123f`, and `ff4c8093`
-   authorizations as consumed evidence. Revision 026 and both LOGIN envelopes
-   stay applied; all unshipped credentials are not recoverable and must be
-   rotated.
-   The separate runtime-event-writer remediation is complete and verified; do
-   not rotate it again during the corrected rollout.
-3. After authorized production enablement, let recovery confirmation open a fresh epoch
-   automatically; independently verify its immutable certificate before
-   marking Phase 05.6 and M1 complete.
+1. Obtain explicit approval for
+   `evidence/authorization-657174db-pgcrypto-repair/authorization-request.json`,
+   original SHA256
+   `9d432bc674409d8fd2c3217ef2b3eb4add21c89296cd2498e1d2fb3bf22c1a69`.
+   Do not infer this function-only migration and qualification restart authority
+   from the consumed `6ae40683` rollout approval.
+2. After approval, repeat the revision/function/topology preflight, apply only
+   revision 027, prove owner/ACL/SECURITY/proconfig equality and one active
+   scoped freshness write, then start only qualification Machine
+   `876077f0274598`. Runtime controller `6e82036dce4958` must not restart.
+3. Let the existing production epoch accumulate for 86,400 seconds and
+   independently reverify its immutable certificate before marking Phase 05.6
+   and M1 complete. Fault and recovery mutation remain separately gated.

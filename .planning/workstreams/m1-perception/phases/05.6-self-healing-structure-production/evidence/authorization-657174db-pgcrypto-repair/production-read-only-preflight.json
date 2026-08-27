@@ -1,0 +1,69 @@
+{
+  "artifact_version": 1,
+  "recorded_at": "2026-08-27T22:02:59+08:00",
+  "status": "pass",
+  "database": "postgres",
+  "database_revision": "026",
+  "target_revision": "027",
+  "pgcrypto": {
+    "schema": "extensions",
+    "qualified_digest": "extensions.digest(bytea,text)",
+    "public_digest": null
+  },
+  "qualification_functions": [
+    {
+      "signature": "public.m1_record_qualification_ingress(text,text,text,timestamp with time zone,jsonb)",
+      "public_digest_calls": 1,
+      "definition_sha256": "c8ea1d9f5b83410db9fd929eb00857e7538a23dfdb9d803111e71466926f8d81",
+      "authority_projection_sha256": "b2a77a006433204aa5bda85af0c4fbb1e416454670e7a0cd23506de0630a26fe"
+    },
+    {
+      "signature": "public.m1_verify_qualification_certificate_insert()",
+      "public_digest_calls": 2,
+      "definition_sha256": "26c160942d673c4841d7a016f5a598c77af4d3e8614d1db6c222a9d4120dab75",
+      "authority_projection_sha256": "b236c5c8b57a1db7e03517594abd05c6b89544c214956734e7c3cc19e2812a7a"
+    },
+    {
+      "signature": "public.m1_insert_qualification_certificate(text,text,text,text,jsonb,timestamp with time zone,timestamp with time zone,jsonb,text,text,text,text)",
+      "public_digest_calls": 1,
+      "definition_sha256": "712b35ca603f1ad0bf564b04da4ea5174d7eba680e22b5c3042e782e5b5f22ca",
+      "authority_projection_sha256": "7d0e87c35b652f0baea46efcfa83857fa10c05069822fa338d7dbd20ef722db8"
+    }
+  ],
+  "runtime_observe": {
+    "controller_id": "m1-runtime-reconciler",
+    "controller_owner_id": "runtime-reconcile-service",
+    "controller_epoch": 3,
+    "decision_count": 59,
+    "first_at": "2026-08-27T13:32:27.233627+00:00",
+    "latest_at": "2026-08-27T14:02:34.206634+00:00",
+    "recovery_action_count": 0,
+    "minimum_1800_second_gate": {
+      "status": "pass",
+      "duration_seconds": 1806,
+      "idle_count": 59,
+      "current_candidate_count": 0,
+      "max_gap_seconds": 31,
+      "latest_decision_digest": "eacf27e94253402af3c81d5cc84fab343e30cc7ad18fd059da34b428839f30d8"
+    }
+  },
+  "qualification": {
+    "release_id": "6ae40683fc096a57d616b4dc774f507ad94917ae",
+    "config_id": "sha256:843eb3b3d0cc5e97df6c2f0a036510ddd5eb969cb8f10d5bae7f61315c11eab3",
+    "epoch_count": 1,
+    "machine_id": "876077f0274598",
+    "machine_state": "stopped"
+  },
+  "exact_topology_audit": {
+    "status": "pass",
+    "machine_count": 8,
+    "started_machine_count": 7,
+    "stopped_machine_count": 1,
+    "qualification_hidden_secret_present": true,
+    "runtime_hidden_secret_present": true,
+    "runtime_event_writer_required_secrets_present": true,
+    "ordinary_credential_env_keys_present": false
+  },
+  "raw_provider_bodies_recorded": false,
+  "secret_values_recorded": false
+}

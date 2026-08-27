@@ -1,0 +1,59 @@
+{
+  "artifact_version": 1,
+  "recorded_at": "2026-08-27T21:55:34+08:00",
+  "authorized_request_sha256": "9e967eca0f56cbd7d34d5650cd0f8b9f7686059e6ee849239fd005a3534f734b",
+  "release_sha": "6ae40683fc096a57d616b4dc774f507ad94917ae",
+  "status": "failed-closed",
+  "runtime_controller": {
+    "app": "polyarb-runtime-controller-m1",
+    "machine_id": "6e82036dce4958",
+    "state": "started",
+    "recovery_mode": "observe-only",
+    "recovery_allowed_targets": [],
+    "decision_projection": {
+      "controller_epoch": 3,
+      "decision_count_at_preflight": 45,
+      "first_at": "2026-08-27T13:32:27.233627+00:00",
+      "latest_at": "2026-08-27T13:55:18.356438+00:00",
+      "recovery_action_count": 0,
+      "action": null,
+      "pointer_mutations": 0
+    }
+  },
+  "deploy_race_cleanup": {
+    "cause": "two remote deploy commands completed concurrently after the first command output was truncated",
+    "extra_machine_id": "08046d9c944dd8",
+    "extra_machine_had_mount_or_volume": false,
+    "extra_machine_stopped": true,
+    "extra_machine_destroyed": true,
+    "retained_machine_id": "6e82036dce4958"
+  },
+  "qualification_worker": {
+    "app": "polyarb-qualification-worker-m1",
+    "machine_id": "876077f0274598",
+    "state": "stopped",
+    "epoch_initialized": true,
+    "tick_status": "failed-closed",
+    "sanitized_service_reason": "qualification-service.tick-failed",
+    "diagnostic_sqlstate": "42883",
+    "root_cause": "revision 026 calls public.digest(bytea,text), but production pgcrypto is installed as extensions.digest(bytea,text)",
+    "production_pgcrypto_schema": "extensions",
+    "public_digest_present": false,
+    "hidden_scoped_secret_present": true
+  },
+  "topology": {
+    "exact_eight_machine_audit_status": "pass",
+    "original_six_machines_unchanged": true,
+    "runtime_controller_state": "started",
+    "qualification_worker_state": "stopped",
+    "ordinary_credential_env_keys_present": false
+  },
+  "forbidden_effects_observed": [],
+  "schema_revision": "026",
+  "schema_mutation_after_authorized_026": false,
+  "recovery_actions_created": 0,
+  "fault_injection_performed": false,
+  "trading_effects_performed": false,
+  "raw_provider_bodies_recorded": false,
+  "secret_values_recorded": false
+}

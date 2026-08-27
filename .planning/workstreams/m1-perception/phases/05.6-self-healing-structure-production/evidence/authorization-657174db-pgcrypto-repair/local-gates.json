@@ -1,0 +1,56 @@
+{
+  "artifact_version": 1,
+  "recorded_at": "2026-08-27T21:55:34+08:00",
+  "release_sha": "657174dbc73d0a6ac330e008260fd47279dbdc35",
+  "status": "pass",
+  "artifacts": {
+    "alembic/versions/027_m1_qualification_pgcrypto_namespace.py": "sha256:921d3285e754b123893816d9a49d6d09b14d5be5e800c99fa45abee92fb849fd",
+    "tests/alembic/test_027.py": "sha256:c6b9319974a31fe5b0bedd005e062586e0f4198a2d31730ce0f913ffa6f3f66a"
+  },
+  "gates": [
+    {
+      "command": "uv run alembic heads",
+      "result": "027 (head)",
+      "status": "pass"
+    },
+    {
+      "command": "uv run pytest tests/alembic/test_024.py tests/alembic/test_026.py tests/alembic/test_027.py -q",
+      "result": "pass",
+      "status": "pass"
+    },
+    {
+      "command": "uv run pytest tests/alembic/test_027.py tests/m1-perception/test_control_plane_qualification_service.py tests/m1-perception/test_control_plane_qualification.py tests/m1-perception/test_control_plane_qualification_identity.py tests/m1-perception/test_control_plane_deployment_templates.py tests/m1-perception/test_control_plane_db_role_contract.py tests/m1-perception/test_control_plane_cli.py -q",
+      "result": "pass",
+      "status": "pass"
+    },
+    {
+      "command": "uv run ruff check alembic/versions/027_m1_qualification_pgcrypto_namespace.py tests/alembic/test_027.py tests/m1-perception/test_control_plane_cli.py",
+      "result": "All checks passed!",
+      "status": "pass"
+    },
+    {
+      "command": "uv run ruff format --check alembic/versions/027_m1_qualification_pgcrypto_namespace.py tests/alembic/test_027.py tests/m1-perception/test_control_plane_cli.py",
+      "result": "3 files already formatted",
+      "status": "pass"
+    },
+    {
+      "command": "make planning-status",
+      "result": "no drift detected",
+      "status": "pass"
+    }
+  ],
+  "production_like_postgres_16": {
+    "pgcrypto_schema": "extensions",
+    "revision_026_scoped_call": "UndefinedFunction public.digest",
+    "revision_027_scoped_call": "pass",
+    "authority_projection_equal": true,
+    "authority_projection_fields": [
+      "owner",
+      "acl",
+      "security_definer",
+      "proconfig"
+    ],
+    "roundtrip": "027->026->027 pass"
+  },
+  "secret_values_recorded": false
+}
