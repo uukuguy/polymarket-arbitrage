@@ -10730,3 +10730,63 @@ inside its window. Then repeat the read-only 027/function/runtime/topology
 preflights, start only coordinator `e82d1220b2d138`, prove its bounded gate,
 start only qualification `876077f0274598`, prove its bounded gate, and resume
 the 86,400-second rolling certificate.
+
+### SESSION 315 — 2026-08-28 (public.digest exhaustion fully diagnosed and repaired)
+
+- [AUTHORIZED SCOPE] The user explicitly approved every authorization needed
+  to identify and solve the repeated `public.digest` retry exhaustion. The
+  bound image-rollout request records original SHA256
+  `5382223d0e0bc58e32b7ca002c18f005c97b2185a5b08544ea73b9f644923680`.
+- [ROOT CAUSE / TWO LAYERS] The upstream task failure was the original failure.
+  Its incident/recovery insert fired revision-024 qualification projection;
+  revision 026 then called absent `public.digest`, raised SQLSTATE 42883, and
+  terminated the old-image process until Fly exhausted ten retries. Revision
+  027 removed that secondary exception. A separate production image audit found
+  all three original workers still on the August 18 image, predating Plan 201+
+  runtime-event instrumentation, so the runtime controller and qualification
+  runtime source remained blind even after the SQL repair.
+- [IMAGE-ONLY ROLLOUT] A local amd64 image bound to executable release
+  `657174dbc73d0a6ac330e008260fd47279dbdc35` passed 87 focused tests, Ruff,
+  UID/revision/CLI/runtime-code smoke, then was pushed as immutable digest
+  `sha256:95131c6560f666d470077dea7638f951120fa4ce22b6c5da057e85198966127f`.
+  Coordinator, Structure range and Quote batch were rolled sequentially on the
+  same Machine IDs. Their image-excluded config hashes remained exactly
+  `ad1beac6…437c`, `1b9b8fcd…90e7`, and `431fcfe6…227d9`.
+- [CHAIN TRUTH] Coordinator canary passed 207 seconds with 172 runtime events,
+  172 matching qualification runtime ingress rows and a real `job.succeeded`.
+  Structure range produced its own runtime events after a zero-lease graceful
+  stop/update/start. Quote had no pending job and repeatedly returned healthy
+  idle ticks; no artificial production job was injected. By `16:40:28Z`, the
+  two active task roles had 2,202 runtime events and runtime ingress had reached
+  2,200 rows / ingest sequence 6834 without UndefinedFunction.
+- [DATABASE PROOF] Production is revision 027. The three function definitions
+  contain zero `public.digest` and exactly four `extensions.digest` calls with
+  hashes `907bc00a…5aa4c`, `bf6bdce0…592af`, and `7d58cf75…3fbf1`; their
+  owner/ACL/SECURITY/proconfig projection remains unchanged.
+- [QUALIFICATION GATE] Existing Machine `876077f0274598` started after worker
+  gates. At 401 seconds its new epoch was correctly `recovering`, cursor 1802,
+  evidence gap 0, with 1,199 healthy recovery observations. The prior bounded
+  stop created a real continuity break, so append-only recovery rather than
+  silent epoch splicing is correct. The service remains started and draining
+  backlog.
+- [OBSERVE-ONLY GATE] Controller epoch 3 passed at 11,132 seconds / 386
+  decisions, max gap 32 seconds, one healthy current candidate and zero recovery
+  actions. One intermediate verifier invocation sampled a new job before the
+  controller's next durable decision and failed parity closed; the next normal
+  controller tick converged and the unchanged verifier passed.
+- [FINAL TOPOLOGY] Exact eight-Machine/required-secret-name audit passed with
+  every expected Machine started, exactly three workers on the target digest,
+  and no unexpected Machine. No recovery enablement/action, fault injection,
+  credential/role/secret mutation, wallet, signing, order, balance or trade
+  action occurred.
+- [TEACHING / EVIDENCE] Added chapter 91 on secondary failures, trigger chains,
+  extension namespaces and running-image drift; architecture thread §2.37 now
+  makes deployment identity part of chain-truth. Full bounded result is in
+  `evidence/authorization-657174db-worker-image-rollout/rollout-result.json`.
+
+[NEXT] From the scoped environment, run `make qualification-status`; keep the
+qualification Machine, all three workers and the observe-only controller
+running while the cursor drains backlog. Once the live accumulating epoch
+begins, monitor it through 86,400 continuous seconds, then run
+`make qualification-certificates` and independently reverify the immutable
+certificate before marking Phase 05.6 and M1 complete.

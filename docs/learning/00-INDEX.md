@@ -102,6 +102,7 @@
 | 88 | [确定性故障矩阵与 Observe-Only 上线门](88-确定性故障矩阵与Observe-Only上线门.md) | 12 类真实 PostgreSQL 故障如何压缩验证反馈 / decision 与 idle 证据 / observe-only 零 mutation 窗口 / 精确 Fly recovery capability 边界 |
 | 89 | [数据库能力角色与进程身份](89-数据库能力角色与进程身份.md) | LOGIN/capability 分工 / catalog-enumerated 闭集权限 / canonical app-scoped DSN / SECURITY DEFINER 和降级 ACL / release identity 与生产授权顺序 |
 | 90 | [可达权限与无秘密拓扑审计](90-可达权限与无秘密拓扑审计.md) | schema→object 可达链 / Supabase ambient ACL / 全局 namespace 门 / raw provider JSON 收缩 / 普通 credential env fail-closed |
+| 91 | [二次故障与运行镜像漂移](91-二次故障与运行镜像漂移.md) | 原始故障与二次故障 / trigger chain / pgcrypto namespace / image digest 漂移 / runtime-event chain-truth |
 
 ## Phase 02.1 教学增量（2026-05）
 

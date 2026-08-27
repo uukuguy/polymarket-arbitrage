@@ -1864,3 +1864,33 @@ success is not user receipt/read evidence.
   `extensions` schema, prove revision 026 fails for the scoped qualification
   login, then prove 027 succeeds and survives a 027→026→027 round trip. A
   default local `public` install cannot expose this provider-specific defect.
+
+### §2.37 Failure reporting can become the process-killing secondary failure (2026-08-28)
+
+- The first business failure and the final process exception need not be the
+  same defect. Here an old worker's upstream task failed first; recording its
+  incident/recovery facts fired qualification projection, whose missing
+  `public.digest` dependency raised SQLSTATE 42883 and terminated the process.
+  Fly then repeated that deterministic secondary failure until ten retries were
+  exhausted. Diagnosis must preserve both links instead of naming only the last
+  stack trace.
+- A database repair does not repair an old running image. Revision 027 made the
+  trigger chain safe, but the three 2026-08-18 worker images still predated
+  task-runtime instrumentation. They could run without crashing while leaving
+  runtime reconciliation and qualification's runtime source blind.
+- Deployment identity is therefore part of chain-truth: bind the reviewed
+  source release to an immutable image digest, verify that exact digest on each
+  Machine, and hash the config projection with only `image` removed before and
+  after. A healthy process on an unreviewed digest is not evidence that the
+  intended observation chain exists.
+- Runtime-event proof must follow real workload semantics. An idle quote pool
+  correctly emits no job lifecycle event; coordinator and Structure jobs proved
+  the shared append→trigger→qualification path. Injecting an artificial
+  production job merely to make a counter non-zero would expand the effect and
+  weaken the evidence boundary.
+- Current-candidate parity is intentionally fail-closed and can sample the
+  small interval after a new job becomes visible but before the controller's
+  next durable decision. Do not waive the gate. Require an active lease, the
+  next scheduled decision, a bounded max gap, deterministic replay and zero
+  recovery actions; a genuine stalled controller will not converge on the next
+  tick.

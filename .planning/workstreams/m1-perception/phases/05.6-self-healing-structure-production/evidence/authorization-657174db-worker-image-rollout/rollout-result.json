@@ -1,0 +1,144 @@
+{
+  "artifact_version": 1,
+  "completed_at": "2026-08-28T00:41:30+08:00",
+  "status": "pass",
+  "authorization_request": "authorization-request.json",
+  "authorized_request_sha256": "5382223d0e0bc58e32b7ca002c18f005c97b2185a5b08544ea73b9f644923680",
+  "source_release_sha": "657174dbc73d0a6ac330e008260fd47279dbdc35",
+  "root_cause": {
+    "primary": "all three original worker Machines still used the 2026-08-18 image, which predates the runtime-event instrumentation consumed by the runtime controller and rolling qualification",
+    "secondary": "an old-image upstream job failure inserted incident/recovery evidence; the revision-024 projection trigger then called the revision-026 qualification ingress function, whose hard-coded public.digest was absent in Supabase and raised SQLSTATE 42883 until Fly exhausted ten restarts",
+    "why_revision_027_alone_was_insufficient": "revision 027 removed the terminating secondary exception, but the old worker image still emitted no task lifecycle runtime events and therefore left observe-only recovery and runtime qualification blind",
+    "resolved_by": [
+      "production revision 027 dynamically binds digest to the installed pgcrypto extension namespace",
+      "the same three worker Machines were rolled sequentially to the reviewed runtime-event image without changing their non-image configuration",
+      "the existing qualification Machine was restarted only after worker and observe-only gates passed"
+    ]
+  },
+  "database": {
+    "revision": "027",
+    "pgcrypto_schema": "extensions",
+    "functions": [
+      {
+        "signature": "m1_record_qualification_ingress(text,text,text,timestamp with time zone,jsonb)",
+        "public_digest_count": 0,
+        "extensions_digest_count": 1,
+        "definition_sha256": "907bc00aa8774d242d7725d4b15265a4267b4ea553193e2ed0107b26c9c5aa4c"
+      },
+      {
+        "signature": "m1_verify_qualification_certificate_insert()",
+        "public_digest_count": 0,
+        "extensions_digest_count": 2,
+        "definition_sha256": "bf6bdce0dee68cd73213f733405a5a00ff90508fd1353c0c88326fe2e83592af"
+      },
+      {
+        "signature": "m1_insert_qualification_certificate(text,text,text,text,jsonb,timestamp with time zone,timestamp with time zone,jsonb,text,text,text,text)",
+        "public_digest_count": 0,
+        "extensions_digest_count": 1,
+        "definition_sha256": "7d58cf752a57e91820509b7ec62241247c49c0f3591ad79c27392bd84c03fbf1"
+      }
+    ],
+    "function_authority_projection": "unchanged across revision 027",
+    "recovery_action_count": 0
+  },
+  "worker_rollout": {
+    "old_image_digest": "sha256:87ee7acaba1a1549436355477855bebb9b0dca919cc4a7ee559ec25aacc714f7",
+    "target_image_digest": "sha256:95131c6560f666d470077dea7638f951120fa4ce22b6c5da057e85198966127f",
+    "strategy": "sequential same-Machine image-only update after graceful stop and zero active lease where applicable",
+    "machines": [
+      {
+        "machine_id": "e82d1220b2d138",
+        "process_group": "coordinator",
+        "final_state": "started",
+        "non_image_config_projection_sha256_before_and_after": "ad1beac61d0d26e83ac2a8962af6e1131cc0bcc599a042b71f9c3710122f437c",
+        "canary_duration_seconds": 207,
+        "canary_runtime_event_count": 172,
+        "matching_runtime_ingress_count": 172,
+        "job_succeeded_present": true
+      },
+      {
+        "machine_id": "683e46ea500dd8",
+        "process_group": "structure_range",
+        "final_state": "started",
+        "non_image_config_projection_sha256_before_and_after": "1b9b8fcd556d9222d7632b9243675a4568fdfb142375c61e8b45aab9168f90e7",
+        "first_worker_specific_runtime_event_count": 29
+      },
+      {
+        "machine_id": "4d895231f66748",
+        "process_group": "quote_batch",
+        "final_state": "started",
+        "non_image_config_projection_sha256_before_and_after": "431fcfe63c846ba4713fae11bbb6715720a8a5caedc0d972e8045cb1b2b227d9",
+        "runtime_event_count": 0,
+        "runtime_event_explanation": "no quote job was pending during the bounded gate; repeated post-start ticks were healthy idle and shared instrumentation was proved by the other two roles"
+      }
+    ],
+    "machine_ids_preserved": true,
+    "non_image_configuration_preserved": true
+  },
+  "runtime_evidence_at_2026_08_27T16_40_28Z": {
+    "runtime_event_counts": {
+      "fly-control-plane-coordinator": 1348,
+      "fly-control-plane-structure-range": 854
+    },
+    "qualification_ingress_counts": {
+      "freshness": 78,
+      "incident": 4556,
+      "runtime": 2200
+    },
+    "latest_runtime_ingress_seq": 6834,
+    "latest_runtime_ingested_at": "2026-08-27T16:40:27+00:00"
+  },
+  "qualification_gate": {
+    "machine_id": "876077f0274598",
+    "final_state": "started",
+    "epoch_id": "epoch-f3d2796cb4028a6a48172ff6",
+    "state": "recovering",
+    "duration_seconds": 401,
+    "evidence_gap_seconds": 0,
+    "cursor_ingest_seq": 1802,
+    "recovery_observation_count": 1199,
+    "last_recovery_observation_reason": "healthy",
+    "interpretation": "the prior authorized stop invalidated continuity; the new epoch correctly recovers append-only backlog instead of silently joining the old epoch"
+  },
+  "observe_only_gate": {
+    "controller_id": "m1-runtime-reconciler",
+    "controller_epoch": 3,
+    "status": "pass",
+    "duration_seconds": 11132,
+    "decision_count": 386,
+    "idle_count": 314,
+    "current_candidate_count": 1,
+    "max_gap_seconds": 32,
+    "recovery_action_count": 0,
+    "latest_observed_at": "2026-08-27T16:37:59.580820+00:00",
+    "latest_decision_digest": "54dc095639e64fc5f8182498bfd8587fb21b6305ef7f18a06c2c0603dbe0c314",
+    "transient_failed_closed_sample": "one verification sampled a newly visible job before the next controller decision and failed current-candidate parity; the next controller turn produced the decision and the unchanged gate passed"
+  },
+  "final_topology": {
+    "status": "pass",
+    "expected_machine_count": 8,
+    "all_expected_machines_started": true,
+    "required_secret_names_present": true,
+    "worker_target_digest_count": 3,
+    "unexpected_machine_count": 0
+  },
+  "failed_closed_or_no_effect_attempts": [
+    "the remote Depot build-only command stalled at 224 KB for 196 seconds and was cancelled before any release or Machine mutation",
+    "a Fly lease update returned EOF before a successful serial retry; state and projection were read before continuing",
+    "an invalid double-digest image identifier was rejected before mutation",
+    "the transient observe-only parity sample failed closed and was not treated as a pass"
+  ],
+  "forbidden_effects_observed": {
+    "new_or_deleted_machine": false,
+    "non_worker_image_change": false,
+    "non_image_worker_config_change": false,
+    "database_role_or_secret_change": false,
+    "runtime_recovery_enablement": false,
+    "recovery_action": false,
+    "fault_injection": false,
+    "wallet_signing_order_balance_or_trade_action": false
+  },
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false,
+  "remaining_acceptance": "qualification must drain backlog, open an accumulating epoch, cover 86400 continuous seconds, issue an immutable certificate, and pass independent certificate reverification before M1 completion"
+}
