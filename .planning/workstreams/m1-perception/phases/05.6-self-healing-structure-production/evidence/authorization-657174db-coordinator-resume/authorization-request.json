@@ -1,12 +1,12 @@
 {
   "artifact_version": 1,
   "prepared_at": "2026-08-27T22:25:22+08:00",
-  "status": "requested",
-  "authorization_granted": false,
-  "approved_by": null,
-  "approved_at": null,
-  "approval_text": null,
-  "authorized_request_sha256": null,
+  "status": "authorized",
+  "authorization_granted": true,
+  "approved_by": "user",
+  "approved_at": "2026-08-27T23:47:15+08:00",
+  "approval_text": "要找出同一 public.digest 缺陷耗尽重试并停止的原因并解决，需要的授权都批准。",
+  "authorized_request_sha256": "d038ec1d69244522f62a4414ac3d18e10f4ee43b3a372760edae6514380a3924",
   "requested_window": {
     "not_before": "2026-08-27T22:25:22+08:00",
     "not_after": "2026-08-28T04:25:22+08:00"
