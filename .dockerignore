@@ -21,3 +21,4 @@ node_modules/
 # to every remote Docker context.
 dashboard/
 .superpowers/
+dist/

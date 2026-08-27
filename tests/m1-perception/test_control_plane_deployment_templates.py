@@ -8,6 +8,16 @@ from polyarb.control_plane.db_role_admin import PROFILE_DSN_ENV
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_docker_build_context_excludes_local_distribution_artifacts() -> None:
+    ignored = {
+        line.strip()
+        for line in (ROOT / ".dockerignore").read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert "dist/" in ignored
+
+
 def test_control_api_template_has_only_postgres_read_process_and_http_health() -> None:
     payload = tomllib.loads(
         (ROOT / "deploy/control-plane/fly-control-api.toml.template").read_text()
