@@ -95,6 +95,10 @@ def test_pg16_delegated_createrole_adds_noninheriting_creator_admin_membership()
                 "CREATE ROLE m1_delegated_capability NOLOGIN NOSUPERUSER "
                 "NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
             )
+            delegated.execute(
+                "CREATE ROLE m1_delegated_login LOGIN NOSUPERUSER "
+                "NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS"
+            )
             assert delegated.execute(
                 "SELECT membership.admin_option, membership.inherit_option, "
                 "membership.set_option, grantor.rolname "
@@ -105,7 +109,18 @@ def test_pg16_delegated_createrole_adds_noninheriting_creator_admin_membership()
                 "WHERE member.rolname = 'm1_delegated_admin' "
                 "AND granted.rolname = 'm1_delegated_capability'"
             ).fetchone() == (True, False, False, "test")
+            assert delegated.execute(
+                "SELECT membership.admin_option, membership.inherit_option, "
+                "membership.set_option, grantor.rolname "
+                "FROM pg_catalog.pg_auth_members AS membership "
+                "JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member "
+                "JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid "
+                "JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = membership.grantor "
+                "WHERE member.rolname = 'm1_delegated_admin' "
+                "AND granted.rolname = 'm1_delegated_login'"
+            ).fetchone() == (True, False, False, "test")
         with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute("DROP ROLE m1_delegated_login")
             admin.execute("DROP ROLE m1_delegated_capability")
             admin.execute("DROP ROLE m1_delegated_admin")
 

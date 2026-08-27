@@ -480,7 +480,19 @@ def _require_login_roles_safe(snapshot: AdminRoleSnapshot) -> None:
             {(capability_role, False, True, True)}
         ):
             _fail("database-role-admin.membership-unsafe", login_role)
-        if snapshot.incoming_members.get(login_role, frozenset()):
+        incoming_options = snapshot.incoming_membership_options.get(
+            login_role,
+            frozenset(),
+        )
+        if (
+            incoming_options
+            not in (
+                frozenset(),
+                frozenset({SUPABASE_CREATOR_MEMBERSHIP}),
+            )
+            or snapshot.incoming_members.get(login_role, frozenset())
+            != frozenset(item[0] for item in incoming_options)
+        ):
             _fail("database-role-admin.membership-unsafe", login_role)
         if snapshot.owned_objects.get(login_role, frozenset()):
             _fail("database-role-admin.ownership-unsafe", login_role)

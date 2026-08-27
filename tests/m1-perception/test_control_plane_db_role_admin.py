@@ -440,6 +440,43 @@ def test_preflight_accepts_exact_supabase_creator_membership() -> None:
     )["status"] == "ready"
 
 
+def test_preflight_accepts_exact_supabase_creator_membership_on_scoped_logins() -> None:
+    from polyarb.control_plane.db_role_admin import preflight_capability_roles
+
+    factory = FakeAdminFactory()
+    factory.add_login(
+        RUNTIME_LOGIN,
+        capability=RUNTIME_CAPABILITY,
+        password="runtime-secret",
+    )
+    factory.add_login(
+        QUALIFICATION_LOGIN,
+        capability=QUALIFICATION_CAPABILITY,
+        password="qualification-secret",
+    )
+    factory.roles["postgres"] = {
+        "can_login": True,
+        "superuser": False,
+        "create_db": True,
+        "create_role": True,
+        "inherits": True,
+        "replication": False,
+        "bypass_rls": False,
+        "memberships": {
+            RUNTIME_CAPABILITY,
+            QUALIFICATION_CAPABILITY,
+            RUNTIME_LOGIN,
+            QUALIFICATION_LOGIN,
+        },
+        "password": None,
+    }
+
+    assert preflight_capability_roles(
+        _as_connection_factory(factory),
+        expected_database="role_test",
+    )["status"] == "ready"
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason_code"),
     (
