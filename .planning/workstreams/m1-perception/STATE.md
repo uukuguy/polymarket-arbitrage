@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Exact credential-remediation and revision 026 observe-only packages await explicit production authorization
-last_updated: "2026-08-27T16:15:00+08:00"
+stopped_at: Corrected db51b21d revision 026 observe-only package awaits exact re-authorization after the first attempt failed closed
+last_updated: "2026-08-27T16:54:56+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -82,12 +82,24 @@ progress:
   decision/idle facts, and a read-only zero-mutation verifier. The production
   observe, job-recovery, and process-recovery gates are explicitly NOT RUN.
 - Plan `05.6-207` is locally complete after final-rereview remediation. Corrected
-  executable release `d050c8290c52e07acb72c8db7fe3fb02072d126c`
+  executable release `db51b21d1278916064d5e4a3c0490b3bc49d7145`
   schema-qualifies both daemon paths and catalog-enumerates a closed effective
   authority envelope across every non-system namespace, relation, sequence,
   ownership, SECURITY DEFINER routine, database CREATE, search-path setting and
   exact PostgreSQL 16 membership option. `TEMPORARY` remains an explicit
   compatibility allowance under the controlled namespace contract.
+- The first authorized production `026` attempt under `d050c829` failed closed
+  and rolled back completely at revision `025`. Production Supabase exposes two
+  PUBLIC-readable views in the inaccessible `extensions` schema; PostgreSQL's
+  object ACL helper reports them true without schema USAGE. Commit `fe36a330`
+  corrects migration and daemon verification to enumerate effective object
+  authority only in reachable schemas while retaining the all-schema namespace,
+  direct-grant, ownership, membership and search-path gates.
+- Climb H-020 cycle 23 run `20260827-085048-h-020` scored 100/100 and introduced
+  `make control-plane-fly-topology-audit`. Its read-only production proof shows
+  all original Machines started, no credential-bearing ordinary env key on the
+  repaired writer, and both canonical writer secret names present without
+  exposing values or raw provider bodies.
 - Operator mutations use only `POLYARB_CONTROL_PLANE_DB_ADMIN_DSN`; runtime and
   qualification verification retain their distinct app-scoped DSNs. The
   disable path reconnects as admin after scoped verification, and neither app
@@ -149,16 +161,15 @@ progress:
 
 ## Resume
 
-1. Before production, present one exact observe-only authorization package:
-   corrected application release `d050c8290c52e07acb72c8db7fe3fb02072d126c`,
+1. Obtain explicit approval for the fresh exact observe-only authorization package:
+   corrected application release `db51b21d1278916064d5e4a3c0490b3bc49d7145`,
    production database `postgres`, revision 026,
    the two scoped login roles, the two new private apps, observe-only mode,
    empty recovery allowlist, rollback, and evidence directory. Do not infer
    this authority from generic approval.
-2. Before that rollout, complete the separate exact credential-remediation
-   request for `m1_runtime_event_writer` and Machine `28654e35a73d08`; rotate
-   the exposed login, restore the existing hidden secret path, remove the
-   ordinary password-bearing env value, and touch no other app or schema.
+2. Treat the old `d050c829` authorization as consumed failed-closed evidence.
+   The separate runtime-event-writer remediation is complete and verified; do
+   not rotate it again during the corrected rollout.
 3. After authorized production enablement, let recovery confirmation open a fresh epoch
    automatically; independently verify its immutable certificate before
    marking Phase 05.6 and M1 complete.

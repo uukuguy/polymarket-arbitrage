@@ -1,0 +1,28 @@
+{
+  "artifact_version": 1,
+  "status": "pass",
+  "recorded_at": "2026-08-27T16:44:43+08:00",
+  "attempt_window": {
+    "after": "2026-08-27T16:27:00+08:00",
+    "before": "2026-08-27T16:34:40+08:00"
+  },
+  "authorized_release_sha": "d050c8290c52e07acb72c8db7fe3fb02072d126c",
+  "attempted_operation": "alembic upgrade 026",
+  "result": "failed_closed",
+  "bounded_failure": "m1_runtime_controller_capability authority envelope is not exact",
+  "root_cause": "ambient PUBLIC object ACLs in the provider-owned extensions schema were enumerated even though the capability role had no schema USAGE",
+  "post_attempt_read_only_verification": {
+    "database": "postgres",
+    "database_revision": "025",
+    "transaction_status": "rolled_back",
+    "scoped_roles_present": [],
+    "partial_schema_mutation_present": false
+  },
+  "unaffected_authorized_remediation": {
+    "runtime_event_writer_credential_remediation": "completed",
+    "evidence": "runtime-event-writer-credential-remediation-evidence.json"
+  },
+  "secret_values_emitted": false,
+  "provider_response_bodies_recorded": false,
+  "retry_policy": "This release authorization is consumed. A corrected executable release requires fresh local gates and a new exact authorization package."
+}

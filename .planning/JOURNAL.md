@@ -10425,3 +10425,45 @@ verify only the two scoped logins, deploy only the two new private apps in
 observe-only mode with an empty recovery allowlist, and collect the 30-minute
 zero-action window. Job/process faults still require later separate exact
 authorizations.
+
+## SESSION 309 — 2026-08-27 (authorized rollout fails closed; reachable authority and safe Fly audit)
+
+- [AUTHORIZED REMEDIATION] The user explicitly approved both exact `d050c829`
+  requests. The runtime-event-writer login was rotated, its canonical hidden
+  `POLYARB_SUPABASE_DB_DSN` restored, the ordinary versioned DSN and command
+  override removed, and exactly Machine `28654e35a73d08` redeployed on the same
+  image. All four original apps remained started and durable work advanced.
+- [FAILED CLOSED] The authorized `alembic upgrade 026` refused
+  `m1_runtime_controller_capability authority envelope is not exact`. The
+  transaction rolled back completely: production remains revision `025` and
+  none of the four scoped capability/login roles exists. The old authorization
+  is consumed and cannot be retried.
+- [ROOT CAUSE + FIX] Supabase grants PUBLIC SELECT on two objects in its
+  inaccessible `extensions` schema. PostgreSQL reports the object ACL even when
+  schema USAGE is false. Commit `fe36a330` now enumerates relation, sequence and
+  SECURITY DEFINER effective authority only in role-reachable schemas; the
+  independent all-schema namespace, direct ACL, ownership, membership and
+  search-path gates remain closed. Real PostgreSQL regression tests prove both
+  the inaccessible-ACL pass case and reachable-schema rejection.
+- [CLIMB] H-020 cycle 23 run `20260827-085048-h-020` scored 100/100 across nine
+  nodes. Commit `db51b21d` adds `make control-plane-fly-topology-audit`, whose
+  parser emits only app/Machine/state/image/process/env-key names and requested
+  secret-name presence. It fails on credential-bearing ordinary env keys and
+  never emits raw provider bodies.
+- [FRESH EVIDENCE] The safe production audit passed: all six exact original
+  Machines are started, the runtime-event-writer ordinary env contains only
+  runtime metadata, and both canonical hidden secret names are present. Database
+  `postgres` remains 025 with zero scoped roles, control API `/healthz` is 200,
+  succeeded attempts reached 89367, and both new apps remain absent.
+- [TEACHING] Added chapter 90 on PostgreSQL schema→object reachability and
+  provider-output contraction. A new exact local rollout package binds release
+  `db51b21d1278916064d5e4a3c0490b3bc49d7145`, revision 026, two scoped roles,
+  two new private apps, observe-only mode, empty recovery allowlist and the
+  corrected artifact hashes.
+
+[NEXT] Obtain explicit approval for
+`evidence/authorization-db51b21d-observe-only/authorization-request.json`
+inside its exact window. Then re-run the DB and safe Fly preflights, apply 026,
+provision/verify only the two scoped logins, deploy only the two new private
+apps, and collect the 30-minute zero-action window. Job/process faults still
+require later separate exact authorizations.
