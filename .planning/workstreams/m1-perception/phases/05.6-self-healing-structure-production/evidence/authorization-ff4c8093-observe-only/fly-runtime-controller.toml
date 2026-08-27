@@ -1,0 +1,28 @@
+# Private runtime recovery controller. Install only its scoped runtime-controller Postgres DSN as
+# POLYARB_SUPABASE_DB_DSN; never install the qualification DSN in this app.
+# An optional exact Fly recovery token may be
+# installed as a secret only when recovery mode is explicitly changed away from
+# observe-only and the rendered allowlist names the exact app/machine targets.
+# This template carries no R2, Gamma, CLOB, Telegram, sampler, worker, or public
+# HTTP authority.
+app = "polyarb-runtime-controller-m1"
+primary_region = "ams"
+
+[env]
+POLYARB_DB_EXPECTED_DATABASE = "postgres"
+POLYARB_RUNTIME_ROLE = "control-plane"
+POLYARB_RUNTIME_RECOVERY_MODE = "observe-only"
+POLYARB_RUNTIME_RECOVERY_ALLOWED_TARGETS = ""
+
+[build]
+
+[processes]
+controller = "python -m polyarb.cli_control_plane runtime-reconcile-serve --enable --interval-seconds 30 --json"
+
+[[restart]]
+policy = "always"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"
+processes = ["controller"]

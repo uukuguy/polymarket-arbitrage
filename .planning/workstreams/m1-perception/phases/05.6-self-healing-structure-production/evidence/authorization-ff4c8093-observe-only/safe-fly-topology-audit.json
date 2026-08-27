@@ -1,0 +1,112 @@
+{
+  "artifact_version": 1,
+  "status": "pass",
+  "recorded_at": "2026-08-27T19:49:27+08:00",
+  "climb_hypothesis": "H-020",
+  "climb_run": "20260827-085048-h-020",
+  "credential_source": "local-keychain",
+  "apps": [
+    {
+      "app": "polyarb-control-alert",
+      "machines": [
+        {
+          "machine_id": "d891e941a41dd8",
+          "state": "started",
+          "image": "registry.fly.io/polyarb-control-api:m1-watchdog-formal-run-0aef68c3@sha256:3d0b445d2bbddbfd30e8b49ebd07eb077685f38225b9f745442e420b14ee90a9",
+          "process_group": "watchdog",
+          "env_keys": [
+            "FLY_PROCESS_GROUP",
+            "POLYARB_RUNTIME_ROLE",
+            "POLYARB_WATCHDOG_SOAK_RUN_ID_V1",
+            "POLYARB_WATCHDOG_SOAK_RUN_ID_V2",
+            "POLYARB_WATCHDOG_SOAK_RUN_ID_V3",
+            "PRIMARY_REGION"
+          ]
+        }
+      ],
+      "required_secret_presence": {}
+    },
+    {
+      "app": "polyarb-control-api",
+      "machines": [
+        {
+          "machine_id": "d8d0e27a734158",
+          "state": "started",
+          "image": "registry.fly.io/polyarb-control-api:m1-runtime-dashboard-diagnostics-32e3794c@sha256:490681380654920f494bf3b9de13294484287a0c21bb73b828d43452466ac4e1",
+          "process_group": "api",
+          "env_keys": [
+            "FLY_PROCESS_GROUP",
+            "POLYARB_RUNTIME_ROLE",
+            "PRIMARY_REGION"
+          ]
+        }
+      ],
+      "required_secret_presence": {}
+    },
+    {
+      "app": "polyarb-control-runtime-event-writer",
+      "machines": [
+        {
+          "machine_id": "28654e35a73d08",
+          "state": "started",
+          "image": "registry.fly.io/polyarb-control-api@sha256:80abcdf6d8c8cb1b155aadd8a7e47f8c4772f55886a662c3bed20fa34aafbdb3",
+          "process_group": "writer",
+          "env_keys": [
+            "FLY_PROCESS_GROUP",
+            "POLYARB_RUNTIME_ROLE",
+            "PRIMARY_REGION"
+          ]
+        }
+      ],
+      "required_secret_presence": {
+        "POLYARB_RUNTIME_EVENT_WRITER_TOKEN": true,
+        "POLYARB_SUPABASE_DB_DSN": true
+      }
+    },
+    {
+      "app": "polyarb-control-worker-m1",
+      "machines": [
+        {
+          "machine_id": "4d895231f66748",
+          "state": "started",
+          "image": "registry.fly.io/polyarb-control-worker-m1:deployment-01M0QFF82WA4H4Q74X9SJFSB3A",
+          "process_group": "quote_batch",
+          "env_keys": [
+            "FLY_PROCESS_GROUP",
+            "POLYARB_ALERT_CHANNELS",
+            "POLYARB_RUNTIME_ROLE",
+            "PRIMARY_REGION"
+          ]
+        },
+        {
+          "machine_id": "683e46ea500dd8",
+          "state": "started",
+          "image": "registry.fly.io/polyarb-control-worker-m1:deployment-01M0QFF82WA4H4Q74X9SJFSB3A",
+          "process_group": "structure_range",
+          "env_keys": [
+            "FLY_PROCESS_GROUP",
+            "POLYARB_ALERT_CHANNELS",
+            "POLYARB_RUNTIME_ROLE",
+            "PRIMARY_REGION"
+          ]
+        },
+        {
+          "machine_id": "e82d1220b2d138",
+          "state": "started",
+          "image": "registry.fly.io/polyarb-control-worker-m1:deployment-01M0QFF82WA4H4Q74X9SJFSB3A",
+          "process_group": "coordinator",
+          "env_keys": [
+            "FLY_PROCESS_GROUP",
+            "POLYARB_ALERT_CHANNELS",
+            "POLYARB_RUNTIME_ROLE",
+            "PRIMARY_REGION"
+          ]
+        }
+      ],
+      "required_secret_presence": {}
+    }
+  ],
+  "ordinary_credential_env_keys_present": false,
+  "raw_provider_bodies_recorded": false,
+  "secret_values_recorded": false
+}

@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Revision 026 applied; ad8a123f remaining rollout explicitly authorized and fresh preflight is next
-last_updated: "2026-08-27T19:14:31+08:00"
+stopped_at: H-023 confirmed; ff4c8093 minimal-rotation rollout package awaits exact approval
+last_updated: "2026-08-27T19:49:27+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -79,8 +79,8 @@ progress:
   an exact capability-limited Fly recovery adapter, durable observe-only
   decision/idle facts, and a read-only zero-mutation verifier. The production
   observe, job-recovery, and process-recovery gates are explicitly NOT RUN.
-- Plan `05.6-207` is locally complete after final-rereview remediation. Corrected
-  executable release `ad8a123f6bd403904142dc30df8a4facd61d7e0a`
+- Plan `05.6-207` is locally complete after production-boundary remediation. Corrected
+  executable release `ff4c8093d55a6363f7dcb26f6ffe2113e260a9ba`
   schema-qualifies both daemon paths and catalog-enumerates a closed effective
   authority envelope across every non-system namespace, relation, sequence,
   ownership, SECURITY DEFINER routine, database CREATE, search-path setting and
@@ -109,6 +109,14 @@ progress:
   tuple while preserving its single outgoing application capability tuple.
   Climb H-022 cycle 25 run `20260827-104319-h-022` scored 100/100 on all nine
   nodes.
+- The authorized `ad8a123f` provision then created and committed both exact
+  scoped LOGIN envelopes. Active daemon verification failed closed before any
+  Fly app was created, so their first passwords were never shipped and were
+  discarded. A retry exposed PostgreSQL `42501`: the delegated creator can
+  rotate a password or toggle LOGIN, but cannot replay the complete verified
+  role attribute clause. Release `ff4c8093` validates the full existing
+  envelope and writes only the necessary LOGIN/password delta. H-023 cycle 26
+  run `20260827-113937-h-023` scored 100/100 across all nine nodes.
 - Climb H-020 cycle 23 run `20260827-085048-h-020` scored 100/100 and introduced
   `make control-plane-fly-topology-audit`. Its read-only production proof shows
   all original Machines started, no credential-bearing ordinary env key on the
@@ -138,13 +146,12 @@ progress:
   nine-node production-enablement profile and confirms the immutable exact
   observe-only authorization envelope. It performs no external submission or
   production mutation.
-- Production truth boundary as of the 2026-08-25 audit: production database is
-  `postgres`; revisions 022/023/024/025 are applied and post-migration worker
-  health passed; `m1_qualification_ingress_ledger` had 1643 incident ingress
-  rows at audit. Revision 026 is applied in production with exactly two
-  NOLOGIN capability roles and no scoped LOGIN roles. The original four apps
-  are running; the new runtime-controller and qualification-worker apps do not
-  exist. No scoped production login changes, new secrets, recovery
+- Production truth boundary as of the 2026-08-27 19:49 +08:00 audit: production database is
+  `postgres`; revision 026 is applied with exactly two NOLOGIN capability roles
+  and two safe scoped LOGIN roles. The full admin authority preflight is ready,
+  successful attempts reached 92111, the control API health endpoint is 200,
+  and all six original Machines are started. The new runtime-controller and
+  qualification-worker apps do not exist. No new-app secret, recovery
   enablement, fault mutation, observe-only window, job recovery gate, or process
   recovery gate has run.
 
@@ -177,14 +184,15 @@ progress:
 ## Resume
 
 1. Obtain explicit approval for the fresh exact remaining observe-only rollout package:
-   corrected application release `ad8a123f6bd403904142dc30df8a4facd61d7e0a`,
+   corrected application release `ff4c8093d55a6363f7dcb26f6ffe2113e260a9ba`,
    production database `postgres`, revision 026,
-   the two scoped login roles, the two new private apps, observe-only mode,
+   minimal password rotation for the two existing scoped LOGIN roles, active
+   identity verification, the two new private apps, observe-only mode,
    empty recovery allowlist, rollback, and evidence directory. Do not infer
    this authority from generic approval.
-2. Treat `d050c829`, `db51b21d`, and the partially applied `03a2deee`
-   authorizations as consumed evidence. Revision 026 stays applied; the latter
-   package's login transaction rolled back completely.
+2. Treat `d050c829`, `db51b21d`, `03a2deee`, and `ad8a123f` authorizations as
+   consumed evidence. Revision 026 and both LOGIN envelopes stay applied; their
+   unshipped credentials are not recoverable and must be rotated.
    The separate runtime-event-writer remediation is complete and verified; do
    not rotate it again during the corrected rollout.
 3. After authorized production enablement, let recovery confirmation open a fresh epoch

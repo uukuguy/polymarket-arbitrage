@@ -1,0 +1,107 @@
+{
+  "artifact_version": 6,
+  "status": "pending_exact_authorization",
+  "prepared_at": "2026-08-27T19:49:27+08:00",
+  "requested_window": {
+    "not_before": "2026-08-27T19:49:27+08:00",
+    "not_after": "2026-08-28T01:49:27+08:00"
+  },
+  "operator": "codex-climb-agent",
+  "release_sha": "ff4c8093d55a6363f7dcb26f6ffe2113e260a9ba",
+  "corrected_login_rotation_commit": "ff4c8093d55a6363f7dcb26f6ffe2113e260a9ba",
+  "production_database": "postgres",
+  "current_database_revision": "026",
+  "target_database_revision": "026",
+  "supersedes_partially_applied_authorization": "../authorization-ad8a123f-observe-only/authorization-request.json",
+  "schema_mutation_already_completed": "revision 026 was applied by the consumed 03a2deee authorization and is outside this request",
+  "existing_scoped_login_state": "both exact LOGIN roles exist and passed the full admin catalog preflight; their first unshipped passwords were discarded after active verification failed closed",
+  "existing_apps": [
+    "polyarb-control-api",
+    "polyarb-control-worker-m1",
+    "polyarb-control-alert",
+    "polyarb-control-runtime-event-writer"
+  ],
+  "new_private_apps": [
+    "polyarb-runtime-controller-m1",
+    "polyarb-qualification-worker-m1"
+  ],
+  "scoped_login_roles": [
+    "m1_runtime_controller_login",
+    "m1_qualification_worker_login"
+  ],
+  "runtime_recovery_mode": "observe-only",
+  "runtime_recovery_allowed_targets": [],
+  "maximum_effect": [
+    "rotate exactly the two existing scoped LOGIN passwords to new independent credentials after their full envelopes pass validation",
+    "actively verify each new scoped DSN against its exact daemon authority profile",
+    "create and deploy exactly two new private Fly apps",
+    "install exactly one app-scoped hidden database DSN secret in each new app",
+    "record observe-only decisions and rolling qualification facts",
+    "leave revision 026 and all existing four production apps running without restart"
+  ],
+  "forbidden_effects": [
+    "no schema migration or downgrade",
+    "no creation of additional database roles",
+    "no job, process, or Machine recovery action",
+    "no Fly recovery token in either new app",
+    "no fault injection",
+    "no existing app credential rotation",
+    "no topology replacement",
+    "no wallet, signing, order, balance, or trade action"
+  ],
+  "rollback": [
+    "stop both new private apps",
+    "disable both scoped login roles through the admin-only Make target",
+    "verify database revision 026, exact NOLOGIN capabilities, and health of the original four apps",
+    "retain all evidence and failed qualification epochs append-only"
+  ],
+  "prerequisites": [
+    "explicit approval of this exact minimal-rotation request inside its requested window",
+    "re-run admin capability/login and safe Fly topology preflights immediately before mutation",
+    "require revision 026, exact two NOLOGIN capabilities, exact two safe scoped LOGIN roles, all four original apps started, and both new apps absent",
+    "preserve observe-only mode, empty recovery allowlist, and no recovery token"
+  ],
+  "delegated_rotation_contract": {
+    "existing_role_validation": "complete attributes, membership options, ownership, direct ACL, namespace and effective authority must pass before mutation",
+    "allowed_existing_role_mutations": [
+      "ALTER ROLE exact_login LOGIN only when currently NOLOGIN",
+      "ALTER ROLE exact_login PASSWORD generated_independent_secret",
+      "restate exact application-login-to-capability membership"
+    ],
+    "forbidden_existing_role_mutation": "do not replay the complete role attribute clause",
+    "allowed_ambient_creator_membership_for_each_capability_and_login": {
+      "member": "postgres",
+      "grantor": "supabase_admin",
+      "admin_option": true,
+      "inherit_option": false,
+      "set_option": false
+    },
+    "application_login_outgoing_capability_membership": {
+      "admin_option": false,
+      "inherit_option": true,
+      "set_option": true
+    },
+    "all_other_memberships": "rejected"
+  },
+  "local_gate_evidence": {
+    "climb_hypothesis": "H-023",
+    "climb_run": "20260827-113937-h-023",
+    "score": 100.0,
+    "nodes": 9
+  },
+  "read_only_preflight": "read-only-preflight-20260827T1949+0800.json",
+  "safe_fly_topology_audit": "safe-fly-topology-audit.json",
+  "rendered_artifact_hashes": {
+    "fly-control-alert.toml": "2fcdfcaedd9d0b428ace2dc51a9ac4628da45f8ec03b5968a62ef370e425c27a",
+    "fly-control-api.toml": "e11ddfd8688fd35e36fa91fd9fb8c8c817456fb2b5d577a6badce01b20b8562c",
+    "fly-control-worker.toml": "065207cbb5ee6edfb827d465cbe5697e1944887be934892f1d305c6736c2eea2",
+    "fly-qualification-worker.toml": "6d99162091319a2ce5eaee87ccf380ecf189ab42311acd22ffb978d045d99496",
+    "fly-runtime-controller.toml": "0b66fbace4c78a831e889c69469960e4363c489343bff428fb179ae70acbdc94",
+    "fly-runtime-event-writer.toml": "a1eb699580e4145c447c5ea7cf317d20246044f72b5d2b3c77a258253c92b0f5",
+    "rollout-checklist.json": "8e82b736e9893849e5842adeb32df4b0d59a1ef6cb7a7cb02d6e1e80409c453c"
+  },
+  "authorization_granted": false,
+  "approved_at": null,
+  "approved_by": null,
+  "approval_text": null
+}

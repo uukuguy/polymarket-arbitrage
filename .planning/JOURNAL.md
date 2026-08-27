@@ -10541,3 +10541,44 @@ provisions/verifies two scoped LOGIN roles, installs one hidden scoped DSN per
 new private app, deploys both in observe-only mode with an empty allowlist, and
 collects the zero-action/rolling-qualification evidence. Fault injection still
 requires a later separate exact authorization.
+
+## SESSION 312 — 2026-08-27 (delegated LOGIN rotation boundary and H-023 closure)
+
+- [AUTHORIZED PARTIAL PROGRESS] The user approved the exact `ad8a123f` request.
+  Its full immediate DB/Fly preflight passed, and the first provision committed
+  both exact scoped LOGIN envelopes. Active daemon verification then failed
+  closed before either Fly app was created or any secret was staged; both
+  generated passwords were deliberately discarded.
+- [ROOT CAUSE] A same-release retry with fresh in-memory passwords failed with
+  PostgreSQL `42501`. A rollback-only production diagnostic isolated the
+  boundary: complete existing-role attribute replay is forbidden, while
+  isolated password rotation, LOGIN/NOLOGIN toggle and the exact membership
+  grant all succeed. No diagnostic mutation persisted and no secret was
+  printed.
+- [TDD + TEACHING] Release
+  `ff4c8093d55a6363f7dcb26f6ffe2113e260a9ba` now validates the complete
+  existing role envelope and writes only the required LOGIN/password delta;
+  first creation remains fully explicit. The production rejection is captured
+  by a RED→GREEN regression. Plan 207 SUMMARY, architecture thread and chapter
+  90 FAQ record the delegated lifecycle rule.
+- [CLIMB] H-023 cycle 26 run `20260827-113937-h-023` scored 100/100 across all
+  nine production-enablement nodes, with manifest bound to `ff4c8093`.
+- [FRESH READ-ONLY EVIDENCE] The full admin authority preflight returned ready;
+  revision 026 has exactly two NOLOGIN capabilities and two safe LOGIN roles;
+  succeeded attempts reached 92111; control API health is 200; all six original
+  Machines are started; the writer secret-provenance audit passes; both new
+  apps remain absent.
+- [EXACT REQUEST] Prepared
+  `evidence/authorization-ff4c8093-observe-only/authorization-request.json`,
+  original SHA256
+  `bcaeda7f72bf10a6308a6de6fea82cadedd284a5490c6a393b7feee15e881669`.
+  It permits only minimal rotation and active verification of the two existing
+  scoped LOGINs, one hidden scoped DSN per new private app, observe-only deploy,
+  zero-action evidence and rolling qualification. Schema, fault and recovery
+  mutation remain forbidden.
+
+[NEXT] Obtain explicit approval for the exact `ff4c8093` request inside its
+window. Then repeat its immediate read-only preflights, rotate/verify both
+scoped identities in one bounded operator, create/deploy only the two private
+apps, and begin the 30-minute zero-action gate followed by rolling
+qualification. Fault injection requires a later exact authorization.
