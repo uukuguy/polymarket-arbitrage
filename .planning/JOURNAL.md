@@ -10582,3 +10582,16 @@ window. Then repeat its immediate read-only preflights, rotate/verify both
 scoped identities in one bounded operator, create/deploy only the two private
 apps, and begin the 30-minute zero-action gate followed by rolling
 qualification. Fault injection requires a later exact authorization.
+
+### SESSION 312 continuation — exact ff4c8093 rollout authorized
+
+- [AUTHORIZED] At `2026-08-27T19:54:43+08:00`, the user replied `同意` directly
+  to the exact request whose original SHA256 is
+  `bcaeda7f72bf10a6308a6de6fea82cadedd284a5490c6a393b7feee15e881669`.
+  The authorization remains bounded to minimal scoped-LOGIN rotation and
+  verification, two new private observe-only apps, empty recovery allowlist and
+  evidence collection. Schema, fault and recovery mutation remain forbidden.
+
+[NEXT] Re-run the full admin and safe Fly preflights, then execute the bounded
+in-memory credential rotation→active verification→hidden-secret staging
+operator. Do not create either app unless both scoped identities pass.

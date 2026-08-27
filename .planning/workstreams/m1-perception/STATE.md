@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: H-023 confirmed; ff4c8093 minimal-rotation rollout package awaits exact approval
-last_updated: "2026-08-27T19:49:27+08:00"
+stopped_at: ff4c8093 minimal-rotation rollout explicitly authorized; immediate preflight is next
+last_updated: "2026-08-27T19:54:43+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
