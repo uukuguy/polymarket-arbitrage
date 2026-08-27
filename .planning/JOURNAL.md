@@ -10790,3 +10790,20 @@ running while the cursor drains backlog. Once the live accumulating epoch
 begins, monitor it through 86,400 continuous seconds, then run
 `make qualification-certificates` and independently reverify the immutable
 certificate before marking Phase 05.6 and M1 complete.
+
+### SESSION 315 continuation — qualification entered the live certificate window
+
+- [RECOVERY COMPLETE] At `2026-08-28T00:46:57+08:00`, the scoped read-only
+  status showed the recovery epoch had advanced into live healthy evidence and
+  automatically opened accumulating epoch `epoch-fff4fa1ad4f778a9009a4039`.
+  It had 301 facts, 133 seconds of coverage, max evidence gap 34 seconds, no
+  breaker and no contained recovery. The previous invalidated/recovering epochs
+  remain append-only history.
+- [ACTIVE WINDOW] All production services remain running. The next gate is no
+  longer backlog recovery: it is uninterrupted accumulation to 86,400 seconds,
+  immutable certificate issuance, and independent reverification.
+
+[NEXT] Run `make qualification-status` from the scoped environment and verify
+epoch `epoch-fff4fa1ad4f778a9009a4039` is still accumulating with a bounded gap
+and zero recovery actions; continue monitoring until the 86,400-second
+certificate exists, then run `make qualification-certificates`.

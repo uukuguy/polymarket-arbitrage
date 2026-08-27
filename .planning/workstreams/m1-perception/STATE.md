@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: revision 027 and worker image drift repaired; qualification is draining append-only backlog before the 86400-second certificate window
-last_updated: "2026-08-28T00:41:30+08:00"
+stopped_at: revision 027 and worker image drift repaired; live accumulating qualification epoch is running toward the 86400-second certificate
+last_updated: "2026-08-28T00:46:57+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -64,8 +64,9 @@ progress:
   config projection hashes are unchanged. Coordinator and Structure emitted
   2,202 task runtime events by `16:40:28Z`, and qualification runtime ingress
   continued advancing without SQLSTATE 42883. Existing qualification Machine
-  `876077f0274598` is started and draining the append-only backlog in a correctly
-  fail-closed `recovering` epoch. Both app-scoped hidden DSNs remain installed,
+  `876077f0274598` is started; it consumed the stop-created recovery boundary
+  and opened live accumulating epoch `epoch-fff4fa1ad4f778a9009a4039`, which had
+  301 facts / 133 seconds / max gap 34 seconds at `16:45:50Z`. Both app-scoped hidden DSNs remain installed,
   no ordinary credential env key is present, and the exact eight-Machine
   topology audit passes with every Machine started.
 
@@ -195,19 +196,20 @@ progress:
   image digest `sha256:95131c…127f`, with exact pre/post non-image config hashes.
   Runtime events and matching qualification runtime ingress are advancing.
   Runtime observe-only has 11,132 seconds of bounded zero-action evidence. The
-  qualification Machine is started; its new epoch reached 401 seconds and
-  1,199 healthy recovery observations while consuming the stop-created backlog.
-  All eight exact Machines are started. No recovery enablement, recovery action,
+  qualification Machine is started; its recovery epoch reached 401 seconds and
+  1,199 healthy observations, then automatically opened a new accumulating
+  epoch that reached 301 facts / 133 seconds. All eight exact Machines are
+  started. No recovery enablement, recovery action,
   fault mutation, wallet, signing, order, balance, or trade action has run.
 
 ## Formal Acceptance
 
 - **Active qualifying run:** revision 027 and the reviewed worker image have
   turned the complete release-bound ingestion path green. The original gap and
-  post-stop epochs remain append-only history. The current epoch is deliberately
-  `recovering` while its cursor drains the retained backlog; it cannot silently
-  join pre-stop coverage. Once recovery reaches live ingress, the service must
-  open/advance an accumulating epoch for the full 86,400-second certificate.
+  post-stop epochs remain append-only history. Recovery reached live healthy
+  evidence and automatically opened accumulating epoch
+  `epoch-fff4fa1ad4f778a9009a4039`; it must now advance without a breaking gap
+  for the full 86,400-second certificate.
   `m1-formal-20260823T1335Z` is immutable
   historical evidence; replay found the first breaking `lease.expired` fact at
   `2026-08-23T16:22:21Z`, so its earlier 338-second liveness pass cannot become
@@ -230,16 +232,15 @@ progress:
 | Structure/Quote cloud worker migration | three independent fixed-role workers and advancing durable successes | complete |
 | Process-loss recovery | fenced R2-before-receipt takeover evidence for both job classes | complete |
 | Immediate fault visibility | Fly watchdog plus independent Cloudflare supervisor, Telegram and source-aware Dashboard incident/recovery ledger | complete |
-| Continuous final-topology acceptance | rolling epoch + immutable certificate | 027, three-worker image continuity, runtime observe-only and 300-second qualification gates passed; qualification is draining backlog before the 86,400-second certificate |
+| Continuous final-topology acceptance | rolling epoch + immutable certificate | 027, three-worker image continuity, runtime observe-only and recovery gates passed; live accumulating epoch is running toward the 86,400-second certificate |
 
 ## Resume
 
 1. Start with `make qualification-status` using the scoped qualification DSN;
-   verify the recovering cursor continues to advance and recovery actions stay
-   zero until backlog is drained.
-2. When the service opens/advances the live accumulating epoch, monitor its
-   freshness, maximum evidence gap, exact release/config identity and the
-   observe-only controller alongside the exact eight-Machine topology.
+   verify accumulating epoch `epoch-fff4fa1ad4f778a9009a4039` advances and
+   recovery actions stay zero.
+2. Monitor its freshness, maximum evidence gap, exact release/config identity
+   and the observe-only controller alongside the exact eight-Machine topology.
 3. After 86,400 continuous seconds, run `make qualification-certificates` and
    independently reverify the immutable certificate before marking Phase 05.6
    and M1 complete. Fault and recovery mutation remain separately gated.
