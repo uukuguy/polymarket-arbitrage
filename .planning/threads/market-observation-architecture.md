@@ -64,6 +64,21 @@ subjects from Git's actual message file. Fresh local H-018 run
 
 See `docs/learning/89-数据库能力角色与进程身份.md` for the teaching version.
 
+## 0.6 Provider 角色创建者也是 catalog 事实（2026-08-27）
+
+Supabase 生产连接中的 `postgres` 不是 superuser，而是由
+`supabase_admin` 授权的 delegated `CREATEROLE` 身份。PostgreSQL 16
+用它执行 `CREATE ROLE capability` 时，会自动留下一条创建者成员关系：
+`postgres -> capability`，选项精确为 `ADMIN=true, INHERIT=false,
+SET=false`，grantor 为 `supabase_admin`。这条边是 provider 的角色生命周期
+真值，但它不让 `postgres` 继承或 `SET ROLE` 进入 capability。
+
+闭合权限包因此只允许这一条 exact ambient creator tuple；应用
+login 仍必须是唯一 effective member，且其 tuple 必须为
+`ADMIN=false, INHERIT=true, SET=true`。任何其他 member、grantor 或选项变化
+继续 fail-closed。这是“承认 provider 现实”，不是把运行时权限放宽给
+admin identity。
+
 ## 0.3 失败事实与已发布事实必须分离（2026-07-27）
 
 `snapshots` / `market_view_published` 说明最近一版可读市场事实；`snapshot_attempts` 说明

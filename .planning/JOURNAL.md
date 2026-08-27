@@ -10467,3 +10467,38 @@ inside its exact window. Then re-run the DB and safe Fly preflights, apply 026,
 provision/verify only the two scoped logins, deploy only the two new private
 apps, and collect the 30-minute zero-action window. Job/process faults still
 require later separate exact authorizations.
+
+## SESSION 310 — 2026-08-27 (delegated creator membership fail-closed and H-021 closure)
+
+- [SECOND FAILED CLOSED] The explicitly authorized `db51b21d` revision 026
+  attempt reached the final membership authority gate and refused the
+  capability envelope. The whole transaction rolled back: production remains
+  revision `025`, all four scoped roles remain absent, and neither new private
+  app exists. That authorization is consumed and cannot be reused.
+- [ROOT CAUSE] Supabase production connects as non-superuser delegated
+  `CREATEROLE` identity `postgres`. PostgreSQL 16 automatically records that
+  creator as an incoming member of each new capability role, granted by
+  `supabase_admin` with exact options `(admin=true, inherit=false, set=false)`.
+  The diagnostic transaction was rolled back and emitted no secret value or
+  provider response body.
+- [FIX + CLIMB] Executable release
+  `03a2deee478adfa3b740711a162c583f2f0b0747` admits only that exact ambient,
+  non-effective creator tuple while still requiring the matching application
+  login as the sole effective member. H-021 cycle 24 run
+  `20260827-100730-h-021` scored 100/100 across all nine production-enablement
+  nodes, including real PostgreSQL 16 delegated-CREATEROLE semantics.
+- [FRESH READ-ONLY EVIDENCE] Database `postgres` remains 025 with zero scoped
+  roles; successful job attempts advanced to 90613; control API `/healthz` is
+  200; all six original Machines are started; the repaired writer has no
+  ordinary credential env and both required hidden secret names are present;
+  both new apps remain absent.
+- [TEACHING] Chapter 90 and the market-observation architecture thread now
+  explain why a complete PG16 membership option tuple distinguishes provider
+  creator lifecycle truth from effective daemon authority.
+
+[NEXT] Obtain explicit approval for the immutable exact request at
+`evidence/authorization-03a2deee-observe-only/authorization-request.json`
+inside its window. Then repeat the safe preflight, apply 026, provision and
+verify exactly two scoped logins, create/deploy exactly two private apps with
+observe-only and an empty allowlist, and collect the 30-minute zero-action
+window. Fault injection still requires a later separate exact authorization.

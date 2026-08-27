@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Corrected db51b21d revision 026 observe-only package awaits exact re-authorization after the first attempt failed closed
-last_updated: "2026-08-27T16:54:56+08:00"
+stopped_at: Creator-aware 03a2deee revision 026 observe-only package awaits exact authorization after two consumed attempts failed closed
+last_updated: "2026-08-27T18:13:54+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -82,7 +82,7 @@ progress:
   decision/idle facts, and a read-only zero-mutation verifier. The production
   observe, job-recovery, and process-recovery gates are explicitly NOT RUN.
 - Plan `05.6-207` is locally complete after final-rereview remediation. Corrected
-  executable release `db51b21d1278916064d5e4a3c0490b3bc49d7145`
+  executable release `03a2deee478adfa3b740711a162c583f2f0b0747`
   schema-qualifies both daemon paths and catalog-enumerates a closed effective
   authority envelope across every non-system namespace, relation, sequence,
   ownership, SECURITY DEFINER routine, database CREATE, search-path setting and
@@ -95,6 +95,14 @@ progress:
   corrects migration and daemon verification to enumerate effective object
   authority only in reachable schemas while retaining the all-schema namespace,
   direct-grant, ownership, membership and search-path gates.
+- The second authorized production `026` attempt under `db51b21d` also failed
+  closed and rolled back at revision `025`. PostgreSQL 16 automatically records
+  Supabase's delegated `CREATEROLE` creator `postgres` as an incoming member of
+  each created capability, granted by `supabase_admin` with exact options
+  `(admin=true, inherit=false, set=false)`. Commit `03a2deee` admits only that
+  ambient non-effective creator edge while still requiring the matching scoped
+  login to be the sole effective member. Climb H-021 cycle 24 run
+  `20260827-100730-h-021` scored 100/100 across all nine nodes.
 - Climb H-020 cycle 23 run `20260827-085048-h-020` scored 100/100 and introduced
   `make control-plane-fly-topology-audit`. Its read-only production proof shows
   all original Machines started, no credential-bearing ordinary env key on the
@@ -162,12 +170,13 @@ progress:
 ## Resume
 
 1. Obtain explicit approval for the fresh exact observe-only authorization package:
-   corrected application release `db51b21d1278916064d5e4a3c0490b3bc49d7145`,
+   corrected application release `03a2deee478adfa3b740711a162c583f2f0b0747`,
    production database `postgres`, revision 026,
    the two scoped login roles, the two new private apps, observe-only mode,
    empty recovery allowlist, rollback, and evidence directory. Do not infer
    this authority from generic approval.
-2. Treat the old `d050c829` authorization as consumed failed-closed evidence.
+2. Treat both old `d050c829` and `db51b21d` authorizations as consumed
+   failed-closed evidence.
    The separate runtime-event-writer remediation is complete and verified; do
    not rotate it again during the corrected rollout.
 3. After authorized production enablement, let recovery confirmation open a fresh epoch

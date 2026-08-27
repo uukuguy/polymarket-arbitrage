@@ -1,0 +1,40 @@
+{
+  "artifact_version": 1,
+  "status": "pass",
+  "recorded_at": "2026-08-27T18:13:54+08:00",
+  "attempt_window": {
+    "after": "2026-08-27T17:54:25+08:00",
+    "before": "2026-08-27T18:07:23+08:00"
+  },
+  "authorized_release_sha": "db51b21d1278916064d5e4a3c0490b3bc49d7145",
+  "attempted_operation": "alembic upgrade 026",
+  "result": "failed_closed",
+  "bounded_failure": "m1_runtime_controller_capability authority envelope is not exact",
+  "failure_gate": "final combined membership authority gate",
+  "root_cause": "PostgreSQL 16 automatically records the delegated CREATEROLE creator postgres as an incoming member of each newly created capability role, with grantor supabase_admin and options admin=true, inherit=false, set=false",
+  "transient_diagnostic": {
+    "session_user": "postgres",
+    "current_user": "postgres",
+    "creator_superuser": false,
+    "creator_has_createrole": true,
+    "observed_creator_membership": {
+      "member": "postgres",
+      "grantor": "supabase_admin",
+      "admin_option": true,
+      "inherit_option": false,
+      "set_option": false
+    },
+    "transaction_status": "rolled_back"
+  },
+  "post_attempt_read_only_verification": {
+    "database": "postgres",
+    "database_revision": "025",
+    "transaction_status": "rolled_back",
+    "scoped_roles_present": [],
+    "partial_schema_mutation_present": false,
+    "new_private_apps_present": []
+  },
+  "secret_values_emitted": false,
+  "provider_response_bodies_recorded": false,
+  "retry_policy": "This release authorization is consumed. A creator-aware executable release requires fresh local gates and a new exact authorization package."
+}
