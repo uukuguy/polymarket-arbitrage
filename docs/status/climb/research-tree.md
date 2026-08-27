@@ -4,7 +4,7 @@
 
 ## Session
 
-- Last cycle: 25
+- Last cycle: 26
 - Next action: rank next pending hypothesis
 
 ## In flight
@@ -30,6 +30,7 @@
 - **H-020** [confirmed]: A fail-closed, allowlisted Fly topology and secret-provenance audit can expose only app, Machine, state, image identity, process group, env key names, and secret-name presence while preventing password-bearing ordinary environment values or provider bodies from reaching operator output.
 - **H-021** [confirmed]: An exact Supabase delegated-CREATEROLE ambient membership contract can admit only the PostgreSQL 16 non-inheriting, non-SET creator ADMIN edge while preserving the matching application login as the sole effective capability member.
 - **H-022** [confirmed]: An exact Supabase delegated-CREATEROLE login creator-membership contract can admit only the PostgreSQL 16 non-inheriting, non-SET creator ADMIN edge into each scoped LOGIN while preserving its single effective outgoing capability membership.
+- **H-023** [confirmed]: A Supabase delegated-role provisioner can remain idempotent by validating the complete existing scoped LOGIN envelope and mutating only the required LOGIN/password delta instead of replaying privileged role attributes.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
@@ -63,3 +64,4 @@
 - 20260827-085048-h-020: 100.0 (confirmed)
 - 20260827-100730-h-021: 100.0 (confirmed)
 - 20260827-104319-h-022: 100.0 (confirmed)
+- 20260827-113937-h-023: 100.0 (confirmed)

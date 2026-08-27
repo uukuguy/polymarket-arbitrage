@@ -637,3 +637,32 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-023
+  description: A Supabase delegated-role provisioner can remain idempotent by validating
+    the complete existing scoped LOGIN envelope and mutating only the required LOGIN/password
+    delta instead of replaying privileged role attributes.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Recover unshipped scoped credentials after a failed active verifier
+    without broadening either daemon role or requiring provider-superuser authority.
+  cost_h: 0.75
+  ranking: 1.0
+  status: confirmed
+  created_at: '2026-08-27T20:05:00+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 26
+    run: 20260827-113937-h-023
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
