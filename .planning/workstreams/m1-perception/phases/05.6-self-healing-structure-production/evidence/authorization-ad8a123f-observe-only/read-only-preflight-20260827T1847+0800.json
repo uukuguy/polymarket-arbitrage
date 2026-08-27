@@ -1,0 +1,31 @@
+{
+  "artifact_version": 1,
+  "observed_at": "2026-08-27T18:47:09+08:00",
+  "operator": "codex-climb-agent",
+  "release_sha": "ad8a123f6bd403904142dc30df8a4facd61d7e0a",
+  "production_database": {
+    "name": "postgres",
+    "current_revision": "026",
+    "capability_roles_present": [
+      "m1_qualification_worker_capability",
+      "m1_runtime_controller_capability"
+    ],
+    "scoped_login_roles_present": [],
+    "succeeded_attempt_count": 91212
+  },
+  "control_plane": {
+    "public_healthz_http_status": 200,
+    "public_api_status": "available"
+  },
+  "fly_topology_evidence": "safe-fly-topology-audit.json",
+  "original_apps_started": true,
+  "absent_apps": [
+    "polyarb-runtime-controller-m1",
+    "polyarb-qualification-worker-m1"
+  ],
+  "runtime_event_writer_ordinary_credential_env_present": false,
+  "runtime_event_writer_required_secret_names_present": true,
+  "production_mutations_performed": false,
+  "secret_values_recorded": false,
+  "provider_response_bodies_recorded": false
+}

@@ -106,21 +106,26 @@ ambient edge, not an application member. The closed contract permits either:
 
 - local/superuser fixtures: no ambient creator membership; or
 - Supabase: exactly `(postgres, ADMIN TRUE, INHERIT FALSE, SET FALSE)` incoming
-  to each capability, created by grantor `supabase_admin`.
+  to each capability and each scoped LOGIN, created by grantor
+  `supabase_admin`.
 
-After provisioning, the only additional incoming member is the matching app
-login with `(ADMIN FALSE, INHERIT TRUE, SET TRUE)`. Any other member, option,
-outgoing membership, ownership, privilege, or search-path setting still fails.
+After provisioning, each scoped LOGIN has only one outgoing membership: its
+matching capability with `(ADMIN FALSE, INHERIT TRUE, SET TRUE)`. Each
+capability therefore has that effective application member plus the optional
+non-effective provider creator edge. Any other member, option, outgoing
+membership, ownership, privilege, or search-path setting still fails.
 
 ## Failure and Rollback Semantics
 
-- The failed production attempt is immutable evidence; it performed no partial
-  migration and production remains at 025.
+- The first two failed production attempts are immutable rollback evidence.
+  The third authorization applied revision 026, then rolled back the scoped
+  LOGIN provisioning transaction before any app or secret creation.
 - No second production attempt may use the old `d050c829` authorization. The
   corrected executable receives a new Git SHA, a new local gate, and a refreshed
   exact authorization package.
-- Every migration failure must again leave production at 025 and stop the
-  rollout. No manual role/schema cleanup is permitted outside Alembic.
+- Production now remains at revision 026 with the two exact NOLOGIN
+  capabilities and no scoped LOGIN. Remaining rollout authorization must not
+  re-run or downgrade the schema.
 - The runtime-event-writer credential remediation already completed and is
   independent of revision 026 rollback.
 

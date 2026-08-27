@@ -607,3 +607,33 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-022
+  description: An exact Supabase delegated-CREATEROLE login creator-membership contract
+    can admit only the PostgreSQL 16 non-inheriting, non-SET creator ADMIN edge into
+    each scoped LOGIN while preserving its single effective outgoing capability membership.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Close the production-only scoped-login provisioning gap without granting
+    either daemon, the provider creator, or any third role additional effective database
+    authority.
+  cost_h: 1.0
+  ranking: 1.0
+  status: confirmed
+  created_at: '2026-08-27T18:43:05+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 25
+    run: 20260827-104319-h-022
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed

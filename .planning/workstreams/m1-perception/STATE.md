@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Creator-aware 03a2deee revision 026 observe-only package explicitly authorized; fresh production preflight is next
-last_updated: "2026-08-27T18:22:31+08:00"
+stopped_at: Revision 026 applied; login-creator-aware ad8a123f remaining rollout package awaits exact authorization
+last_updated: "2026-08-27T18:47:09+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,7 +19,7 @@ progress:
 ## Current Position
 
 - **Sole authority:** Supabase project `polyarb` (`lgykffpcsebewvobkbdm`),
-  production Alembic revision `025`, and R2 bucket `polyarb-control-plane`.
+  production Alembic revision `026`, and R2 bucket `polyarb-control-plane`.
   The runtime's durable job, receipt, lease, pointer, evidence, and incident
   facts live there.
 
@@ -48,14 +48,12 @@ progress:
   Dashboard entries visibly show `Observed by: <source>`, timestamp and bounded
   failure list (Vercel deployment `dpl_28qrQKP5NHPG9qzqh9UdECBL7iJS`).
 
-- **Credential/runtime invariant:** Fly detached Machines retain duplicate
-  same-name environment values on update. A 2026-08-27 read-only audit found
-  that the runtime-event-writer's versioned DSN is ordinary Machine env and
-  overrides its existing hidden app secret, so that login is now treated as
-  compromised. Exact single-login/single-Machine remediation is prepared and
-  must complete before revision 026 rollout. All database runtime roles must
-  use hidden secrets and the Supabase IPv4 Session Pooler, not the unreachable
-  direct IPv6 database endpoint.
+- **Credential/runtime invariant:** The runtime-event-writer's exposed
+  versioned DSN was rotated and removed from ordinary Machine env; both
+  canonical writer secrets are hidden and the same Machine/image remains
+  healthy. Do not rotate it again during this rollout. All database runtime
+  roles use hidden secrets and the Supabase IPv4 Session Pooler, not the
+  unreachable direct IPv6 database endpoint.
 
 ## Local Event-Driven Recovery Closure (2026-08-25)
 
@@ -82,7 +80,7 @@ progress:
   decision/idle facts, and a read-only zero-mutation verifier. The production
   observe, job-recovery, and process-recovery gates are explicitly NOT RUN.
 - Plan `05.6-207` is locally complete after final-rereview remediation. Corrected
-  executable release `03a2deee478adfa3b740711a162c583f2f0b0747`
+  executable release `ad8a123f6bd403904142dc30df8a4facd61d7e0a`
   schema-qualifies both daemon paths and catalog-enumerates a closed effective
   authority envelope across every non-system namespace, relation, sequence,
   ownership, SECURITY DEFINER routine, database CREATE, search-path setting and
@@ -103,6 +101,14 @@ progress:
   ambient non-effective creator edge while still requiring the matching scoped
   login to be the sole effective member. Climb H-021 cycle 24 run
   `20260827-100730-h-021` scored 100/100 across all nine nodes.
+- The authorized `03a2deee` attempt successfully applied revision `026` and
+  passed the independent capability preflight. Scoped login provisioning then
+  failed closed and rolled back both passwords/logins before any Fly app was
+  created: delegated `CREATEROLE` also adds the exact non-effective creator
+  edge to each new LOGIN. Commit `ad8a123f` admits that exact incoming login
+  tuple while preserving its single outgoing application capability tuple.
+  Climb H-022 cycle 25 run `20260827-104319-h-022` scored 100/100 on all nine
+  nodes.
 - Climb H-020 cycle 23 run `20260827-085048-h-020` scored 100/100 and introduced
   `make control-plane-fly-topology-audit`. Its read-only production proof shows
   all original Machines started, no credential-bearing ordinary env key on the
@@ -135,9 +141,10 @@ progress:
 - Production truth boundary as of the 2026-08-25 audit: production database is
   `postgres`; revisions 022/023/024/025 are applied and post-migration worker
   health passed; `m1_qualification_ingress_ledger` had 1643 incident ingress
-  rows at audit. Revision 026 is **not** applied in production. The original
-  four apps are running; the new runtime-controller and qualification-worker
-  apps do not exist. No scoped production login changes, new secrets, recovery
+  rows at audit. Revision 026 is applied in production with exactly two
+  NOLOGIN capability roles and no scoped LOGIN roles. The original four apps
+  are running; the new runtime-controller and qualification-worker apps do not
+  exist. No scoped production login changes, new secrets, recovery
   enablement, fault mutation, observe-only window, job recovery gate, or process
   recovery gate has run.
 
@@ -169,14 +176,15 @@ progress:
 
 ## Resume
 
-1. Obtain explicit approval for the fresh exact observe-only authorization package:
-   corrected application release `03a2deee478adfa3b740711a162c583f2f0b0747`,
+1. Obtain explicit approval for the fresh exact remaining observe-only rollout package:
+   corrected application release `ad8a123f6bd403904142dc30df8a4facd61d7e0a`,
    production database `postgres`, revision 026,
    the two scoped login roles, the two new private apps, observe-only mode,
    empty recovery allowlist, rollback, and evidence directory. Do not infer
    this authority from generic approval.
-2. Treat both old `d050c829` and `db51b21d` authorizations as consumed
-   failed-closed evidence.
+2. Treat `d050c829`, `db51b21d`, and the partially applied `03a2deee`
+   authorizations as consumed evidence. Revision 026 stays applied; the latter
+   package's login transaction rolled back completely.
    The separate runtime-event-writer remediation is complete and verified; do
    not rotate it again during the corrected rollout.
 3. After authorized production enablement, let recovery confirmation open a fresh epoch

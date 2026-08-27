@@ -1,0 +1,54 @@
+{
+  "artifact_version": 1,
+  "status": "pass",
+  "recorded_at": "2026-08-27T18:47:09+08:00",
+  "attempt_window": {
+    "after": "2026-08-27T18:23:35+08:00",
+    "before": "2026-08-27T18:43:05+08:00"
+  },
+  "authorized_release_sha": "03a2deee478adfa3b740711a162c583f2f0b0747",
+  "results": {
+    "alembic_upgrade_026": "succeeded",
+    "post_migration_capability_preflight": "ready",
+    "scoped_login_provision": "failed_closed",
+    "new_private_app_creation": "not_started",
+    "hidden_secret_install": "not_started",
+    "deploy": "not_started"
+  },
+  "bounded_failure": "database-role-admin.membership-unsafe: m1_runtime_controller_login",
+  "root_cause": "PostgreSQL 16 also records the delegated CREATEROLE creator postgres as an incoming member of each newly created scoped LOGIN, with grantor supabase_admin and options admin=true, inherit=false, set=false",
+  "transient_diagnostic": {
+    "outgoing_application_membership": {
+      "member": "m1_runtime_controller_login",
+      "granted_role": "m1_runtime_controller_capability",
+      "grantor": "postgres",
+      "admin_option": false,
+      "inherit_option": true,
+      "set_option": true
+    },
+    "incoming_creator_membership": {
+      "member": "postgres",
+      "granted_role": "m1_runtime_controller_login",
+      "grantor": "supabase_admin",
+      "admin_option": true,
+      "inherit_option": false,
+      "set_option": false
+    },
+    "transaction_status": "rolled_back",
+    "login_persisted_after_rollback": false
+  },
+  "post_attempt_read_only_verification": {
+    "database": "postgres",
+    "database_revision": "026",
+    "capability_roles_present": [
+      "m1_qualification_worker_capability",
+      "m1_runtime_controller_capability"
+    ],
+    "scoped_login_roles_present": [],
+    "new_private_apps_present": [],
+    "original_apps_started": true
+  },
+  "secret_values_emitted": false,
+  "provider_response_bodies_recorded": false,
+  "retry_policy": "Revision 026 remains applied as an additive safe capability boundary. This release authorization is consumed; the remaining login/app rollout requires a login-creator-aware executable SHA and a new exact authorization package."
+}

@@ -10502,3 +10502,42 @@ inside its window. Then repeat the safe preflight, apply 026, provision and
 verify exactly two scoped logins, create/deploy exactly two private apps with
 observe-only and an empty allowlist, and collect the 30-minute zero-action
 window. Fault injection still requires a later separate exact authorization.
+
+## SESSION 311 — 2026-08-27 (revision 026 applied; scoped LOGIN provision fails closed)
+
+- [AUTHORIZED SCHEMA] The user approved the exact `03a2deee` request. Immediate
+  database/Fly preflight passed, Alembic revision 026 committed, and the
+  independent full catalog capability preflight returned
+  `{"database":"postgres","status":"ready"}`. The original four apps
+  stayed healthy and advancing.
+- [THIRD FAILED-CLOSED BOUNDARY] Scoped LOGIN provisioning failed inside its
+  transaction with `database-role-admin.membership-unsafe` on
+  `m1_runtime_controller_login`. Both generated passwords and both LOGIN roles
+  rolled back; Fly app creation, hidden-secret install and deploy never began.
+  Production safely remains revision 026 with exactly two NOLOGIN capability
+  roles, no scoped LOGIN, and no new app.
+- [ROOT CAUSE] A real production diagnostic transaction proved PostgreSQL 16
+  applies the same delegated creator edge to each new LOGIN:
+  `postgres -> login` from `supabase_admin` with
+  `(admin=true, inherit=false, set=false)`. The application edge remains the
+  opposite direction, `login -> capability`, with
+  `(admin=false, inherit=true, set=true)`. The diagnostic rolled back and
+  persisted no login or secret.
+- [TDD + CLIMB] Commit `ad8a123f` permits only an empty incoming LOGIN set or
+  that exact creator tuple, while retaining exact outgoing membership, role
+  attributes, direct-ACL, ownership and namespace gates. The RED regression
+  failed on the production reason code before the fix. H-022 cycle 25 run
+  `20260827-104319-h-022` then scored 100/100 across all nine nodes; Ruff,
+  Pyright and the focused 62-test admin/daemon/PG16 suite passed.
+- [FRESH EVIDENCE] At 18:47 +08:00, revision 026 and the two NOLOGIN
+  capabilities were present, scoped LOGIN roles and both new apps were absent,
+  control API `/healthz` was 200, all six original Machines were started, and
+  successful job attempts reached 91212.
+
+[NEXT] Obtain explicit approval for
+`evidence/authorization-ad8a123f-observe-only/authorization-request.json`.
+This remaining-action request does not authorize any schema migration: it only
+provisions/verifies two scoped LOGIN roles, installs one hidden scoped DSN per
+new private app, deploys both in observe-only mode with an empty allowlist, and
+collects the zero-action/rolling-qualification evidence. Fault injection still
+requires a later separate exact authorization.

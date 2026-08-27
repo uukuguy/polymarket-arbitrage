@@ -1,18 +1,19 @@
 {
-  "artifact_version": 4,
-  "status": "partially_applied_failed_closed",
-  "prepared_at": "2026-08-27T18:13:54+08:00",
+  "artifact_version": 5,
+  "status": "pending_exact_authorization",
+  "prepared_at": "2026-08-27T18:47:09+08:00",
   "requested_window": {
-    "not_before": "2026-08-27T18:13:54+08:00",
-    "not_after": "2026-08-28T00:13:54+08:00"
+    "not_before": "2026-08-27T18:47:09+08:00",
+    "not_after": "2026-08-28T00:47:09+08:00"
   },
   "operator": "codex-climb-agent",
-  "release_sha": "03a2deee478adfa3b740711a162c583f2f0b0747",
-  "corrected_migration_commit": "03a2deee478adfa3b740711a162c583f2f0b0747",
+  "release_sha": "ad8a123f6bd403904142dc30df8a4facd61d7e0a",
+  "corrected_login_provision_commit": "ad8a123f6bd403904142dc30df8a4facd61d7e0a",
   "production_database": "postgres",
-  "current_database_revision": "025",
+  "current_database_revision": "026",
   "target_database_revision": "026",
-  "supersedes_failed_closed_authorization": "../authorization-db51b21d-observe-only/authorization-request.json",
+  "supersedes_partially_applied_authorization": "../authorization-03a2deee-observe-only/authorization-request.json",
+  "schema_mutation_already_completed": "revision 026 was applied by the consumed 03a2deee authorization and is outside this request",
   "existing_apps": [
     "polyarb-control-api",
     "polyarb-control-worker-m1",
@@ -30,13 +31,14 @@
   "runtime_recovery_mode": "observe-only",
   "runtime_recovery_allowed_targets": [],
   "maximum_effect": [
-    "apply additive Alembic revision 026 to database postgres",
     "provision exactly two scoped login roles with independent credentials",
     "create and deploy exactly two new private Fly apps",
+    "install exactly one app-scoped hidden database DSN secret in each new app",
     "record observe-only decisions and rolling qualification facts",
-    "leave all existing four production apps running without restart"
+    "leave revision 026 and all existing four production apps running without restart"
   ],
   "forbidden_effects": [
+    "no schema migration or downgrade",
     "no job, process, or Machine recovery action",
     "no Fly recovery token in either new app",
     "no fault injection",
@@ -47,29 +49,24 @@
   "rollback": [
     "stop both new private apps",
     "disable both scoped login roles through the admin-only Make target",
-    "downgrade revision 026 to 025 only after both new apps are stopped",
-    "verify database revision 025 and health of the original four apps",
+    "verify database revision 026, exact NOLOGIN capabilities, and health of the original four apps",
     "retain all evidence and failed qualification epochs append-only"
   ],
   "prerequisites": [
-    "explicit approval of this exact creator-aware authorization request inside its requested window",
-    "re-run read-only database and safe Fly topology preflights immediately before mutation",
-    "require revision 025, no scoped roles, all four original apps started, and both new apps absent",
+    "explicit approval of this exact login-creator-aware request inside its requested window",
+    "re-run admin capability/login and safe Fly topology preflights immediately before mutation",
+    "require revision 026, exact two NOLOGIN capabilities, no scoped logins, all four original apps started, and both new apps absent",
     "preserve observe-only mode, empty recovery allowlist, and no recovery token"
   ],
   "creator_membership_contract": {
-    "capability_roles": [
-      "m1_runtime_controller_capability",
-      "m1_qualification_worker_capability"
-    ],
-    "allowed_ambient_creator_membership": {
+    "allowed_ambient_creator_membership_for_each_capability_and_login": {
       "member": "postgres",
       "grantor": "supabase_admin",
       "admin_option": true,
       "inherit_option": false,
       "set_option": false
     },
-    "application_login_membership": {
+    "application_login_outgoing_capability_membership": {
       "admin_option": false,
       "inherit_option": true,
       "set_option": true
@@ -77,35 +74,24 @@
     "all_other_memberships": "rejected"
   },
   "local_gate_evidence": {
-    "climb_hypothesis": "H-021",
-    "climb_run": "20260827-100730-h-021",
+    "climb_hypothesis": "H-022",
+    "climb_run": "20260827-104319-h-022",
     "score": 100.0,
     "nodes": 9
   },
-  "read_only_preflight": "read-only-preflight-20260827T1813+0800.json",
+  "read_only_preflight": "read-only-preflight-20260827T1847+0800.json",
   "safe_fly_topology_audit": "safe-fly-topology-audit.json",
   "rendered_artifact_hashes": {
     "fly-control-alert.toml": "2fcdfcaedd9d0b428ace2dc51a9ac4628da45f8ec03b5968a62ef370e425c27a",
     "fly-control-api.toml": "e11ddfd8688fd35e36fa91fd9fb8c8c817456fb2b5d577a6badce01b20b8562c",
     "fly-control-worker.toml": "065207cbb5ee6edfb827d465cbe5697e1944887be934892f1d305c6736c2eea2",
-    "fly-qualification-worker.toml": "6c0e0abbd89c491df1f8c32cb6cd257ae2e8a60c534df265ee581014ee6f66fe",
+    "fly-qualification-worker.toml": "ea0636af796d6df90a79ec75842012bc9cca8ff012f07f2ce67f6ae05baa4d9a",
     "fly-runtime-controller.toml": "0b66fbace4c78a831e889c69469960e4363c489343bff428fb179ae70acbdc94",
     "fly-runtime-event-writer.toml": "a1eb699580e4145c447c5ea7cf317d20246044f72b5d2b3c77a258253c92b0f5",
-    "rollout-checklist.json": "56a9bc678de4c4176518e44a6b1aa7544c78e714fb70ac56d63cb4fe083a8409"
+    "rollout-checklist.json": "f4b77d12f14c0f5e5801253f0a553c0dd9f34d75c05904706dc51b2a18cf3801"
   },
-  "authorization_granted": true,
-  "authorized_request_sha256": "2dfd209a0ea17966d22722724e397af17221a5ac29f76e800b02682c47ddad6f",
-  "approved_at": "2026-08-27T18:22:31+08:00",
-  "approved_by": "user",
-  "approval_text": "批准授权",
-  "attempt_window": {
-    "after": "2026-08-27T18:23:35+08:00",
-    "before": "2026-08-27T18:43:05+08:00"
-  },
-  "migration_result": "revision_026_applied",
-  "login_provision_result": "failed_closed",
-  "failure_reason_code": "database-role-admin.membership-unsafe",
-  "failure_object": "m1_runtime_controller_login",
-  "retry_authorized": false,
-  "failure_evidence": "revision-026-applied-login-provision-failed-closed.json"
+  "authorization_granted": false,
+  "approved_at": null,
+  "approved_by": null,
+  "approval_text": null
 }
