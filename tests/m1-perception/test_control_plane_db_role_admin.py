@@ -225,7 +225,13 @@ class FakeAdminFactory:
             rows: list[tuple[str, str, bool, bool, bool]] = []
             for member, attrs in self.roles.items():
                 rows.extend(
-                    (member, role, False, True, True)
+                    (
+                        member,
+                        role,
+                        member == "postgres",
+                        member != "postgres",
+                        member != "postgres",
+                    )
                     for role in cast(set[str], attrs["memberships"])
                 )
             if "where member.rolname = %s" in normalized:
@@ -410,6 +416,28 @@ def test_preflight_rejects_unsafe_capability_role_attributes() -> None:
 
     with pytest.raises(DatabaseRoleAdminError, match="database-role-admin.capability-unsafe"):
         preflight_capability_roles(_as_connection_factory(factory), expected_database="role_test")
+
+
+def test_preflight_accepts_exact_supabase_creator_membership() -> None:
+    from polyarb.control_plane.db_role_admin import preflight_capability_roles
+
+    factory = FakeAdminFactory()
+    factory.roles["postgres"] = {
+        "can_login": True,
+        "superuser": False,
+        "create_db": True,
+        "create_role": True,
+        "inherits": True,
+        "replication": False,
+        "bypass_rls": False,
+        "memberships": {RUNTIME_CAPABILITY, QUALIFICATION_CAPABILITY},
+        "password": None,
+    }
+
+    assert preflight_capability_roles(
+        _as_connection_factory(factory),
+        expected_database="role_test",
+    )["status"] == "ready"
 
 
 @pytest.mark.parametrize(

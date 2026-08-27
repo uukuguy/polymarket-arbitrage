@@ -229,6 +229,8 @@ class FakeRoleFactory:
                 rows = [row]
                 if self.authority_failure == "unexpected-member":
                     rows.append(("unexpected_member", False, True, True))
+                if self.authority_failure == "supabase-creator-membership":
+                    rows.append(("postgres", True, False, False))
                 return rows
             if "where member.rolname = %s" in sql:
                 return []
@@ -450,6 +452,23 @@ def test_database_role_contract_ignores_ambient_acl_in_unreachable_schema() -> N
     assert len(reachable_catalog_queries) == 3
     assert all("has_schema_privilege" in call[0] for call in reachable_catalog_queries)
     assert all(call[1] == (factory.session_user,) for call in reachable_catalog_queries)
+
+
+def test_database_role_contract_accepts_exact_supabase_creator_membership() -> None:
+    from polyarb.control_plane.db_role_contract import (
+        ConnectionFactory,
+        verify_daemon_database_role,
+    )
+
+    factory = FakeRoleFactory(authority_failure="supabase-creator-membership")
+
+    verification = verify_daemon_database_role(
+        cast(ConnectionFactory, factory),
+        "runtime-controller",
+        expected_database="role_test",
+    )
+
+    assert verification.status == "pass"
 
 
 @pytest.mark.parametrize(

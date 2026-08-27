@@ -66,6 +66,50 @@ def test_026_declares_exact_capability_roles_and_chain() -> None:
         assert attribute in text
 
 
+def test_026_allows_only_exact_supabase_creator_membership() -> None:
+    text = MIGRATION_PATH.read_text()
+
+    assert "CREATE ROLE {role} {CAPABILITY_ATTRIBUTES};" in text
+    assert "SUPABASE_ROLE_CREATOR = \"postgres\"" in text
+    assert "SUPABASE_ROLE_GRANTOR = \"supabase_admin\"" in text
+    assert text.count("membership.admin_option") >= 2
+    assert text.count("NOT membership.inherit_option") >= 2
+    assert text.count("NOT membership.set_option") >= 2
+    assert text.count("grantor.rolname = '{SUPABASE_ROLE_GRANTOR}'") >= 2
+
+
+def test_pg16_delegated_createrole_adds_noninheriting_creator_admin_membership() -> None:
+    if not _docker_available():
+        pytest.fail("Docker daemon unavailable; cannot prove PostgreSQL 16 role creation semantics")
+
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as postgres:
+        dsn = _normalize_dsn(postgres.get_connection_url())
+        delegated_dsn = _role_dsn(dsn, "m1_delegated_admin", "delegated-test-secret")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            _create_test_login(admin, "m1_delegated_admin", "delegated-test-secret")
+            admin.execute("ALTER ROLE m1_delegated_admin CREATEROLE")
+        with psycopg.connect(delegated_dsn, autocommit=True) as delegated:
+            delegated.execute(
+                "CREATE ROLE m1_delegated_capability NOLOGIN NOSUPERUSER "
+                "NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+            )
+            assert delegated.execute(
+                "SELECT membership.admin_option, membership.inherit_option, "
+                "membership.set_option, grantor.rolname "
+                "FROM pg_catalog.pg_auth_members AS membership "
+                "JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member "
+                "JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid "
+                "JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = membership.grantor "
+                "WHERE member.rolname = 'm1_delegated_admin' "
+                "AND granted.rolname = 'm1_delegated_capability'"
+            ).fetchone() == (True, False, False, "test")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute("DROP ROLE m1_delegated_capability")
+            admin.execute("DROP ROLE m1_delegated_admin")
+
+
 def test_026_closes_all_application_namespaces_and_database_creation() -> None:
     text = MIGRATION_PATH.read_text()
     for fragment in (

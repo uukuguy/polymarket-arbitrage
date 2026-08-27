@@ -59,6 +59,8 @@ CAPABILITY_ATTRIBUTES = (
 RUNTIME_ROLE = "m1_runtime_controller_capability"
 QUALIFICATION_ROLE = "m1_qualification_worker_capability"
 SUPABASE_ROLES = ("anon", "authenticated", "service_role")
+SUPABASE_ROLE_CREATOR = "postgres"
+SUPABASE_ROLE_GRANTOR = "supabase_admin"
 CERTIFICATE_FUNCTION_SIGNATURE = (
     "text, text, text, text, jsonb, timestamptz, timestamptz, jsonb, text, text, text, text"
 )
@@ -147,9 +149,20 @@ def _ensure_capability_role(role: str) -> None:
             END IF;
 
             IF EXISTS (
-                   SELECT 1 FROM pg_catalog.pg_auth_members
-                   WHERE roleid = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = '{role}')
-                      OR member = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = '{role}')
+                   SELECT 1
+                   FROM pg_catalog.pg_auth_members AS membership
+                   JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+                   JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
+                   JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = membership.grantor
+                   WHERE (member.rolname = '{role}' OR granted.rolname = '{role}')
+                     AND NOT (
+                         granted.rolname = '{role}'
+                         AND member.rolname = '{SUPABASE_ROLE_CREATOR}'
+                         AND grantor.rolname = '{SUPABASE_ROLE_GRANTOR}'
+                         AND membership.admin_option
+                         AND NOT membership.inherit_option
+                         AND NOT membership.set_option
+                     )
                )
                OR EXISTS (
                    SELECT 1
@@ -427,7 +440,16 @@ def _assert_closed_effective_authority(
                    SELECT 1 FROM pg_catalog.pg_auth_members AS membership
                    JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
                    JOIN pg_catalog.pg_roles AS granted ON granted.oid = membership.roleid
-                   WHERE member.rolname = '{role}' OR granted.rolname = '{role}'
+                   JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = membership.grantor
+                   WHERE (member.rolname = '{role}' OR granted.rolname = '{role}')
+                     AND NOT (
+                         granted.rolname = '{role}'
+                         AND member.rolname = '{SUPABASE_ROLE_CREATOR}'
+                         AND grantor.rolname = '{SUPABASE_ROLE_GRANTOR}'
+                         AND membership.admin_option
+                         AND NOT membership.inherit_option
+                         AND NOT membership.set_option
+                     )
                )
                OR EXISTS (
                    SELECT 1 FROM pg_catalog.pg_namespace AS namespace

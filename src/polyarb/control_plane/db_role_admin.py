@@ -43,6 +43,7 @@ LOGIN_ROLE_CAPABILITY = {
 LOGIN_ROLES = tuple(LOGIN_ROLE_CAPABILITY)
 CAPABILITY_ROLES = tuple(LOGIN_ROLE_CAPABILITY.values())
 ALL_ROLES = (*CAPABILITY_ROLES, *LOGIN_ROLES)
+SUPABASE_CREATOR_MEMBERSHIP = ("postgres", True, False, False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,21 +434,24 @@ def _require_capability_roles_safe(
             _fail("database-role-admin.namespace-unsafe", role_name)
         if snapshot.memberships.get(role_name, frozenset()):
             _fail("database-role-admin.membership-unsafe", role_name)
-        expected_incoming = (
-            frozenset({login_role})
-            if login_role in snapshot.roles or require_provisioned
-            else frozenset()
-        )
-        if snapshot.incoming_members.get(role_name, frozenset()) != expected_incoming:
-            _fail("database-role-admin.membership-unsafe", role_name)
-        expected_incoming_options = (
+        login_incoming_options = (
             frozenset({(login_role, False, True, True)})
             if login_role in snapshot.roles or require_provisioned
             else frozenset()
         )
-        if snapshot.incoming_membership_options.get(
+        actual_incoming_options = snapshot.incoming_membership_options.get(
             role_name, frozenset()
-        ) != expected_incoming_options or snapshot.membership_options.get(role_name, frozenset()):
+        )
+        allowed_incoming_options = (
+            login_incoming_options,
+            login_incoming_options | frozenset({SUPABASE_CREATOR_MEMBERSHIP}),
+        )
+        if (
+            actual_incoming_options not in allowed_incoming_options
+            or snapshot.incoming_members.get(role_name, frozenset())
+            != frozenset(item[0] for item in actual_incoming_options)
+            or snapshot.membership_options.get(role_name, frozenset())
+        ):
             _fail("database-role-admin.membership-unsafe", role_name)
         if snapshot.owned_objects.get(role_name, frozenset()):
             _fail("database-role-admin.ownership-unsafe", role_name)

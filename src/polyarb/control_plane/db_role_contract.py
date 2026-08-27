@@ -28,6 +28,7 @@ CONTROLLED_CONNECTION_OPTIONS = "-csearch_path=pg_catalog,public"
 # revoking it globally would change the original four applications. Namespace
 # safety instead comes from qualified daemon SQL plus this controlled path.
 TEMPORARY_POSTURE = "allowed"
+SUPABASE_CREATOR_MEMBERSHIP = ("postgres", True, False, False)
 
 RUNTIME_ALLOWED = {
     "m1_runtime_controller_leases": frozenset({"SELECT", "INSERT", "UPDATE"}),
@@ -545,7 +546,12 @@ def _verify_exact_capability_membership(
         )
         for row in cursor.fetchall()
     )
-    if incoming != frozenset({(contract.login_role, False, True, True)}):
+    required_incoming = frozenset({(contract.login_role, False, True, True)})
+    allowed_incoming = (
+        required_incoming,
+        required_incoming | frozenset({SUPABASE_CREATOR_MEMBERSHIP}),
+    )
+    if incoming not in allowed_incoming:
         _fail("database-role.forbidden-privilege-present", "capability-membership")
     cursor.execute(
         """

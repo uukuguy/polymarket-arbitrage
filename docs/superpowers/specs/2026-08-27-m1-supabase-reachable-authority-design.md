@@ -90,6 +90,28 @@ namespace gate fails before the object loop can normalize the drift away.
 - `docs/learning/89-数据库能力角色与进程身份.md`: explain namespace reachability
   as part of effective authority.
 
+## PostgreSQL 16 delegated CREATEROLE membership
+
+The corrected reachability attempt exposed a second provider-specific fact.
+Supabase's login `postgres` is a delegated `CREATEROLE` administrator rather
+than a superuser. PostgreSQL 16 automatically records the creator as an ADMIN
+member of each new role, with `INHERIT FALSE` and `SET FALSE`; Supabase records
+`supabase_admin` as grantor. The delegated creator cannot revoke that grant
+because it is not the grantor.
+
+This membership does not add effective application authority to `postgres`:
+the database administrator already has broader role-management authority and
+cannot inherit or SET the capability. It is therefore an exact provider
+ambient edge, not an application member. The closed contract permits either:
+
+- local/superuser fixtures: no ambient creator membership; or
+- Supabase: exactly `(postgres, ADMIN TRUE, INHERIT FALSE, SET FALSE)` incoming
+  to each capability, created by grantor `supabase_admin`.
+
+After provisioning, the only additional incoming member is the matching app
+login with `(ADMIN FALSE, INHERIT TRUE, SET TRUE)`. Any other member, option,
+outgoing membership, ownership, privilege, or search-path setting still fails.
+
 ## Failure and Rollback Semantics
 
 - The failed production attempt is immutable evidence; it performed no partial
@@ -97,7 +119,7 @@ namespace gate fails before the object loop can normalize the drift away.
 - No second production attempt may use the old `d050c829` authorization. The
   corrected executable receives a new Git SHA, a new local gate, and a refreshed
   exact authorization package.
-- A second migration failure must again leave production at 025 and stop the
+- Every migration failure must again leave production at 025 and stop the
   rollout. No manual role/schema cleanup is permitted outside Alembic.
 - The runtime-event-writer credential remediation already completed and is
   independent of revision 026 rollback.
