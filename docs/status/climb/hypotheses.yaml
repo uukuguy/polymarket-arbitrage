@@ -517,3 +517,16 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-019
+  description: An exact, immutable observe-only authorization envelope binding the reviewed
+    release, production database, revision, six Fly apps, scoped roles, empty recovery
+    allowlist, rollback, and evidence directory can make the production gate auditable
+    without silently broadening recovery authority.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Convert the completed local self-healing implementation into a fail-closed
+    production authorization package whose first rollout has zero recovery mutation authority.
+  cost_h: 1.0
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-27T06:08:00+08:00'
+  results: []

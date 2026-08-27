@@ -10367,3 +10367,26 @@ authorization package for executable release
 `d050c8290c52e07acb72c8db7fe3fb02072d126c`, revision 026, both scoped
 roles/apps, observe-only mode, empty recovery allowlist, rollback, and the 05.6
 evidence directory.
+
+## SESSION 307 — 2026-08-27 (resume into the active self-healing worktree)
+
+- [RESTORED] The active M1 implementation is the `feat/m1-self-healing`
+  worktree at `b9ed5eda`, not the root `main` checkout that stops after the
+  design and implementation-plan commits. Plan `05.6-207` final-rereview local
+  closure remains the latest completed work.
+- [QUALITY GATE] `make planning-status` reports 88 plans with no SUMMARY drift
+  and matching reviewed evidence hashes. `core.hooksPath` remains `.githooks`;
+  no interrupted agent or current `.continue-here` checkpoint exists.
+- [BOUNDARY] Production remains database `postgres` at revisions 022-025;
+  revision 026, scoped logins, the two private apps and observe-only production
+  gates remain NOT RUN. No production mutation was performed during resume.
+- [HYGIENE] Removed the obsolete one-shot `HANDOFF.json` whose superseded
+  instruction still treated the failed `m1-formal-20260823T1335Z` run as
+  qualifying. Existing unrelated dirty SDD report files were preserved.
+
+[NEXT] In `.worktrees/m1-self-healing`, prepare but do not execute the exact
+observe-only authorization package for release
+`d050c8290c52e07acb72c8db7fe3fb02072d126c`, production database `postgres`,
+revision 026, both scoped roles/apps, empty recovery allowlist, rollback and the
+05.6 evidence directory. The first local-only command is
+`make control-plane-render-rollout enable=1 release_id=d050c8290c52e07acb72c8db7fe3fb02072d126c`.

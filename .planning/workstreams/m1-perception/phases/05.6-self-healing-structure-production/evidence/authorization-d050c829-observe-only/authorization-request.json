@@ -1,0 +1,63 @@
+{
+  "artifact_version": 1,
+  "status": "awaiting-explicit-authorization",
+  "prepared_at": "2026-08-27T06:12:00+08:00",
+  "requested_window": {
+    "not_before": "2026-08-27T06:12:00+08:00",
+    "not_after": "2026-08-27T10:12:00+08:00"
+  },
+  "operator": "codex-climb-agent",
+  "release_sha": "d050c8290c52e07acb72c8db7fe3fb02072d126c",
+  "production_database": "postgres",
+  "current_database_revision": "025",
+  "target_database_revision": "026",
+  "existing_apps": [
+    "polyarb-control-api",
+    "polyarb-control-worker-m1",
+    "polyarb-control-alert",
+    "polyarb-control-runtime-event-writer"
+  ],
+  "new_private_apps": [
+    "polyarb-runtime-controller-m1",
+    "polyarb-qualification-worker-m1"
+  ],
+  "scoped_login_roles": [
+    "m1_runtime_controller_login",
+    "m1_qualification_worker_login"
+  ],
+  "runtime_recovery_mode": "observe-only",
+  "runtime_recovery_allowed_targets": [],
+  "maximum_effect": [
+    "apply additive Alembic revision 026 to database postgres",
+    "provision exactly two scoped login roles with independent credentials",
+    "create and deploy exactly two new private Fly apps",
+    "record observe-only decisions and rolling qualification facts",
+    "leave all existing four production apps running without restart"
+  ],
+  "forbidden_effects": [
+    "no job, process, or Machine recovery action",
+    "no Fly recovery token in either new app",
+    "no fault injection",
+    "no existing app credential rotation",
+    "no topology replacement",
+    "no wallet, signing, order, balance, or trade action"
+  ],
+  "rollback": [
+    "stop both new private apps",
+    "disable both scoped login roles through the admin-only Make target",
+    "downgrade revision 026 to 025 only after both new apps are stopped",
+    "verify database revision 025 and health of the original four apps",
+    "retain all evidence and failed qualification epochs append-only"
+  ],
+  "evidence_directory": ".planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/evidence/authorization-d050c829-observe-only",
+  "rendered_artifact_hashes": {
+    "fly-control-alert.toml": "2fcdfcaedd9d0b428ace2dc51a9ac4628da45f8ec03b5968a62ef370e425c27a",
+    "fly-control-api.toml": "e11ddfd8688fd35e36fa91fd9fb8c8c817456fb2b5d577a6badce01b20b8562c",
+    "fly-control-worker.toml": "065207cbb5ee6edfb827d465cbe5697e1944887be934892f1d305c6736c2eea2",
+    "fly-qualification-worker.toml": "9f065bea546b9457ed8c5628c6fcf07757dbb179ba514de37ccc13b0e1de1119",
+    "fly-runtime-controller.toml": "0b66fbace4c78a831e889c69469960e4363c489343bff428fb179ae70acbdc94",
+    "fly-runtime-event-writer.toml": "a1eb699580e4145c447c5ea7cf317d20246044f72b5d2b3c77a258253c92b0f5",
+    "rollout-checklist.json": "c1e4432be00552aec3f9b1283c68c61317e520167e990c7c0f4395da4d0bdca6"
+  },
+  "authorization_granted": false
+}

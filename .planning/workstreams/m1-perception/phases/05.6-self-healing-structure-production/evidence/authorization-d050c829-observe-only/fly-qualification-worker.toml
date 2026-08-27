@@ -1,0 +1,28 @@
+# Private rolling qualification worker. Install only its scoped qualification Postgres DSN as
+# POLYARB_QUALIFICATION_DB_DSN; never install the runtime-controller DSN in this app.
+# It has no Fly token, public HTTP service, R2,
+# Gamma, CLOB, Telegram, sampler, worker, or recovery authority.
+app = "polyarb-qualification-worker-m1"
+primary_region = "ams"
+
+[env]
+POLYARB_DB_EXPECTED_DATABASE = "postgres"
+POLYARB_QUALIFICATION_RELEASE_ID = "d050c8290c52e07acb72c8db7fe3fb02072d126c"
+POLYARB_QUALIFICATION_CONFIG_ID = "sha256:843eb3b3d0cc5e97df6c2f0a036510ddd5eb969cb8f10d5bae7f61315c11eab3"
+POLYARB_QUALIFICATION_ROLE_IDENTITY = "opportunity,quote,structure"
+POLYARB_QUALIFICATION_RUNTIME_RECOVERY_MODE = "observe-only"
+POLYARB_QUALIFICATION_RUNTIME_RECOVERY_ALLOWED_TARGETS = ""
+POLYARB_RUNTIME_ROLE = "control-plane"
+
+[build]
+
+[processes]
+qualification = "python -m polyarb.cli_control_plane qualification-serve --enable --interval-seconds 30 --batch-size 100 --json"
+
+[[restart]]
+policy = "always"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"
+processes = ["qualification"]

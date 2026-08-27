@@ -1,0 +1,51 @@
+{
+  "alert_app": "polyarb-control-alert",
+  "api_app": "polyarb-control-api",
+  "artifact_version": 10,
+  "cloud_actions_performed": false,
+  "database_revision": "026",
+  "expected_database": "postgres",
+  "qualification_config_id": "sha256:843eb3b3d0cc5e97df6c2f0a036510ddd5eb969cb8f10d5bae7f61315c11eab3",
+  "qualification_config_payload": {
+    "batch_size": 100,
+    "interval_seconds": 30,
+    "max_gap_seconds": 900,
+    "policy_version": "m1-rolling-qualification-v1",
+    "required_seconds": 86400,
+    "role_identity": [
+      "opportunity",
+      "quote",
+      "structure"
+    ],
+    "runtime_recovery_allowed_targets": [],
+    "runtime_recovery_mode": "observe-only",
+    "signature_budget": 3
+  },
+  "qualification_database_role": "qualification_worker",
+  "qualification_release_id": "d050c8290c52e07acb72c8db7fe3fb02072d126c",
+  "qualification_role_identity": [
+    "opportunity",
+    "quote",
+    "structure"
+  ],
+  "qualification_worker_app": "polyarb-qualification-worker-m1",
+  "rendered_secret_values": false,
+  "runtime_controller_app": "polyarb-runtime-controller-m1",
+  "runtime_controller_database_role": "runtime_controller",
+  "runtime_event_writer_app": "polyarb-control-runtime-event-writer",
+  "runtime_recovery_allowed_targets": [],
+  "runtime_recovery_mode": "observe-only",
+  "source_window_admission": "explicit-operator-command",
+  "steps": [
+    "preflight",
+    "revisions-022-through-026-migration",
+    "isolated-api-data-worker-alert-worker-runtime-event-writer-runtime-controller-and-qualification-deploy",
+    "three-fresh-source-window-structure-quote-shadows",
+    "source-and-quote-admitter-worker-loss-circuit-probe-and-api-readability",
+    "runtime-controller-observe-only-dry-run",
+    "qualification-worker-read-only-replay",
+    "continuous-24-hour-soak",
+    "one-way-formal-transactional-promotion"
+  ],
+  "worker_app": "polyarb-control-worker-m1"
+}
