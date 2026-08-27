@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Creator-aware 03a2deee revision 026 observe-only package awaits exact authorization after two consumed attempts failed closed
-last_updated: "2026-08-27T18:13:54+08:00"
+stopped_at: Creator-aware 03a2deee revision 026 observe-only package explicitly authorized; fresh production preflight is next
+last_updated: "2026-08-27T18:22:31+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
