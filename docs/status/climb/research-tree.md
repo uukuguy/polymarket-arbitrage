@@ -5,7 +5,7 @@
 ## Session
 
 - Last cycle: 22
-- Next action: rank next pending hypothesis
+- Next action: resolve H-020 fail-closed design gate, then write spec and TDD plan
 
 ## In flight
 
@@ -27,6 +27,7 @@
 - **H-017** [confirmed]: A bounded fail-closed operator read model rendered consistently by the control API, Dashboard, and Telegram makes task progress, incidents, recovery actions, and rolling qualification immediately understandable without inventing state.
 - **H-018** [confirmed]: A deterministic real-Postgres runtime fault matrix plus isolated least-privilege services and a capability-limited exact Fly recovery adapter can prove the complete detection, incident, action, operator-surface, and qualification chain before any production mutation.
 - **H-019** [confirmed]: An exact, immutable observe-only authorization envelope binding the reviewed release, production database, revision, six Fly apps, scoped roles, empty recovery allowlist, rollback, and evidence directory can make the production gate auditable without silently broadening recovery authority.
+- **H-020** [pending]: A fail-closed, allowlisted Fly topology and secret-provenance audit can expose only app, Machine, state, image identity, process group, env key names, and secret-name presence while preventing password-bearing ordinary environment values or provider bodies from reaching operator output.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts

@@ -548,3 +548,17 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-020
+  description: A fail-closed, allowlisted Fly topology and secret-provenance audit
+    can expose only app, Machine, state, image identity, process group, env key names,
+    and secret-name presence while preventing password-bearing ordinary environment
+    values or provider bodies from reaching operator output.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Eliminate raw Fly status as an operator dependency and make the
+    runtime-event-writer credential remediation plus all later topology preflights
+    reproducibly credential-free.
+  cost_h: 1.5
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-27T16:19:00+08:00'
+  results: []
