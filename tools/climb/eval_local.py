@@ -560,6 +560,7 @@ DETERMINISTIC_RUNTIME_PRODUCTION_ENABLEMENT_GATE_COMMANDS = {
         "run",
         "pytest",
         "tests/m1-perception/test_control_plane_fly_recovery.py",
+        "tests/m1-perception/test_control_plane_fly_topology_audit.py",
         "tests/m1-perception/test_control_plane_deployment_templates.py::test_runtime_controller_template_is_private_observe_only_recovery_topology",
         "tests/m1-perception/test_control_plane_deployment_templates.py::test_qualification_worker_template_has_only_scoped_database_and_no_recovery_authority",
         "-q",
@@ -585,6 +586,7 @@ DETERMINISTIC_RUNTIME_PRODUCTION_ENABLEMENT_GATE_COMMANDS = {
         "tests/m1-perception/test_control_plane_cli.py::test_runtime_reconcile_once_observe_only_records_idle_without_executor",
         "tests/m1-perception/test_makefile_contract.py::test_make_runtime_observe_verify_is_read_only_and_bounded",
         "tests/m1-perception/test_makefile_contract.py::test_make_render_rollout_exposes_exact_six_app_topology",
+        "tests/m1-perception/test_makefile_contract.py::test_make_fly_topology_audit_exposes_exact_read_only_argv",
         "-q",
     ],
     "restart": [

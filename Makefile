@@ -614,7 +614,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-db-role-preflight control-plane-db-role-provision control-plane-db-role-verify control-plane-db-role-disable control-plane-egress-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-start control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify runtime-policy-replay runtime-fault-matrix runtime-controller-status runtime-observe-verify runtime-reconcile-once runtime-reconcile-serve supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-db-role-preflight control-plane-db-role-provision control-plane-db-role-verify control-plane-db-role-disable control-plane-fly-topology-audit control-plane-egress-preflight control-plane-render-rollout control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-start control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify runtime-policy-replay runtime-fault-matrix runtime-controller-status runtime-observe-verify runtime-reconcile-once runtime-reconcile-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -674,6 +674,11 @@ control-plane-db-role-disable:
 	@test "$(enable)" = "1" -a -n "$(expected_database)" || (echo "usage: make control-plane-db-role-disable enable=1 expected_database=<name>" >&2; exit 2)
 	@test -n "$$POLYARB_CONTROL_PLANE_DB_ADMIN_DSN" || (echo "ERROR: POLYARB_CONTROL_PLANE_DB_ADMIN_DSN is required" >&2; exit 2)
 	@uv run python -m polyarb.control_plane.db_role_admin disable --enable --expected-database "$(expected_database)" --json
+
+## control-plane-fly-topology-audit: Read-only, fail-closed exact Machine and required-secret-name audit; never emits env values or raw provider bodies.
+control-plane-fly-topology-audit:
+	@test -n "$(targets)" || (echo "usage: make control-plane-fly-topology-audit targets='app/machine ...' [required_secrets='app/SECRET ...']" >&2; exit 2)
+	@uv run python -m polyarb.control_plane.fly_topology_audit $(foreach target,$(targets),--target "$(target)") $(foreach secret,$(required_secrets),--required-secret "$(secret)") --json
 
 ## control-plane-render-rollout: Render local-only six-app runtime/qualification topology and checklist; usage enable=1 release_id=<40-char-lowercase-git-sha>; never contacts cloud resources.
 control-plane-render-rollout:

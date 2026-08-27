@@ -361,6 +361,42 @@ def test_make_help_lists_control_plane_db_role_targets() -> None:
     assert "control-plane-db-role-provision:" in result.stdout
     assert "control-plane-db-role-verify:" in result.stdout
     assert "control-plane-db-role-disable:" in result.stdout
+    assert "control-plane-fly-topology-audit:" in result.stdout
+
+
+def test_make_fly_topology_audit_exposes_exact_read_only_argv(tmp_path: Path) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    result = subprocess.run(
+        [
+            "make",
+            "control-plane-fly-topology-audit",
+            "targets=writer-app/28654e35a73d08",
+            "required_secrets=writer-app/POLYARB_SUPABASE_DB_DSN",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _fake_uv_calls(log_path) == [
+        [
+            "run",
+            "python",
+            "-m",
+            "polyarb.control_plane.fly_topology_audit",
+            "--target",
+            "writer-app/28654e35a73d08",
+            "--required-secret",
+            "writer-app/POLYARB_SUPABASE_DB_DSN",
+            "--json",
+        ]
+    ]
+    recipe = result.stdout.lower()
+    for forbidden in ("deploy", "machine stop", "machine start", "secrets set", "secrets unset"):
+        assert forbidden not in recipe
 
 
 @pytest.mark.parametrize(
