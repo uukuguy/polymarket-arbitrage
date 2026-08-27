@@ -1,0 +1,77 @@
+{
+  "artifact_version": 1,
+  "prepared_at": "2026-08-28T00:07:25+08:00",
+  "status": "authorized-by-explicit-scope-expansion",
+  "authorization_granted": true,
+  "authorization_basis": "user explicitly approved every authorization required to identify and solve the public.digest exhaustion cause",
+  "approved_by": "user",
+  "approved_at": "2026-08-27T23:47:15+08:00",
+  "approval_text": "要找出同一 public.digest 缺陷耗尽重试并停止的原因并解决，需要的授权都批准。",
+  "authorized_request_sha256": "5382223d0e0bc58e32b7ca002c18f005c97b2185a5b08544ea73b9f644923680",
+  "requested_window": {
+    "not_before": "2026-08-28T00:07:25+08:00",
+    "not_after": "2026-08-28T06:07:25+08:00"
+  },
+  "operator": "Codex",
+  "source_release_sha": "657174dbc73d0a6ac330e008260fd47279dbdc35",
+  "production_database_revision": "027",
+  "old_worker_image": "registry.fly.io/polyarb-control-worker-m1@sha256:87ee7acaba1a1549436355477855bebb9b0dca919cc4a7ee559ec25aacc714f7",
+  "target_worker_image": "registry.fly.io/polyarb-control-worker-m1@sha256:95131c6560f666d470077dea7638f951120fa4ce22b6c5da057e85198966127f",
+  "local_image_id": "sha256:f9167685ee089cd2f43a03c168e94dce5e759bf97c7fda1bd1e05a072fa27020",
+  "exact_existing_targets": [
+    "polyarb-control-worker-m1/e82d1220b2d138",
+    "polyarb-control-worker-m1/683e46ea500dd8",
+    "polyarb-control-worker-m1/4d895231f66748"
+  ],
+  "root_cause": {
+    "primary": "the original worker Machines still run the 2026-08-18 image, which predates Plan 201+ runtime-event instrumentation and therefore cannot feed the runtime controller or rolling qualification runtime source",
+    "secondary": "when an old-image worker recorded an incident or recovery after an upstream failure, revision 026 projected that row through m1_record_qualification_ingress and failed on public.digest; the secondary failure terminated the process until Fly exhausted ten restarts",
+    "revision_027_proof": "after 027, the previously failing structure-source event page completed successfully and the next structure-certify lease continued heartbeating without UndefinedFunction",
+    "remaining_fix": "roll the same three Machines to the reviewed 657174db image so every task lifecycle emits the runtime events required by observe-only detection and rolling qualification"
+  },
+  "local_gates": {
+    "focused_test_count": 87,
+    "focused_tests_status": "pass",
+    "ruff_status": "pass",
+    "image_architecture": "amd64",
+    "image_uid": 10001,
+    "image_runtime_event_code_present": true,
+    "image_revision_027_present": true,
+    "image_cli_smoke_status": "pass"
+  },
+  "prerequisites": [
+    "re-run revision-027 function, exact topology, source/target image, zero-recovery-action, and runtime observe-only preflights immediately before the first Machine update",
+    "require coordinator and qualification stopped, the other two worker Machines started, all other original Machines started, and runtime controller started observe-only with an empty recovery allowlist",
+    "require the target registry digest to equal sha256:95131c6560f666d470077dea7638f951120fa4ce22b6c5da057e85198966127f"
+  ],
+  "maximum_effect": [
+    "update only the image field of the three exact existing worker Machines to the target immutable digest, one Machine at a time",
+    "preserve every Machine ID, process command, process group, VM size, region, env-key projection, hidden secret set, restart policy, private IP, and no-volume topology",
+    "update the stopped coordinator first, start it, and require durable runtime events plus matching qualification runtime ingress before updating either pool worker",
+    "roll structure-range and quote-batch sequentially only after the coordinator gate passes, preserving fenced job safety",
+    "require all three workers started and advancing, runtime controller observe-only continuity, and zero recovery actions",
+    "start only existing qualification Machine 876077f0274598 after all worker gates pass and prove at least 300 seconds of append-only rolling qualification"
+  ],
+  "forbidden_effects": [
+    "no new, deleted, or replaced Fly app or Machine",
+    "no Machine ID, command, process, env, secret, VM, region, volume, IP, service, restart-policy, autostart, or autostop change",
+    "no image change outside the three exact worker Machines",
+    "no database schema, role, credential, privilege, owner, search-path, or extension change",
+    "no runtime-controller stop, restart, update, recovery allowlist, or recovery-mode change",
+    "no recovery action, fault injection, wallet, signing, order, balance, or trade action"
+  ],
+  "rollback": [
+    "stop qualification if any post-update or qualification gate fails",
+    "restore each changed worker Machine to the old immutable image digest in reverse order if its process or projection gate fails",
+    "leave coordinator stopped if its target-image gate fails; otherwise preserve its proved started state",
+    "verify exact topology, original Machine IDs, runtime controller observe-only continuity, zero recovery actions, and append-only evidence",
+    "retain all images, logs, runtime events, ingress rows, epochs, and authorization evidence"
+  ],
+  "cloud_actions_performed_before_this_request": {
+    "target_image_built_and_pushed": true,
+    "machine_updated": false,
+    "app_release_deployed": false
+  },
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}
