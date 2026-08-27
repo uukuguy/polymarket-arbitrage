@@ -126,11 +126,25 @@ def scoped_connection_factory(dsn: str) -> ConnectionFactory:
     """Return a connection factory with a non-overridable application namespace."""
 
     _reject_dsn_namespace_override(dsn)
-    return lambda: psycopg.connect(
-        dsn,
-        connect_timeout=5,
-        options=CONTROLLED_CONNECTION_OPTIONS,
-    )
+
+    def connect() -> psycopg.Connection[Any]:
+        connection = psycopg.connect(
+            dsn,
+            connect_timeout=5,
+            options=CONTROLLED_CONNECTION_OPTIONS,
+        )
+        try:
+            connection.execute(
+                "SELECT pg_catalog.set_config('search_path', %s, false)",
+                (",".join(CONTROLLED_SEARCH_PATH),),
+            )
+            connection.commit()
+        except Exception:
+            connection.close()
+            raise
+        return connection
+
+    return connect
 
 
 def _reject_dsn_namespace_override(dsn: str) -> None:

@@ -1832,3 +1832,16 @@ success is not user receipt/read evidence.
 - First creation remains explicit and fail-closed. Separating validation from
   minimal mutation preserves least privilege while respecting provider role
   ownership boundaries; it does not trust ambient state.
+
+### §2.35 Connection startup intent is not active namespace truth (2026-08-27)
+
+- A libpq `options=-csearch_path=...` argument can be accepted locally while a
+  managed Session Pooler does not forward it to PostgreSQL. The only authority
+  is the connected session's `current_setting` plus `current_schemas` result.
+- Relaxing the startup verifier would create a false green: later daemon
+  connections would still use `"$user", public`. The factory must establish
+  the invariant, not merely the verifier.
+- Each scoped connection therefore applies schema-qualified
+  `pg_catalog.set_config` at session scope, commits that bootstrap so callers
+  receive a clean connection, and closes on bootstrap failure. Startup options
+  remain defense-in-depth for direct PostgreSQL paths.

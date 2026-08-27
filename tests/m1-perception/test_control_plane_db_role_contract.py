@@ -701,7 +701,16 @@ def test_scoped_connection_factory_binds_controlled_search_path(
     from polyarb.control_plane import db_role_contract
 
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-    sentinel = object()
+    bootstrap_calls: list[tuple[str, object]] = []
+
+    class FakeBootstrapConnection:
+        def execute(self, statement: str, params: object) -> None:
+            bootstrap_calls.append((statement, params))
+
+        def commit(self) -> None:
+            bootstrap_calls.append(("commit", ()))
+
+    sentinel = FakeBootstrapConnection()
 
     def connect(*args: object, **kwargs: object) -> object:
         calls.append((args, kwargs))
@@ -721,6 +730,13 @@ def test_scoped_connection_factory_binds_controlled_search_path(
                 "options": "-csearch_path=pg_catalog,public",
             },
         )
+    ]
+    assert bootstrap_calls == [
+        (
+            "SELECT pg_catalog.set_config('search_path', %s, false)",
+            ("pg_catalog,public",),
+        ),
+        ("commit", ()),
     ]
 
 
