@@ -1,0 +1,26 @@
+{
+  "artifact_version": 2,
+  "status": "pass",
+  "recorded_at": "2026-08-27T20:23:42+08:00",
+  "climb_hypothesis": "H-020",
+  "climb_run": "20260827-085048-h-020",
+  "credential_source": "local-keychain",
+  "exact_started_targets": [
+    "polyarb-control-api/d8d0e27a734158",
+    "polyarb-control-worker-m1/e82d1220b2d138",
+    "polyarb-control-worker-m1/683e46ea500dd8",
+    "polyarb-control-worker-m1/4d895231f66748",
+    "polyarb-control-alert/d891e941a41dd8",
+    "polyarb-control-runtime-event-writer/28654e35a73d08"
+  ],
+  "runtime_event_writer_required_secret_presence": {
+    "POLYARB_RUNTIME_EVENT_WRITER_TOKEN": true,
+    "POLYARB_SUPABASE_DB_DSN": true
+  },
+  "full_bounded_projection_baseline": "../authorization-ff4c8093-observe-only/safe-fly-topology-audit.json",
+  "full_bounded_projection_baseline_sha256": "780136ca97b6b1fd763fc518679a5808afeb0820eec9f6ce32d839b5a327a730",
+  "identity_image_process_env_projection_changed": false,
+  "ordinary_credential_env_keys_present": false,
+  "raw_provider_bodies_recorded": false,
+  "secret_values_recorded": false
+}

@@ -1,0 +1,26 @@
+{
+  "artifact_version": 1,
+  "recorded_at": "2026-08-27T20:23:42+08:00",
+  "authorized_release_sha": "ff4c8093d55a6363f7dcb26f6ffe2113e260a9ba",
+  "authorized_request_original_sha256": "bcaeda7f72bf10a6308a6de6fea82cadedd284a5490c6a393b7feee15e881669",
+  "scoped_login_rotation": "committed",
+  "runtime_active_verification": {
+    "status": "failed_closed",
+    "reason_code": "database-role.namespace-unsafe",
+    "object_identifier": "active-search-path"
+  },
+  "qualification_active_verification": "not_run_after_runtime_failure",
+  "root_cause": "Supabase Session Pooler did not forward the libpq startup options search_path; both scoped sessions retained the default user/public path",
+  "diagnostic_session_truth": {
+    "configured_search_path": "\"$user\", public",
+    "current_schemas_false": [
+      "public"
+    ]
+  },
+  "new_apps_created": false,
+  "new_hidden_secrets_staged": false,
+  "recovery_actions": 0,
+  "fault_injections": 0,
+  "secret_values_recorded": false,
+  "provider_response_bodies_recorded": false
+}

@@ -1,0 +1,42 @@
+{
+  "artifact_version": 2,
+  "observed_at": "2026-08-27T20:23:42+08:00",
+  "operator": "codex-climb-agent",
+  "release_sha": "6ae40683fc096a57d616b4dc774f507ad94917ae",
+  "production_database": {
+    "name": "postgres",
+    "current_revision": "026",
+    "capability_roles_present": [
+      "m1_qualification_worker_capability",
+      "m1_runtime_controller_capability"
+    ],
+    "scoped_login_roles_present": [
+      "m1_qualification_worker_login",
+      "m1_runtime_controller_login"
+    ],
+    "scoped_login_roles_can_login": true,
+    "full_admin_authority_preflight": "ready",
+    "succeeded_attempt_count": 92732
+  },
+  "session_pooler_namespace_bootstrap": {
+    "configured_search_path": "pg_catalog,public",
+    "current_schemas_false": [
+      "pg_catalog",
+      "public"
+    ],
+    "status": "pass"
+  },
+  "control_plane": {
+    "public_healthz_http_status": 200,
+    "public_api_status": "available"
+  },
+  "fly_topology_evidence": "safe-fly-topology-audit.json",
+  "original_apps_started": true,
+  "absent_apps": [
+    "polyarb-runtime-controller-m1",
+    "polyarb-qualification-worker-m1"
+  ],
+  "production_mutations_performed": false,
+  "secret_values_recorded": false,
+  "provider_response_bodies_recorded": false
+}

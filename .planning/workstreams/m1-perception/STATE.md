@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: ff4c8093 minimal-rotation rollout explicitly authorized; immediate preflight is next
-last_updated: "2026-08-27T19:54:43+08:00"
+stopped_at: H-024 confirmed; 6ae40683 session-bootstrap rollout package awaits exact approval
+last_updated: "2026-08-27T20:23:42+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -117,6 +117,14 @@ progress:
   role attribute clause. Release `ff4c8093` validates the full existing
   envelope and writes only the necessary LOGIN/password delta. H-023 cycle 26
   run `20260827-113937-h-023` scored 100/100 across all nine nodes.
+- The authorized `ff4c8093` retry rotated both scoped passwords, then failed
+  closed before Fly mutation because the runtime active session retained
+  `"$user", public`: Supabase Session Pooler did not forward libpq startup
+  `options`. Release `6ae40683` now applies schema-qualified session-scope
+  `pg_catalog.set_config`, commits the bootstrap before returning a clean
+  connection, and closes on bootstrap failure. A real pooler probe returned
+  exactly `pg_catalog,public` and `[pg_catalog, public]`. H-024 cycle 27 run
+  `20260827-121528-h-024` scored 100/100 across all nine nodes.
 - Climb H-020 cycle 23 run `20260827-085048-h-020` scored 100/100 and introduced
   `make control-plane-fly-topology-audit`. Its read-only production proof shows
   all original Machines started, no credential-bearing ordinary env key on the
@@ -184,15 +192,16 @@ progress:
 ## Resume
 
 1. Obtain explicit approval for the fresh exact remaining observe-only rollout package:
-   corrected application release `ff4c8093d55a6363f7dcb26f6ffe2113e260a9ba`,
+   corrected application release `6ae40683fc096a57d616b4dc774f507ad94917ae`,
    production database `postgres`, revision 026,
    minimal password rotation for the two existing scoped LOGIN roles, active
    identity verification, the two new private apps, observe-only mode,
    empty recovery allowlist, rollback, and evidence directory. Do not infer
    this authority from generic approval.
-2. Treat `d050c829`, `db51b21d`, `03a2deee`, and `ad8a123f` authorizations as
-   consumed evidence. Revision 026 and both LOGIN envelopes stay applied; their
-   unshipped credentials are not recoverable and must be rotated.
+2. Treat `d050c829`, `db51b21d`, `03a2deee`, `ad8a123f`, and `ff4c8093`
+   authorizations as consumed evidence. Revision 026 and both LOGIN envelopes
+   stay applied; all unshipped credentials are not recoverable and must be
+   rotated.
    The separate runtime-event-writer remediation is complete and verified; do
    not rotate it again during the corrected rollout.
 3. After authorized production enablement, let recovery confirmation open a fresh epoch

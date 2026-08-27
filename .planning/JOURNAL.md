@@ -10595,3 +10595,41 @@ qualification. Fault injection requires a later exact authorization.
 [NEXT] Re-run the full admin and safe Fly preflights, then execute the bounded
 in-memory credential rotation→active verification→hidden-secret staging
 operator. Do not create either app unless both scoped identities pass.
+
+### SESSION 312 continuation — Session Pooler namespace fail-closed and H-024
+
+- [AUTHORIZED ROTATION] The exact `ff4c8093` immediate DB and Fly preflights
+  passed. Minimal password rotation committed successfully. Runtime active
+  verification then failed closed with
+  `database-role.namespace-unsafe / active-search-path`; qualification
+  verification and all Fly creation/staging remained NOT RUN.
+- [ROOT CAUSE] A second bounded rotation plus read-only session diagnostic proved
+  both scoped logins connected through Supabase Session Pooler with
+  `current_setting('search_path') = '"$user", public'` and
+  `current_schemas(false) = [public]`. The pooler accepted the connection but
+  did not forward libpq startup `options`. All generated passwords were again
+  discarded and no secret value was recorded.
+- [TDD + REAL POOLER PROOF] Executable release
+  `6ae40683fc096a57d616b4dc774f507ad94917ae` makes the connection factory apply
+  schema-qualified `pg_catalog.set_config` at session scope, commit that
+  bootstrap, and close on failure. The RED factory contract turned GREEN;
+  focused PostgreSQL/role tests, Ruff and Pyright passed. A real production
+  pooler probe then returned exactly `pg_catalog,public` and
+  `[pg_catalog, public]`.
+- [CLIMB] H-024 cycle 27 run `20260827-121528-h-024` scored 100/100 across all
+  nine nodes and binds to `6ae40683`.
+- [FRESH READ-ONLY EVIDENCE] The full admin authority preflight is ready,
+  revision remains 026 with the exact four scoped roles, successful attempts
+  reached 92732, API health is 200, all six original Machines are started and
+  both new apps remain absent.
+- [EXACT REQUEST] Prepared
+  `evidence/authorization-6ae40683-observe-only/authorization-request.json`,
+  original SHA256
+  `9e967eca0f56cbd7d34d5650cd0f8b9f7686059e6ee849239fd005a3534f734b`.
+  It adds no authority beyond the prior remaining-actions package; it binds the
+  corrected session bootstrap release.
+
+[NEXT] Obtain explicit approval for the exact `6ae40683` request. Then repeat
+the immediate preflights and the bounded rotation→both active verifies→two-app
+hidden-secret staging operator. Schema, fault and recovery mutation remain
+forbidden.
