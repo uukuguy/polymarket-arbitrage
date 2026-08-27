@@ -1,12 +1,12 @@
 {
   "artifact_version": 1,
   "prepared_at": "2026-08-27T21:55:34+08:00",
-  "status": "requested",
-  "authorization_granted": false,
-  "approved_by": null,
-  "approved_at": null,
-  "approval_text": null,
-  "authorized_request_sha256": null,
+  "status": "authorized",
+  "authorization_granted": true,
+  "approved_by": "user",
+  "approved_at": "2026-08-27T22:05:35+08:00",
+  "approval_text": "同意",
+  "authorized_request_sha256": "9d432bc674409d8fd2c3217ef2b3eb4add21c89296cd2498e1d2fb3bf22c1a69",
   "requested_window": {
     "not_before": "2026-08-27T21:55:34+08:00",
     "not_after": "2026-08-28T03:55:34+08:00"
