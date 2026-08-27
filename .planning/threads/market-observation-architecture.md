@@ -1845,3 +1845,22 @@ success is not user receipt/read evidence.
   `pg_catalog.set_config` at session scope, commits that bootstrap so callers
   receive a clean connection, and closes on bootstrap failure. Startup options
   remain defense-in-depth for direct PostgreSQL paths.
+
+### §2.36 Extension namespace is deployment state, not a source-code constant (2026-08-27)
+
+- Schema-qualifying a SECURITY DEFINER dependency is necessary but the schema
+  must be the one recorded by `pg_extension.extnamespace`. Standard PostgreSQL
+  commonly installs pgcrypto in `public`; Supabase installs it in
+  `extensions`. Hard-coding either environment turns namespace hardening into
+  a deterministic production outage.
+- The safe repair resolves the installed extension schema from system catalogs,
+  verifies the exact `digest(bytea,text)` routine, and rewrites only the known
+  token count in the three existing function definitions. Missing functions,
+  unexpected counts, or an invalid schema name fail the migration closed.
+- `CREATE OR REPLACE FUNCTION` repair evidence must compare owner, ACL,
+  SECURITY mode and configured search path before/after. A working freshness
+  call is insufficient if the repair silently broadens EXECUTE authority.
+- Production-like migration tests must preinstall pgcrypto into an
+  `extensions` schema, prove revision 026 fails for the scoped qualification
+  login, then prove 027 succeeds and survives a 027→026→027 round trip. A
+  default local `public` install cannot expose this provider-specific defect.

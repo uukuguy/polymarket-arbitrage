@@ -10,6 +10,21 @@ from typing import cast
 import pytest
 
 
+class _BootstrapConnection:
+    def __init__(self, captured: dict[str, object]) -> None:
+        self._captured = captured
+
+    def execute(self, query: str, params: tuple[str, ...]) -> object:
+        self._captured["bootstrap"] = (query, params)
+        return object()
+
+    def commit(self) -> None:
+        self._captured["bootstrap_committed"] = True
+
+    def close(self) -> None:
+        self._captured["closed"] = True
+
+
 @pytest.fixture(autouse=True)
 def _allow_daemon_database_role(monkeypatch: pytest.MonkeyPatch) -> None:
     from polyarb import cli_control_plane
@@ -36,7 +51,9 @@ def test_control_plane_connection_factory_bounds_postgres_connect_time(
     monkeypatch.setattr(
         cli_control_plane.psycopg,
         "connect",
-        lambda dsn, **kwargs: captured.update(dsn=dsn, kwargs=kwargs) or object(),
+        lambda dsn, **kwargs: (
+            captured.update(dsn=dsn, kwargs=kwargs) or _BootstrapConnection(captured)
+        ),
     )
 
     control_plane = cli_control_plane._control_plane_from_env()
@@ -49,6 +66,11 @@ def test_control_plane_connection_factory_bounds_postgres_connect_time(
             "connect_timeout": 5,
             "options": "-csearch_path=pg_catalog,public",
         },
+        "bootstrap": (
+            "SELECT pg_catalog.set_config('search_path', %s, false)",
+            ("pg_catalog,public",),
+        ),
+        "bootstrap_committed": True,
     }
 
 
@@ -2063,7 +2085,9 @@ def test_qualification_status_uses_scoped_dsn_and_is_read_only(monkeypatch, caps
     monkeypatch.setattr(
         cli_control_plane.psycopg,
         "connect",
-        lambda dsn, **kwargs: captured.update(dsn=dsn, kwargs=kwargs) or object(),
+        lambda dsn, **kwargs: (
+            captured.update(dsn=dsn, kwargs=kwargs) or _BootstrapConnection(captured)
+        ),
     )
 
     class Store:
@@ -2097,6 +2121,11 @@ def test_qualification_status_uses_scoped_dsn_and_is_read_only(monkeypatch, caps
             "connect_timeout": 5,
             "options": "-csearch_path=pg_catalog,public",
         },
+        "bootstrap": (
+            "SELECT pg_catalog.set_config('search_path', %s, false)",
+            ("pg_catalog,public",),
+        ),
+        "bootstrap_committed": True,
     }
     assert json.loads(capsys.readouterr().out)["epoch"]["epoch_id"] == "epoch-a"
 
