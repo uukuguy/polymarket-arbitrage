@@ -4,8 +4,8 @@
 
 ## Session
 
-- Last cycle: 23
-- Next action: evaluate H-021 exact Supabase creator membership contract
+- Last cycle: 24
+- Next action: rank next pending hypothesis
 
 ## In flight
 
@@ -28,7 +28,7 @@
 - **H-018** [confirmed]: A deterministic real-Postgres runtime fault matrix plus isolated least-privilege services and a capability-limited exact Fly recovery adapter can prove the complete detection, incident, action, operator-surface, and qualification chain before any production mutation.
 - **H-019** [confirmed]: An exact, immutable observe-only authorization envelope binding the reviewed release, production database, revision, six Fly apps, scoped roles, empty recovery allowlist, rollback, and evidence directory can make the production gate auditable without silently broadening recovery authority.
 - **H-020** [confirmed]: A fail-closed, allowlisted Fly topology and secret-provenance audit can expose only app, Machine, state, image identity, process group, env key names, and secret-name presence while preventing password-bearing ordinary environment values or provider bodies from reaching operator output.
-- **H-021** [pending]: An exact Supabase delegated-CREATEROLE ambient membership contract can admit only the PostgreSQL 16 non-inheriting, non-SET creator ADMIN edge while preserving the matching application login as the sole effective capability member.
+- **H-021** [confirmed]: An exact Supabase delegated-CREATEROLE ambient membership contract can admit only the PostgreSQL 16 non-inheriting, non-SET creator ADMIN edge while preserving the matching application login as the sole effective capability member.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
@@ -60,3 +60,4 @@
 - 20260826-135855-h-018: 100.0 (confirmed)
 - 20260827-075919-h-019: 100.0 (confirmed)
 - 20260827-085048-h-020: 100.0 (confirmed)
+- 20260827-100730-h-021: 100.0 (confirmed)
