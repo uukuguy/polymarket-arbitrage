@@ -1819,3 +1819,16 @@ success is not user receipt/read evidence.
   removes the ordinary env override and updates exactly one Machine. Rollback
   must never restore the compromised password. This is a separate exact
   authorization from revision 026 rollout and from all recovery/fault gates.
+
+### §2.34 Delegated role lifecycle must write only the verified delta (2026-08-27)
+
+- A delegated `CREATEROLE` identity can create a constrained LOGIN and rotate
+  its password, yet PostgreSQL may reject a later full attribute restatement
+  with `42501`. Idempotence cannot mean replaying every original DDL clause.
+- Existing roles must first pass the complete attribute, membership,
+  ownership, direct-ACL and namespace snapshot. After that proof, provision
+  writes only the necessary delta: restore `LOGIN` if disabled, rotate the
+  password, and restate the exact application-to-capability membership.
+- First creation remains explicit and fail-closed. Separating validation from
+  minimal mutation preserves least privilege while respecting provider role
+  ownership boundaries; it does not trust ambient state.

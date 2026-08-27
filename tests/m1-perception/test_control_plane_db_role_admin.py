@@ -115,6 +115,7 @@ class FakeAdminFactory:
         self.commits = 0
         self.password_changes = 0
         self.fail_after_first_password_change = False
+        self.reject_redundant_attribute_rewrite = False
         self.public_schema_create = False
         self._transaction_backup: dict[str, dict[str, Any]] | None = None
 
@@ -165,6 +166,14 @@ class FakeAdminFactory:
         self.direct_privileges.setdefault(role, set())
 
     def answer(self, normalized: str, params: object) -> object:
+        if (
+            self.reject_redundant_attribute_rewrite
+            and normalized.startswith("alter role ")
+            and " inherit " in normalized
+        ):
+            raise psycopg.errors.InsufficientPrivilege(
+                "delegated creator cannot rewrite existing role attributes"
+            )
         if normalized == "set transaction read only":
             return None
         if "select current_database()" in normalized:
@@ -283,9 +292,12 @@ class FakeAdminFactory:
             return None
         if normalized.startswith("alter role ") and " password " in normalized:
             role = _identifier_after(rendered=normalized, keyword="alter role")
-            self.roles[role]["can_login"] = True
             self.roles[role]["password"] = _literal_password(normalized)
             self.password_changes += 1
+            return None
+        if normalized.startswith("alter role ") and normalized.endswith(" login"):
+            role = _identifier_after(rendered=normalized, keyword="alter role")
+            self.roles[role]["can_login"] = True
             return None
         if normalized.startswith("alter role ") and normalized.endswith(" nologin"):
             role = _identifier_after(rendered=normalized, keyword="alter role")
@@ -344,7 +356,14 @@ def _render_for_fake(statement: object) -> str:
     if "ALTER ROLE" in rendered and "NOLOGIN" in rendered and "PASSWORD" not in rendered:
         role = _first_composed_value(rendered, "Identifier")
         return f"ALTER ROLE {role} NOLOGIN"
+    if "ALTER ROLE" in rendered and "LOGIN" in rendered and "PASSWORD" not in rendered:
+        role = _first_composed_value(rendered, "Identifier")
+        return f"ALTER ROLE {role} LOGIN"
     if "ALTER ROLE" in rendered:
+        if "INHERIT" not in rendered:
+            role = _first_composed_value(rendered, "Identifier")
+            password = _first_composed_value(rendered, "Literal")
+            return f"ALTER ROLE {role} PASSWORD '{password}'"
         return _render_role_statement(rendered, "ALTER ROLE")
     if "GRANT" in rendered:
         capability, login = _composed_values(rendered, "Identifier")[:2]
@@ -625,6 +644,34 @@ def test_provision_success_idempotent_rotation_and_no_secret_output(
     assert factory.roles[QUALIFICATION_LOGIN]["password"] == "independent-qualification-password"
     assert factory.roles[RUNTIME_LOGIN]["memberships"] == {RUNTIME_CAPABILITY}
     assert factory.roles[QUALIFICATION_LOGIN]["memberships"] == {QUALIFICATION_CAPABILITY}
+
+
+def test_provision_rotates_safe_existing_logins_without_rewriting_attributes() -> None:
+    from polyarb.control_plane.db_role_admin import provision_login_roles
+
+    factory = FakeAdminFactory()
+    factory.add_login(
+        RUNTIME_LOGIN,
+        capability=RUNTIME_CAPABILITY,
+        password="old-runtime-password",
+    )
+    factory.add_login(
+        QUALIFICATION_LOGIN,
+        capability=QUALIFICATION_CAPABILITY,
+        password="old-qualification-password",
+    )
+    factory.reject_redundant_attribute_rewrite = True
+
+    result = provision_login_roles(
+        _as_connection_factory(factory),
+        expected_database="role_test",
+        runtime_password="rotated-runtime-password",
+        qualification_password="rotated-qualification-password",
+    )
+
+    assert result == {"database": "role_test", "status": "provisioned"}
+    assert factory.roles[RUNTIME_LOGIN]["password"] == "rotated-runtime-password"
+    assert factory.roles[QUALIFICATION_LOGIN]["password"] == "rotated-qualification-password"
 
 
 def test_provision_rolls_back_all_role_mutations_on_any_failure() -> None:

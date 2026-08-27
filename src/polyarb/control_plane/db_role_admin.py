@@ -585,14 +585,15 @@ def _create_or_rotate_login(
     snapshot = _read_single_login_snapshot(cursor, login_role)
     if snapshot is not None:
         _require_single_login_safe(snapshot, login_role, capability_role)
+        attributes, _memberships = snapshot
+        if not attributes.can_login:
+            cursor.execute(
+                sql.SQL("ALTER ROLE {} LOGIN").format(sql.Identifier(login_role))
+            )
         cursor.execute(
-            sql.SQL(
-                """
-                ALTER ROLE {}
-                LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
-                PASSWORD {}
-                """
-            ).format(sql.Identifier(login_role), sql.Literal(password))
+            sql.SQL("ALTER ROLE {} PASSWORD {}").format(
+                sql.Identifier(login_role), sql.Literal(password)
+            )
         )
     else:
         cursor.execute(
