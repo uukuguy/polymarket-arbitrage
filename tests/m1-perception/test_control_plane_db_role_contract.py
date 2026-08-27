@@ -112,6 +112,17 @@ class FakeRoleFactory:
             rows = [(f"public.{name}", name, "public") for name in sorted(names)]
             if self.authority_failure == "nonpublic-relation":
                 rows.append(("evil.shadow", "shadow", "evil"))
+            if (
+                self.authority_failure == "ambient-unreachable-relation"
+                and "has_schema_privilege" not in sql
+            ):
+                rows.append(
+                    (
+                        "extensions.pg_stat_statements",
+                        "pg_stat_statements",
+                        "extensions",
+                    )
+                )
             return rows
         if "routine.prosecdef" in sql and "pg_catalog.pg_proc" in sql:
             return [
@@ -243,6 +254,11 @@ class FakeRoleFactory:
             privilege = str(_param(params, 2))
             table = str(_param(params, 1)).removeprefix("public.")
             allowed = privilege in _allowed_table_privileges(self.profile, table)
+            if str(_param(params, 1)).startswith("extensions."):
+                allowed = (
+                    self.authority_failure == "ambient-unreachable-relation"
+                    and privilege == "SELECT"
+                )
             if str(_param(params, 1)).startswith("evil."):
                 allowed = self.authority_failure == "nonpublic-relation" and privilege == "SELECT"
             if table == "unrelated_authority" and privilege == "SELECT":
@@ -404,6 +420,38 @@ def test_database_role_contract_accepts_exact_qualification_worker_identity() ->
     assert factory.write_count == 0
 
 
+def test_database_role_contract_ignores_ambient_acl_in_unreachable_schema() -> None:
+    from polyarb.control_plane.db_role_contract import (
+        ConnectionFactory,
+        verify_daemon_database_role,
+    )
+
+    factory = FakeRoleFactory(authority_failure="ambient-unreachable-relation")
+
+    verification = verify_daemon_database_role(
+        cast(ConnectionFactory, factory),
+        "runtime-controller",
+        expected_database="role_test",
+    )
+
+    assert verification.status == "pass"
+    reachable_catalog_queries = [
+        call
+        for call in factory.calls
+        if any(
+            marker in call[0]
+            for marker in (
+                "as relation_name",
+                "pg_catalog.pg_class as sequence",
+                "routine.prosecdef",
+            )
+        )
+    ]
+    assert len(reachable_catalog_queries) == 3
+    assert all("has_schema_privilege" in call[0] for call in reachable_catalog_queries)
+    assert all(call[1] == (factory.session_user,) for call in reachable_catalog_queries)
+
+
 @pytest.mark.parametrize(
     "failure_code",
     (
@@ -523,7 +571,7 @@ def test_runtime_sequence_denial_uses_public_catalog_enumeration() -> None:
         call for call in factory.calls if "pg_catalog.pg_class as sequence" in call[0]
     ]
     assert len(sequence_queries) == 1
-    assert sequence_queries[0][1] == ()
+    assert sequence_queries[0][1] == (factory.session_user,)
 
 
 @pytest.mark.parametrize(

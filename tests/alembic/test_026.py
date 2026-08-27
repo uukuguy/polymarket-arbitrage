@@ -78,6 +78,54 @@ def test_026_closes_all_application_namespaces_and_database_creation() -> None:
         "namespace.nspname !~ '^pg_(toast|temp)(_|$)'",
     ):
         assert fragment in text
+    assert text.count("'{role}', namespace.oid, 'USAGE'") == 3
+
+
+def test_026_accepts_ambient_acl_only_in_an_unreachable_schema() -> None:
+    if not _docker_available():
+        pytest.fail("Docker daemon unavailable; cannot prove reachable authority boundary")
+
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine") as postgres:
+        dsn = _normalize_dsn(postgres.get_connection_url())
+        _create_supabase_roles(dsn)
+        _run_alembic(dsn, "upgrade", "025")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute("CREATE SCHEMA extensions")
+            admin.execute("REVOKE ALL ON SCHEMA extensions FROM PUBLIC")
+            admin.execute(
+                "CREATE VIEW extensions.pg_stat_statements AS "
+                "SELECT 1::bigint AS queryid"
+            )
+            admin.execute(
+                "CREATE VIEW extensions.pg_stat_statements_info AS "
+                "SELECT 1::bigint AS dealloc"
+            )
+            admin.execute(
+                "GRANT SELECT ON extensions.pg_stat_statements, "
+                "extensions.pg_stat_statements_info TO PUBLIC"
+            )
+
+        _run_alembic(dsn, "upgrade", "026")
+        assert _current_revision(dsn) == "026"
+        with psycopg.connect(dsn) as admin:
+            row = admin.execute(
+                "SELECT "
+                "has_table_privilege(%s, 'extensions.pg_stat_statements', 'SELECT'), "
+                "has_schema_privilege(%s, 'extensions', 'USAGE')",
+                (RUNTIME_ROLE, RUNTIME_ROLE),
+            ).fetchone()
+            assert row == (True, False)
+
+        _run_alembic(dsn, "downgrade", "025")
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute("GRANT USAGE ON SCHEMA extensions TO PUBLIC")
+
+        result = _run_alembic_result(dsn, "upgrade", "026")
+        assert result.returncode != 0
+        assert "authority envelope is not exact" in result.stderr + result.stdout
+        assert _current_revision(dsn) == "025"
 
 
 def test_026_keeps_observe_role_out_of_recovery_mutation() -> None:

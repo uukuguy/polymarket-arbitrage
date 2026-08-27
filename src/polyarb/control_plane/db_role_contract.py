@@ -651,7 +651,7 @@ def _verify_public_relation_privileges(
 ) -> None:
     cursor.execute(
         """
-        SELECT pg_catalog.format('%I.%I', namespace.nspname, relation.relname)
+        SELECT pg_catalog.format('%%I.%%I', namespace.nspname, relation.relname)
                    AS relation_name,
                relation.relname,
                namespace.nspname
@@ -660,9 +660,11 @@ def _verify_public_relation_privileges(
           ON namespace.oid = relation.relnamespace
         WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
           AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+          AND pg_catalog.has_schema_privilege(%s, namespace.oid, 'USAGE')
           AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
         ORDER BY namespace.nspname, relation.relname
-        """
+        """,
+        (subject_role,),
     )
     allowed_tables = _allowed_tables(contract)
     seen: set[str] = set()
@@ -696,16 +698,18 @@ def _verify_public_relation_privileges(
 def _verify_public_sequence_privileges(cursor: Any, subject_role: str) -> None:
     cursor.execute(
         """
-        SELECT pg_catalog.format('%I.%I', namespace.nspname, sequence.relname)
+        SELECT pg_catalog.format('%%I.%%I', namespace.nspname, sequence.relname)
                    AS sequence_name
         FROM pg_catalog.pg_class AS sequence
         JOIN pg_catalog.pg_namespace AS namespace
           ON namespace.oid = sequence.relnamespace
         WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
           AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+          AND pg_catalog.has_schema_privilege(%s, namespace.oid, 'USAGE')
           AND sequence.relkind = 'S'
         ORDER BY namespace.nspname, sequence.relname
-        """
+        """,
+        (subject_role,),
     )
     for row in cursor.fetchall():
         sequence_name = str(_row_value(row, 0, "sequence_name"))
@@ -726,7 +730,7 @@ def _verify_security_definer_execute(
     cursor.execute(
         """
         SELECT pg_catalog.format(
-                   '%I.%I(%s)', namespace.nspname, routine.proname,
+                   '%%I.%%I(%%s)', namespace.nspname, routine.proname,
                    pg_catalog.oidvectortypes(routine.proargtypes)
                ) AS function_signature
         FROM pg_catalog.pg_proc AS routine
@@ -734,9 +738,11 @@ def _verify_security_definer_execute(
           ON namespace.oid = routine.pronamespace
         WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
           AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+          AND pg_catalog.has_schema_privilege(%s, namespace.oid, 'USAGE')
           AND routine.prosecdef
         ORDER BY function_signature
-        """
+        """,
+        (subject_role,),
     )
     expected = {
         _normalize_function_signature(signature)

@@ -236,6 +236,8 @@ class FakeAdminFactory:
         if "has_database_privilege" in normalized:
             privilege = str(_param_tuple(params)[2]).upper()
             return (privilege != "CREATE",)
+        if "as sequence_name" in normalized and "pg_catalog.pg_class" in normalized:
+            return []
         if "has_schema_privilege" in normalized:
             privilege = str(_param_tuple(params)[2]).upper()
             return (self.public_schema_create if privilege == "CREATE" else True,)
@@ -245,8 +247,6 @@ class FakeAdminFactory:
             allowed = RUNTIME_ALLOWED if profile == "runtime-controller" else QUALIFICATION_ALLOWED
             table_name = relation_name.removeprefix("public.")
             return (privilege in allowed.get(table_name, frozenset()),)
-        if "as sequence_name" in normalized and "pg_catalog.pg_class" in normalized:
-            return []
         if "has_sequence_privilege" in normalized:
             return (False,)
         if "has_function_privilege" in normalized:

@@ -359,6 +359,9 @@ def _assert_closed_effective_authority(
                   ON namespace.oid = object.relnamespace
                 WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
                   AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                  AND pg_catalog.has_schema_privilege(
+                          '{role}', namespace.oid, 'USAGE'
+                      )
                   AND object.relkind IN ('r', 'p', 'v', 'm', 'f')
             LOOP
                 FOREACH privilege IN ARRAY ARRAY[
@@ -387,6 +390,9 @@ def _assert_closed_effective_authority(
                   ON namespace.oid = object.relnamespace
                 WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
                   AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                  AND pg_catalog.has_schema_privilege(
+                          '{role}', namespace.oid, 'USAGE'
+                      )
                   AND object.relkind = 'S'
             LOOP
                 FOREACH privilege IN ARRAY ARRAY['USAGE', 'SELECT', 'UPDATE'] LOOP
@@ -403,6 +409,9 @@ def _assert_closed_effective_authority(
                   ON namespace.oid = object.pronamespace
                 WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
                   AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
+                  AND pg_catalog.has_schema_privilege(
+                          '{role}', namespace.oid, 'USAGE'
+                      )
                   AND object.prosecdef
             LOOP
                 expected := {function_condition};
