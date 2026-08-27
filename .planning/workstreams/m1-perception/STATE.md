@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Session resumed on feat/m1-self-healing; next action is to prepare, but not execute, the exact revision 026 observe-only authorization package
-last_updated: "2026-08-27T05:58:43+08:00"
+stopped_at: Exact credential-remediation and revision 026 observe-only packages await explicit production authorization
+last_updated: "2026-08-27T16:15:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,7 +19,7 @@ progress:
 ## Current Position
 
 - **Sole authority:** Supabase project `polyarb` (`lgykffpcsebewvobkbdm`),
-  Alembic migrations through `021`, and R2 bucket `polyarb-control-plane`.
+  production Alembic revision `025`, and R2 bucket `polyarb-control-plane`.
   The runtime's durable job, receipt, lease, pointer, evidence, and incident
   facts live there.
 
@@ -49,11 +49,13 @@ progress:
   failure list (Vercel deployment `dpl_28qrQKP5NHPG9qzqh9UdECBL7iJS`).
 
 - **Credential/runtime invariant:** Fly detached Machines retain duplicate
-  same-name environment values on update. Runtime commands therefore map only
-  dedicated versioned variables; all database runtime roles use the Supabase
-  IPv4 Session Pooler, not the unreachable direct IPv6 database endpoint.
-  The evidence sampler and Cloudflare supervisor each have separate short-lived
-  Fly read-only credentials; neither shares a worker credential.
+  same-name environment values on update. A 2026-08-27 read-only audit found
+  that the runtime-event-writer's versioned DSN is ordinary Machine env and
+  overrides its existing hidden app secret, so that login is now treated as
+  compromised. Exact single-login/single-Machine remediation is prepared and
+  must complete before revision 026 rollout. All database runtime roles must
+  use hidden secrets and the Supabase IPv4 Session Pooler, not the unreachable
+  direct IPv6 database endpoint.
 
 ## Local Event-Driven Recovery Closure (2026-08-25)
 
@@ -106,6 +108,10 @@ progress:
   actions, and restart behavior. Append-only cycle 21 run
   `20260826-135855-h-018` binds to exact executable commit
   `d050c8290c52e07acb72c8db7fe3fb02072d126c`.
+- H-019 cycle 22 run `20260827-075919-h-019` scored 100/100 across the same
+  nine-node production-enablement profile and confirms the immutable exact
+  observe-only authorization envelope. It performs no external submission or
+  production mutation.
 - Production truth boundary as of the 2026-08-25 audit: production database is
   `postgres`; revisions 022/023/024/025 are applied and post-migration worker
   health passed; `m1_qualification_ingress_ledger` had 1643 incident ingress
@@ -149,6 +155,10 @@ progress:
    the two scoped login roles, the two new private apps, observe-only mode,
    empty recovery allowlist, rollback, and evidence directory. Do not infer
    this authority from generic approval.
-2. After authorized production enablement, let recovery confirmation open a fresh epoch
+2. Before that rollout, complete the separate exact credential-remediation
+   request for `m1_runtime_event_writer` and Machine `28654e35a73d08`; rotate
+   the exposed login, restore the existing hidden secret path, remove the
+   ordinary password-bearing env value, and touch no other app or schema.
+3. After authorized production enablement, let recovery confirmation open a fresh epoch
    automatically; independently verify its immutable certificate before
    marking Phase 05.6 and M1 complete.

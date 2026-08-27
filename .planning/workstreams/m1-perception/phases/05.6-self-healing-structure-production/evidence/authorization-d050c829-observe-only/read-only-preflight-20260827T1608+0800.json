@@ -1,0 +1,79 @@
+{
+  "artifact_version": 1,
+  "observed_at": "2026-08-27T16:08:41+08:00",
+  "operator": "codex-climb-agent",
+  "release_sha": "d050c8290c52e07acb72c8db7fe3fb02072d126c",
+  "production_database": {
+    "name": "postgres",
+    "current_revision": "025",
+    "connection_identity": "postgres",
+    "connection_can_create_role": true,
+    "present_named_roles": [
+      "m1_runtime_event_writer"
+    ],
+    "absent_named_roles": [
+      "m1_runtime_controller_capability",
+      "m1_runtime_controller_login",
+      "m1_qualification_worker_capability",
+      "m1_qualification_worker_login"
+    ]
+  },
+  "control_plane": {
+    "database_status": "ok",
+    "public_api_status": "available",
+    "durable_progress_observed": true,
+    "runtime_controller_status": "unavailable",
+    "runtime_controller_reason": "missing-controller",
+    "qualification_certificate_present": false,
+    "recovery_action_count": 0
+  },
+  "fly_topology": {
+    "credential_source": "local-keychain",
+    "existing_started_apps": {
+      "polyarb-control-api": [
+        "d8d0e27a734158"
+      ],
+      "polyarb-control-worker-m1": [
+        "e82d1220b2d138",
+        "683e46ea500dd8",
+        "4d895231f66748"
+      ],
+      "polyarb-control-alert": [
+        "d891e941a41dd8"
+      ],
+      "polyarb-control-runtime-event-writer": [
+        "28654e35a73d08"
+      ]
+    },
+    "absent_apps": [
+      "polyarb-runtime-controller-m1",
+      "polyarb-qualification-worker-m1"
+    ]
+  },
+  "credential_findings": [
+    {
+      "severity": "critical",
+      "affected_app": "polyarb-control-runtime-event-writer",
+      "affected_machine": "28654e35a73d08",
+      "affected_login": "m1_runtime_event_writer",
+      "finding": "a password-bearing versioned DSN is stored in ordinary Machine env and overrides the existing hidden app secret",
+      "secret_value_recorded": false,
+      "required_action": "treat the credential as compromised and complete the separate exact rotation request before rollout"
+    },
+    {
+      "severity": "warning",
+      "finding": "the root .env Fly token cannot see the known production apps; Keychain identity can",
+      "secret_value_recorded": false,
+      "required_action": "use the Keychain Fly identity for authorized operations and never infer app absence from the stale token"
+    },
+    {
+      "severity": "warning",
+      "finding": "the combined database/R2 preflight reached R2 HeadBucket and received HTTP 403 from the root .env credentials",
+      "secret_value_recorded": false,
+      "required_action": "do not use the stale R2 credential context for rollout; the two new private apps receive no R2 authority"
+    }
+  ],
+  "production_mutations_performed": false,
+  "cloud_actions_performed": false,
+  "secret_values_recorded": false
+}

@@ -1,10 +1,11 @@
 {
-  "artifact_version": 1,
+  "artifact_version": 2,
   "status": "awaiting-explicit-authorization",
   "prepared_at": "2026-08-27T06:12:00+08:00",
+  "refreshed_at": "2026-08-27T16:15:00+08:00",
   "requested_window": {
-    "not_before": "2026-08-27T06:12:00+08:00",
-    "not_after": "2026-08-27T10:12:00+08:00"
+    "not_before": "2026-08-27T16:15:00+08:00",
+    "not_after": "2026-08-27T22:15:00+08:00"
   },
   "operator": "codex-climb-agent",
   "release_sha": "d050c8290c52e07acb72c8db7fe3fb02072d126c",
@@ -49,7 +50,13 @@
     "verify database revision 025 and health of the original four apps",
     "retain all evidence and failed qualification epochs append-only"
   ],
+  "prerequisites": [
+    "explicit approval of this exact authorization request inside its requested window",
+    "complete the separate runtime-event-writer credential remediation request before revision 026 rollout",
+    "re-run read-only database, scoped-role and Fly topology preflights immediately before mutation"
+  ],
   "evidence_directory": ".planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/evidence/authorization-d050c829-observe-only",
+  "read_only_preflight": "read-only-preflight-20260827T1608+0800.json",
   "rendered_artifact_hashes": {
     "fly-control-alert.toml": "2fcdfcaedd9d0b428ace2dc51a9ac4628da45f8ec03b5968a62ef370e425c27a",
     "fly-control-api.toml": "e11ddfd8688fd35e36fa91fd9fb8c8c817456fb2b5d577a6badce01b20b8562c",

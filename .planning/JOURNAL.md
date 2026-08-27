@@ -10390,3 +10390,38 @@ observe-only authorization package for release
 revision 026, both scoped roles/apps, empty recovery allowlist, rollback and the
 05.6 evidence directory. The first local-only command is
 `make control-plane-render-rollout enable=1 release_id=d050c8290c52e07acb72c8db7fe3fb02072d126c`.
+
+## SESSION 308 — 2026-08-27 (exact gate and read-only production audit)
+
+- [CLIMB] H-019 cycle 22 run `20260827-075919-h-019` scored 100/100 on all
+  nine deterministic production-enablement nodes. Commit `c98ed1fa` records
+  the append-only result; external submission and production mutation are both
+  false.
+- [READ-ONLY PRODUCTION] Database `postgres` remains at revision 025. The
+  original control plane is available and advancing durable jobs; runtime
+  controller reports `missing-controller`, qualification has no certificate,
+  and recovery action count is zero. Keychain Fly identity sees all four old
+  apps started and both new apps absent.
+- [SECURITY] Raw Fly Machine status exposed a password-bearing versioned DSN
+  in ordinary env for `polyarb-control-runtime-event-writer/28654e35a73d08`.
+  The app also has a hidden generic DSN secret, but the Machine command
+  overrides it. The value is not repeated or persisted; the
+  `m1_runtime_event_writer` credential is now treated as compromised.
+- [BOUNDARY] Prepared separate exact authorization requests for the one-login/
+  one-Machine credential remediation and the subsequent revision 026
+  observe-only rollout. Neither request grants recovery, fault injection,
+  other-app mutation, schema change beyond 026, or trading authority. No
+  production mutation ran.
+- [CREDENTIAL CONTEXT] Root `.env` Fly credentials cannot see known apps and
+  its R2 HeadBucket preflight returns 403; the Keychain Fly identity is the
+  verified topology reader. The database connection identity is `postgres`
+  with role-management capability, and only `m1_runtime_event_writer` exists
+  among the five audited M1 roles.
+
+[NEXT] Obtain explicit approval for both exact requests in
+`evidence/authorization-d050c829-observe-only/`, then remediate the writer
+credential first. Re-run read-only gates, apply revision 026, provision and
+verify only the two scoped logins, deploy only the two new private apps in
+observe-only mode with an empty recovery allowlist, and collect the 30-minute
+zero-action window. Job/process faults still require later separate exact
+authorizations.

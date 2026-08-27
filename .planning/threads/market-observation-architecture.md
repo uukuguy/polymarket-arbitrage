@@ -1790,3 +1790,17 @@ success is not user receipt/read evidence.
   A missing/invalid evidence file or empty artifact list is drift, and repeated
   numeric phase names in Git hooks require an unambiguous staged workstream
   path rather than first-match selection.
+
+### §2.33 Secret inventory is not effective secret provenance (2026-08-27)
+
+- A Fly app can list a deployed hidden secret while an older detached Machine
+  command overrides it from a password-bearing ordinary environment variable.
+  Secret inventory therefore proves presence, not effective runtime provenance.
+- Read-only topology inspection must avoid unfiltered Machine JSON because
+  ordinary env values may contain credentials. Prefer bounded app/Machine
+  identity projections; if raw config is unavoidable, capture it only through
+  a redactor and never persist or quote secret-like values.
+- Remediation rotates the affected database login, replaces the hidden secret,
+  removes the ordinary env override and updates exactly one Machine. Rollback
+  must never restore the compromised password. This is a separate exact
+  authorization from revision 026 rollout and from all recovery/fault gates.
