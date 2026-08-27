@@ -10686,3 +10686,47 @@ rotation→both active verifies→two-app hidden-secret staging operator.
 window. Then repeat its immediate read-only preflights, apply only revision
 027, verify the bounded function/authority projection and scoped freshness
 call, and start only qualification Machine `876077f0274598`.
+
+### SESSION 314 — 2026-08-27 (027 green; pre-existing coordinator stop contained)
+
+- [AUTHORIZED 027] The user approved exact request SHA256
+  `9d432bc674409d8fd2c3217ef2b3eb4add21c89296cd2498e1d2fb3bf22c1a69`.
+  Immediate runtime, revision/function-authority and exact topology preflights
+  passed. Revision 027 then applied transactionally and rewrote exactly four
+  `public.digest` tokens to `extensions.digest`; owner, ACL, SECURITY mode and
+  proconfig remained unchanged.
+- [ACTIVE SCOPED PROOF] Existing qualification Machine `876077f0274598`
+  returned from its configured restart backoff and executed successfully
+  through the hidden scoped DSN. Freshness ingress advanced 0→21 and the new
+  accumulating epoch reached version/fact count 601 with 207 seconds of
+  coverage. The original gap epoch was invalidated and retained, its recovery
+  epoch retained, and no row was deleted or overwritten.
+- [POST-GATE ROLLBACK] The full topology projection exposed original
+  coordinator `e82d1220b2d138` stopped after reaching its max restart count at
+  `14:11:47Z`. Its `UndefinedFunction` failures began before 027 was applied.
+  The prior request forbids starting an original Machine, so qualification was
+  stopped exactly as its post-gate rollback requires. Revision 027 remains in
+  place because its database and active scoped-write proofs passed.
+- [CHAIN TRUTH] Catalog/source/timeline evidence connects the coordinator
+  failure to the same 026 defect: runtime-event trigger →
+  `m1_project_runtime_qualification_ingress` →
+  `m1_record_qualification_ingress` → missing `public.digest`. Revision 027 now
+  repairs that shared ingress function. Runtime controller remained observe-only
+  for 2989 seconds / 97 idle decisions with zero candidates and zero recovery
+  actions; this also exposed that its current candidate source does not detect
+  the exhausted Fly Machine.
+- [NEW EXACT REQUEST] Prepared the no-deploy/no-config/no-schema request at
+  `evidence/authorization-657174db-coordinator-resume/authorization-request.json`,
+  original SHA256
+  `d038ec1d69244522f62a4414ac3d18e10f4ee43b3a372760edae6514380a3924`.
+  It permits only starting the same coordinator, a 180-second continuity and
+  runtime-event gate, then starting the same qualification Machine and a
+  300-second scoped-write gate. Recovery, fault and trading effects remain
+  forbidden.
+
+[NEXT] Obtain explicit approval for exact request SHA256
+`d038ec1d69244522f62a4414ac3d18e10f4ee43b3a372760edae6514380a3924`
+inside its window. Then repeat the read-only 027/function/runtime/topology
+preflights, start only coordinator `e82d1220b2d138`, prove its bounded gate,
+start only qualification `876077f0274598`, prove its bounded gate, and resume
+the 86,400-second rolling certificate.

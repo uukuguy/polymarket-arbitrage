@@ -1,0 +1,73 @@
+{
+  "artifact_version": 1,
+  "prepared_at": "2026-08-27T22:25:22+08:00",
+  "status": "requested",
+  "authorization_granted": false,
+  "approved_by": null,
+  "approved_at": null,
+  "approval_text": null,
+  "authorized_request_sha256": null,
+  "requested_window": {
+    "not_before": "2026-08-27T22:25:22+08:00",
+    "not_after": "2026-08-28T04:25:22+08:00"
+  },
+  "operator": "Codex",
+  "executable_release_sha": "657174dbc73d0a6ac330e008260fd47279dbdc35",
+  "production_database": "postgres",
+  "current_database_revision": "027",
+  "target_database_revision": "027",
+  "prior_authorized_result": {
+    "path": "../authorization-657174db-pgcrypto-repair/rollout-result-coordinator-preexisting-stop.json",
+    "sha256": "d118ec8b392fbe302e908dcb54b07ce94a3e35105f7350fe359d6d0a1f1daac0"
+  },
+  "root_cause": {
+    "inference": true,
+    "description": "before revision 027 was applied, coordinator runtime-event writes reached the revision-026 qualification-ingress trigger chain and failed at the same missing public.digest routine; the existing Machine exhausted its configured restart count before 027 repaired that function",
+    "evidence": [
+      "coordinator emitted UndefinedFunction and reached max restart count at 2026-08-27T14:11:47+00:00",
+      "revision 027 was applied afterward at 2026-08-27T22:11:54+08:00",
+      "the runtime-event trigger chain calls m1_record_qualification_ingress",
+      "revision 027 active scoped freshness writes through that repaired function passed"
+    ]
+  },
+  "exact_existing_targets": {
+    "coordinator": "polyarb-control-worker-m1/e82d1220b2d138",
+    "qualification_worker": "polyarb-qualification-worker-m1/876077f0274598",
+    "runtime_controller_observe_only": "polyarb-runtime-controller-m1/6e82036dce4958"
+  },
+  "prerequisites": [
+    "explicit approval of this exact request hash inside its requested window",
+    "re-run revision, repaired function, zero-recovery-action, hidden-secret-name, and exact eight-Machine topology preflights immediately before any start",
+    "require production revision exactly 027 with zero public.digest calls and exactly four extensions.digest calls across the three repaired functions",
+    "require coordinator Machine e82d1220b2d138 stopped, qualification Machine 876077f0274598 stopped, runtime controller Machine 6e82036dce4958 started, and every other original Machine started and unchanged",
+    "require runtime controller observe-only verification to pass with an empty recovery allowlist and zero recovery actions"
+  ],
+  "maximum_effect": [
+    "start only existing coordinator Machine e82d1220b2d138 on its existing image and configuration",
+    "observe at least 180 seconds of coordinator continuity beyond its prior UndefinedFunction failure point and require successful ticks plus durable runtime-event progress",
+    "after the coordinator gate passes, start only existing qualification Machine 876077f0274598 on its existing image and configuration",
+    "observe at least 300 seconds of scoped freshness, append-only epoch, and qualification continuity",
+    "leave runtime controller Machine 6e82036dce4958 running in observe-only mode with an empty recovery allowlist",
+    "retain all prior invalidated, recovering, and accumulating epochs append-only"
+  ],
+  "forbidden_effects": [
+    "no database schema migration, downgrade, role, credential, grant, revoke, owner, search-path, or extension change",
+    "no Fly app create, delete, deploy, image, config, secret, public IP, Machine update, or Machine replacement",
+    "no start, stop, restart, or update of any Machine other than the two exact stopped targets",
+    "no stop, restart, or update of runtime controller Machine 6e82036dce4958",
+    "no job, process, Machine, or pointer recovery action",
+    "no fault injection",
+    "no wallet, signing, order, balance, or trade action"
+  ],
+  "rollback": [
+    "stop qualification Machine 876077f0274598 if either continuity gate fails",
+    "stop coordinator Machine e82d1220b2d138 only if it remains running after a failed coordinator gate, returning it to the exact pre-request state",
+    "do not downgrade revision 027 because its database and active scoped freshness proofs passed",
+    "verify runtime controller observe-only continuity, zero recovery actions, and every unchanged Machine",
+    "retain all ingress, epoch, runtime-event, log, and authorization evidence append-only"
+  ],
+  "schema_mutation_already_completed": true,
+  "cloud_actions_performed_by_this_request": false,
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}

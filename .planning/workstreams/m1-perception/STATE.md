@@ -19,7 +19,7 @@ progress:
 ## Current Position
 
 - **Sole authority:** Supabase project `polyarb` (`lgykffpcsebewvobkbdm`),
-  production Alembic revision `026`, and R2 bucket `polyarb-control-plane`.
+  production Alembic revision `027`, and R2 bucket `polyarb-control-plane`.
   The runtime's durable job, receipt, lease, pointer, evidence, and incident
   facts live there.
 
@@ -56,13 +56,15 @@ progress:
   unreachable direct IPv6 database endpoint.
 
 - **Observe-only production rollout:** `polyarb-runtime-controller-m1`
-  Machine `6e82036dce4958` is started with an empty recovery allowlist. Its
-  1800-second verifier passed with 59/59 idle decisions, max gap 31 seconds,
-  zero current candidates, and zero recovery actions. Existing
-  `polyarb-qualification-worker-m1/876077f0274598` is stopped after its first
-  tick failed closed at the revision-026 pgcrypto namespace boundary; both new
-  app-scoped hidden DSNs remain installed and no ordinary credential env key is
-  present.
+  Machine `6e82036dce4958` is started with an empty recovery allowlist. Its latest
+  verifier passed 2989 seconds with 97/97 idle decisions, zero current
+  candidates, and zero recovery actions. Revision 027 repaired the production
+  pgcrypto namespace and the scoped qualification worker then proved 21
+  freshness ingress rows plus 601 append-only epoch facts. Qualification is
+  stopped under the post-topology rollback because original coordinator
+  `e82d1220b2d138` had already exhausted its restart count on the same
+  revision-026 trigger failure before 027 landed. Both app-scoped hidden DSNs
+  remain installed and no ordinary credential env key is present.
 
 ## Local Event-Driven Recovery Closure (2026-08-25)
 
@@ -176,19 +178,23 @@ progress:
   nine-node production-enablement profile and confirms the immutable exact
   observe-only authorization envelope. It performs no external submission or
   production mutation.
-- Production truth boundary as of `2026-08-27T22:02:59+08:00`: database
-  `postgres` remains revision 026; the original six Machines and runtime
-  controller are started; qualification Machine is stopped; all required
-  hidden secret names and the exact eight-Machine topology audit pass. Runtime
-  observe-only has 1806 seconds of continuous zero-action evidence. No recovery
-  enablement, recovery action, fault mutation, wallet, signing, order, balance,
-  or trade action has run.
+- Production truth boundary as of `2026-08-27T22:24:40+08:00`: database
+  `postgres` is revision 027 with exactly four repaired `extensions.digest`
+  calls and unchanged function authority. Scoped freshness and epoch writes
+  pass. Runtime controller and five unaffected original Machines are started;
+  coordinator `e82d1220b2d138` and qualification `876077f0274598` are stopped.
+  Runtime observe-only has 2989 seconds of continuous zero-action evidence. No
+  recovery enablement, recovery action, fault mutation, wallet, signing, order,
+  balance, or trade action has run.
 
 ## Formal Acceptance
 
-- **Active qualifying run:** the release-bound production epoch was initialized
-  at `2026-08-27T13:35:42Z`, but qualification is stopped at the pgcrypto
-  namespace boundary and has no accepted facts yet. `m1-formal-20260823T1335Z` is immutable
+- **Active qualifying run:** revision 027 turned the release-bound production
+  path green. The original gap epoch is append-only invalidated, a recovery
+  epoch is retained, and a new accumulating epoch reached 601 facts / 207
+  seconds before the post-topology rollback stopped qualification. The next run
+  must resume only after the original coordinator passes its bounded gate.
+  `m1-formal-20260823T1335Z` is immutable
   historical evidence; replay found the first breaking `lease.expired` fact at
   `2026-08-23T16:22:21Z`, so its earlier 338-second liveness pass cannot become
   final acceptance.
@@ -210,20 +216,20 @@ progress:
 | Structure/Quote cloud worker migration | three independent fixed-role workers and advancing durable successes | complete |
 | Process-loss recovery | fenced R2-before-receipt takeover evidence for both job classes | complete |
 | Immediate fault visibility | Fly watchdog plus independent Cloudflare supervisor, Telegram and source-aware Dashboard incident/recovery ledger | complete |
-| Continuous final-topology acceptance | rolling epoch + immutable certificate | runtime 1800-second observe gate passed; blocked on exact 027 authorization, worker restart, and 86,400-second certificate |
+| Continuous final-topology acceptance | rolling epoch + immutable certificate | 027 and scoped writes passed; blocked on exact coordinator-resume authorization, both worker continuity gates, and 86,400-second certificate |
 
 ## Resume
 
 1. Obtain explicit approval for
-   `evidence/authorization-657174db-pgcrypto-repair/authorization-request.json`,
+   `evidence/authorization-657174db-coordinator-resume/authorization-request.json`,
    original SHA256
-   `9d432bc674409d8fd2c3217ef2b3eb4add21c89296cd2498e1d2fb3bf22c1a69`.
-   Do not infer this function-only migration and qualification restart authority
-   from the consumed `6ae40683` rollout approval.
-2. After approval, repeat the revision/function/topology preflight, apply only
-   revision 027, prove owner/ACL/SECURITY/proconfig equality and one active
-   scoped freshness write, then start only qualification Machine
-   `876077f0274598`. Runtime controller `6e82036dce4958` must not restart.
-3. Let the existing production epoch accumulate for 86,400 seconds and
+   `d038ec1d69244522f62a4414ac3d18e10f4ee43b3a372760edae6514380a3924`.
+   The prior function-only request expressly forbade touching original Machine
+   `e82d1220b2d138`, so its approval cannot be reused.
+2. After approval, repeat the revision/function/runtime/topology preflight,
+   start only coordinator `e82d1220b2d138`, prove at least 180 seconds of ticks
+   and durable runtime-event progress, then start only qualification
+   `876077f0274598` and prove at least 300 seconds of continuous scoped writes.
+3. Let the resulting production epoch accumulate for 86,400 seconds and
    independently reverify its immutable certificate before marking Phase 05.6
    and M1 complete. Fault and recovery mutation remain separately gated.

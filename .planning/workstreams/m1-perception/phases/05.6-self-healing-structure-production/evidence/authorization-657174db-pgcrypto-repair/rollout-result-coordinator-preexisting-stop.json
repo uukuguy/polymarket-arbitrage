@@ -1,0 +1,78 @@
+{
+  "artifact_version": 1,
+  "recorded_at": "2026-08-27T22:24:40+08:00",
+  "authorized_request_sha256": "9d432bc674409d8fd2c3217ef2b3eb4add21c89296cd2498e1d2fb3bf22c1a69",
+  "authorized_request_recorded_sha256": "d8dc621997491552783fc086451e9863b01264bc1e4a69b6b50e85f063bce61c",
+  "migration_release_sha": "657174dbc73d0a6ac330e008260fd47279dbdc35",
+  "status": "database-repair-passed-post-topology-rolled-back",
+  "database": {
+    "name": "postgres",
+    "revision": "027",
+    "pgcrypto_schema": "extensions",
+    "function_rewrite": {
+      "public_digest_calls": 0,
+      "extensions_digest_calls": 4,
+      "owner_acl_security_proconfig_changed": false
+    }
+  },
+  "scoped_freshness_proof": {
+    "status": "pass",
+    "ingress_count_before": 4543,
+    "ingress_count_after": 4564,
+    "freshness_count_before": 0,
+    "freshness_count_after": 21,
+    "latest_freshness_at": "2026-08-27T14:23:47.447636+00:00",
+    "active_epoch_id": "epoch-cacac3b02a9eb92fa121cff7",
+    "active_epoch_state": "accumulating",
+    "active_epoch_version": 601,
+    "active_epoch_fact_count": 601,
+    "active_epoch_coverage_seconds": 207,
+    "active_epoch_max_gap_seconds": 37
+  },
+  "append_only_epoch_transition": {
+    "original_epoch_id": "epoch-5447da2d0d54daa531c761a7",
+    "original_epoch_state": "invalidated",
+    "original_epoch_reason": "evidence.gap",
+    "recovery_epoch_id": "epoch-12009195af4285d42ad463e1",
+    "active_epoch_id": "epoch-cacac3b02a9eb92fa121cff7",
+    "rows_deleted_or_overwritten": false
+  },
+  "post_topology_gate": {
+    "status": "failed",
+    "qualification_machine": "polyarb-qualification-worker-m1/876077f0274598",
+    "qualification_first_tick_passed": true,
+    "qualification_rollback_stop_completed": true,
+    "coordinator_machine": "polyarb-control-worker-m1/e82d1220b2d138",
+    "coordinator_state": "stopped",
+    "coordinator_last_exit_at": "2026-08-27T14:11:47+00:00",
+    "coordinator_last_exit_code": 1,
+    "coordinator_oom_killed": false,
+    "coordinator_max_restart_count_reached": true,
+    "coordinator_sanitized_error": "UndefinedFunction",
+    "coordinator_failure_began_before_revision_027": true
+  },
+  "root_cause_chain": {
+    "status": "supported-by-catalog-source-and-timeline",
+    "inference": true,
+    "cause": "revision 024 projects m1_job_runtime_events through m1_project_runtime_qualification_ingress into m1_record_qualification_ingress; revision 026 hard-coded public.digest in that ingress function, so an eligible coordinator runtime-event write reached the same missing function before revision 027 was applied",
+    "repair_present": "revision 027 now resolves that same ingress digest call to extensions.digest",
+    "remaining_action": "start the same stopped coordinator Machine once so its existing image can execute against revision 027"
+  },
+  "runtime_controller": {
+    "machine_id": "6e82036dce4958",
+    "state": "started",
+    "controller_epoch": 3,
+    "decision_count": 97,
+    "duration_seconds": 2989,
+    "idle_count": 97,
+    "current_candidate_count": 0,
+    "recovery_action_count": 0,
+    "status": "pass"
+  },
+  "forbidden_effects_observed": [],
+  "recovery_actions_created": 0,
+  "fault_injection_performed": false,
+  "trading_effects_performed": false,
+  "raw_provider_bodies_recorded": false,
+  "secret_values_recorded": false
+}
