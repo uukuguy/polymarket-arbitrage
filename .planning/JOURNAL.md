@@ -10633,3 +10633,15 @@ operator. Do not create either app unless both scoped identities pass.
 the immediate preflights and the bounded rotation→both active verifies→two-app
 hidden-secret staging operator. Schema, fault and recovery mutation remain
 forbidden.
+
+### SESSION 312 continuation — exact 6ae40683 rollout authorized
+
+- [AUTHORIZED] At `2026-08-27T20:30:27+08:00`, the user replied `同意` directly
+  to the exact request whose original SHA256 is
+  `9e967eca0f56cbd7d34d5650cd0f8b9f7686059e6ee849239fd005a3534f734b`.
+  Scope remains minimal rotation, both active identity checks, two private
+  observe-only apps, empty allowlist and evidence; no schema, fault or recovery
+  mutation is authorized.
+
+[NEXT] Repeat immediate read-only DB/Fly preflights, then execute the bounded
+rotation→both active verifies→two-app hidden-secret staging operator.

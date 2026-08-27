@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: H-024 confirmed; 6ae40683 session-bootstrap rollout package awaits exact approval
-last_updated: "2026-08-27T20:23:42+08:00"
+stopped_at: 6ae40683 session-bootstrap rollout explicitly authorized; immediate preflight is next
+last_updated: "2026-08-27T20:30:27+08:00"
 progress:
   total_phases: 14
   completed_phases: 13

@@ -1,6 +1,6 @@
 {
   "artifact_version": 7,
-  "status": "pending_exact_authorization",
+  "status": "authorized",
   "prepared_at": "2026-08-27T20:23:42+08:00",
   "requested_window": {
     "not_before": "2026-08-27T20:23:42+08:00",
@@ -92,8 +92,9 @@
     "fly-runtime-event-writer.toml": "a1eb699580e4145c447c5ea7cf317d20246044f72b5d2b3c77a258253c92b0f5",
     "rollout-checklist.json": "f6f25c5acfdb50d7f5ae58159c2b05ed2f9bb34c938cb2ee40019cf81ee4738d"
   },
-  "authorization_granted": false,
-  "approved_at": null,
-  "approved_by": null,
-  "approval_text": null
+  "authorization_granted": true,
+  "authorized_request_sha256": "9e967eca0f56cbd7d34d5650cd0f8b9f7686059e6ee849239fd005a3534f734b",
+  "approved_at": "2026-08-27T20:30:27+08:00",
+  "approved_by": "user",
+  "approval_text": "同意"
 }
