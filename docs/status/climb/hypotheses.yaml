@@ -666,3 +666,33 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-024
+  description: A scoped connection factory can preserve an exact namespace across
+    managed Session Poolers by actively bootstrapping and committing a schema-qualified
+    session setting instead of trusting libpq startup options.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Make both daemon identities pass the production namespace gate while
+    ensuring every later connection, not only the verifier, starts from the same fail-closed
+    pg_catalog,public resolution order.
+  cost_h: 0.75
+  ranking: 1.0
+  status: confirmed
+  created_at: '2026-08-27T20:15:16+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 27
+    run: 20260827-121528-h-024
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed

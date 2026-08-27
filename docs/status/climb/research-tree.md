@@ -4,7 +4,7 @@
 
 ## Session
 
-- Last cycle: 26
+- Last cycle: 27
 - Next action: rank next pending hypothesis
 
 ## In flight
@@ -31,6 +31,7 @@
 - **H-021** [confirmed]: An exact Supabase delegated-CREATEROLE ambient membership contract can admit only the PostgreSQL 16 non-inheriting, non-SET creator ADMIN edge while preserving the matching application login as the sole effective capability member.
 - **H-022** [confirmed]: An exact Supabase delegated-CREATEROLE login creator-membership contract can admit only the PostgreSQL 16 non-inheriting, non-SET creator ADMIN edge into each scoped LOGIN while preserving its single effective outgoing capability membership.
 - **H-023** [confirmed]: A Supabase delegated-role provisioner can remain idempotent by validating the complete existing scoped LOGIN envelope and mutating only the required LOGIN/password delta instead of replaying privileged role attributes.
+- **H-024** [confirmed]: A scoped connection factory can preserve an exact namespace across managed Session Poolers by actively bootstrapping and committing a schema-qualified session setting instead of trusting libpq startup options.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
@@ -65,3 +66,4 @@
 - 20260827-100730-h-021: 100.0 (confirmed)
 - 20260827-104319-h-022: 100.0 (confirmed)
 - 20260827-113937-h-023: 100.0 (confirmed)
+- 20260827-121528-h-024: 100.0 (confirmed)
