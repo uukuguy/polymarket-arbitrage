@@ -11336,3 +11336,24 @@ protected user SDD files, build and push a new exact amd64 image, then update
 only controller `6e82036dce4958` with exact image plus `SIGTERM + 40s`. Prove
 all other config invariant and pass fresh 120/300/1,800-second observe gates
 before any sibling rollout.
+
+### SESSION 330 — 2026-08-29 (Task 14 bounded authenticated image build)
+
+- [BUILD DISCOVERY] Exact Task 13 amd64 build reached the Supercronic v0.2.30
+  download and stayed silent for 138.8 seconds. Read-only process inspection
+  proved the build container was still inside the unbounded `curl -fsSL`.
+  The build eventually completed as local image `sha256:8ea2c43e…48ccc`, but
+  it was not pushed and is superseded before registry or Machine mutation.
+- [DESIGN / TDD] Measured the embedded artifact at 12,432,517 bytes and SHA256
+  `55f3a65b…e29e5`. At a 64 KiB/s floor, transfer needs about 190 seconds;
+  policy now gives connect 15s, one transfer 240s, one transient retry and one
+  500s aggregate owner, then requires checksum proof before chmod. RED failed
+  on the absent checksum; focused migration-image tests pass 3/3 after repair.
+- [BOUNDARY] This is build-input policy only; it does not alter runtime job,
+  retry, lease or Machine clocks. Production remains unchanged and no recovery
+  action executed. The final release must be rebuilt from the Task 14 commit.
+
+[NEXT] Run planning/climb/static gates, commit Task 14 without protected SDD
+files, rebuild the exact amd64 image, verify OCI revision/user/Alembic/job order
+and embedded checksum, then push both registries. Only after exact digest
+preflight may controller `6e82036dce4958` receive image + SIGTERM/40.

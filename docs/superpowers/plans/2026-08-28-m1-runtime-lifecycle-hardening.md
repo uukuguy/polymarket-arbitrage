@@ -276,3 +276,26 @@ cursor handoff.
   observe-only mode and empty allowlist are unchanged; only image,
   `kill_signal`, and `kill_timeout` may differ. Start a fresh lease epoch and
   pass 120/300/1,800-second observe gates before any sibling rollout.
+
+## Task 14: Bound and authenticate immutable build downloads
+
+**Files:**
+
+- Modify: `Dockerfile`
+- Test: `tests/m1-perception/test_control_plane_migration_image.py`
+
+**Interfaces:**
+
+- Consumes: fixed Supercronic v0.2.30 linux/amd64 artifact, measured at
+  12,432,517 bytes.
+- Produces: one 500-second aggregate download owner, 15-second connect bound,
+  240-second per-transfer bound, one transient retry, and pinned SHA256 proof.
+
+- [x] Add a RED Dockerfile contract test for aggregate/connection/transfer
+  bounds, single retry, and exact v0.2.30 checksum.
+- [x] Run the focused test and require failure on the unbounded `curl -fsSL`.
+- [x] Add the derived curl/owner bounds and verify SHA256 before chmod; do not
+  change the Supercronic version, runtime packages, user, entrypoint, or app
+  bytes.
+- [ ] Re-run focused and complete relevant static/planning gates, commit Task
+  14, then rebuild the exact amd64 image and verify its embedded checksum.

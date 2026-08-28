@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Task 13 formal Fly shutdown templates and full local gate passed; commit and exact-image rebuild remain before fresh controller canary
-last_updated: "2026-08-29T01:46:54+08:00"
+stopped_at: Task 14 bounded authenticated build download passed focused gates; commit and exact-image rebuild remain before fresh controller canary
+last_updated: "2026-08-29T01:58:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -84,6 +84,12 @@ progress:
   in 1,477.06 seconds without an outer timeout. Commit, exact-image rebuild and a fresh controller gate are required
   before coordinator restarts; `b3a47506` and its continuity evidence are
   superseded because executable bytes changed.
+  The first post-Task-13 local build then exposed an unbounded, unauthenticated
+  Supercronic download after 138.8 seconds. That image stayed local and is
+  superseded. Task 14 derives a 15s connect / 240s transfer / one-retry / 500s
+  aggregate build-input owner from the measured 12,432,517-byte artifact and
+  pins its v0.2.30 amd64 SHA256 before chmod. A new commit-bound image is still
+  required; production remains unchanged.
 - **Plan 05.6-209 runtime lifecycle repair:** Plan 208's job-specific deadline
   change exposed the wider defect: scheduler/role turn timeouts, worker-local
   profiles, relative I/O budgets and durable attempt deadlines could all kill

@@ -1,0 +1,26 @@
+{
+  "schema": "polyarb.runtime-v2.immutable-build-download-preflight.v1",
+  "recorded_at": "2026-08-29T01:58:00+08:00",
+  "superseded_local_candidate": {
+    "source_commit": "6b0b3a26f86aa73033486545575451e84f4d1799",
+    "local_image_id": "sha256:8ea2c43e092ba88e367050ad2285dd731e921da8a99ed848996055e3d6448ccc",
+    "pushed": false,
+    "deployed": false,
+    "observed_unbounded_download_seconds": 138.8
+  },
+  "artifact": {
+    "name": "supercronic-linux-amd64",
+    "version": "v0.2.30",
+    "size_bytes": 12432517,
+    "sha256": "55f3a65b6ef29856d948230a96448f6ec7376d39fca367fae49d2512167e29e5"
+  },
+  "derived_policy": {
+    "minimum_throughput_bytes_per_second": 65536,
+    "connect_timeout_seconds": 15,
+    "transfer_timeout_seconds": 240,
+    "retry_count": 1,
+    "aggregate_owner_seconds": 500
+  },
+  "production_mutation": false,
+  "recovery_actions_executed": 0
+}

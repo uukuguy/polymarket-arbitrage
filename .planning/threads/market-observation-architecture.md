@@ -2235,3 +2235,18 @@ success is not user receipt/read evidence.
   lifecycle fields; Machine identity, region, env, guest, restart policy,
   observe-only mode and empty allowlist remain invariant. Discovery of the gap
   superseded the pushed candidate before any Machine mutation.
+
+### §2.55 Release builds need bounded and authenticated input acquisition (2026-08-29)
+
+- A runtime can have correct shutdown semantics while its release pipeline can
+  still block forever. The exact-image build exposed an unbounded Supercronic
+  `curl`; 138.8 seconds of silence had no declared way to distinguish a slow
+  valid transfer from a wedged release lane.
+- Immutable input acquisition now has one aggregate owner and smaller leaf
+  bounds derived from the measured 12,432,517-byte artifact: 15-second connect,
+  240-second transfer at a 64 KiB/s throughput floor plus margin, one transient
+  retry, and a 500-second aggregate owner. The downloaded bytes must match the
+  pinned v0.2.30 amd64 SHA256 before execution permission is added.
+- Build-download policy is not runtime policy. Its retry cannot alter a job,
+  lease, circuit, Machine, or production evidence window; a failed build simply
+  produces no release artifact and can resume from immutable Docker layers.

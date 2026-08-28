@@ -203,6 +203,15 @@ region, and recovery allowlist remain canonically identical. Sibling roles
 cannot advance until the controller proves the new image and termination
 contract together.
 
+The final runtime image build is also part of the release lifecycle. Its fixed
+Supercronic v0.2.30 amd64 artifact is 12,432,517 bytes; at a declared minimum
+acceptable throughput of 64 KiB/s it needs about 190 seconds. One transfer gets
+240 seconds including TLS, redirect, and filesystem margin, while the
+connection phase gets 15 seconds. Curl may retry one transient failure. A
+500-second aggregate owner covers two 240-second attempts, retry delay, and
+process-exit margin. The build then verifies a pinned SHA256 before chmod. This
+owner applies only to an immutable build input; it is not a runtime task clock.
+
 Production preflight is resource-aware. Read-only permission proof runs from
 the operator host through the fixed-round admin catalog path; Fly topology
 binds required secret names without exposing values. It must not start an

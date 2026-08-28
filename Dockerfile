@@ -30,7 +30,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Supercronic — cron with full cron syntax (W8 RESOLVED — see RESEARCH Open Q #4)
 ARG SUPERCRONIC_VERSION=v0.2.30
-RUN curl -fsSL "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-amd64" -o /usr/local/bin/supercronic \
+ARG SUPERCRONIC_SHA256=55f3a65b6ef29856d948230a96448f6ec7376d39fca367fae49d2512167e29e5
+# 12,432,517 bytes at a 64 KiB/s floor is ~190s. The 240s transfer budget
+# adds TLS/redirect/filesystem margin; 500s owns two attempts plus teardown.
+RUN timeout --signal=TERM --kill-after=5s 500s curl -fsSL \
+        --connect-timeout 15 \
+        --max-time 240 \
+        --retry 1 \
+        --retry-all-errors \
+        "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-amd64" \
+        -o /usr/local/bin/supercronic \
+    && echo "${SUPERCRONIC_SHA256}  /usr/local/bin/supercronic" | sha256sum -c - \
     && chmod +x /usr/local/bin/supercronic
 
 # Non-root user (UID 10001 follows ASVS V14.1.1 — distroless-style numeric UID)
