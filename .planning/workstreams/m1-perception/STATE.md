@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Actionable observe-gate diagnostics passed the fresh full M1 gate; final climb/planning checks, commit and exact-image rebuild remain
-last_updated: "2026-08-28T21:45:00+08:00"
+stopped_at: Task 12 audit and all local gates passed; commit and exact-image rebuild remain before fresh controller canary
+last_updated: "2026-08-29T00:15:35+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -56,24 +56,30 @@ progress:
   roles use hidden secrets and the Supabase IPv4 Session Pooler, not the
   unreachable direct IPv6 database endpoint.
 
-- **Current production boundary:** `polyarb-runtime-controller-m1` Machine
-  `6e82036dce4958` runs controller-only candidate `352cb3ca`, digest
-  `sha256:45668021…c8d`, started observe-only with an empty recovery allowlist,
-  lease epoch 8 and unchanged non-image config hash `4504c4…b4a4`. It passed
-  124-second and 311-second zero-action gates but is superseded before sibling
-  rollout because expected observe-gate failures hid their actionable reason.
-  Coordinator `e82d1220b2d138` and qualification `876077f0274598` are stopped;
-  Structure `683e46ea500dd8` and Quote `4d895231f66748` remain started on the
-  pre-Plan-209 runtime. The failed coordinator canary was restored to digest
-  `sha256:bd21b2d…33df` and its original stopped state without changing its
-  non-image config. Production is revision 031; the migration was applied with
-  zero Machine changes and its post-migration parity/compaction audit passed.
-  The `eb7e24c9` candidate reached only this controller canary, failed closed
-  because Session Pooler dropped startup options, and was rolled back before
-  any sibling update. Its digest `sha256:f5d624d1…be2e` is superseded. Both
-  app-scoped hidden DSNs remain installed and no ordinary credential env key is
-  present.
-
+- **Current production boundary:** Production remains revision 031 with 6,572
+  normalized facts, zero legacy arrays, three compaction constraints, one
+  append-only trigger and zero scalar mismatches. Controller Machine
+  `6e82036dce4958` is started observe-only with empty recovery allowlist,
+  non-image config hash `4504c4…b4a4`, source commit `b3a47506` and remote
+  digest `sha256:6ba61618…8d0d`; lease epoch 9 passed fresh 120/300/1,800-second
+  zero-action gates. Coordinator `e82d1220b2d138` is deliberately stopped on
+  the same digest after its canary exposed intermittent public status failures.
+  Structure `683e46ea500dd8` and Quote `4d895231f66748` remain started on
+  `sha256:bd21b2d…33df`; qualification `876077f0274598` remains stopped on
+  that older digest. No recovery action was enabled or executed. Task 12 proved
+  the failure was an early client clock plus roughly 45 later
+  `READ COMMITTED` queries, then found the same request-round mismatch in
+  opportunity pagination and contradictory nested shutdown deadlines in the
+  compatibility daemon. The local repair uses one database-owned repeatable-read
+  clock/data statement per public read and one task-owned bounded TERM/KILL
+  sequence. Independent review found no Critical issue; its changed-line type
+  boundary finding is closed with validated JSON scalars/arrays, behavioral
+  result-set tests and already-exited process-race coverage. The final local
+  gate passed 3,997 tests, one skip and one expected xfail in 1,555.91 seconds;
+  climb 50/50, planning no-drift, Pyright, Ruff, format, JSON and diff checks
+  pass. Commit, exact-image rebuild and a fresh controller gate are required
+  before coordinator restarts; `b3a47506` and its continuity evidence are
+  superseded because executable bytes changed.
 - **Plan 05.6-209 runtime lifecycle repair:** Plan 208's job-specific deadline
   change exposed the wider defect: scheduler/role turn timeouts, worker-local
   profiles, relative I/O budgets and durable attempt deadlines could all kill

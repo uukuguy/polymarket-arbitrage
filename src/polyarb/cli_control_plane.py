@@ -2366,9 +2366,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _write(result, as_json=args.json)
             return 0
-        snapshot = control_plane.operational_snapshot(
-            now=datetime.now(UTC), sample_limit=args.limit
-        )
+        snapshot = control_plane.operational_snapshot(sample_limit=args.limit)
         _write({"status": "ok", **snapshot}, as_json=args.json)
         return 0
     except RuntimeObserveVerificationError as error:

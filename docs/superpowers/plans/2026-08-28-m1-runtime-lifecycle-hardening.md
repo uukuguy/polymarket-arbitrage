@@ -207,3 +207,31 @@ cursor handoff.
 - [x] Pass climb 50/50, planning no-drift, Ruff, format, JSON and diff gates.
 - [ ] Commit, supersede `352cb3ca`, and restart the exact
   image/controller evidence window before any sibling Machine update.
+
+## Task 12: Snapshot-clock, request-round, and nested-shutdown audit
+
+- [x] Reproduce the coordinator canary status failure three times and prove the
+  read used an early client clock with later `READ COMMITTED` heartbeat facts,
+  producing negative lease/progress ages.
+- [x] Move production operator reads to one database-owned time inside one
+  `REPEATABLE READ READ ONLY` snapshot; keep explicit time injection only for
+  deterministic tests.
+- [x] Collapse both operator snapshot and opportunity page to one PostgreSQL
+  data statement and one client execute round, matching the existing
+  `connect + one statement` HTTP envelope instead of increasing it.
+- [x] Add structural operation-round guards plus real production-equivalent
+  timing proof: snapshot 2.85–4.56s, three HTTP 200 reads at 3.53–4.81s, and
+  opportunity page 5.15s.
+- [x] Audit subprocess cancellation in the compatibility daemon; unify bounded
+  TERM/KILL/pipe drain, bound ProducerSupervisor KILL wait/output drain, and
+  remove the parent 5s timeout that preempted the child 30s cleanup contract.
+- [x] Align Uvicorn graceful shutdown to the maximum child contract and make
+  Fly's 40s kill timeout the sole process-level backstop.
+- [x] Validate aggregated JSON scalars/arrays at the read boundary, close
+  changed-line Pyright diagnostics, add behavioral execute/result-set tests,
+  and accept already-exited TERM/KILL races without false supervisor failure.
+- [x] Run complete focused/full/climb/planning/static gates: 3,997 passed, one
+  skipped and one expected xfail in 1,555.91 seconds; climb 50/50, planning
+  no-drift, Pyright/Ruff/format/JSON/diff checks pass.
+- [ ] Commit the amended Plan 209 evidence, rebuild the exact image, and restart controller canary from
+  a fresh lease epoch before resuming coordinator rollout.

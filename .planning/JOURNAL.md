@@ -11233,3 +11233,73 @@ gate; fresh 86,400-second qualification begins only after live terminal flow.
 gate repair, build and verify its exact image, then restart the controller-only
 canary and 1,800/90/90 window from a new lease epoch. No sibling rollout before
 that gate.
+
+### SESSION 327 — 2026-08-28 (snapshot clock, request rounds, and shutdown authority)
+
+- [CANARY / SAFE STOP] Commit `b3a47506`, remote digest
+  `sha256:6ba61618…8d0d`, passed the controller-only 120/300/1,800-second gates
+  at lease epoch 9 with zero recovery actions. The stopped coordinator received
+  the same image and started healthy, then unified status intermittently failed.
+  Coordinator was stopped gracefully before Structure, Quote or qualification
+  changed; controller remains observe-only with an empty allowlist.
+- [ROOT CAUSE 1 — TIME WORLD] Three production reads reproduced negative lease
+  or progress age. `operational_snapshot()` captured client time before
+  connection/bootstrap, then roughly 45 `READ COMMITTED` queries observed newer
+  heartbeat facts. Production status now owns one PostgreSQL repeatable-read
+  clock; explicit caller time remains test-only.
+- [ROOT CAUSE 2 — OPERATION ROUND] The 10.5-second HTTP policy described one
+  connect plus one statement, while snapshot executed roughly 45 serial data
+  statements and opportunity pagination executed two. Both now use one data
+  statement and one client execute round. Production-equivalent snapshot reads
+  completed in 2.85–4.56 seconds; three HTTP calls returned 200 in 3.53–4.81
+  seconds with nonnegative ages; opportunity page completed in 5.15 seconds.
+- [ROOT CAUSE 3 — NESTED CANCELLATION] Two Structure subprocess paths waited
+  forever on pipe drain after SIGKILL, while daemon main cancelled their formal
+  15s TERM + 15s KILL recovery after 5s. All paths now share bounded shutdown;
+  ProducerSupervisor KILL wait/output drain are bounded; daemon no longer adds
+  a competing outer cancellation. Uvicorn uses the 30s child budget and Fly's
+  40s kill timeout is the sole process-level backstop.
+- [TDD / PROOF] Structural operation-round guards, real PostgreSQL read-model
+  tests, wedged-pipe tests, supervisor shutdown tests and all focused suites
+  pass. Fresh `make test-m1` passed **3,992 tests, one skip and one expected
+  xfail in 1,616.15 seconds** without an outer timeout. The first attempted full
+  run exposed two stale source-structure assertions; they were updated to prove
+  membership in `shutdown_tasks` plus the final gather, then the complete gate
+  passed.
+- [PRODUCTION BOUNDARY] Executable bytes changed, so `b3a47506` and its
+  controller window are superseded. Production remains revision 031; controller
+  is started safe observe-only, coordinator and qualification are stopped, and
+  Structure/Quote remain on the old digest. No recovery action ran.
+
+[NEXT] Finish climb/planning/static gates, amend Plan 05.6-209 summary, commit
+Task 12 without the three protected user-owned SDD files, build/verify the exact
+amd64 image, then restart the controller-only canary and fresh 1,800/90/90 gate.
+Do not restart coordinator or update Structure/Quote/qualification before that
+gate passes.
+
+### SESSION 328 — 2026-08-29 (Task 12 independent review and final local gate)
+
+- [REVIEW] Independent code review found no Critical defect. Its one Important
+  finding identified weak static/runtime guarantees at the new JSON aggregate
+  boundary plus a float Uvicorn grace value. Aggregated counts, durations,
+  arrays and opportunity fields now validate before conversion; changed files
+  pass Pyright with zero diagnostics.
+- [BEHAVIORAL PROOF] The single-round snapshot/opportunity tests now record real
+  `execute` and `nextset` behavior rather than relying only on source-string
+  counts. A further reverse shutdown audit found and fixed TERM/KILL
+  `ProcessLookupError` races so an already-exited child is not recorded as a
+  supervisor control failure.
+- [FINAL LOCAL GATE] Fresh `make test-m1` passed **3,997 tests, one skip and one
+  expected xfail in 1,555.91 seconds** without an outer timeout. The Structure
+  performance group stayed CPU-active through its long quiet interval and
+  completed naturally. Climb 50/50, planning no-drift, Pyright, Ruff, format,
+  JSON and diff gates pass.
+- [BOUNDARY] Production was not changed. Controller remains safe observe-only;
+  coordinator and qualification remain stopped; Structure/Quote remain on the
+  old digest; zero recovery actions executed. Protected user SDD files remain
+  outside this task's staging scope.
+
+[NEXT] Commit Task 12 with its Plan 05.6-209 summary/evidence, build and verify
+the exact immutable amd64 image, then restart only the controller canary and a
+fresh 1,800/90/90 observe gate. Do not restart coordinator or update sibling
+workers before that gate passes.

@@ -54,6 +54,9 @@ from polyarb.perception.structure_contract import (
 )
 from polyarb.validator.category import SnapshotStatus
 
+STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S = 15
+STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S = 2 * STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S
+
 
 class SchedulerState(StrEnum):
     """Producer lifecycle; RECOVERING remains active but is health-visible."""
@@ -291,6 +294,43 @@ class IsolatedStructureEventMemberCheckpoint:
     elapsed_ms: int
 
 
+async def _terminate_then_kill_subprocess(
+    process: asyncio.subprocess.Process,
+    communicate_task: asyncio.Task[tuple[bytes, bytes]],
+    *,
+    terminate_timeout_s: float,
+) -> tuple[bytes, bytes]:
+    """Bound TERM, KILL, and pipe drain under one two-stage shutdown budget."""
+    if terminate_timeout_s <= 0:
+        raise ValueError("terminate_timeout_s must be positive")
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        pass
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(communicate_task),
+            timeout=terminate_timeout_s,
+        )
+    except TimeoutError:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(communicate_task),
+            timeout=terminate_timeout_s,
+        )
+    except TimeoutError:
+        # SIGKILL is already authoritative. A wedged stdio drain cannot retain
+        # the scheduler lane after both explicit shutdown stages have expired.
+        communicate_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await communicate_task
+        return b"", b""
+
+
 async def run_structure_event_members_in_subprocess(
     *,
     db_path: object,
@@ -300,7 +340,7 @@ async def run_structure_event_members_in_subprocess(
     max_elapsed_s: float = 45.0,
     spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = asyncio.create_subprocess_exec,
     timeout_s: float = 75.0,
-    terminate_timeout_s: float = 15.0,
+    terminate_timeout_s: float = STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S,
 ) -> IsolatedStructureEventMemberCheckpoint:
     """Run one bounded event-member slice outside the resident scheduler."""
     process = await spawn(
@@ -325,33 +365,11 @@ async def run_structure_event_members_in_subprocess(
     communicate_task = asyncio.create_task(process.communicate())
 
     async def terminate_then_kill() -> tuple[bytes, bytes]:
-        try:
-            process.terminate()
-        except ProcessLookupError:
-            pass
-        try:
-            return await asyncio.wait_for(
-                asyncio.shield(communicate_task), timeout=terminate_timeout_s
-            )
-        except TimeoutError:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            try:
-                return await asyncio.wait_for(
-                    asyncio.shield(communicate_task), timeout=terminate_timeout_s
-                )
-            except TimeoutError:
-                # SIGKILL has already been sent.  A wedged stdio drain must
-                # not keep the resident scheduler (and its HTTP/SQLite lanes)
-                # hostage indefinitely.  The asyncio child watcher will reap
-                # the killed child; cancelling this local pipe reader releases
-                # the supervisor to record the durable timeout and retry.
-                communicate_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await communicate_task
-                return b"", b""
+        return await _terminate_then_kill_subprocess(
+            process,
+            communicate_task,
+            terminate_timeout_s=terminate_timeout_s,
+        )
 
     try:
         stdout, stderr = await asyncio.wait_for(asyncio.shield(communicate_task), timeout=timeout_s)
@@ -424,7 +442,7 @@ async def run_structure_drift_in_subprocess(
     max_elapsed_s: float,
     spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (asyncio.create_subprocess_exec),
     timeout_s: float = 75.0,
-    terminate_timeout_s: float = 15.0,
+    terminate_timeout_s: float = STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S,
 ) -> IsolatedStructureDriftCheckpoint:
     """Run one cooperative drift slice outside the scheduler event loop."""
     process = await spawn(
@@ -447,21 +465,11 @@ async def run_structure_drift_in_subprocess(
     communicate_task = asyncio.create_task(process.communicate())
 
     async def terminate_then_kill() -> tuple[bytes, bytes]:
-        try:
-            process.terminate()
-        except ProcessLookupError:
-            pass
-        try:
-            return await asyncio.wait_for(
-                asyncio.shield(communicate_task),
-                timeout=terminate_timeout_s,
-            )
-        except TimeoutError:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            return await asyncio.shield(communicate_task)
+        return await _terminate_then_kill_subprocess(
+            process,
+            communicate_task,
+            terminate_timeout_s=terminate_timeout_s,
+        )
 
     def elapsed_ms() -> int:
         return max(0, int((time.monotonic() - started) * 1_000))
@@ -633,21 +641,11 @@ async def run_snapshot_in_subprocess(
     communicate_task = asyncio.create_task(process.communicate())
 
     async def terminate_then_kill() -> tuple[bytes, bytes]:
-        try:
-            process.terminate()
-        except ProcessLookupError:
-            pass
-        try:
-            return await asyncio.wait_for(
-                asyncio.shield(communicate_task),
-                timeout=terminate_timeout_s,
-            )
-        except TimeoutError:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            return await asyncio.shield(communicate_task)
+        return await _terminate_then_kill_subprocess(
+            process,
+            communicate_task,
+            terminate_timeout_s=terminate_timeout_s,
+        )
 
     def elapsed_ms() -> int:
         return max(0, int((time.monotonic() - started) * 1000))
@@ -1013,14 +1011,10 @@ class SnapshotScheduler:
         """Restore or derive one bounded schedule from durable attempt truth."""
         try:
             slot_budget_s = int(structure_attempt_slot_budget_s(None))
-            configured_cadence_s = int(
-                getattr(self._settings, "scheduler_interval_s", 300)
-            )
+            configured_cadence_s = int(getattr(self._settings, "scheduler_interval_s", 300))
             latest_adjustment = self._sqlite_store.get_latest_structure_schedule_adjustment()
             if latest_adjustment is not None:
-                self._effective_timeout_s = min(
-                    int(latest_adjustment["timeout_s"]), slot_budget_s
-                )
+                self._effective_timeout_s = min(int(latest_adjustment["timeout_s"]), slot_budget_s)
                 self._effective_cadence_s = min(
                     int(latest_adjustment["cadence_s"]), configured_cadence_s
                 )
@@ -1485,7 +1479,7 @@ class SnapshotScheduler:
                     max_chunks=max_chunks,
                     max_elapsed_s=slice_s,
                     timeout_s=75.0,
-                    terminate_timeout_s=15.0,
+                    terminate_timeout_s=STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S,
                 )
             except asyncio.CancelledError as error:
                 self._finish_structure_drift_attempt(
@@ -1707,7 +1701,7 @@ class SnapshotScheduler:
                     max_chunks=100,
                     max_elapsed_s=45.0,
                     timeout_s=75.0,
-                    terminate_timeout_s=15.0,
+                    terminate_timeout_s=STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S,
                 )
             except SnapshotSubprocessError as error:
                 reason = (
@@ -1719,10 +1713,7 @@ class SnapshotScheduler:
                 raise
             if checkpoint.deferred:
                 await self._record_structure_defer(
-                    reason=(
-                        "structure-event-members:"
-                        f"{checkpoint.defer_reason or 'writer-busy'}"
-                    ),
+                    reason=(f"structure-event-members:{checkpoint.defer_reason or 'writer-busy'}"),
                     queued_at_ms=queued_at_ms,
                 )
             else:

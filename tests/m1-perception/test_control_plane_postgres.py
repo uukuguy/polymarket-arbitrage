@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import subprocess
@@ -572,8 +573,10 @@ def test_quote_admission_input_uses_bounded_read_only_transaction() -> None:
             return None
 
         def execute(self, query: object, params: object = None) -> None:
-            commands.append(" ".join(str(query).split()))
-            if "FROM m1_quote_admission_inputs" in str(query):
+            as_string = getattr(query, "as_string", None)
+            rendered = str(as_string(None) if callable(as_string) else query)
+            commands.append(" ".join(rendered.split()))
+            if "FROM m1_quote_admission_inputs" in rendered:
                 assert params == ("generation:quote-admit",)
 
         def fetchone(self):
@@ -3744,6 +3747,75 @@ def test_opportunity_projection_publish_is_atomic_and_current_pointer_is_pageabl
             now=now,
         )
     assert control_plane.current_opportunities(limit=1, after_group_id="")["items"] == [row]
+
+
+def test_current_opportunities_is_one_bounded_data_statement_and_one_client_round() -> None:
+    commands = [
+        command.strip()
+        for command in postgres_module._CURRENT_OPPORTUNITIES_SQL.split(";")
+        if command.strip()
+    ]
+    source = inspect.getsource(PostgresControlPlane.current_opportunities)
+
+    assert len(commands) == 4
+    assert commands[3].startswith("WITH ")
+    assert source.count("cursor.execute(") == 1
+    assert source.count("cursor.nextset()") == 1
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_error"),
+    [
+        (
+            lambda control_plane: control_plane.current_opportunities(limit=1, after_group_id=""),
+            "opportunity result missing after repeatable-read transaction",
+        ),
+        (
+            lambda control_plane: control_plane.operational_snapshot(),
+            "snapshot data result missing after repeatable-read transaction",
+        ),
+    ],
+)
+def test_consolidated_reads_execute_once_and_advance_result_sets_behaviorally(
+    operation: Callable[[PostgresControlPlane], object],
+    expected_error: str,
+) -> None:
+    class RecordingCursor:
+        execute_count = 0
+        nextset_count = 0
+
+        def __enter__(self) -> RecordingCursor:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def execute(self, _query: object) -> None:
+            self.execute_count += 1
+
+        def nextset(self) -> bool:
+            self.nextset_count += 1
+            return False
+
+    cursor = RecordingCursor()
+
+    class RecordingConnection:
+        def __enter__(self) -> RecordingConnection:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def cursor(self, **_kwargs: object) -> RecordingCursor:
+            return cursor
+
+    control_plane = PostgresControlPlane(cast(Any, lambda: RecordingConnection()))
+
+    with pytest.raises(ControlPlaneError, match=expected_error):
+        operation(control_plane)
+
+    assert cursor.execute_count == 1
+    assert cursor.nextset_count == 1
 
 
 def test_opportunity_terminal_success_event_rolls_back_projection_and_pointer(
@@ -8056,6 +8128,45 @@ def test_operational_snapshot_reads_fenced_work_and_alert_intent(
             "state": "pending",
         }
     ]
+
+
+def test_operational_snapshot_production_read_owns_database_snapshot_clock(
+    control_plane: PostgresControlPlane,
+) -> None:
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT clock_timestamp()")
+        database_now = cursor.fetchone()[0]
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="database-clock-snapshot",
+        lease_seconds=90,
+        now=database_now,
+    )
+
+    snapshot = cast(dict[str, Any], control_plane.operational_snapshot())
+
+    assert snapshot["runtime_controller"]["epoch"] == controller.lease_epoch
+    assert snapshot["runtime_controller"]["lease_age_seconds"] >= 0
+
+
+def test_operational_snapshot_is_one_bounded_data_statement_and_one_client_round() -> None:
+    commands = [
+        command.strip()
+        for command in postgres_module._OPERATIONAL_SNAPSHOT_SQL.split(";")
+        if command.strip()
+    ]
+    source = inspect.getsource(PostgresControlPlane.operational_snapshot)
+
+    assert commands[:3] == [
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+        "SET LOCAL statement_timeout = {statement_timeout}",
+        "SET LOCAL lock_timeout = {lock_timeout}",
+    ]
+    assert len(commands) == 4
+    assert commands[3].startswith("WITH\n")
+    assert source.count("cursor.execute(") == 1
+    assert source.count("cursor.nextset()") == 1
 
 
 def test_operational_snapshot_projects_external_runtime_watchdog_source(

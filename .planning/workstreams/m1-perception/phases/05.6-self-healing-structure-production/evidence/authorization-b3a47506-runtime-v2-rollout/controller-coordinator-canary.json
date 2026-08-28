@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "source_release_sha": "b3a475066e9442c95848d52c766c6aedb9fc11c6",
+  "local_image_id": "sha256:15adf1f1b94c40198020a4fc454d1d8959e2f9858405310be368c841abc3c213",
+  "remote_image_digest": "sha256:6ba616187be72affed0e3dc314b490a488861757f0cb4815be67d74d0b968d0d",
+  "production_revision": "031",
+  "controller": {
+    "machine_id": "6e82036dce4958",
+    "state": "started",
+    "mode": "observe-only",
+    "recovery_allowlist": [],
+    "non_image_config_sha256": "4504c4b458bc12831d872cb04b12f3ab6307a7fc4946efa8e29bd1d8b445b4a4",
+    "lease_epoch": 9,
+    "observe_gates": [
+      {
+        "required_seconds": 120,
+        "available_seconds": 186,
+        "decision_count": 14,
+        "max_gap_seconds": 31,
+        "candidate_count": 2,
+        "recovery_action_count": 0,
+        "status": "passed"
+      },
+      {
+        "required_seconds": 300,
+        "available_seconds": 341,
+        "decision_count": 24,
+        "max_gap_seconds": 31,
+        "candidate_count": 2,
+        "recovery_action_count": 0,
+        "status": "passed"
+      },
+      {
+        "required_seconds": 1800,
+        "available_seconds": 1835,
+        "decision_count": 120,
+        "max_gap_seconds": 31,
+        "candidate_count": 2,
+        "recovery_action_count": 0,
+        "status": "passed"
+      }
+    ]
+  },
+  "coordinator": {
+    "machine_id": "e82d1220b2d138",
+    "state_after_canary": "stopped",
+    "non_image_config_sha256": "1d0abf0215b71ff96ee22a05554203c779ada56a4ae9ea29be55faba45cbafbf",
+    "canary_result": "healthy runtime ticks followed by intermittent operator status failure",
+    "safe_stop": true
+  },
+  "unchanged_siblings": {
+    "structure": {
+      "machine_id": "683e46ea500dd8",
+      "state": "started",
+      "image_digest": "sha256:bd21b2d118237c7f1e8c81fd9067985b20d5c23cd085d13251b724cf78b333df"
+    },
+    "quote": {
+      "machine_id": "4d895231f66748",
+      "state": "started",
+      "image_digest": "sha256:bd21b2d118237c7f1e8c81fd9067985b20d5c23cd085d13251b724cf78b333df"
+    },
+    "qualification": {
+      "machine_id": "876077f0274598",
+      "state": "stopped",
+      "image_digest": "sha256:bd21b2d118237c7f1e8c81fd9067985b20d5c23cd085d13251b724cf78b333df"
+    }
+  },
+  "root_cause_reproduction": {
+    "runs": 3,
+    "elapsed_seconds_range": [15.5, 17.0],
+    "failures": [
+      "lease_age_seconds is negative",
+      "progress_age_seconds is negative",
+      "lease_age_seconds is negative"
+    ],
+    "cause": "early client clock compared with later READ COMMITTED heartbeat facts across approximately 45 serial data statements"
+  },
+  "task_12_read_only_validation": {
+    "snapshot_direct_seconds": [2.85, 4.555, 3.0],
+    "snapshot_http_seconds": [4.025, 3.533, 4.809],
+    "snapshot_http_statuses": [200, 200, 200],
+    "opportunity_page_seconds": 5.147,
+    "negative_age_count": 0,
+    "full_test_gate": {
+      "passed": 3997,
+      "skipped": 1,
+      "xfailed": 1,
+      "elapsed_seconds": 1555.91,
+      "outer_timeout": null
+    },
+    "climb_nodes_passed": 50,
+    "planning_drift": false
+  },
+  "recovery_actions_executed": 0,
+  "status": "superseded-before-sibling-rollout",
+  "next_release_requirement": "commit Task 12, build an exact immutable image, restart controller-only canary, and pass a fresh 1800/90/90 observe gate before coordinator or sibling rollout"
+}

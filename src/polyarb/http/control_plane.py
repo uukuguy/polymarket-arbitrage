@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -30,7 +29,6 @@ async def control_plane_status(request: Request) -> JSONResponse:
     try:
         snapshot = await run_blocking_call_with_timeout(
             control_plane.operational_snapshot,
-            now=datetime.now(UTC),
             sample_limit=_SAMPLE_LIMIT,
             timeout_seconds=CONTROL_PLANE_DB_POLICY.request_timeout_seconds,
             thread_name="control-plane-api:status-read",

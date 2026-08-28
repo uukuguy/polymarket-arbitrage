@@ -1547,6 +1547,39 @@ async def test_structure_drift_child_timeout_reaps_before_failure() -> None:
 
 
 @pytest.mark.asyncio
+async def test_subprocess_shutdown_cannot_stall_after_sigkill_pipe_drain() -> None:
+    from polyarb.daemon.scheduler import _terminate_then_kill_subprocess
+
+    class WedgedProcess:
+        def __init__(self) -> None:
+            self.terminated = False
+            self.killed = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process = WedgedProcess()
+    communicate_task = asyncio.create_task(asyncio.Event().wait())
+
+    result = await asyncio.wait_for(
+        _terminate_then_kill_subprocess(  # type: ignore[arg-type]
+            process,
+            communicate_task,  # type: ignore[arg-type]
+            terminate_timeout_s=0.001,
+        ),
+        timeout=0.1,
+    )
+
+    assert result == (b"", b"")
+    assert process.terminated is True
+    assert process.killed is True
+    assert communicate_task.done()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "marker",
     (

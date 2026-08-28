@@ -215,14 +215,17 @@ def test_generation_cleanup_owner_runs_in_isolated_topology_but_not_without_sync
     # Isolated snapshot producers do not own this resident cleanup loop. The
     # parent daemon must still own it, otherwise enabled cleanup has no
     # heartbeat or executor in production.
-    assert _build_generation_cleanup_worker(
-        settings,
-        store,
-        lock,
-        runtime,
-        isolated_producers=True,
-        structure_sync_enabled=True,
-    ) is not None
+    assert (
+        _build_generation_cleanup_worker(
+            settings,
+            store,
+            lock,
+            runtime,
+            isolated_producers=True,
+            structure_sync_enabled=True,
+        )
+        is not None
+    )
     assert (
         _build_generation_cleanup_worker(
             settings,
@@ -234,14 +237,17 @@ def test_generation_cleanup_owner_runs_in_isolated_topology_but_not_without_sync
         )
         is None
     )
-    assert _build_generation_cleanup_worker(
-        settings,
-        store,
-        lock,
-        runtime,
-        isolated_producers=False,
-        structure_sync_enabled=True,
-    ) is not None
+    assert (
+        _build_generation_cleanup_worker(
+            settings,
+            store,
+            lock,
+            runtime,
+            isolated_producers=False,
+            structure_sync_enabled=True,
+        )
+        is not None
+    )
 
 
 def test_l1_main_owns_quote_worker_shutdown() -> None:
@@ -253,7 +259,9 @@ def test_l1_main_owns_quote_worker_shutdown() -> None:
     assert "None if quote_supervised else quote_worker" in source
     assert "_start_durable_quote_feed_hydrator(" in source
     assert "quote_worker_task.cancel()" in source
-    assert "quote_worker_task" in source.partition("asyncio.gather(")[2]
+    shutdown_source = source.partition("shutdown_tasks = (")[2].partition("warning_task")[0]
+    assert "quote_worker_task" in shutdown_source
+    assert "await asyncio.gather(*shutdown_tasks" in source
 
 
 def test_disabled_opportunity_first_watcher_does_not_compete_with_global_quote() -> None:
@@ -273,7 +281,9 @@ def test_l1_main_owns_generation_cleanup_worker_shutdown() -> None:
     assert "_build_generation_cleanup_worker(" in source
     assert "_start_generation_cleanup_worker(cleanup_worker, stop_event)" in source
     assert "cleanup_worker_task.cancel()" in source
-    assert "cleanup_worker_task" in source.partition("asyncio.gather(")[2]
+    shutdown_source = source.partition("shutdown_tasks = (")[2].partition("warning_task")[0]
+    assert "cleanup_worker_task" in shutdown_source
+    assert "await asyncio.gather(*shutdown_tasks" in source
 
 
 def test_l1_main_feature_flags_candidate_watcher_as_sibling_task() -> None:
@@ -286,8 +296,7 @@ def test_l1_main_feature_flags_candidate_watcher_as_sibling_task() -> None:
     assert "candidate_group_ids=candidate_group_ids" in builder_source
     assert 'fault_runtime=component_fault_runtimes["candidate"]' in builder_source
     assert (
-        "if settings.opportunity_first_watcher_enabled and not isolated_producers"
-        in builder_source
+        "if settings.opportunity_first_watcher_enabled and not isolated_producers" in builder_source
     )
     assert "_start_candidate_watcher(candidate_watcher, stop_event)" in lifecycle_source
     assert "candidate_watcher_task.cancel()" in lifecycle_source
@@ -392,8 +401,7 @@ def test_candidate_controller_accepts_strictly_sub_boundary_high_burst() -> None
     )
 
     assert (
-        settings.candidate_high_burst_groups
-        * settings.candidate_group_timeout_s
+        settings.candidate_high_burst_groups * settings.candidate_group_timeout_s
         < settings.candidate_lower_lane_max_wait_s
     )
 

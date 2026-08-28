@@ -1,6 +1,11 @@
 # Phase 02 Fly.io config — Supercronic cron (W8 RESOLVED, 2026-05-12)
 app = "polyarb-l1"
 primary_region = "ams"
+# The longest in-process stop owner is Structure's 2 x 15s TERM/KILL drain.
+# Fly is the sole process-level backstop and retains 10s for terminal evidence
+# and interpreter teardown after that owner finishes.
+kill_signal = "SIGTERM"
+kill_timeout = 40
 
 [build]
 

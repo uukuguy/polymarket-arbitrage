@@ -58,12 +58,8 @@ _SENSITIVE_KEY = (
     r"[a-z0-9_.-]*(?:token|secret|password|api[_-]?key|authorization|cookie|"
     r"service[_-]?key|access[_-]?key)[a-z0-9_.-]*"
 )
-_JSON_SECRET_RE = re.compile(
-    rf'(?i)("{_SENSITIVE_KEY}"\s*:\s*")' r'[^"]*(")'
-)
-_KEY_VALUE_RE = re.compile(
-    rf"(?i)((?:^|[?&;\s]){_SENSITIVE_KEY}\s*=\s*)[^&;\s\\]+"
-)
+_JSON_SECRET_RE = re.compile(rf'(?i)("{_SENSITIVE_KEY}"\s*:\s*")' r'[^"]*(")')
+_KEY_VALUE_RE = re.compile(rf"(?i)((?:^|[?&;\s]){_SENSITIVE_KEY}\s*=\s*)[^&;\s\\]+")
 _URI_USERINFO_RE = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@")
 
 
@@ -202,12 +198,14 @@ class ProducerSupervisor:
                 if process is not None:
                     await self._terminate(process, spec.terminate_grace_s)
             finally:
-                stdout = await self._drain_result(stdout_task)
-                stderr = await self._drain_result(stderr_task)
+                stdout, stderr = await asyncio.gather(
+                    self._drain_result(stdout_task, timeout_s=spec.terminate_grace_s),
+                    self._drain_result(stderr_task, timeout_s=spec.terminate_grace_s),
+                )
                 if supervisor_error_kind is not None:
-                    stderr = (
-                        stderr + b"\n" + supervisor_error_kind.encode("ascii")
-                    )[-spec.output_limit_bytes :]
+                    stderr = (stderr + b"\n" + supervisor_error_kind.encode("ascii"))[
+                        -spec.output_limit_bytes :
+                    ]
                 await self._record_terminal_receipt(
                     ProducerReceipt(
                         component=spec.component,
@@ -305,11 +303,7 @@ class ProducerSupervisor:
         stop_task = asyncio.create_task(stop_event.wait())
         marker = self._progress_marker(component, supervisor_run_id, attempt)
         deadline = time.monotonic() + timeout_s
-        stall_deadline = (
-            None
-            if stall_detection_s is None
-            else time.monotonic() + stall_detection_s
-        )
+        stall_deadline = None if stall_detection_s is None else time.monotonic() + stall_detection_s
         stall_recovery_anchor = attempt_recovery_anchor
         stall_reported = incident is not None
         try:
@@ -461,12 +455,23 @@ class ProducerSupervisor:
     async def _terminate(process, grace_s: float) -> None:
         if process.returncode is not None:
             return
-        process.terminate()
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            return
         try:
             await asyncio.wait_for(process.wait(), timeout=grace_s)
         except TimeoutError:
-            process.kill()
-            await process.wait()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                return
+            try:
+                await asyncio.wait_for(process.wait(), timeout=grace_s)
+            except TimeoutError:
+                # SIGKILL is already authoritative. A broken child watcher
+                # cannot retain the supervisor lane beyond both stop stages.
+                return
 
     @staticmethod
     async def _drain(reader: asyncio.StreamReader, limit: int) -> bytes:
@@ -478,13 +483,32 @@ class ProducerSupervisor:
         return bytes(tail)
 
     @staticmethod
-    async def _drain_result(task: asyncio.Task[bytes] | None) -> bytes:
+    async def _drain_result(
+        task: asyncio.Task[bytes] | None,
+        *,
+        timeout_s: float,
+    ) -> bytes:
         if task is None:
             return b""
         try:
-            return await asyncio.shield(task)
+            return await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
+        except TimeoutError:
+            task.cancel()
+            done, _ = await asyncio.wait({task}, timeout=timeout_s)
+            if done:
+                ProducerSupervisor._consume_task_result(task)
+            else:
+                task.add_done_callback(ProducerSupervisor._consume_task_result)
+            return b"[output-read-timeout]"
         except Exception:
             return b"[output-read-error]"
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Task[object]) -> None:
+        try:
+            task.result()
+        except BaseException:
+            pass
 
     @staticmethod
     def _safe_text(value: bytes) -> str:

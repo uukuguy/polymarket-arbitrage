@@ -172,6 +172,330 @@ _QUALIFICATION_SNAPSHOT_SQL = """
              updated_at DESC, epoch_id DESC
     LIMIT 1
 """
+_OPERATIONAL_SNAPSHOT_SQL = """
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL statement_timeout = {statement_timeout};
+SET LOCAL lock_timeout = {lock_timeout};
+WITH
+snapshot AS MATERIALIZED (
+    SELECT COALESCE({observed_at}::timestamptz, clock_timestamp()) AS observed_at
+),
+runtime_incident_sample AS MATERIALIZED (
+    SELECT incident_key, component, severity, state, summary, opened_at, updated_at
+    FROM m1_incidents
+    WHERE state IN ('open', 'acknowledged')
+      AND (component IN ('runtime', 'recovery')
+           OR incident_key LIKE 'recovery:' || chr(37))
+    ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+             updated_at DESC, incident_key DESC
+    LIMIT {sample_limit}
+),
+qualification_epoch AS MATERIALIZED (
+    SELECT epoch_id, state, role_identity, started_at, last_fact_at,
+           required_seconds, coverage_seconds, max_gap_seconds,
+           policy_version, release_id, config_id, previous_epoch_id
+    FROM m1_qualification_epochs
+    ORDER BY CASE WHEN state IN ('accumulating', 'recovering') THEN 0 ELSE 1 END,
+             updated_at DESC, epoch_id DESC
+    LIMIT 1
+)
+SELECT
+    s.observed_at AS snapshot_now,
+    COALESCE((
+        SELECT jsonb_object_agg(state, count)
+        FROM (SELECT state, count(*) AS count FROM m1_jobs GROUP BY state) counts
+    ), '{{}}'::jsonb) AS job_counts,
+    COALESCE((
+        SELECT jsonb_object_agg(state, count)
+        FROM (SELECT state, count(*) AS count FROM m1_jobs
+              WHERE job_type = 'quote-batch' GROUP BY state) counts
+    ), '{{}}'::jsonb) AS quote_batch_states,
+    COALESCE((
+        SELECT jsonb_object_agg(state, count)
+        FROM (SELECT state, count(*) AS count FROM m1_jobs
+              WHERE job_type = 'quote-admit' GROUP BY state) counts
+    ), '{{}}'::jsonb) AS quote_admission_states,
+    (SELECT extract(epoch FROM (s.observed_at - min(created_at)))
+     FROM m1_jobs WHERE job_type = 'quote-admit' AND state = 'retryable')
+        AS retryable_quote_admission_age,
+    COALESCE((
+        SELECT jsonb_object_agg(state, count)
+        FROM (SELECT state, count(*) AS count FROM m1_jobs
+              WHERE job_type = 'quote-certify' GROUP BY state) counts
+    ), '{{}}'::jsonb) AS quote_certifier_states,
+    (SELECT extract(epoch FROM (s.observed_at - min(created_at)))
+     FROM m1_jobs WHERE job_type = 'quote-batch' AND state = 'retryable')
+        AS retryable_quote_age,
+    (SELECT to_jsonb(pointer_row) FROM (
+        SELECT pointer.generation_key, pointer.published_at,
+               manifest.artifact_key, manifest.artifact_digest, manifest.record_count
+        FROM m1_publication_pointers AS pointer
+        JOIN m1_generation_manifests AS manifest
+          ON manifest.generation_key = pointer.generation_key
+        WHERE pointer.pointer_key = 'quote:current'
+    ) pointer_row) AS quote_pointer,
+    COALESCE((
+        SELECT jsonb_object_agg(state, count)
+        FROM (SELECT state, count(*) AS count FROM m1_jobs
+              WHERE job_type = 'structure-normalize' GROUP BY state) counts
+    ), '{{}}'::jsonb) AS structure_range_states,
+    COALESCE((
+        SELECT jsonb_object_agg(state, count)
+        FROM (SELECT state, count(*) AS count FROM m1_jobs
+              WHERE job_type = 'structure-fetch' GROUP BY state) counts
+    ), '{{}}'::jsonb) AS source_fetch_states,
+    COALESCE((
+        SELECT jsonb_object_agg(state, count)
+        FROM (SELECT state, count(*) AS count FROM m1_jobs
+              WHERE job_type = 'structure-materialize' GROUP BY state) counts
+    ), '{{}}'::jsonb) AS source_materializer_states,
+    (SELECT extract(epoch FROM (s.observed_at - min(created_at)))
+     FROM m1_jobs
+     WHERE job_type IN ('structure-fetch', 'structure-materialize') AND state = 'retryable')
+        AS retryable_source_age,
+    COALESCE((
+        SELECT jsonb_object_agg(state, count)
+        FROM (SELECT state, count(*) AS count FROM m1_jobs
+              WHERE job_type = 'structure-certify' GROUP BY state) counts
+    ), '{{}}'::jsonb) AS structure_certifier_states,
+    (SELECT extract(epoch FROM (s.observed_at - min(created_at)))
+     FROM m1_jobs WHERE job_type = 'structure-normalize' AND state = 'retryable')
+        AS retryable_structure_age,
+    (SELECT to_jsonb(manifest_row) FROM (
+        SELECT generation_key, artifact_key, artifact_digest, record_count, published_at
+        FROM m1_generation_manifests
+        WHERE generation_key LIKE 'structure:%'
+        ORDER BY published_at DESC, generation_key DESC LIMIT 1
+    ) manifest_row) AS structure_manifest,
+    (SELECT to_jsonb(pointer_row) FROM (
+        SELECT pointer.generation_key, pointer.expected_generation_key,
+               pointer.published_at, manifest.artifact_key, manifest.artifact_digest,
+               manifest.record_count
+        FROM m1_publication_pointers AS pointer
+        JOIN m1_generation_manifests AS manifest
+          ON manifest.generation_key = pointer.generation_key
+        WHERE pointer.pointer_key = 'structure:current:shadow'
+    ) pointer_row) AS structure_pointer,
+    (SELECT extract(epoch FROM (s.observed_at - min(created_at)))
+     FROM m1_jobs WHERE state IN ('runnable', 'retryable', 'checkpointed'))
+        AS oldest_runnable_age,
+    jsonb_build_object(
+        'unfinished_count', (SELECT count(*) FROM m1_jobs
+            WHERE job_type = 'structure-normalize'
+              AND state IN ('runnable', 'retryable', 'leased', 'checkpointed')),
+        'oldest_age_seconds', (SELECT extract(epoch FROM (s.observed_at - min(created_at)))
+            FROM m1_jobs WHERE job_type = 'structure-normalize'
+              AND state IN ('runnable', 'retryable', 'leased', 'checkpointed')),
+        'next_job_key', (SELECT job_key FROM m1_jobs
+            WHERE job_type = 'structure-normalize'
+              AND (((state IN ('runnable', 'retryable', 'checkpointed'))
+                    AND (next_attempt_at IS NULL OR next_attempt_at <= s.observed_at))
+                   OR (state = 'leased' AND lease_expires_at <= s.observed_at))
+            ORDER BY CASE WHEN state = 'retryable' AND next_attempt_at <= s.observed_at
+                          THEN 0 ELSE 1 END,
+                     next_attempt_at NULLS FIRST, updated_at, job_key LIMIT 1)
+    ) AS structure_queue_health,
+    jsonb_build_object(
+        'unfinished_count', (SELECT count(*) FROM m1_jobs
+            WHERE job_type = 'quote-batch'
+              AND state IN ('runnable', 'retryable', 'leased', 'checkpointed')),
+        'oldest_age_seconds', (SELECT extract(epoch FROM (s.observed_at - min(created_at)))
+            FROM m1_jobs WHERE job_type = 'quote-batch'
+              AND state IN ('runnable', 'retryable', 'leased', 'checkpointed')),
+        'next_job_key', (SELECT job_key FROM m1_jobs
+            WHERE job_type = 'quote-batch'
+              AND (((state IN ('runnable', 'retryable', 'checkpointed'))
+                    AND (next_attempt_at IS NULL OR next_attempt_at <= s.observed_at))
+                   OR (state = 'leased' AND lease_expires_at <= s.observed_at))
+            ORDER BY CASE WHEN state = 'retryable' AND next_attempt_at <= s.observed_at
+                          THEN 0 ELSE 1 END,
+                     next_attempt_at NULLS FIRST, updated_at, job_key LIMIT 1)
+    ) AS quote_queue_health,
+    (SELECT count(*) FROM m1_jobs
+     WHERE state = 'leased' AND lease_expires_at <= s.observed_at) AS expired_leases,
+    (SELECT count(*) FROM m1_job_circuits WHERE state = 'open') AS open_circuit_count,
+    COALESCE((SELECT jsonb_agg(to_jsonb(circuit_row)) FROM (
+        SELECT job_key, consecutive_failures, next_probe_at
+        FROM m1_job_circuits WHERE state = 'open'
+        ORDER BY updated_at DESC, job_key DESC LIMIT {sample_limit}
+    ) circuit_row), '[]'::jsonb) AS open_circuits,
+    COALESCE((SELECT jsonb_agg(to_jsonb(attempt_row)) FROM (
+        SELECT job_key, lease_epoch, worker_id, state
+        FROM m1_job_attempts ORDER BY started_at DESC, attempt_id DESC
+        LIMIT {sample_limit}
+    ) attempt_row), '[]'::jsonb) AS attempts,
+    COALESCE((SELECT jsonb_agg(to_jsonb(incident_row)) FROM (
+        SELECT incident_key, component, severity, summary
+        FROM m1_incidents WHERE state = 'open'
+        ORDER BY opened_at DESC, incident_key DESC LIMIT {sample_limit}
+    ) incident_row), '[]'::jsonb) AS incidents,
+    (SELECT to_jsonb(runtime_current_row) FROM (
+        SELECT i.incident_key, i.severity, i.summary, i.opened_at, e.detail
+        FROM m1_incidents i
+        JOIN LATERAL (
+            SELECT detail FROM m1_incident_events
+            WHERE incident_key = i.incident_key
+            ORDER BY occurred_at DESC, incident_event_id DESC LIMIT 1
+        ) e ON TRUE
+        WHERE (i.dedupe_key = 'runtime-watchdog'
+               OR i.dedupe_key LIKE 'runtime-watchdog:' || chr(37))
+          AND i.state <> 'resolved'
+        ORDER BY i.updated_at DESC, i.incident_key DESC LIMIT 1
+    ) runtime_current_row) AS runtime_current,
+    COALESCE((SELECT jsonb_agg(to_jsonb(runtime_event_row)) FROM (
+        SELECT i.incident_key, i.severity, i.summary, e.kind, e.occurred_at, e.detail
+        FROM m1_incident_events e
+        JOIN m1_incidents i ON i.incident_key = e.incident_key
+        WHERE i.dedupe_key = 'runtime-watchdog'
+           OR i.dedupe_key LIKE 'runtime-watchdog:' || chr(37)
+        ORDER BY e.occurred_at DESC, e.incident_event_id DESC LIMIT {sample_limit}
+    ) runtime_event_row), '[]'::jsonb) AS runtime_events,
+    COALESCE((SELECT jsonb_agg(to_jsonb(outbox_row)) FROM (
+        SELECT i.incident_key, o.channel, o.state
+        FROM m1_alert_outbox o
+        JOIN m1_incident_events e ON e.incident_event_id = o.incident_event_id
+        JOIN m1_incidents i ON i.incident_key = e.incident_key
+        WHERE o.state = 'pending'
+        ORDER BY o.created_at DESC, o.outbox_id DESC LIMIT {sample_limit}
+    ) outbox_row), '[]'::jsonb) AS outbox,
+    (SELECT to_jsonb(soak_row) FROM (
+        SELECT run_id, observed_at FROM m1_soak_observations
+        ORDER BY observed_at DESC, run_id DESC LIMIT 1
+    ) soak_row) AS latest_soak_observation,
+    (SELECT to_jsonb(cloud_row) FROM (
+        SELECT COALESCE(sum(bytes_received), 0) AS used_bytes,
+               max(daily_budget_bytes) AS daily_budget_bytes
+        FROM m1_cloud_usage_observations
+        WHERE budget_day = (s.observed_at AT TIME ZONE 'UTC')::date
+    ) cloud_row) AS cloud_usage,
+    (SELECT to_jsonb(cloud_row) FROM (
+        SELECT observation_id, source, operation, bytes_received, item_count,
+               artifact_key, artifact_digest, observed_at
+        FROM m1_cloud_usage_observations
+        WHERE budget_day = (s.observed_at AT TIME ZONE 'UTC')::date
+        ORDER BY observed_at DESC, observation_id DESC LIMIT 1
+    ) cloud_row) AS latest_cloud_usage,
+    (SELECT to_jsonb(controller_row) FROM (
+        SELECT controller_id, owner_id, lease_epoch, lease_expires_at, claimed_at, updated_at,
+               extract(epoch FROM (s.observed_at - updated_at)) AS lease_age_seconds,
+               extract(epoch FROM greatest(s.observed_at - lease_expires_at,
+                                            interval '0 seconds')) AS lease_overdue_seconds
+        FROM m1_runtime_controller_leases
+        WHERE controller_id = {controller_id} LIMIT 1
+    ) controller_row) AS runtime_controller,
+    (SELECT count(*) FROM m1_job_runtime_state runtime
+     JOIN m1_jobs job ON job.job_key = runtime.job_key WHERE job.state = 'leased')
+        AS active_task_total,
+    COALESCE((SELECT jsonb_agg(to_jsonb(task_row)) FROM (
+        SELECT job.job_key, runtime.attempt_id, job.job_type, runtime.worker_id,
+               runtime.lease_epoch, runtime.stage, runtime.recovery_state,
+               runtime.progress_current, runtime.progress_total,
+               runtime.started_at, runtime.last_heartbeat_at, runtime.last_progress_at,
+               runtime.lease_deadline_at, runtime.heartbeat_deadline_at,
+               runtime.progress_deadline_at, runtime.attempt_deadline_at,
+               extract(epoch FROM (s.observed_at - runtime.last_heartbeat_at))
+                   AS heartbeat_age_seconds,
+               extract(epoch FROM (s.observed_at - runtime.last_progress_at))
+                   AS progress_age_seconds,
+               extract(epoch FROM greatest(s.observed_at - runtime.lease_deadline_at,
+                                            interval '0 seconds')) AS lease_overdue_seconds,
+               extract(epoch FROM greatest(s.observed_at - runtime.attempt_deadline_at,
+                                            interval '0 seconds')) AS attempt_overdue_seconds
+        FROM m1_job_runtime_state runtime
+        JOIN m1_jobs job ON job.job_key = runtime.job_key
+        WHERE job.state = 'leased'
+        ORDER BY CASE runtime.recovery_state WHEN 'recovering' THEN 0
+                                             WHEN 'suspect' THEN 1 ELSE 2 END,
+                 least(runtime.lease_deadline_at, runtime.heartbeat_deadline_at,
+                       runtime.progress_deadline_at, runtime.attempt_deadline_at),
+                 runtime.started_at, job.job_key
+        LIMIT {sample_limit}
+    ) task_row), '[]'::jsonb) AS active_tasks,
+    (SELECT count(*) FROM m1_incidents
+     WHERE state IN ('open', 'acknowledged')
+       AND (component IN ('runtime', 'recovery')
+            OR incident_key LIKE 'recovery:' || chr(37))) AS runtime_incident_total,
+    COALESCE((SELECT jsonb_agg(to_jsonb(incident_row))
+              FROM runtime_incident_sample incident_row), '[]'::jsonb)
+        AS runtime_incidents,
+    COALESCE((SELECT jsonb_agg(to_jsonb(event_row)) FROM (
+        SELECT incident_key, kind, detail, occurred_at,
+               extract(epoch FROM (s.observed_at - occurred_at)) AS age_seconds
+        FROM (
+            SELECT event.*, row_number() OVER (
+                PARTITION BY incident_key
+                ORDER BY occurred_at DESC, incident_event_id DESC
+            ) AS event_rank
+            FROM m1_incident_events event
+            WHERE incident_key IN (SELECT incident_key FROM runtime_incident_sample)
+        ) ranked
+        WHERE event_rank <= {sample_limit}
+        ORDER BY incident_key, occurred_at DESC
+    ) event_row), '[]'::jsonb) AS runtime_incident_events,
+    (SELECT count(*) FROM m1_recovery_actions) AS recovery_action_total,
+    COALESCE((SELECT jsonb_agg(to_jsonb(action_row)) FROM (
+        SELECT action_id, incident_key, target_type, target_id, action_type,
+               state, result_code, expected_controller_epoch,
+               expected_attempt_id, expected_lease_epoch, requested_at,
+               started_at, finished_at, next_allowed_at, worker_id,
+               worker_epoch, worker_lease_expires_at
+        FROM m1_recovery_actions
+        ORDER BY CASE state WHEN 'pending' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,
+                 COALESCE(finished_at, started_at, requested_at) DESC, action_id DESC
+        LIMIT {sample_limit}
+    ) action_row), '[]'::jsonb) AS recovery_actions,
+    (SELECT to_jsonb(q) FROM qualification_epoch q) AS qualification_epoch,
+    (SELECT to_jsonb(certificate_row) FROM (
+        SELECT certificate_id, certificate_digest, evidence_digest, qualified_at, created_at
+        FROM m1_qualification_certificates
+        WHERE epoch_id = (SELECT epoch_id FROM qualification_epoch)
+        ORDER BY created_at DESC, certificate_id DESC LIMIT 1
+    ) certificate_row) AS qualification_certificate,
+    COALESCE(
+        (SELECT to_jsonb(breaker_row) FROM (
+            SELECT fact_id, reason, observed_at
+            FROM m1_qualification_recovery_observations
+            WHERE recovering_epoch_id = (SELECT epoch_id FROM qualification_epoch)
+              AND reason NOT IN ('healthy', 'recovery.confirmed')
+              AND (SELECT state FROM qualification_epoch) = 'recovering'
+            ORDER BY observed_at DESC, ingest_seq DESC LIMIT 1
+        ) breaker_row),
+        (SELECT to_jsonb(breaker_row) FROM (
+            SELECT epoch_id AS fact_id, invalidation_reason AS reason,
+                   invalidated_at AS observed_at
+            FROM m1_qualification_epochs
+            WHERE epoch_id = (SELECT previous_epoch_id FROM qualification_epoch)
+              AND state = 'invalidated'
+              AND (SELECT state FROM qualification_epoch) = 'recovering'
+        ) breaker_row)
+    ) AS qualification_breaker
+FROM snapshot s
+"""
+_CURRENT_OPPORTUNITIES_SQL = """
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL statement_timeout = {statement_timeout};
+SET LOCAL lock_timeout = {lock_timeout};
+WITH current_projection AS MATERIALIZED (
+    SELECT projection.generation_key, projection.record_count
+    FROM m1_opportunity_publication_pointers AS pointer
+    JOIN m1_opportunity_projections AS projection
+      ON projection.generation_key = pointer.generation_key
+    WHERE pointer.pointer_key = 'opportunity:current'
+)
+SELECT current_projection.generation_key, current_projection.record_count,
+       COALESCE((SELECT jsonb_agg(to_jsonb(page_row)) FROM (
+           SELECT rows.group_id, rows.event_id, rows.membership_hash, rows.bundle_cost,
+                  rows.gross_edge_bps, rows.max_bundle_size, rows.legs,
+                  rows.structure_observed_at_ms, rows.quote_started_at_ms,
+                  rows.quote_quoted_at_ms
+           FROM m1_opportunity_projection_rows AS rows
+           WHERE rows.generation_key = current_projection.generation_key
+             AND rows.group_id > {after_group_id}
+           ORDER BY rows.group_id
+           LIMIT {page_size}
+       ) page_row), '[]'::jsonb) AS rows
+FROM current_projection
+"""
 _ALERT_BOUNDED_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:/._ @#=+-]{0,255}$")
 _ALERT_SECRET_WORDS = ("secret", "token", "password", "api_key", "apikey", "authorization")
 _ALERT_ACTIONS = frozenset(
@@ -325,14 +649,68 @@ def _set_fenced_transaction_timeouts(
 
 def _set_snapshot_read_timeouts(cursor: psycopg.Cursor[Any]) -> None:
     cursor.execute("SET TRANSACTION READ ONLY")
-    cursor.execute(f"SET LOCAL statement_timeout = '{CONTROL_PLANE_DB_POLICY.statement_setting}'")
-    cursor.execute(f"SET LOCAL lock_timeout = '{CONTROL_PLANE_DB_POLICY.lock_setting}'")
+    cursor.execute(
+        sql.SQL("SET LOCAL statement_timeout = {}").format(
+            sql.Literal(CONTROL_PLANE_DB_POLICY.statement_setting)
+        )
+    )
+    cursor.execute(
+        sql.SQL("SET LOCAL lock_timeout = {}").format(
+            sql.Literal(CONTROL_PLANE_DB_POLICY.lock_setting)
+        )
+    )
 
 
 def _snapshot_aware(value: object, field: str) -> datetime:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError as error:
+            raise ControlPlaneError(f"{field} is not timezone-aware") from error
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ControlPlaneError(f"{field} is not timezone-aware")
     return value.astimezone(UTC)
+
+
+def _snapshot_mapping(value: object, field: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or any(type(key) is not str for key in value):
+        raise ControlPlaneError(f"{field} is malformed")
+    return value
+
+
+def _snapshot_optional_mapping(value: object, field: str) -> Mapping[str, object] | None:
+    if value is None:
+        return None
+    return _snapshot_mapping(value, field)
+
+
+def _snapshot_rows(value: object, field: str) -> tuple[Mapping[str, object], ...]:
+    if not isinstance(value, list):
+        raise ControlPlaneError(f"{field} is malformed")
+    return tuple(_snapshot_mapping(row, field) for row in value)
+
+
+def _snapshot_count_map(value: object, field: str) -> dict[str, int]:
+    mapping = _snapshot_mapping(value, field)
+    return {
+        _snapshot_text(key, f"{field}.state"): _snapshot_int(count, f"{field}.count")
+        for key, count in mapping.items()
+    }
+
+
+def _snapshot_queue_health(value: object, field: str) -> dict[str, object]:
+    mapping = _snapshot_mapping(value, field)
+    age = mapping.get("oldest_age_seconds")
+    next_job_key = mapping.get("next_job_key")
+    return {
+        "unfinished_count": _snapshot_int(mapping.get("unfinished_count"), f"{field}.count"),
+        "oldest_age_seconds": (
+            None if age is None else _snapshot_seconds(age, f"{field}.oldest_age_seconds")
+        ),
+        "next_job_key": (
+            None if next_job_key is None else _snapshot_text(next_job_key, f"{field}.next_job_key")
+        ),
+    }
 
 
 def _snapshot_seconds(value: object, field: str) -> float:
@@ -394,8 +772,14 @@ def _snapshot_role_identity(value: object) -> list[str]:
 
 def _snapshot_json_array(value: object, field: str) -> list[object]:
     if not isinstance(value, list):
-        raise ControlPlaneError("qualification source is malformed")
+        raise ControlPlaneError(f"{field} is malformed")
     return list(value)
+
+
+def _snapshot_text_array(value: object, field: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ControlPlaneError(f"{field} is malformed")
+    return [_snapshot_text(item, field) for item in value]
 
 
 _RUNTIME_COLUMNS: dict[str, dict[str, tuple[str, bool, str | None]]] = {
@@ -6477,7 +6861,7 @@ class PostgresControlPlane:
     def operational_snapshot(
         self,
         *,
-        now: datetime,
+        now: datetime | None = None,
         sample_limit: int = 20,
     ) -> dict[str, object]:
         """Read the bounded, durable operator view without touching SQLite.
@@ -6486,503 +6870,185 @@ class PostgresControlPlane:
         data worker or unavailable Fly volume must therefore not turn an
         operator incident into an empty/healthy response.
         """
-        self._validate_aware(now, "now")
+        if now is not None:
+            self._validate_aware(now, "now")
         if not 1 <= sample_limit <= 100:
             raise ValueError("sample_limit must be in 1..100")
         with (
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            _set_snapshot_read_timeouts(cursor)
-            cursor.execute("SELECT state, count(*) AS count FROM m1_jobs GROUP BY state")
-            job_counts = {str(row["state"]): int(row["count"]) for row in cursor.fetchall()}
-            cursor.execute(
-                """
-                SELECT state, count(*) AS count
-                FROM m1_jobs WHERE job_type = 'quote-batch' GROUP BY state
-                """
+            query = sql.SQL(_OPERATIONAL_SNAPSHOT_SQL).format(
+                observed_at=sql.Literal(now),
+                sample_limit=sql.Literal(sample_limit),
+                controller_id=sql.Literal(_SNAPSHOT_RUNTIME_CONTROLLER_ID),
+                statement_timeout=sql.Literal(CONTROL_PLANE_DB_POLICY.statement_setting),
+                lock_timeout=sql.Literal(CONTROL_PLANE_DB_POLICY.lock_setting),
             )
-            quote_batch_states = {str(row["state"]): int(row["count"]) for row in cursor.fetchall()}
-            cursor.execute(
-                """
-                SELECT state, count(*) AS count
-                FROM m1_jobs WHERE job_type = 'quote-admit' GROUP BY state
-                """
-            )
-            quote_admission_states = {
-                str(row["state"]): int(row["count"]) for row in cursor.fetchall()
-            }
-            cursor.execute(
-                """
-                SELECT extract(epoch FROM (%s - min(created_at))) AS age_seconds
-                FROM m1_jobs WHERE job_type = 'quote-admit' AND state = 'retryable'
-                """,
-                (now,),
-            )
-            retryable_quote_admission_age = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT state, count(*) AS count
-                FROM m1_jobs WHERE job_type = 'quote-certify' GROUP BY state
-                """
-            )
-            quote_certifier_states = {
-                str(row["state"]): int(row["count"]) for row in cursor.fetchall()
-            }
-            cursor.execute(
-                """
-                SELECT extract(epoch FROM (%s - min(created_at))) AS age_seconds
-                FROM m1_jobs WHERE job_type = 'quote-batch' AND state = 'retryable'
-                """,
-                (now,),
-            )
-            retryable_quote_age = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT pointer.generation_key, pointer.published_at,
-                       manifest.artifact_key, manifest.artifact_digest,
-                       manifest.record_count
-                FROM m1_publication_pointers AS pointer
-                JOIN m1_generation_manifests AS manifest
-                    ON manifest.generation_key = pointer.generation_key
-                WHERE pointer.pointer_key = 'quote:current'
-                """
-            )
-            quote_pointer = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT state, count(*) AS count
-                FROM m1_jobs WHERE job_type = 'structure-normalize' GROUP BY state
-                """
-            )
-            structure_range_states = {
-                str(row["state"]): int(row["count"]) for row in cursor.fetchall()
-            }
-            cursor.execute(
-                """
-                SELECT state, count(*) AS count
-                FROM m1_jobs WHERE job_type = 'structure-fetch' GROUP BY state
-                """
-            )
-            source_fetch_states = {
-                str(row["state"]): int(row["count"]) for row in cursor.fetchall()
-            }
-            cursor.execute(
-                """
-                SELECT state, count(*) AS count
-                FROM m1_jobs WHERE job_type = 'structure-materialize' GROUP BY state
-                """
-            )
-            source_materializer_states = {
-                str(row["state"]): int(row["count"]) for row in cursor.fetchall()
-            }
-            cursor.execute(
-                """
-                SELECT extract(epoch FROM (%s - min(created_at))) AS age_seconds
-                FROM m1_jobs
-                WHERE job_type IN ('structure-fetch', 'structure-materialize')
-                  AND state = 'retryable'
-                """,
-                (now,),
-            )
-            retryable_source_age = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT state, count(*) AS count
-                FROM m1_jobs WHERE job_type = 'structure-certify' GROUP BY state
-                """
-            )
-            structure_certifier_states = {
-                str(row["state"]): int(row["count"]) for row in cursor.fetchall()
-            }
-            cursor.execute(
-                """
-                SELECT extract(epoch FROM (%s - min(created_at))) AS age_seconds
-                FROM m1_jobs
-                WHERE job_type = 'structure-normalize' AND state = 'retryable'
-                """,
-                (now,),
-            )
-            retryable_structure_age = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT generation_key, artifact_key, artifact_digest, record_count, published_at
-                FROM m1_generation_manifests
-                WHERE generation_key LIKE 'structure:%'
-                ORDER BY published_at DESC, generation_key DESC LIMIT 1
-                """
-            )
-            structure_manifest = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT pointer.generation_key, pointer.expected_generation_key,
-                       pointer.published_at, manifest.artifact_key, manifest.artifact_digest,
-                       manifest.record_count
-                FROM m1_publication_pointers AS pointer
-                JOIN m1_generation_manifests AS manifest
-                    ON manifest.generation_key = pointer.generation_key
-                WHERE pointer.pointer_key = 'structure:current:shadow'
-                """
-            )
-            structure_pointer = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT extract(epoch FROM (%s - min(created_at))) AS age_seconds
-                FROM m1_jobs WHERE state IN ('runnable', 'retryable', 'checkpointed')
-                """,
-                (now,),
-            )
-            oldest = cursor.fetchone()
-            queue_health = {
-                "structure-range": self._queue_health_snapshot_cursor(
-                    cursor,
-                    job_type="structure-normalize",
-                    now=now,
+            cursor.execute(query)
+            for setup_command in (
+                "repeatable-read transaction",
+                "statement deadline",
+                "lock deadline",
+            ):
+                if not cursor.nextset():
+                    raise ControlPlaneError(f"snapshot data result missing after {setup_command}")
+            snapshot_row = cursor.fetchone()
+            if snapshot_row is None:
+                raise ControlPlaneError("snapshot database projection is unavailable")
+
+        now = _snapshot_aware(snapshot_row["snapshot_now"], "snapshot_now")
+        job_counts = _snapshot_count_map(snapshot_row["job_counts"], "job_counts")
+        quote_batch_states = _snapshot_count_map(
+            snapshot_row["quote_batch_states"], "quote_batch_states"
+        )
+        quote_admission_states = _snapshot_count_map(
+            snapshot_row["quote_admission_states"], "quote_admission_states"
+        )
+        retryable_quote_admission_age = snapshot_row["retryable_quote_admission_age"]
+        quote_certifier_states = _snapshot_count_map(
+            snapshot_row["quote_certifier_states"], "quote_certifier_states"
+        )
+        retryable_quote_age = snapshot_row["retryable_quote_age"]
+        quote_pointer = _snapshot_optional_mapping(snapshot_row["quote_pointer"], "quote_pointer")
+        structure_range_states = _snapshot_count_map(
+            snapshot_row["structure_range_states"], "structure_range_states"
+        )
+        source_fetch_states = _snapshot_count_map(
+            snapshot_row["source_fetch_states"], "source_fetch_states"
+        )
+        source_materializer_states = _snapshot_count_map(
+            snapshot_row["source_materializer_states"], "source_materializer_states"
+        )
+        retryable_source_age = snapshot_row["retryable_source_age"]
+        structure_certifier_states = _snapshot_count_map(
+            snapshot_row["structure_certifier_states"], "structure_certifier_states"
+        )
+        retryable_structure_age = snapshot_row["retryable_structure_age"]
+        structure_manifest = _snapshot_optional_mapping(
+            snapshot_row["structure_manifest"], "structure_manifest"
+        )
+        structure_pointer = _snapshot_optional_mapping(
+            snapshot_row["structure_pointer"], "structure_pointer"
+        )
+        age = snapshot_row["oldest_runnable_age"]
+        queue_health = {
+            "structure-range": _snapshot_queue_health(
+                snapshot_row["structure_queue_health"], "structure_queue_health"
+            ),
+            "quote-batch": _snapshot_queue_health(
+                snapshot_row["quote_queue_health"], "quote_queue_health"
+            ),
+        }
+        expired = snapshot_row["expired_leases"]
+        open_circuit_count = snapshot_row["open_circuit_count"]
+        open_circuit_rows = _snapshot_rows(snapshot_row["open_circuits"], "open_circuits")
+        open_circuits = [
+            {
+                "job_key": _snapshot_text(row["job_key"], "job_key"),
+                "consecutive_failures": _snapshot_int(
+                    row["consecutive_failures"], "consecutive_failures"
                 ),
-                "quote-batch": self._queue_health_snapshot_cursor(
-                    cursor,
-                    job_type="quote-batch",
-                    now=now,
-                ),
+                "next_probe_at": _snapshot_aware(row["next_probe_at"], "next_probe_at").isoformat(),
             }
-            cursor.execute(
-                """
-                SELECT count(*) AS count FROM m1_jobs
-                WHERE state = 'leased' AND lease_expires_at <= %s
-                """,
-                (now,),
-            )
-            expired = cursor.fetchone()
-            cursor.execute("SELECT count(*) AS count FROM m1_job_circuits WHERE state = 'open'")
-            open_circuit_count = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT job_key, consecutive_failures, next_probe_at
-                FROM m1_job_circuits WHERE state = 'open'
-                ORDER BY updated_at DESC, job_key DESC LIMIT %s
-                """,
-                (sample_limit,),
-            )
-            open_circuits = [
-                {
-                    "job_key": str(row["job_key"]),
-                    "consecutive_failures": int(row["consecutive_failures"]),
-                    "next_probe_at": row["next_probe_at"].isoformat(),
-                }
-                for row in cursor.fetchall()
-            ]
-            cursor.execute(
-                """
-                SELECT job_key, lease_epoch, worker_id, state
-                FROM m1_job_attempts ORDER BY started_at DESC, attempt_id DESC LIMIT %s
-                """,
-                (sample_limit,),
-            )
-            attempts = [
-                {
-                    "job_key": str(row["job_key"]),
-                    "lease_epoch": int(row["lease_epoch"]),
-                    "worker_id": str(row["worker_id"]),
-                    "state": str(row["state"]),
-                }
-                for row in cursor.fetchall()
-            ]
-            cursor.execute(
-                """
-                SELECT incident_key, component, severity, summary
-                FROM m1_incidents WHERE state = 'open'
-                ORDER BY opened_at DESC, incident_key DESC LIMIT %s
-                """,
-                (sample_limit,),
-            )
-            incidents = [
-                {
-                    "incident_key": str(row["incident_key"]),
-                    "component": str(row["component"]),
-                    "severity": str(row["severity"]),
-                    "summary": str(row["summary"]),
-                }
-                for row in cursor.fetchall()
-            ]
-            cursor.execute(
-                """
-                SELECT i.incident_key, i.severity, i.summary, i.opened_at, e.detail
-                FROM m1_incidents i
-                JOIN LATERAL (
-                    SELECT detail FROM m1_incident_events
-                    WHERE incident_key = i.incident_key
-                    ORDER BY occurred_at DESC, incident_event_id DESC LIMIT 1
-                ) e ON TRUE
-                WHERE (i.dedupe_key = 'runtime-watchdog'
-                       OR i.dedupe_key LIKE 'runtime-watchdog:' || chr(37))
-                  AND i.state <> 'resolved'
-                ORDER BY i.updated_at DESC, i.incident_key DESC LIMIT 1
-                """
-            )
-            runtime_current = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT i.incident_key, i.severity, i.summary, e.kind, e.occurred_at, e.detail
-                FROM m1_incident_events e
-                JOIN m1_incidents i ON i.incident_key = e.incident_key
-                WHERE i.dedupe_key = 'runtime-watchdog'
-                   OR i.dedupe_key LIKE 'runtime-watchdog:' || chr(37)
-                ORDER BY e.occurred_at DESC, e.incident_event_id DESC LIMIT %s
-                """,
-                (sample_limit,),
-            )
-            runtime_events = [
-                {
-                    "kind": str(row["kind"]),
-                    "occurred_at": row["occurred_at"].isoformat(),
-                    "incident_key": str(row["incident_key"]),
-                    "severity": str(row["severity"]),
-                    "summary": str(row["summary"]),
-                    "detail": dict(row["detail"]),
-                }
-                for row in cursor.fetchall()
-            ]
-            cursor.execute(
-                """
-                SELECT i.incident_key, o.channel, o.state
-                FROM m1_alert_outbox o
-                JOIN m1_incident_events e ON e.incident_event_id = o.incident_event_id
-                JOIN m1_incidents i ON i.incident_key = e.incident_key
-                WHERE o.state = 'pending'
-                ORDER BY o.created_at DESC, o.outbox_id DESC LIMIT %s
-                """,
-                (sample_limit,),
-            )
-            outbox = [
-                {
-                    "incident_key": str(row["incident_key"]),
-                    "channel": str(row["channel"]),
-                    "state": str(row["state"]),
-                }
-                for row in cursor.fetchall()
-            ]
-            cursor.execute(
-                """
-                SELECT run_id, observed_at FROM m1_soak_observations
-                ORDER BY observed_at DESC, run_id DESC LIMIT 1
-                """
-            )
-            latest_soak_observation = cursor.fetchone()
-            budget_day = now.astimezone(UTC).date()
-            cursor.execute(
-                """SELECT COALESCE(sum(bytes_received),0) AS used_bytes,
-                          max(daily_budget_bytes) AS daily_budget_bytes
-                   FROM m1_cloud_usage_observations WHERE budget_day = %s""",
-                (budget_day,),
-            )
-            cloud_usage = cursor.fetchone()
-            if cloud_usage is None:
-                raise RuntimeError("cloud usage aggregate was not returned")
-            cursor.execute(
-                """SELECT observation_id, source, operation, bytes_received, item_count,
-                          artifact_key, artifact_digest, observed_at
-                   FROM m1_cloud_usage_observations WHERE budget_day = %s
-                   ORDER BY observed_at DESC, observation_id DESC LIMIT 1""",
-                (budget_day,),
-            )
-            latest_cloud_usage = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT controller_id, owner_id, lease_epoch, lease_expires_at,
-                       claimed_at, updated_at,
-                       EXTRACT(EPOCH FROM (%s - updated_at)) AS lease_age_seconds,
-                       EXTRACT(EPOCH FROM GREATEST(%s - lease_expires_at, INTERVAL '0 seconds'))
-                           AS lease_overdue_seconds
-                FROM m1_runtime_controller_leases
-                WHERE controller_id = %s
-                LIMIT 1
-                """,
-                (now, now, _SNAPSHOT_RUNTIME_CONTROLLER_ID),
-            )
-            runtime_controller_row = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT count(*) AS count
-                FROM m1_job_runtime_state AS runtime
-                JOIN m1_jobs AS job ON job.job_key = runtime.job_key
-                WHERE job.state = 'leased'
-                """
-            )
-            active_task_total = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT job.job_key, runtime.attempt_id, job.job_type, runtime.worker_id,
-                       runtime.lease_epoch, runtime.stage, runtime.recovery_state,
-                       runtime.progress_current, runtime.progress_total,
-                       runtime.started_at, runtime.last_heartbeat_at, runtime.last_progress_at,
-                       runtime.lease_deadline_at, runtime.heartbeat_deadline_at,
-                       runtime.progress_deadline_at, runtime.attempt_deadline_at,
-                       EXTRACT(EPOCH FROM (%s - runtime.last_heartbeat_at))
-                           AS heartbeat_age_seconds,
-                       EXTRACT(EPOCH FROM (%s - runtime.last_progress_at))
-                           AS progress_age_seconds,
-                       EXTRACT(EPOCH FROM GREATEST(%s - runtime.lease_deadline_at,
-                           INTERVAL '0 seconds')) AS lease_overdue_seconds,
-                       EXTRACT(EPOCH FROM GREATEST(%s - runtime.attempt_deadline_at,
-                           INTERVAL '0 seconds')) AS attempt_overdue_seconds
-                FROM m1_job_runtime_state AS runtime
-                JOIN m1_jobs AS job ON job.job_key = runtime.job_key
-                WHERE job.state = 'leased'
-                ORDER BY
-                    CASE runtime.recovery_state
-                        WHEN 'recovering' THEN 0
-                        WHEN 'suspect' THEN 1
-                        ELSE 2
-                    END,
-                    LEAST(runtime.lease_deadline_at, runtime.heartbeat_deadline_at,
-                          runtime.progress_deadline_at, runtime.attempt_deadline_at),
-                    runtime.started_at,
-                    job.job_key
-                LIMIT %s
-                """,
-                (now, now, now, now, sample_limit),
-            )
-            active_task_rows = cursor.fetchall()
-            cursor.execute(
-                """
-                SELECT count(*) AS count
-                FROM m1_incidents
-                WHERE state IN ('open', 'acknowledged')
-                  AND (component IN ('runtime', 'recovery')
-                       OR incident_key LIKE 'recovery:' || chr(37))
-                """
-            )
-            runtime_incident_total = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT incident_key, component, severity, state, summary, opened_at, updated_at
-                FROM m1_incidents
-                WHERE state IN ('open', 'acknowledged')
-                  AND (component IN ('runtime', 'recovery')
-                       OR incident_key LIKE 'recovery:' || chr(37))
-                ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
-                         updated_at DESC, incident_key DESC
-                LIMIT %s
-                """,
-                (sample_limit,),
-            )
-            runtime_incident_rows = cursor.fetchall()
-            incident_keys = [str(row["incident_key"]) for row in runtime_incident_rows]
-            if incident_keys:
-                cursor.execute(
-                    """
-                    SELECT incident_key, kind, detail, occurred_at,
-                           EXTRACT(EPOCH FROM (%s - occurred_at)) AS age_seconds
-                    FROM (
-                        SELECT event.*, row_number() OVER (
-                            PARTITION BY incident_key
-                            ORDER BY occurred_at DESC, incident_event_id DESC
-                        ) AS event_rank
-                        FROM m1_incident_events AS event
-                        WHERE incident_key = ANY(%s)
-                    ) AS ranked
-                    WHERE event_rank <= %s
-                    ORDER BY incident_key, occurred_at DESC
-                    """,
-                    (now, incident_keys, sample_limit),
-                )
-                runtime_incident_event_rows = cursor.fetchall()
-            else:
-                runtime_incident_event_rows = []
-            cursor.execute("SELECT count(*) AS count FROM m1_recovery_actions")
-            recovery_action_total = cursor.fetchone()
-            cursor.execute(
-                """
-                SELECT action_id, incident_key, target_type, target_id, action_type,
-                       state, result_code, expected_controller_epoch,
-                       expected_attempt_id, expected_lease_epoch, requested_at,
-                       started_at, finished_at, next_allowed_at, worker_id,
-                       worker_epoch, worker_lease_expires_at
-                FROM m1_recovery_actions
-                ORDER BY CASE state WHEN 'pending' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,
-                         COALESCE(finished_at, started_at, requested_at) DESC,
-                         action_id DESC
-                LIMIT %s
-                """,
-                (sample_limit,),
-            )
-            recovery_action_rows = cursor.fetchall()
-            cursor.execute(_QUALIFICATION_SNAPSHOT_SQL)
-            qualification_epoch = cursor.fetchone()
-            qualification_certificate = None
-            qualification_breaker = None
-            if qualification_epoch is not None:
-                cursor.execute(
-                    """
-                    SELECT certificate_id, certificate_digest, evidence_digest,
-                           qualified_at, created_at
-                    FROM m1_qualification_certificates
-                    WHERE epoch_id = %s
-                    ORDER BY created_at DESC, certificate_id DESC
-                    LIMIT 1
-                    """,
-                    (qualification_epoch["epoch_id"],),
-                )
-                qualification_certificate = cursor.fetchone()
-                if qualification_epoch["state"] == "recovering":
-                    cursor.execute(
-                        """
-                        SELECT fact_id, reason, observed_at
-                        FROM m1_qualification_recovery_observations
-                        WHERE recovering_epoch_id = %s
-                          AND reason NOT IN ('healthy', 'recovery.confirmed')
-                        ORDER BY observed_at DESC, ingest_seq DESC
-                        LIMIT 1
-                        """,
-                        (qualification_epoch["epoch_id"],),
-                    )
-                    qualification_breaker = cursor.fetchone()
-                    if (
-                        qualification_breaker is None
-                        and qualification_epoch["previous_epoch_id"] is not None
-                    ):
-                        cursor.execute(
-                            """
-                            SELECT invalidation_reason AS reason, invalidated_at AS observed_at,
-                                   epoch_id AS fact_id
-                            FROM m1_qualification_epochs
-                            WHERE epoch_id = %s AND state = 'invalidated'
-                            """,
-                            (qualification_epoch["previous_epoch_id"],),
-                        )
-                        qualification_breaker = cursor.fetchone()
-        age = None if oldest is None else oldest["age_seconds"]
-        quote_retry_age = (
-            None if retryable_quote_age is None else retryable_quote_age["age_seconds"]
+            for row in open_circuit_rows
+        ]
+        attempt_rows = _snapshot_rows(snapshot_row["attempts"], "attempts")
+        attempts = [
+            {
+                "job_key": _snapshot_text(row["job_key"], "job_key"),
+                "lease_epoch": _snapshot_int(row["lease_epoch"], "lease_epoch"),
+                "worker_id": _snapshot_text(row["worker_id"], "worker_id"),
+                "state": _snapshot_text(row["state"], "state"),
+            }
+            for row in attempt_rows
+        ]
+        incident_rows = _snapshot_rows(snapshot_row["incidents"], "incidents")
+        incidents = [
+            {
+                "incident_key": _snapshot_text(row["incident_key"], "incident_key"),
+                "component": _snapshot_text(row["component"], "component"),
+                "severity": _snapshot_text(row["severity"], "severity"),
+                "summary": _snapshot_text(row["summary"], "summary"),
+            }
+            for row in incident_rows
+        ]
+        runtime_current = _snapshot_optional_mapping(
+            snapshot_row["runtime_current"], "runtime_current"
         )
-        quote_admission_retry_age = (
-            None
-            if retryable_quote_admission_age is None
-            else retryable_quote_admission_age["age_seconds"]
+        runtime_event_rows = _snapshot_rows(snapshot_row["runtime_events"], "runtime_events")
+        runtime_events = [
+            {
+                "kind": _snapshot_text(row["kind"], "kind"),
+                "occurred_at": _snapshot_aware(row["occurred_at"], "occurred_at").isoformat(),
+                "incident_key": _snapshot_text(row["incident_key"], "incident_key"),
+                "severity": _snapshot_text(row["severity"], "severity"),
+                "summary": _snapshot_text(row["summary"], "summary"),
+                "detail": dict(_snapshot_mapping(row["detail"], "detail")),
+            }
+            for row in runtime_event_rows
+        ]
+        outbox_rows = _snapshot_rows(snapshot_row["outbox"], "outbox")
+        outbox = [
+            {
+                "incident_key": _snapshot_text(row["incident_key"], "incident_key"),
+                "channel": _snapshot_text(row["channel"], "channel"),
+                "state": _snapshot_text(row["state"], "state"),
+            }
+            for row in outbox_rows
+        ]
+        latest_soak_observation = _snapshot_optional_mapping(
+            snapshot_row["latest_soak_observation"], "latest_soak_observation"
         )
-        source_retry_age = (
-            None if retryable_source_age is None else retryable_source_age["age_seconds"]
+        cloud_usage = _snapshot_mapping(snapshot_row["cloud_usage"], "cloud_usage")
+        latest_cloud_usage = _snapshot_optional_mapping(
+            snapshot_row["latest_cloud_usage"], "latest_cloud_usage"
         )
-        structure_retry_age = (
-            None if retryable_structure_age is None else retryable_structure_age["age_seconds"]
+        budget_day = now.astimezone(UTC).date()
+        runtime_controller_row = _snapshot_optional_mapping(
+            snapshot_row["runtime_controller"], "runtime_controller"
         )
+        active_task_rows = _snapshot_rows(snapshot_row["active_tasks"], "active_tasks")
+        active_task_total = snapshot_row["active_task_total"]
+        runtime_incident_rows = _snapshot_rows(
+            snapshot_row["runtime_incidents"], "runtime_incidents"
+        )
+        runtime_incident_event_rows = _snapshot_rows(
+            snapshot_row["runtime_incident_events"], "runtime_incident_events"
+        )
+        runtime_incident_total = snapshot_row["runtime_incident_total"]
+        recovery_action_rows = _snapshot_rows(snapshot_row["recovery_actions"], "recovery_actions")
+        recovery_action_total = snapshot_row["recovery_action_total"]
+        qualification_epoch = _snapshot_optional_mapping(
+            snapshot_row["qualification_epoch"], "qualification_epoch"
+        )
+        qualification_certificate = _snapshot_optional_mapping(
+            snapshot_row["qualification_certificate"], "qualification_certificate"
+        )
+        qualification_breaker = _snapshot_optional_mapping(
+            snapshot_row["qualification_breaker"], "qualification_breaker"
+        )
+        quote_retry_age = retryable_quote_age
+        quote_admission_retry_age = retryable_quote_admission_age
+        source_retry_age = retryable_source_age
+        structure_retry_age = retryable_structure_age
         runtime_controller = self._runtime_controller_snapshot(
             runtime_controller_row,
             now=now,
         )
         active_tasks = self._active_tasks_snapshot(
             active_task_rows,
-            total=0 if active_task_total is None else active_task_total["count"],
+            total=active_task_total,
         )
         runtime_incidents = self._runtime_incidents_snapshot(
             runtime_incident_rows,
             runtime_incident_event_rows,
-            total=0 if runtime_incident_total is None else runtime_incident_total["count"],
+            total=runtime_incident_total,
             now=now,
         )
         recovery_actions = self._recovery_actions_snapshot(
             recovery_action_rows,
-            total=0 if recovery_action_total is None else recovery_action_total["count"],
+            total=recovery_action_total,
         )
         qualification = self._qualification_snapshot(
             qualification_epoch,
@@ -6992,11 +7058,11 @@ class PostgresControlPlane:
         )
         return {
             "job_counts": job_counts,
-            "oldest_runnable_age_seconds": None if age is None else float(age),
-            "expired_leases": 0 if expired is None else int(expired["count"]),
-            "open_circuit_count": (
-                0 if open_circuit_count is None else int(open_circuit_count["count"])
+            "oldest_runnable_age_seconds": (
+                None if age is None else _snapshot_seconds(age, "oldest_runnable_age_seconds")
             ),
+            "expired_leases": _snapshot_int(expired, "expired_leases"),
+            "open_circuit_count": _snapshot_int(open_circuit_count, "open_circuit_count"),
             "open_circuits": open_circuits,
             "recent_attempts": attempts,
             "open_incidents": incidents,
@@ -7013,9 +7079,21 @@ class PostgresControlPlane:
                         "incident_key": str(runtime_current["incident_key"]),
                         "severity": str(runtime_current["severity"]),
                         "summary": str(runtime_current["summary"]),
-                        "opened_at": runtime_current["opened_at"].isoformat(),
-                        "source": str(dict(runtime_current["detail"]).get("source", "unknown")),
-                        "failures": list(dict(runtime_current["detail"]).get("failures", [])),
+                        "opened_at": _snapshot_aware(
+                            runtime_current["opened_at"], "runtime_watchdog.opened_at"
+                        ).isoformat(),
+                        "source": _snapshot_text(
+                            _snapshot_mapping(runtime_current["detail"], "detail").get(
+                                "source", "unknown"
+                            ),
+                            "runtime_watchdog.source",
+                        ),
+                        "failures": _snapshot_text_array(
+                            _snapshot_mapping(runtime_current["detail"], "detail").get(
+                                "failures", []
+                            ),
+                            "runtime_watchdog.failures",
+                        ),
                     }
                 ),
                 "recent_events": runtime_events,
@@ -7025,26 +7103,33 @@ class PostgresControlPlane:
                 if latest_soak_observation is None
                 else {
                     "latest_run_id": str(latest_soak_observation["run_id"]),
-                    "latest_observed_at": latest_soak_observation["observed_at"].isoformat(),
+                    "latest_observed_at": _snapshot_aware(
+                        latest_soak_observation["observed_at"], "soak.observed_at"
+                    ).isoformat(),
                 }
             ),
             "pending_alert_outbox": outbox,
             "cloud_usage": {
                 "budget_day": budget_day.isoformat(),
-                "used_bytes": int(cloud_usage["used_bytes"]),
+                "used_bytes": _snapshot_int(cloud_usage["used_bytes"], "cloud_usage.used_bytes"),
                 "daily_budget_bytes": (
                     None
                     if cloud_usage["daily_budget_bytes"] is None
-                    else int(cloud_usage["daily_budget_bytes"])
+                    else _snapshot_int(
+                        cloud_usage["daily_budget_bytes"], "cloud_usage.daily_budget_bytes"
+                    )
                 ),
                 "threshold_percent": (
                     0
                     if cloud_usage["daily_budget_bytes"] is None
                     else min(
                         100,
-                        int(cloud_usage["used_bytes"])
+                        _snapshot_int(cloud_usage["used_bytes"], "cloud_usage.used_bytes")
                         * 100
-                        // int(cloud_usage["daily_budget_bytes"]),
+                        // _snapshot_int(
+                            cloud_usage["daily_budget_bytes"],
+                            "cloud_usage.daily_budget_bytes",
+                        ),
                     )
                 ),
                 "latest_observation": (
@@ -7054,11 +7139,17 @@ class PostgresControlPlane:
                         "observation_id": str(latest_cloud_usage["observation_id"]),
                         "source": str(latest_cloud_usage["source"]),
                         "operation": str(latest_cloud_usage["operation"]),
-                        "bytes_received": int(latest_cloud_usage["bytes_received"]),
-                        "item_count": int(latest_cloud_usage["item_count"]),
+                        "bytes_received": _snapshot_int(
+                            latest_cloud_usage["bytes_received"], "cloud_usage.bytes_received"
+                        ),
+                        "item_count": _snapshot_int(
+                            latest_cloud_usage["item_count"], "cloud_usage.item_count"
+                        ),
                         "artifact_key": str(latest_cloud_usage["artifact_key"]),
                         "artifact_digest": str(latest_cloud_usage["artifact_digest"]),
-                        "observed_at": latest_cloud_usage["observed_at"].isoformat(),
+                        "observed_at": _snapshot_aware(
+                            latest_cloud_usage["observed_at"], "cloud_usage.observed_at"
+                        ).isoformat(),
                     }
                 ),
             },
@@ -7066,35 +7157,47 @@ class PostgresControlPlane:
             "quote": {
                 "admission_job_states": quote_admission_states,
                 "oldest_retryable_admission_age_seconds": (
-                    None if quote_admission_retry_age is None else float(quote_admission_retry_age)
+                    None
+                    if quote_admission_retry_age is None
+                    else _snapshot_seconds(quote_admission_retry_age, "quote.admission_retry_age")
                 ),
                 "batch_job_states": quote_batch_states,
                 "certifier_job_states": quote_certifier_states,
                 "oldest_retryable_batch_age_seconds": (
-                    None if quote_retry_age is None else float(quote_retry_age)
+                    None
+                    if quote_retry_age is None
+                    else _snapshot_seconds(quote_retry_age, "quote.batch_retry_age")
                 ),
                 "current_pointer": (
                     None
                     if quote_pointer is None
                     else {
                         "generation_key": str(quote_pointer["generation_key"]),
-                        "published_at": quote_pointer["published_at"].isoformat(),
+                        "published_at": _snapshot_aware(
+                            quote_pointer["published_at"], "quote.published_at"
+                        ).isoformat(),
                         "artifact_key": str(quote_pointer["artifact_key"]),
                         "artifact_digest": str(quote_pointer["artifact_digest"]),
-                        "record_count": int(quote_pointer["record_count"]),
+                        "record_count": _snapshot_int(
+                            quote_pointer["record_count"], "quote.record_count"
+                        ),
                     }
                 ),
             },
             "structure": {
                 "source_fetch_job_states": source_fetch_states,
                 "oldest_retryable_source_age_seconds": (
-                    None if source_retry_age is None else float(source_retry_age)
+                    None
+                    if source_retry_age is None
+                    else _snapshot_seconds(source_retry_age, "structure.source_retry_age")
                 ),
                 "source_materializer_job_states": source_materializer_states,
                 "range_job_states": structure_range_states,
                 "certifier_job_states": structure_certifier_states,
                 "oldest_retryable_range_age_seconds": (
-                    None if structure_retry_age is None else float(structure_retry_age)
+                    None
+                    if structure_retry_age is None
+                    else _snapshot_seconds(structure_retry_age, "structure.range_retry_age")
                 ),
                 "latest_manifest": self._manifest_snapshot(structure_manifest),
                 "shadow_pointer": (
@@ -7103,10 +7206,14 @@ class PostgresControlPlane:
                     else {
                         "generation_key": str(structure_pointer["generation_key"]),
                         "expected_generation_key": structure_pointer["expected_generation_key"],
-                        "published_at": structure_pointer["published_at"].isoformat(),
+                        "published_at": _snapshot_aware(
+                            structure_pointer["published_at"], "structure.published_at"
+                        ).isoformat(),
                         "artifact_key": str(structure_pointer["artifact_key"]),
                         "artifact_digest": str(structure_pointer["artifact_digest"]),
-                        "record_count": int(structure_pointer["record_count"]),
+                        "record_count": _snapshot_int(
+                            structure_pointer["record_count"], "structure.record_count"
+                        ),
                     }
                 ),
             },
@@ -7459,54 +7566,62 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            _set_snapshot_read_timeouts(cursor)
-            cursor.execute(
-                """
-                SELECT projection.generation_key, projection.record_count
-                FROM m1_opportunity_publication_pointers AS pointer
-                JOIN m1_opportunity_projections AS projection
-                  ON projection.generation_key = pointer.generation_key
-                WHERE pointer.pointer_key = 'opportunity:current'
-                """
+            query = sql.SQL(_CURRENT_OPPORTUNITIES_SQL).format(
+                statement_timeout=sql.Literal(CONTROL_PLANE_DB_POLICY.statement_setting),
+                lock_timeout=sql.Literal(CONTROL_PLANE_DB_POLICY.lock_setting),
+                after_group_id=sql.Literal(after_group_id),
+                page_size=sql.Literal(limit + 1),
             )
+            cursor.execute(query)
+            for setup_command in (
+                "repeatable-read transaction",
+                "statement deadline",
+                "lock deadline",
+            ):
+                if not cursor.nextset():
+                    raise ControlPlaneError(f"opportunity result missing after {setup_command}")
             projection = cursor.fetchone()
             if projection is None:
                 raise ControlPlaneError("opportunity-projection-unavailable")
-            generation_key = str(projection["generation_key"])
-            cursor.execute(
-                """
-                SELECT group_id, event_id, membership_hash, bundle_cost,
-                       gross_edge_bps, max_bundle_size, legs,
-                       structure_observed_at_ms, quote_started_at_ms, quote_quoted_at_ms
-                FROM m1_opportunity_projection_rows
-                WHERE generation_key = %s AND group_id > %s
-                ORDER BY group_id LIMIT %s
-                """,
-                (generation_key, after_group_id, limit + 1),
-            )
-            rows = cursor.fetchall()
+            rows = _snapshot_rows(projection["rows"], "opportunity.rows")
         has_more = len(rows) > limit
         page = rows[:limit]
         return {
             "status": "available",
-            "current_opportunity_count": int(projection["record_count"]),
+            "current_opportunity_count": _snapshot_int(
+                projection["record_count"], "opportunity.record_count"
+            ),
             "items": [
                 {
-                    "group_id": str(row["group_id"]),
-                    "event_id": str(row["event_id"]),
-                    "membership_hash": str(row["membership_hash"]),
-                    "bundle_cost": float(row["bundle_cost"]),
-                    "gross_edge_bps": float(row["gross_edge_bps"]),
-                    "max_bundle_size": float(row["max_bundle_size"]),
-                    "legs": row["legs"],
-                    "structure_observed_at_ms": int(row["structure_observed_at_ms"]),
-                    "quote_started_at_ms": int(row["quote_started_at_ms"]),
-                    "quote_quoted_at_ms": int(row["quote_quoted_at_ms"]),
+                    "group_id": _snapshot_text(row["group_id"], "opportunity.group_id"),
+                    "event_id": _snapshot_text(row["event_id"], "opportunity.event_id"),
+                    "membership_hash": _snapshot_text(
+                        row["membership_hash"], "opportunity.membership_hash"
+                    ),
+                    "bundle_cost": _snapshot_seconds(row["bundle_cost"], "opportunity.bundle_cost"),
+                    "gross_edge_bps": _snapshot_seconds(
+                        row["gross_edge_bps"], "opportunity.gross_edge_bps"
+                    ),
+                    "max_bundle_size": _snapshot_seconds(
+                        row["max_bundle_size"], "opportunity.max_bundle_size"
+                    ),
+                    "legs": _snapshot_json_array(row["legs"], "opportunity.legs"),
+                    "structure_observed_at_ms": _snapshot_int(
+                        row["structure_observed_at_ms"], "opportunity.structure_observed_at_ms"
+                    ),
+                    "quote_started_at_ms": _snapshot_int(
+                        row["quote_started_at_ms"], "opportunity.quote_started_at_ms"
+                    ),
+                    "quote_quoted_at_ms": _snapshot_int(
+                        row["quote_quoted_at_ms"], "opportunity.quote_quoted_at_ms"
+                    ),
                 }
                 for row in page
             ],
             "limit": limit,
-            "next_after_group_id": str(page[-1]["group_id"]) if has_more else None,
+            "next_after_group_id": (
+                _snapshot_text(page[-1]["group_id"], "opportunity.group_id") if has_more else None
+            ),
         }
 
     def publish_opportunity_projection(
@@ -7902,7 +8017,7 @@ class PostgresControlPlane:
             return None
         return {
             "generation_key": str(row["generation_key"]),
-            "published_at": row["published_at"].isoformat(),
+            "published_at": _snapshot_aware(row["published_at"], "published_at").isoformat(),
             "artifact_key": str(row["artifact_key"]),
             "artifact_digest": str(row["artifact_digest"]),
             "record_count": int(row["record_count"]),

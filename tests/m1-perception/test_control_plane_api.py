@@ -6,7 +6,7 @@ from starlette.testclient import TestClient
 
 
 class _AvailableControlPlane:
-    def operational_snapshot(self, *, now, sample_limit: int) -> dict[str, object]:
+    def operational_snapshot(self, *, sample_limit: int) -> dict[str, object]:
         assert sample_limit in {1, 20}
         return {
             "job_counts": {"runnable": 1},

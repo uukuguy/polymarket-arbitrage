@@ -2159,3 +2159,61 @@ success is not user receipt/read evidence.
   The gate remains nonzero and never waits, relaxes policy or kills the observed
   controller; interruption only discards the operator read and the durable
   lease-epoch evidence continues accumulating.
+
+### §2.50 A read model needs one snapshot clock, not an early caller clock (2026-08-28)
+
+- Production coordinator canary exposed negative controller lease/progress ages.
+  `operational_snapshot()` captured client wall time before connection/bootstrap,
+  then executed roughly 45 statements under `READ COMMITTED`. Later statements
+  could observe a heartbeat committed after the captured time, making a healthy
+  future fact look malformed.
+- Production operator reads now use `REPEATABLE READ READ ONLY` and obtain
+  `clock_timestamp()` inside the same PostgreSQL data statement as every compared
+  row. Explicit caller time remains only for deterministic fault tests. Time
+  consistency is a database snapshot property, not an NTP or tolerance setting.
+
+### §2.51 A one-statement request envelope requires one data statement (2026-08-28)
+
+- `CONTROL_PLANE_DB_POLICY.request_timeout_seconds` intentionally covers one
+  connection plus one bounded statement. Applying it to roughly 45 sequential
+  snapshot queries caused 15.5–17 second operator reads to fail at 10.5 seconds
+  even though no individual SQL timed out. The same latent mismatch existed in
+  the two-query opportunity page.
+- Both public reads now send transaction setup and one aggregate data statement
+  in one client execute round. Structural tests fence the number of commands and
+  execute calls. Production-equivalent snapshot reads complete in 2.85–4.56
+  seconds and the opportunity page in 5.15 seconds; the envelope now describes
+  the operation it actually wraps.
+- The general rule from §2.44 is stricter for request paths: if the request policy
+  says one statement, composition must occur in SQL or the operation must declare
+  a different explicit policy. Increasing a generic timeout is not an option.
+
+### §2.52 Parent cancellation must not preempt child recovery ownership (2026-08-28)
+
+- Two Structure subprocess paths sent SIGKILL and then waited forever for pipe
+  drain. The daemon parent simultaneously imposed a five-second `wait_for` on a
+  child cleanup contract that allowed 15 seconds for TERM and 15 for KILL. This
+  created two lifecycle authorities and could interrupt receipt persistence or
+  leave a subprocess lane wedged.
+- Structure subprocesses now share one bounded TERM/KILL/pipe-drain helper.
+  Producer supervisor process wait and stdout/stderr drain are bounded as well.
+  The daemon no longer installs a competing outer cancellation; each task owns
+  its cleanup, Uvicorn uses the same 30-second maximum child budget, and Fly's
+  40-second `kill_timeout` is the sole process-level backstop.
+- Platform kill time is best-effort, so restart correctness still depends on
+  durable checkpoints, lease expiry and terminal-receipt reconciliation. Grace
+  improves clean shutdown; it never becomes the recovery source of truth.
+
+### §2.53 Process exit is a valid TERM/KILL race outcome (2026-08-29)
+
+- `returncode is None` is only a prior observation. A child may exit before the
+  following `terminate()` or `kill()`, causing `ProcessLookupError`. Treating
+  that race as supervisor-control failure corrupts the terminal receipt and
+  incident narrative even though the intended stopped state already exists.
+- Both supervisor signal stages now accept only `ProcessLookupError` as
+  already-exited success; all other control failures remain visible. Behavioral
+  tests inject the race independently at TERM and KILL and prove bounded return.
+- Read/recovery paths apply the same boundary discipline to database JSON:
+  numeric, list and text fields are validated before domain conversion. A
+  malformed observation must fail as a bounded read error, not cascade into a
+  second ambiguous recovery failure.

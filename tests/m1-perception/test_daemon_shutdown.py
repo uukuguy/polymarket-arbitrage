@@ -4,12 +4,13 @@ Background: Phase 1 调试期 verification found that `pkill -INT polyarb.daemon
 required `pkill -9` workarounds because the scheduler loop polled stop_event
 only every 10s. Wave 5 chaos test requires < 1s graceful shutdown.
 
-Fix (F-04):
+Fix (F-04, hardened after the timeout-authority audit):
 1. scheduler.run() inner sleep granularity 10s → 1s
 2. _tick() is cancellation-aware (raises CancelledError up so the task
    actually unwinds)
-3. main.py wraps the final gather() in asyncio.wait_for(timeout=5.0) and
-   explicitly cancels scheduler_task after stop_event fires
+3. main.py explicitly cancels scheduler_task after stop_event fires, then lets
+   each task finish its own bounded recovery contract without a contradictory
+   outer timeout cancelling cleanup a second time
 
 The tests below mock _run_snapshot so we test the scheduler's responsiveness
 in isolation — the orchestrator's actual runtime is out of scope (it takes
@@ -19,8 +20,10 @@ in isolation — the orchestrator's actual runtime is out of scope (it takes
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import time
+import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,6 +31,87 @@ import pytest
 
 os.environ.setdefault("POLYARB_ALLOW_EXTERNAL_PATHS", "1")
 os.environ.setdefault("POLYARB_ALLOW_EMPTY_SECRET", "1")
+
+
+def test_shutdown_authority_outlives_structure_child_cleanup() -> None:
+    from polyarb.daemon import main as daemon_main
+    from polyarb.daemon.scheduler import STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S
+
+    source = inspect.getsource(daemon_main.main)
+    fly_config = tomllib.loads(Path("fly.toml").read_text())
+
+    assert STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S == 30.0
+    assert "timeout=5.0" not in source
+    assert "timeout_graceful_shutdown=STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S" in source
+    assert fly_config["kill_signal"] == "SIGTERM"
+    assert fly_config["kill_timeout"] > STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S
+
+
+@pytest.mark.asyncio
+async def test_supervisor_sigkill_wait_and_output_drain_are_bounded() -> None:
+    from polyarb.perception.supervisor import ProducerSupervisor
+
+    class WedgedProcess:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.terminated = False
+            self.killed = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+        async def wait(self) -> int:
+            await asyncio.Event().wait()
+            return -9
+
+    process = WedgedProcess()
+    await asyncio.wait_for(
+        ProducerSupervisor._terminate(process, 0.001),  # type: ignore[arg-type]
+        timeout=0.1,
+    )
+    drain_task = asyncio.create_task(asyncio.Event().wait())
+    output = await asyncio.wait_for(
+        ProducerSupervisor._drain_result(  # type: ignore[arg-type]
+            drain_task,
+            timeout_s=0.001,
+        ),
+        timeout=0.1,
+    )
+
+    assert process.terminated is True
+    assert process.killed is True
+    assert output == b"[output-read-timeout]"
+    assert drain_task.done()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("race_stage", ["terminate", "kill"])
+async def test_supervisor_shutdown_accepts_already_exited_process_races(race_stage: str) -> None:
+    from polyarb.perception.supervisor import ProducerSupervisor
+
+    class ExitedProcess:
+        returncode = None
+
+        def terminate(self) -> None:
+            if race_stage == "terminate":
+                raise ProcessLookupError
+
+        def kill(self) -> None:
+            if race_stage == "kill":
+                raise ProcessLookupError
+
+        async def wait(self) -> int:
+            await asyncio.Event().wait()
+            return -9
+
+    await asyncio.wait_for(
+        ProducerSupervisor._terminate(ExitedProcess(), 0.001),  # type: ignore[arg-type]
+        timeout=0.1,
+    )
 
 
 def _make_settings(tmp_path: Path, interval_s: int = 60) -> MagicMock:

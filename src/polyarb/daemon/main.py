@@ -44,12 +44,16 @@ from polyarb.daemon.opportunity_watcher import (
 )
 from polyarb.daemon.producer_arbitration import ProducerArbitrator
 from polyarb.daemon.quote_worker import (
+    CertifiedQuoteFeed,
     QuoteWorker,
     QuoteWorkerRuntime,
     build_production_quote_worker,
     load_certified_quote_feed,
 )
-from polyarb.daemon.scheduler import SnapshotScheduler
+from polyarb.daemon.scheduler import (
+    STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S,
+    SnapshotScheduler,
+)
 from polyarb.daemon.structure_incidents import StructureIncidentLifecycle
 from polyarb.http.app import create_app
 from polyarb.observability.logging import init_logging
@@ -217,7 +221,7 @@ def _start_quote_worker(
 
 async def _hydrate_durable_quote_feed(
     runtime: QuoteWorkerRuntime,
-    loader: Callable[[], object],
+    loader: Callable[[], CertifiedQuoteFeed | None],
 ) -> bool:
     """Atomically copy an already-certified child feed into HTTP memory."""
     feed = await asyncio.to_thread(loader)
@@ -229,7 +233,7 @@ async def _hydrate_durable_quote_feed(
 
 async def _run_durable_quote_feed_hydrator(
     runtime: QuoteWorkerRuntime,
-    loader: Callable[[], object],
+    loader: Callable[[], CertifiedQuoteFeed | None],
     stop_event: asyncio.Event,
     *,
     interval_s: float,
@@ -258,7 +262,7 @@ async def _run_durable_quote_feed_hydrator(
 
 def _start_durable_quote_feed_hydrator(
     runtime: QuoteWorkerRuntime | None,
-    loader: Callable[[], object] | None,
+    loader: Callable[[], CertifiedQuoteFeed | None] | None,
     stop_event: asyncio.Event,
     *,
     interval_s: float,
@@ -743,7 +747,10 @@ async def main() -> int:
     try:
         current_structure = sqlite_store.current_structure_generation()
         if current_structure is not None:
-            structure_incidents.record_success(int(current_structure["snapshot_id"]))
+            snapshot_id = current_structure["snapshot_id"]
+            if not isinstance(snapshot_id, int) or isinstance(snapshot_id, bool):
+                raise ValueError("current structure snapshot_id is malformed")
+            structure_incidents.record_success(snapshot_id)
     except (KeyError, TypeError, ValueError, sqlite3.Error) as error:
         logger.warning(
             f"structure incident startup reconciliation unavailable kind={type(error).__name__}"
@@ -789,6 +796,7 @@ async def main() -> int:
         port=settings.http_port,
         log_config=None,  # use loguru, not uvicorn's logger
         access_log=False,  # Axiom doesn't need access logs at this volume
+        timeout_graceful_shutdown=STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S,
     )
     server = uvicorn.Server(config)
 
@@ -895,30 +903,37 @@ async def main() -> int:
     if http_probe_task is not None:
         http_probe_task.cancel()
 
-    # Bounded final wait — even if some task ignores cancellation, the daemon
-    # exits within 5s instead of hanging indefinitely.
+    shutdown_tasks = (
+        server_task,
+        *([scheduler_task] if scheduler_task is not None else []),
+        *([focused_watcher_task] if focused_watcher_task is not None else []),
+        *([quote_worker_task] if quote_worker_task is not None else []),
+        *([quote_feed_hydrator_task] if quote_feed_hydrator_task is not None else []),
+        *([cleanup_worker_task] if cleanup_worker_task is not None else []),
+        *([capacity_worker_task] if capacity_worker_task is not None else []),
+        *([candidate_watcher_task] if candidate_watcher_task is not None else []),
+        *([discovery_task] if discovery_task is not None else []),
+        *([reconciliation_task] if reconciliation_task is not None else []),
+        *supervised_tasks,
+        *([resource_task] if resource_task is not None else []),
+        *([http_probe_task] if http_probe_task is not None else []),
+    )
+
+    async def report_slow_shutdown() -> None:
+        await asyncio.sleep(STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S)
+        pending = sorted(task.get_name() for task in shutdown_tasks if not task.done())
+        logger.warning(f"daemon shutdown still draining pending_tasks={pending}")
+
+    warning_task = asyncio.create_task(report_slow_shutdown())
     try:
-        await asyncio.wait_for(
-            asyncio.gather(
-                server_task,
-                *([scheduler_task] if scheduler_task is not None else []),
-                *([focused_watcher_task] if focused_watcher_task is not None else []),
-                *([quote_worker_task] if quote_worker_task is not None else []),
-                *([quote_feed_hydrator_task] if quote_feed_hydrator_task is not None else []),
-                *([cleanup_worker_task] if cleanup_worker_task is not None else []),
-                *([capacity_worker_task] if capacity_worker_task is not None else []),
-                *([candidate_watcher_task] if candidate_watcher_task is not None else []),
-                *([discovery_task] if discovery_task is not None else []),
-                *([reconciliation_task] if reconciliation_task is not None else []),
-                *supervised_tasks,
-                *([resource_task] if resource_task is not None else []),
-                *([http_probe_task] if http_probe_task is not None else []),
-                return_exceptions=True,
-            ),
-            timeout=5.0,
-        )
-    except TimeoutError:
-        logger.warning("graceful shutdown exceeded 5s; daemon exiting anyway")
+        # Every task owns its cancellation and durable-recovery boundary. A
+        # competing outer wait_for used to cancel those handlers after 5s,
+        # before the 30s TERM/KILL contract could finish. Fly's kill_timeout is
+        # the one process-level backstop; this layer must not invent another.
+        await asyncio.gather(*shutdown_tasks, return_exceptions=True)
+    finally:
+        warning_task.cancel()
+        await asyncio.gather(warning_task, return_exceptions=True)
 
     logger.info("polyarb daemon stopped cleanly")
     return 0

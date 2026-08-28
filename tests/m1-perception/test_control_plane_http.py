@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import threading
-from datetime import UTC, datetime
 from time import monotonic
 
 import pytest
 
 
 class _AvailableControlPlane:
-    def operational_snapshot(self, *, now: datetime, sample_limit: int) -> dict[str, object]:
-        assert now.tzinfo is UTC
+    def operational_snapshot(self, *, sample_limit: int) -> dict[str, object]:
         assert sample_limit == 20
         return {
             "job_counts": {"retryable": 1},
@@ -73,7 +71,7 @@ class _AvailableControlPlane:
 
 
 class _MalformedControlPlane:
-    def operational_snapshot(self, *, now: datetime, sample_limit: int) -> dict[str, object]:
+    def operational_snapshot(self, *, sample_limit: int) -> dict[str, object]:
         raise ValueError("secret DSN postgres://user:pass@example/control-plane")
 
 
