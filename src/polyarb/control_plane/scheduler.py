@@ -242,6 +242,12 @@ class TransactionalControlPlaneScheduler:
                             await asyncio.gather(stop_task, return_exceptions=True)
                     await emit_completed()
                     if not active and not stop_event.is_set():
+                        # Observer work is part of this cadence turn. Re-read
+                        # the monotonic clock after it completes instead of
+                        # sleeping the pre-observer remainder a second time.
+                        remaining = cycle_deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            break
                         try:
                             await asyncio.wait_for(stop_event.wait(), timeout=remaining)
                         except TimeoutError:

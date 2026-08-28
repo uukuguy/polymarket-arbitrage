@@ -23,11 +23,15 @@ from polyarb.control_plane.runtime_fault_matrix import (
 
 FAULT_CLASSES = (
     "task-exception",
+    "transport-generation-replacement",
+    "pre-io-stage-timeout",
     "r2-timeout-hang",
     "heartbeat-loss",
     "progress-stall",
     "stale-owner",
     "circuit-probe",
+    "recovery-episode-isolation",
+    "service-interruption",
     "process-exit",
     "machine-restart-decision",
     "database-event-writer-failure",
@@ -107,7 +111,7 @@ def test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database(
     assert canonical_fault_matrix_bytes(first) == canonical_fault_matrix_bytes(second)
     assert first == second
     assert first["status"] == "pass"
-    assert first["schema_version"] == "m1-runtime-fault-matrix-v2"
+    assert first["schema_version"] == "m1-runtime-fault-matrix-v3"
     assert first["scoped_roles"] == {
         "qualification_worker": {
             "facts_consumed": first["qualification_fact_count"],
@@ -190,6 +194,12 @@ def test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database(
     )
     assert "runtime" in by_fault["task-exception"]["qualification_projection"]["sources"]
     assert by_fault["r2-timeout-hang"]["incident_transition"]["outbox_pending"] >= 1
+    assert by_fault["transport-generation-replacement"]["fence_result"] == (
+        "transport-generation-retired"
+    )
+    assert by_fault["pre-io-stage-timeout"]["recovery"]["stage"] == "fetch-page"
+    assert by_fault["service-interruption"]["fence_result"] == "defect-streak-preserved"
+    assert by_fault["recovery-episode-isolation"]["recovery"]["episode_count"] == 3
     assert by_fault["heartbeat-loss"]["action"]["type"] == "reclaim-job"
     assert by_fault["progress-stall"]["action"]["type"] == "cancel-job"
     assert by_fault["duplicate-delivery"]["fence_result"] == "idempotent-replay"

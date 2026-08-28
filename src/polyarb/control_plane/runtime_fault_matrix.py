@@ -83,11 +83,15 @@ _DISPOSABLE_LOGIN_ROLES: Final[tuple[str, ...]] = (
 )
 _FAULT_CLASSES: Final[tuple[str, ...]] = (
     "task-exception",
+    "transport-generation-replacement",
+    "pre-io-stage-timeout",
     "r2-timeout-hang",
     "heartbeat-loss",
     "progress-stall",
     "stale-owner",
     "circuit-probe",
+    "recovery-episode-isolation",
+    "service-interruption",
     "process-exit",
     "machine-restart-decision",
     "database-event-writer-failure",
@@ -201,7 +205,7 @@ def run_fault_matrix() -> dict[str, object]:
                     "observe_decision_count": observe_decision_count,
                     "qualification_fact_count": qualification_fact_count,
                     "qualification_identity_digest": _qualification_identity_digest(),
-                    "schema_version": "m1-runtime-fault-matrix-v2",
+                    "schema_version": "m1-runtime-fault-matrix-v3",
                     "scoped_roles": {
                         "qualification_worker": {
                             "facts_consumed": qualification_fact_count,
@@ -546,6 +550,14 @@ def _run_case(context: _RuntimeContext, index: int, fault_class: str) -> _CaseOu
     before_ingest_seq = _ingress_high_water(context)
     if fault_class in {"task-exception", "r2-timeout-hang"}:
         case = _retryable_incident_case(context, fault_class=fault_class, now=now)
+    elif fault_class == "transport-generation-replacement":
+        case = _transport_generation_case(context, now=now)
+    elif fault_class == "pre-io-stage-timeout":
+        case = _pre_io_stage_timeout_case(context, now=now)
+    elif fault_class == "recovery-episode-isolation":
+        case = _recovery_episode_isolation_case(context, now=now)
+    elif fault_class == "service-interruption":
+        case = _service_interruption_case(context, now=now)
     elif fault_class == "database-event-writer-failure":
         case = _writer_failure_case(context, now=now)
     elif fault_class == "watchdog-failure":
@@ -624,6 +636,218 @@ def _retryable_incident_case(
     )
 
 
+def _source_retry_case(
+    context: _RuntimeContext,
+    *,
+    fault_class: str,
+    now: datetime,
+    fence_result: str,
+    recovery: Mapping[str, object],
+) -> dict[str, object]:
+    lease = _seed_claimed_job(
+        context,
+        fault_class=fault_class,
+        now=now,
+        job_type="structure-fetch",
+    )
+    context.control_plane.record_runtime_progress(
+        lease,
+        progress=RuntimeProgress(sequence=1, current=0, total=1, stage="fetch-page"),
+        now=now + timedelta(seconds=1),
+        idempotency_key=f"matrix:{fault_class}:fetch-start",
+        detail={"component": "structure-fetch"},
+    )
+    context.control_plane.finish_retryable_with_incident(
+        lease,
+        error_class="TimeoutError",
+        incident_key=f"matrix:{fault_class}",
+        dedupe_key=f"matrix:{fault_class}",
+        component="structure-fetch",
+        summary=f"{fault_class} contained at durable source boundary",
+        detail={
+            "failure_fingerprint": "sha256:" + sha256(fault_class.encode()).hexdigest(),
+            "stage": "fetch-page",
+        },
+        channels=("dashboard",),
+        now=now + timedelta(seconds=2),
+    )
+    snapshot = _snapshot(context, now=now + timedelta(seconds=3))
+    return _case_result(
+        fault_class=fault_class,
+        detection_latency_seconds=2,
+        incident_transition={
+            "outbox_pending": _outbox_total(snapshot),
+            "source": "finish_retryable_with_incident",
+            "state": "open",
+        },
+        action={"result": "recorded", "type": "retry-job"},
+        fence_result=fence_result,
+        recovery={"state": "contained", **dict(recovery)},
+        dashboard_projection=_dashboard_projection(snapshot),
+        qualification_impact="pending-db-ingress",
+    )
+
+
+def _transport_generation_case(
+    context: _RuntimeContext,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    return _source_retry_case(
+        context,
+        fault_class="transport-generation-replacement",
+        now=now,
+        fence_result="transport-generation-retired",
+        recovery={"transport_generation": "replaced-before-durable-retry"},
+    )
+
+
+def _pre_io_stage_timeout_case(
+    context: _RuntimeContext,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    return _source_retry_case(
+        context,
+        fault_class="pre-io-stage-timeout",
+        now=now,
+        fence_result="durable-stage-start",
+        recovery={"stage": "fetch-page"},
+    )
+
+
+def _service_interruption_case(
+    context: _RuntimeContext,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    lease = _seed_claimed_job(
+        context,
+        fault_class="service-interruption",
+        now=now,
+        job_type="structure-fetch",
+    )
+    resumed_at = context.control_plane.finish_interrupted(
+        lease,
+        component="structure-fetch",
+        now=now + timedelta(seconds=1),
+    )
+    snapshot = _snapshot(context, now=now + timedelta(seconds=2))
+    return _case_result(
+        fault_class="service-interruption",
+        detection_latency_seconds=1,
+        incident_transition={
+            "outbox_pending": _outbox_total(snapshot),
+            "source": "finish_interrupted",
+            "state": "not-required",
+        },
+        action={"result": "not-required", "type": "retry-job"},
+        fence_result="defect-streak-preserved",
+        recovery={
+            "next_attempt_at": resumed_at.isoformat(),
+            "state": "contained",
+        },
+        dashboard_projection=_dashboard_projection(snapshot),
+        qualification_impact="pending-db-ingress",
+    )
+
+
+def _recovery_episode_isolation_case(
+    context: _RuntimeContext,
+    *,
+    now: datetime,
+) -> dict[str, object]:
+    fault_class = "recovery-episode-isolation"
+    lease = _seed_claimed_job(context, fault_class=fault_class, now=now)
+    _open_circuit(context, lease.job_key, now=now)
+    controller = claim_controller(
+        context.admin_factory,
+        controller_id=f"matrix-controller-{fault_class}",
+        owner_id=f"matrix-owner-{fault_class}",
+        lease_seconds=120,
+        now=now,
+    )
+    with context.admin_factory() as connection:
+        connection.execute(
+            """
+            INSERT INTO m1_recovery_target_budgets (
+                controller_id, target_type, target_id, episode_key,
+                max_actions, remaining_actions
+            ) VALUES (%s, 'circuit', %s, 'legacy', 3, 0)
+            """,
+            (controller.controller_id, lease.job_key),
+        )
+
+    def schedule_episode(observed_at: datetime) -> RecoveryActionRecord:
+        candidate = next(
+            item
+            for item in read_runtime_reconcile_states(
+                context.admin_factory,
+                controller_id=controller.controller_id,
+                now=observed_at,
+                sample_limit=100,
+            )
+            if item.target_id == lease.job_key
+        )
+        decision = RuntimeReconciler().evaluate(candidate.runtime_state, now=observed_at)
+        return schedule_action(
+            context.admin_factory,
+            controller=controller,
+            decision=decision,
+            incident_key=candidate.incident_key,
+            component=candidate.component,
+            target_type=candidate.target_type,
+            target_id=candidate.target_id,
+            recovery_episode_key=candidate.runtime_state.recovery_episode_key,
+            expected_attempt_id=candidate.runtime_state.attempt_id,
+            expected_lease_epoch=candidate.runtime_state.lease_epoch,
+            recovery_budget_remaining=1,
+            cooldown_seconds=0,
+            channels=("dashboard",),
+            now=observed_at,
+        )
+
+    first = schedule_episode(now + timedelta(seconds=1))
+    _claim_and_complete(context, controller, first, now=now + timedelta(seconds=2))
+    second_episode = "sha256:" + "1" * 64
+    with context.admin_factory() as connection:
+        connection.execute(
+            """
+            UPDATE m1_job_circuits
+            SET failure_fingerprint = %s, next_probe_at = %s, updated_at = %s
+            WHERE job_key = %s
+            """,
+            (second_episode, now, now + timedelta(seconds=4), lease.job_key),
+        )
+    second = schedule_episode(now + timedelta(seconds=4))
+    completed = _claim_and_complete(context, controller, second, now=now + timedelta(seconds=5))
+    with context.admin_factory() as connection:
+        rows = connection.execute(
+            """
+            SELECT episode_key, remaining_actions
+            FROM m1_recovery_target_budgets
+            WHERE controller_id = %s AND target_type = 'circuit' AND target_id = %s
+            ORDER BY episode_key
+            """,
+            (controller.controller_id, lease.job_key),
+        ).fetchall()
+    if len(rows) != 3 or any(int(row[1]) != 0 for row in rows):
+        raise RuntimeFaultMatrixError("recovery episodes did not retain independent exhaustion")
+    snapshot = _snapshot(context, now=now + timedelta(seconds=7))
+    return _case_result(
+        fault_class=fault_class,
+        detection_latency_seconds=4,
+        incident_transition={
+            "outbox_pending": _outbox_total(snapshot),
+            "source": "schedule_action",
+            "state": "open",
+        },
+        action={"result": completed.result_code or "scheduled", "type": completed.action_type},
+        fence_result="episode-key-current",
+        recovery={"episode_count": len(rows), "legacy_remaining": 0, "state": "contained"},
+        dashboard_projection=_dashboard_projection(snapshot),
+        qualification_impact="pending-db-ingress",
+    )
 def _writer_failure_case(context: _RuntimeContext, *, now: datetime) -> dict[str, object]:
     lease = _seed_claimed_job(context, fault_class="database-event-writer-failure", now=now)
     progress = RuntimeProgress(sequence=1, current=1, total=2, stage="upload-range")
@@ -823,12 +1047,16 @@ def _reconciler_case(
         lease_seconds=120,
         now=now,
     )
-    candidate = read_runtime_reconcile_states(
-        context.admin_factory,
-        controller_id=controller.controller_id,
-        now=now + timedelta(seconds=2),
-        sample_limit=1,
-    )[0]
+    candidate = next(
+        item
+        for item in read_runtime_reconcile_states(
+            context.admin_factory,
+            controller_id=controller.controller_id,
+            now=now + timedelta(seconds=2),
+            sample_limit=100,
+        )
+        if item.target_id == lease.job_key
+    )
     decision = RuntimeReconciler().evaluate(
         candidate.runtime_state,
         now=now + timedelta(seconds=2),
@@ -841,6 +1069,7 @@ def _reconciler_case(
         component=candidate.component,
         target_type=candidate.target_type,
         target_id=candidate.target_id,
+        recovery_episode_key=candidate.runtime_state.recovery_episode_key,
         expected_attempt_id=candidate.runtime_state.attempt_id,
         expected_lease_epoch=candidate.runtime_state.lease_epoch,
         recovery_budget_remaining=1,
@@ -895,6 +1124,7 @@ def _stale_owner_case(
         component="structure-normalize",
         target_type="job",
         target_id=lease_job_key,
+        recovery_episode_key=attempt_id,
         expected_attempt_id=attempt_id,
         expected_lease_epoch=1,
         recovery_budget_remaining=1,
@@ -955,6 +1185,7 @@ def _schedule_recovery(
         component="structure-normalize",
         target_type="job",
         target_id=lease.job_key,
+        recovery_episode_key=attempt_id,
         expected_attempt_id=attempt_id,
         expected_lease_epoch=expected_epoch,
         recovery_budget_remaining=2,
@@ -970,6 +1201,7 @@ def _schedule_recovery(
         component="structure-normalize",
         target_type="job",
         target_id=lease.job_key,
+        recovery_episode_key=attempt_id,
         expected_attempt_id=attempt_id,
         expected_lease_epoch=expected_epoch,
         recovery_budget_remaining=2,
@@ -986,17 +1218,18 @@ def _seed_claimed_job(
     fault_class: str,
     now: datetime,
     lease_seconds: int = 60,
+    job_type: str = "structure-normalize",
 ) -> Any:
     job_key = f"runtime-fault-matrix:{fault_class}"
     context.control_plane.enqueue_job(
         job_key=job_key,
-        job_type="structure-normalize",
+        job_type=job_type,
         input_identity=job_key,
         now=now,
     )
     lease = context.control_plane.claim_job(
         worker_id=f"worker:{fault_class}",
-        job_types=("structure-normalize",),
+        job_types=(job_type,),
         lease_seconds=lease_seconds,
         now=now,
     )

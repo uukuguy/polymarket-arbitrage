@@ -81,7 +81,7 @@ class FakeConnection:
 class FakeAdminFactory:
     def __init__(self) -> None:
         self.database = "role_test"
-        self.revision = "034"
+        self.revision = "035"
         self.roles: dict[str, dict[str, Any]] = {
             RUNTIME_CAPABILITY: {
                 "can_login": False,
@@ -1336,6 +1336,7 @@ def test_real_scoped_runtime_role_executes_one_fenced_circuit_probe(
         component=candidate.component,
         target_type=candidate.target_type,
         target_id=candidate.target_id,
+        recovery_episode_key=candidate.runtime_state.recovery_episode_key,
         expected_attempt_id=candidate.runtime_state.attempt_id,
         expected_lease_epoch=candidate.runtime_state.lease_epoch,
         recovery_budget_remaining=candidate.runtime_state.recovery_budget.remaining_actions,
@@ -1439,7 +1440,7 @@ def postgres_026_dsn() -> Iterator[str]:
     with PostgresContainer("postgres:16-alpine") as postgres:
         dsn = _normalize_dsn(postgres.get_connection_url())
         _create_supabase_roles(dsn)
-        _run_alembic(dsn, "upgrade", "034")
+        _run_alembic(dsn, "upgrade", "035")
         yield dsn
 
 

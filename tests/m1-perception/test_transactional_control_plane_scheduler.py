@@ -481,6 +481,51 @@ def test_scheduler_service_emits_tick_then_stops_without_sleeping() -> None:
     ]
 
 
+def test_scheduler_recomputes_cadence_after_slow_observer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.control_plane import scheduler as scheduler_module
+
+    stop_event = asyncio.Event()
+    emitted = 0
+    scheduler = TransactionalControlPlaneScheduler(
+        structure_source_admitter=_AsyncWorker("structure-source-admit"),
+        structure_source_worker=_AsyncWorker("structure-source"),
+        structure_source_materializer=_AsyncWorker("structure-source-materialize"),
+        structure_worker=_AsyncWorker("structure-range"),
+        structure_certifier=_SyncWorker("structure-certify"),
+        quote_worker=_AsyncWorker("quote-batch"),
+        quote_admitter=_AsyncWorker("quote-admit"),
+        quote_certifier=_SyncWorker("quote-certify"),
+        max_turns=1,
+    )
+    real_wait_for = asyncio.wait_for
+
+    async def reject_stale_cadence_wait(awaitable, *, timeout):
+        awaitable.close()
+        raise AssertionError(f"scheduler reused stale cadence remainder: {timeout}")
+
+    async def on_tick(_outcome: dict[str, object]) -> None:
+        nonlocal emitted
+        emitted += 1
+        await asyncio.sleep(0.02)
+        if emitted == 2:
+            stop_event.set()
+
+    async def run() -> dict[str, object]:
+        monkeypatch.setattr(scheduler_module.asyncio, "wait_for", reject_stale_cadence_wait)
+        try:
+            return await scheduler.run_until_stopped(
+                stop_event=stop_event,
+                interval_seconds=0.001,
+                on_tick=on_tick,
+            )
+        finally:
+            monkeypatch.setattr(scheduler_module.asyncio, "wait_for", real_wait_for)
+
+    assert asyncio.run(run()) == {"status": "stopped", "ticks": 2}
+
+
 def test_scheduler_does_not_own_a_competing_worker_timeout() -> None:
     scheduler = TransactionalControlPlaneScheduler(
         structure_source_admitter=_DelayedWorker("structure-source-admit"),

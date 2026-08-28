@@ -113,7 +113,9 @@
 - Create: `docs/dev/m1-runtime-boundary-inventory.md`
 - Modify: `src/polyarb/control_plane/runtime_fault_matrix.py`
 - Modify: `tests/m1-perception/test_control_plane_runtime_fault_matrix.py`
-- Modify: `tests/m1-perception/test_control_plane_runtime_deadlines.py`
+- Modify: `src/polyarb/control_plane/scheduler.py`
+- Modify: `tests/m1-perception/test_control_plane_runtime_policy.py`
+- Modify: `tests/m1-perception/test_transactional_control_plane_scheduler.py`
 
 **Interfaces:**
 

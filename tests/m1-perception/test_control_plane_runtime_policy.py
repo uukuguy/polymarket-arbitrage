@@ -3,8 +3,37 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
+
+
+def test_runtime_boundary_inventory_covers_every_clock_authority() -> None:
+    inventory = Path("docs/dev/m1-runtime-boundary-inventory.md").read_text()
+
+    for authority in (
+        "Provider request",
+        "Worker I/O",
+        "Database connect/statement/lock",
+        "Durable retry",
+        "Circuit probe",
+        "Recovery action count",
+        "Scheduler cadence",
+        "Terminal shutdown",
+        "Operator observation",
+        "Qualification window",
+    ):
+        assert authority in inventory
+    assert "Wrapping `run_once()`" in inventory
+    assert "fault matrix v3 contains 16 cases" in inventory
+
+
+def test_scheduler_has_no_competing_outer_worker_timeout() -> None:
+    source = Path("src/polyarb/control_plane/scheduler.py").read_text()
+
+    assert "wait_for(self._run_worker" not in source
+    assert "wait_for(worker.run_once" not in source
+    assert "remaining = cycle_deadline - asyncio.get_running_loop().time()" in source
 
 
 def soak_record(
