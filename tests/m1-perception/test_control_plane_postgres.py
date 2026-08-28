@@ -7859,6 +7859,7 @@ def test_retry_circuit_opens_on_third_failure_with_bounded_probe_delay(
         component=candidate.component,
         target_type=candidate.target_type,
         target_id=candidate.target_id,
+        recovery_episode_key=candidate.runtime_state.recovery_episode_key,
         expected_attempt_id=candidate.runtime_state.attempt_id,
         expected_lease_epoch=candidate.runtime_state.lease_epoch,
         recovery_budget_remaining=candidate.runtime_state.recovery_budget.remaining_actions,
