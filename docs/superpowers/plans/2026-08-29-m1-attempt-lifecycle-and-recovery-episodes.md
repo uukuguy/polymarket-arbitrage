@@ -84,7 +84,6 @@
 - Modify: `src/polyarb/control_plane/recovery_store.py`
 - Modify: `src/polyarb/control_plane/runtime_observe.py`
 - Test: `tests/alembic/test_035.py`
-- Test: `tests/m1-perception/test_control_plane_recovery_store.py`
 - Test: `tests/m1-perception/test_control_plane_runtime_observe.py`
 - Test: `tests/m1-perception/test_control_plane_postgres.py`
 

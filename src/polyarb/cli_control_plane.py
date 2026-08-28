@@ -1575,6 +1575,7 @@ def _runtime_reconcile_once(
                     recovery_budget_remaining=(
                         candidate.runtime_state.recovery_budget.remaining_actions
                     ),
+                    recovery_episode_key=candidate.runtime_state.recovery_episode_key,
                     cooldown_seconds=max(0, candidate.cooldown_seconds),
                     channels=candidate.channels,
                     now=now,

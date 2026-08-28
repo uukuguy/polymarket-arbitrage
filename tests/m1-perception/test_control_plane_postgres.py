@@ -6318,6 +6318,149 @@ def test_recovery_action_persisted_budget_does_not_reset_on_controller_reclaim(
         assert cursor.fetchone() == (0,)
 
 
+def test_recovery_budget_isolated_by_circuit_failure_episode(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-action:circuit-episodes",
+        job_type="structure-normalize",
+        input_identity="recovery-action:circuit-episodes",
+        now=now,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="controller-circuit-episodes",
+        lease_seconds=60,
+        now=now,
+    )
+    first_episode = "sha256:" + "a" * 64
+    second_episode = "sha256:" + "b" * 64
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            """
+            INSERT INTO m1_job_circuits (
+                job_key, consecutive_failures, state, opened_at,
+                next_probe_at, updated_at, failure_fingerprint
+            ) VALUES (%s, 3, 'open', %s, %s, %s, %s)
+            """,
+            (lease.job_key, now - timedelta(minutes=5), now, now, first_episode),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_recovery_target_budgets (
+                controller_id, target_type, target_id, episode_key,
+                max_actions, remaining_actions
+            ) VALUES (%s, 'circuit', %s, 'legacy', 3, 0)
+            """,
+            (controller.controller_id, lease.job_key),
+        )
+
+    first_candidate = next(
+        item
+        for item in read_runtime_reconcile_states(
+            control_plane._connection_factory,
+            controller_id=controller.controller_id,
+            now=now,
+        )
+        if item.target_id == lease.job_key
+    )
+    assert first_candidate.runtime_state.recovery_episode_key == first_episode
+    assert first_candidate.runtime_state.recovery_budget.remaining_actions == 3
+    first_decision = RuntimeReconciler().evaluate(first_candidate.runtime_state, now=now)
+    first = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=first_decision,
+        incident_key=first_candidate.incident_key,
+        component=first_candidate.component,
+        target_type="circuit",
+        target_id=lease.job_key,
+        recovery_episode_key=first_episode,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=0,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=1),
+    )
+    assert first.detail["recovery_episode_key"] == first_episode
+    claimed = claim_action(
+        control_plane._connection_factory,
+        worker_id="episode-action-worker",
+        controller=controller,
+        lease_seconds=30,
+        now=now + timedelta(seconds=2),
+    )
+    assert claimed is not None
+    finish_action(
+        control_plane._connection_factory,
+        action_id=first.action_id,
+        worker_id=claimed.worker_id or "",
+        worker_epoch=claimed.worker_epoch,
+        result_code="failed",
+        now=now + timedelta(seconds=3),
+    )
+
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            """
+            UPDATE m1_job_circuits
+            SET failure_fingerprint = %s, next_probe_at = %s, updated_at = %s
+            WHERE job_key = %s
+            """,
+            (second_episode, now, now + timedelta(seconds=4), lease.job_key),
+        )
+    second_candidate = next(
+        item
+        for item in read_runtime_reconcile_states(
+            control_plane._connection_factory,
+            controller_id=controller.controller_id,
+            now=now + timedelta(seconds=4),
+        )
+        if item.target_id == lease.job_key
+    )
+    assert second_candidate.runtime_state.recovery_episode_key == second_episode
+    assert second_candidate.runtime_state.recovery_budget.remaining_actions == 3
+    second_decision = RuntimeReconciler().evaluate(
+        second_candidate.runtime_state,
+        now=now + timedelta(seconds=4),
+    )
+    second = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=second_decision,
+        incident_key=second_candidate.incident_key,
+        component=second_candidate.component,
+        target_type="circuit",
+        target_id=lease.job_key,
+        recovery_episode_key=second_episode,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=1,
+        cooldown_seconds=0,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=5),
+    )
+    assert second.state == "pending"
+    assert second.detail["recovery_episode_key"] == second_episode
+
+    with control_plane._connection_factory() as connection:
+        rows = connection.execute(
+            """
+            SELECT episode_key, remaining_actions
+            FROM m1_recovery_target_budgets
+            WHERE controller_id = %s AND target_type = 'circuit' AND target_id = %s
+            ORDER BY episode_key
+            """,
+            (controller.controller_id, lease.job_key),
+        ).fetchall()
+        assert rows == [("legacy", 0), (first_episode, 0), (second_episode, 0)]
+
+
 def test_recovery_action_concurrent_last_budget_unit_is_consumed_once(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -6487,6 +6630,7 @@ def test_circuit_recovery_rejects_a_second_cooldown_authority(
             component="structure-normalize",
             target_type="circuit",
             target_id=lease.job_key,
+            recovery_episode_key="sha256:" + "0" * 64,
             expected_attempt_id=_runtime_attempt_id(control_plane, lease.job_key),
             expected_lease_epoch=lease.lease_epoch,
             recovery_budget_remaining=1,
@@ -6852,6 +6996,7 @@ def test_recovery_executor_releases_one_due_circuit_probe(
         component="structure-normalize",
         target_type="circuit",
         target_id=lease.job_key,
+        recovery_episode_key="sha256:" + "0" * 64,
         expected_attempt_id=attempt_id,
         expected_lease_epoch=lease.lease_epoch,
         recovery_budget_remaining=1,

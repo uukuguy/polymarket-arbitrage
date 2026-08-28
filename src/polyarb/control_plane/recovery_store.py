@@ -1,8 +1,8 @@
 """Fenced Postgres persistence for M1 runtime recovery actions.
 
-Budget boundary: Task 2 has no production reset policy, so budgets are
-monotonic per ``(controller_id, target_type, target_id)``.  A controller
-re-claim advances its lease epoch but never resets an existing target budget.
+Budgets are monotonic inside one immutable recovery episode. Controller
+reclaims never refill an episode; a genuinely new attempt or circuit failure
+identity receives an independent row while legacy exhaustion remains history.
 """
 
 from __future__ import annotations
@@ -454,7 +454,7 @@ def read_runtime_controller_status(
 
         cursor.execute(
             """
-            SELECT target_type, target_id, max_actions, remaining_actions,
+            SELECT target_type, target_id, episode_key, max_actions, remaining_actions,
                    last_next_allowed_at, updated_at
             FROM public.m1_recovery_target_budgets
             WHERE controller_id = %s
@@ -467,6 +467,7 @@ def read_runtime_controller_status(
             {
                 "target_type": _safe_text(row["target_type"]),
                 "target_id": _safe_text(row["target_id"]),
+                "episode_key": _safe_text(row["episode_key"]),
                 "max_actions": int(row["max_actions"]),
                 "remaining_actions": int(row["remaining_actions"]),
                 "last_next_allowed_at": _safe_timestamp(
@@ -627,6 +628,7 @@ def read_runtime_reconcile_states(
                    r.profile_attempt_seconds,
                    c.state AS circuit_state, c.opened_at AS circuit_opened_at,
                    c.next_probe_at AS circuit_next_probe_at,
+                   c.failure_fingerprint AS circuit_failure_fingerprint,
                    a.error_class AS attempt_error_class,
                    b.remaining_actions
             FROM public.m1_job_runtime_state AS r
@@ -637,6 +639,10 @@ def read_runtime_reconcile_states(
               ON b.controller_id = %s
              AND b.target_type = CASE WHEN c.state = 'open' THEN 'circuit' ELSE 'job' END
              AND b.target_id = j.job_key
+             AND b.episode_key = CASE
+                 WHEN c.state = 'open' THEN COALESCE(c.failure_fingerprint, 'legacy')
+                 ELSE r.attempt_id
+             END
             WHERE j.state NOT IN ('succeeded', 'quarantined')
               AND r.recovery_state <> 'terminal'
             ORDER BY r.updated_at ASC, j.job_key ASC
@@ -666,6 +672,11 @@ def read_runtime_reconcile_states(
         cooldown_seconds = 0 if circuit_open else 60
         target_type = "circuit" if circuit_open else "job"
         target_id = str(row["job_key"])
+        recovery_episode_key = (
+            str(row["circuit_failure_fingerprint"] or "legacy")
+            if circuit_open
+            else str(row["attempt_id"])
+        )
         candidates.append(
             RuntimeReconcileCandidate(
                 runtime_state=RecoveryRuntimeState(
@@ -680,6 +691,7 @@ def read_runtime_reconcile_states(
                     lease_expires_at=_require_aware(row["lease_deadline_at"], "lease_deadline_at"),
                     retry_count=max(0, int(row["attempt_count"])),
                     recovery_budget=RecoveryBudget(max(0, remaining)),
+                    recovery_episode_key=recovery_episode_key,
                     failure_class=_runtime_failure_class(
                         row["attempt_error_class"] or row["last_error_class"]
                     ),
@@ -719,21 +731,23 @@ def _lock_target_budget(
     controller_id: str,
     target_type: str,
     target_id: str,
+    episode_key: str,
     initial_budget: int,
     now: datetime,
 ) -> BudgetState:
     cursor.execute(
         """
         INSERT INTO public.m1_recovery_target_budgets (
-            controller_id, target_type, target_id, max_actions, remaining_actions,
+            controller_id, target_type, target_id, episode_key, max_actions, remaining_actions,
             last_next_allowed_at, created_at, updated_at
-        ) VALUES (%s, %s, %s, %s, %s, NULL, %s, %s)
-        ON CONFLICT (controller_id, target_type, target_id) DO NOTHING
+        ) VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, %s)
+        ON CONFLICT (controller_id, target_type, target_id, episode_key) DO NOTHING
         """,
         (
             controller_id,
             target_type,
             target_id,
+            episode_key,
             initial_budget,
             initial_budget,
             now,
@@ -742,17 +756,19 @@ def _lock_target_budget(
     )
     cursor.execute(
         """
-        SELECT max_actions, remaining_actions, last_next_allowed_at
+        SELECT episode_key, max_actions, remaining_actions, last_next_allowed_at
         FROM public.m1_recovery_target_budgets
         WHERE controller_id = %s AND target_type = %s AND target_id = %s
+          AND episode_key = %s
         FOR UPDATE
         """,
-        (controller_id, target_type, target_id),
+        (controller_id, target_type, target_id, episode_key),
     )
     row = cursor.fetchone()
     if row is None:
         raise RecoveryStoreError("recovery budget row is missing")
     return BudgetState(
+        episode_key=str(row["episode_key"]),
         max_actions=int(row["max_actions"]),
         remaining_actions=int(row["remaining_actions"]),
         last_next_allowed_at=(
@@ -769,6 +785,7 @@ def _consume_budget_and_cooldown(
     controller_id: str,
     target_type: str,
     target_id: str,
+    episode_key: str,
     next_allowed_at: datetime,
     now: datetime,
 ) -> None:
@@ -782,9 +799,10 @@ def _consume_budget_and_cooldown(
             ),
             updated_at = %s
         WHERE controller_id = %s AND target_type = %s AND target_id = %s
+          AND episode_key = %s
           AND remaining_actions > 0
         """,
-        (next_allowed_at, now, controller_id, target_type, target_id),
+        (next_allowed_at, now, controller_id, target_type, target_id, episode_key),
     )
     if cursor.rowcount != 1:
         raise RecoveryActionConflict("recovery budget changed during scheduling")
@@ -799,6 +817,7 @@ def _canonical_idempotency(
     controller: RuntimeControllerLease,
     target_type: str,
     target_id: str,
+    recovery_episode_key: str,
     expected_attempt_id: str,
     expected_lease_epoch: int,
 ) -> str:
@@ -809,6 +828,7 @@ def _canonical_idempotency(
         "expected_lease_epoch": expected_lease_epoch,
         "target_id": target_id,
         "target_type": target_type,
+        "recovery_episode_key": recovery_episode_key,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return f"recovery-action:{sha256(encoded).hexdigest()}"
@@ -833,6 +853,7 @@ def _schedule_detail(
     component: str,
     channels: Sequence[str],
     recovery_budget_remaining: int,
+    recovery_episode_key: str,
     cooldown_seconds: int,
     detail: Mapping[str, object] | None,
 ) -> dict[str, object]:
@@ -845,6 +866,7 @@ def _schedule_detail(
         "incident_key": incident_key,
         "next_check_at": _require_aware(decision.next_check_at, "next_check_at").isoformat(),
         "qualification_breaking": decision.qualification_breaking,
+        "recovery_episode_key": recovery_episode_key,
         "reason_code": decision.reason_code,
         "severity": decision.incident_severity,
     }
@@ -1225,6 +1247,7 @@ def schedule_action(
     channels: Sequence[str],
     now: datetime,
     detail: Mapping[str, object] | None = None,
+    recovery_episode_key: str | None = None,
 ) -> RecoveryActionRecord:
     """Schedule one fenced action or persist a durable completed stale/disabled action."""
     if type(controller) is not RuntimeControllerLease:
@@ -1240,6 +1263,14 @@ def schedule_action(
         target_id=target_id,
         expected_attempt_id=expected_attempt_id,
     )
+    episode_key = expected_attempt_id if recovery_episode_key is None else recovery_episode_key
+    _require_nonempty(recovery_episode_key=episode_key)
+    if len(episode_key.encode()) > 160:
+        raise ValueError("recovery_episode_key must be at most 160 bytes")
+    if target_type == "job" and episode_key != expected_attempt_id:
+        raise ValueError("job recovery episode must equal expected_attempt_id")
+    if target_type == "circuit" and recovery_episode_key is None:
+        raise ValueError("circuit recovery requires an explicit failure episode")
     observed_at = _require_aware(now, "now")
     if type(recovery_budget_remaining) is not int or recovery_budget_remaining < 0:
         raise ValueError("recovery_budget_remaining must be an exact non-negative int")
@@ -1259,6 +1290,7 @@ def schedule_action(
         component=component,
         channels=channels,
         recovery_budget_remaining=recovery_budget_remaining,
+        recovery_episode_key=episode_key,
         cooldown_seconds=cooldown_seconds,
         detail=normalized_detail,
     )
@@ -1267,6 +1299,7 @@ def schedule_action(
         controller=controller,
         target_type=target_type,
         target_id=target_id,
+        recovery_episode_key=episode_key,
         expected_attempt_id=expected_attempt_id,
         expected_lease_epoch=expected_lease_epoch,
     )
@@ -1370,6 +1403,7 @@ def schedule_action(
                 controller_id=controller.controller_id,
                 target_type=target_type,
                 target_id=target_id,
+                episode_key=episode_key,
                 initial_budget=recovery_budget_remaining,
                 now=observed_at,
             )
@@ -1422,6 +1456,7 @@ def schedule_action(
             controller_id=controller.controller_id,
             target_type=target_type,
             target_id=target_id,
+            episode_key=episode_key,
             next_allowed_at=next_allowed_at,
             now=observed_at,
         )

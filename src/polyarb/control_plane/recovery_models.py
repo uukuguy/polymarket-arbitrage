@@ -139,6 +139,7 @@ class RecoveryRuntimeState:
     lease_expires_at: datetime
     retry_count: int
     recovery_budget: RecoveryBudget
+    recovery_episode_key: str
     failure_class: RecoveryFailureClass | None = None
     open_circuit: bool = False
     circuit_opened_at: datetime | None = None
@@ -159,6 +160,12 @@ class RecoveryRuntimeState:
         require_exact_non_negative_int(self.retry_count, field_name="retry_count")
         if type(self.recovery_budget) is not RecoveryBudget:
             raise TypeError("recovery_budget must be RecoveryBudget")
+        if type(self.recovery_episode_key) is not str or not self.recovery_episode_key:
+            raise ValueError("recovery_episode_key must be a non-empty str")
+        if len(self.recovery_episode_key.encode()) > 160:
+            raise ValueError("recovery_episode_key must be at most 160 bytes")
+        if not self.open_circuit and self.recovery_episode_key != self.attempt_id:
+            raise ValueError("job recovery episode must equal attempt_id")
         if self.failure_class is not None and type(self.failure_class) is not RecoveryFailureClass:
             raise TypeError("failure_class must be RecoveryFailureClass or None")
         if type(self.open_circuit) is not bool:

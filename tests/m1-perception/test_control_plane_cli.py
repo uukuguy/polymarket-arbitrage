@@ -1149,6 +1149,7 @@ def test_runtime_reconcile_once_evaluates_schedules_and_executes_one_action(
         lease_expires_at=now + timedelta(seconds=5),
         retry_count=0,
         recovery_budget=RecoveryBudget(2),
+        recovery_episode_key="attempt-a",
     )
     from polyarb.control_plane.recovery_store import RuntimeReconcileCandidate
 
@@ -1280,6 +1281,7 @@ def test_runtime_reconcile_once_observe_only_records_every_candidate_without_rec
         lease_expires_at=now + timedelta(seconds=5),
         retry_count=0,
         recovery_budget=RecoveryBudget(2),
+        recovery_episode_key="attempt-a",
     )
     candidate_a = RuntimeReconcileCandidate(
         runtime_state=state,
@@ -1295,7 +1297,12 @@ def test_runtime_reconcile_once_observe_only_records_every_candidate_without_rec
     )
     candidate_b = replace(
         candidate_a,
-        runtime_state=replace(state, job_key="job-b", attempt_id="attempt-b"),
+        runtime_state=replace(
+            state,
+            job_key="job-b",
+            attempt_id="attempt-b",
+            recovery_episode_key="attempt-b",
+        ),
         target_id="job-b",
         incident_key="recovery:job:job-b",
     )
@@ -1429,6 +1436,7 @@ def _install_runtime_reconcile_conflict(monkeypatch, message: str) -> None:
             lease_expires_at=now + timedelta(seconds=5),
             retry_count=0,
             recovery_budget=RecoveryBudget(2),
+            recovery_episode_key="attempt-a",
         ),
         job_type="structure-normalize",
         job_state="leased",

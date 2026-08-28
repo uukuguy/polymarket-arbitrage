@@ -60,6 +60,7 @@ def state(
         lease_expires_at=lease_expires_at,
         retry_count=retry_count,
         recovery_budget=RecoveryBudget(remaining_actions=recovery_budget_remaining),
+        recovery_episode_key=("sha256:" + "a" * 64 if open_circuit else "attempt-1"),
         failure_class=failure_class,
         open_circuit=open_circuit,
         circuit_opened_at=circuit_opened_at,

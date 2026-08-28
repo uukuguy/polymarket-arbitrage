@@ -48,6 +48,7 @@ def _state(base: datetime, *, stalled: bool = False) -> RecoveryRuntimeState:
         lease_expires_at=base + timedelta(seconds=90),
         retry_count=0,
         recovery_budget=RecoveryBudget(remaining_actions=3),
+        recovery_episode_key="attempt-1",
     )
 
 
@@ -95,6 +96,7 @@ def test_decision_and_idle_records_are_typed_canonical_and_secret_free() -> None
     assert record.reason_code == "job.progress-stalled"
     assert record.target_type == "job"
     assert record.target_id == "quote-batch:active"
+    assert record.payload["runtime_state"]["recovery_episode_key"] == "attempt-1"
     assert record.decision_id.startswith("runtime-observe:")
     assert len(record.decision_digest) == 64
     assert record.payload_sha256 == record.decision_digest
@@ -124,6 +126,29 @@ def test_decision_and_idle_records_are_typed_canonical_and_secret_free() -> None
             next_check_at=now + timedelta(seconds=30),
             observed_by="Bearer leaked-token",
         )
+
+
+def test_historical_observe_payloads_receive_conservative_episode_identity() -> None:
+    from polyarb.control_plane.runtime_observe import (
+        _runtime_state_from_payload,
+        _runtime_state_payload,
+    )
+
+    now = _now()
+    historical_job = _runtime_state_payload(_state(now))
+    historical_job.pop("recovery_episode_key")
+    assert _runtime_state_from_payload(historical_job).recovery_episode_key == "attempt-1"
+
+    circuit_state = replace(
+        _state(now),
+        open_circuit=True,
+        circuit_opened_at=now - timedelta(minutes=5),
+        circuit_next_probe_at=now + timedelta(minutes=5),
+        recovery_episode_key="sha256:" + "a" * 64,
+    )
+    historical_circuit = _runtime_state_payload(circuit_state)
+    historical_circuit.pop("recovery_episode_key")
+    assert _runtime_state_from_payload(historical_circuit).recovery_episode_key == "legacy"
 
 
 def test_insert_decision_is_idempotent_and_never_writes_recovery_actions() -> None:

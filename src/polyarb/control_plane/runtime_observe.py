@@ -772,6 +772,7 @@ def _read_runtime_reconcile_states_in_snapshot(
                r.profile_attempt_seconds,
                c.state AS circuit_state, c.opened_at AS circuit_opened_at,
                c.next_probe_at AS circuit_next_probe_at,
+               c.failure_fingerprint AS circuit_failure_fingerprint,
                a.error_class AS attempt_error_class,
                b.remaining_actions
         FROM public.m1_job_runtime_state AS r
@@ -782,6 +783,10 @@ def _read_runtime_reconcile_states_in_snapshot(
           ON b.controller_id = %s
          AND b.target_type = CASE WHEN c.state = 'open' THEN 'circuit' ELSE 'job' END
          AND b.target_id = j.job_key
+         AND b.episode_key = CASE
+             WHEN c.state = 'open' THEN COALESCE(c.failure_fingerprint, 'legacy')
+             ELSE r.attempt_id
+         END
         WHERE j.state NOT IN ('succeeded', 'quarantined')
           AND r.recovery_state <> 'terminal'
         ORDER BY r.updated_at ASC, j.job_key ASC
@@ -804,6 +809,11 @@ def _read_runtime_reconcile_states_in_snapshot(
         cooldown_seconds = 0 if circuit_open else 60
         target_type = "circuit" if circuit_open else "job"
         target_id = str(row["job_key"])
+        recovery_episode_key = (
+            str(row["circuit_failure_fingerprint"] or "legacy")
+            if circuit_open
+            else str(row["attempt_id"])
+        )
         candidates.append(
             RuntimeReconcileCandidate(
                 runtime_state=RecoveryRuntimeState(
@@ -818,6 +828,7 @@ def _read_runtime_reconcile_states_in_snapshot(
                     lease_expires_at=_aware(row["lease_deadline_at"], "lease_deadline_at"),
                     retry_count=max(0, int(row["attempt_count"])),
                     recovery_budget=RecoveryBudget(max(0, remaining)),
+                    recovery_episode_key=recovery_episode_key,
                     failure_class=_runtime_failure_class(
                         row["attempt_error_class"] or row["last_error_class"]
                     ),
@@ -934,6 +945,7 @@ def _runtime_state_payload(state: RecoveryRuntimeState) -> dict[str, object]:
         "recovery_budget": {
             "remaining_actions": state.recovery_budget.remaining_actions,
         },
+        "recovery_episode_key": state.recovery_episode_key,
         "failure_class": None if state.failure_class is None else state.failure_class.value,
         "open_circuit": state.open_circuit,
         "circuit_opened_at": None
@@ -969,9 +981,17 @@ def _runtime_state_from_payload(payload: Mapping[str, object]) -> RecoveryRuntim
         circuit_next_probe_at = circuit_opened_at + timedelta(
             seconds=_object_to_int(payload["circuit_cooldown_seconds"])
         )
+    attempt_id = str(payload["attempt_id"])
+    open_circuit = bool(payload["open_circuit"])
+    recovery_episode_key = payload.get("recovery_episode_key")
+    if recovery_episode_key is None:
+        # Historical observe payloads predate episode-scoped budgets. Their
+        # circuit budget identity can only be represented as legacy; job
+        # attempts already carried their exact episode identity.
+        recovery_episode_key = "legacy" if open_circuit else attempt_id
     return RecoveryRuntimeState(
         job_key=str(payload["job_key"]),
-        attempt_id=str(payload["attempt_id"]),
+        attempt_id=attempt_id,
         lease_epoch=_object_to_int(payload["lease_epoch"]),
         owner_is_current=bool(payload["owner_is_current"]),
         profile=RuntimeDeadlineProfile(
@@ -989,8 +1009,9 @@ def _runtime_state_from_payload(payload: Mapping[str, object]) -> RecoveryRuntim
         recovery_budget=RecoveryBudget(
             remaining_actions=_object_to_int(budget["remaining_actions"])
         ),
+        recovery_episode_key=str(recovery_episode_key),
         failure_class=None if failure_class is None else RecoveryFailureClass(str(failure_class)),
-        open_circuit=bool(payload["open_circuit"]),
+        open_circuit=open_circuit,
         circuit_opened_at=circuit_opened_at,
         circuit_next_probe_at=circuit_next_probe_at,
     )

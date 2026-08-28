@@ -58,6 +58,7 @@ class RuntimeFence:
 
 @dataclass(frozen=True, slots=True)
 class BudgetState:
+    episode_key: str
     max_actions: int
     remaining_actions: int
     last_next_allowed_at: datetime | None
