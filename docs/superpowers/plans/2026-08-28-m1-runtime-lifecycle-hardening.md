@@ -269,10 +269,10 @@ cursor handoff.
   margin; do not change env, process, VM, restart, HTTP, secret, or role scope.
 - [x] Re-run the focused tests and require all pass; then run the complete M1,
   climb, planning, Pyright/Ruff/format/JSON/diff gates without an outer timeout.
-- [ ] Mark remote digest `sha256:9bb6ebde…c1989` superseded before deployment,
+- [x] Mark remote digest `sha256:9bb6ebde…c1989` superseded before deployment,
   commit Task 13 with the Plan 209 summary, build/push/verify the new exact
   amd64 image, and update only controller Machine `6e82036dce4958`.
-- [ ] Prove controller Machine ID, region, env, guest, restart policy,
+- [x] Prove controller Machine ID, region, env, guest, restart policy,
   observe-only mode and empty allowlist are unchanged; only image,
   `kill_signal`, and `kill_timeout` may differ. Start a fresh lease epoch and
   pass 120/300/1,800-second observe gates before any sibling rollout.
@@ -297,5 +297,40 @@ cursor handoff.
 - [x] Add the derived curl/owner bounds and verify SHA256 before chmod; do not
   change the Supercronic version, runtime packages, user, entrypoint, or app
   bytes.
-- [ ] Re-run focused and complete relevant static/planning gates, commit Task
+- [x] Re-run focused and complete relevant static/planning gates, commit Task
   14, then rebuild the exact amd64 image and verify its embedded checksum.
+
+## Task 15: Machines API lifecycle translation and remote proof
+
+**Files:**
+
+- Create: `src/polyarb/control_plane/fly_machine_update.py`
+- Modify: `Makefile`
+- Test: `tests/m1-perception/test_fly_machine_update.py`
+- Test: `tests/m1-perception/test_makefile_contract.py`
+
+**Interfaces:**
+
+- Consumes: one fresh Machines API GET, one rendered formal Fly TOML and one
+  exact target image.
+- Produces: a full optimistic update with `current_version` and
+  `config.stop_config`, plus a redacted fresh-GET verifier that permits no
+  other config delta.
+
+- [x] Reproduce both false-success paths: `flyctl machine update
+  --machine-config` and direct API POST accepted top-level `kill_signal` /
+  `kill_timeout` but persisted both as null.
+- [x] Read the official Machines OpenAPI and identify the distinct JSON
+  contract: `stop_config.signal` plus duration-string `stop_config.timeout`.
+- [x] Repair only controller `6e82036dce4958` from a fresh GET using
+  `current_version`; prove exact image, new instance version, `SIGTERM/40s`,
+  unchanged Machine ID/region/config, observe-only mode and empty allowlist.
+- [x] Add RED/GREEN local renderer and verifier contracts. Remove unknown TOML
+  field names from Machine JSON, preserve every other fresh config field, hash
+  preserved config without emitting env values, and expose both commands in
+  the Makefile.
+- [x] Pass the new focused tests, Pyright, Ruff, format and diff gates; pass the
+  fresh epoch-12 120-second and 300-second observe gates with zero actions.
+- [x] Pass the same epoch's 1,800-second gate, commit Task 15 evidence, then use
+  this renderer/verifier for every coordinator, Structure, Quote and
+  qualification Machine update.

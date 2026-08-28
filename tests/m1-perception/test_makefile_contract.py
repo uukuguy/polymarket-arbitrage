@@ -190,6 +190,64 @@ def test_make_runtime_mutation_target_has_enable_guard() -> None:
         assert "enable=1" in result.stderr
 
 
+def test_make_render_machine_update_uses_local_contract_translator() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "control-plane-render-machine-update",
+            "current_machine=/tmp/current.json",
+            "fly_config=/tmp/fly.toml",
+            "expected_app=polyarb-runtime-controller-m1",
+            "machine_id=6e82036dce4958",
+            "target_image=registry.fly.io/example:new",
+            "output=/tmp/update.json",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "python -m polyarb.control_plane.fly_machine_update render" in result.stdout
+    assert '--current-machine "/tmp/current.json"' in result.stdout
+    assert '--fly-config "/tmp/fly.toml"' in result.stdout
+    assert '--expected-app "polyarb-runtime-controller-m1"' in result.stdout
+    assert '--expected-machine-id "6e82036dce4958"' in result.stdout
+    assert '--target-image "registry.fly.io/example:new"' in result.stdout
+    assert '--output "/tmp/update.json"' in result.stdout
+    assert "flyctl" not in result.stdout.lower()
+    assert "curl" not in result.stdout.lower()
+
+
+def test_make_verify_machine_update_uses_local_redacted_verifier() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "control-plane-verify-machine-update",
+            "updated_machine=/tmp/updated.json",
+            "update_payload=/tmp/update.json",
+            "machine_id=6e82036dce4958",
+            "region=ams",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "python -m polyarb.control_plane.fly_machine_update verify" in result.stdout
+    assert '--updated-machine "/tmp/updated.json"' in result.stdout
+    assert '--update-payload "/tmp/update.json"' in result.stdout
+    assert '--expected-machine-id "6e82036dce4958"' in result.stdout
+    assert '--expected-region "ams"' in result.stdout
+    assert "flyctl" not in result.stdout.lower()
+    assert "curl" not in result.stdout.lower()
+
+
 def test_make_runtime_status_is_read_only_dry_run() -> None:
     result = subprocess.run(
         ["make", "-n", "runtime-controller-status"],

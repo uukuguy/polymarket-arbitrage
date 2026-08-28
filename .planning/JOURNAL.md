@@ -11357,3 +11357,39 @@ before any sibling rollout.
 files, rebuild the exact amd64 image, verify OCI revision/user/Alembic/job order
 and embedded checksum, then push both registries. Only after exact digest
 preflight may controller `6e82036dce4958` receive image + SIGTERM/40.
+
+### SESSION 331 — 2026-08-29 (Task 15 Machines API lifecycle translation)
+
+- [EXACT IMAGE] Task 14 commit `282480ec` built and passed embedded revision,
+  Alembic-031, eight-job order, user and Supercronic checksum checks. Both
+  registry tags resolve to manifest list `sha256:d0905397…33687`; Fly selected
+  amd64 child manifest `sha256:594424ed…d1bc4`.
+- [PRODUCTION DEFECT / FAIL CLOSED] Updating only controller
+  `6e82036dce4958` through `flyctl machine update --machine-config` changed the
+  image but silently persisted no lifecycle fields. A full direct Machines API
+  POST using the same top-level TOML names also returned success with both
+  fields null. Coordinator, Structure, Quote and qualification were not
+  changed; observe gates did not start on false evidence.
+- [ROOT CAUSE / REPAIR] Official Machines OpenAPI represents lifecycle as
+  `config.stop_config.signal` and duration-string `timeout`, not TOML's
+  `kill_signal/kill_timeout`. A fresh GET plus optimistic `current_version`
+  repaired the same controller to `SIGTERM/40s`. Fresh-GET proof shows new
+  instance `01M14S7MT04KBYMPZ7KHA8C1N4`, exact image, unchanged ID/region and
+  exact remaining config, observe-only mode and empty allowlist.
+- [TDD / OPERATOR CONTRACT] Added local full-config renderer and redacted
+  verifier plus Makefile entries. They preserve every fresh Machine field,
+  translate only image/stop_config, reject stale identity or non-formal
+  lifecycle, and allow only Fly's resolved image digest. Focused 9/9, Pyright
+  zero, Ruff/format/diff pass.
+- [GATES] Controller epoch 12 passed 120/300/1,800-second gates; final duration
+  2,176 seconds, 142 decisions, max gap 31 seconds and zero recovery actions.
+  Fresh complete M1 gate passed **4,014 tests, one skip and one expected xfail
+  in 1,495.39 seconds** without an outer timeout. The Structure performance
+  case stayed CPU-active and completed naturally.
+
+[NEXT] Commit Task 15 without the three protected user SDD files. Then use
+`make control-plane-render-machine-update` and
+`make control-plane-verify-machine-update` for coordinator → Structure → Quote
+→ qualification sequential rollout on the same Machine IDs. Do not start the
+fresh 86,400-second qualification epoch until publication freshness and zero
+recovery actions pass after all four roles.

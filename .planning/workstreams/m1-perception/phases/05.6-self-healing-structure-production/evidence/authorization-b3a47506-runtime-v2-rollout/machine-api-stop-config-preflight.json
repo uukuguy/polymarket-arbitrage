@@ -1,0 +1,73 @@
+{
+  "schema": "polyarb.runtime-v2.machine-api-stop-config-preflight.v1",
+  "recorded_at": "2026-08-29T02:22:32+08:00",
+  "source_commit": "282480ecefb216e140be02c3a8c7ec7c0327f9d8",
+  "controller": {
+    "app": "polyarb-runtime-controller-m1",
+    "machine_id": "6e82036dce4958",
+    "region": "ams",
+    "state": "started",
+    "old_instance_id": "01M14S5CWDJ9KVKTBBRN0KTEBS",
+    "new_instance_id": "01M14S7MT04KBYMPZ7KHA8C1N4",
+    "image_manifest_list_digest": "sha256:d0905397c718689ab39746ad9d9981d61e71ecbc1e48003822f394290d933687",
+    "fly_amd64_manifest_digest": "sha256:594424ed1e477fec899c7006f9d5b8db718e79bc0951ca0c5e2d725b106d1bc4",
+    "oci_revision": "282480ecefb216e140be02c3a8c7ec7c0327f9d8",
+    "stop_config": {
+      "signal": "SIGTERM",
+      "timeout": "40s"
+    },
+    "recovery_mode": "observe-only",
+    "recovery_allowed_targets": [],
+    "preserved_config_sha256": "944183400a2007686a840665f97bd8d2b762c867f700f42be4b924cada52a2f3"
+  },
+  "failed_schema_attempts": [
+    {
+      "transport": "flyctl-machine-config",
+      "posted_fields": ["kill_signal", "kill_timeout"],
+      "persisted": false
+    },
+    {
+      "transport": "machines-api-full-config",
+      "posted_fields": ["kill_signal", "kill_timeout"],
+      "persisted": false
+    }
+  ],
+  "repair_contract": {
+    "source": "official-machines-openapi",
+    "api_field": "config.stop_config",
+    "optimistic_version_field": "current_version",
+    "fresh_get_before_and_after": true,
+    "only_image_and_stop_config_may_change": true
+  },
+  "observe_gates": [
+    {
+      "minimum_seconds": 120,
+      "controller_epoch": 12,
+      "duration_seconds": 434,
+      "decision_count": 30,
+      "max_gap_seconds": 31,
+      "recovery_action_count": 0,
+      "status": "pass"
+    },
+    {
+      "minimum_seconds": 300,
+      "controller_epoch": 12,
+      "duration_seconds": 465,
+      "decision_count": 32,
+      "max_gap_seconds": 31,
+      "recovery_action_count": 0,
+      "status": "pass"
+    },
+    {
+      "minimum_seconds": 1800,
+      "controller_epoch": 12,
+      "duration_seconds": 2176,
+      "decision_count": 142,
+      "max_gap_seconds": 31,
+      "recovery_action_count": 0,
+      "status": "pass"
+    }
+  ],
+  "sibling_mutation": false,
+  "recovery_actions_executed": 0
+}

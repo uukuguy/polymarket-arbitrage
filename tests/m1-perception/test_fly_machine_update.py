@@ -1,0 +1,224 @@
+"""Contracts for translating rendered Fly config into a Machines API update."""
+
+from __future__ import annotations
+
+import json
+from copy import deepcopy
+from pathlib import Path
+
+import pytest
+
+
+def _machine() -> dict[str, object]:
+    return {
+        "id": "6e82036dce4958",
+        "instance_id": "01M14S7MT04KBYMPZ7KHA8C1N4",
+        "region": "ams",
+        "config": {
+            "image": "registry.fly.io/example:old",
+            "env": {"MODE": "observe-only", "ALLOWED": ""},
+            "init": {"cmd": ["python", "-m", "example"]},
+            "guest": {"cpu_kind": "shared", "cpus": 1, "memory_mb": 256},
+            "restart": {"policy": "always"},
+            "metadata": {"fly_process_group": "controller"},
+        },
+    }
+
+
+def _fly_config(path: Path) -> Path:
+    path.write_text(
+        "\n".join(
+            (
+                'app = "polyarb-runtime-controller-m1"',
+                'kill_signal = "SIGTERM"',
+                "kill_timeout = 40",
+                "",
+            )
+        )
+    )
+    return path
+
+
+def test_machine_update_maps_toml_lifecycle_to_api_stop_config_and_preserves_rest(
+    tmp_path: Path,
+) -> None:
+    from polyarb.control_plane.fly_machine_update import render_machine_update_payload
+
+    current = _machine()
+    original = deepcopy(current)
+    target_image = "registry.fly.io/example:new@sha256:abc"
+
+    payload, proof = render_machine_update_payload(
+        current_machine=current,
+        fly_config_path=_fly_config(tmp_path / "fly.toml"),
+        expected_app="polyarb-runtime-controller-m1",
+        expected_machine_id="6e82036dce4958",
+        target_image=target_image,
+    )
+
+    assert current == original
+    assert payload["current_version"] == current["instance_id"]
+    assert payload["config"]["image"] == target_image
+    assert payload["config"]["stop_config"] == {
+        "signal": "SIGTERM",
+        "timeout": "40s",
+    }
+    assert "kill_signal" not in payload["config"]
+    assert "kill_timeout" not in payload["config"]
+    expected_preserved = deepcopy(current["config"])
+    assert isinstance(expected_preserved, dict)
+    expected_preserved.pop("image")
+    actual_preserved = deepcopy(payload["config"])
+    actual_preserved.pop("image")
+    actual_preserved.pop("stop_config")
+    assert actual_preserved == expected_preserved
+    assert proof == {
+        "app": "polyarb-runtime-controller-m1",
+        "machine_id": "6e82036dce4958",
+        "current_version": "01M14S7MT04KBYMPZ7KHA8C1N4",
+        "kill_signal": "SIGTERM",
+        "kill_timeout_seconds": 40,
+        "preserved_config_sha256": proof["preserved_config_sha256"],
+        "target_image": target_image,
+    }
+    assert len(proof["preserved_config_sha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    "fly_config",
+    (
+        'app = "polyarb-runtime-controller-m1"\nkill_signal = "SIGTERM"\n',
+        'app = "polyarb-runtime-controller-m1"\nkill_timeout = 40\n',
+        ('app = "polyarb-runtime-controller-m1"\nkill_signal = "SIGINT"\nkill_timeout = 40\n'),
+        ('app = "polyarb-runtime-controller-m1"\nkill_signal = "SIGTERM"\nkill_timeout = 30\n'),
+    ),
+)
+def test_machine_update_rejects_missing_or_nonformal_shutdown_contract(
+    tmp_path: Path, fly_config: str
+) -> None:
+    from polyarb.control_plane.fly_machine_update import (
+        FlyMachineUpdateContractError,
+        render_machine_update_payload,
+    )
+
+    config_path = tmp_path / "fly.toml"
+    config_path.write_text(fly_config)
+
+    with pytest.raises(FlyMachineUpdateContractError):
+        render_machine_update_payload(
+            current_machine=_machine(),
+            fly_config_path=config_path,
+            expected_app="polyarb-runtime-controller-m1",
+            expected_machine_id="6e82036dce4958",
+            target_image="registry.fly.io/example:new@sha256:abc",
+        )
+
+
+def test_machine_update_cli_writes_payload_without_emitting_machine_environment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from polyarb.control_plane.fly_machine_update import main
+
+    machine_path = tmp_path / "machine.json"
+    machine_path.write_text(json.dumps(_machine()))
+    output_path = tmp_path / "update.json"
+
+    assert (
+        main(
+            [
+                "render",
+                "--current-machine",
+                str(machine_path),
+                "--fly-config",
+                str(_fly_config(tmp_path / "fly.toml")),
+                "--expected-app",
+                "polyarb-runtime-controller-m1",
+                "--expected-machine-id",
+                "6e82036dce4958",
+                "--target-image",
+                "registry.fly.io/example:new@sha256:abc",
+                "--output",
+                str(output_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    emitted = capsys.readouterr().out
+    assert "MODE" not in emitted
+    assert "ALLOWED" not in emitted
+    assert "observe-only" not in emitted
+    result = json.loads(emitted)
+    assert result["status"] == "rendered"
+    assert result["output"] == str(output_path)
+    payload = json.loads(output_path.read_text())
+    assert payload["config"]["env"] == {"MODE": "observe-only", "ALLOWED": ""}
+
+    with pytest.raises(FileExistsError):
+        main(
+            [
+                "render",
+                "--current-machine",
+                str(machine_path),
+                "--fly-config",
+                str(tmp_path / "fly.toml"),
+                "--expected-app",
+                "polyarb-runtime-controller-m1",
+                "--expected-machine-id",
+                "6e82036dce4958",
+                "--target-image",
+                "registry.fly.io/example:new@sha256:abc",
+                "--output",
+                str(output_path),
+            ]
+        )
+
+
+def test_machine_update_verifier_requires_exact_remote_config_except_resolved_image(
+    tmp_path: Path,
+) -> None:
+    from polyarb.control_plane.fly_machine_update import (
+        FlyMachineUpdateContractError,
+        render_machine_update_payload,
+        verify_machine_update_response,
+    )
+
+    payload, _ = render_machine_update_payload(
+        current_machine=_machine(),
+        fly_config_path=_fly_config(tmp_path / "fly.toml"),
+        expected_app="polyarb-runtime-controller-m1",
+        expected_machine_id="6e82036dce4958",
+        target_image="registry.fly.io/example:new",
+    )
+    updated = {
+        "id": "6e82036dce4958",
+        "instance_id": "01M14S8NEWVERSION0000000000",
+        "region": "ams",
+        "state": "started",
+        "config": deepcopy(payload["config"]),
+    }
+    updated["config"]["image"] = "registry.fly.io/example:new@sha256:abc"
+
+    proof = verify_machine_update_response(
+        updated_machine=updated,
+        update_payload=payload,
+        expected_machine_id="6e82036dce4958",
+        expected_region="ams",
+    )
+
+    assert proof["status"] == "verified"
+    assert proof["new_version"] == "01M14S8NEWVERSION0000000000"
+    assert proof["kill_signal"] == "SIGTERM"
+    assert proof["kill_timeout_seconds"] == 40
+    assert "env" not in proof
+
+    broken = deepcopy(updated)
+    broken["config"]["restart"] = {"policy": "no"}
+    with pytest.raises(FlyMachineUpdateContractError):
+        verify_machine_update_response(
+            updated_machine=broken,
+            update_payload=payload,
+            expected_machine_id="6e82036dce4958",
+            expected_region="ams",
+        )

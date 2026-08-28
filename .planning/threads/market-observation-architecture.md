@@ -2250,3 +2250,18 @@ success is not user receipt/read evidence.
 - Build-download policy is not runtime policy. Its retry cannot alter a job,
   lease, circuit, Machine, or production evidence window; a failed build simply
   produces no release artifact and can resume from immutable Docker layers.
+
+### §2.56 Deployment schemas require an explicit translation boundary (2026-08-29)
+
+- A valid Fly TOML lifecycle contract does not have the same JSON shape as a
+  direct Machines API update. Top-level `kill_signal` / `kill_timeout` translate
+  to `config.stop_config.signal` / `config.stop_config.timeout`; posting the TOML
+  names in Machine JSON returned success but silently persisted neither field.
+- Direct rollout now starts from a fresh Machine GET, includes its
+  `instance_id` as optimistic `current_version`, copies the complete config and
+  changes only image plus `stop_config`. The local renderer removes unknown
+  legacy names and emits only a preserved-config digest, never env values.
+- Command success is not deployment truth. A second fresh GET must show a new
+  version, exact Machine ID/region, exact non-release config and the intended
+  stop contract; only Fly's image digest resolution may differ. Template tests
+  and remote-object verification guard distinct links in the chain.

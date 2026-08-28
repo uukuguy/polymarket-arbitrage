@@ -203,6 +203,22 @@ region, and recovery allowlist remain canonically identical. Sibling roles
 cannot advance until the controller proves the new image and termination
 contract together.
 
+Fly TOML and the Machines API do not use the same lifecycle field shape. The
+rendered application config owns top-level `kill_signal` and `kill_timeout`,
+while a direct Machine update must send
+`config.stop_config = {signal: "SIGTERM", timeout: "40s"}`. Posting the TOML
+names inside Machine JSON is invalid evidence even when the API returns 200:
+unknown fields are discarded and the Machine continues with platform defaults.
+
+Every direct Machine rollout therefore starts from a fresh GET, carries its
+`instance_id` back as `current_version`, copies the complete config, and changes
+only image plus `stop_config`. A local renderer performs this translation and
+hashes the preserved config without emitting environment values. A separate
+fresh-GET verifier requires a new version, unchanged Machine ID/region and exact
+config equality, allowing only Fly to append the resolved image digest. Neither
+`flyctl machine update --machine-config` success nor a template-only test is a
+remote lifecycle proof.
+
 The final runtime image build is also part of the release lifecycle. Its fixed
 Supercronic v0.2.30 amd64 artifact is 12,432,517 bytes; at a declared minimum
 acceptable throughput of 64 KiB/s it needs about 190 seconds. One transfer gets
@@ -274,8 +290,8 @@ marked as a backfill. Only current-cursor live observations count toward the
 - rollout evidence proves role authority without live-Machine diagnostic
   processes and restarts reset rather than splice the observe-only window;
 - every rendered long-running Fly template proves SIGTERM plus a 40-second
-  platform backstop, and canary evidence rejects any other non-image config
-  delta;
+  platform backstop; the Machine API translator proves the corresponding
+  `stop_config`, and canary evidence rejects any other non-image config delta;
 - full M1 regression, migration upgrade/downgrade, lint, format, planning, and
   climb gates.
 

@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Task 14 bounded authenticated build download passed focused gates; commit and exact-image rebuild remain before fresh controller canary
-last_updated: "2026-08-29T01:58:00+08:00"
+stopped_at: Task 15 controller Machine API lifecycle proof and 120/300/1800 observe gates passed; commit rollout tooling before coordinator canary
+last_updated: "2026-08-29T02:51:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -56,40 +56,26 @@ progress:
   roles use hidden secrets and the Supabase IPv4 Session Pooler, not the
   unreachable direct IPv6 database endpoint.
 
-- **Current production boundary:** Production remains revision 031 with 6,572
-  normalized facts, zero legacy arrays, three compaction constraints, one
-  append-only trigger and zero scalar mismatches. Controller Machine
-  `6e82036dce4958` is started observe-only with empty recovery allowlist,
-  non-image config hash `4504c4…b4a4`, source commit `b3a47506` and remote
-  digest `sha256:6ba61618…8d0d`; lease epoch 9 passed fresh 120/300/1,800-second
-  zero-action gates. Coordinator `e82d1220b2d138` is deliberately stopped on
-  the same digest after its canary exposed intermittent public status failures.
-  Structure `683e46ea500dd8` and Quote `4d895231f66748` remain started on
-  `sha256:bd21b2d…33df`; qualification `876077f0274598` remains stopped on
-  that older digest. No recovery action was enabled or executed. Task 12 proved
-  the failure was an early client clock plus roughly 45 later
-  `READ COMMITTED` queries, then found the same request-round mismatch in
-  opportunity pagination and contradictory nested shutdown deadlines in the
-  compatibility daemon. A final deployment-layer preflight then proved all
-  formal runtime-v2 templates still inherited Fly's historical five-second
-  process kill default despite the internal 30-second owner. All seven templates
-  now declare uniform `SIGTERM + 40s`, derived as 30 seconds internal cleanup plus
-  10 seconds terminal/interpreter margin, and both source/rendered TOML contracts
-  are tested. The local repair uses one database-owned repeatable-read
-  clock/data statement per public read and one task-owned bounded TERM/KILL
-  sequence. Independent review found no Critical issue; its changed-line type
-  boundary finding is closed with validated JSON scalars/arrays, behavioral
-  result-set tests and already-exited process-race coverage. The final local
-  Task 13's fresh local gate passed 4,004 tests, one skip and one expected xfail
-  in 1,477.06 seconds without an outer timeout. Commit, exact-image rebuild and a fresh controller gate are required
-  before coordinator restarts; `b3a47506` and its continuity evidence are
-  superseded because executable bytes changed.
-  The first post-Task-13 local build then exposed an unbounded, unauthenticated
-  Supercronic download after 138.8 seconds. That image stayed local and is
-  superseded. Task 14 derives a 15s connect / 240s transfer / one-retry / 500s
-  aggregate build-input owner from the measured 12,432,517-byte artifact and
-  pins its v0.2.30 amd64 SHA256 before chmod. A new commit-bound image is still
-  required; production remains unchanged.
+- **Current production boundary:** Production remains revision 031. The exact
+  Task 14 runtime image from commit `282480ec` is pushed to both registries;
+  Fly resolves its amd64 manifest as `sha256:594424ed…d1bc4`. Controller
+  `6e82036dce4958` is started in `ams` on that image, observe-only with an empty
+  recovery allowlist and Machines API `stop_config=SIGTERM/40s`. Task 15 proved
+  the deployment schema boundary: Fly TOML's top-level `kill_signal` /
+  `kill_timeout` must translate to Machine JSON `stop_config`; both CLI and a
+  direct API post of the TOML names returned success but silently persisted
+  null. The new local renderer uses a fresh GET plus optimistic
+  `current_version`; its fresh-GET verifier proved a new instance version,
+  exact image and unchanged Machine ID, region, env, init, guest, metadata and
+  restart policy without emitting env values. Controller lease epoch 12 passed
+  120/300/1,800-second gates, reaching 2,176 seconds and 142 decisions with max
+  gap 31 seconds and zero recovery actions. Fresh Task 15 `make test-m1` passed
+  4,014 tests, one skip and one expected xfail in 1,495.39 seconds without an
+  outer timeout. Coordinator `e82d1220b2d138` and qualification
+  `876077f0274598` remain stopped; Structure `683e46ea500dd8` and Quote
+  `4d895231f66748` remain started on the old digest. Commit the operator rollout
+  contract, then update coordinator → Structure → Quote → qualification using
+  the same renderer/verifier. No recovery action was enabled or executed.
 - **Plan 05.6-209 runtime lifecycle repair:** Plan 208's job-specific deadline
   change exposed the wider defect: scheduler/role turn timeouts, worker-local
   profiles, relative I/O budgets and durable attempt deadlines could all kill
