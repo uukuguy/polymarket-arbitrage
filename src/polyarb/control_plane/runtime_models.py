@@ -92,7 +92,14 @@ _DETAIL_CODE_REGISTRIES: dict[str, frozenset[str]] = {
     "data_product": frozenset({"market-snapshot", "structure-sync"}),
     "deadline_kind": frozenset({"attempt", "heartbeat", "lease", "progress"}),
     "failure_signature": frozenset(
-        {"progress.stalled", "service.interrupted", "upstream.timeout", "validation.failed"}
+        {
+            "progress.stalled",
+            "service.interrupted",
+            "upstream.malformed",
+            "upstream.timeout",
+            "upstream.transport",
+            "validation.failed",
+        }
     ),
     "job_type": frozenset(
         {

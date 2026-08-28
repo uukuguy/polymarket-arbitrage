@@ -2307,3 +2307,20 @@ success is not user receipt/read evidence.
   a nonexistent exact ID and confirms the actual pending action remains
   untouched. Exactness now spans fact → decision → schedule → claim →
   execute instead of stopping halfway through the chain.
+
+### §2.60 Circuit identity and interruption are different state dimensions (2026-08-29)
+
+- A durable job key identifies work, not a defect. Production accumulated a
+  mixed Timeout/ValueError sequence into one five-failure streak because the
+  circuit stored only a count. Revision 033 persists a secret-free failure
+  fingerprint and increments only when the new identity matches; a changed
+  identity starts a new streak at one and closes the false circuit.
+- Exception text and provider bodies are not identity material. Workers hash
+  component, exception type and innermost code site; attempts and snapshots
+  expose only the bounded digest and failure taxonomy. Gamma malformed 2xx
+  responses become a body-free typed error instead of an ambiguous ValueError.
+- Service shutdown is lifecycle control, not defect evidence. The fenced
+  interruption transition closes the attempt and makes the same input
+  immediately resumable while preserving, but neither increasing nor erasing,
+  the preceding defect streak. Ordinary defect retry rejects
+  `service.interrupted` so future call sites cannot silently rejoin the models.

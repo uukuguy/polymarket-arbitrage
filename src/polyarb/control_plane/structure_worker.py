@@ -19,6 +19,7 @@ from polyarb.config import Settings
 
 from .alert_delivery import incident_alert_channels
 from .blocking_bridge import run_blocking_call
+from .failure_identity import retry_failure_fingerprint
 from .faults import IntentionalStagingRetryFault
 from .models import JobLease, JobState, StructureRangeSpec
 from .postgres import IncompleteStructureGenerationError, PostgresControlPlane, StaleLeaseError
@@ -354,20 +355,9 @@ class TransactionalStructureWorker:
             return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
         except asyncio.CancelledError:
             await _terminal_to_thread(
-                self._control_plane.finish_retryable_with_incident,
+                self._control_plane.finish_interrupted,
                 runtime.current_lease,
-                error_class="ServiceStopRequested",
-                incident_key=f"incident:job-retry:{lease.job_key}",
-                dedupe_key=f"job-retry:{lease.job_key}",
                 component="structure-normalize",
-                summary="structure-normalize interrupted by service stop",
-                detail={
-                    "job_key": lease.job_key,
-                    "lease_epoch": lease.lease_epoch,
-                    "error_class": "ServiceStopRequested",
-                    "reason_code": "service-stop",
-                },
-                channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
             raise
@@ -387,6 +377,7 @@ class TransactionalStructureWorker:
             raise
         except IntentionalStagingRetryFault as error:
             error_class = type(error).__name__
+            failure_fingerprint = retry_failure_fingerprint(error, component="structure-normalize")
             await _runtime_sync_call_async(
                 runtime,
                 lambda: self._control_plane.finish_retryable_with_incident(
@@ -400,6 +391,7 @@ class TransactionalStructureWorker:
                         "job_key": lease.job_key,
                         "lease_epoch": lease.lease_epoch,
                         "error_class": error_class,
+                        "failure_fingerprint": failure_fingerprint,
                     },
                     channels=incident_alert_channels(Settings()),
                     now=self._now(),
@@ -409,6 +401,7 @@ class TransactionalStructureWorker:
             return StructureWorkerResult(job_key=lease.job_key, outcome="retryable")
         except Exception as error:
             error_class = type(error).__name__
+            failure_fingerprint = retry_failure_fingerprint(error, component="structure-normalize")
             await _runtime_sync_call_async(
                 runtime,
                 lambda: self._control_plane.finish_retryable_with_incident(
@@ -422,6 +415,7 @@ class TransactionalStructureWorker:
                         "job_key": lease.job_key,
                         "lease_epoch": lease.lease_epoch,
                         "error_class": error_class,
+                        "failure_fingerprint": failure_fingerprint,
                     },
                     channels=incident_alert_channels(Settings()),
                     now=self._now(),
@@ -627,6 +621,16 @@ class TransactionalStructureCertifier:
                     job_key=lease.job_key, outcome="certified:recovery-pending"
                 )
             return StructureWorkerResult(job_key=lease.job_key, outcome="certified")
+        except ServiceStopRequested:
+            sync_call(
+                lambda: self._control_plane.finish_interrupted(
+                    runtime.current_lease,
+                    component="structure-certify",
+                    now=self._now(),
+                ),
+                terminal=True,
+            )
+            raise
         except IncompleteStructureGenerationError:
             sync_call(
                 lambda: self._control_plane.finish(
@@ -641,6 +645,7 @@ class TransactionalStructureCertifier:
             raise
         except Exception as error:
             error_class = type(error).__name__
+            failure_fingerprint = retry_failure_fingerprint(error, component="structure-certify")
             sync_call(
                 lambda: self._control_plane.finish_retryable_with_incident(
                     runtime.current_lease,
@@ -653,6 +658,7 @@ class TransactionalStructureCertifier:
                         "job_key": lease.job_key,
                         "lease_epoch": lease.lease_epoch,
                         "error_class": error_class,
+                        "failure_fingerprint": failure_fingerprint,
                     },
                     channels=incident_alert_channels(Settings()),
                     now=self._now(),

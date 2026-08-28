@@ -6727,9 +6727,15 @@ def test_recovery_executor_releases_one_due_circuit_probe(
         )
         connection.execute(
             "INSERT INTO m1_job_circuits "
-            "(job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at) "
-            "VALUES (%s, 3, 'open', %s, %s, %s)",
-            (lease.job_key, now - timedelta(minutes=5), now - timedelta(seconds=1), now),
+            "(job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at, "
+            "failure_fingerprint) VALUES (%s, 3, 'open', %s, %s, %s, %s)",
+            (
+                lease.job_key,
+                now - timedelta(minutes=5),
+                now - timedelta(seconds=1),
+                now,
+                "sha256:" + "0" * 64,
+            ),
         )
     controller = claim_controller(
         control_plane._connection_factory,
@@ -7638,6 +7644,183 @@ def test_retry_circuit_opens_on_third_failure_with_bounded_probe_delay(
     )
     assert released_probe is not None
     assert released_probe.job_key == candidate.target_id
+
+
+def test_retry_circuit_counts_only_consecutive_same_failure_identity(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """Different defects on one job cannot combine into a false circuit trip."""
+    now = _now()
+    job_key = "structure:mixed-failures:fetch:events:0"
+    control_plane.enqueue_job(
+        job_key=job_key,
+        job_type="structure-fetch",
+        input_identity="mixed-failures:events:0:<start>",
+        now=now,
+    )
+    failures = ("TimeoutError", "GammaMalformedResponseError", "TimeoutError")
+    attempted_at = now
+    for attempt, error_class in enumerate(failures, start=1):
+        lease = control_plane.claim_job(
+            worker_id=f"mixed-worker-{attempt}",
+            job_types=("structure-fetch",),
+            lease_seconds=30,
+            now=attempted_at,
+        )
+        assert lease is not None
+        next_attempt_at = control_plane.finish_retryable_with_incident(
+            lease,
+            error_class=error_class,
+            incident_key=f"incident:job-retry:{job_key}",
+            dedupe_key=f"job-retry:{job_key}",
+            component="structure-fetch",
+            summary="structure-fetch retryable failure",
+            detail={"job_key": job_key},
+            channels=("dashboard",),
+            now=attempted_at,
+        )
+        attempted_at = next_attempt_at
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT consecutive_failures, state, failure_fingerprint "
+            "FROM m1_job_circuits WHERE job_key = %s",
+            (job_key,),
+        )
+        row = cursor.fetchone()
+        assert row is not None
+        assert row[0:2] == (1, "closed")
+        assert isinstance(row[2], str) and row[2].startswith("sha256:")
+        cursor.execute(
+            "SELECT error_class, error_detail FROM m1_job_attempts "
+            "WHERE job_key = %s ORDER BY lease_epoch",
+            (job_key,),
+        )
+        attempts = cursor.fetchall()
+        assert [row[0] for row in attempts] == list(failures)
+        for _error_class, error_detail in attempts:
+            assert set(error_detail) == {"failure_fingerprint", "failure_signature"}
+            assert error_detail["failure_fingerprint"].startswith("sha256:")
+
+    snapshot = control_plane.operational_snapshot(now=attempted_at, sample_limit=10)
+    recent = snapshot["recent_attempts"]
+    assert isinstance(recent, list)
+    latest = recent[0]
+    assert latest["error_class"] == "TimeoutError"
+    assert latest["failure_signature"] == "upstream.timeout"
+    assert latest["failure_fingerprint"].startswith("sha256:")
+
+
+def test_retry_circuit_still_opens_for_three_same_failure_identities(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    job_key = "structure:same-failure:fetch:events:0"
+    control_plane.enqueue_job(
+        job_key=job_key,
+        job_type="structure-fetch",
+        input_identity="same-failure:events:0:<start>",
+        now=now,
+    )
+    attempted_at = now
+    for attempt in range(1, 4):
+        lease = control_plane.claim_job(
+            worker_id=f"same-worker-{attempt}",
+            job_types=("structure-fetch",),
+            lease_seconds=30,
+            now=attempted_at,
+        )
+        assert lease is not None
+        attempted_at = control_plane.finish_retryable_with_incident(
+            lease,
+            error_class="UndefinedFunction",
+            incident_key=f"incident:job-retry:{job_key}",
+            dedupe_key=f"job-retry:{job_key}",
+            component="structure-fetch",
+            summary="structure-fetch retryable failure",
+            detail={"job_key": job_key},
+            channels=("dashboard",),
+            now=attempted_at,
+        )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT consecutive_failures, state FROM m1_job_circuits WHERE job_key = %s",
+            (job_key,),
+        )
+        assert cursor.fetchone() == (3, "open")
+
+
+def test_service_interruption_preserves_defect_streak_without_consuming_budget(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """A deploy stop is resumable lifecycle evidence, not another defect."""
+    now = _now()
+    job_key = "structure:interrupted:fetch:events:0"
+    control_plane.enqueue_job(
+        job_key=job_key,
+        job_type="structure-fetch",
+        input_identity="interrupted:events:0:<start>",
+        now=now,
+    )
+    failed = control_plane.claim_job(
+        worker_id="failure-worker",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert failed is not None
+    due_at = control_plane.finish_retryable_with_incident(
+        failed,
+        error_class="TimeoutError",
+        incident_key=f"incident:job-retry:{job_key}",
+        dedupe_key=f"job-retry:{job_key}",
+        component="structure-fetch",
+        summary="structure-fetch retryable failure",
+        detail={"job_key": job_key},
+        channels=("dashboard",),
+        now=now,
+    )
+    interrupted = control_plane.claim_job(
+        worker_id="deploy-stop-worker",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=due_at,
+    )
+    assert interrupted is not None
+
+    resumed_at = control_plane.finish_interrupted(
+        interrupted,
+        component="structure-fetch",
+        now=due_at + timedelta(seconds=1),
+    )
+
+    assert resumed_at == due_at + timedelta(seconds=1)
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT consecutive_failures, state, failure_fingerprint "
+            "FROM m1_job_circuits WHERE job_key = %s",
+            (job_key,),
+        )
+        circuit = cursor.fetchone()
+        assert circuit is not None
+        assert circuit[0:2] == (1, "closed")
+        assert circuit[2].startswith("sha256:")
+        cursor.execute(
+            "SELECT state, error_class, error_detail FROM m1_job_attempts "
+            "WHERE job_key = %s AND lease_epoch = %s",
+            (job_key, interrupted.lease_epoch),
+        )
+        assert cursor.fetchone() == (
+            "retryable",
+            "ServiceStopRequested",
+            {"failure_signature": "service.interrupted"},
+        )
+        cursor.execute(
+            "SELECT COUNT(*) FROM m1_incident_events WHERE incident_key = %s",
+            (f"incident:job-retry:{job_key}",),
+        )
+        assert cursor.fetchone()[0] == 1
 
 
 def test_successful_terminal_job_closes_circuit_and_resolves_retry_incident(

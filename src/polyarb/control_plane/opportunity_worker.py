@@ -11,6 +11,7 @@ from typing import Any, Protocol, cast
 from polyarb.config import Settings
 
 from .alert_delivery import incident_alert_channels
+from .failure_identity import retry_failure_fingerprint
 from .models import JobLease, JobState
 from .opportunity_projection import build_opportunity_rows, parse_quote_batch_bytes
 from .postgres import (
@@ -102,6 +103,16 @@ class TransactionalOpportunityCertifier:
                 quote_generation, structure_generation, batches = (
                     self._control_plane.current_quote_projection_inputs()
                 )
+        except ServiceStopRequested:
+            if runtime is None:
+                self._finish_interrupted(lease)
+            else:
+                _runtime_sync_call(
+                    runtime,
+                    lambda: self._finish_interrupted(runtime.current_lease),
+                    terminal=True,
+                )
+            raise
         except OpportunityProjectionCurrentError:
             if runtime is not None:
                 runtime.progress(stage="publish-opportunity", current=1, total=1)
@@ -275,6 +286,16 @@ class TransactionalOpportunityCertifier:
                             outcome=f"certified:{digest}:recovery-pending",
                         )
             return OpportunityCertifierResult(job_key=lease.job_key, outcome=f"certified:{digest}")
+        except ServiceStopRequested:
+            if runtime is None:
+                self._finish_interrupted(lease)
+            else:
+                _runtime_sync_call(
+                    runtime,
+                    lambda: self._finish_interrupted(runtime.current_lease),
+                    terminal=True,
+                )
+            raise
         except StaleLeaseError:
             raise
         except Exception as error:
@@ -335,7 +356,17 @@ class TransactionalOpportunityCertifier:
                 "job_key": lease.job_key,
                 "lease_epoch": lease.lease_epoch,
                 "error_class": type(error).__name__,
+                "failure_fingerprint": retry_failure_fingerprint(
+                    error, component="opportunity-certify"
+                ),
             },
             channels=incident_alert_channels(Settings()),
+            now=self._now(),
+        )
+
+    def _finish_interrupted(self, lease: JobLease) -> None:
+        self._control_plane.finish_interrupted(
+            lease,
+            component="opportunity-certify",
             now=self._now(),
         )

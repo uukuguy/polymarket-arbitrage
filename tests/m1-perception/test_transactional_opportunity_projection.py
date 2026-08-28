@@ -14,6 +14,7 @@ from polyarb.control_plane.postgres import (
     StaleLeaseError,
 )
 from polyarb.control_plane.quote_artifact import QuoteBatchInputArtifact
+from polyarb.control_plane.runtime_contract import ServiceStopRequested
 
 
 def test_complete_authenticated_quote_group_projects_only_positive_buy_all_edge() -> None:
@@ -195,6 +196,49 @@ def test_opportunity_incomplete_input_uses_durable_retry_circuit() -> None:
     assert result.outcome == "retryable"
     assert control_plane.retry["component"] == "opportunity-certify"
     assert control_plane.retry["error_class"] == "IncompleteQuoteGenerationError"
+
+
+def test_opportunity_service_stop_uses_interruption_not_defect_retry() -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.interruption = None
+
+        def claim_job(self, **_kwargs):
+            return JobLease(
+                job_key="quote:old:opportunity-certify",
+                job_type="opportunity-certify",
+                input_identity="quote:old",
+                lease_owner="opportunity-worker",
+                lease_epoch=4,
+                lease_expires_at=now,
+                checkpoint_cursor=None,
+                checkpoint_digest=None,
+            )
+
+        def finish_interrupted(self, _lease, **kwargs):
+            self.interruption = kwargs
+
+        def finish_retryable_with_incident(self, *_args, **_kwargs):
+            raise AssertionError("service stop must not consume defect retry budget")
+
+    control_plane = ControlPlane()
+    certifier = TransactionalOpportunityCertifier(
+        control_plane=control_plane,
+        object_client=object(),
+        bucket="bucket",
+        now=lambda: now,
+    )
+    certifier.request_stop()
+
+    with pytest.raises(ServiceStopRequested):
+        certifier.run_once()
+
+    assert control_plane.interruption == {
+        "component": "opportunity-certify",
+        "now": now,
+    }
 
 
 def test_certifier_uses_fenced_r2_input_when_postgres_legs_are_compacted() -> None:

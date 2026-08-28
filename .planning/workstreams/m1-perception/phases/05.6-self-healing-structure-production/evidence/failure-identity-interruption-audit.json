@@ -1,0 +1,24 @@
+{
+  "schema": "polyarb.m1.failure-identity-interruption-audit.v1",
+  "observed_production_attempts": [
+    {"lease_epoch": 1, "error_class": "TimeoutError"},
+    {"lease_epoch": 2, "error_class": "ValueError"},
+    {"lease_epoch": 3, "error_class": "TimeoutError"},
+    {"lease_epoch": 4, "error_class": "TimeoutError"},
+    {"lease_epoch": 5, "error_class": "ValueError"}
+  ],
+  "root_causes": [
+    "circuit-count-was-keyed-only-by-job",
+    "service-stop-consumed-defect-budget",
+    "malformed-success-response-lost-typed-safe-metadata"
+  ],
+  "contracts": {
+    "defect_counting": "increment-only-for-equal-failure-fingerprint",
+    "changed_defect": "reset-streak-to-one-and-close-circuit",
+    "service_interruption": "immediate-resume-without-circuit-or-incident-mutation",
+    "diagnostics": "type-signature-and-sha256-only-no-provider-body-or-error-message"
+  },
+  "database_revision": "033",
+  "production_mutation_recorded_by_this_artifact": false,
+  "m1_complete": false
+}

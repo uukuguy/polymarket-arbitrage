@@ -146,7 +146,7 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
     assert checklist["qualification_config_id"] == config_id
     assert checklist["qualification_database_role"] == "qualification_worker"
     assert checklist["runtime_controller_database_role"] == "runtime_controller"
-    assert checklist["database_revision"] == "032"
+    assert checklist["database_revision"] == "033"
     assert checklist["rendered_secret_values"] is False
     assert checklist["cloud_actions_performed"] is False
     assert checklist["steps"] == [

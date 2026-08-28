@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Task 15 controller Machine API lifecycle proof and 120/300/1800 observe gates passed; commit rollout tooling before coordinator canary
-last_updated: "2026-08-29T02:51:00+08:00"
+stopped_at: Plan 210 local failure-identity and interruption repair verified; commit and build revision-033 release before exact source recovery
+last_updated: "2026-08-29T18:30:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,13 +19,12 @@ progress:
 ## Current Position
 
 - **Sole authority:** Supabase project `polyarb` (`lgykffpcsebewvobkbdm`),
-  production Alembic revision `031`, and R2 bucket `polyarb-control-plane`.
+  production Alembic revision `032`, and R2 bucket `polyarb-control-plane`.
   The runtime's durable job, receipt, lease, pointer, evidence, and incident
   facts live there.
 
 - **Transactional collection:** `polyarb-control-worker-m1` has three fixed
-  1GB roles on the current layered runtime image: coordinator `e82d1220b2d138` is
-  deliberately stopped pending Plan 05.6-209 rollout; Structure range worker
+  1GB roles: coordinator `e82d1220b2d138`, Structure range worker
   `683e46ea500dd8`, and Quote batch worker `4d895231f66748`. Fenced Postgres
   leases and idempotent receipts make process replacement safe; Structure and
   Quote are not competing for a local SQLite writer.
@@ -56,26 +55,27 @@ progress:
   roles use hidden secrets and the Supabase IPv4 Session Pooler, not the
   unreachable direct IPv6 database endpoint.
 
-- **Current production boundary:** Production remains revision 031. The exact
-  Task 14 runtime image from commit `282480ec` is pushed to both registries;
-  Fly resolves its amd64 manifest as `sha256:594424ed…d1bc4`. Controller
-  `6e82036dce4958` is started in `ams` on that image, observe-only with an empty
-  recovery allowlist and Machines API `stop_config=SIGTERM/40s`. Task 15 proved
-  the deployment schema boundary: Fly TOML's top-level `kill_signal` /
-  `kill_timeout` must translate to Machine JSON `stop_config`; both CLI and a
-  direct API post of the TOML names returned success but silently persisted
-  null. The new local renderer uses a fresh GET plus optimistic
-  `current_version`; its fresh-GET verifier proved a new instance version,
-  exact image and unchanged Machine ID, region, env, init, guest, metadata and
-  restart policy without emitting env values. Controller lease epoch 12 passed
-  120/300/1,800-second gates, reaching 2,176 seconds and 142 decisions with max
-  gap 31 seconds and zero recovery actions. Fresh Task 15 `make test-m1` passed
-  4,014 tests, one skip and one expected xfail in 1,495.39 seconds without an
-  outer timeout. Coordinator `e82d1220b2d138` and qualification
-  `876077f0274598` remain stopped; Structure `683e46ea500dd8` and Quote
-  `4d895231f66748` remain started on the old digest. Commit the operator rollout
-  contract, then update coordinator → Structure → Quote → qualification using
-  the same renderer/verifier. No recovery action was enabled or executed.
+- **Current production boundary:** Production is revision 032. Controller
+  `6e82036dce4958` and coordinator `e82d1220b2d138` run exact release
+  `814913451581a13b1d3fcb5e13ae90f3116f2e03`; controller is observe-only with
+  an empty allowlist. Structure `683e46ea500dd8`, Quote `4d895231f66748` and
+  qualification `876077f0274598` remain on prior release `282480ec`. Two exact
+  isolated source probes executed only `probe-circuit` for
+  `structure-source:300:5959460:fetch:events:162`; zero publication pointers
+  mutated. The circuit is open after five mixed failures and one manual recovery
+  action remains. Do not execute it until revision 033 and the new coordinator
+  image are live. Every formal Machine retains `SIGTERM/40s`.
+- **Plan 05.6-210 failure identity repair:** an isolated exact source probe
+  succeeded, but its resumed attempt produced a mixed sequence of Timeout and
+  ValueError failures. The old circuit counted all failures on a job as one
+  streak and falsely opened at five. Revision 033 persists a secret-free
+  failure fingerprint and increments only an equal identity; changed roots
+  reset to one. Gamma malformed success responses are typed without provider
+  bodies. Service stops now use a separate fenced interruption transition and
+  cannot consume defect budget. Fresh local M1 proof is 4,027 passed, one skip,
+  one expected xfail in 1,611.78 seconds. Production has not received revision
+  033 or the new executable bytes; controller remains observe-only and the
+  final source recovery budget is deliberately unspent.
 - **Plan 05.6-209 runtime lifecycle repair:** Plan 208's job-specific deadline
   change exposed the wider defect: scheduler/role turn timeouts, worker-local
   profiles, relative I/O budgets and durable attempt deadlines could all kill
@@ -325,14 +325,13 @@ progress:
 
 ## Resume
 
-1. Finish Plan `05.6-209` climb/planning/static gates, commit the probe-release
-   retry authority repair, then build and verify a superseding exact amd64 image.
-2. Canary only the unchanged controller; after active role verification and a
-   new lease epoch succeed, run the full 1,800/90/90 observe-only replay gate.
-3. Roll coordinator → Structure → Quote → qualification sequentially on
-   the same Machine IDs. Prove `structure-certify` passes range 300 in one lease and reaches terminal
-   success; then verify fresh Structure, Quote, and opportunity observations and
-   a new accumulating epoch with zero recovery actions.
+1. Commit Plan `05.6-210`, build and verify the exact revision-033 amd64 image.
+2. Apply revision 033 transactionally, update coordinator, then spend the final
+   exact source probe only against the pinned source job/action. Restore the
+   controller to observe-only with an empty allowlist.
+3. Roll Structure, Quote and qualification sequentially on the same Machine
+   IDs. Prove source, Structure, Quote and opportunity publications advance and
+   a new accumulating epoch starts with no false circuit trip.
 4. After the new epoch reaches 86,400 continuous seconds, run
    `make qualification-certificates` and
    independently reverify the immutable certificate before marking Phase 05.6

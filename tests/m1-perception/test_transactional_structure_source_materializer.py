@@ -49,6 +49,7 @@ class FakeControlPlane:
         self.pages = pages
         self.admitted: dict[str, object] | None = None
         self.retry_incidents: list[dict[str, object]] = []
+        self.interruptions: list[dict[str, object]] = []
         self.recoveries: list[dict[str, object]] = []
         self.checkpoints: list[dict[str, object]] = []
         self.runtime_progress: list[dict[str, object]] = []
@@ -84,6 +85,9 @@ class FakeControlPlane:
 
     def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
         self.retry_incidents.append(kwargs)
+
+    def finish_interrupted(self, lease: JobLease, **kwargs: object) -> None:
+        self.interruptions.append(kwargs)
 
     def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
         self.recoveries.append(kwargs)
@@ -141,9 +145,7 @@ def test_final_shard_manifest_recovery_failure_is_not_retried_after_admission() 
     shard_receipts: list[StructureShardReceipt] = []
     objects = MemoryR2(pages)
     for page in pages:
-        for component, artifact in materialize_event_page_shards(
-            page, source_digest=source_digest
-        ):
+        for component, artifact in materialize_event_page_shards(page, source_digest=source_digest):
             objects.objects[artifact.key] = artifact.payload
             shard_receipts.append(
                 StructureShardReceipt(
@@ -404,7 +406,9 @@ def test_materializer_records_retry_incident_when_sealed_page_is_unavailable() -
 
     assert control_plane.retry_incidents[0]["component"] == "structure-materialize"
     assert control_plane.retry_incidents[0]["detail"]["lease_epoch"] == 1
-    assert isinstance(control_plane.retry_incidents[0]["detail"]["error_message"], str)
+    detail = control_plane.retry_incidents[0]["detail"]
+    assert detail["failure_fingerprint"].startswith("sha256:")
+    assert "error_message" not in detail
 
 
 def test_event_only_materializer_checkpoints_one_bounded_shard_batch() -> None:

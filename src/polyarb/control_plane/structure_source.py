@@ -18,6 +18,7 @@ from polyarb.snapshot.normalizer import normalize_events, normalize_market
 from .alert_delivery import incident_alert_channels
 from .blocking_bridge import run_blocking_call, run_blocking_call_with_timeout
 from .db_deadlines import CONTROL_PLANE_DB_POLICY
+from .failure_identity import retry_failure_fingerprint
 from .models import StructureSourcePageSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .runtime_contract import AsyncAttemptRuntime
@@ -682,20 +683,9 @@ class TransactionalStructureSourceWorker:
                 return await self._run_claimed(runtime)
         except asyncio.CancelledError:
             await _terminal_to_thread(
-                self._control_plane.finish_retryable_with_incident,
+                self._control_plane.finish_interrupted,
                 runtime.current_lease,
-                error_class="ServiceStopRequested",
-                incident_key=f"incident:job-retry:{lease.job_key}",
-                dedupe_key=f"job-retry:{lease.job_key}",
                 component="structure-fetch",
-                summary="structure-fetch interrupted by service stop",
-                detail={
-                    "job_key": lease.job_key,
-                    "lease_epoch": lease.lease_epoch,
-                    "error_class": "ServiceStopRequested",
-                    "reason_code": "service-stop",
-                },
-                channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
             raise
@@ -753,6 +743,9 @@ class TransactionalStructureSourceWorker:
                     "job_key": lease.job_key,
                     "lease_epoch": lease.lease_epoch,
                     "error_class": type(error).__name__,
+                    "failure_fingerprint": retry_failure_fingerprint(
+                        error, component="structure-fetch"
+                    ),
                 },
                 channels=incident_alert_channels(Settings()),
                 now=self._now(),
@@ -1026,20 +1019,9 @@ class TransactionalStructureSourceMaterializer:
                 return await self._run_claimed(runtime)
         except asyncio.CancelledError:
             await _terminal_to_thread(
-                self._control_plane.finish_retryable_with_incident,
+                self._control_plane.finish_interrupted,
                 runtime.current_lease,
-                error_class="ServiceStopRequested",
-                incident_key=f"incident:job-retry:{lease.job_key}",
-                dedupe_key=f"job-retry:{lease.job_key}",
                 component="structure-materialize",
-                summary="structure-materialize interrupted by service stop",
-                detail={
-                    "job_key": lease.job_key,
-                    "lease_epoch": lease.lease_epoch,
-                    "error_class": "ServiceStopRequested",
-                    "reason_code": "service-stop",
-                },
-                channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
             raise
@@ -1058,7 +1040,9 @@ class TransactionalStructureSourceMaterializer:
                     "job_key": lease.job_key,
                     "lease_epoch": lease.lease_epoch,
                     "error_class": type(error).__name__,
-                    "error_message": str(error)[:200],
+                    "failure_fingerprint": retry_failure_fingerprint(
+                        error, component="structure-materialize"
+                    ),
                 },
                 channels=incident_alert_channels(Settings()),
                 now=self._now(),

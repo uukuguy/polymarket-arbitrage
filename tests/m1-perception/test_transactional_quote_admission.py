@@ -218,6 +218,7 @@ class _ControlPlane:
         self.admitted: dict[str, object] | None = None
         self.finished: list[JobState] = []
         self.retry_incidents: list[dict[str, object]] = []
+        self.interruptions: list[dict[str, object]] = []
         self.recoveries: list[dict[str, object]] = []
         self.recovery_leases: list[JobLease] = []
         self.heartbeats: list[datetime] = []
@@ -303,6 +304,9 @@ class _ControlPlane:
 
     def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
         self.retry_incidents.append(kwargs)
+
+    def finish_interrupted(self, lease: JobLease, **kwargs: object) -> None:
+        self.interruptions.append(kwargs)
 
     def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
         now = kwargs.get("now")
@@ -623,9 +627,8 @@ def test_quote_admitter_external_cancellation_drains_blocking_read_before_return
 
     asyncio.run(exercise())
     assert control_plane.admitted is None
-    assert len(control_plane.retry_incidents) == 1
-    assert control_plane.retry_incidents[0]["error_class"] == "ServiceStopRequested"
-    assert control_plane.retry_incidents[0]["detail"]["reason_code"] == "service-stop"
+    assert control_plane.retry_incidents == []
+    assert control_plane.interruptions == [{"component": "quote-admit", "now": NOW}]
     assert control_plane.recoveries == []
 
 
@@ -977,7 +980,9 @@ def test_quote_admitter_retries_without_batches_when_bundle_digest_is_wrong() ->
         "job_key": "structure:digest:quote-admit",
         "lease_epoch": 1,
         "error_class": "StructureBundleError",
+        "failure_fingerprint": control_plane.retry_incidents[0]["detail"]["failure_fingerprint"],
     }
+    assert control_plane.retry_incidents[0]["detail"]["failure_fingerprint"].startswith("sha256:")
     assert objects.puts == []
 
 

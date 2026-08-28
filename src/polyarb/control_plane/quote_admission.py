@@ -15,6 +15,7 @@ from polyarb.config import Settings
 
 from .alert_delivery import incident_alert_channels
 from .blocking_bridge import run_blocking_call
+from .failure_identity import retry_failure_fingerprint
 from .models import QuoteBatchLeg, QuoteBatchSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .quote_artifact import QuoteBatchInputArtifact, upload_quote_batch_artifact
@@ -337,20 +338,9 @@ class TransactionalQuoteAdmitter:
                 return await self._run_claimed(runtime)
         except asyncio.CancelledError:
             await _terminal_to_thread(
-                self._control_plane.finish_retryable_with_incident,
+                self._control_plane.finish_interrupted,
                 runtime.current_lease,
-                error_class="ServiceStopRequested",
-                incident_key=f"incident:job-retry:{lease.job_key}",
-                dedupe_key=f"job-retry:{lease.job_key}",
                 component="quote-admit",
-                summary="quote-admit interrupted by service stop",
-                detail={
-                    "job_key": lease.job_key,
-                    "lease_epoch": lease.lease_epoch,
-                    "error_class": "ServiceStopRequested",
-                    "reason_code": "service-stop",
-                },
-                channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
             raise
@@ -369,6 +359,9 @@ class TransactionalQuoteAdmitter:
                     "job_key": lease.job_key,
                     "lease_epoch": lease.lease_epoch,
                     "error_class": type(error).__name__,
+                    "failure_fingerprint": retry_failure_fingerprint(
+                        error, component="quote-admit"
+                    ),
                 },
                 channels=incident_alert_channels(Settings()),
                 now=self._now(),

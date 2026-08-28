@@ -18,6 +18,7 @@ import respx
 
 from polyarb.clients.gamma_client import (
     GammaClient,
+    GammaMalformedResponseError,
     PaginationCoverage,
     PaginationCursorRejectedError,
     PaginationIntegrityError,
@@ -69,6 +70,29 @@ def _market_page(markets: list[dict], next_cursor: str | None = None) -> dict:
 
 def _event_page(events: list[dict], next_cursor: str | None = None) -> dict:
     return {"events": events, "next_cursor": next_cursor}
+
+
+async def test_malformed_success_body_is_typed_without_exposing_body() -> None:
+    settings = _fast_settings().model_copy(update={"retry_attempts": 1})
+    secret_marker = "provider-body-must-not-escape"
+    with respx.mock(base_url=settings.gamma_url, assert_all_called=True) as router:
+        route = router.get("/events/keyset").mock(
+            return_value=httpx.Response(
+                200,
+                text=f"not-json:{secret_marker}",
+                headers={"content-type": "text/html; charset=utf-8"},
+            )
+        )
+        async with GammaClient(settings) as client:
+            with pytest.raises(GammaMalformedResponseError) as raised:
+                await client.fetch_active_event_page(None, 100)
+
+    assert raised.value.status_code == 200
+    assert raised.value.content_type == "text/html"
+    assert raised.value.body_bytes > 0
+    assert secret_marker not in str(raised.value)
+    assert secret_marker not in repr(raised.value)
+    assert route.call_count == 1
 
 
 async def test_fetch_markets_by_ids_rejects_missing_or_unknown_response_ids() -> None:

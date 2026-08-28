@@ -18,6 +18,7 @@ from polyarb.routing.neg_risk_quote_store import UniverseLeg
 
 from .alert_delivery import incident_alert_channels
 from .blocking_bridge import run_blocking_call
+from .failure_identity import retry_failure_fingerprint
 from .faults import IntentionalStagingRetryFault
 from .models import JobLease, JobState, QuoteBatchSpec
 from .postgres import (
@@ -363,20 +364,9 @@ class TransactionalQuoteBatchWorker:
                 )
         except asyncio.CancelledError:
             await _terminal_to_thread(
-                self._control_plane.finish_retryable_with_incident,
+                self._control_plane.finish_interrupted,
                 runtime.current_lease,
-                error_class="ServiceStopRequested",
-                incident_key=f"incident:job-retry:{lease.job_key}",
-                dedupe_key=f"job-retry:{lease.job_key}",
                 component="quote-batch",
-                summary="quote-batch interrupted by service stop",
-                detail={
-                    "job_key": lease.job_key,
-                    "lease_epoch": lease.lease_epoch,
-                    "error_class": "ServiceStopRequested",
-                    "reason_code": "service-stop",
-                },
-                channels=incident_alert_channels(Settings()),
                 now=self._now(),
             )
             raise
@@ -571,8 +561,28 @@ class TransactionalQuoteCertifier:
                 )
             del recovery
             return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="certified")
+        except ServiceStopRequested:
+            current_lease = lease if runtime is None else runtime.current_lease
+            if runtime is None:
+                self._control_plane.finish_interrupted(
+                    current_lease,
+                    component="quote-certify",
+                    now=self._now(),
+                )
+            else:
+                _runtime_sync_call(
+                    runtime,
+                    lambda: self._control_plane.finish_interrupted(
+                        current_lease,
+                        component="quote-certify",
+                        now=self._now(),
+                    ),
+                    terminal=True,
+                )
+            raise
         except IncompleteQuoteGenerationError as error:
             failure_class = type(error).__name__
+            failure_fingerprint = retry_failure_fingerprint(error, component="quote-certify")
             current_lease = lease if runtime is None else runtime.current_lease
             if runtime is None:
                 self._control_plane.finish_retryable_with_incident(
@@ -586,6 +596,7 @@ class TransactionalQuoteCertifier:
                         "job_key": lease.job_key,
                         "lease_epoch": lease.lease_epoch,
                         "error_class": failure_class,
+                        "failure_fingerprint": failure_fingerprint,
                     },
                     channels=incident_alert_channels(Settings()),
                     now=self._now(),
@@ -604,6 +615,7 @@ class TransactionalQuoteCertifier:
                             "job_key": lease.job_key,
                             "lease_epoch": lease.lease_epoch,
                             "error_class": failure_class,
+                            "failure_fingerprint": failure_fingerprint,
                         },
                         channels=incident_alert_channels(Settings()),
                         now=self._now(),
@@ -615,6 +627,7 @@ class TransactionalQuoteCertifier:
             raise
         except Exception as error:
             failure_class = type(error).__name__
+            failure_fingerprint = retry_failure_fingerprint(error, component="quote-certify")
             current_lease = lease if runtime is None else runtime.current_lease
             if runtime is None:
                 self._control_plane.finish_retryable_with_incident(
@@ -628,6 +641,7 @@ class TransactionalQuoteCertifier:
                         "job_key": lease.job_key,
                         "lease_epoch": lease.lease_epoch,
                         "error_class": type(error).__name__,
+                        "failure_fingerprint": failure_fingerprint,
                     },
                     channels=incident_alert_channels(Settings()),
                     now=self._now(),
@@ -646,6 +660,7 @@ class TransactionalQuoteCertifier:
                             "job_key": lease.job_key,
                             "lease_epoch": lease.lease_epoch,
                             "error_class": failure_class,
+                            "failure_fingerprint": failure_fingerprint,
                         },
                         channels=incident_alert_channels(Settings()),
                         now=self._now(),

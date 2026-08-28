@@ -14,8 +14,9 @@ F-2 SECURITY:
   will trigger a ``PaginationIntegrityError`` instead of OOMing.
 
 F-6 SECURITY (NON-RETRY POLICY):
-- ``json.JSONDecodeError`` raised at the httpx boundary is intentionally
-  NOT in ``retry_if_exception_type`` and propagates directly. Rationale:
+- malformed JSON raised at the httpx boundary is wrapped in a bounded,
+  body-free ``GammaMalformedResponseError``. It is intentionally NOT in
+  ``retry_if_exception_type``. Rationale:
   a 200 with malformed JSON usually indicates CDN/cache misconfiguration,
   not transient network — retrying is unlikely to help and burns time.
   The orchestrator (Plan 4) categorizes the propagated exception as
@@ -34,8 +35,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -116,6 +118,25 @@ class PaginationCursorRejectedError(RuntimeError):
         super().__init__(f"{source}-cursor-rejected-{status_code}")
 
 
+class GammaMalformedResponseError(RuntimeError):
+    """A successful Gamma response could not be decoded as JSON.
+
+    Only bounded transport metadata is retained.  Provider bodies can contain
+    arbitrary upstream text and must never enter logs, incidents, or durable
+    runtime evidence.
+    """
+
+    def __init__(self, *, status_code: int, content_type: str, body_bytes: int) -> None:
+        self.status_code = status_code
+        self.content_type = content_type.split(";", 1)[0].strip().casefold()
+        self.body_bytes = body_bytes
+        super().__init__(
+            "gamma-malformed-json-response:"
+            f"status={status_code}:content_type={self.content_type or 'missing'}:"
+            f"body_bytes={body_bytes}"
+        )
+
+
 class GammaClient:
     """Async client for Polymarket's Gamma metadata REST API.
 
@@ -183,7 +204,7 @@ class GammaClient:
     async def _get(
         self,
         path: str,
-        params: dict | list[tuple[str, str]],
+        params: Mapping[str, object] | Sequence[tuple[str, str]],
     ) -> list[dict] | dict:
         """Single GET with retry policy.
 
@@ -192,7 +213,7 @@ class GammaClient:
 
         Does NOT retry:
         - 4xx other than 429 (raised as ``_NonRetryableHTTPError``)
-        - ``json.JSONDecodeError`` (propagates — orchestrator classifies)
+        - malformed JSON (wrapped without the provider body)
         """
         s = self._settings
         url = f"{s.gamma_url}{path}"
@@ -207,7 +228,7 @@ class GammaClient:
         ):
             with attempt:
                 async with self._limiter:
-                    r = await self._http.get(url, params=params)
+                    r = await self._http.get(url, params=cast(Any, params))
                     # Pre-classify 4xx (non-429) so tenacity does NOT retry them.
                     if 400 <= r.status_code < 500 and r.status_code != 429:
                         try:
@@ -218,7 +239,14 @@ class GammaClient:
                                 f"non-retryable {r.status_code} from {url}"
                             ) from e
                     r.raise_for_status()
-                    return r.json()
+                    try:
+                        return r.json()
+                    except ValueError as error:
+                        raise GammaMalformedResponseError(
+                            status_code=r.status_code,
+                            content_type=r.headers.get("content-type", ""),
+                            body_bytes=len(r.content),
+                        ) from error
 
         # Unreachable: AsyncRetrying with reraise=True will raise from .with()
         # block above. Mypy/pyright happiness only.
@@ -479,7 +507,7 @@ class GammaClient:
     async def fetch_market_parent_states(
         self,
         market_groups: dict[str, str],
-    ) -> dict[str, dict[str, str | bool]]:
+    ) -> dict[str, dict[str, str | bool | None]]:
         """Resolve nested parent-event truth for unattached neg-risk markets.
 
         ``/markets/{id}`` omits nested events, while the exact-id list endpoint
@@ -505,7 +533,7 @@ class GammaClient:
 
         async def fetch_batch(
             batch: list[tuple[str, str]],
-        ) -> dict[str, dict[str, object]]:
+        ) -> dict[str, dict[str, str | bool | None]]:
             expected_groups = dict(batch)
             expected_ids = set(expected_groups)
             payload = await self._get(
@@ -528,7 +556,7 @@ class GammaClient:
                     "/markets exact-id parent response identity set mismatch"
                 )
 
-            batch_states: dict[str, dict[str, object]] = {}
+            batch_states: dict[str, dict[str, str | bool | None]] = {}
             missing_ids = sorted(expected_ids - set(response_ids))
             if missing_ids:
                 point_states = await self.fetch_market_states(missing_ids)
@@ -591,7 +619,7 @@ class GammaClient:
             items[start : start + self.MARKET_PARENT_LOOKUP_BATCH_SIZE]
             for start in range(0, len(items), self.MARKET_PARENT_LOOKUP_BATCH_SIZE)
         ]
-        states: dict[str, dict[str, object]] = {}
+        states: dict[str, dict[str, str | bool | None]] = {}
         for start in range(0, len(batches), self.MAX_CONCURRENT_PARENT_LOOKUPS):
             wave = batches[start : start + self.MAX_CONCURRENT_PARENT_LOOKUPS]
             for batch_states in await asyncio.gather(*(fetch_batch(batch) for batch in wave)):

@@ -89,6 +89,40 @@ class RuntimeEventConflictError(ControlPlaneError):
     """Runtime event idempotency or sequence was reused for different data."""
 
 
+_FAILURE_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _retry_failure_signature(error_class: str) -> str:
+    """Map a bounded exception identity to the durable failure taxonomy."""
+    normalized = error_class.casefold()
+    if "timeout" in normalized or "deadline" in normalized:
+        return "upstream.timeout"
+    if "progress" in normalized or "stalled" in normalized:
+        return "progress.stalled"
+    if "service" in normalized or "cancel" in normalized:
+        return "service.interrupted"
+    if "malformedresponse" in normalized or "jsondecode" in normalized:
+        return "upstream.malformed"
+    if any(part in normalized for part in ("transport", "network", "connect", "http")):
+        return "upstream.transport"
+    return "validation.failed"
+
+
+def _retry_failure_identity(
+    *, component: str, error_class: str, detail: Mapping[str, object]
+) -> tuple[str, str]:
+    """Return a secret-free stable identity and its coarse failure signature."""
+    supplied = detail.get("failure_fingerprint")
+    if supplied is not None:
+        if type(supplied) is not str or _FAILURE_FINGERPRINT_RE.fullmatch(supplied) is None:
+            raise ValueError("failure_fingerprint must be a sha256 identity")
+        fingerprint = supplied
+    else:
+        digest = sha256(f"{component}\0{error_class}".encode()).hexdigest()
+        fingerprint = f"sha256:{digest}"
+    return fingerprint, _retry_failure_signature(error_class)
+
+
 class RuntimeProgressConflictError(ControlPlaneError):
     """Runtime progress did not strictly advance the current attempt."""
 
@@ -315,12 +349,12 @@ SELECT
      WHERE state = 'leased' AND lease_expires_at <= s.observed_at) AS expired_leases,
     (SELECT count(*) FROM m1_job_circuits WHERE state = 'open') AS open_circuit_count,
     COALESCE((SELECT jsonb_agg(to_jsonb(circuit_row)) FROM (
-        SELECT job_key, consecutive_failures, next_probe_at
+        SELECT job_key, consecutive_failures, next_probe_at, failure_fingerprint
         FROM m1_job_circuits WHERE state = 'open'
         ORDER BY updated_at DESC, job_key DESC LIMIT {sample_limit}
     ) circuit_row), '[]'::jsonb) AS open_circuits,
     COALESCE((SELECT jsonb_agg(to_jsonb(attempt_row)) FROM (
-        SELECT job_key, lease_epoch, worker_id, state
+        SELECT job_key, lease_epoch, worker_id, state, error_class, error_detail
         FROM m1_job_attempts ORDER BY started_at DESC, attempt_id DESC
         LIMIT {sample_limit}
     ) attempt_row), '[]'::jsonb) AS attempts,
@@ -3192,19 +3226,17 @@ class PostgresControlPlane:
                 stage=stage,
             )
         )
-        normalized_error = error_class.casefold()
-        if "timeout" in normalized_error or "deadline" in normalized_error:
-            failure_signature = "upstream.timeout"
+        failure_signature = _retry_failure_signature(error_class)
+        interrupted = failure_signature == "service.interrupted"
+        if failure_signature == "upstream.timeout":
             reason_code = "timeout"
-        elif "progress" in normalized_error or "stalled" in normalized_error:
-            failure_signature = "progress.stalled"
+        elif failure_signature == "progress.stalled":
             reason_code = "invalid-input"
-        elif "service" in normalized_error or "cancel" in normalized_error:
-            failure_signature = "service.interrupted"
+        elif failure_signature == "service.interrupted":
             reason_code = "service-stop"
         else:
-            failure_signature = "validation.failed"
             reason_code = "invalid-input"
+        recovery_policy = "retry-same-input" if interrupted else "exponential-backoff"
         attempt_id = str(state["attempt_id"])
         cursor.execute(
             """
@@ -3235,7 +3267,7 @@ class PostgresControlPlane:
                         "failure_signature": failure_signature,
                         "qualification_impact": "delayed",
                         "reason_code": reason_code,
-                        "recovery_policy": "exponential-backoff",
+                        "recovery_policy": recovery_policy,
                         "retry_count": retry_count,
                     },
                     occurred_at=now,
@@ -3257,7 +3289,7 @@ class PostgresControlPlane:
                         "backoff_seconds": backoff_seconds,
                         "next_decision_at": next_attempt_at.isoformat(),
                         "reason_code": reason_code,
-                        "recovery_policy": "exponential-backoff",
+                        "recovery_policy": recovery_policy,
                         "retry_count": retry_count,
                     },
                     occurred_at=now,
@@ -5394,6 +5426,13 @@ class PostgresControlPlane:
             raise ValueError("channels must contain non-empty values")
         if len(set(channels)) != len(channels):
             raise ValueError("channels must be unique")
+        failure_fingerprint, failure_signature = _retry_failure_identity(
+            component=component,
+            error_class=error_class,
+            detail=detail,
+        )
+        if failure_signature == "service.interrupted":
+            raise ValueError("service interruption must use finish_interrupted")
         _set_fenced_transaction_timeouts(
             cursor,
             lease=lease,
@@ -5402,32 +5441,45 @@ class PostgresControlPlane:
         )
         cursor.execute(
             """
-            SELECT consecutive_failures, state, opened_at
+            SELECT consecutive_failures, state, opened_at, failure_fingerprint
             FROM public.m1_job_circuits WHERE job_key = %s FOR UPDATE
             """,
             (lease.job_key,),
         )
         circuit = cursor.fetchone()
-        failures = (0 if circuit is None else int(circuit["consecutive_failures"])) + 1
+        previous_opened_at = None
+        if circuit is not None and str(circuit["failure_fingerprint"]) == failure_fingerprint:
+            failures = int(circuit["consecutive_failures"]) + 1
+            previous_opened_at = circuit["opened_at"]
+        else:
+            failures = 1
         retry_policy = runtime_retry_policy(component)
         retry_budget = retry_policy.retry_budget
         delay_seconds = retry_policy.retry_backoff_seconds(failures)
         next_attempt_at = now + timedelta(seconds=delay_seconds)
         circuit_state = "open" if failures >= retry_budget else "closed"
-        opened_at = (
-            now if failures == retry_budget else (None if circuit is None else circuit["opened_at"])
-        )
+        opened_at = now if failures == retry_budget else previous_opened_at
         cursor.execute(
             """
             INSERT INTO public.m1_job_circuits (
-                job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s)
+                job_key, consecutive_failures, state, opened_at, next_probe_at,
+                updated_at, failure_fingerprint
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (job_key) DO UPDATE
             SET consecutive_failures = EXCLUDED.consecutive_failures,
                 state = EXCLUDED.state, opened_at = EXCLUDED.opened_at,
-                next_probe_at = EXCLUDED.next_probe_at, updated_at = EXCLUDED.updated_at
+                next_probe_at = EXCLUDED.next_probe_at, updated_at = EXCLUDED.updated_at,
+                failure_fingerprint = EXCLUDED.failure_fingerprint
             """,
-            (lease.job_key, failures, circuit_state, opened_at, next_attempt_at, now),
+            (
+                lease.job_key,
+                failures,
+                circuit_state,
+                opened_at,
+                next_attempt_at,
+                now,
+                failure_fingerprint,
+            ),
         )
         self._append_retry_runtime_events_cursor(
             cursor,
@@ -5461,10 +5513,22 @@ class PostgresControlPlane:
         cursor.execute(
             """
             UPDATE public.m1_job_attempts
-            SET state = 'retryable', finished_at = %s, error_class = %s
+            SET state = 'retryable', finished_at = %s, error_class = %s,
+                error_detail = %s
             WHERE job_key = %s AND lease_epoch = %s
             """,
-            (now, error_class, lease.job_key, lease.lease_epoch),
+            (
+                now,
+                error_class,
+                Jsonb(
+                    {
+                        "failure_fingerprint": failure_fingerprint,
+                        "failure_signature": failure_signature,
+                    }
+                ),
+                lease.job_key,
+                lease.lease_epoch,
+            ),
         )
         kind = (
             "circuit-opened"
@@ -5481,6 +5545,8 @@ class PostgresControlPlane:
             kind=kind,
             detail={
                 **detail,
+                "failure_fingerprint": failure_fingerprint,
+                "failure_signature": failure_signature,
                 "consecutive_failures": failures,
                 "circuit_state": circuit_state,
                 "next_probe_at": next_attempt_at.isoformat(),
@@ -6261,6 +6327,61 @@ class PostgresControlPlane:
                 (state.value, now, error_class, lease.job_key, lease.lease_epoch),
             )
 
+    def finish_interrupted(
+        self,
+        lease: JobLease,
+        *,
+        component: str,
+        now: datetime,
+    ) -> datetime:
+        """Release a stopped attempt for immediate resume without defect accounting."""
+        self._validate_aware(now, "now")
+        self._validate_nonempty(component=component)
+        runtime_retry_policy(component)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+            self._append_retry_runtime_events_cursor(
+                cursor,
+                lease=lease,
+                component=component,
+                error_class="ServiceStopRequested",
+                retry_count=0,
+                backoff_seconds=0,
+                next_attempt_at=now,
+                now=now,
+            )
+            cursor.execute(
+                """
+                UPDATE m1_jobs
+                SET state = 'retryable', next_attempt_at = %s,
+                    last_error_class = 'ServiceStopRequested',
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = %s
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+                  AND state IN ('leased', 'checkpointed')
+                """,
+                (now, now, lease.job_key, lease.lease_owner, lease.lease_epoch),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            cursor.execute(
+                """
+                UPDATE m1_job_attempts
+                SET state = 'retryable', finished_at = %s,
+                    error_class = 'ServiceStopRequested', error_detail = %s
+                WHERE job_key = %s AND lease_epoch = %s
+                """,
+                (
+                    now,
+                    Jsonb({"failure_signature": "service.interrupted"}),
+                    lease.job_key,
+                    lease.lease_epoch,
+                ),
+            )
+        return now
+
     def record_incident_event(
         self,
         *,
@@ -6334,6 +6455,13 @@ class PostgresControlPlane:
             raise ValueError("channels must contain non-empty values")
         if len(set(channels)) != len(channels):
             raise ValueError("channels must be unique")
+        failure_fingerprint, failure_signature = _retry_failure_identity(
+            component=component,
+            error_class=error_class,
+            detail=detail,
+        )
+        if failure_signature == "service.interrupted":
+            raise ValueError("service interruption must use finish_interrupted")
         with (
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
@@ -6341,34 +6469,45 @@ class PostgresControlPlane:
             _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
             cursor.execute(
                 """
-                SELECT consecutive_failures, state, opened_at
+                SELECT consecutive_failures, state, opened_at, failure_fingerprint
                 FROM m1_job_circuits WHERE job_key = %s FOR UPDATE
                 """,
                 (lease.job_key,),
             )
             circuit = cursor.fetchone()
-            failures = (0 if circuit is None else int(circuit["consecutive_failures"])) + 1
+            previous_opened_at = None
+            if circuit is not None and str(circuit["failure_fingerprint"]) == failure_fingerprint:
+                failures = int(circuit["consecutive_failures"]) + 1
+                previous_opened_at = circuit["opened_at"]
+            else:
+                failures = 1
             retry_policy = runtime_retry_policy(component)
             retry_budget = retry_policy.retry_budget
             delay_seconds = retry_policy.retry_backoff_seconds(failures)
             next_attempt_at = now + timedelta(seconds=delay_seconds)
             circuit_state = "open" if failures >= retry_budget else "closed"
-            opened_at = (
-                now
-                if failures == retry_budget
-                else (None if circuit is None else circuit["opened_at"])
-            )
+            opened_at = now if failures == retry_budget else previous_opened_at
             cursor.execute(
                 """
                 INSERT INTO m1_job_circuits (
-                    job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s)
+                    job_key, consecutive_failures, state, opened_at, next_probe_at,
+                    updated_at, failure_fingerprint
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (job_key) DO UPDATE
                 SET consecutive_failures = EXCLUDED.consecutive_failures,
                     state = EXCLUDED.state, opened_at = EXCLUDED.opened_at,
-                    next_probe_at = EXCLUDED.next_probe_at, updated_at = EXCLUDED.updated_at
+                    next_probe_at = EXCLUDED.next_probe_at, updated_at = EXCLUDED.updated_at,
+                    failure_fingerprint = EXCLUDED.failure_fingerprint
                 """,
-                (lease.job_key, failures, circuit_state, opened_at, next_attempt_at, now),
+                (
+                    lease.job_key,
+                    failures,
+                    circuit_state,
+                    opened_at,
+                    next_attempt_at,
+                    now,
+                    failure_fingerprint,
+                ),
             )
             self._append_retry_runtime_events_cursor(
                 cursor,
@@ -6402,10 +6541,22 @@ class PostgresControlPlane:
             cursor.execute(
                 """
                 UPDATE m1_job_attempts
-                SET state = 'retryable', finished_at = %s, error_class = %s
+                SET state = 'retryable', finished_at = %s, error_class = %s,
+                    error_detail = %s
                 WHERE job_key = %s AND lease_epoch = %s
                 """,
-                (now, error_class, lease.job_key, lease.lease_epoch),
+                (
+                    now,
+                    error_class,
+                    Jsonb(
+                        {
+                            "failure_fingerprint": failure_fingerprint,
+                            "failure_signature": failure_signature,
+                        }
+                    ),
+                    lease.job_key,
+                    lease.lease_epoch,
+                ),
             )
             kind = (
                 "circuit-opened"
@@ -6422,6 +6573,8 @@ class PostgresControlPlane:
                 kind=kind,
                 detail={
                     **detail,
+                    "failure_fingerprint": failure_fingerprint,
+                    "failure_signature": failure_signature,
                     "job_key": lease.job_key,
                     "stage": detail.get("stage", component),
                     "error_class": error_class,
@@ -6574,7 +6727,7 @@ class PostgresControlPlane:
                 """
                 UPDATE m1_job_circuits
                 SET consecutive_failures = 0, state = 'closed', opened_at = NULL,
-                    next_probe_at = NULL, updated_at = %s
+                    next_probe_at = NULL, updated_at = %s, failure_fingerprint = NULL
                 WHERE job_key = %s
                 """,
                 (now, lease.job_key),
@@ -6950,19 +7103,32 @@ class PostgresControlPlane:
                     row["consecutive_failures"], "consecutive_failures"
                 ),
                 "next_probe_at": _snapshot_aware(row["next_probe_at"], "next_probe_at").isoformat(),
+                "failure_fingerprint": _snapshot_text(
+                    row["failure_fingerprint"], "failure_fingerprint"
+                ),
             }
             for row in open_circuit_rows
         ]
         attempt_rows = _snapshot_rows(snapshot_row["attempts"], "attempts")
-        attempts = [
-            {
+        attempts = []
+        for row in attempt_rows:
+            attempt: dict[str, object] = {
                 "job_key": _snapshot_text(row["job_key"], "job_key"),
                 "lease_epoch": _snapshot_int(row["lease_epoch"], "lease_epoch"),
                 "worker_id": _snapshot_text(row["worker_id"], "worker_id"),
                 "state": _snapshot_text(row["state"], "state"),
             }
-            for row in attempt_rows
-        ]
+            if row["error_class"] is not None:
+                attempt["error_class"] = _snapshot_text(row["error_class"], "error_class")
+            error_detail = row["error_detail"]
+            if error_detail is not None:
+                if not isinstance(error_detail, Mapping):
+                    raise ControlPlaneError("attempt error detail is malformed")
+                for key in ("failure_signature", "failure_fingerprint"):
+                    value = error_detail.get(key)
+                    if value is not None:
+                        attempt[key] = _snapshot_text(value, key)
+            attempts.append(attempt)
         incident_rows = _snapshot_rows(snapshot_row["incidents"], "incidents")
         incidents = [
             {

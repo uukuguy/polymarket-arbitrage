@@ -1053,17 +1053,20 @@ def _open_circuit(context: _RuntimeContext, job_key: str, *, now: datetime) -> N
         cursor.execute(
             """
             INSERT INTO m1_job_circuits (
-                job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at
-            ) VALUES (%s, 3, 'open', %s, %s, %s)
+                job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at,
+                failure_fingerprint
+            ) VALUES (%s, 3, 'open', %s, %s, %s, %s)
             ON CONFLICT (job_key) DO UPDATE
             SET consecutive_failures = 3, state = 'open', opened_at = EXCLUDED.opened_at,
-                next_probe_at = EXCLUDED.next_probe_at, updated_at = EXCLUDED.updated_at
+                next_probe_at = EXCLUDED.next_probe_at, updated_at = EXCLUDED.updated_at,
+                failure_fingerprint = EXCLUDED.failure_fingerprint
             """,
             (
                 job_key,
                 now - timedelta(seconds=120),
                 now - timedelta(seconds=1),
                 now,
+                "sha256:" + "0" * 64,
             ),
         )
 

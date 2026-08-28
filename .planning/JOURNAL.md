@@ -11447,3 +11447,36 @@ revision-032 amd64 image. Then stop controller, migrate transactionally, run
 only the exact source `probe-circuit` in an isolated 512MB auto-removed Machine,
 restore controller observe-only, and verify publication freshness before the
 86,400-second qualification epoch.
+
+### SESSION 334 — 2026-08-29 (failure identity and interruption contract)
+
+- [PRODUCTION EVIDENCE] Two isolated exact source probes succeeded without
+  pointer mutation. The resumed source attempts across epochs 1–5 failed as
+  Timeout, ValueError, Timeout, Timeout, ValueError. The circuit nevertheless
+  accumulated five because its schema retained only a job-scoped count.
+- [ROOT CAUSE] A job key identifies work, not a defect. Mixed failures were
+  incorrectly treated as repeated identical failures. A second reverse audit
+  found normal service stops also used defect retry and could open a circuit
+  after repeated deployments.
+- [TDD REPAIR] Revision 033 persists a secret-free failure fingerprint. Equal
+  identities increment; changed identities reset to one and close. Attempts and
+  snapshots expose only fingerprint/signature. Gamma malformed 2xx JSON is now
+  a body-free typed error and Structure incidents no longer retain exception
+  messages. `finish_interrupted()` makes stopped work immediately resumable
+  without incident/circuit mutation and defect retry rejects service stops.
+- [PROOF] Full `test_control_plane_postgres.py`, real 032→033→032 migration,
+  scoped role/rollout/runtime and all worker suites pass. Fresh `make test-m1`
+  passed 4,027 tests, one skip and one expected xfail in 1,611.78 seconds with
+  no outer timeout. Changed files pass Ruff and Pyright; planning has no drift;
+  climb-check passed 50/50. The full-repository Ruff command still reports 16
+  pre-existing findings in untouched legacy migrations/tests; none are staged.
+- [BOUNDARY] Production remains revision 032 on the prior release. Controller
+  is observe-only with an empty allowlist; the final exact source recovery
+  budget remains unused. M1 is not complete before a fresh 86,400-second
+  qualification certificate.
+
+[NEXT] Commit Plan 05.6-210, build and verify the exact revision-033 amd64
+image, apply migration 033 transactionally, roll coordinator, then run only the
+final exact source probe. Restore controller observe-only, verify downstream
+publication freshness, roll sibling workers/qualification, and start a new
+86,400-second qualification window.

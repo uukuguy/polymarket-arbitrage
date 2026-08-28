@@ -17,6 +17,7 @@ from polyarb.control_plane.models import (
     StructureRangeSpec,
 )
 from polyarb.control_plane.postgres import IncompleteStructureGenerationError, StaleLeaseError
+from polyarb.control_plane.runtime_contract import ServiceStopRequested
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
@@ -127,6 +128,7 @@ class FakeControlPlane:
         self.completed: dict[str, object] | None = None
         self.recoveries: list[dict[str, object]] = []
         self.retry_incidents: list[dict[str, object]] = []
+        self.interruptions: list[dict[str, object]] = []
         self.runtime_progress: list[dict[str, object]] = []
         self.runtime_heartbeats: list[dict[str, object]] = []
 
@@ -165,6 +167,9 @@ class FakeControlPlane:
 
     def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
         self.retry_incidents.append(kwargs)
+
+    def finish_interrupted(self, lease: JobLease, **kwargs: object) -> None:
+        self.interruptions.append(kwargs)
 
     def record_runtime_progress(self, lease: JobLease, **kwargs: object) -> None:
         self.runtime_progress.append(kwargs)
@@ -270,6 +275,8 @@ def test_stale_normalize_heartbeat_drains_read_and_prevents_terminal_commit() ->
 
     assert control_plane.recorded is None
     assert control_plane.finished == []
+    assert control_plane.retry_incidents == []
+    assert control_plane.interruptions == []
     assert objects.upload == {}
 
 
@@ -298,6 +305,8 @@ def test_cancelled_normalize_read_is_drained_without_terminal_commit() -> None:
 
     assert control_plane.recorded is None
     assert control_plane.finished == []
+    assert control_plane.retry_incidents == []
+    assert control_plane.interruptions[0]["component"] == "structure-normalize"
     assert objects.upload == {}
 
 
@@ -497,6 +506,54 @@ def test_structure_worker_reads_only_named_v3_shard() -> None:
 
     assert asyncio.run(worker.run_once()).outcome == "succeeded"
     assert objects.read_keys == [manifest.key, shard.key]
+
+
+def test_structure_certifier_service_stop_uses_interruption_not_defect_retry() -> None:
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.interruption = None
+
+        def claim_job(self, **_kwargs: object) -> JobLease:
+            return JobLease(
+                job_key="structure:" + "a" * 64 + ":certify",
+                job_type="structure-certify",
+                input_identity="structure:" + "a" * 64,
+                lease_owner="certifier-a",
+                lease_epoch=1,
+                lease_expires_at=NOW,
+                checkpoint_cursor=None,
+                checkpoint_digest=None,
+            )
+
+        def structure_generation_receipts(self, _generation_key: str):
+            return ((object(), object()),)
+
+        def record_runtime_progress(self, _lease: JobLease, **_kwargs: object) -> None:
+            return None
+
+        def heartbeat_runtime_attempt(self, lease: JobLease, **_kwargs: object) -> JobLease:
+            return lease
+
+        def finish_interrupted(self, _lease: JobLease, **kwargs: object) -> None:
+            self.interruption = kwargs
+
+        def finish_retryable_with_incident(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("service stop must not consume defect retry budget")
+
+    control_plane = ControlPlane()
+    certifier = TransactionalStructureCertifier(
+        control_plane=control_plane,
+        object_client=object(),
+        bucket="structure",
+        worker_id="certifier-a",
+        now=lambda: NOW,
+    )
+    certifier.request_stop()
+
+    with pytest.raises(ServiceStopRequested):
+        certifier.run_once()
+
+    assert control_plane.interruption == {"component": "structure-certify", "now": NOW}
 
 
 def test_structure_certifier_heartbeats_during_parity_before_fenced_commit() -> None:

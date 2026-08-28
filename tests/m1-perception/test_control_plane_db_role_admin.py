@@ -81,7 +81,7 @@ class FakeConnection:
 class FakeAdminFactory:
     def __init__(self) -> None:
         self.database = "role_test"
-        self.revision = "032"
+        self.revision = "033"
         self.roles: dict[str, dict[str, Any]] = {
             RUNTIME_CAPABILITY: {
                 "can_login": False,
@@ -1298,9 +1298,15 @@ def test_real_scoped_runtime_role_executes_one_fenced_circuit_probe(
         )
         connection.execute(
             "INSERT INTO public.m1_job_circuits "
-            "(job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at) "
-            "VALUES (%s, 3, 'open', %s, %s, %s)",
-            (job_key, now - timedelta(minutes=2), now - timedelta(seconds=1), now),
+            "(job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at, "
+            "failure_fingerprint) VALUES (%s, 3, 'open', %s, %s, %s, %s)",
+            (
+                job_key,
+                now - timedelta(minutes=2),
+                now - timedelta(seconds=1),
+                now,
+                "sha256:" + "0" * 64,
+            ),
         )
 
     controller = claim_controller(
@@ -1433,7 +1439,7 @@ def postgres_026_dsn() -> Iterator[str]:
     with PostgresContainer("postgres:16-alpine") as postgres:
         dsn = _normalize_dsn(postgres.get_connection_url())
         _create_supabase_roles(dsn)
-        _run_alembic(dsn, "upgrade", "032")
+        _run_alembic(dsn, "upgrade", "033")
         yield dsn
 
 

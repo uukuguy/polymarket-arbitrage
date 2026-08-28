@@ -36,6 +36,7 @@ class FakeControlPlane:
         self.finished: list[JobState] = []
         self.quarantines: list[dict[str, object]] = []
         self.retry_incidents: list[dict[str, object]] = []
+        self.interruptions: list[dict[str, object]] = []
         self.recoveries: list[dict[str, object]] = []
         self.runtime_progress: list[dict[str, object]] = []
         self.runtime_heartbeats: list[dict[str, object]] = []
@@ -79,6 +80,9 @@ class FakeControlPlane:
 
     def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
         self.retry_incidents.append(kwargs)
+
+    def finish_interrupted(self, lease: JobLease, **kwargs: object) -> None:
+        self.interruptions.append(kwargs)
 
     def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
         self.recoveries.append(kwargs)
@@ -256,8 +260,12 @@ def test_source_worker_refuses_receipt_when_cloud_budget_is_exhausted() -> None:
     control_plane = FakeControlPlane(spec)
     control_plane.usage_decision = CloudUsageDecision(False, 90, 90, "usage-1")
     worker = TransactionalStructureSourceWorker(
-        control_plane=control_plane, gamma=FakeGamma(), object_client=FakeObjectClient(),
-        bucket="structure", worker_id="source-worker-a", now=lambda: NOW,
+        control_plane=control_plane,
+        gamma=FakeGamma(),
+        object_client=FakeObjectClient(),
+        bucket="structure",
+        worker_id="source-worker-a",
+        now=lambda: NOW,
     )
     assert asyncio.run(worker.run_once()).outcome == "retryable"
     assert control_plane.recorded is None
@@ -565,11 +573,15 @@ def test_source_worker_marks_only_current_page_retryable_when_gamma_fails() -> N
                 "job_key": "source-window:one:fetch:events:0",
                 "lease_epoch": 1,
                 "error_class": "TimeoutError",
+                "failure_fingerprint": control_plane.retry_incidents[0]["detail"][
+                    "failure_fingerprint"
+                ],
             },
             "channels": ("dashboard",),
             "now": NOW,
         }
     ]
+    assert control_plane.retry_incidents[0]["detail"]["failure_fingerprint"].startswith("sha256:")
 
 
 def test_source_worker_quarantines_window_when_frozen_market_becomes_inactive() -> None:

@@ -19,6 +19,7 @@ from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
 )
+from polyarb.control_plane.runtime_contract import ServiceStopRequested
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
@@ -30,6 +31,7 @@ class FakeControlPlane:
         self.finished: list[JobState] = []
         self.recorded: dict[str, object] | None = None
         self.retry_incidents: list[dict[str, object]] = []
+        self.interruptions: list[dict[str, object]] = []
         self.recoveries: list[dict[str, object]] = []
         self.runtime_progress: list[dict[str, object]] = []
         self.runtime_heartbeats: list[dict[str, object]] = []
@@ -62,6 +64,9 @@ class FakeControlPlane:
 
     def finish_retryable_with_incident(self, lease, **kwargs):
         self.retry_incidents.append(kwargs)
+
+    def finish_interrupted(self, lease, **kwargs):
+        self.interruptions.append(kwargs)
 
     def record_job_recovery(self, lease, **kwargs):
         self.recoveries.append(kwargs)
@@ -376,9 +381,8 @@ def test_quote_batch_scheduler_cancellation_drains_reader_without_late_receipt()
             await task
         assert control_plane.recorded is None
         assert control_plane.finished == []
-        assert len(control_plane.retry_incidents) == 1
-        assert control_plane.retry_incidents[0]["error_class"] == "ServiceStopRequested"
-        assert control_plane.retry_incidents[0]["detail"]["reason_code"] == "service-stop"
+        assert control_plane.retry_incidents == []
+        assert control_plane.interruptions == [{"component": "quote-batch", "now": NOW}]
         assert not any(
             item.get_name().startswith("runtime-heartbeat")
             for item in asyncio.all_tasks()
@@ -499,6 +503,34 @@ def test_quote_certifier_incomplete_barrier_uses_durable_retry_circuit() -> None
     assert result.outcome == "retryable"
     assert control_plane.retry["component"] == "quote-certify"
     assert control_plane.retry["error_class"] == "IncompleteQuoteGenerationError"
+
+
+def test_quote_certifier_service_stop_uses_interruption_not_defect_retry() -> None:
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.interruption = None
+
+        def claim_job(self, **_kwargs):
+            return _runtime_quote_certifier_lease()
+
+        def finish_interrupted(self, _lease, **kwargs):
+            self.interruption = kwargs
+
+        def finish_retryable_with_incident(self, *_args, **_kwargs):
+            raise AssertionError("service stop must not consume defect retry budget")
+
+    control_plane = ControlPlane()
+    certifier = TransactionalQuoteCertifier(
+        control_plane=control_plane,
+        worker_id="quote-certifier",
+        now=lambda: NOW,
+    )
+    certifier.request_stop()
+
+    with pytest.raises(ServiceStopRequested):
+        certifier.run_once()
+
+    assert control_plane.interruption == {"component": "quote-certify", "now": NOW}
 
 
 def test_quote_certifier_terminal_commit_wins_heartbeat_race_and_drains_thread() -> None:
