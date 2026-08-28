@@ -103,6 +103,7 @@
 | 89 | [数据库能力角色与进程身份](89-数据库能力角色与进程身份.md) | LOGIN/capability 分工 / catalog-enumerated 闭集权限 / canonical app-scoped DSN / SECURITY DEFINER 和降级 ACL / release identity 与生产授权顺序 |
 | 90 | [可达权限与无秘密拓扑审计](90-可达权限与无秘密拓扑审计.md) | schema→object 可达链 / Supabase ambient ACL / 全局 namespace 门 / raw provider JSON 收缩 / 普通 credential env fail-closed |
 | 91 | [二次故障与运行镜像漂移](91-二次故障与运行镜像漂移.md) | 原始故障与二次故障 / trigger chain / pgcrypto namespace / image digest 漂移 / runtime-event chain-truth |
+| 92 | [资格计时为何会被健康任务打断](92-资格计时为何会被健康任务打断.md) | lease/heartbeat/progress/attempt 四时钟 / 健康推进活锁 / Quote→Structure freshness truth / 最小权限 fail-closed join |
 
 ## Phase 02.1 教学增量（2026-05）
 

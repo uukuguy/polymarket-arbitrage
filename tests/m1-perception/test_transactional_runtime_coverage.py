@@ -23,6 +23,7 @@ from polyarb.control_plane.runtime_models import (
     RuntimeEventKind,
     RuntimeProgress,
 )
+from polyarb.control_plane.runtime_store import runtime_deadline_profile
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
@@ -160,9 +161,7 @@ class _CapturingStore:
         now: datetime,
         detail: dict[str, object] | None = None,
     ) -> object:
-        self.progress.append(
-            {"lease": lease, "progress": progress, "now": now, "detail": detail}
-        )
+        self.progress.append({"lease": lease, "progress": progress, "now": now, "detail": detail})
         return object()
 
     def heartbeat_runtime_attempt(
@@ -181,9 +180,17 @@ def test_runtime_registry_has_exact_eight_job_types_with_meaningful_stage_names(
         assert stages
         assert len(stages) == len(set(stages))
         assert all(
-            stage and stage != "started" and not stage.startswith("job.")
-            for stage in stages
+            stage and stage != "started" and not stage.startswith("job.") for stage in stages
         )
+
+
+def test_structure_certifier_gets_bounded_long_attempt_without_weakening_liveness() -> None:
+    certifier = runtime_deadline_profile("structure-certify", 30)
+    normalizer = runtime_deadline_profile("structure-normalize", 30)
+
+    assert (certifier.heartbeat_seconds, certifier.progress_seconds) == (10, 30)
+    assert certifier.attempt_seconds == 3_600
+    assert normalizer.attempt_seconds == 300
 
 
 def test_runtime_coverage_gate_uses_real_terminal_boundaries_and_fails_closed() -> None:
@@ -266,13 +273,9 @@ def test_transactional_job_type_persists_one_start_progress_chain_and_terminal_e
     assert events[0]["kind"] == RuntimeEventKind.STARTED.value
     assert events[0]["stage"] == "started"
 
-    progress_events = [
-        row for row in events if row["kind"] == RuntimeEventKind.STAGE_CHANGED.value
-    ]
+    progress_events = [row for row in events if row["kind"] == RuntimeEventKind.STAGE_CHANGED.value]
     assert [row["stage"] for row in progress_events] == list(stages)
-    assert [row["progress_sequence"] for row in progress_events] == list(
-        range(1, len(stages) + 1)
-    )
+    assert [row["progress_sequence"] for row in progress_events] == list(range(1, len(stages) + 1))
     assert all(row["progress_current"] >= 1 for row in progress_events)
     assert all(row["progress_total"] >= row["progress_current"] for row in progress_events)
 
@@ -288,9 +291,7 @@ def test_transactional_job_type_persists_one_start_progress_chain_and_terminal_e
         assert not _secret_like_detail_keys(detail)
 
 
-def _claim_progress_and_complete(
-    control_plane: PostgresControlPlane, *, job_type: str
-) -> JobLease:
+def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:
     now = NOW + timedelta(minutes=REQUIRED_JOB_TYPES.index(job_type) + 1)
     if job_type == "structure-fetch":
         return _complete_structure_fetch(control_plane, now=now)
@@ -389,9 +390,7 @@ def _complete_structure_materialize(
 def _complete_structure_normalize(
     control_plane: PostgresControlPlane, *, now: datetime
 ) -> JobLease:
-    spec, _bundle = _enqueue_structure_generation(
-        control_plane, suffix="normalize", now=now
-    )
+    spec, _bundle = _enqueue_structure_generation(control_plane, suffix="normalize", now=now)
     lease = _claim(control_plane, "structure-normalize", now=now)
     _record_all_progress(control_plane, lease=lease, now=now)
     receipt = control_plane.complete_structure_range(
@@ -406,9 +405,7 @@ def _complete_structure_normalize(
     return lease
 
 
-def _complete_structure_certify(
-    control_plane: PostgresControlPlane, *, now: datetime
-) -> JobLease:
+def _complete_structure_certify(control_plane: PostgresControlPlane, *, now: datetime) -> JobLease:
     spec, bundle = _enqueue_structure_generation(control_plane, suffix="certify", now=now)
     range_artifact = "d" * 64
     range_lease = _claim(control_plane, "structure-normalize", now=now)
@@ -696,9 +693,7 @@ def _certify_quote_prerequisite(
 def _enqueue_structure_generation(
     control_plane: PostgresControlPlane, *, suffix: str, now: datetime
 ):
-    bundle = StructureBundleArtifact.from_bytes(
-        f'{{"kind":"runtime-{suffix}-bundle"}}\n'.encode()
-    )
+    bundle = StructureBundleArtifact.from_bytes(f'{{"kind":"runtime-{suffix}-bundle"}}\n'.encode())
     specs = control_plane.enqueue_structure_generation(
         identity=_structure_identity(
             suffix=suffix,
@@ -769,9 +764,12 @@ def _claim(control_plane: PostgresControlPlane, job_type: str, *, now: datetime)
 def _runtime_event_rows(
     control_plane: PostgresControlPlane, *, job_keys: tuple[str, ...]
 ) -> list[dict[str, object]]:
-    with control_plane._connection_factory() as connection, connection.cursor(  # noqa: SLF001
-        row_factory=dict_row
-    ) as cursor:
+    with (
+        control_plane._connection_factory() as connection,
+        connection.cursor(  # noqa: SLF001
+            row_factory=dict_row
+        ) as cursor,
+    ):
         cursor.execute(
             """
             SELECT job.job_type, event.job_key, event.event_sequence, event.kind,

@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: revision 027 and worker image drift repaired; live accumulating qualification epoch is running toward the 86400-second certificate
-last_updated: "2026-08-28T00:46:57+08:00"
+stopped_at: Plan 05.6-208 locally repairs the Structure certifier deadline loop and qualification freshness source; verified image rollout is next
+last_updated: "2026-08-28T07:55:15+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
-  total_plans: 72
-  completed_plans: 72
+  total_plans: 73
+  completed_plans: 73
   percent: 99
 ---
 
@@ -69,6 +69,18 @@ progress:
   301 facts / 133 seconds / max gap 34 seconds at `16:45:50Z`. Both app-scoped hidden DSNs remain installed,
   no ordinary credential env key is present, and the exact eight-Machine
   topology audit passes with every Machine started.
+
+- **Plan 05.6-208 local liveness repair:** the initial accumulating epoch was
+  later invalidated by repeated Structure freshness gaps. Production evidence
+  proved one 1,117-range `structure-certify` job was heartbeat/progress healthy
+  but hit the generic 300-second attempt deadline at roughly range 290 on every
+  retry; attempt count reached 86. Local TDD now gives only that job type a
+  3,600-second absolute ceiling while preserving 10/30-second
+  heartbeat/progress gates. Qualification now derives Structure freshness from
+  the certified manifest named by `quote:current`, not absent legacy
+  `structure:current`; both Structure and Quote freshness reject any generation
+  identity outside exact lowercase 64-hex grammar. The verified code has not
+  yet been rolled out.
 
 ## Local Event-Driven Recovery Closure (2026-08-25)
 
@@ -204,12 +216,13 @@ progress:
 
 ## Formal Acceptance
 
-- **Active qualifying run:** revision 027 and the reviewed worker image have
-  turned the complete release-bound ingestion path green. The original gap and
-  post-stop epochs remain append-only history. Recovery reached live healthy
-  evidence and automatically opened accumulating epoch
-  `epoch-fff4fa1ad4f778a9009a4039`; it must now advance without a breaking gap
-  for the full 86,400-second certificate.
+- **Qualification restart required:** accumulating epoch
+  `epoch-fff4fa1ad4f778a9009a4039` was correctly invalidated after the
+  publication chain stopped refreshing Structure, Quote, and opportunity
+  truth. Plan `05.6-208` is locally verified but not deployed. A new production
+  epoch may start only after the image-only rollout proves one certifier attempt
+  completes all ranges, current publications return inside the 900-second SLO,
+  and the exact topology remains unchanged.
   `m1-formal-20260823T1335Z` is immutable
   historical evidence; replay found the first breaking `lease.expired` fact at
   `2026-08-23T16:22:21Z`, so its earlier 338-second liveness pass cannot become
@@ -232,15 +245,16 @@ progress:
 | Structure/Quote cloud worker migration | three independent fixed-role workers and advancing durable successes | complete |
 | Process-loss recovery | fenced R2-before-receipt takeover evidence for both job classes | complete |
 | Immediate fault visibility | Fly watchdog plus independent Cloudflare supervisor, Telegram and source-aware Dashboard incident/recovery ledger | complete |
-| Continuous final-topology acceptance | rolling epoch + immutable certificate | 027, three-worker image continuity, runtime observe-only and recovery gates passed; live accumulating epoch is running toward the 86,400-second certificate |
+| Continuous final-topology acceptance | rolling epoch + immutable certificate | Plan 05.6-208 local repair passed; production rollout, fresh epoch and 86,400-second certificate remain |
 
 ## Resume
 
-1. Start with `make qualification-status` using the scoped qualification DSN;
-   verify accumulating epoch `epoch-fff4fa1ad4f778a9009a4039` advances and
-   recovery actions stay zero.
-2. Monitor its freshness, maximum evidence gap, exact release/config identity
-   and the observe-only controller alongside the exact eight-Machine topology.
-3. After 86,400 continuous seconds, run `make qualification-certificates` and
+1. Build and verify the Plan `05.6-208` image, then use the existing image-only
+   rollout path while preserving all Machine IDs and non-image config hashes.
+2. Prove `structure-certify` passes range 300 in one lease and reaches terminal
+   success; then verify fresh Structure, Quote, and opportunity observations and
+   a new accumulating epoch with zero recovery actions.
+3. After the new epoch reaches 86,400 continuous seconds, run
+   `make qualification-certificates` and
    independently reverify the immutable certificate before marking Phase 05.6
    and M1 complete. Fault and recovery mutation remain separately gated.

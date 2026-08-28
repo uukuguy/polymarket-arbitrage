@@ -53,24 +53,29 @@ finish parity verification in about 19 minutes.
 
 ### Transactional Structure freshness
 
-The Structure freshness query will start at `quote:current`, derive its matching
-Structure generation through `m1_quote_admission_inputs`, and join that exact
-generation to `m1_generation_manifests`. The query therefore measures the
-certified Structure snapshot actually consumed by the currently published
-Quote generation.
+The Structure freshness query will start at `quote:current`, map its canonical
+`quote:<structure bundle digest>` identity to `structure:<digest>`, and join
+that exact generation to `m1_generation_manifests`. The query therefore
+measures the certified Structure snapshot actually consumed by the currently
+published Quote generation.
 
-The join requires the canonical admission job identity
-`generation_key || ':quote-admit'`. Missing or conflicting links return no row,
-which keeps the existing `evidence.gap` behavior. No compatibility pointer is
-created and no mutation or migration is needed.
+The query uses only relations already granted to the production qualification
+capability. It accepts only `quote:` followed by exactly 64 lowercase hex
+characters before deriving the Structure identity. A malformed pointer or
+missing certified manifest returns no row, which keeps the existing
+`evidence.gap` behavior. No compatibility pointer, new table grant, or
+migration is needed.
 
 ## Verification
 
 - Unit RED/GREEN proof for the job-specific 3,600-second attempt deadline while
   other job types remain at 300 seconds.
-- Qualification SQL contract proof that the Structure query uses
-  `quote:current`, `m1_quote_admission_inputs`, and the certified manifest, and
-  contains no legacy `structure:current` predicate.
+- Qualification SQL contract proof that the Structure query maps
+  `quote:current` directly to the certified Structure manifest, touches no
+  ungranted admission relation, and contains no legacy `structure:current`
+  predicate.
+- Real-PostgreSQL proof that matching malformed Quote and Structure manifests
+  still produce fail-closed gaps for both freshness products.
 - Focused runtime/qualification tests, the broader M1 control-plane suite,
   Ruff, formatting, `make planning-status`, and `make climb-check`.
 - Production rollout only after local verification, followed by proof that one

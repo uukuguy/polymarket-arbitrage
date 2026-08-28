@@ -656,10 +656,16 @@ def test_postgres_freshness_observations_use_bounded_wrapper() -> None:
 
     source._insert_freshness_observations(cast(Any, cursor), now=NOW)
 
+    structure_query = cursor.calls[0][0]
+    assert "pointer.pointer_key = 'quote:current'" in structure_query
+    assert "pointer.generation_key ~ '^quote:[0-9a-f]{64}$'" in structure_query
+    assert "'structure:' || substr(pointer.generation_key, 7)" in structure_query
+    assert "m1_quote_admission_inputs" not in structure_query
+    assert "pointer.pointer_key = 'structure:current'" not in structure_query
+    quote_query = cursor.calls[2][0]
+    assert "pointer.generation_key ~ '^quote:[0-9a-f]{64}$'" in quote_query
     writes = [
-        statement
-        for statement, _params in cursor.calls
-        if "m1_record_qualification" in statement
+        statement for statement, _params in cursor.calls if "m1_record_qualification" in statement
     ]
     assert len(writes) == 3
     assert all("public.m1_record_qualification_freshness_ingress" in call for call in writes)

@@ -10807,3 +10807,66 @@ certificate before marking Phase 05.6 and M1 complete.
 epoch `epoch-fff4fa1ad4f778a9009a4039` is still accumulating with a bounded gap
 and zero recovery actions; continue monitoring until the 86,400-second
 certificate exists, then run `make qualification-certificates`.
+
+### SESSION 316 — 2026-08-28 (qualification publication liveness repaired locally)
+
+- [LIVE REGRESSION] The accumulating epoch did not continue. Read-only
+  production evidence showed all eight Machines started and the observe-only
+  controller healthy with zero recovery actions, but `structure:current` was
+  absent while Quote and opportunity truth had become roughly 9.5 hours stale.
+- [CERTIFIER ROOT CAUSE] Current Structure generation
+  `18daa4bd…8dec5` has 1,117 complete range receipts. Certifier attempts 75–85
+  remained heartbeat/progress healthy but reached only ranges 286–297 before
+  the generic 300-second attempt deadline. Every reclaim restarted parity at
+  range one; the job reached attempt/lease epoch 86 without terminal success.
+- [FRESHNESS ROOT CAUSE] Transactional Structure certification deliberately
+  never publishes legacy `structure:current`; qualification nevertheless used
+  that pointer as its only Structure freshness source. The current Quote
+  generation identity already canonically names its consumed Structure bundle.
+- [TDD REPAIR] Plan `05.6-208` gives only `structure-certify` a bounded
+  3,600-second absolute ceiling while retaining 10/30-second
+  heartbeat/progress detection and the generic 300-second ceiling for other
+  jobs. Qualification now maps `quote:<digest>` directly to the certified
+  `structure:<digest>` manifest. A proposed admission-table join was rejected
+  by RED coverage because that relation is outside the deployed qualification
+  capability; no migration or grant was added.
+- [LOCAL EVIDENCE] Deadline RED→GREEN plus focused runtime/reconciler tests
+  passed 163 cases. The combined transactional runtime, qualification,
+  reconciler and role gate passed 131 cases. Ruff lint/format, `make
+  planning-status` (89 plans, no drift) and `make climb-check` all pass.
+- [TEACHING] Chapter 92 separates lease, heartbeat, progress and absolute
+  attempt clocks; architecture thread §2.38 records workload-scaled deadlines
+  and least-privilege freshness truth.
+- [PRODUCTION BOUNDARY] No production mutation occurred during diagnosis or
+  local implementation. The old image remains active and qualification remains
+  recovering; no certificate exists.
+
+[NEXT] Build the Plan `05.6-208` image, run the existing image/revision/CLI
+smoke, then perform an image-only rollout that preserves worker Machine IDs and
+image-excluded config hashes. Prove one certifier attempt passes range 300 and
+reaches terminal success, then verify all freshness products and a new
+accumulating epoch before restarting the 86,400-second acceptance window.
+
+### SESSION 316 continuation — adversarial review closed
+
+- [REVIEW FINDING] Independent review found that substring mapping alone could
+  accept matching malformed `quote:bad` and `structure:bad` manifests. It also
+  noted the new deadline-profile helper was missing from the module export
+  contract.
+- [RED→GREEN] Unit SQL assertions and a real PostgreSQL regression first proved
+  the malformed pair produced healthy Structure/Quote rows. Both freshness
+  queries now require `^quote:[0-9a-f]{64}$`; the same pair produces
+  `evidence.gap` for both products. Healthy fixtures use a real 64-hex digest.
+  `runtime_deadline_profile` is exported. Reviewer re-check reports zero
+  Critical/Important findings and marks the image-only rollout ready.
+- [EXTENDED GATE] The expanded runtime/qualification/reconciler/role/PostgreSQL
+  selection passes. Full `make test-m1` ran all 3,929 cases: 3,922 passed, one
+  skipped, one expected failure, and five pre-existing revision-027 baseline
+  failures (026 downgrade formatting, stale service-role privilege expectation,
+  and three fault-matrix revision-026 expectations). None touches the Plan
+  05.6-208 files or behavior; they remain explicit debt rather than being
+  misreported as a green full-suite gate.
+
+[NEXT] Commit the reviewed Plan `05.6-208` local closure, build the exact commit
+image, pass image/revision/CLI smoke, and execute the bounded worker image-only
+rollout with unchanged Machine IDs/config hashes.

@@ -524,8 +524,10 @@ class PostgresQualificationFactSource:
                        manifest.record_count AS successful_count
                 FROM public.m1_publication_pointers AS pointer
                 JOIN public.m1_generation_manifests AS manifest
-                  ON manifest.generation_key = pointer.generation_key
-                WHERE pointer.pointer_key = 'structure:current'
+                  ON manifest.generation_key =
+                     'structure:' || substr(pointer.generation_key, 7)
+                WHERE pointer.pointer_key = 'quote:current'
+                  AND pointer.generation_key ~ '^quote:[0-9a-f]{64}$'
                 ORDER BY manifest.published_at DESC
                 LIMIT 1
                 """,
@@ -545,6 +547,7 @@ class PostgresQualificationFactSource:
                 JOIN public.m1_generation_manifests AS manifest
                   ON manifest.generation_key = pointer.generation_key
                 WHERE pointer.pointer_key = 'quote:current'
+                  AND pointer.generation_key ~ '^quote:[0-9a-f]{64}$'
                 ORDER BY manifest.published_at DESC
                 LIMIT 1
                 """,

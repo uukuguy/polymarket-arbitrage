@@ -227,7 +227,7 @@ def test_runtime_event_writer_concurrent_first_detected_records_one_event_and_tw
                     "Idempotency-Key": idempotency_key,
                 },
                 json=payload,
-        )
+            )
         assert response.status_code == 201
         return cast(dict[str, object], response.json())
 
@@ -8246,9 +8246,7 @@ def test_runtime_read_model_rejects_unknown_review_vocab_from_postgres(
             "UPDATE m1_incident_events SET kind = 'recovery-started' WHERE incident_key = %s",
             (f"recovery:job:{lease.job_key}",),
         )
-        cursor.execute(
-            "ALTER TABLE m1_incidents DROP CONSTRAINT ck_m1_incidents_severity"
-        )
+        cursor.execute("ALTER TABLE m1_incidents DROP CONSTRAINT ck_m1_incidents_severity")
         cursor.execute(
             "UPDATE m1_incidents SET severity = 'urgent' WHERE incident_key = %s",
             (f"recovery:job:{lease.job_key}",),
@@ -8373,9 +8371,7 @@ def test_control_plane_route_maps_real_postgres_permission_denied_to_fixed_unava
 ) -> None:
     role_name = "m1_snapshot_read_denied"
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
-        cursor.execute(
-            sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role_name))
-        )
+        cursor.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role_name)))
 
     def denied_connect() -> psycopg.Connection:
         connection = control_plane._connection_factory()
@@ -9786,6 +9782,64 @@ def test_qualification_service_first_tick_initializes_sql_null_cursor(
     assert row[2] == 3
 
 
+def test_qualification_malformed_quote_pointer_fails_structure_freshness_closed(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    _seed_freshness_pointers(control_plane, published_at=now)
+    with control_plane._connection_factory() as connection:
+        for job_key, job_type in (
+            ("job:malformed-structure", "structure"),
+            ("job:malformed-quote", "quote-certify"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO m1_jobs(
+                    job_key, job_type, input_identity, state, created_at, updated_at
+                ) VALUES (%s, %s, %s, 'succeeded', %s, %s)
+                """,
+                (job_key, job_type, f"{job_key}:input", now, now),
+            )
+        connection.execute(
+            """
+            INSERT INTO m1_generation_manifests (
+                generation_key, producer_job_key, input_digest, artifact_key,
+                artifact_digest, record_count, published_at
+            ) VALUES
+                ('structure:bad', 'job:malformed-structure', %s, 'bad-structure', %s, 3, %s),
+                ('quote:bad', 'job:malformed-quote', %s, 'bad-quote', %s, 5, %s)
+            """,
+            ("a" * 64, "b" * 64, now, "c" * 64, "d" * 64, now),
+        )
+        connection.execute(
+            """
+            UPDATE m1_publication_pointers
+            SET generation_key = 'quote:bad', published_at = %s
+            WHERE pointer_key = 'quote:current'
+            """,
+            (now,),
+        )
+
+    result = _qualification_service(control_plane, batch_size=20).tick(now)
+
+    assert result.state is QualificationState.RECOVERING
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT payload->>'data_product', payload->>'reason',
+                   payload->>'evidence_complete'
+            FROM m1_qualification_ingress_ledger
+            WHERE source = 'freshness'
+              AND payload->>'data_product' IN ('structure', 'quote')
+            ORDER BY payload->>'data_product'
+            """
+        )
+        assert cursor.fetchall() == [
+            ("quote", "evidence.gap", "false"),
+            ("structure", "evidence.gap", "false"),
+        ]
+
+
 def test_qualification_ingress_late_runtime_commit_is_consumed_after_cursor(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -10610,8 +10664,9 @@ def _seed_freshness_pointers(
     *,
     published_at: datetime,
 ) -> None:
-    structure_key = "structure:qualification-freshness"
-    quote_key = "quote:qualification-freshness"
+    structure_digest = "1" * 64
+    structure_key = f"structure:{structure_digest}"
+    quote_key = f"quote:{structure_digest}"
     with control_plane._connection_factory() as connection:
         for job_key, job_type in (
             ("job:qualification-structure", "structure"),

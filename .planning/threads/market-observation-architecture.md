@@ -1894,3 +1894,35 @@ success is not user receipt/read evidence.
   next scheduled decision, a bounded max gap, deterministic replay and zero
   recovery actions; a genuine stalled controller will not converge on the next
   tick.
+
+### §2.38 Liveness deadlines must scale with deterministic work, not only leases (2026-08-28)
+
+- Lease, heartbeat, progress and attempt deadlines protect different failure
+  modes. A job can renew its lease and emit real progress while still being
+  deterministically cancelled by an absolute attempt ceiling shorter than its
+  admitted workload.
+- The production Structure certifier exposed this exact live-lock: 1,117
+  immutable ranges advanced at roughly one per second, but the common
+  300-second ceiling cancelled every attempt around range 290. Because parity
+  has no checkpoint, each reclaim restarted at range one. Short liveness gates
+  were healthy; the total-work budget was wrong.
+- Keep heartbeat/progress detection short and job-specific absolute ceilings
+  bounded. Plan 05.6-208 changes only `structure-certify` to 3,600 seconds for
+  a 30-second lease; every other job retains 300 seconds. If the workload later
+  approaches the new ceiling, optimize parity or introduce authenticated
+  checkpointing rather than removing the ceiling.
+- Qualification freshness must follow consumed publication authority. The
+  transactional chain intentionally never writes legacy `structure:current`;
+  `quote:current` canonically embeds the Structure bundle digest it consumes.
+  Mapping that identity to the certified Structure manifest avoids a second
+  drifting pointer and stays inside the existing qualification capability.
+- Query design is part of least-privilege chain-truth. An initially plausible
+  join through `m1_quote_admission_inputs` was rejected because the production
+  qualification role cannot read that table. The final query uses only its
+  already-reviewed pointer and manifest reads, while missing identity still
+  fails closed as `evidence.gap`.
+- Identity derivation must validate grammar before transforming strings.
+  Substring mapping alone lets matching malformed `quote:bad` and
+  `structure:bad` rows look internally consistent. Both freshness queries now
+  require the exact lowercase 64-hex Quote generation grammar; a real
+  PostgreSQL regression proves malformed pairs become gaps.

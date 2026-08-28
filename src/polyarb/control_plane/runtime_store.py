@@ -312,12 +312,15 @@ def append_runtime_event_cursor(cursor: Cursor[Any], event: RuntimeEvent) -> Run
     return normalized
 
 
-def _derived_profile(lease_seconds: int) -> RuntimeDeadlineProfile:
-    """Build a valid common profile even for short test leases."""
+def runtime_deadline_profile(job_type: str, lease_seconds: int) -> RuntimeDeadlineProfile:
+    """Build the bounded deadline profile for one transactional job type."""
+    if not job_type.strip():
+        raise ValueError("job_type must be non-empty")
     bounded_lease = max(3, int(lease_seconds))
     heartbeat = max(1, min(30, bounded_lease // 3))
     progress = max(bounded_lease, heartbeat * 3)
-    attempt = max(progress, bounded_lease * 10)
+    attempt_multiplier = 120 if job_type == "structure-certify" else 10
+    attempt = max(progress, bounded_lease * attempt_multiplier)
     return RuntimeDeadlineProfile(
         policy_version="runtime-v1",
         lease_seconds=bounded_lease,
@@ -352,7 +355,9 @@ def start_runtime_attempt_cursor(
         lease_seconds = max(1, int((lease_deadline - started).total_seconds()))
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
-    selected_profile = _derived_profile(lease_seconds) if profile is None else profile
+    selected_profile = (
+        runtime_deadline_profile(job_type, lease_seconds) if profile is None else profile
+    )
     if type(selected_profile) is not RuntimeDeadlineProfile:
         raise TypeError("profile must be RuntimeDeadlineProfile")
     heartbeat_deadline = min(
@@ -620,6 +625,7 @@ __all__ = [
     "RuntimeProgressConflict",
     "RuntimeStoreError",
     "append_runtime_event_cursor",
+    "runtime_deadline_profile",
     "start_runtime_attempt_cursor",
     "update_runtime_heartbeat_cursor",
     "update_runtime_progress_cursor",
