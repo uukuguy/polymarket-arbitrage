@@ -187,6 +187,22 @@ Machine. Production templates expose only transactional runtime-v2 processes,
 so legacy SQLite/L3 retry policies cannot become a second production lifecycle
 controller without a new explicit deployment contract.
 
+Fly termination is the one process-level backstop, not another attempt or I/O
+deadline. Every formal long-running control-plane template declares
+`kill_signal = "SIGTERM"` and `kill_timeout = 40`. Forty seconds is derived from
+the longest in-process owner: 15 seconds for TERM, 15 seconds for KILL/reap,
+and 10 seconds for terminal evidence plus interpreter teardown. A uniform
+platform backstop avoids role-local drift; it does not delay a process that
+exits earlier. Fly's historical five-second default is forbidden because it
+can preempt the documented 30-second child/recovery contract.
+
+The rollout treats these two fields as an intentional, audited configuration
+delta. Controller canary may change only image, `kill_signal`, and
+`kill_timeout`; environment, secrets, guest shape, restart policy, Machine ID,
+region, and recovery allowlist remain canonically identical. Sibling roles
+cannot advance until the controller proves the new image and termination
+contract together.
+
 Production preflight is resource-aware. Read-only permission proof runs from
 the operator host through the fixed-round admin catalog path; Fly topology
 binds required secret names without exposing values. It must not start an
@@ -248,10 +264,14 @@ marked as a backfill. Only current-cursor live observations count toward the
 - alert policy tests prove `provider timeout < stop grace < outbox lease`;
 - rollout evidence proves role authority without live-Machine diagnostic
   processes and restarts reset rather than splice the observe-only window;
+- every rendered long-running Fly template proves SIGTERM plus a 40-second
+  platform backstop, and canary evidence rejects any other non-image config
+  delta;
 - full M1 regression, migration upgrade/downgrade, lint, format, planning, and
   climb gates.
 
 Production remains stopped until the policy/reclaim foundation and
-production-size resume path pass. Rollout is image-only with topology and
-configuration hashes preserved, followed by live proof through current Quote
-and opportunity publication before qualification resumes.
+production-size resume path pass. Rollout preserves topology and all
+configuration except the explicit SIGTERM/40-second lifecycle delta, followed
+by live proof through current Quote and opportunity publication before
+qualification resumes.
