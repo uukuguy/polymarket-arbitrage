@@ -792,8 +792,25 @@ def test_scoped_connection_factory_binds_namespace_and_database_timeouts(
 
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
+    bootstrap_calls: list[tuple[str, object]] = []
+
+    class FakeResult:
+        def fetchone(self):
+            return ("pg_catalog,public", "5s", "1s", ["pg_catalog", "public"])
+
     class FakeBootstrapConnection:
-        pass
+        def __init__(self) -> None:
+            self.autocommit = False
+
+        def execute(self, statement: str, params: object) -> FakeResult:
+            bootstrap_calls.append((statement, params))
+            return FakeResult()
+
+        def close(self) -> None:
+            bootstrap_calls.append(("close", ()))
+
+        def cancel_safe(self, *, timeout: float) -> None:
+            bootstrap_calls.append(("cancel", timeout))
 
     sentinel = FakeBootstrapConnection()
 
@@ -819,6 +836,100 @@ def test_scoped_connection_factory_binds_namespace_and_database_timeouts(
             },
         )
     ]
+    assert len(bootstrap_calls) == 1
+    assert "set_config('search_path'" in bootstrap_calls[0][0]
+    assert bootstrap_calls[0][1] == ("pg_catalog,public", "5000ms", "1000ms")
+    assert sentinel.autocommit is False
+
+
+def test_scoped_connection_factory_fails_closed_when_pooler_bootstrap_exceeds_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from threading import Event
+
+    from polyarb.control_plane import db_role_contract
+
+    started = Event()
+    released = Event()
+
+    class BlockingConnection:
+        def __init__(self) -> None:
+            self.autocommit = False
+            self.closed = False
+            self.cancelled = False
+
+        def execute(self, _statement: str, _params: object):
+            started.set()
+            released.wait(0.5)
+            return self
+
+        def fetchone(self):
+            return ("pg_catalog,public", "5s", "1s", ["pg_catalog", "public"])
+
+        def cancel_safe(self, *, timeout: float) -> None:
+            assert timeout == 5
+            self.cancelled = True
+            released.set()
+
+        def close(self) -> None:
+            self.closed = True
+            released.set()
+
+    connection = BlockingConnection()
+    monkeypatch.setattr(db_role_contract.psycopg, "connect", lambda *_args, **_kwargs: connection)
+    monkeypatch.setattr(db_role_contract, "_BOOTSTRAP_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(
+        db_role_contract.DatabaseRoleContractError,
+        match="database-role.bootstrap-timeout",
+    ):
+        db_role_contract.scoped_connection_factory(
+            "postgresql://runtime:secret@example.test/role_test"
+        )()
+
+    assert started.is_set()
+    assert connection.cancelled is True
+    assert connection.closed is True
+
+
+def test_scoped_connection_factory_closes_pooler_session_when_readback_is_unsafe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.control_plane import db_role_contract
+
+    class UnsafeConnection:
+        def __init__(self) -> None:
+            self.autocommit = False
+            self.closed = False
+
+        def execute(self, _statement: str, _params: object):
+            return self
+
+        def fetchone(self):
+            return ('"$user", public', "0", "0", ["public"])
+
+        def cancel_safe(self, *, timeout: float) -> None:
+            raise AssertionError(f"completed bootstrap must not cancel: {timeout}")
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = UnsafeConnection()
+    monkeypatch.setattr(
+        db_role_contract.psycopg,
+        "connect",
+        lambda *_args, **_kwargs: connection,
+    )
+
+    with pytest.raises(
+        db_role_contract.DatabaseRoleContractError,
+        match="database-role.bootstrap-unsafe",
+    ):
+        db_role_contract.scoped_connection_factory(
+            "postgresql://runtime:secret@example.test/role_test"
+        )()
+
+    assert connection.closed is True
 
 
 def test_database_role_contract_declares_namespace_and_pg16_membership_closure() -> None:

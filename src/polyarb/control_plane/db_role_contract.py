@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from threading import Event, Timer
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
@@ -27,6 +28,23 @@ SEQUENCE_PRIVILEGES = ("USAGE", "SELECT", "UPDATE")
 CONTROLLED_SEARCH_PATH = ("pg_catalog", "public")
 CONTROLLED_CONNECTION_OPTIONS = (
     "-csearch_path=pg_catalog,public " + CONTROL_PLANE_DB_POLICY.connection_options
+)
+_BOOTSTRAP_TIMEOUT_SECONDS = CONTROL_PLANE_DB_POLICY.statement_timeout_ms / 1_000
+
+
+def _canonical_timeout_setting(milliseconds: int) -> str:
+    return f"{milliseconds // 1_000}s" if milliseconds % 1_000 == 0 else f"{milliseconds}ms"
+
+
+_CONTROLLED_SESSION_SETTINGS = (
+    ",".join(CONTROLLED_SEARCH_PATH),
+    CONTROL_PLANE_DB_POLICY.statement_setting,
+    CONTROL_PLANE_DB_POLICY.lock_setting,
+)
+_EXPECTED_SESSION_SETTINGS = (
+    _CONTROLLED_SESSION_SETTINGS[0],
+    _canonical_timeout_setting(CONTROL_PLANE_DB_POLICY.statement_timeout_ms),
+    _canonical_timeout_setting(CONTROL_PLANE_DB_POLICY.lock_timeout_ms),
 )
 # TEMPORARY is intentionally allowed. PostgreSQL grants it to PUBLIC by default;
 # revoking it globally would change the original four applications. Namespace
@@ -133,13 +151,74 @@ def scoped_connection_factory(dsn: str) -> ConnectionFactory:
     _reject_dsn_namespace_override(dsn)
 
     def connect() -> psycopg.Connection[Any]:
-        return psycopg.connect(
+        connection = psycopg.connect(
             dsn,
             connect_timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds,
             options=CONTROLLED_CONNECTION_OPTIONS,
         )
+        try:
+            _bootstrap_scoped_session(connection)
+        except Exception:
+            connection.close()
+            raise
+        return connection
 
     return connect
+
+
+def _bootstrap_scoped_session(connection: psycopg.Connection[Any]) -> None:
+    """Reassert and verify policy when a session pooler drops startup options."""
+    completed = Event()
+    timed_out = Event()
+
+    def cancel_bootstrap() -> None:
+        if completed.is_set():
+            return
+        timed_out.set()
+        try:
+            connection.cancel_safe(timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds)
+        except Exception:
+            # The caller still closes the connection and fails closed. No
+            # provider exception detail may replace the stable contract error.
+            pass
+
+    timer = Timer(_BOOTSTRAP_TIMEOUT_SECONDS, cancel_bootstrap)
+    timer.daemon = True
+    original_autocommit = connection.autocommit
+    connection.autocommit = True
+    timer.start()
+    try:
+        result = connection.execute(
+            """
+            WITH configured AS MATERIALIZED (
+                SELECT pg_catalog.set_config('search_path', %s, false) AS search_path,
+                       pg_catalog.set_config('statement_timeout', %s, false)
+                           AS statement_timeout,
+                       pg_catalog.set_config('lock_timeout', %s, false) AS lock_timeout
+            )
+            SELECT search_path, statement_timeout, lock_timeout,
+                   pg_catalog.current_schemas(false)
+            FROM configured
+            """,
+            _CONTROLLED_SESSION_SETTINGS,
+        )
+        row = result.fetchone()
+    except Exception as error:
+        if timed_out.is_set():
+            raise DatabaseRoleContractError("database-role.bootstrap-timeout", "session") from error
+        raise
+    finally:
+        completed.set()
+        timer.cancel()
+    if timed_out.is_set():
+        raise DatabaseRoleContractError("database-role.bootstrap-timeout", "session")
+    if (
+        row is None
+        or tuple(row[:3]) != _EXPECTED_SESSION_SETTINGS
+        or tuple(row[3]) != CONTROLLED_SEARCH_PATH
+    ):
+        raise DatabaseRoleContractError("database-role.bootstrap-unsafe", "session")
+    connection.autocommit = original_autocommit
 
 
 def _reject_dsn_namespace_override(dsn: str) -> None:

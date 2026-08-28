@@ -11139,3 +11139,40 @@ immutable amd64 image, then re-run topology/role/rollback and 1,800/90/90
 observe-only gates before any sequential same-Machine rollout. Start the fresh
 86,400-second certificate only after live Structure→Quote→opportunity terminal
 publication without zero restart or orphan attempts.
+
+### SESSION 324 — 2026-08-28 (resource-safe preflight and Session Pooler rollback)
+
+- [RESOURCE EFFECT] An operator-launched read-only Python role verifier inside
+  the 256MB live controller exhausted the cgroup. Fly recorded exit 137/OOM and
+  restarted the same Machine. Image/config/ID stayed unchanged, but the
+  observe-only continuity window was discarded. Live-Machine interpreter
+  preflight is now prohibited; fixed-round catalog proof runs from the operator
+  host.
+- [REPLAY CONTRACT] The old controller records `reclaim-job /
+  job.heartbeat-missing / critical`, while the new reconciler deterministically
+  replays the same open circuit as `probe-circuit / circuit.probe-due /
+  warning`. Eleven of 22 current-epoch decisions mismatched, proving the new
+  controller must canary before the 1,800/90/90 replay gate can be meaningful.
+- [CANARY / ROLLBACK] Candidate `eb7e24c9`, digest
+  `sha256:f5d624d1…be2e`, was applied image-only to the same controller Machine.
+  It failed closed on `active-search-path` because the Supabase Session Pooler
+  dropped libpq startup options. The Machine was immediately restored to prior
+  digest `sha256:698344a7…3086`, observe-only mode, empty allowlist and unchanged
+  non-image config. No sibling Machine was updated; the candidate is superseded.
+- [ROOT CAUSE / FIX] The operation-round cleanup had removed the post-connect
+  bootstrap despite earlier production proof that it is required. Scoped
+  connections now retain startup options as defense-in-depth and perform one
+  autocommit `set_config`/readback round under a central cancellation deadline.
+  Timeout, mismatch or provider failure closes the connection. A real operator-
+  host Session Pooler probe returned `pg_catalog,public`, `5s`, `1s`; focused
+  database-role/control-plane/transactional suites pass.
+- [FRESH FULL PROOF] Final `make test-m1` passed 3,986 tests, one skip and one
+  expected xfail in 1,554.43 seconds. The 120k/166,926 scale group remained
+  CPU-active during its quiet interval and completed naturally; no outer
+  orchestration timeout or restart was used.
+
+[NEXT] Finish the fresh full M1/climb/planning/format gates, commit the bounded
+dual-layer bootstrap repair, build and verify a new exact amd64 image, then
+controller-canary and run a fresh 1,800/90/90 gate from its new lease epoch.
+Only then roll coordinator → Structure → Quote → qualification and begin the
+new 86,400-second certificate after live terminal publication.

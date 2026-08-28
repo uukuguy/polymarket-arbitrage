@@ -14,13 +14,17 @@ import pytest
 class _BootstrapConnection:
     def __init__(self, captured: dict[str, object]) -> None:
         self._captured = captured
+        self.autocommit = False
 
-    def execute(self, query: str, params: tuple[str, ...]) -> object:
+    def execute(self, query: str, params: tuple[str, ...]) -> _BootstrapConnection:
         self._captured["bootstrap"] = (query, params)
-        return object()
+        return self
 
-    def commit(self) -> None:
-        self._captured["bootstrap_committed"] = True
+    def fetchone(self) -> tuple[str, str, str, list[str]]:
+        return ("pg_catalog,public", "5s", "1s", ["pg_catalog", "public"])
+
+    def cancel_safe(self, *, timeout: float) -> None:
+        self._captured["bootstrap_cancel_timeout"] = timeout
 
     def close(self) -> None:
         self._captured["closed"] = True
@@ -61,15 +65,16 @@ def test_control_plane_connection_factory_bounds_postgres_connect_time(
 
     assert control_plane is not None
     assert control_plane._connection_factory() is not None
-    assert captured == {
-        "dsn": "postgresql://operator:secret@example.test/control",
-        "kwargs": {
-            "connect_timeout": 5,
-            "options": (
-                "-csearch_path=pg_catalog,public -cstatement_timeout=5000ms -clock_timeout=1000ms"
-            ),
-        },
+    assert captured["dsn"] == "postgresql://operator:secret@example.test/control"
+    assert captured["kwargs"] == {
+        "connect_timeout": 5,
+        "options": (
+            "-csearch_path=pg_catalog,public -cstatement_timeout=5000ms -clock_timeout=1000ms"
+        ),
     }
+    bootstrap_query, bootstrap_params = cast(tuple[str, tuple[str, ...]], captured["bootstrap"])
+    assert "set_config('search_path'" in bootstrap_query
+    assert bootstrap_params == ("pg_catalog,public", "5000ms", "1000ms")
 
 
 def test_quote_control_plane_once_requires_explicit_enable(monkeypatch, capsys) -> None:
@@ -2397,15 +2402,14 @@ def test_qualification_status_uses_scoped_dsn_and_is_read_only(monkeypatch, caps
     )
 
     assert cli_control_plane.main(["qualification-status", "--json"]) == 0
-    assert captured == {
-        "dsn": "postgresql://qualification:secret@example.test/control",
-        "kwargs": {
-            "connect_timeout": 5,
-            "options": (
-                "-csearch_path=pg_catalog,public -cstatement_timeout=5000ms -clock_timeout=1000ms"
-            ),
-        },
+    assert captured["dsn"] == "postgresql://qualification:secret@example.test/control"
+    assert captured["kwargs"] == {
+        "connect_timeout": 5,
+        "options": (
+            "-csearch_path=pg_catalog,public -cstatement_timeout=5000ms -clock_timeout=1000ms"
+        ),
     }
+    assert "set_config('search_path'" in cast(tuple[str, object], captured["bootstrap"])[0]
     assert json.loads(capsys.readouterr().out)["epoch"]["epoch_id"] == "epoch-a"
 
 

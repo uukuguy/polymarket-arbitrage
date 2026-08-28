@@ -1,0 +1,52 @@
+{
+  "artifact_version": 1,
+  "recorded_at": "2026-08-28T18:47:00+08:00",
+  "status": "pass",
+  "apps": {
+    "polyarb-control-worker-m1": {
+      "machines": {
+        "e82d1220b2d138": {"process_group": "coordinator", "state": "stopped"},
+        "683e46ea500dd8": {"process_group": "structure_range", "state": "started"},
+        "4d895231f66748": {"process_group": "quote_batch", "state": "started"}
+      },
+      "required_secret_presence": {
+        "POLYARB_R2_ACCESS_KEY_ID": true,
+        "POLYARB_R2_BUCKET": true,
+        "POLYARB_R2_ENDPOINT": true,
+        "POLYARB_R2_SECRET_ACCESS_KEY": true,
+        "POLYARB_SUPABASE_DB_DSN": true
+      }
+    },
+    "polyarb-qualification-worker-m1": {
+      "machines": {"876077f0274598": {"process_group": "qualification", "state": "stopped"}},
+      "required_secret_presence": {"POLYARB_QUALIFICATION_DB_DSN": true}
+    },
+    "polyarb-runtime-controller-m1": {
+      "machines": {"6e82036dce4958": {"process_group": "controller", "state": "started"}},
+      "required_secret_presence": {"POLYARB_SUPABASE_DB_DSN": true}
+    },
+    "polyarb-control-alert": {
+      "machines": {"d891e941a41dd8": {"process_group": "watchdog", "state": "started"}},
+      "required_secret_presence": {
+        "POLYARB_FLY_API_TOKEN": true,
+        "POLYARB_RUNTIME_EVENT_WRITER_TOKEN": true,
+        "POLYARB_TELEGRAM_BOT_TOKEN": true,
+        "POLYARB_TELEGRAM_CHAT_ID": true
+      }
+    },
+    "polyarb-control-api": {
+      "machines": {"d8d0e27a734158": {"process_group": "api", "state": "started"}},
+      "required_secret_presence": {"POLYARB_SUPABASE_DB_DSN": true}
+    },
+    "polyarb-control-runtime-event-writer": {
+      "machines": {"28654e35a73d08": {"process_group": "writer", "state": "started"}},
+      "required_secret_presence": {
+        "POLYARB_RUNTIME_EVENT_WRITER_TOKEN": true,
+        "POLYARB_SUPABASE_DB_DSN": true
+      }
+    }
+  },
+  "ordinary_credential_env_keys_present": false,
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}

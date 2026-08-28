@@ -1,0 +1,94 @@
+{
+  "artifact_version": 1,
+  "prepared_at": "2026-08-28T18:52:44+08:00",
+  "status": "superseded-after-controller-canary-rollback",
+  "authorization_granted": true,
+  "authorization_basis": "The user granted complete authority for all changes required to solve repeated timeout, sequencing, interruption and recovery failures and instructed autonomous M1 completion.",
+  "approved_by": "user",
+  "operator": "Codex",
+  "source_release_sha": "eb7e24c9c69916d874599b0eed8482649025f98d",
+  "production_database_revision": "031",
+  "worker_image": "registry.fly.io/polyarb-control-worker-m1@sha256:f5d624d1adb7ec9d1abbdb3751efeb52fe51c5e066e231a550a5c38c47bbbe2e",
+  "qualification_image": "registry.fly.io/polyarb-qualification-worker-m1@sha256:f5d624d1adb7ec9d1abbdb3751efeb52fe51c5e066e231a550a5c38c47bbbe2e",
+  "image_contract": {
+    "local_image_id": "sha256:267b85ec21fd2a8d04f320a6a8ef18f9e10558a9bf7ffbefff45224663eff56a",
+    "architecture": "amd64",
+    "runtime_uid": 10001,
+    "oci_revision": "eb7e24c9c69916d874599b0eed8482649025f98d",
+    "alembic_head": "031",
+    "runtime_policy_version": "runtime-v2",
+    "closed_job_registry_count": 8,
+    "provider_attempts": 1,
+    "cli_smoke": "pass"
+  },
+  "local_verification": {
+    "full_m1": "3984-passed-1-skipped-1-xfailed",
+    "full_m1_seconds": 1541.27,
+    "focused_provider_and_lifecycle": "pass",
+    "changed_python_ruff_and_format": "pass",
+    "planning_status": "pass-no-drift",
+    "climb_check": "pass"
+  },
+  "production_read_only_preflight": {
+    "topology_and_required_secret_names": "pass",
+    "admin_fixed_round_capability_preflight": "pass-11.6-seconds",
+    "runtime_controller_mode": "observe-only",
+    "runtime_controller_recovery_allowlist": "empty",
+    "recovery_actions": 0,
+    "observe_1800_90_90": "pending-new-lease-epoch-boundary"
+  },
+  "continuity_reset": {
+    "machine": "polyarb-runtime-controller-m1/6e82036dce4958",
+    "observed_at": "2026-08-28T18:48:45.073+08:00",
+    "cause": "operator-started read-only Python verifier exhausted the 256MB live Machine cgroup",
+    "machine_event": "exit_code=137,oom_killed=true,requested_stop=false",
+    "recovery": "Fly restarted the same Machine and controller claimed lease epoch 5",
+    "evidence_rule": "discard pre-restart continuity and require a fresh 1800-second window",
+    "config_or_image_change": false
+  },
+  "superseded_result": {
+    "reason": "the old controller could not satisfy the new deterministic replay gate, so controller-first canary was required; the candidate then failed active-search-path because Session Pooler dropped startup options",
+    "candidate_controller_digest": "sha256:f5d624d1adb7ec9d1abbdb3751efeb52fe51c5e066e231a550a5c38c47bbbe2e",
+    "rollback_controller_digest": "sha256:698344a73c3349de526ca7becef7b7ac87ee9e9ec8109244d9ece204dc3b3086",
+    "rollback_non_image_config_hash": "4504c4b458bc12831d872cb04b12f3ab6307a7fc4946efa8e29bd1d8b445b4a4",
+    "rollback_state": "started-observe-only-empty-allowlist",
+    "sibling_machine_updates": 0,
+    "recovery_actions": 0,
+    "next_authorization_identity": "new commit and immutable image required"
+  },
+  "exact_existing_targets": [
+    "polyarb-control-worker-m1/e82d1220b2d138",
+    "polyarb-control-worker-m1/683e46ea500dd8",
+    "polyarb-control-worker-m1/4d895231f66748",
+    "polyarb-qualification-worker-m1/876077f0274598"
+  ],
+  "protected_unchanged_targets": [
+    "polyarb-control-alert/d891e941a41dd8",
+    "polyarb-control-api/d8d0e27a734158",
+    "polyarb-control-runtime-event-writer/28654e35a73d08",
+    "polyarb-runtime-controller-m1/6e82036dce4958"
+  ],
+  "ordered_maximum_effect": [
+    "wait for and verify the new controller lease epoch with the unchanged 1800/90/90 observe-only zero-action gate",
+    "update and start the stopped coordinator on the same Machine ID",
+    "after coordinator proof, gracefully stop, image-update and start Structure range on the same Machine ID",
+    "after Structure proof, gracefully stop, image-update and start Quote batch on the same Machine ID",
+    "after worker proof, update the stopped qualification image and release identity, then start the same Machine ID",
+    "begin a fresh append-only 86400-second qualification epoch only after live terminal publication"
+  ],
+  "forbidden_effects": [
+    "no new, deleted or replaced Fly app or Machine",
+    "no Machine ID, VM, region, volume, IP, service, restart policy or hidden secret-set change",
+    "no runtime-controller update, allowlist expansion, mode change or recovery action",
+    "no live-Machine diagnostic interpreter during preflight",
+    "no fault injection, wallet, signing, order, balance or trade action",
+    "no raw provider body or secret value in evidence"
+  ],
+  "rollback": [
+    "stop a changed Machine and restore its prior immutable digest before proceeding if any gate fails",
+    "retain revision 031 and exact Machine IDs",
+    "reverify topology, observe-only continuity, zero actions and durable publication after rollback"
+  ],
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}

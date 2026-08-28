@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Revision 031 is live with zero Machine changes; provider/proof-loop lifecycle gates are green and the superseding exact image must be built before rollout
-last_updated: "2026-08-28T18:39:00+08:00"
+stopped_at: Bounded dual-layer Session Pooler repair passed the fresh full M1 gate; final climb/planning checks and exact-image rebuild remain
+last_updated: "2026-08-28T20:42:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -57,16 +57,20 @@ progress:
   unreachable direct IPv6 database endpoint.
 
 - **Current production boundary:** `polyarb-runtime-controller-m1` Machine
-  `6e82036dce4958` remains started observe-only with an empty recovery allowlist.
+  `6e82036dce4958` is restored to prior immutable digest
+  `sha256:698344a7…3086`, started observe-only with an empty recovery allowlist
+  and unchanged non-image config hash.
   Coordinator `e82d1220b2d138` and qualification `876077f0274598` are stopped;
   Structure `683e46ea500dd8` and Quote `4d895231f66748` remain started on the
   pre-Plan-209 runtime. The failed coordinator canary was restored to digest
   `sha256:bd21b2d…33df` and its original stopped state without changing its
   non-image config. Production is revision 031; the migration was applied with
   zero Machine changes and its post-migration parity/compaction audit passed.
-  The first revision-031 image was built and verified but is superseded before
-  deployment by the operation-round repair. Both app-scoped hidden DSNs remain
-  installed and no ordinary credential env key is present.
+  The `eb7e24c9` candidate reached only this controller canary, failed closed
+  because Session Pooler dropped startup options, and was rolled back before
+  any sibling update. Its digest `sha256:f5d624d1…be2e` is superseded. Both
+  app-scoped hidden DSNs remain installed and no ordinary credential env key is
+  present.
 
 - **Plan 05.6-209 runtime lifecycle repair:** Plan 208's job-specific deadline
   change exposed the wider defect: scheduler/role turn timeouts, worker-local
@@ -110,8 +114,10 @@ progress:
   is 3,984 passed / 1 skipped / 1 expected xfail in 1,541.27 seconds. Revision 031 is now in
   production with 6,572 facts, zero legacy arrays, three compaction constraints,
   one append-only trigger and zero scalar mismatches. No Machine changed. The
-  first revision-031 image is superseded: role authority checks now use fixed
-  catalog rounds, scoped DB policy is active in the startup packet,
+  first revision-031 images are superseded: role authority checks now use fixed
+  catalog rounds; scoped DB policy uses startup intent plus one centrally
+  bounded active-session bootstrap/readback because production Session Pooler
+  drops libpq options;
   qualification initializes once and bulk-appends healthy batches with
   cooperative stop, and climb checkpoints exact-identity gate progress without
   a universal 120-second kill. Runtime-controller decisions now use one bulk
@@ -122,7 +128,12 @@ progress:
   watchdog observations run in bounded interruptible rounds, and alert clocks
   are explicitly ordered. Fresh full and climb gates pass. Commit `2b7c7817a5ab`
   image digest `sha256:413e2b4a…5d30` is superseded without Machine mutation; a
-  new exact image remains.
+  new exact image remains. A read-only SSH verifier also caused a real exit-137
+  restart on the 256MB controller, so live-Machine interpreter preflight is
+  prohibited and every restart resets continuity evidence to a new lease epoch.
+  The bounded dual-layer repair's final full gate passed 3,986 tests, one skip
+  and one expected xfail in 1,554.43 seconds; the 120k/166,926 scale gate
+  completed naturally without an outer timeout.
 
 - **Plan 05.6-208 diagnosis (superseded locally by Plan 209):** the initial accumulating epoch was
   later invalidated by repeated Structure freshness gaps. Production evidence
@@ -304,12 +315,15 @@ progress:
 
 ## Resume
 
-1. Build and verify the Plan `05.6-208` image, then use the existing image-only
-   rollout path while preserving all Machine IDs and non-image config hashes.
-2. Prove `structure-certify` passes range 300 in one lease and reaches terminal
+1. Finish the fresh Plan `05.6-209` full gate, commit the bounded Session Pooler
+   bootstrap repair, then build and verify a superseding exact amd64 image.
+2. Canary only the unchanged controller; after active role verification and a
+   new lease epoch succeed, run the full 1,800/90/90 observe-only replay gate.
+3. Roll coordinator → Structure → Quote → qualification sequentially on
+   the same Machine IDs. Prove `structure-certify` passes range 300 in one lease and reaches terminal
    success; then verify fresh Structure, Quote, and opportunity observations and
    a new accumulating epoch with zero recovery actions.
-3. After the new epoch reaches 86,400 continuous seconds, run
+4. After the new epoch reaches 86,400 continuous seconds, run
    `make qualification-certificates` and
    independently reverify the immutable certificate before marking Phase 05.6
    and M1 complete. Fault and recovery mutation remain separately gated.

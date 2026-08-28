@@ -2046,11 +2046,12 @@ success is not user receipt/read evidence.
   matrices into fixed catalog rounds. Qualification's ordinary accumulating
   path uses one bulk append, one range verification and fixed scalar updates;
   restart history is the explicit paged/checkpointed exception.
-- Session policy must be active when a connection is returned. Installing
-  search path or timeouts with an initial SQL statement creates an unbounded
-  bootstrap gap and invalidates any request envelope derived as connect plus
-  business statement. The scoped factory now installs all three through libpq
-  startup options.
+- Session policy must be active when a connection is returned. Libpq startup
+  options provide the first layer, but the production Session Pooler is known
+  to drop them. The scoped factory therefore performs one post-connect
+  `set_config`/readback round under a cancellation deadline derived from the
+  central statement policy; it closes on timeout or mismatch. This preserves
+  §2.35 active-session truth without restoring an unbounded bootstrap gap.
 - Orchestration tools cannot add a universal outer timeout to heterogeneous
   gates. Climb delegates deadlines to each gate and checkpoints successful
   gates against exact git head plus argv, so interruption resumes the unfinished
@@ -2096,3 +2097,36 @@ success is not user receipt/read evidence.
   provider timeout below DB-derived stop grace, stop grace below the durable
   outbox lease, and retry cadence owning only future scheduling. This ordering
   is executable policy, not a comment beside independent constants.
+
+### §2.46 Read-only database intent does not imply zero runtime effect (2026-08-28)
+
+- A role verifier launched over SSH inside the 256MB live controller performed
+  no writes, but the extra Python process exhausted the Machine cgroup and
+  produced exit 137. Fly restarted the Machine and the controller correctly
+  claimed a new lease epoch. The incident invalidated the prior 1,800-second
+  continuity window even though durable data remained correct.
+- Publication preflight therefore runs fixed-round catalog proof from the
+  operator host and binds deployed identities through required secret-name
+  presence. It may not execute extra interpreters inside constrained production
+  Machines. Resource footprint is part of an operation's effect class.
+- Continuity evidence is boot/lease-epoch scoped. An automatic restart is a
+  successful recovery fact, not permission to splice evidence across the old
+  and new processes. Qualification and observe-only clocks restart from the new
+  durable anchor.
+
+### §2.47 Transport intent and active session truth require two bounded layers (2026-08-28)
+
+- The operation-round repair accidentally removed §2.35's post-connect session
+  bootstrap and trusted only libpq startup options. The controller canary then
+  failed `database-role.namespace-unsafe: active-search-path`, confirming again
+  that the production Supabase Session Pooler accepts but drops those options.
+  The Machine was rolled back before any sibling rollout.
+- This was a design-regression failure, not a reason to increase a timeout.
+  Startup options remain defense-in-depth for direct PostgreSQL. A single
+  autocommit `set_config`/readback statement establishes active truth for pooled
+  sessions and is cancelled at the central statement-policy boundary. Timeout,
+  mismatch or provider exception closes the connection; no partially scoped
+  session reaches role verification or business SQL.
+- Release gates must preserve previously established provider-specific facts.
+  A locally valid simplification cannot delete a production workaround unless
+  the new path re-proves the same provider boundary end to end.

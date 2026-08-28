@@ -132,8 +132,9 @@ cursor handoff.
 
 - [x] Replace per-object authority probes with fixed-round catalog queries and
   prove production preflight stays inside the request envelope.
-- [x] Install scoped search path and database timeouts in the libpq startup
-  packet so the first SQL never runs in an unbounded bootstrap window.
+- [x] Install scoped search path and database timeouts through startup options
+  plus one centrally bounded post-connect verification round, preserving
+  Session Pooler compatibility without an unbounded bootstrap window.
 - [x] Initialize qualification once per process and batch the healthy append
   path into fixed SQL rounds while retaining exact sequential terminal logic.
 - [x] Send cooperative stop before grace detach and refuse later qualification
@@ -168,3 +169,16 @@ cursor handoff.
   and refuse the database append when stop wins before the write boundary.
 - [x] Re-run focused RED/GREEN suites, the complete M1/climb/planning gates, and
   supersede the current image if any executable byte changes.
+
+## Task 9: Resource-safe production preflight
+
+- [x] Prohibit live-Machine interpreter diagnostics in the rollout contract;
+  use operator-host fixed-round catalog proof plus required secret-name topology.
+- [x] Record the diagnostic-induced controller OOM/restart as a real runtime
+  effect and discard the pre-restart observe-only continuity window.
+- [x] Canary the controller before sibling rollout; detect the Session Pooler
+  startup-options regression and restore the exact prior digest/config.
+- [x] Reintroduce active-session `set_config`/readback as one autocommit round
+  bounded by the central database policy; close on timeout or mismatch.
+- [ ] Build the superseding image, canary it on the unchanged controller, then
+  require a fresh 1,800/90/90 gate on its new lease epoch before sibling updates.

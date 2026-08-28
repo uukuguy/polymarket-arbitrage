@@ -62,7 +62,7 @@ io_timeout < progress_timeout <= attempt_timeout
 scheduler_timeout is absent for claimed work
 terminal_statement_timeout < remaining_lease
 policy job types == runtime-stage job types
-connection return implies search-path/statement/lock policy is already active
+connection return implies verified search-path/statement/lock policy is active
 fixed operation implies fixed query rounds or an explicit page/checkpoint protocol
 provider_timeout < io_timeout < progress_timeout
 provider_attempts == 1 for formal runtime clients
@@ -74,9 +74,13 @@ round complexity. Catalog verification and healthy batch ingestion use a fixed
 number of bulk rounds; history replay is explicitly paged and cooperatively
 stoppable between pages.
 
-Connection bootstrap is part of the connection boundary. No connection factory
-may return before search path, statement timeout, and lock timeout are active,
-and it may not run an unbounded SQL statement in order to install those bounds.
+Connection bootstrap is part of the connection boundary. Startup options are a
+first layer for direct PostgreSQL, but managed Session Poolers may accept and
+drop them. Every scoped factory therefore performs exactly one autocommit,
+post-connect `set_config`/readback round under a cancellation deadline derived
+from the central statement policy. It returns only after active search path,
+statement timeout and lock timeout match; timeout, mismatch or provider error
+closes the connection. Startup intent alone is never production authority.
 
 Provider SDK retry is another recovery controller, not a harmless transport
 detail. Formal Gamma, CLOB and R2 clients perform one inner attempt inside the
@@ -174,6 +178,13 @@ timeout fit below database-derived stop grace, which fits below the outbox
 lease. Retry cadence schedules future work only and cannot extend an active
 claim.
 
+Production preflight is resource-aware. Read-only permission proof runs from
+the operator host through the fixed-round admin catalog path; Fly topology
+binds required secret names without exposing values. It must not start an
+additional Python interpreter inside a memory-constrained live Machine. Any
+unexpected Machine restart invalidates the current continuity window and
+requires a new controller lease-epoch anchor.
+
 ## Gate runner recovery
 
 The climb evaluator does not own a universal subprocess timeout. Each gate owns
@@ -207,7 +218,9 @@ marked as a backfill. Only current-cursor live observations count toward the
 - qualification release handoff test rejects zero-cursor continuity claims;
 - fixed-round catalog and qualification batch tests reject per-object/per-fact
   network loops;
-- scoped connection tests prove timeout policy is active before the first SQL;
+- scoped connection tests prove one bounded bootstrap verifies active policy
+  before the first business SQL, including a Session-Pooler-style dropped
+  startup-options case;
 - climb interruption test proves exact-identity resume without a competing
   evaluator timeout;
 - provider-client tests prove one inner attempt and an explicit request
@@ -218,6 +231,8 @@ marked as a backfill. Only current-cursor live observations count toward the
 - cloud-soak and watchdog tests prove signal-responsive fixed parallel
   observation rounds with bounded target cardinality;
 - alert policy tests prove `provider timeout < stop grace < outbox lease`;
+- rollout evidence proves role authority without live-Machine diagnostic
+  processes and restarts reset rather than splice the observe-only window;
 - full M1 regression, migration upgrade/downgrade, lint, format, planning, and
   climb gates.
 

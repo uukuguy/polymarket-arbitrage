@@ -1,0 +1,32 @@
+{
+  "artifact_version": 1,
+  "recorded_at": "2026-08-28T20:10:00+08:00",
+  "status": "failed-closed-rolled-back-superseded",
+  "source_release_sha": "eb7e24c9c69916d874599b0eed8482649025f98d",
+  "candidate_digest": "sha256:f5d624d1adb7ec9d1abbdb3751efeb52fe51c5e066e231a550a5c38c47bbbe2e",
+  "machine": "polyarb-runtime-controller-m1/6e82036dce4958",
+  "precondition": {
+    "old_controller_replay_matches_new_reconciler": false,
+    "mismatched_records": 11,
+    "compared_records": 22,
+    "old_decision": "reclaim-job/job.heartbeat-missing/critical/qualification-breaking",
+    "new_decision": "probe-circuit/circuit.probe-due/warning/not-qualification-breaking"
+  },
+  "canary_failure": {
+    "reason_code": "database-role.namespace-unsafe",
+    "object_identifier": "active-search-path",
+    "root_cause": "Supabase Session Pooler dropped libpq startup options after the candidate removed the required post-connect active-session bootstrap"
+  },
+  "rollback": {
+    "digest": "sha256:698344a73c3349de526ca7becef7b7ac87ee9e9ec8109244d9ece204dc3b3086",
+    "non_image_config_hash": "4504c4b458bc12831d872cb04b12f3ab6307a7fc4946efa8e29bd1d8b445b4a4",
+    "machine_id_unchanged": true,
+    "state": "started",
+    "mode": "observe-only",
+    "recovery_allowlist": "empty"
+  },
+  "sibling_machine_updates": 0,
+  "recovery_actions": 0,
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}

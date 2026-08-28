@@ -105,11 +105,17 @@ def test_control_api_connection_factory_bounds_postgres_connect_time(monkeypatch
     calls: list[tuple[str, dict[str, object]]] = []
 
     class Connection:
+        autocommit = False
+
         def execute(self, query, params):
             calls.append((query, {"params": params}))
+            return self
 
-        def commit(self):
-            calls.append(("commit", {}))
+        def fetchone(self):
+            return ("pg_catalog,public", "5s", "1s", ["pg_catalog", "public"])
+
+        def cancel_safe(self, *, timeout):
+            calls.append(("cancel", {"timeout": timeout}))
 
         def close(self):
             calls.append(("close", {}))
@@ -124,15 +130,15 @@ def test_control_api_connection_factory_bounds_postgres_connect_time(monkeypatch
     control_plane = api._build_control_plane("postgresql://control-plane")
 
     assert control_plane._connection_factory() is sentinel
-    assert calls == [
-        (
-            "postgresql://control-plane",
-            {
-                "connect_timeout": 5,
-                "options": (
-                    "-csearch_path=pg_catalog,public "
-                    "-cstatement_timeout=5000ms -clock_timeout=1000ms"
-                ),
-            },
-        ),
-    ]
+    assert calls[0] == (
+        "postgresql://control-plane",
+        {
+            "connect_timeout": 5,
+            "options": (
+                "-csearch_path=pg_catalog,public -cstatement_timeout=5000ms -clock_timeout=1000ms"
+            ),
+        },
+    )
+    assert len(calls) == 2
+    assert "set_config('search_path'" in calls[1][0]
+    assert calls[1][1] == {"params": ("pg_catalog,public", "5000ms", "1000ms")}
