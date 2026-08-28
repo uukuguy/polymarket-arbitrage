@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from threading import Event, Thread
 from time import monotonic
 from typing import Any, Protocol, cast
@@ -199,7 +199,6 @@ class TransactionalQuoteBatchWorker:
         worker_id: str,
         now: Callable[[], datetime],
         lease_seconds: int = 120,
-        retry_delay: timedelta = timedelta(seconds=15),
         crash_after_r2_upload: Callable[[JobLease], None] | None = None,
         retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
         acceptance_run_id: str | None = None,
@@ -207,8 +206,8 @@ class TransactionalQuoteBatchWorker:
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
-        if lease_seconds <= 0 or retry_delay.total_seconds() <= 0:
-            raise ValueError("lease_seconds and retry_delay must be positive")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
         self._control_plane = control_plane
         self._reader = reader
         self._object_client = object_client
@@ -216,7 +215,6 @@ class TransactionalQuoteBatchWorker:
         self._worker_id = worker_id
         self._now = now
         self._lease_seconds = lease_seconds
-        self._retry_delay = retry_delay
         self._crash_after_r2_upload = crash_after_r2_upload
         self._retry_fault_before_receipt = retry_fault_before_receipt
         self._acceptance_run_id = acceptance_run_id
@@ -487,15 +485,13 @@ class TransactionalQuoteCertifier:
         worker_id: str,
         now: Callable[[], datetime],
         lease_seconds: int = 30,
-        retry_delay: timedelta = timedelta(seconds=5),
     ) -> None:
-        if not worker_id or lease_seconds <= 0 or retry_delay.total_seconds() <= 0:
-            raise ValueError("worker_id, lease_seconds, and retry_delay must be positive")
+        if not worker_id or lease_seconds <= 0:
+            raise ValueError("worker_id and lease_seconds must be positive")
         self._control_plane = control_plane
         self._worker_id = worker_id
         self._now = now
         self._lease_seconds = lease_seconds
-        self._retry_delay = retry_delay
         self._stop_requested = Event()
 
     def request_stop(self) -> None:
@@ -575,30 +571,46 @@ class TransactionalQuoteCertifier:
                 )
             del recovery
             return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="certified")
-        except IncompleteQuoteGenerationError:
-            finish = self._control_plane.finish
+        except IncompleteQuoteGenerationError as error:
+            failure_class = type(error).__name__
             current_lease = lease if runtime is None else runtime.current_lease
             if runtime is None:
-                finish(
+                self._control_plane.finish_retryable_with_incident(
                     current_lease,
-                    state=JobState.RETRYABLE,
-                    next_attempt_at=self._now() + self._retry_delay,
                     error_class="IncompleteQuoteGenerationError",
+                    incident_key=f"incident:job-retry:{lease.job_key}",
+                    dedupe_key=f"job-retry:{lease.job_key}",
+                    component="quote-certify",
+                    summary="quote-certify durable barrier invariant failed",
+                    detail={
+                        "job_key": lease.job_key,
+                        "lease_epoch": lease.lease_epoch,
+                        "error_class": failure_class,
+                    },
+                    channels=incident_alert_channels(Settings()),
                     now=self._now(),
                 )
             else:
                 _runtime_sync_call(
                     runtime,
-                    lambda: finish(
+                    lambda: self._control_plane.finish_retryable_with_incident(
                         current_lease,
-                        state=JobState.RETRYABLE,
-                        next_attempt_at=self._now() + self._retry_delay,
                         error_class="IncompleteQuoteGenerationError",
+                        incident_key=f"incident:job-retry:{lease.job_key}",
+                        dedupe_key=f"job-retry:{lease.job_key}",
+                        component="quote-certify",
+                        summary="quote-certify durable barrier invariant failed",
+                        detail={
+                            "job_key": lease.job_key,
+                            "lease_epoch": lease.lease_epoch,
+                            "error_class": failure_class,
+                        },
+                        channels=incident_alert_channels(Settings()),
                         now=self._now(),
                     ),
                     terminal=True,
                 )
-            return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="waiting")
+            return QuoteBatchWorkerResult(job_key=lease.job_key, outcome="retryable")
         except StaleLeaseError:
             raise
         except Exception as error:

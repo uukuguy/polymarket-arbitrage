@@ -11102,3 +11102,40 @@ image at Alembic 031/runtime-v2, re-run exact topology/role/rollback and the
 unchanged 1,800/90/90 observe-only gate, then roll coordinator → Structure →
 Quote → qualification on the same Machine IDs. Start the fresh 86,400-second
 certificate only after live Structure/Quote/opportunity terminal publication.
+
+### SESSION 323 — 2026-08-28 (provider retry and proof-loop lifecycle closure)
+
+- [RETRY MULTIPLICATION] Reverse factory-chain audit found formal Gamma, CLOB
+  and R2 provider calls could retain SDK retries underneath the durable job
+  retry/circuit. Runtime policy now requires one inner attempt, an explicit
+  provider envelope below worker I/O, and one central durable backoff function.
+  Quote's R2 factory was caught by a second RED test after the first focused
+  implementation and is now covered explicitly.
+- [DURABLE BARRIER] Quote and opportunity certifiers no longer call incomplete
+  input `waiting` while scheduling an unlimited five-second retry outside the
+  circuit. They record a retryable incident and consume the central failure,
+  backoff and circuit budget; unused local retry-delay controls were removed.
+- [INTERRUPTIBLE PROOF] Cloud-soak samples run off the signal loop, receive a
+  cooperative stop and recheck it before DB append. Local Fly reads have an
+  operation-specific subprocess bound. Watchdog observation admits at most
+  eight apps and sixteen Machines/app, reads control/app snapshots in parallel,
+  and preserves restart semantics through one list plus one parallel detail
+  round per app.
+- [ALERT CLOCK ORDER] Alert delivery declares and validates one provider
+  attempt, 5-second provider timeout, DB-derived 11-second stop grace, 30-second
+  outbox lease and 15-second retry cadence. The service consumes that same
+  policy instead of rereading an independent grace constant.
+- [PROOF] Focused lifecycle/provider suites pass. Fresh `make test-m1` passed
+  3,984 tests, one skip and one expected xfail in 1,541.27 seconds; the long
+  Structure performance gate completed naturally without an outer kill.
+  `make climb-check`, `make planning-status`, changed-file Ruff/format and diff
+  checks pass.
+- [PRODUCTION BOUNDARY] Production remains revision 031 with zero Machine
+  changes. Commit `2b7c7817a5ab` image digest `sha256:413e2b4a…5d30` is
+  superseded before deployment because this audit changed executable bytes.
+
+[NEXT] Commit Plan 05.6-209 Task 8 and its evidence, build and verify the exact
+immutable amd64 image, then re-run topology/role/rollback and 1,800/90/90
+observe-only gates before any sequential same-Machine rollout. Start the fresh
+86,400-second certificate only after live Structure→Quote→opportunity terminal
+publication without zero restart or orphan attempts.

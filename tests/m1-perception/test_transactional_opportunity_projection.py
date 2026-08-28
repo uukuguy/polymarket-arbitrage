@@ -8,7 +8,11 @@ import pytest
 from polyarb.control_plane.models import JobLease, QuoteBatchLeg, QuoteBatchReceipt, QuoteBatchSpec
 from polyarb.control_plane.opportunity_projection import build_opportunity_rows
 from polyarb.control_plane.opportunity_worker import TransactionalOpportunityCertifier
-from polyarb.control_plane.postgres import OpportunityProjectionCurrentError, StaleLeaseError
+from polyarb.control_plane.postgres import (
+    IncompleteQuoteGenerationError,
+    OpportunityProjectionCurrentError,
+    StaleLeaseError,
+)
 from polyarb.control_plane.quote_artifact import QuoteBatchInputArtifact
 
 
@@ -152,6 +156,47 @@ def test_certifier_skips_r2_when_current_quote_is_already_projected() -> None:
     assert result.outcome == "current"
 
 
+def test_opportunity_incomplete_input_uses_durable_retry_circuit() -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.retry = None
+
+        def claim_job(self, **_kwargs):
+            return JobLease(
+                job_key="quote:old:opportunity-certify",
+                job_type="opportunity-certify",
+                input_identity="quote:old",
+                lease_owner="opportunity-worker",
+                lease_epoch=4,
+                lease_expires_at=now,
+                checkpoint_cursor=None,
+                checkpoint_digest=None,
+            )
+
+        def current_quote_projection_inputs(self):
+            raise IncompleteQuoteGenerationError("current generation is unavailable")
+
+        def finish(self, *_args, **_kwargs):
+            raise AssertionError("incomplete input must not use an ungoverned timed retry")
+
+        def finish_retryable_with_incident(self, _lease, **kwargs):
+            self.retry = kwargs
+
+    control_plane = ControlPlane()
+    result = TransactionalOpportunityCertifier(
+        control_plane=control_plane,
+        object_client=object(),
+        bucket="bucket",
+        now=lambda: now,
+    ).run_once()
+
+    assert result.outcome == "retryable"
+    assert control_plane.retry["component"] == "opportunity-certify"
+    assert control_plane.retry["error_class"] == "IncompleteQuoteGenerationError"
+
+
 def test_certifier_uses_fenced_r2_input_when_postgres_legs_are_compacted() -> None:
     quoted_at = datetime(2030, 1, 1, tzinfo=UTC)
     legs = (
@@ -166,9 +211,13 @@ def test_certifier_uses_fenced_r2_input_when_postgres_legs_are_compacted() -> No
     )
     input_artifact = QuoteBatchInputArtifact.from_spec(batch)
     quote_payload = (
-        b'{"structure_receipt_digest":"' + b"a" * 64
-        + b'","token_range_digest":"' + batch.token_range_digest.encode()
-        + b'","universe_hash":"' + b"c" * 64 + b'"}\n'
+        b'{"structure_receipt_digest":"'
+        + b"a" * 64
+        + b'","token_range_digest":"'
+        + batch.token_range_digest.encode()
+        + b'","universe_hash":"'
+        + b"c" * 64
+        + b'"}\n'
         + (
             b'{"best_ask_price":0.4,"best_ask_size":4,'
             b'"terminal_state":"executable","yes_token_id":"token-a"}\n'
@@ -220,9 +269,13 @@ def test_certifier_uses_fenced_r2_input_when_postgres_legs_are_compacted() -> No
 def test_opportunity_certifier_reports_projection_stages() -> None:
     quoted_at = datetime(2030, 1, 1, tzinfo=UTC)
     payload = (
-        b'{"structure_receipt_digest":"' + b"a" * 64
-        + b'","token_range_digest":"' + b"b" * 64
-        + b'","universe_hash":"' + b"c" * 64 + b'"}\n'
+        b'{"structure_receipt_digest":"'
+        + b"a" * 64
+        + b'","token_range_digest":"'
+        + b"b" * 64
+        + b'","universe_hash":"'
+        + b"c" * 64
+        + b'"}\n'
         + b'{"best_ask_price":0.4,"best_ask_size":4,"terminal_state":"executable",'
         + b'"yes_token_id":"token-a"}\n'
     )
@@ -351,17 +404,17 @@ def test_opportunity_stale_heartbeat_drains_blocking_db_call_without_retry() -> 
 def test_opportunity_stale_heartbeat_drains_blocking_r2_body_without_publish() -> None:
     quoted_at = datetime.now(UTC)
     payload = (
-        b'{"structure_receipt_digest":"' + b"a" * 64
-        + b'","token_range_digest":"' + b"b" * 64
-        + b'","universe_hash":"' + b"c" * 64 + b'"}\n'
+        b'{"structure_receipt_digest":"'
+        + b"a" * 64
+        + b'","token_range_digest":"'
+        + b"b" * 64
+        + b'","universe_hash":"'
+        + b"c" * 64
+        + b'"}\n'
         + b'{"best_ask_price":0.4,"best_ask_size":4,'
         + b'"terminal_state":"executable","yes_token_id":"token-a"}\n'
     )
-    legs = (
-        QuoteBatchLeg(
-            "group-a", "market-a", "condition-a", "a", "token-a", "event-a", "m-a"
-        ),
-    )
+    legs = (QuoteBatchLeg("group-a", "market-a", "condition-a", "a", "token-a", "event-a", "m-a"),)
 
     class ControlPlane:
         def __init__(self) -> None:

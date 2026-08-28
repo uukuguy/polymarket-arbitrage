@@ -7,7 +7,7 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Protocol
 
 from polyarb.clients.gamma_client import EventPage, MarketPage, PaginationIntegrityError
@@ -621,7 +621,6 @@ class TransactionalStructureSourceWorker:
         max_market_batches: int = DEFAULT_MAX_MARKET_BATCHES,
         lease_seconds: int = 120,
         object_store_timeout_seconds: float | None = None,
-        retry_delay: timedelta = timedelta(seconds=15),
         daily_egress_budget_bytes: int = 3_500_000_000,
         runtime_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
@@ -636,7 +635,6 @@ class TransactionalStructureSourceWorker:
         if (
             lease_seconds <= 0
             or (object_store_timeout_seconds is not None and object_store_timeout_seconds <= 0)
-            or retry_delay.total_seconds() <= 0
             or daily_egress_budget_bytes <= 0
         ):
             raise ValueError("source worker time bounds must be positive")
@@ -656,7 +654,6 @@ class TransactionalStructureSourceWorker:
             if object_store_timeout_seconds is None
             else object_store_timeout_seconds
         )
-        self._retry_delay = retry_delay
         self._daily_egress_budget_bytes = daily_egress_budget_bytes
         self._runtime_sleep = runtime_sleep
 
@@ -986,7 +983,6 @@ class TransactionalStructureSourceMaterializer:
         lease_seconds: int = 120,
         read_concurrency: int = 8,
         shard_page_batch_size: int = 4,
-        retry_delay: timedelta = timedelta(seconds=15),
         runtime_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         if not bucket or not worker_id:
@@ -996,7 +992,6 @@ class TransactionalStructureSourceMaterializer:
             or lease_seconds <= 0
             or read_concurrency <= 0
             or shard_page_batch_size <= 0
-            or retry_delay.total_seconds() <= 0
         ):
             raise ValueError("materializer bounds must be positive")
         self._control_plane = control_plane
@@ -1008,7 +1003,6 @@ class TransactionalStructureSourceMaterializer:
         self._lease_seconds = lease_seconds
         self._read_concurrency = read_concurrency
         self._shard_page_batch_size = shard_page_batch_size
-        self._retry_delay = retry_delay
         self._runtime_sleep = runtime_sleep
 
     async def run_once(self) -> StructureWorkerResult:

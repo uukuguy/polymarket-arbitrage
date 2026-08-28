@@ -44,7 +44,9 @@ Create a closed `RuntimePolicyRegistry` covering exactly the eight job types in
 - absolute attempt deadline;
 - terminal/recovery grace;
 - maximum non-terminal I/O duration;
+- maximum provider request duration and exactly one inner provider attempt;
 - retry/circuit budget;
+- centralized durable retry backoff;
 - checkpoint cadence;
 - immutable policy version.
 
@@ -62,6 +64,8 @@ terminal_statement_timeout < remaining_lease
 policy job types == runtime-stage job types
 connection return implies search-path/statement/lock policy is already active
 fixed operation implies fixed query rounds or an explicit page/checkpoint protocol
+provider_timeout < io_timeout < progress_timeout
+provider_attempts == 1 for formal runtime clients
 ```
 
 A per-statement deadline does not bound a sequence containing an unbounded
@@ -73,6 +77,12 @@ stoppable between pages.
 Connection bootstrap is part of the connection boundary. No connection factory
 may return before search path, statement timeout, and lock timeout are active,
 and it may not run an unbounded SQL statement in order to install those bounds.
+
+Provider SDK retry is another recovery controller, not a harmless transport
+detail. Formal Gamma, CLOB and R2 clients perform one inner attempt inside the
+worker I/O envelope. PostgreSQL durable retry/circuit state exclusively owns
+failure count, backoff and probe release. Legacy archive clients may retain a
+separate policy only when they cannot enter runtime-v2.
 
 ## Cancellation and effect classes
 
@@ -151,6 +161,19 @@ stop is checked after claim and provider response and before retry/finalization,
 so a late response cannot begin new SQL; a non-cooperative client is detached
 after the database-derived stop grace.
 
+Proof and watchdog loops are operations too. A cloud-soak sample runs off the
+signal loop, receives cooperative stop before terminal grace, and rechecks stop
+before appending evidence. Watchdog observation has a fixed target cardinality
+and fixed parallel rounds: control API plus app snapshots in one round, then
+within each app one Machine list and one parallel exact-Machine detail round.
+The detail round is required because list events do not carry authoritative
+restart counts. A shared observation bound discards incomplete read-only work.
+
+Alert clocks are explicitly ordered: one provider attempt and its request
+timeout fit below database-derived stop grace, which fits below the outbox
+lease. Retry cadence schedules future work only and cannot extend an active
+claim.
+
 ## Gate runner recovery
 
 The climb evaluator does not own a universal subprocess timeout. Each gate owns
@@ -187,6 +210,14 @@ marked as a backfill. Only current-cursor live observations count toward the
 - scoped connection tests prove timeout policy is active before the first SQL;
 - climb interruption test proves exact-identity resume without a competing
   evaluator timeout;
+- provider-client tests prove one inner attempt and an explicit request
+  envelope below worker I/O, while both durable failure transactions use the
+  same central backoff function;
+- incomplete Quote/opportunity barriers consume durable failure/circuit budget
+  rather than polling forever on a module-local delay;
+- cloud-soak and watchdog tests prove signal-responsive fixed parallel
+  observation rounds with bounded target cardinality;
+- alert policy tests prove `provider timeout < stop grace < outbox lease`;
 - full M1 regression, migration upgrade/downgrade, lint, format, planning, and
   climb gates.
 

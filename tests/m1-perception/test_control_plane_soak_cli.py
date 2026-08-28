@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import time
 from pathlib import Path
 
 
@@ -43,14 +45,34 @@ def test_soak_start_and_sample_are_read_only_and_need_no_dsn(
     assert json.loads(capsys.readouterr().out)["status"] == "sample-recorded"
 
 
+def test_local_soak_fly_read_has_an_operation_specific_subprocess_bound(monkeypatch) -> None:
+    from polyarb import cli_control_plane
+
+    observed = {}
+
+    def run(argv, **kwargs):
+        observed.update({"argv": argv, **kwargs})
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=json.dumps([{"id": "machine-a", "state": "started"}]),
+            stderr="",
+        )
+
+    monkeypatch.setattr(cli_control_plane.subprocess, "run", run)
+
+    assert cli_control_plane._read_fly_machine_states(
+        ("machine-a",), app="polyarb-control-worker"
+    ) == {"machine-a": "started"}
+    assert observed["timeout"] == cli_control_plane._FLY_CLI_READ_TIMEOUT_SECONDS
+
+
 def test_soak_verify_is_local_and_fail_closed(tmp_path: Path, capsys) -> None:
     from polyarb import cli_control_plane
     from polyarb.control_plane.soak_evidence import append_record, create_record
 
     evidence = tmp_path / "soak.jsonl"
-    for index, observed_at in enumerate(
-        ("2030-01-01T00:00:00+00:00", "2030-01-02T00:00:00+00:00")
-    ):
+    for index, observed_at in enumerate(("2030-01-01T00:00:00+00:00", "2030-01-02T00:00:00+00:00")):
         append_record(
             evidence,
             create_record(
@@ -89,9 +111,7 @@ def test_soak_verify_reports_the_safe_gate_reason(tmp_path: Path, capsys) -> Non
     from polyarb.control_plane.soak_evidence import append_record, create_record
 
     evidence = tmp_path / "short-soak.jsonl"
-    for index, observed_at in enumerate(
-        ("2030-01-01T00:00:00+00:00", "2030-01-01T00:05:00+00:00")
-    ):
+    for index, observed_at in enumerate(("2030-01-01T00:00:00+00:00", "2030-01-01T00:05:00+00:00")):
         append_record(
             evidence,
             create_record(
@@ -224,3 +244,57 @@ def test_cloud_soak_service_stops_without_synthesizing_a_sample() -> None:
     assert asyncio.run(
         cli_control_plane._run_cloud_soak_service(object(), args, stop_event=stopped)
     ) == {"status": "stopped", "samples": 0}
+
+
+def test_cloud_soak_stop_wins_before_a_late_sample_can_write(monkeypatch) -> None:
+    from polyarb import cli_control_plane
+
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.writes = 0
+
+        def append_soak_observation(self, **_kwargs) -> None:
+            self.writes += 1
+
+    control_plane = ControlPlane()
+    args = cli_control_plane._parser().parse_args(
+        [
+            "cloud-soak-serve",
+            "--enable",
+            "--run-id",
+            "formal-cloud-v1",
+            "--control-api-url",
+            "https://control.example/perception/control-plane",
+            "--fly-app",
+            "polyarb-control-worker",
+            "--machine-id",
+            "machine-a",
+        ]
+    )
+
+    def blocked_sample(_control_plane, _args, *, baseline, stop_requested):
+        assert baseline is False
+        time.sleep(0.05)
+        if stop_requested():
+            return None
+        raise AssertionError("stop must be visible before the write boundary")
+
+    monkeypatch.setattr(cli_control_plane, "_record_cloud_soak_observation", blocked_sample)
+
+    async def scenario():
+        stop = asyncio.Event()
+
+        async def stop_soon() -> None:
+            await asyncio.sleep(0.005)
+            stop.set()
+
+        asyncio.create_task(stop_soon())
+        return await cli_control_plane._run_cloud_soak_service(
+            control_plane,
+            args,
+            stop_event=stop,
+            grace_seconds=0.1,
+        )
+
+    assert asyncio.run(scenario()) == {"status": "stopped", "samples": 0}
+    assert control_plane.writes == 0

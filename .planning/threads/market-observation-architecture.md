@@ -2069,3 +2069,30 @@ success is not user receipt/read evidence.
   loop. Its whole turn now runs in a stop-aware daemon bridge; cooperative stop
   prevents a late provider response from starting finish SQL, while the durable
   outbox lease recovers abandoned claims.
+
+### §2.45 Inner retries and proof loops are lifecycle controllers (2026-08-28)
+
+- An SDK retry policy is a second recovery controller. R2's three inner attempts
+  multiplied with three durable attempts, while Gamma retry/backoff could outlive
+  the worker I/O envelope that was supposed to contain it. Formal Gamma, CLOB
+  and R2 clients now perform one explicit provider attempt below the worker I/O
+  deadline; PostgreSQL attempt/circuit state exclusively owns retry count,
+  backoff and probe release.
+- Outcome labels do not define scheduling semantics. Quote and opportunity
+  certifiers called incomplete input `waiting` but persisted a fixed five-second
+  retry outside the central circuit. Incomplete barriers now consume the normal
+  retryable incident/backoff/circuit path. Durable `waiting` remains only an
+  eligibility state changed by predecessor receipts.
+- A proof loop with bounded leaf calls can still block shutdown or exceed its
+  cadence. Cloud-soak samples run off the signal loop, receive cooperative stop,
+  and recheck it before the append boundary. Local `flyctl` reads have their own
+  bounded subprocess lifetime.
+- Watchdog observation is a fixed parallel operation round, not an app/Machine
+  serial loop: at most eight apps, sixteen Machines per app, control and app
+  snapshots in parallel, then one list plus one parallel exact-Machine detail
+  round per app. Detail reads remain necessary because list events omit
+  authoritative `request.restart_count`.
+- Alert delivery declares one ordered clock contract: one provider attempt,
+  provider timeout below DB-derived stop grace, stop grace below the durable
+  outbox lease, and retry cadence owning only future scheduling. This ordering
+  is executable policy, not a comment beside independent constants.

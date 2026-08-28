@@ -37,6 +37,19 @@ _R2_RETRY_CONFIG = Config(
 )
 
 
+def control_plane_r2_config(provider_timeout_seconds: float) -> Config:
+    """Build the no-hidden-retry R2 envelope used by formal runtime-v2 jobs."""
+    if provider_timeout_seconds <= 0:
+        raise ValueError("provider_timeout_seconds must be positive")
+    connect_timeout = min(5.0, provider_timeout_seconds / 3)
+    read_timeout = provider_timeout_seconds - connect_timeout
+    return Config(
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+        retries={"total_max_attempts": 1, "mode": "standard"},
+    )
+
+
 class R2UploadError(Exception):
     """Raised when an R2 upload fails after retries.
 
@@ -45,7 +58,13 @@ class R2UploadError(Exception):
     """
 
 
-def _build_client(endpoint: str, access_key: str, secret_key: str):
+def _build_client(
+    endpoint: str,
+    access_key: str,
+    secret_key: str,
+    *,
+    config: Config | None = None,
+):
     """Build a boto3 s3 client configured for Cloudflare R2.
 
     R2 uses S3-compatible API with a custom endpoint URL. The region_name='auto'
@@ -57,7 +76,7 @@ def _build_client(endpoint: str, access_key: str, secret_key: str):
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
         region_name="auto",
-        config=_R2_RETRY_CONFIG,
+        config=_R2_RETRY_CONFIG if config is None else config,
     )
 
 

@@ -9,14 +9,27 @@ from pydantic import SecretStr
 
 from polyarb.config import Settings
 from polyarb.control_plane.alert_delivery import (
+    ALERT_DELIVERY_POLICY,
     AlertDeliveryStopRequested,
     TransactionalAlertDeliveryWorker,
     incident_alert_channels,
     render_runtime_incident_message,
 )
+from polyarb.control_plane.db_deadlines import CONTROL_PLANE_DB_POLICY
 from polyarb.control_plane.models import AlertDeliveryLease
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+def test_alert_delivery_policy_orders_provider_stop_lease_and_retry_clocks() -> None:
+    assert (
+        ALERT_DELIVERY_POLICY.provider_timeout_seconds
+        < ALERT_DELIVERY_POLICY.stop_grace_seconds
+        < ALERT_DELIVERY_POLICY.lease_seconds
+    )
+    assert ALERT_DELIVERY_POLICY.stop_grace_seconds == CONTROL_PLANE_DB_POLICY.stop_grace_seconds
+    assert ALERT_DELIVERY_POLICY.provider_attempts == 1
+    assert ALERT_DELIVERY_POLICY.retry_delay_seconds > 0
 
 
 class _ControlPlane:

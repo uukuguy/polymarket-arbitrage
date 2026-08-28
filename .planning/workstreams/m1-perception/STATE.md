@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Revision 031 is live with zero Machine changes; the operation-round audit superseded its first image, and a new exact image plus fresh full gates must land before rollout
-last_updated: "2026-08-28T17:35:00+08:00"
+stopped_at: Revision 031 is live with zero Machine changes; provider/proof-loop lifecycle gates are green and the superseding exact image must be built before rollout
+last_updated: "2026-08-28T18:39:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -80,7 +80,7 @@ progress:
   circuits release one controller probe before historical attempt clocks are
   considered. Qualification consumes breaker history for the first identity
   and hands successor releases the live ledger high-water. Full M1 regression
-  is 3,972 passed / 1 skipped / 1 expected xfail; independent final review has
+  is 3,984 passed / 1 skipped / 1 expected xfail; independent final review has
   zero findings. Production revision 029 is applied; coordinator and
   qualification Machines remain stopped and no Machine has received the new
   runtime image. Pre-rollout proof additionally found that qualification status
@@ -107,7 +107,7 @@ progress:
   the legacy arrays backfilled into normalized rows. Revision 031 validates
   parity, clears the arrays and fences regrowth; it also closes the remaining
   compatibility writer and Alembic lock-wait deadline gaps. The fresh full gate
-  is 3,972 passed / 1 skipped / 1 expected xfail in 1,579.71 seconds. Revision 031 is now in
+  is 3,984 passed / 1 skipped / 1 expected xfail in 1,541.27 seconds. Revision 031 is now in
   production with 6,572 facts, zero legacy arrays, three compaction constraints,
   one append-only trigger and zero scalar mismatches. No Machine changed. The
   first revision-031 image is superseded: role authority checks now use fixed
@@ -116,7 +116,12 @@ progress:
   cooperative stop, and climb checkpoints exact-identity gate progress without
   a universal 120-second kill. Runtime-controller decisions now use one bulk
   lease-fenced transaction behind cooperative stop; alert delivery runs off the
-  signal loop and rejects late finish SQL. Fresh full and climb gates pass; a
+  signal loop and rejects late finish SQL. Formal Gamma/CLOB/R2 clients now use
+  one provider attempt below worker I/O; Quote/opportunity incomplete barriers
+  consume the durable circuit instead of five-second polling. Cloud-soak and
+  watchdog observations run in bounded interruptible rounds, and alert clocks
+  are explicitly ordered. Fresh full and climb gates pass. Commit `2b7c7817a5ab`
+  image digest `sha256:413e2b4a…5d30` is superseded without Machine mutation; a
   new exact image remains.
 
 - **Plan 05.6-208 diagnosis (superseded locally by Plan 209):** the initial accumulating epoch was

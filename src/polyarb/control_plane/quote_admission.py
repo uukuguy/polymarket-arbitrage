@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from hashlib import sha256
 from typing import Any, Protocol
 
@@ -303,7 +303,6 @@ class TransactionalQuoteAdmitter:
         now: Callable[[], datetime],
         batch_size: int,
         lease_seconds: int = 120,
-        retry_delay: timedelta = timedelta(seconds=15),
         runtime_sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         if not bucket or not worker_id or batch_size <= 0 or lease_seconds <= 0:
@@ -315,7 +314,6 @@ class TransactionalQuoteAdmitter:
         self._now = now
         self._batch_size = batch_size
         self._lease_seconds = lease_seconds
-        self._retry_delay = retry_delay
         self._runtime_sleep = runtime_sleep
 
     async def run_once(self) -> QuoteBatchWorkerResult:

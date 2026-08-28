@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from threading import Event
 from typing import Any, Protocol, cast
 
@@ -134,26 +134,17 @@ class TransactionalOpportunityCertifier:
             else:
                 self._control_plane.finish(lease, state=JobState.SUCCEEDED, now=self._now())
             return OpportunityCertifierResult(job_key=lease.job_key, outcome="current")
-        except IncompleteQuoteGenerationError:
+        except IncompleteQuoteGenerationError as error:
+            failure = error
             if runtime is None:
-                self._control_plane.finish(
-                    lease,
-                    state=JobState.RETRYABLE,
-                    next_attempt_at=self._now() + timedelta(seconds=5),
-                    now=self._now(),
-                )
+                self._finish_retryable(lease, failure)
             else:
                 _runtime_sync_call(
                     runtime,
-                    lambda: self._control_plane.finish(
-                        runtime.current_lease,
-                        state=JobState.RETRYABLE,
-                        next_attempt_at=self._now() + timedelta(seconds=5),
-                        now=self._now(),
-                    ),
+                    lambda: self._finish_retryable(runtime.current_lease, failure),
                     terminal=True,
                 )
-            return OpportunityCertifierResult(job_key=lease.job_key, outcome="waiting")
+            return OpportunityCertifierResult(job_key=lease.job_key, outcome="retryable")
         except StaleLeaseError:
             raise
         except Exception as error:

@@ -13,7 +13,8 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock, Thread
+from time import monotonic
 from typing import Any, Protocol, cast
 from urllib.request import Request, urlopen
 
@@ -22,7 +23,10 @@ import psycopg
 from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
-from polyarb.control_plane.alert_delivery import TransactionalAlertDeliveryWorker
+from polyarb.control_plane.alert_delivery import (
+    ALERT_DELIVERY_POLICY,
+    TransactionalAlertDeliveryWorker,
+)
 from polyarb.control_plane.blocking_bridge import (
     run_blocking_call,
     run_blocking_call_until_stopped,
@@ -67,6 +71,7 @@ from polyarb.control_plane.recovery_store import (
     schedule_action,
 )
 from polyarb.control_plane.rollout import render_rollout_artifacts
+from polyarb.control_plane.runtime_deadlines import runtime_policy
 from polyarb.control_plane.runtime_fault_matrix import RuntimeFaultMatrixError, run_fault_matrix
 from polyarb.control_plane.runtime_observe import (
     build_runtime_observe_decision_record,
@@ -114,9 +119,14 @@ from polyarb.control_plane.watchdog import (
     run_watchdog_service,
 )
 from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
-from polyarb.storage.r2_sync import _build_client
+from polyarb.storage.r2_sync import _build_client, control_plane_r2_config
 
 _R2_UPLOAD_FAULT_ACK = "staging-r2-upload-before-receipt"
+_FLY_HTTP_TIMEOUT_SECONDS = 10.0
+_FLY_CLI_READ_TIMEOUT_SECONDS = 30.0
+_MAX_FLY_MACHINES_PER_APP = 16
+_MAX_WATCHDOG_APPS = 8
+_WATCHDOG_OBSERVATION_TIMEOUT_SECONDS = 2 * _FLY_HTTP_TIMEOUT_SECONDS + 1.0
 
 
 class _RuntimeReconcileControlPlane(Protocol):
@@ -504,12 +514,16 @@ def _read_soak_control_snapshot(url: str) -> dict[str, object]:
 
 def _read_fly_machine_states(machine_ids: Sequence[str], *, app: str) -> dict[str, str]:
     """Read exact Fly machine state using its local CLI, with no machine mutation."""
-    result = subprocess.run(
-        ["flyctl", "machines", "list", "--app", app, "--json"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["flyctl", "machines", "list", "--app", app, "--json"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_FLY_CLI_READ_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise SoakEvidenceError("Fly machine state read exceeded its operator bound") from error
     payload = json.loads(result.stdout)
     if not isinstance(payload, list):
         raise SoakEvidenceError("Fly machines list must be an array")
@@ -533,11 +547,15 @@ def _read_cloud_fly_machine_states(
     """Read exact Fly states over HTTPS; production images intentionally lack flyctl."""
     if not token:
         raise SoakEvidenceError("POLYARB_FLY_API_TOKEN is required for cloud soak sampling")
+    if not machine_ids or len(machine_ids) > _MAX_FLY_MACHINES_PER_APP:
+        raise SoakEvidenceError("cloud Fly target count is outside the bounded app envelope")
     request = Request(
         f"https://api.machines.dev/v1/apps/{app}/machines",
         headers={"Authorization": f"Bearer {token}"},
     )
-    with urlopen(request, timeout=10) as response:  # noqa: S310 -- fixed Fly API origin
+    with urlopen(  # noqa: S310 -- fixed Fly API origin
+        request, timeout=_FLY_HTTP_TIMEOUT_SECONDS
+    ) as response:
         payload = json.loads(response.read())
     if not isinstance(payload, list):
         raise SoakEvidenceError("Fly machines response must be an array")
@@ -558,30 +576,70 @@ def _read_cloud_fly_machine_restart_counts(
     """Read exact Fly restart counters; a ``started`` Machine may still be looping."""
     if not token:
         raise SoakEvidenceError("POLYARB_FLY_API_TOKEN is required for watchdog event reads")
+    if not machine_ids or len(machine_ids) > _MAX_FLY_MACHINES_PER_APP:
+        raise SoakEvidenceError("cloud Fly target count is outside the bounded app envelope")
     counts: dict[str, int] = {}
-    for machine_id in machine_ids:
-        request = Request(
-            f"https://api.machines.dev/v1/apps/{app}/machines/{machine_id}",
-            headers={"Authorization": f"Bearer {token}"},
+    failures: list[BaseException] = []
+    result_lock = Lock()
+
+    def read_one(machine_id: str) -> None:
+        try:
+            request = Request(
+                f"https://api.machines.dev/v1/apps/{app}/machines/{machine_id}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            with urlopen(  # noqa: S310 -- fixed Fly API origin
+                request, timeout=_FLY_HTTP_TIMEOUT_SECONDS
+            ) as response:
+                payload = json.loads(response.read())
+            if not isinstance(payload, dict) or payload.get("id") != machine_id:
+                raise SoakEvidenceError("an exact cloud Fly machine event record is missing")
+            events = payload.get("events")
+            if not isinstance(events, list):
+                raise SoakEvidenceError("cloud Fly machine events must be an array")
+            restart_count = max(
+                (
+                    count
+                    for event in events
+                    if isinstance(event, dict)
+                    and isinstance(event.get("request"), dict)
+                    and isinstance((count := event["request"].get("restart_count")), int)
+                ),
+                default=0,
+            )
+            with result_lock:
+                counts[machine_id] = restart_count
+        except BaseException as error:
+            with result_lock:
+                failures.append(error)
+
+    threads = [
+        Thread(
+            target=read_one,
+            args=(machine_id,),
+            name=f"runtime-watchdog:fly-detail:{machine_id}",
+            daemon=True,
         )
-        with urlopen(request, timeout=10) as response:  # noqa: S310 -- fixed Fly API origin
-            payload = json.loads(response.read())
-        if not isinstance(payload, dict) or payload.get("id") != machine_id:
-            raise SoakEvidenceError("an exact cloud Fly machine event record is missing")
-        events = payload.get("events")
-        if not isinstance(events, list):
-            raise SoakEvidenceError("cloud Fly machine events must be an array")
-        counts[machine_id] = max(
-            (
-                restart_count
-                for event in events
-                if isinstance(event, dict)
-                and isinstance(event.get("request"), dict)
-                and isinstance((restart_count := event["request"].get("restart_count")), int)
-            ),
-            default=0,
-        )
+        for machine_id in machine_ids
+    ]
+    for thread in threads:
+        thread.start()
+    round_deadline = monotonic() + _FLY_HTTP_TIMEOUT_SECONDS + 0.5
+    for thread in threads:
+        thread.join(max(0.0, round_deadline - monotonic()))
+    if any(thread.is_alive() for thread in threads) or failures or len(counts) != len(machine_ids):
+        raise SoakEvidenceError("cloud Fly machine event round did not complete")
     return counts
+
+
+def _read_cloud_fly_machine_snapshot(
+    machine_ids: Sequence[str], *, app: str, token: str
+) -> tuple[dict[str, str], dict[str, int]]:
+    """Read one app in a fixed list round plus one parallel detail round."""
+    return (
+        _read_cloud_fly_machine_states(machine_ids, app=app, token=token),
+        _read_cloud_fly_machine_restart_counts(machine_ids, app=app, token=token),
+    )
 
 
 def _record_soak_observation(args: argparse.Namespace, *, exclusive: bool) -> dict[str, object]:
@@ -602,8 +660,14 @@ def _record_soak_observation(args: argparse.Namespace, *, exclusive: bool) -> di
 
 
 def _record_cloud_soak_observation(
-    control_plane: PostgresControlPlane, args: argparse.Namespace, *, baseline: bool
-) -> dict[str, object]:
+    control_plane: PostgresControlPlane,
+    args: argparse.Namespace,
+    *,
+    baseline: bool,
+    stop_requested: Callable[[], bool] | None = None,
+) -> dict[str, object] | None:
+    if stop_requested is not None and stop_requested():
+        return None
     record = create_record(
         observed_at=datetime.now(UTC).isoformat(),
         control_api_url=args.control_api_url,
@@ -614,6 +678,8 @@ def _record_cloud_soak_observation(
         ),
         control_snapshot=_read_soak_control_snapshot(args.control_api_url),
     )
+    if stop_requested is not None and stop_requested():
+        return None
     if baseline:
         control_plane.start_soak_run(run_id=args.run_id, baseline_record=record)
     else:
@@ -631,6 +697,7 @@ async def _run_cloud_soak_service(
     args: argparse.Namespace,
     *,
     stop_event: asyncio.Event | None = None,
+    grace_seconds: float | None = None,
 ) -> dict[str, object]:
     """Sample at fixed cadence; a read/write failure exits and leaves a proof gap."""
     if args.interval_seconds <= 0:
@@ -644,8 +711,26 @@ async def _run_cloud_soak_service(
             except (NotImplementedError, RuntimeError):
                 pass
     samples = 0
+    stop_grace = (
+        CONTROL_PLANE_DB_POLICY.stop_grace_seconds if grace_seconds is None else grace_seconds
+    )
     while not stop.is_set():
-        outcome = _record_cloud_soak_observation(control_plane, args, baseline=False)
+        turn_stop = Event()
+        completed, outcome = await run_blocking_call_until_stopped(
+            lambda: _record_cloud_soak_observation(
+                control_plane,
+                args,
+                baseline=False,
+                stop_requested=turn_stop.is_set,
+            ),
+            stop_event=stop,
+            grace_seconds=stop_grace,
+            point_of_no_return=True,
+            request_stop=turn_stop.set,
+            thread_name="control-plane-cloud-soak:sample",
+        )
+        if not completed or outcome is None:
+            break
         _write(
             {"event": "cloud-soak-sample", **outcome},
             as_json=args.json,
@@ -672,10 +757,9 @@ def _read_runtime_watchdog_observation(
     machine_states: dict[str, str] = {}
     restart_counts: dict[str, int] = {}
     machine_error: BaseException | None = None
-    try:
-        control_api_payload = _read_soak_control_snapshot(args.control_api_url)
-    except (OSError, SoakEvidenceError, ValueError) as error:
-        control_api_error = error
+    expected_machine_ids: list[str] = []
+    token = os.environ.get("POLYARB_FLY_API_TOKEN", "")
+    target_apps: dict[str, tuple[str, ...]] = {}
     try:
         secondary_ids = args.secondary_machine_id or []
         if bool(args.secondary_fly_app) != bool(secondary_ids):
@@ -683,29 +767,85 @@ def _read_runtime_watchdog_observation(
                 "secondary watchdog target requires both --secondary-fly-app and "
                 "at least one --secondary-machine-id"
             )
-        token = os.environ.get("POLYARB_FLY_API_TOKEN", "")
-        target_states: list[tuple[str, Sequence[str]]] = [(args.fly_app, args.machine_id)]
+        configured_apps: dict[str, list[str]] = {args.fly_app: list(args.machine_id)}
         if args.secondary_fly_app:
-            target_states.append((args.secondary_fly_app, secondary_ids))
-        additional_targets: dict[str, list[str]] = {}
+            configured_apps.setdefault(args.secondary_fly_app, []).extend(secondary_ids)
         for target in args.secondary_target or []:
             app, separator, machine_id = target.partition("/")
             if not separator or not app or not machine_id or "/" in machine_id:
                 raise ValueError("secondary watchdog target must use <app>/<machine-id> form")
-            additional_targets.setdefault(app, []).append(machine_id)
-        target_states.extend(additional_targets.items())
-        expected_machine_ids: list[str] = []
-        for app, machine_ids in target_states:
-            states = _read_cloud_fly_machine_states(machine_ids, app=app, token=token)
-            restarts = _read_cloud_fly_machine_restart_counts(machine_ids, app=app, token=token)
+            configured_apps.setdefault(app, []).append(machine_id)
+        if len(configured_apps) > _MAX_WATCHDOG_APPS:
+            raise ValueError("watchdog app count exceeds the bounded observation envelope")
+        target_apps = {
+            app: tuple(dict.fromkeys(machine_ids)) for app, machine_ids in configured_apps.items()
+        }
+    except ValueError as error:
+        machine_error = error
+
+    provider_lock = Lock()
+    app_results: dict[str, tuple[dict[str, str], dict[str, int]]] = {}
+    app_errors: list[BaseException] = []
+
+    def read_control_api() -> None:
+        nonlocal control_api_payload, control_api_error
+        try:
+            payload = _read_soak_control_snapshot(args.control_api_url)
+        except (OSError, SoakEvidenceError, ValueError) as error:
+            with provider_lock:
+                control_api_error = error
+        else:
+            with provider_lock:
+                control_api_payload = payload
+
+    def read_app(app: str, machine_ids: tuple[str, ...]) -> None:
+        try:
+            snapshot = _read_cloud_fly_machine_snapshot(machine_ids, app=app, token=token)
+        except BaseException as error:
+            with provider_lock:
+                app_errors.append(error)
+        else:
+            with provider_lock:
+                app_results[app] = snapshot
+
+    threads = [
+        Thread(
+            target=read_control_api,
+            name="runtime-watchdog:control-api-read",
+            daemon=True,
+        )
+    ]
+    if machine_error is None:
+        threads.extend(
+            Thread(
+                target=read_app,
+                args=(app, machine_ids),
+                name=f"runtime-watchdog:app-read:{app}",
+                daemon=True,
+            )
+            for app, machine_ids in target_apps.items()
+        )
+    for thread in threads:
+        thread.start()
+    operation_deadline = monotonic() + _WATCHDOG_OBSERVATION_TIMEOUT_SECONDS
+    for thread in threads:
+        thread.join(max(0.0, operation_deadline - monotonic()))
+    if control_api_payload is None and control_api_error is None:
+        control_api_error = SoakEvidenceError("control API observation round did not complete")
+    if machine_error is None and (
+        app_errors
+        or any(thread.is_alive() for thread in threads[1:])
+        or len(app_results) != len(target_apps)
+    ):
+        machine_error = SoakEvidenceError("Fly observation round did not complete")
+
+    if machine_error is None:
+        for app, (states, restarts) in app_results.items():
             for machine_id, state in states.items():
                 qualified_id = f"{app}/{machine_id}"
                 machine_states[qualified_id] = state
                 restart_counts[qualified_id] = restarts[machine_id]
                 expected_machine_ids.append(qualified_id)
-    except (OSError, SoakEvidenceError, ValueError) as error:
-        machine_error = error
-        expected_machine_ids = []
     observation = assess_runtime(
         machine_states=machine_states,
         expected_machine_ids=expected_machine_ids if machine_error is None else (),
@@ -892,13 +1032,17 @@ def _transactional_quote_workers(
     acceptance_run_id: str | None = None,
 ) -> tuple[TransactionalQuoteBatchWorker, TransactionalQuoteCertifier]:
     """Build explicitly invoked workers; nothing schedules these by default."""
-    settings = Settings()
+    provider_policy = runtime_policy("quote-batch", 120)
+    settings = Settings().model_copy(
+        update={"http_timeout_s": provider_policy.provider_timeout_seconds}
+    )
     if not settings.r2_enabled:
         raise RuntimeError("transactional Quote requires configured R2 credentials")
     object_client = _build_client(
         settings.r2_endpoint,
         settings.r2_access_key_id.get_secret_value(),
         settings.r2_secret_access_key.get_secret_value(),
+        config=control_plane_r2_config(provider_policy.provider_timeout_seconds),
     )
     return (
         TransactionalQuoteBatchWorker(
@@ -952,7 +1096,13 @@ def _transactional_structure_source_worker(
     if lane_count <= 0:
         raise ValueError("lane_count must be positive")
     object_client, bucket = _structure_object_client()
-    settings = Settings()
+    provider_policy = runtime_policy("structure-fetch", 120)
+    settings = Settings().model_copy(
+        update={
+            "http_timeout_s": provider_policy.provider_timeout_seconds,
+            "retry_attempts": provider_policy.provider_attempts,
+        }
+    )
     return TransactionalStructureSourcePool(
         lanes=tuple(
             TransactionalStructureSourceWorker(
@@ -1094,11 +1244,13 @@ def _structure_object_client() -> tuple[Any, str]:
     settings = Settings()
     if not settings.r2_enabled:
         raise RuntimeError("transactional Structure requires configured R2 credentials")
+    provider_policy = runtime_policy("structure-certify", 30)
     return (
         _build_client(
             settings.r2_endpoint,
             settings.r2_access_key_id.get_secret_value(),
             settings.r2_secret_access_key.get_secret_value(),
+            config=control_plane_r2_config(provider_policy.provider_timeout_seconds),
         ),
         settings.r2_bucket,
     )
@@ -1161,7 +1313,7 @@ async def _run_alert_service(
         completed, result = await run_blocking_call_until_stopped(
             lambda: asyncio.run(worker.run_once()),
             stop_event=stop,
-            grace_seconds=CONTROL_PLANE_DB_POLICY.stop_grace_seconds,
+            grace_seconds=ALERT_DELIVERY_POLICY.stop_grace_seconds,
             point_of_no_return=True,
             request_stop=getattr(worker, "request_stop", None),
             thread_name="control-plane-alert:delivery-turn",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
@@ -1613,7 +1614,7 @@ def test_alert_service_detaches_a_stalled_turn_at_database_grace(
             release.wait()
             return SimpleNamespace(outbox_id="late", outcome="late")
 
-    monkeypatch.setattr(cli_control_plane, "CONTROL_PLANE_DB_POLICY", Policy())
+    monkeypatch.setattr(cli_control_plane, "ALERT_DELIVERY_POLICY", Policy())
 
     async def run() -> dict[str, object]:
         task = asyncio.create_task(
@@ -1770,6 +1771,208 @@ def test_structure_source_factory_builds_eight_distinct_lease_lanes(monkeypatch)
     ]
     assert {id(lane["object_client"]) for lane in captured} == {id(object_client)}
     assert {lane["bucket"] for lane in captured} == {"source-bucket"}
+
+
+def test_structure_source_factory_disables_hidden_gamma_retries(monkeypatch) -> None:
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.postgres import PostgresControlPlane
+    from polyarb.control_plane.runtime_deadlines import runtime_policy
+
+    captured_settings = []
+
+    class SourceWorker:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    class SourcePool:
+        def __init__(self, *, lanes: tuple[SourceWorker, ...]) -> None:
+            self.lanes = lanes
+
+    def gamma_client(settings):
+        captured_settings.append(settings)
+        return object()
+
+    monkeypatch.setattr(cli_control_plane, "TransactionalStructureSourceWorker", SourceWorker)
+    monkeypatch.setattr(cli_control_plane, "TransactionalStructureSourcePool", SourcePool)
+    monkeypatch.setattr(cli_control_plane, "GammaClient", gamma_client)
+    monkeypatch.setattr(cli_control_plane, "_structure_object_client", lambda: (object(), "b"))
+
+    cli_control_plane._transactional_structure_source_worker(
+        cast(PostgresControlPlane, object()), worker_id="control:source", lane_count=2
+    )
+
+    assert len(captured_settings) == 2
+    policy = runtime_policy("structure-fetch", 120)
+    assert {settings.retry_attempts for settings in captured_settings} == {policy.provider_attempts}
+    assert {settings.http_timeout_s for settings in captured_settings} == {
+        policy.provider_timeout_seconds
+    }
+
+
+def test_quote_factory_disables_hidden_r2_retries(monkeypatch, settings_for_test_with_r2) -> None:
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.postgres import PostgresControlPlane
+    from polyarb.control_plane.runtime_deadlines import runtime_policy
+
+    captured = {}
+
+    class Worker:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+    def build_client(*_args, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(cli_control_plane, "Settings", lambda: settings_for_test_with_r2)
+    monkeypatch.setattr(cli_control_plane, "_build_client", build_client)
+    monkeypatch.setattr(cli_control_plane, "ClobReaderClient", lambda _settings: object())
+    monkeypatch.setattr(cli_control_plane, "TransactionalQuoteBatchWorker", Worker)
+    monkeypatch.setattr(cli_control_plane, "TransactionalQuoteCertifier", Worker)
+
+    cli_control_plane._transactional_quote_workers(
+        cast(PostgresControlPlane, object()), worker_id="quote-worker"
+    )
+
+    policy = runtime_policy("quote-batch", 120)
+    assert captured["config"].retries["total_max_attempts"] == policy.provider_attempts
+    assert (
+        captured["config"].connect_timeout + captured["config"].read_timeout
+        <= policy.provider_timeout_seconds
+    )
+
+
+def test_watchdog_reads_restart_details_in_one_parallel_round_per_app(monkeypatch) -> None:
+    from polyarb import cli_control_plane
+
+    calls = []
+
+    detail_barrier = threading.Barrier(2, timeout=0.5)
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    def open_once(request, *, timeout):
+        calls.append((request.full_url, timeout))
+        if request.full_url.endswith("/machines"):
+            return Response(
+                [
+                    {"id": "worker-a", "state": "started"},
+                    {"id": "worker-b", "state": "stopped"},
+                ]
+            )
+        detail_barrier.wait()
+        restart_count = 2 if request.full_url.endswith("worker-a") else 7
+        machine_id = "worker-a" if restart_count == 2 else "worker-b"
+        return Response(
+            {
+                "id": machine_id,
+                "events": [{"request": {"restart_count": restart_count}}],
+            }
+        )
+
+    monkeypatch.setattr(cli_control_plane, "urlopen", open_once)
+
+    states, restarts = cli_control_plane._read_cloud_fly_machine_snapshot(
+        ("worker-a", "worker-b"), app="worker-app", token="read-token"
+    )
+
+    assert states == {"worker-a": "started", "worker-b": "stopped"}
+    assert restarts == {"worker-a": 2, "worker-b": 7}
+    assert len(calls) == 3
+
+
+def test_watchdog_rejects_an_unbounded_cross_app_operation_before_provider_reads(
+    monkeypatch,
+) -> None:
+    from polyarb import cli_control_plane
+
+    argv = [
+        "watchdog-serve",
+        "--enable",
+        "--control-api-url",
+        "https://control.example/perception/control-plane",
+        "--fly-app",
+        "primary-app",
+        "--machine-id",
+        "primary-machine",
+    ]
+    for index in range(cli_control_plane._MAX_WATCHDOG_APPS):
+        argv.extend(("--secondary-target", f"extra-app-{index}/machine-{index}"))
+    args = cli_control_plane._parser().parse_args(argv)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_read_soak_control_snapshot",
+        lambda _url: {"status": "available", "job_counts": {}},
+    )
+    provider_reads = 0
+
+    def snapshot(*_args, **_kwargs):
+        nonlocal provider_reads
+        provider_reads += 1
+        return {}, {}
+
+    monkeypatch.setattr(cli_control_plane, "_read_cloud_fly_machine_snapshot", snapshot)
+    monkeypatch.setenv("POLYARB_FLY_API_TOKEN", "status-token")
+
+    observation = cli_control_plane._read_runtime_watchdog_observation(args)
+
+    assert observation.healthy is False
+    assert provider_reads == 0
+
+
+def test_watchdog_control_and_app_reads_share_one_parallel_observation_round(
+    monkeypatch,
+) -> None:
+    from polyarb import cli_control_plane
+
+    args = cli_control_plane._parser().parse_args(
+        [
+            "watchdog-serve",
+            "--enable",
+            "--control-api-url",
+            "https://control.example/perception/control-plane",
+            "--fly-app",
+            "worker-app",
+            "--machine-id",
+            "worker-a",
+            "--secondary-fly-app",
+            "evidence-app",
+            "--secondary-machine-id",
+            "evidence-a",
+        ]
+    )
+    round_barrier = threading.Barrier(3, timeout=0.5)
+
+    def read_control(_url):
+        round_barrier.wait()
+        return {"status": "available", "job_counts": {"succeeded": 1}}
+
+    def read_app(machine_ids, *, app, token):
+        assert token == "status-token"
+        round_barrier.wait()
+        return (
+            {machine_id: "started" for machine_id in machine_ids},
+            {machine_id: 0 for machine_id in machine_ids},
+        )
+
+    monkeypatch.setattr(cli_control_plane, "_read_soak_control_snapshot", read_control)
+    monkeypatch.setattr(cli_control_plane, "_read_cloud_fly_machine_snapshot", read_app)
+    monkeypatch.setenv("POLYARB_FLY_API_TOKEN", "status-token")
+
+    observation = cli_control_plane._read_runtime_watchdog_observation(args)
+
+    assert observation.healthy is True
 
 
 def test_control_plane_preflight_proves_named_database_and_r2_readiness(

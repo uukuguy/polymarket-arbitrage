@@ -145,5 +145,26 @@ cursor handoff.
   cooperative stop plus recovery-DB grace isolation.
 - [x] Move mixed async/synchronous alert turns off the signal loop and prevent
   claim/provider results from starting later finish SQL after cooperative stop.
-- [ ] Re-run the fresh full M1/climb/planning gates, commit the amended Plan 209
+- [x] Re-run the fresh full M1/climb/planning gates, commit the amended Plan 209
   summary, and build a new immutable image; all earlier images are superseded.
+
+## Task 8: Provider retry multiplication and proof-loop interruption audit
+
+**Files:**
+
+- Modify: `runtime_deadlines.py`, `postgres.py`, `gamma_client.py`,
+  `clob_client.py`, `r2_sync.py`, `cli_control_plane.py`
+- Test: runtime policy/PostgreSQL, provider clients, watchdog and cloud-soak CLI
+
+- [x] Add RED policy tests proving provider calls get one inner attempt, a
+  request timeout strictly below the worker I/O envelope, and one centralized
+  durable backoff formula shared by both retry transactions.
+- [x] Build formal Gamma/CLOB/R2 clients from that provider policy instead of
+  inheriting legacy SDK defaults or hidden retries.
+- [x] Collapse watchdog Machine state/restart collection to two bounded rounds
+  per app: one list read plus one parallel exact-Machine detail round, preserving
+  `request.restart_count` semantics without multiplying latency by target count.
+- [x] Move a cloud-soak sample off the signal loop, send a cooperative stop hint,
+  and refuse the database append when stop wins before the write boundary.
+- [x] Re-run focused RED/GREEN suites, the complete M1/climb/planning gates, and
+  supersede the current image if any executable byte changes.

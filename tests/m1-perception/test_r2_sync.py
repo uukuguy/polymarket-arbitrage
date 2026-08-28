@@ -34,6 +34,19 @@ _R2_TEST_ACCESS_KEY = "dummy-access-key"
 _R2_TEST_SECRET_KEY = "dummy-secret-key"
 
 
+def test_control_plane_r2_config_has_one_inner_attempt_inside_runtime_io() -> None:
+    from polyarb.control_plane.runtime_deadlines import runtime_policy
+    from polyarb.storage.r2_sync import control_plane_r2_config
+
+    policy = runtime_policy("structure-certify", 30)
+    config = control_plane_r2_config(policy.provider_timeout_seconds)
+
+    assert config.connect_timeout <= policy.provider_timeout_seconds
+    assert config.connect_timeout + config.read_timeout <= policy.provider_timeout_seconds
+    assert policy.provider_timeout_seconds < policy.io_timeout_seconds
+    assert config.retries["total_max_attempts"] == policy.provider_attempts
+
+
 def _make_boto3_client(endpoint: str = _R2_TEST_ENDPOINT) -> Any:
     import boto3
 

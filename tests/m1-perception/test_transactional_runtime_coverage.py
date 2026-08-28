@@ -208,9 +208,14 @@ def test_runtime_policy_is_closed_and_orders_every_timeout() -> None:
         assert 3 * policy.deadlines.heartbeat_seconds <= policy.deadlines.lease_seconds
         assert policy.io_timeout_seconds < policy.deadlines.progress_seconds
         assert policy.io_timeout_seconds < policy.terminal_grace_seconds
+        assert policy.provider_attempts == 1
+        assert 0 < policy.provider_timeout_seconds < policy.io_timeout_seconds
         assert policy.deadlines.progress_seconds <= policy.deadlines.attempt_seconds
         assert policy.terminal_grace_seconds > 0
         assert policy.retry_budget > 0
+        assert policy.retry_backoff_seconds(1) == 15
+        assert policy.retry_backoff_seconds(2) == 30
+        assert policy.retry_backoff_seconds(99) == 300
         assert policy.checkpoint_interval > 0
 
     with pytest.raises(ValueError, match="unknown runtime job type"):
@@ -236,12 +241,14 @@ def test_worker_modules_do_not_define_private_runtime_profiles() -> None:
     assert offenders == []
 
 
-def test_retry_circuit_budget_has_one_runtime_policy_authority() -> None:
+def test_retry_circuit_budget_and_backoff_have_one_runtime_policy_authority() -> None:
     source = (Path(__file__).parents[2] / "src/polyarb/control_plane/postgres.py").read_text()
 
-    assert source.count("retry_budget = runtime_policy(component, 3).retry_budget") == 2
+    assert source.count("retry_policy = runtime_policy(component, 3)") == 2
+    assert source.count("delay_seconds = retry_policy.retry_backoff_seconds(failures)") == 2
     assert 'circuit_state = "open" if failures >= 3' not in source
     assert "now if failures == 3" not in source
+    assert "min(15 * (2 ** (failures - 1)), 300)" not in source
 
 
 def test_database_deadlines_have_one_registry_and_no_private_copies() -> None:

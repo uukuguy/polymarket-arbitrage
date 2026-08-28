@@ -5025,8 +5025,9 @@ class PostgresControlPlane:
         )
         circuit = cursor.fetchone()
         failures = (0 if circuit is None else int(circuit["consecutive_failures"])) + 1
-        retry_budget = runtime_policy(component, 3).retry_budget
-        delay_seconds = min(15 * (2 ** (failures - 1)), 300)
+        retry_policy = runtime_policy(component, 3)
+        retry_budget = retry_policy.retry_budget
+        delay_seconds = retry_policy.retry_backoff_seconds(failures)
         next_attempt_at = now + timedelta(seconds=delay_seconds)
         circuit_state = "open" if failures >= retry_budget else "closed"
         opened_at = (
@@ -5960,8 +5961,9 @@ class PostgresControlPlane:
             )
             circuit = cursor.fetchone()
             failures = (0 if circuit is None else int(circuit["consecutive_failures"])) + 1
-            retry_budget = runtime_policy(component, 3).retry_budget
-            delay_seconds = min(15 * (2 ** (failures - 1)), 300)
+            retry_policy = runtime_policy(component, 3)
+            retry_budget = retry_policy.retry_budget
+            delay_seconds = retry_policy.retry_backoff_seconds(failures)
             next_attempt_at = now + timedelta(seconds=delay_seconds)
             circuit_state = "open" if failures >= retry_budget else "closed"
             opened_at = (

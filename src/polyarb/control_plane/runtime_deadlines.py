@@ -15,6 +15,8 @@ class _RuntimePolicySpec:
     attempt_multiplier: int
     retry_budget: int
     checkpoint_interval: int
+    retry_backoff_base_seconds: int = 15
+    retry_backoff_cap_seconds: int = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +30,10 @@ class RuntimePolicy:
     terminal_grace_seconds: int
     retry_budget: int
     checkpoint_interval: int
+    provider_attempts: int
+    provider_timeout_seconds: float
+    retry_backoff_base_seconds: int
+    retry_backoff_cap_seconds: int
 
     def __post_init__(self) -> None:
         if self.job_type not in RUNTIME_STAGE_REGISTRY:
@@ -38,16 +44,34 @@ class RuntimePolicy:
             raise ValueError("I/O timeout must be below progress deadline")
         if self.io_timeout_seconds >= self.terminal_grace_seconds:
             raise ValueError("I/O timeout must be below terminal grace")
+        if self.provider_attempts != 1:
+            raise ValueError("formal runtime provider calls must use one inner attempt")
+        if not 0 < self.provider_timeout_seconds < self.io_timeout_seconds:
+            raise ValueError("provider timeout must be inside the worker I/O envelope")
+        if self.retry_backoff_base_seconds > self.retry_backoff_cap_seconds:
+            raise ValueError("retry backoff base cannot exceed its cap")
         if (
             min(
                 self.io_timeout_seconds,
                 self.terminal_grace_seconds,
                 self.retry_budget,
                 self.checkpoint_interval,
+                self.retry_backoff_base_seconds,
+                self.retry_backoff_cap_seconds,
             )
             <= 0
         ):
             raise ValueError("runtime policy values must be positive")
+
+    def retry_backoff_seconds(self, failure_count: int) -> int:
+        """Return the single durable exponential backoff for one failed attempt."""
+        if failure_count <= 0:
+            raise ValueError("failure_count must be positive")
+        exponent = min(failure_count - 1, 62)
+        return min(
+            self.retry_backoff_base_seconds * (2**exponent),
+            self.retry_backoff_cap_seconds,
+        )
 
 
 _POLICY_VERSION: Final = "runtime-v2"
@@ -131,14 +155,19 @@ def runtime_policy(job_type: str, lease_seconds: int) -> RuntimePolicy:
         attempt_seconds=attempt,
     )
     terminal_grace = max(3, min(30, bounded_lease // 2))
+    io_timeout = max(1, min(90, progress - 1, terminal_grace - 1))
     return RuntimePolicy(
         job_type=job_type,
         policy_version=_POLICY_VERSION,
         deadlines=deadlines,
-        io_timeout_seconds=max(1, min(90, progress - 1, terminal_grace - 1)),
+        io_timeout_seconds=io_timeout,
         terminal_grace_seconds=terminal_grace,
         retry_budget=spec.retry_budget,
         checkpoint_interval=spec.checkpoint_interval,
+        provider_attempts=1,
+        provider_timeout_seconds=max(0.5, min(15.0, io_timeout - 0.5)),
+        retry_backoff_base_seconds=spec.retry_backoff_base_seconds,
+        retry_backoff_cap_seconds=spec.retry_backoff_cap_seconds,
     )
 
 

@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import partial
 from threading import Event, Thread
 from time import monotonic
@@ -217,22 +217,20 @@ class TransactionalStructureWorker:
         worker_id: str,
         now: Callable[[], datetime],
         lease_seconds: int = 120,
-        retry_delay: timedelta = timedelta(seconds=15),
         crash_after_r2_upload: Callable[[JobLease], None] | None = None,
         retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
         acceptance_run_id: str | None = None,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
-        if lease_seconds <= 0 or retry_delay.total_seconds() <= 0:
-            raise ValueError("lease_seconds and retry_delay must be positive")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
         self._control_plane = control_plane
         self._object_client = object_client
         self._bucket = bucket
         self._worker_id = worker_id
         self._now = now
         self._lease_seconds = lease_seconds
-        self._retry_delay = retry_delay
         self._crash_after_r2_upload = crash_after_r2_upload
         self._retry_fault_before_receipt = retry_fault_before_receipt
         self._acceptance_run_id = acceptance_run_id
@@ -519,20 +517,18 @@ class TransactionalStructureCertifier:
         worker_id: str,
         now: Callable[[], datetime],
         lease_seconds: int = 30,
-        retry_delay: timedelta = timedelta(seconds=5),
         monotonic_clock: Callable[[], float] = monotonic,
     ) -> None:
         if not bucket or not worker_id:
             raise ValueError("bucket and worker_id must be non-empty")
-        if lease_seconds <= 0 or retry_delay.total_seconds() <= 0:
-            raise ValueError("lease_seconds and retry_delay must be positive")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
         self._control_plane = control_plane
         self._object_client = object_client
         self._bucket = bucket
         self._worker_id = worker_id
         self._now = now
         self._lease_seconds = lease_seconds
-        self._retry_delay = retry_delay
         self._monotonic_clock = monotonic_clock
         self._heartbeat_interval_seconds = max(0.1, lease_seconds / 3)
         self._stop_requested = Event()

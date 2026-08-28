@@ -13,6 +13,7 @@ import httpx
 
 from polyarb.config import Settings
 
+from .db_deadlines import CONTROL_PLANE_DB_POLICY
 from .models import AlertDeliveryLease
 
 _RUNTIME_TRANSITION_SCHEMA = "m1-runtime-incident-transition-v1"
@@ -55,6 +56,42 @@ _RUNTIME_ACTIONS = {
 _BOUNDED_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:/._ @#=+-]{0,255}$")
 _BOUNDED_URL = re.compile(r"^https?://[^\s]{1,511}$")
 _SECRET_WORDS = ("secret", "token", "password", "api_key", "apikey", "authorization")
+
+
+@dataclass(frozen=True, slots=True)
+class AlertDeliveryPolicy:
+    lease_seconds: int
+    provider_timeout_seconds: float
+    provider_attempts: int
+    stop_grace_seconds: float
+    retry_delay_seconds: int
+
+    def __post_init__(self) -> None:
+        if (
+            min(
+                self.lease_seconds,
+                self.provider_timeout_seconds,
+                self.stop_grace_seconds,
+                self.retry_delay_seconds,
+            )
+            <= 0
+        ):
+            raise ValueError("alert delivery policy values must be positive")
+        if self.provider_attempts != 1:
+            raise ValueError("alert provider delivery must use one inner attempt")
+        if not self.provider_timeout_seconds < self.stop_grace_seconds < self.lease_seconds:
+            raise ValueError(
+                "alert clocks must order provider timeout below stop grace below lease"
+            )
+
+
+ALERT_DELIVERY_POLICY = AlertDeliveryPolicy(
+    lease_seconds=30,
+    provider_timeout_seconds=5.0,
+    provider_attempts=1,
+    stop_grace_seconds=CONTROL_PLANE_DB_POLICY.stop_grace_seconds,
+    retry_delay_seconds=15,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,8 +264,8 @@ class TransactionalAlertDeliveryWorker:
         control_plane: _AlertControlPlane,
         worker_id: str,
         now: Callable[[], datetime],
-        lease_seconds: int = 30,
-        retry_delay: timedelta = timedelta(seconds=15),
+        lease_seconds: int = ALERT_DELIVERY_POLICY.lease_seconds,
+        retry_delay: timedelta = timedelta(seconds=ALERT_DELIVERY_POLICY.retry_delay_seconds),
         settings: Settings | None = None,
         telegram_client: _TelegramClient | None = None,
         acceptance_run_id: str | None = None,
@@ -322,7 +359,9 @@ class TransactionalAlertDeliveryWorker:
     async def _telegram_post(self, url: str, payload: dict[str, object]) -> httpx.Response:
         if self._telegram_client is not None:
             return await self._telegram_client.post(url, json=payload)
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(
+            timeout=ALERT_DELIVERY_POLICY.provider_timeout_seconds
+        ) as client:
             return await client.post(url, json=payload)
 
     def _retry(self, lease: AlertDeliveryLease, error_class: str) -> AlertDeliveryResult:

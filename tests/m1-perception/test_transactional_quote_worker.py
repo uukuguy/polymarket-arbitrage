@@ -13,7 +13,7 @@ from polyarb.control_plane.models import (
     QuoteBatchLeg,
     QuoteBatchSpec,
 )
-from polyarb.control_plane.postgres import StaleLeaseError
+from polyarb.control_plane.postgres import IncompleteQuoteGenerationError, StaleLeaseError
 from polyarb.control_plane.quote_artifact import QuoteBatchInputArtifact
 from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
@@ -470,6 +470,35 @@ def test_quote_certifier_stale_progress_fences_before_terminal_call() -> None:
     with pytest.raises(StaleLeaseError, match="quote certifier progress fenced"):
         certifier.run_once()
     assert not control_plane.certified
+
+
+def test_quote_certifier_incomplete_barrier_uses_durable_retry_circuit() -> None:
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.retry = None
+
+        def claim_job(self, **_kwargs):
+            return _runtime_quote_certifier_lease()
+
+        def certify_quote_generation(self, _lease, **_kwargs):
+            raise IncompleteQuoteGenerationError("receipt barrier invariant failed")
+
+        def finish(self, *_args, **_kwargs):
+            raise AssertionError("incomplete barrier must not use an ungoverned timed retry")
+
+        def finish_retryable_with_incident(self, _lease, **kwargs):
+            self.retry = kwargs
+
+    control_plane = ControlPlane()
+    result = TransactionalQuoteCertifier(
+        control_plane=control_plane,
+        worker_id="quote-certifier",
+        now=lambda: NOW,
+    ).run_once()
+
+    assert result.outcome == "retryable"
+    assert control_plane.retry["component"] == "quote-certify"
+    assert control_plane.retry["error_class"] == "IncompleteQuoteGenerationError"
 
 
 def test_quote_certifier_terminal_commit_wins_heartbeat_race_and_drains_thread() -> None:

@@ -29,6 +29,32 @@ from polyarb.config import Settings
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def test_clob_sdk_transport_uses_the_declared_http_timeout(monkeypatch) -> None:
+    from polyarb.clients import clob_client
+
+    observed = []
+
+    class FakeHttpClient:
+        def __init__(self, **kwargs):
+            observed.append(kwargs)
+
+        def close(self) -> None:
+            pass
+
+    previous = clob_client.clob_http_helpers._http_client
+    monkeypatch.setattr(clob_client.httpx, "Client", FakeHttpClient)
+    monkeypatch.setattr(ClobReaderClient, "_transport_configured", False)
+
+    try:
+        ClobReaderClient(Settings(http_timeout_s=13.5, clob_batch_max_concurrency=4))
+    finally:
+        clob_client.clob_http_helpers._http_client = previous
+
+    assert observed[0]["http2"] is False
+    assert observed[0]["timeout"] == 13.5
+    assert observed[0]["limits"] == clob_client.httpx.Limits(max_connections=4)
+
+
 @pytest.fixture
 def real_clob_sample() -> dict:
     """The recorded T1 fixture (2 books + prices_buy + prices_sell + token_ids)."""
@@ -93,9 +119,7 @@ async def test_get_books_multiple_chunks() -> None:
 
 async def test_get_books_fetches_chunks_with_bounded_concurrency() -> None:
     """A full Quote run must not spend its entire deadline on serial batches."""
-    client = ClobReaderClient(
-        Settings(clob_batch_size=2, clob_batch_max_concurrency=2)
-    )
+    client = ClobReaderClient(Settings(clob_batch_size=2, clob_batch_max_concurrency=2))
     active = 0
     peak_active = 0
     lock = threading.Lock()
@@ -120,9 +144,7 @@ async def test_get_books_fetches_chunks_with_bounded_concurrency() -> None:
 
 
 async def test_get_books_does_not_return_partial_books_when_one_chunk_fails() -> None:
-    client = ClobReaderClient(
-        Settings(clob_batch_size=2, clob_batch_max_concurrency=2)
-    )
+    client = ClobReaderClient(Settings(clob_batch_size=2, clob_batch_max_concurrency=2))
 
     def fetch(params):
         if params[0].token_id == "tok_2":
@@ -200,9 +222,7 @@ async def test_logs_sdk_transport_cause_without_exposing_request_content() -> No
             raise PolyApiException(error_msg="Request exception!")
 
     with (
-        patch.object(
-            client._client, "get_order_books", side_effect=wrapped_transport_failure
-        ),
+        patch.object(client._client, "get_order_books", side_effect=wrapped_transport_failure),
         patch("polyarb.clients.clob_client.logger.warning") as warning,
         pytest.raises(PolyApiException, match="Request exception"),
     ):
@@ -288,9 +308,7 @@ async def test_get_books_top_projection_does_not_block_event_loop_during_compact
             side_effect=slow_compaction,
         ),
     ):
-        task = asyncio.create_task(
-            client.get_books(["t0", "t1", "t2", "t3"], projection="top")
-        )
+        task = asyncio.create_task(client.get_books(["t0", "t1", "t2", "t3"], projection="top"))
         await asyncio.wait_for(ticker.wait(), timeout=0.1)
         assert not task.done()
         await task

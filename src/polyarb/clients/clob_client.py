@@ -138,7 +138,10 @@ class ClobReaderClient:
         executor: Executor | None = None,
     ) -> None:
         self._settings = settings
-        self._configure_sdk_transport(settings.clob_batch_max_concurrency)
+        self._configure_sdk_transport(
+            settings.clob_batch_max_concurrency,
+            settings.http_timeout_s,
+        )
         # L0 read-only: only host needed. NO key/creds/chain_id (tested in T5).
         self._client = ClobClient(settings.clob_url)
         self._limiter = AsyncLimiter(settings.clob_batch_rate_per_10s, 10)
@@ -146,13 +149,14 @@ class ClobReaderClient:
         self._executor = executor
 
     @classmethod
-    def _configure_sdk_transport(cls, max_connections: int) -> None:
+    def _configure_sdk_transport(cls, max_connections: int, timeout_seconds: float) -> None:
         """Install one bounded HTTP/1.1 pool for the SDK in this process."""
         if cls._transport_configured:
             return
         previous = clob_http_helpers._http_client
         clob_http_helpers._http_client = httpx.Client(
             http2=False,
+            timeout=timeout_seconds,
             limits=httpx.Limits(max_connections=max_connections),
         )
         previous.close()
@@ -198,6 +202,7 @@ class ClobReaderClient:
 
         chunks = _chunked(token_ids, self._settings.clob_batch_size)
         n_chunks = len(chunks)
+
         async def fetch_chunk(i: int, chunk: list[str]) -> list[Any]:
             if cache is not None and cache.has_books_chunk(i):
                 cached = cache.load_books_chunk(i)
