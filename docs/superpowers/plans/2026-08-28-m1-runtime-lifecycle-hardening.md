@@ -121,3 +121,29 @@ cursor handoff.
   opportunity publication complete without zero-restart or orphan attempts.
 - [ ] Resume qualification only with verified cursor semantics; start the new
   86,400-second acceptance window from current live evidence.
+
+## Task 7: Operation-round and evaluator recovery audit
+
+**Files:**
+
+- Modify: `db_role_contract.py`, `postgres.py`, `qualification_service.py`,
+  `blocking_bridge.py`, `tools/climb/eval_local.py`
+- Test: role contract/admin, qualification PostgreSQL/service, climb evaluator
+
+- [x] Replace per-object authority probes with fixed-round catalog queries and
+  prove production preflight stays inside the request envelope.
+- [x] Install scoped search path and database timeouts in the libpq startup
+  packet so the first SQL never runs in an unbounded bootstrap window.
+- [x] Initialize qualification once per process and batch the healthy append
+  path into fixed SQL rounds while retaining exact sequential terminal logic.
+- [x] Send cooperative stop before grace detach and refuse later qualification
+  SQL after a stop request.
+- [x] Remove climb's universal 120-second outer kill and atomically checkpoint
+  exact-git-head/full-argv gate progress for interruption-safe resume.
+- [x] Replace runtime-controller per-candidate connection writes with one
+  lease-fenced bulk decision transaction and move the synchronous turn behind
+  cooperative stop plus recovery-DB grace isolation.
+- [x] Move mixed async/synchronous alert turns off the signal loop and prevent
+  claim/provider results from starting later finish SQL after cooperative stop.
+- [ ] Re-run the fresh full M1/climb/planning gates, commit the amended Plan 209
+  summary, and build a new immutable image; all earlier images are superseded.

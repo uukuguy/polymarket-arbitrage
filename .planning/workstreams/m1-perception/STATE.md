@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Revision 030 is live with zero Machine changes; post-migration audit found legacy active arrays, and verified revision 031 plus a new immutable image must land before rollout
-last_updated: "2026-08-28T16:03:24+08:00"
+stopped_at: Revision 031 is live with zero Machine changes; the operation-round audit superseded its first image, and a new exact image plus fresh full gates must land before rollout
+last_updated: "2026-08-28T17:35:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,7 +19,7 @@ progress:
 ## Current Position
 
 - **Sole authority:** Supabase project `polyarb` (`lgykffpcsebewvobkbdm`),
-  production Alembic revision `030`, and R2 bucket `polyarb-control-plane`.
+  production Alembic revision `031`, and R2 bucket `polyarb-control-plane`.
   The runtime's durable job, receipt, lease, pointer, evidence, and incident
   facts live there.
 
@@ -62,10 +62,11 @@ progress:
   Structure `683e46ea500dd8` and Quote `4d895231f66748` remain started on the
   pre-Plan-209 runtime. The failed coordinator canary was restored to digest
   `sha256:bd21b2d…33df` and its original stopped state without changing its
-  non-image config. Production is revision 030; revision 031 and its replacement
-  image have not been applied. The revision-030 image was built and verified but
-  never deployed. Both app-scoped hidden DSNs remain installed and no ordinary
-  credential env key is present.
+  non-image config. Production is revision 031; the migration was applied with
+  zero Machine changes and its post-migration parity/compaction audit passed.
+  The first revision-031 image was built and verified but is superseded before
+  deployment by the operation-round repair. Both app-scoped hidden DSNs remain
+  installed and no ordinary credential env key is present.
 
 - **Plan 05.6-209 runtime lifecycle repair:** Plan 208's job-specific deadline
   change exposed the wider defect: scheduler/role turn timeouts, worker-local
@@ -79,7 +80,7 @@ progress:
   circuits release one controller probe before historical attempt clocks are
   considered. Qualification consumes breaker history for the first identity
   and hands successor releases the live ledger high-water. Full M1 regression
-  is 3,963 passed / 1 skipped / 1 expected xfail; independent final review has
+  is 3,972 passed / 1 skipped / 1 expected xfail; independent final review has
   zero findings. Production revision 029 is applied; coordinator and
   qualification Machines remain stopped and no Machine has received the new
   runtime image. Pre-rollout proof additionally found that qualification status
@@ -106,8 +107,17 @@ progress:
   the legacy arrays backfilled into normalized rows. Revision 031 validates
   parity, clears the arrays and fences regrowth; it also closes the remaining
   compatibility writer and Alembic lock-wait deadline gaps. The fresh full gate
-  remains 3,963 passed / 1 skipped / 1 expected xfail. Revision 031 and a new
-  exact image are not yet in production.
+  is 3,972 passed / 1 skipped / 1 expected xfail in 1,579.71 seconds. Revision 031 is now in
+  production with 6,572 facts, zero legacy arrays, three compaction constraints,
+  one append-only trigger and zero scalar mismatches. No Machine changed. The
+  first revision-031 image is superseded: role authority checks now use fixed
+  catalog rounds, scoped DB policy is active in the startup packet,
+  qualification initializes once and bulk-appends healthy batches with
+  cooperative stop, and climb checkpoints exact-identity gate progress without
+  a universal 120-second kill. Runtime-controller decisions now use one bulk
+  lease-fenced transaction behind cooperative stop; alert delivery runs off the
+  signal loop and rejects late finish SQL. Fresh full and climb gates pass; a
+  new exact image remains.
 
 - **Plan 05.6-208 diagnosis (superseded locally by Plan 209):** the initial accumulating epoch was
   later invalidated by repeated Structure freshness gaps. Production evidence

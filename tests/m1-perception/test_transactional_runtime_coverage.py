@@ -236,6 +236,14 @@ def test_worker_modules_do_not_define_private_runtime_profiles() -> None:
     assert offenders == []
 
 
+def test_retry_circuit_budget_has_one_runtime_policy_authority() -> None:
+    source = (Path(__file__).parents[2] / "src/polyarb/control_plane/postgres.py").read_text()
+
+    assert source.count("retry_budget = runtime_policy(component, 3).retry_budget") == 2
+    assert 'circuit_state = "open" if failures >= 3' not in source
+    assert "now if failures == 3" not in source
+
+
 def test_database_deadlines_have_one_registry_and_no_private_copies() -> None:
     from polyarb.control_plane.db_deadlines import (
         CONTROL_PLANE_DB_POLICY,

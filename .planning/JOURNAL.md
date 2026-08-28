@@ -11059,3 +11059,46 @@ exact immutable amd64 image, apply production 030→031, verify scoped roles fro
 the new qualification runtime, then run the unchanged 1,800/90/90 observe-only
 gate before any Machine rollout. Only successful live terminal flow may start
 the fresh 86,400-second qualification certificate.
+
+### SESSION 322 — 2026-08-28 (operation-round, controller and alert lifecycle closure)
+
+- [PRODUCTION / ZERO MACHINE EFFECT] Production upgraded transactionally from
+  030 to 031. Post-migration audit found 6,572 normalized facts, zero legacy
+  arrays, three compaction constraints, one append-only trigger and zero scalar
+  mismatches. No Machine ID, image, state or non-image configuration changed.
+- [OPERATION ROUND ROOT CAUSE] Per-statement timeout did not bound a sequence
+  whose query count scaled with objects or facts. Role authority preflight used
+  object×privilege network turns and exceeded 3m48s; it now uses fixed schema,
+  table, sequence and function catalog rounds and completes production
+  read-only verification in 11–13 seconds.
+- [CONNECTION BOOTSTRAP] Scoped search path, statement timeout and lock timeout
+  now enter the libpq startup packet. The first SQL no longer has to run before
+  the database boundary exists.
+- [QUALIFICATION] Store initialization replays history only once per process.
+  Healthy batches use bulk append/range verification/fixed scalar updates;
+  state-changing terminal/recovery logic remains sequential. Cooperative stop
+  prevents later pages, writes and certificate SQL after the current bounded
+  statement; non-cooperative work still detaches at DB-derived grace.
+- [CONTROLLER / ALERT] Observe-only controller decisions now persist through one
+  controller-lease-fenced bulk transaction rather than up to 100 connections;
+  the synchronous turn runs behind cooperative stop and recovery DB grace.
+  Alert HTTP/PostgreSQL turns run off the signal loop, and a late provider
+  result cannot start finish SQL after stop. Durable controller/outbox leases
+  remain the recovery anchors.
+- [CLIMB RESUME] The universal 120-second subprocess kill is removed. Each gate
+  owns its domain deadline; successful nodes checkpoint atomically against
+  exact git head and full argv. Exact resumes skip completed nodes; malformed
+  or stale progress cannot become final evidence.
+- [PROOF] Fresh `make test-m1`: 3,972 passed, one skipped, one expected xfail in
+  1,579.71 seconds. The expensive performance/golden gate completed naturally.
+  Full changed-file Ruff/format, complete control-plane PostgreSQL/CLI/alert/
+  qualification/controller suites, `make climb-check`, planning-status and
+  diff checks pass.
+- [SUPERSEDED IMAGE] Revision-031 digest `sha256:548cc4c3…243f9` is superseded
+  before Machine rollout because these repairs changed executable bytes.
+
+[NEXT] Commit the amended Plan 05.6-209 state, build a new exact immutable amd64
+image at Alembic 031/runtime-v2, re-run exact topology/role/rollback and the
+unchanged 1,800/90/90 observe-only gate, then roll coordinator → Structure →
+Quote → qualification on the same Machine IDs. Start the fresh 86,400-second
+certificate only after live Structure/Quote/opportunity terminal publication.

@@ -9,6 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import total_ordering
+from threading import Event
 from typing import Any, Protocol, Self, cast
 
 import psycopg
@@ -98,6 +99,15 @@ class QualificationServiceError(RuntimeError):
 
 class QualificationCursorConflict(QualificationServiceError):
     """The durable source cursor lost its compare-and-swap fence."""
+
+
+class QualificationServiceStopRequested(QualificationServiceError):
+    """The service must roll back its current nonterminal tick at the next boundary."""
+
+
+def _raise_if_stopped(stop_requested: Event) -> None:
+    if stop_requested.is_set():
+        raise QualificationServiceStopRequested("qualification service stop requested")
 
 
 @total_ordering
@@ -475,8 +485,18 @@ class QualificationService:
         self._state_store = state_store
         self._writer_id = writer_id
         self._batch_size = batch_size
+        self._stop_requested = Event()
+
+    def request_stop(self) -> None:
+        """Tell every synchronous tick participant to stop before its next I/O."""
+        self._stop_requested.set()
+        for participant in (self._fact_source, self._state_store):
+            request_stop = getattr(participant, "request_stop", None)
+            if callable(request_stop):
+                request_stop()
 
     def tick(self, now: datetime) -> QualificationTickResult:
+        _raise_if_stopped(self._stop_requested)
         observed_at = _require_aware(now, "now")
         self._state_store.initialize(self._policy, now=observed_at)
         cursor = self._state_store.cursor
@@ -495,6 +515,7 @@ class QualificationService:
         )
         certificate = None
         if decision.state is QualificationState.QUALIFIED:
+            _raise_if_stopped(self._stop_requested)
             certificate = self._state_store.ensure_certificate(decision)
         return QualificationTickResult(
             status="ok",
@@ -513,6 +534,10 @@ class PostgresQualificationFactSource:
 
     def __init__(self, connection_factory: ConnectionFactory) -> None:
         self._connection_factory = connection_factory
+        self._stop_requested = Event()
+
+    def request_stop(self) -> None:
+        self._stop_requested.set()
 
     def read_after(
         self,
@@ -531,8 +556,10 @@ class PostgresQualificationFactSource:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as db,
         ):
+            _raise_if_stopped(self._stop_requested)
             _set_timeouts(db)
             self._insert_freshness_observations(db, now=observed_at)
+            _raise_if_stopped(self._stop_requested)
             db.execute(
                 """
                 SELECT ingest_seq, ingested_at, source, source_id, source_version,
@@ -615,14 +642,17 @@ class PostgresQualificationFactSource:
                 """,
             ),
         ):
+            _raise_if_stopped(self._stop_requested)
             observed_key = _cursor_time_key(now)
             cursor.execute(cast(Any, query), (observed_key, now, now))
+            _raise_if_stopped(self._stop_requested)
             row = cursor.fetchone()
             payload = (
                 _freshness_gap_payload(product=product, now=now)
                 if row is None
                 else _json_payload(row)
             )
+            _raise_if_stopped(self._stop_requested)
             cursor.execute(
                 """
                 SELECT public.m1_record_qualification_freshness_ingress(
@@ -647,6 +677,10 @@ class PostgresQualificationServiceStore:
         self._cursor: FactCursor | None = None
         self._last_applied_count = 0
         self._version: int | None = None
+        self._stop_requested = Event()
+
+    def request_stop(self) -> None:
+        self._stop_requested.set()
 
     @property
     def cursor(self) -> FactCursor | None:
@@ -663,7 +697,12 @@ class PostgresQualificationServiceStore:
         return self._last_applied_count
 
     def initialize(self, policy: RollingQualificationPolicy, *, now: datetime) -> None:
+        _raise_if_stopped(self._stop_requested)
         observed_at = _require_aware(now, "now")
+        if self._current is not None:
+            if _identity_key(self._current) != _identity_key(policy):
+                raise QualificationServiceError("qualification store identity changed")
+            return
         with (
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
@@ -680,7 +719,10 @@ class PostgresQualificationServiceStore:
                 if record is None:
                     raise QualificationServiceError("qualification epoch insert returned no row")
             records = _load_epoch_fact_records(
-                cursor, epoch_id=record.epoch_id, expected_count=record.runtime_fact_count
+                cursor,
+                epoch_id=record.epoch_id,
+                expected_count=record.runtime_fact_count,
+                stop_requested=self._stop_requested.is_set,
             )
             self._current = _decision_from_runtime_epoch(policy, record, records)
             self._version = record.version
@@ -696,6 +738,7 @@ class PostgresQualificationServiceStore:
         expected_cursor: FactCursor | None,
         writer_id: str,
     ) -> QualificationDecision:
+        _raise_if_stopped(self._stop_requested)
         if type(writer_id) is not str or not writer_id:
             raise ValueError("writer_id must be non-empty")
         with (
@@ -728,7 +771,41 @@ class PostgresQualificationServiceStore:
             fact_count = record.runtime_fact_count
             source_cursor = persisted_cursor
             applied_count = 0
-            for fact_record in sorted(records, key=lambda item: item.cursor):
+            ordered_records = tuple(sorted(records, key=lambda item: item.cursor))
+            accumulating = _apply_accumulating_batch(policy, current, ordered_records)
+            if accumulating is not None and ordered_records:
+                first_ordinal = fact_count + 1
+                _append_epoch_facts_cursor(
+                    cursor,
+                    epoch_id=current.epoch_id,
+                    first_ordinal=first_ordinal,
+                    fact_records=ordered_records,
+                    stop_requested=self._stop_requested.is_set,
+                )
+                _raise_if_stopped(self._stop_requested)
+                fact_count += len(ordered_records)
+                source_cursor = ordered_records[-1].cursor
+                _update_epoch_cursor(
+                    cursor,
+                    accumulating,
+                    source_cursor=None,
+                    fact_count=fact_count,
+                    writer_id=writer_id,
+                    version_increment=len(ordered_records),
+                )
+                _update_source_cursor(
+                    cursor,
+                    policy=policy,
+                    source_cursor=source_cursor,
+                    writer_id=writer_id,
+                )
+                self._current = accumulating
+                self._cursor = source_cursor
+                self._last_applied_count = len(ordered_records)
+                self._version += len(ordered_records)
+                return accumulating
+            for fact_record in ordered_records:
+                _raise_if_stopped(self._stop_requested)
                 opened_recovered_epoch = False
                 if current.state is QualificationState.RECOVERING:
                     if not _is_recovery_confirmation_fact(fact_record.fact):
@@ -736,6 +813,7 @@ class PostgresQualificationServiceStore:
                             cursor,
                             recovering_epoch_id=current.epoch_id,
                             fact_record=fact_record,
+                            stop_requested=self._stop_requested.is_set,
                         )
                         source_cursor = fact_record.cursor
                         applied_count += 1
@@ -758,6 +836,7 @@ class PostgresQualificationServiceStore:
                         source_cursor=None,
                         fact_records=(fact_record,),
                         writer_id=writer_id,
+                        stop_requested=self._stop_requested.is_set,
                     )
                     current = _compact_active_decision(current)
                     fact_count = 1
@@ -770,6 +849,7 @@ class PostgresQualificationServiceStore:
                         epoch_id=current.epoch_id,
                         ordinal=fact_count,
                         fact_record=fact_record,
+                        stop_requested=self._stop_requested.is_set,
                     )
                     terminal_records: Sequence[QualificationFactRecord] = ()
                     if current.state in {
@@ -780,6 +860,7 @@ class PostgresQualificationServiceStore:
                             cursor,
                             epoch_id=current.epoch_id,
                             expected_count=fact_count,
+                            stop_requested=self._stop_requested.is_set,
                         )
                         current = _materialize_terminal_decision(current, terminal_records)
                     else:
@@ -791,6 +872,7 @@ class PostgresQualificationServiceStore:
                         fact_count=fact_count,
                         writer_id=writer_id,
                     )
+                    _raise_if_stopped(self._stop_requested)
                     self._version += 1
                     if current.state is QualificationState.INVALIDATED:
                         current = policy.recovering(
@@ -803,6 +885,7 @@ class PostgresQualificationServiceStore:
                             source_cursor=None,
                             fact_records=(),
                             writer_id=writer_id,
+                            stop_requested=self._stop_requested.is_set,
                         )
                         fact_count = 0
                         self._version = 1
@@ -814,6 +897,7 @@ class PostgresQualificationServiceStore:
                     source_cursor=source_cursor,
                     writer_id=writer_id,
                 )
+                _raise_if_stopped(self._stop_requested)
                 if current.state is QualificationState.QUALIFIED:
                     break
                 if opened_recovered_epoch:
@@ -824,6 +908,7 @@ class PostgresQualificationServiceStore:
             return current
 
     def ensure_certificate(self, decision: QualificationDecision) -> Mapping[str, object] | None:
+        _raise_if_stopped(self._stop_requested)
         if decision.state is not QualificationState.QUALIFIED:
             return None
         record = insert_qualification_certificate(self._connection_factory, decision=decision)
@@ -925,6 +1010,7 @@ async def run_qualification_service(
             stop_event=stop,
             grace_seconds=CONTROL_PLANE_DB_POLICY.stop_grace_seconds,
             point_of_no_return=True,
+            request_stop=getattr(service, "request_stop", None),
             thread_name="qualification:tick",
         )
         if not completed:
@@ -1287,11 +1373,17 @@ def _runtime_epoch_from_row(row: Mapping[str, object]) -> _RuntimeEpochProjectio
 
 
 def _load_epoch_fact_records(
-    cursor: psycopg.Cursor[dict[str, Any]], *, epoch_id: str, expected_count: int
+    cursor: psycopg.Cursor[dict[str, Any]],
+    *,
+    epoch_id: str,
+    expected_count: int,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> tuple[QualificationFactRecord, ...]:
     records: list[QualificationFactRecord] = []
     after_ordinal = 0
     while len(records) < expected_count:
+        if stop_requested is not None and stop_requested():
+            raise QualificationServiceStopRequested("qualification service stop requested")
         cursor.execute(
             """
             SELECT ordinal, fact_record
@@ -1385,6 +1477,23 @@ def _compact_active_decision(decision: QualificationDecision) -> QualificationDe
         recovery_confirmed_at=decision.recovery_confirmed_at,
         pending_recovery_started=decision.pending_recovery_started,
     )
+
+
+def _apply_accumulating_batch(
+    policy: RollingQualificationPolicy,
+    current: QualificationDecision,
+    records: Sequence[QualificationFactRecord],
+) -> QualificationDecision | None:
+    """Fold one ordinary live batch without creating per-fact database turns."""
+    if current.state is not QualificationState.ACCUMULATING:
+        return None
+    decision = current
+    for record in records:
+        decision = policy.apply(decision, record.fact)
+        if decision.state is not QualificationState.ACCUMULATING:
+            return None
+        decision = _compact_active_decision(decision)
+    return decision
 
 
 def _materialize_terminal_decision(
@@ -1562,6 +1671,7 @@ def _append_recovery_observation(
     *,
     recovering_epoch_id: str,
     fact_record: QualificationFactRecord,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> None:
     ingest_seq = fact_record.cursor.ingest_seq
     if ingest_seq is None:
@@ -1588,6 +1698,8 @@ def _append_recovery_observation(
             record_digest,
         ),
     )
+    if stop_requested is not None and stop_requested():
+        raise QualificationServiceStopRequested("qualification service stop requested")
     cursor.execute(
         """
         SELECT observation_id, fact_id, reason, observed_at, fact_record_sha256
@@ -1617,6 +1729,7 @@ def _insert_epoch_cursor(
     source_cursor: FactCursor | None,
     fact_records: Sequence[QualificationFactRecord],
     writer_id: str | None,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> None:
     cursor.execute(
         """
@@ -1642,10 +1755,15 @@ def _insert_epoch_cursor(
             writer_id=writer_id,
         ),
     )
-    for ordinal, fact_record in enumerate(fact_records, start=1):
-        _append_epoch_fact_cursor(
-            cursor, epoch_id=decision.epoch_id, ordinal=ordinal, fact_record=fact_record
-        )
+    if stop_requested is not None and stop_requested():
+        raise QualificationServiceStopRequested("qualification service stop requested")
+    _append_epoch_facts_cursor(
+        cursor,
+        epoch_id=decision.epoch_id,
+        first_ordinal=1,
+        fact_records=fact_records,
+        stop_requested=stop_requested,
+    )
 
 
 def _update_epoch_cursor(
@@ -1655,7 +1773,10 @@ def _update_epoch_cursor(
     source_cursor: FactCursor | None,
     fact_count: int,
     writer_id: str,
+    version_increment: int = 1,
 ) -> None:
+    if version_increment <= 0:
+        raise ValueError("qualification epoch version increment must be positive")
     values = _epoch_values(
         decision,
         source_cursor=source_cursor,
@@ -1665,7 +1786,7 @@ def _update_epoch_cursor(
     cursor.execute(
         """
         UPDATE public.m1_qualification_epochs
-        SET state = %s, version = version + 1, identity_key = %s,
+        SET state = %s, version = version + %s, identity_key = %s,
             policy_version = %s, release_id = %s, config_id = %s,
             role_identity = %s, started_at = %s, last_fact_at = %s,
             invalidated_at = %s, invalidation_reason = %s, qualified_at = %s,
@@ -1678,7 +1799,7 @@ def _update_epoch_cursor(
             updated_at = clock_timestamp()
         WHERE epoch_id = %s
         """,
-        (*values[1:], decision.epoch_id),
+        (values[1], version_increment, *values[2:], decision.epoch_id),
     )
     if cursor.rowcount != 1:
         raise QualificationCursorConflict("qualification epoch update failed")
@@ -1731,39 +1852,80 @@ def _append_epoch_fact_cursor(
     epoch_id: str,
     ordinal: int,
     fact_record: QualificationFactRecord,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> None:
-    payload = fact_record.to_json()
+    _append_epoch_facts_cursor(
+        cursor,
+        epoch_id=epoch_id,
+        first_ordinal=ordinal,
+        fact_records=(fact_record,),
+        stop_requested=stop_requested,
+    )
+
+
+def _append_epoch_facts_cursor(
+    cursor: psycopg.Cursor[dict[str, Any]],
+    *,
+    epoch_id: str,
+    first_ordinal: int,
+    fact_records: Sequence[QualificationFactRecord],
+    stop_requested: Callable[[], bool] | None = None,
+) -> None:
+    if first_ordinal <= 0:
+        raise ValueError("qualification fact ordinal must be positive")
+    if not fact_records:
+        return
+    rows = [
+        {
+            "ordinal": first_ordinal + offset,
+            "fact_id": fact_record.fact.fact_id,
+            "reason": fact_record.fact.reason,
+            "observed_at": fact_record.fact.observed_at.isoformat(),
+            "fact_record": fact_record.to_json(),
+        }
+        for offset, fact_record in enumerate(fact_records)
+    ]
     cursor.execute(
         """
         INSERT INTO public.m1_qualification_epoch_facts (
             epoch_id, ordinal, fact_id, reason, observed_at, fact_record
-        ) VALUES (%s, %s, %s, %s, %s, %s)
+        )
+        SELECT %s, ordinal, fact_id, reason, observed_at, fact_record
+        FROM jsonb_to_recordset(%s::jsonb) AS item(
+            ordinal bigint,
+            fact_id text,
+            reason text,
+            observed_at timestamptz,
+            fact_record jsonb
+        )
+        ORDER BY ordinal
         ON CONFLICT (epoch_id, ordinal) DO NOTHING
         """,
-        (
-            epoch_id,
-            ordinal,
-            fact_record.fact.fact_id,
-            fact_record.fact.reason,
-            fact_record.fact.observed_at,
-            Jsonb(payload),
-        ),
+        (epoch_id, Jsonb(rows)),
     )
+    if stop_requested is not None and stop_requested():
+        raise QualificationServiceStopRequested("qualification service stop requested")
     cursor.execute(
         """
-        SELECT fact_id, fact_record
+        SELECT ordinal, fact_id, fact_record
         FROM public.m1_qualification_epoch_facts
-        WHERE epoch_id = %s AND ordinal = %s
+        WHERE epoch_id = %s AND ordinal BETWEEN %s AND %s
+        ORDER BY ordinal
         """,
-        (epoch_id, ordinal),
+        (epoch_id, first_ordinal, first_ordinal + len(rows) - 1),
     )
-    persisted = cursor.fetchone()
-    if (
-        persisted is None
-        or str(persisted["fact_id"]) != fact_record.fact.fact_id
-        or persisted["fact_record"] != payload
-    ):
-        raise QualificationCursorConflict("qualification epoch fact conflicts")
+    persisted_rows = cursor.fetchall()
+    if stop_requested is not None and stop_requested():
+        raise QualificationServiceStopRequested("qualification service stop requested")
+    if len(persisted_rows) != len(rows):
+        raise QualificationCursorConflict("qualification fact append conflicts")
+    for expected, persisted in zip(rows, persisted_rows, strict=True):
+        if (
+            int(cast(int, persisted["ordinal"])) != expected["ordinal"]
+            or str(persisted["fact_id"]) != expected["fact_id"]
+            or cast(Mapping[str, object], persisted["fact_record"]) != expected["fact_record"]
+        ):
+            raise QualificationCursorConflict("qualification fact idempotency conflicts")
 
 
 def _derived_epoch_evidence(decision: QualificationDecision) -> dict[str, object]:

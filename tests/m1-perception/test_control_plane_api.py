@@ -127,13 +127,12 @@ def test_control_api_connection_factory_bounds_postgres_connect_time(monkeypatch
     assert calls == [
         (
             "postgresql://control-plane",
-            {"connect_timeout": 5, "options": "-csearch_path=pg_catalog,public"},
+            {
+                "connect_timeout": 5,
+                "options": (
+                    "-csearch_path=pg_catalog,public "
+                    "-cstatement_timeout=5000ms -clock_timeout=1000ms"
+                ),
+            },
         ),
-        (
-            "SELECT pg_catalog.set_config('search_path', %s, false), "
-            "pg_catalog.set_config('statement_timeout', %s, false), "
-            "pg_catalog.set_config('lock_timeout', %s, false)",
-            {"params": ("pg_catalog,public", "5000ms", "1000ms")},
-        ),
-        ("commit", {}),
     ]

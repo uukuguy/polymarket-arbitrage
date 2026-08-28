@@ -6,6 +6,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from threading import Event
 from typing import Protocol
 
 import httpx
@@ -62,6 +63,10 @@ class AlertDeliveryResult:
     outcome: str
 
 
+class AlertDeliveryStopRequested(RuntimeError):
+    """The alert turn must not start another external or database effect."""
+
+
 class _TelegramClient(Protocol):
     async def post(self, url: str, *, json: dict[str, object]) -> httpx.Response: ...
 
@@ -111,9 +116,7 @@ def render_runtime_incident_message(payload: Mapping[str, object]) -> str:
         return f"[{kind}] {incident_key}"
 
     transition = _payload_choice(payload, "transition", set(_RUNTIME_TRANSITION_LABELS))
-    qualification_impact = _payload_choice(
-        payload, "qualification_impact", _QUALIFICATION_IMPACTS
-    )
+    qualification_impact = _payload_choice(payload, "qualification_impact", _QUALIFICATION_IMPACTS)
     incident_id = _payload_text(payload, "incident_id", max_len=256)
     incident_key = _payload_text(payload, "incident_key", max_len=256)
     component = _payload_text(payload, "component", max_len=128)
@@ -179,18 +182,15 @@ def runtime_incident_transition_payload(
     }
     render_runtime_incident_message(payload)
     if acceptance_run_id is not None:
-        if (
-            not _BOUNDED_TEXT.fullmatch(acceptance_run_id)
-            or any(word in acceptance_run_id.lower() for word in _SECRET_WORDS)
+        if not _BOUNDED_TEXT.fullmatch(acceptance_run_id) or any(
+            word in acceptance_run_id.lower() for word in _SECRET_WORDS
         ):
             raise ValueError("runtime transition payload invalid field acceptance_run_id")
         payload["acceptance_run_id"] = acceptance_run_id
     return payload
 
 
-def _payload_choice(
-    payload: Mapping[str, object], field: str, allowed: set[str]
-) -> str:
+def _payload_choice(payload: Mapping[str, object], field: str, allowed: set[str]) -> str:
     value = _payload_text(payload, field, max_len=128)
     if value not in allowed:
         raise ValueError(f"runtime transition payload invalid field {field}")
@@ -242,11 +242,20 @@ class TransactionalAlertDeliveryWorker:
         self._retry_delay = retry_delay
         self._settings = settings or Settings()
         self._telegram_client = telegram_client
+        self._stop_requested = Event()
         if acceptance_run_id is not None and not acceptance_run_id:
             raise ValueError("acceptance_run_id must be non-empty when provided")
         self._acceptance_run_id = acceptance_run_id
 
+    def request_stop(self) -> None:
+        self._stop_requested.set()
+
+    def _raise_if_stopped(self) -> None:
+        if self._stop_requested.is_set():
+            raise AlertDeliveryStopRequested("alert delivery stop requested")
+
     async def run_once(self) -> AlertDeliveryResult:
+        self._raise_if_stopped()
         lease = self._control_plane.claim_alert_delivery(
             worker_id=self._worker_id,
             lease_seconds=self._lease_seconds,
@@ -255,7 +264,9 @@ class TransactionalAlertDeliveryWorker:
         )
         if lease is None:
             return AlertDeliveryResult(outbox_id=None, outcome="idle")
+        self._raise_if_stopped()
         if lease.channel == "dashboard":
+            self._raise_if_stopped()
             self._control_plane.finish_alert_delivery(
                 lease,
                 state="delivered",
@@ -265,6 +276,7 @@ class TransactionalAlertDeliveryWorker:
             return AlertDeliveryResult(outbox_id=lease.outbox_id, outcome="delivered")
         if lease.channel == "telegram":
             return await self._deliver_telegram(lease)
+        self._raise_if_stopped()
         self._control_plane.finish_alert_delivery(
             lease,
             state="retryable",
@@ -288,13 +300,17 @@ class TransactionalAlertDeliveryWorker:
                     "text": render_runtime_incident_message(lease.payload),
                 },
             )
+            self._raise_if_stopped()
             response.raise_for_status()
             response_payload = response.json()
             message_id = response_payload["result"]["message_id"]
             if not response_payload.get("ok") or not isinstance(message_id, int):
                 raise ValueError("Telegram response lacks a numeric message_id")
+        except AlertDeliveryStopRequested:
+            raise
         except Exception as error:  # noqa: BLE001 - sender boundary must retain intent
             return self._retry(lease, type(error).__name__)
+        self._raise_if_stopped()
         self._control_plane.finish_alert_delivery(
             lease,
             state="delivered",
@@ -310,6 +326,7 @@ class TransactionalAlertDeliveryWorker:
             return await client.post(url, json=payload)
 
     def _retry(self, lease: AlertDeliveryLease, error_class: str) -> AlertDeliveryResult:
+        self._raise_if_stopped()
         self._control_plane.finish_alert_delivery(
             lease,
             state="retryable",

@@ -908,17 +908,111 @@ def test_evaluate_gates_records_bounded_command_evidence(tmp_path: Path) -> None
     assert json.loads(output_path.read_text()) == payload
 
 
-def test_run_command_records_timeout_as_a_failed_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    def timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"], output="partial output")
+def test_run_command_has_no_competing_outer_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
 
-    monkeypatch.setattr(eval_local.subprocess, "run", timeout)
+    def run(*args, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args[0], 0, stdout="passed")
+
+    monkeypatch.setattr(eval_local.subprocess, "run", run)
 
     result = eval_local.run_command(["pytest", "slow-test"])
 
-    assert result.passed is False
-    assert result.returncode == 124
-    assert "timed out" in result.output
+    assert result == GateResult(passed=True, returncode=0, output="passed")
+    assert "timeout" not in captured
+
+
+def test_evaluate_gates_checkpoints_and_resumes_exact_run_identity(tmp_path: Path) -> None:
+    commands = {
+        "planning": ["fake", "planning"],
+        "unit": ["fake", "unit"],
+    }
+    output_path = tmp_path / "local-eval.json"
+    checkpoint_path = tmp_path / "local-eval.progress.json"
+    first_calls: list[list[str]] = []
+
+    def interrupted_runner(command: list[str]) -> GateResult:
+        first_calls.append(command)
+        if command[-1] == "unit":
+            raise KeyboardInterrupt
+        return GateResult(True, 0, "planning passed")
+
+    with pytest.raises(KeyboardInterrupt):
+        evaluate_gates(
+            commands,
+            runner=interrupted_runner,
+            output_path=output_path,
+            checkpoint_path=checkpoint_path,
+            run_identity="commit-a",
+        )
+
+    checkpoint = json.loads(checkpoint_path.read_text())
+    assert checkpoint["status"] == "running"
+    assert checkpoint["run_identity"] == "commit-a"
+    assert tuple(checkpoint["results"]) == ("planning",)
+    assert not output_path.exists()
+
+    resumed_calls: list[list[str]] = []
+
+    def resumed_runner(command: list[str]) -> GateResult:
+        resumed_calls.append(command)
+        return GateResult(True, 0, "unit passed")
+
+    payload = evaluate_gates(
+        commands,
+        runner=resumed_runner,
+        output_path=output_path,
+        checkpoint_path=checkpoint_path,
+        run_identity="commit-a",
+    )
+
+    assert first_calls == [["fake", "planning"], ["fake", "unit"]]
+    assert resumed_calls == [["fake", "unit"]]
+    assert payload["total"] == 100.0
+    assert not checkpoint_path.exists()
+
+
+def test_evaluate_gates_rejects_malformed_progress_and_does_not_reuse_stale_identity(
+    tmp_path: Path,
+) -> None:
+    commands = {"planning": ["fake", "planning"]}
+    output_path = tmp_path / "local-eval.json"
+    checkpoint_path = tmp_path / "local-eval.progress.json"
+    checkpoint_path.write_text("{not-json")
+
+    with pytest.raises(ValueError, match="invalid local-eval checkpoint"):
+        evaluate_gates(
+            commands,
+            runner=lambda _command: GateResult(True, 0, "passed"),
+            output_path=output_path,
+            checkpoint_path=checkpoint_path,
+            run_identity="commit-a",
+        )
+
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "running",
+                "run_identity": "stale-commit",
+                "commands": commands,
+                "results": {"planning": {"passed": True, "returncode": 0, "output": "stale"}},
+            }
+        )
+    )
+    calls: list[list[str]] = []
+
+    payload = evaluate_gates(
+        commands,
+        runner=lambda command: calls.append(command) or GateResult(True, 0, "fresh"),
+        output_path=output_path,
+        checkpoint_path=checkpoint_path,
+        run_identity="commit-a",
+    )
+
+    assert calls == [["fake", "planning"]]
+    assert payload["commands"]["planning"]["output"] == "fresh"
 
 
 def test_train_script_is_compatible_with_system_bash(tmp_path: Path) -> None:

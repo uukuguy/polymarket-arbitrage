@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -335,6 +335,127 @@ def insert_runtime_observe_decision(
             _compare_existing_row(record, _existing_row_mapping(inserted))
         connection.commit()
     return record
+
+
+def insert_runtime_observe_decisions(
+    connection_factory: ConnectionFactory,
+    records: Sequence[RuntimeObserveDecisionRecord],
+    *,
+    stop_requested: Callable[[], bool] | None = None,
+) -> tuple[RuntimeObserveDecisionRecord, ...]:
+    """Persist one bounded observation turn in fixed database round trips."""
+    batch = tuple(records)
+    if not batch:
+        raise ValueError("runtime observe batch must not be empty")
+    if any(type(record) is not RuntimeObserveDecisionRecord for record in batch):
+        raise TypeError("records must contain RuntimeObserveDecisionRecord values")
+    _raise_if_observe_stopped(stop_requested)
+    identity = (
+        batch[0].controller_id,
+        batch[0].controller_owner_id,
+        batch[0].controller_epoch,
+    )
+    if any(
+        (
+            record.controller_id,
+            record.controller_owner_id,
+            record.controller_epoch,
+        )
+        != identity
+        for record in batch[1:]
+    ):
+        raise ValueError("runtime observe batch must share one controller turn identity")
+    keys = [record.idempotency_key for record in batch]
+    if len(set(keys)) != len(keys):
+        raise ValueError("runtime observe batch contains duplicate idempotency keys")
+    rows = [
+        {
+            "decision_id": record.decision_id,
+            "idempotency_key": record.idempotency_key,
+            "controller_id": record.controller_id,
+            "controller_owner_id": record.controller_owner_id,
+            "controller_epoch": record.controller_epoch,
+            "observed_at": record.observed_at.isoformat(),
+            "decision_kind": record.decision_kind,
+            "target_type": record.target_type,
+            "target_id": record.target_id,
+            "action_type": record.action_type,
+            "reason_code": record.reason_code,
+            "incident_severity": record.incident_severity,
+            "qualification_breaking": record.qualification_breaking,
+            "next_check_at": record.next_check_at.isoformat(),
+            "runtime_state_digest": record.runtime_state_digest,
+            "decision_digest": record.decision_digest,
+            "payload": record.payload,
+            "payload_sha256": record.payload_sha256,
+        }
+        for record in batch
+    ]
+    with (
+        connection_factory() as connection,
+        connection.cursor(row_factory=dict_row) as cursor,
+    ):
+        cursor.execute("SET TRANSACTION READ WRITE")
+        _set_recovery_timeouts(cursor)
+        _raise_if_observe_stopped(stop_requested)
+        _require_current_controller_lease(
+            cursor,
+            controller_id=identity[0],
+            controller_owner_id=identity[1],
+            controller_epoch=identity[2],
+            observed_at=max(record.observed_at for record in batch),
+            lock=True,
+        )
+        _raise_if_observe_stopped(stop_requested)
+        cursor.execute(
+            """
+            INSERT INTO public.m1_runtime_observe_decisions (
+                decision_id, idempotency_key, controller_id, controller_owner_id,
+                controller_epoch, observed_at, decision_kind, target_type, target_id,
+                action_type, reason_code, incident_severity, qualification_breaking,
+                next_check_at, runtime_state_digest, decision_digest, payload,
+                payload_sha256
+            )
+            SELECT decision_id, idempotency_key, controller_id, controller_owner_id,
+                   controller_epoch, observed_at, decision_kind, target_type, target_id,
+                   action_type, reason_code, incident_severity, qualification_breaking,
+                   next_check_at, runtime_state_digest, decision_digest, payload,
+                   payload_sha256
+            FROM jsonb_to_recordset(%s::jsonb) AS item(
+                decision_id text, idempotency_key text, controller_id text,
+                controller_owner_id text, controller_epoch bigint,
+                observed_at timestamptz, decision_kind text, target_type text,
+                target_id text, action_type text, reason_code text,
+                incident_severity text, qualification_breaking boolean,
+                next_check_at timestamptz, runtime_state_digest text,
+                decision_digest text, payload jsonb, payload_sha256 text
+            )
+            ON CONFLICT (idempotency_key) DO NOTHING
+            """,
+            (Jsonb(rows),),
+        )
+        _raise_if_observe_stopped(stop_requested)
+        cursor.execute(
+            """
+            SELECT decision_id, idempotency_key, controller_id, controller_owner_id,
+                   controller_epoch, payload, payload_sha256, decision_digest
+            FROM public.m1_runtime_observe_decisions
+            WHERE idempotency_key = ANY(%s)
+            """,
+            (keys,),
+        )
+        persisted = {str(row["idempotency_key"]): row for row in cursor.fetchall()}
+        if set(persisted) != set(keys):
+            raise RuntimeObserveError("runtime observe batch insert returned incomplete rows")
+        for record in batch:
+            _compare_existing_row(record, persisted[record.idempotency_key])
+        connection.commit()
+    return batch
+
+
+def _raise_if_observe_stopped(stop_requested: Callable[[], bool] | None) -> None:
+    if stop_requested is not None and stop_requested():
+        raise RuntimeObserveError("runtime observe stop requested")
 
 
 def verify_runtime_observe_window(
@@ -976,5 +1097,6 @@ __all__ = [
     "build_runtime_observe_idle_record",
     "canonical_observe_record_bytes",
     "insert_runtime_observe_decision",
+    "insert_runtime_observe_decisions",
     "verify_runtime_observe_window",
 ]

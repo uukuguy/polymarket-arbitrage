@@ -18,6 +18,7 @@ from polyarb.control_plane.db_role_contract import (
     QUALIFICATION_ALLOWED,
     ROLE_CONTRACTS,
     RUNTIME_ALLOWED,
+    TABLE_PRIVILEGES,
     ConnectionFactory,
 )
 
@@ -186,13 +187,33 @@ class FakeAdminFactory:
             "select namespace.nspname" in normalized
             and "from pg_catalog.pg_namespace" in normalized
         ):
-            return [("public",)]
+            return [("public", True, self.public_schema_create)]
         if "as relation_name" in normalized and "pg_catalog.pg_class" in normalized:
+            subject = _param_tuple(params)[0]
+            profile = _profile_for_role(subject)
+            allowed = RUNTIME_ALLOWED if profile == "runtime-controller" else QUALIFICATION_ALLOWED
             names = set(RUNTIME_ALLOWED) | set(QUALIFICATION_ALLOWED)
-            return [(f"public.{name}", name, "public") for name in sorted(names)]
-        if "routine.prosecdef" in normalized and "pg_catalog.pg_proc" in normalized:
             return [
-                (signature,)
+                (
+                    f"public.{name}",
+                    name,
+                    "public",
+                    *(
+                        privilege in allowed.get(name, frozenset())
+                        for privilege in TABLE_PRIVILEGES
+                    ),
+                )
+                for name in sorted(names)
+            ]
+        if "routine.prosecdef" in normalized and "pg_catalog.pg_proc" in normalized:
+            subject = _param_tuple(params)[0]
+            profile = _profile_for_role(subject)
+            allowed = {
+                "".join(item.split())
+                for item in ROLE_CONTRACTS[profile].required_function_privileges
+            }
+            return [
+                (signature, "".join(signature.split()) in allowed)
                 for signature in (
                     "public.l3_retention_cleanup(timestamptz,timestamptz,timestamptz)",
                     *ROLE_CONTRACTS["qualification-worker"].required_function_privileges,

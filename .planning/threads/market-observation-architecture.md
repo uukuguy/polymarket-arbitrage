@@ -2036,3 +2036,36 @@ success is not user receipt/read evidence.
   Its connect/statement/lock settings now come from the central ordered policy;
   a migration fails quickly on lock contention instead of becoming a silent
   deployment singleton.
+
+### §2.44 A bounded statement does not bound an unbounded operation (2026-08-28)
+
+- Every formal operation must declare both its per-I/O deadline and its number
+  of I/O rounds. A loop of individually bounded queries is still an unbounded
+  business operation when object/fact count controls the round count.
+- Role authority verification now batches schema, table and sequence privilege
+  matrices into fixed catalog rounds. Qualification's ordinary accumulating
+  path uses one bulk append, one range verification and fixed scalar updates;
+  restart history is the explicit paged/checkpointed exception.
+- Session policy must be active when a connection is returned. Installing
+  search path or timeouts with an initial SQL statement creates an unbounded
+  bootstrap gap and invalidates any request envelope derived as connect plus
+  business statement. The scoped factory now installs all three through libpq
+  startup options.
+- Orchestration tools cannot add a universal outer timeout to heterogeneous
+  gates. Climb delegates deadlines to each gate and checkpoints successful
+  gates against exact git head plus argv, so interruption resumes the unfinished
+  suffix without treating orchestration death as domain failure.
+- Cooperative stop is a chain property: stop new work, signal blocking code,
+  finish at most the current server-bounded statement, rollback, then refuse
+  subsequent I/O. A second cancellation still detaches under lease fencing if
+  the client does not cooperate.
+- Observe-only is not exempt from operation-round limits. The runtime controller
+  previously wrote up to 100 decision records through 100 connections on the
+  event loop. One turn now uses a single lease-fenced bulk transaction and a
+  stop-aware daemon bridge; controller epoch and idempotency digest fence any
+  late result after grace detach.
+- A provider timeout does not make a mixed async/sync service interruptible.
+  Alert delivery previously ran synchronous claim/finish calls on the signal
+  loop. Its whole turn now runs in a stop-aware daemon bridge; cooperative stop
+  prevents a late provider response from starting finish SQL, while the durable
+  outbox lease recovers abandoned claims.

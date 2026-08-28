@@ -4,10 +4,12 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest
 from pydantic import SecretStr
 
 from polyarb.config import Settings
 from polyarb.control_plane.alert_delivery import (
+    AlertDeliveryStopRequested,
     TransactionalAlertDeliveryWorker,
     incident_alert_channels,
     render_runtime_incident_message,
@@ -87,9 +89,14 @@ def test_alert_worker_passes_acceptance_scope_to_claim() -> None:
 def test_telegram_delivery_persists_provider_message_id() -> None:
     control_plane = _ControlPlane()
     control_plane.claim_alert_delivery = lambda **_kwargs: AlertDeliveryLease(
-        outbox_id="outbox-tg", incident_event_id="event-tg", channel="telegram",
+        outbox_id="outbox-tg",
+        incident_event_id="event-tg",
+        channel="telegram",
         payload={"incident_key": "incident-a", "kind": "attempt-failed"},
-        lease_owner="alert-a", lease_epoch=1, lease_expires_at=NOW, attempt_number=1,
+        lease_owner="alert-a",
+        lease_epoch=1,
+        lease_expires_at=NOW,
+        attempt_number=1,
     )
     client = _TelegramClient(
         httpx.Response(
@@ -109,16 +116,23 @@ def test_telegram_delivery_persists_provider_message_id() -> None:
     assert asyncio.run(worker.run_once()).outcome == "delivered"
     assert client.calls[0][1]["text"] == "[attempt-failed] incident-a"
     assert control_plane.finished == {
-        "state": "delivered", "provider_receipt": "telegram:42", "now": NOW
+        "state": "delivered",
+        "provider_receipt": "telegram:42",
+        "now": NOW,
     }
 
 
 def test_telegram_http_failure_is_a_retryable_delivery_receipt() -> None:
     control_plane = _ControlPlane()
     control_plane.claim_alert_delivery = lambda **_kwargs: AlertDeliveryLease(
-        outbox_id="outbox-tg", incident_event_id="event-tg", channel="telegram",
+        outbox_id="outbox-tg",
+        incident_event_id="event-tg",
+        channel="telegram",
         payload={"incident_key": "incident-a", "kind": "attempt-failed"},
-        lease_owner="alert-a", lease_epoch=1, lease_expires_at=NOW, attempt_number=1,
+        lease_owner="alert-a",
+        lease_epoch=1,
+        lease_expires_at=NOW,
+        attempt_number=1,
     )
     worker = TransactionalAlertDeliveryWorker(
         control_plane=control_plane,
@@ -140,12 +154,63 @@ def test_telegram_http_failure_is_a_retryable_delivery_receipt() -> None:
     }
 
 
+def test_alert_stop_after_provider_response_forbids_starting_finish_sql() -> None:
+    control_plane = _ControlPlane()
+    control_plane.claim_alert_delivery = lambda **_kwargs: AlertDeliveryLease(
+        outbox_id="outbox-tg",
+        incident_event_id="event-tg",
+        channel="telegram",
+        payload={"incident_key": "incident-a", "kind": "attempt-failed"},
+        lease_owner="alert-a",
+        lease_epoch=1,
+        lease_expires_at=NOW,
+        attempt_number=1,
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class Client:
+        async def post(self, _url: str, *, json: dict[str, object]) -> httpx.Response:
+            assert json["chat_id"] == "chat"
+            started.set()
+            await release.wait()
+            return httpx.Response(
+                200,
+                json={"ok": True, "result": {"message_id": 42}},
+                request=httpx.Request("POST", "https://api.telegram.org"),
+            )
+
+    worker = TransactionalAlertDeliveryWorker(
+        control_plane=control_plane,
+        worker_id="alert-a",
+        now=lambda: NOW,
+        settings=Settings(telegram_bot_token=SecretStr("token"), telegram_chat_id="chat"),
+        telegram_client=Client(),
+    )
+
+    async def run() -> None:
+        task = asyncio.create_task(worker.run_once())
+        await started.wait()
+        worker.request_stop()
+        release.set()
+        with pytest.raises(AlertDeliveryStopRequested):
+            await task
+
+    asyncio.run(run())
+    assert control_plane.finished is None
+
+
 def test_unconfigured_telegram_preserves_outbox_for_retry() -> None:
     control_plane = _ControlPlane()
     control_plane.claim_alert_delivery = lambda **_kwargs: AlertDeliveryLease(
-        outbox_id="outbox-tg", incident_event_id="event-tg", channel="telegram",
+        outbox_id="outbox-tg",
+        incident_event_id="event-tg",
+        channel="telegram",
         payload={"incident_key": "incident-a", "kind": "attempt-failed"},
-        lease_owner="alert-a", lease_epoch=1, lease_expires_at=NOW, attempt_number=1,
+        lease_owner="alert-a",
+        lease_epoch=1,
+        lease_expires_at=NOW,
+        attempt_number=1,
     )
     worker = TransactionalAlertDeliveryWorker(
         control_plane=control_plane,
@@ -166,9 +231,10 @@ def test_unconfigured_telegram_preserves_outbox_for_retry() -> None:
 
 def test_incident_alert_channels_are_non_secret_policy_not_delivery_credentials() -> None:
     assert incident_alert_channels(Settings()) == ("dashboard",)
-    assert incident_alert_channels(
-        Settings(alert_channels="dashboard,telegram")
-    ) == ("dashboard", "telegram")
+    assert incident_alert_channels(Settings(alert_channels="dashboard,telegram")) == (
+        "dashboard",
+        "telegram",
+    )
     assert incident_alert_channels(
         Settings(
             alert_channels="dashboard",

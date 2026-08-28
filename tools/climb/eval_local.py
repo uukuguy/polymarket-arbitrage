@@ -33,8 +33,33 @@ def evaluate_gates(
     *,
     runner: Callable[[list[str]], GateResult],
     output_path: Path,
+    checkpoint_path: Path | None = None,
+    run_identity: str = "legacy-unversioned",
 ) -> dict:
-    results = {name: runner(command) for name, command in commands.items()}
+    progress_path = checkpoint_path or output_path.with_name("local-eval.progress.json")
+    command_payload = {name: list(command) for name, command in commands.items()}
+    results = _resume_gate_results(
+        progress_path,
+        commands=command_payload,
+        run_identity=run_identity,
+    )
+    for name, command in commands.items():
+        if name in results:
+            continue
+        results[name] = runner(command)
+        _write_json_atomic(
+            progress_path,
+            {
+                "schema_version": 1,
+                "status": "running",
+                "run_identity": run_identity,
+                "commands": command_payload,
+                "results": {
+                    completed_name: _gate_result_payload(result)
+                    for completed_name, result in results.items()
+                },
+            },
+        )
     payload = build_score(results)
     payload["commands"] = {
         name: {
@@ -44,13 +69,71 @@ def evaluate_gates(
         }
         for name, result in results.items()
     }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    _write_json_atomic(output_path, payload)
+    progress_path.unlink(missing_ok=True)
     return payload
 
 
+def _gate_result_payload(result: GateResult) -> dict[str, object]:
+    return {
+        "passed": result.passed,
+        "returncode": result.returncode,
+        "output": result.output[-8_000:],
+    }
+
+
+def _resume_gate_results(
+    checkpoint_path: Path,
+    *,
+    commands: Mapping[str, list[str]],
+    run_identity: str,
+) -> dict[str, GateResult]:
+    if not checkpoint_path.exists():
+        return {}
+    try:
+        payload = json.loads(checkpoint_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid local-eval checkpoint {checkpoint_path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid local-eval checkpoint {checkpoint_path}: expected object")
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("status") != "running"
+        or payload.get("run_identity") != run_identity
+        or payload.get("commands") != commands
+    ):
+        return {}
+    raw_results = payload.get("results")
+    if not isinstance(raw_results, dict) or set(raw_results) - set(commands):
+        raise ValueError(f"invalid local-eval checkpoint {checkpoint_path}: result set")
+    results: dict[str, GateResult] = {}
+    for name in commands:
+        if name not in raw_results:
+            continue
+        raw = raw_results[name]
+        if (
+            not isinstance(raw, dict)
+            or type(raw.get("passed")) is not bool
+            or type(raw.get("returncode")) is not int
+            or type(raw.get("output")) is not str
+        ):
+            raise ValueError(f"invalid local-eval checkpoint {checkpoint_path}: gate {name}")
+        results[name] = GateResult(
+            passed=raw["passed"],
+            returncode=raw["returncode"],
+            output=raw["output"],
+        )
+    return results
+
+
+def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
 ROOT = Path(__file__).resolve().parents[2]
-GATE_TIMEOUT_S = 120
 GATE_COMMANDS = {
     "planning": ["make", "planning-status"],
     "unit": [
@@ -669,25 +752,14 @@ def gate_commands_for(manifest: Mapping[str, object]) -> Mapping[str, list[str]]
 
 
 def run_command(command: list[str]) -> GateResult:
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=ROOT,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-            timeout=GATE_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired as error:
-        output = error.output or ""
-        if isinstance(output, bytes):
-            output = output.decode(errors="replace")
-        return GateResult(
-            passed=False,
-            returncode=124,
-            output=f"gate timed out after {GATE_TIMEOUT_S}s\n{output}",
-        )
+    completed = subprocess.run(
+        command,
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
     return GateResult(
         passed=completed.returncode == 0,
         returncode=completed.returncode,
@@ -724,6 +796,7 @@ def main(argv: list[str] | None = None) -> int:
         gate_commands_for(manifest),
         runner=run_command,
         output_path=output_path,
+        run_identity=str(manifest.get("git_head", "legacy-unversioned")),
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if not payload["disaster_pattern"] else 1

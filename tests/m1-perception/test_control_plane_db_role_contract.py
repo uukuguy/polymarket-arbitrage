@@ -105,13 +105,35 @@ class FakeRoleFactory:
             names = ["public"]
             if self.authority_failure == "nonpublic-schema":
                 names.append("evil")
-            return [(name,) for name in names]
+            return [
+                (
+                    name,
+                    name == "public" or self.authority_failure == "nonpublic-schema",
+                    name == "public" and self.authority_failure == "schema-create",
+                )
+                for name in names
+            ]
         if "as relation_name" in sql and "pg_catalog.pg_class" in sql:
             names = list(_allowed_table_names(self.profile))
             names.append("unrelated_authority")
-            rows = [(f"public.{name}", name, "public") for name in sorted(names)]
+            rows = [
+                (
+                    f"public.{name}",
+                    name,
+                    "public",
+                    *self._table_privileges(name, f"public.{name}"),
+                )
+                for name in sorted(names)
+            ]
             if self.authority_failure == "nonpublic-relation":
-                rows.append(("evil.shadow", "shadow", "evil"))
+                rows.append(
+                    (
+                        "evil.shadow",
+                        "shadow",
+                        "evil",
+                        *self._table_privileges("shadow", "evil.shadow"),
+                    )
+                )
             if (
                 self.authority_failure == "ambient-unreachable-relation"
                 and "has_schema_privilege" not in sql
@@ -121,12 +143,15 @@ class FakeRoleFactory:
                         "extensions.pg_stat_statements",
                         "pg_stat_statements",
                         "extensions",
+                        *self._table_privileges(
+                            "pg_stat_statements", "extensions.pg_stat_statements"
+                        ),
                     )
                 )
             return rows
         if "routine.prosecdef" in sql and "pg_catalog.pg_proc" in sql:
             return [
-                (signature,)
+                (signature, self._function_privilege(signature))
                 for signature in (
                     "public.l3_retention_cleanup(timestamptz,timestamptz,timestamptz)",
                     "public.m1_insert_qualification_certificate("
@@ -145,7 +170,16 @@ class FakeRoleFactory:
                 return [("table:public.unrelated_owned",)]
             return []
         if "from pg_catalog.pg_class as sequence" in sql:
-            return [("public.m1_qualification_ingress_ledger_ingest_seq",)]
+            sequence = "public.m1_qualification_ingress_ledger_ingest_seq"
+            return [
+                (
+                    sequence,
+                    self.sequence_privilege_source is not None
+                    and sequence in _forbidden_sequences(self.profile),
+                    False,
+                    False,
+                )
+            ]
         if "select pg_get_serial_sequence" in sql:
             table = str(_param(params, 0))
             column = str(_param(params, 1))
@@ -288,6 +322,44 @@ class FakeRoleFactory:
             return (False,)
         raise AssertionError(f"unexpected verifier query: {sql}")
 
+    def _table_privileges(self, table: str, relation_name: str) -> tuple[bool, ...]:
+        values: list[bool] = []
+        for privilege in (
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "REFERENCES",
+            "TRIGGER",
+        ):
+            allowed = privilege in _allowed_table_privileges(self.profile, table)
+            if relation_name.startswith("extensions."):
+                allowed = (
+                    self.authority_failure == "ambient-unreachable-relation"
+                    and privilege == "SELECT"
+                )
+            if relation_name.startswith("evil."):
+                allowed = self.authority_failure == "nonpublic-relation" and privilege == "SELECT"
+            if table == "unrelated_authority" and privilege == "SELECT":
+                allowed = self.authority_failure == "unrelated-relation"
+            if self.failure_code == "database-role.required-privilege-missing" and allowed:
+                allowed = False
+            if self.failure_code == "database-role.forbidden-privilege-present" and not allowed:
+                allowed = True
+            values.append(allowed)
+        return tuple(values)
+
+    def _function_privilege(self, function_signature: str) -> bool:
+        allowed = function_signature in _allowed_functions(self.profile)
+        if function_signature.startswith("public.l3_retention_cleanup"):
+            allowed = self.authority_failure == "security-definer-execute"
+        if self.failure_code == "database-role.required-privilege-missing" and allowed:
+            return False
+        if self.failure_code == "database-role.forbidden-privilege-present" and not allowed:
+            return True
+        return allowed
+
 
 def _param(params: object, index: int) -> object:
     assert isinstance(params, tuple)
@@ -424,6 +496,19 @@ def test_database_role_contract_accepts_exact_qualification_worker_identity() ->
     assert factory.write_count == 0
 
 
+def test_database_role_authority_matrix_batches_catalog_privilege_checks() -> None:
+    from polyarb.control_plane import db_role_contract
+
+    for verifier in (
+        db_role_contract._verify_application_schema_privileges,
+        db_role_contract._verify_public_relation_privileges,
+        db_role_contract._verify_public_sequence_privileges,
+        db_role_contract._verify_security_definer_execute,
+    ):
+        source = inspect.getsource(verifier)
+        assert "_check_privilege(" not in source
+
+
 def test_database_role_contract_ignores_ambient_acl_in_unreachable_schema() -> None:
     from polyarb.control_plane.db_role_contract import (
         ConnectionFactory,
@@ -453,7 +538,10 @@ def test_database_role_contract_ignores_ambient_acl_in_unreachable_schema() -> N
     ]
     assert len(reachable_catalog_queries) == 3
     assert all("has_schema_privilege" in call[0] for call in reachable_catalog_queries)
-    assert all(call[1] == (factory.session_user,) for call in reachable_catalog_queries)
+    assert all(
+        isinstance(call[1], tuple) and set(call[1]) == {factory.session_user}
+        for call in reachable_catalog_queries
+    )
 
 
 def test_database_role_contract_accepts_exact_supabase_creator_membership() -> None:
@@ -592,7 +680,7 @@ def test_runtime_sequence_denial_uses_public_catalog_enumeration() -> None:
         call for call in factory.calls if "pg_catalog.pg_class as sequence" in call[0]
     ]
     assert len(sequence_queries) == 1
-    assert sequence_queries[0][1] == (factory.session_user,)
+    assert sequence_queries[0][1] == (factory.session_user,) * 4
 
 
 @pytest.mark.parametrize(
@@ -703,14 +791,9 @@ def test_scoped_connection_factory_binds_namespace_and_database_timeouts(
     from polyarb.control_plane import db_role_contract
 
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-    bootstrap_calls: list[tuple[str, object]] = []
 
     class FakeBootstrapConnection:
-        def execute(self, statement: str, params: object) -> None:
-            bootstrap_calls.append((statement, params))
-
-        def commit(self) -> None:
-            bootstrap_calls.append(("commit", ()))
+        pass
 
     sentinel = FakeBootstrapConnection()
 
@@ -729,18 +812,12 @@ def test_scoped_connection_factory_binds_namespace_and_database_timeouts(
             ("postgresql://runtime:secret@example.test/role_test",),
             {
                 "connect_timeout": 5,
-                "options": "-csearch_path=pg_catalog,public",
+                "options": (
+                    "-csearch_path=pg_catalog,public "
+                    "-cstatement_timeout=5000ms -clock_timeout=1000ms"
+                ),
             },
         )
-    ]
-    assert bootstrap_calls == [
-        (
-            "SELECT pg_catalog.set_config('search_path', %s, false), "
-            "pg_catalog.set_config('statement_timeout', %s, false), "
-            "pg_catalog.set_config('lock_timeout', %s, false)",
-            ("pg_catalog,public", "5000ms", "1000ms"),
-        ),
-        ("commit", ()),
     ]
 
 

@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+from threading import Event
 from typing import Any, Protocol, cast
 from urllib.request import Request, urlopen
 
@@ -22,7 +23,11 @@ from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
 from polyarb.control_plane.alert_delivery import TransactionalAlertDeliveryWorker
-from polyarb.control_plane.blocking_bridge import run_blocking_call
+from polyarb.control_plane.blocking_bridge import (
+    run_blocking_call,
+    run_blocking_call_until_stopped,
+)
+from polyarb.control_plane.db_deadlines import CONTROL_PLANE_DB_POLICY, RECOVERY_DB_POLICY
 from polyarb.control_plane.db_role_contract import (
     DatabaseRoleContractError,
     scoped_connection_factory,
@@ -66,7 +71,7 @@ from polyarb.control_plane.runtime_fault_matrix import RuntimeFaultMatrixError, 
 from polyarb.control_plane.runtime_observe import (
     build_runtime_observe_decision_record,
     build_runtime_observe_idle_record,
-    insert_runtime_observe_decision,
+    insert_runtime_observe_decisions,
     verify_runtime_observe_window,
 )
 from polyarb.control_plane.runtime_replay import replay_soak_observations
@@ -1134,28 +1139,44 @@ async def _run_scheduler_service(
 
 
 async def _run_alert_service(
-    worker: TransactionalAlertDeliveryWorker, *, interval_seconds: float, as_json: bool
+    worker: TransactionalAlertDeliveryWorker,
+    *,
+    interval_seconds: float,
+    as_json: bool,
+    stop_event: asyncio.Event | None = None,
 ) -> dict[str, object]:
     """Run alert delivery separately from all data-plane process groups."""
     if interval_seconds <= 0:
         raise ValueError("interval_seconds must be positive")
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for stop_signal in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(stop_signal, stop_event.set)
-        except (NotImplementedError, RuntimeError):
-            pass
+    stop = stop_event or asyncio.Event()
+    if stop_event is None:
+        loop = asyncio.get_running_loop()
+        for stop_signal in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(stop_signal, stop.set)
+            except (NotImplementedError, RuntimeError):
+                pass
     turns = 0
-    while not stop_event.is_set():
-        result = await worker.run_once()
+    while not stop.is_set():
+        completed, result = await run_blocking_call_until_stopped(
+            lambda: asyncio.run(worker.run_once()),
+            stop_event=stop,
+            grace_seconds=CONTROL_PLANE_DB_POLICY.stop_grace_seconds,
+            point_of_no_return=True,
+            request_stop=getattr(worker, "request_stop", None),
+            thread_name="control-plane-alert:delivery-turn",
+        )
+        if not completed:
+            break
+        if result is None or not hasattr(result, "outbox_id") or not hasattr(result, "outcome"):
+            raise TypeError("alert delivery turn returned an invalid result")
         turns += 1
         _write(
             {"event": "alert-delivery", "outbox_id": result.outbox_id, "outcome": result.outcome},
             as_json=as_json,
         )
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=interval_seconds)
+            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
         except TimeoutError:
             continue
     return {"status": "stopped", "turns": turns}
@@ -1256,6 +1277,7 @@ def _runtime_reconcile_once(
     *,
     controller: RuntimeControllerLease | None = None,
     recovery_mode: str = "observe-only",
+    stop_requested: Callable[[], bool] | None = None,
 ) -> dict[str, object]:
     """Run one bounded evaluate turn, with mutation fenced by recovery mode.
 
@@ -1272,6 +1294,7 @@ def _runtime_reconcile_once(
         raise ValueError("heartbeat lease seconds must be positive")
     if args.limit <= 0 or args.limit > 100:
         raise ValueError("limit must be in 1..100")
+    _raise_if_runtime_reconcile_stopped(stop_requested)
     now = datetime.now(UTC)
     connection_factory = control_plane._connection_factory
     selected_controller = controller or claim_controller(
@@ -1287,6 +1310,7 @@ def _runtime_reconcile_once(
         now=now,
         sample_limit=args.limit,
     )
+    _raise_if_runtime_reconcile_stopped(stop_requested)
     reconciler = RuntimeReconciler()
     evaluated: list[tuple[RuntimeReconcileCandidate, RecoveryDecision]] = []
     selected: tuple[RuntimeReconcileCandidate, RecoveryDecision] | None = None
@@ -1315,36 +1339,44 @@ def _runtime_reconcile_once(
         candidate, decision = selected
     if recovery_mode == "observe-only":
         if evaluated:
-            for observed_candidate, observed_decision in evaluated:
-                insert_runtime_observe_decision(
-                    connection_factory,
-                    build_runtime_observe_decision_record(
-                        controller_id=selected_controller.controller_id,
-                        controller_owner_id=selected_controller.owner_id,
-                        controller_epoch=selected_controller.lease_epoch,
-                        observed_at=now,
-                        candidate=observed_candidate,
-                        decision=observed_decision,
-                        observed_by=selected_controller.owner_id,
-                    ),
-                )
-                observed_decision_count += 1
-        else:
-            cadence_seconds = max(1.0, float(getattr(args, "interval_seconds", 30.0)))
-            insert_runtime_observe_decision(
-                connection_factory,
-                build_runtime_observe_idle_record(
+            observe_records = tuple(
+                build_runtime_observe_decision_record(
                     controller_id=selected_controller.controller_id,
                     controller_owner_id=selected_controller.owner_id,
                     controller_epoch=selected_controller.lease_epoch,
                     observed_at=now,
-                    next_check_at=now + timedelta(seconds=cadence_seconds),
+                    candidate=observed_candidate,
+                    decision=observed_decision,
                     observed_by=selected_controller.owner_id,
+                )
+                for observed_candidate, observed_decision in evaluated
+            )
+            insert_runtime_observe_decisions(
+                connection_factory,
+                observe_records,
+                stop_requested=stop_requested,
+            )
+            observed_decision_count = len(observe_records)
+        else:
+            cadence_seconds = max(1.0, float(getattr(args, "interval_seconds", 30.0)))
+            insert_runtime_observe_decisions(
+                connection_factory,
+                (
+                    build_runtime_observe_idle_record(
+                        controller_id=selected_controller.controller_id,
+                        controller_owner_id=selected_controller.owner_id,
+                        controller_epoch=selected_controller.lease_epoch,
+                        observed_at=now,
+                        next_check_at=now + timedelta(seconds=cadence_seconds),
+                        observed_by=selected_controller.owner_id,
+                    ),
                 ),
+                stop_requested=stop_requested,
             )
             observed_decision_count = 1
     else:
         if candidate is not None and decision is not None:
+            _raise_if_runtime_reconcile_stopped(stop_requested)
             action_type = getattr(decision, "action", None)
             if isinstance(action_type, RecoveryActionType):
                 scheduled = schedule_action(
@@ -1368,6 +1400,7 @@ def _runtime_reconcile_once(
                         "job_state": candidate.job_state,
                     },
                 )
+        _raise_if_runtime_reconcile_stopped(stop_requested)
         executor = RecoveryExecutor(
             control_plane=control_plane,
             controller=selected_controller,
@@ -1462,53 +1495,82 @@ def _runtime_reconcile_once(
     }
 
 
+def _raise_if_runtime_reconcile_stopped(
+    stop_requested: Callable[[], bool] | None,
+) -> None:
+    if stop_requested is not None and stop_requested():
+        raise RuntimeError("runtime reconcile stop requested")
+
+
 async def _run_runtime_reconcile_service(
     control_plane: _RuntimeReconcileControlPlane,
     args: argparse.Namespace,
     *,
     recovery_mode: str = "observe-only",
+    stop_event: asyncio.Event | None = None,
 ) -> dict[str, object]:
     """Run sequential reconciliation turns and fail immediately on store errors."""
     if args.interval_seconds <= 0:
         raise ValueError("interval_seconds must be positive")
     if args.lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for stop_signal in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(stop_signal, stop_event.set)
-        except (NotImplementedError, RuntimeError):
-            pass
+    stop = stop_event or asyncio.Event()
+    if stop_event is None:
+        loop = asyncio.get_running_loop()
+        for stop_signal in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(stop_signal, stop.set)
+            except (NotImplementedError, RuntimeError):
+                pass
     controller: RuntimeControllerLease | None = None
     turns = 0
-    while not stop_event.is_set():
-        now = datetime.now(UTC)
-        if controller is None:
-            controller = claim_controller(
-                control_plane._connection_factory,
-                controller_id=args.controller_id,
-                owner_id=args.owner_id,
-                lease_seconds=args.lease_seconds,
-                now=now,
-            )
-        else:
-            controller = renew_controller(
-                control_plane._connection_factory,
+    while not stop.is_set():
+        turn_stop = Event()
+
+        def run_turn() -> dict[str, object]:
+            nonlocal controller
+            _raise_if_runtime_reconcile_stopped(turn_stop.is_set)
+            now = datetime.now(UTC)
+            if controller is None:
+                controller = claim_controller(
+                    control_plane._connection_factory,
+                    controller_id=args.controller_id,
+                    owner_id=args.owner_id,
+                    lease_seconds=args.lease_seconds,
+                    now=now,
+                )
+            else:
+                controller = renew_controller(
+                    control_plane._connection_factory,
+                    controller=controller,
+                    lease_seconds=args.lease_seconds,
+                    now=now,
+                )
+            _raise_if_runtime_reconcile_stopped(turn_stop.is_set)
+            return _runtime_reconcile_once(
+                control_plane,
+                args,
                 controller=controller,
-                lease_seconds=args.lease_seconds,
-                now=now,
+                recovery_mode=recovery_mode,
+                stop_requested=turn_stop.is_set,
             )
-        payload = _runtime_reconcile_once(
-            control_plane,
-            args,
-            controller=controller,
-            recovery_mode=recovery_mode,
+
+        completed, payload = await run_blocking_call_until_stopped(
+            run_turn,
+            stop_event=stop,
+            grace_seconds=RECOVERY_DB_POLICY.stop_grace_seconds,
+            point_of_no_return=True,
+            request_stop=turn_stop.set,
+            thread_name="runtime-controller:reconcile-turn",
         )
+        if not completed:
+            break
+        if not isinstance(payload, dict):
+            raise TypeError("runtime reconcile turn returned an invalid result")
         _write({"event": "runtime-reconcile-turn", **payload}, as_json=args.json)
         turns += 1
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=args.interval_seconds)
+            await asyncio.wait_for(stop.wait(), timeout=args.interval_seconds)
         except TimeoutError:
             continue
     return {"status": "stopped", "turns": turns}

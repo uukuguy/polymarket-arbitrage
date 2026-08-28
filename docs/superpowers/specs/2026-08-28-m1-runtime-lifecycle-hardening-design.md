@@ -60,7 +60,19 @@ io_timeout < progress_timeout <= attempt_timeout
 scheduler_timeout is absent for claimed work
 terminal_statement_timeout < remaining_lease
 policy job types == runtime-stage job types
+connection return implies search-path/statement/lock policy is already active
+fixed operation implies fixed query rounds or an explicit page/checkpoint protocol
 ```
+
+A per-statement deadline does not bound a sequence containing an unbounded
+number of statements. Formal operations must therefore declare their query
+round complexity. Catalog verification and healthy batch ingestion use a fixed
+number of bulk rounds; history replay is explicitly paged and cooperatively
+stoppable between pages.
+
+Connection bootstrap is part of the connection boundary. No connection factory
+may return before search path, statement timeout, and lock timeout are active,
+and it may not run an unbounded SQL statement in order to install those bounds.
 
 ## Cancellation and effect classes
 
@@ -122,6 +134,32 @@ Graceful stop stops new claims immediately, lets the current fenced operation
 reach a safe boundary, persists a checkpoint/failure fact, and exits within the
 policy's shutdown grace. It does not abandon a terminal DB transaction.
 
+Blocking multi-statement services receive a cooperative stop hint before the
+terminal grace begins. They may finish the currently server-bounded statement,
+then must roll back and refuse to begin another I/O. Lease fencing remains the
+authority if a non-cooperative client outlives the process grace.
+
+Observe-only controller turns follow the same rule. Candidate evaluation is
+bounded to 100 rows, but evidence persistence is one controller-lease-fenced
+bulk transaction rather than one connection per candidate. The synchronous
+turn runs off-loop; stop prevents later SQL, and grace detach leaves controller
+epoch plus idempotency digest as the late-result fence.
+
+Alert delivery uses the durable outbox lease as its recovery anchor. The mixed
+async-provider/synchronous-database turn runs off the signal loop. Cooperative
+stop is checked after claim and provider response and before retry/finalization,
+so a late response cannot begin new SQL; a non-cooperative client is detached
+after the database-derived stop grace.
+
+## Gate runner recovery
+
+The climb evaluator does not own a universal subprocess timeout. Each gate owns
+its domain-specific timeout and failure semantics. After each successful gate,
+the evaluator atomically checkpoints a progress baton bound to the exact git
+head and full command vector. An interrupted identical run resumes only the
+unfinished suffix; malformed, stale, or command-mismatched progress fails
+closed and is never promoted to final evidence.
+
 ## Qualification restart semantics
 
 A new qualification release must not silently replay from ledger offset zero
@@ -144,6 +182,11 @@ marked as a backfill. Only current-cursor live observations count toward the
 - DAG acyclicity and declared-successor tests;
 - SIGINT during every job type reaches a bounded safe stop;
 - qualification release handoff test rejects zero-cursor continuity claims;
+- fixed-round catalog and qualification batch tests reject per-object/per-fact
+  network loops;
+- scoped connection tests prove timeout policy is active before the first SQL;
+- climb interruption test proves exact-identity resume without a competing
+  evaluator timeout;
 - full M1 regression, migration upgrade/downgrade, lint, format, planning, and
   climb gates.
 

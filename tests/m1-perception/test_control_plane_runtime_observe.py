@@ -454,6 +454,7 @@ def test_real_postgres_records_idempotent_idle_window_and_verifies_read_only() -
         build_runtime_observe_idle_record,
         canonical_observe_record_bytes,
         insert_runtime_observe_decision,
+        insert_runtime_observe_decisions,
         verify_runtime_observe_window,
     )
 
@@ -486,9 +487,17 @@ def test_real_postgres_records_idempotent_idle_window_and_verifies_read_only() -
                 observed_by=CONTROLLER_OWNER_ID,
             ),
         ]
-        for record in records:
-            insert_runtime_observe_decision(lambda: psycopg.connect(dsn), record)
-            insert_runtime_observe_decision(lambda: psycopg.connect(dsn), record)
+        connection_count = 0
+
+        def counted_connection() -> psycopg.Connection[Any]:
+            nonlocal connection_count
+            connection_count += 1
+            return psycopg.connect(dsn)
+
+        assert insert_runtime_observe_decisions(counted_connection, records) == tuple(records)
+        assert connection_count == 1
+        assert insert_runtime_observe_decisions(counted_connection, records) == tuple(records)
+        assert connection_count == 2
 
         payload = dict(records[-1].payload)
         payload["observed_by"] = "runtime-controller-observe-conflict"

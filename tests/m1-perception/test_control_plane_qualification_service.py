@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -23,6 +24,7 @@ from polyarb.control_plane.qualification_service import (
     PostgresQualificationServiceStore,
     QualificationFactRecord,
     QualificationService,
+    QualificationServiceStopRequested,
     StaticQualificationFactSource,
     freshness_row_to_fact_record,
     incident_event_row_to_fact_record,
@@ -76,6 +78,67 @@ def test_qualification_service_stop_detaches_a_stalled_tick_after_database_grace
     finally:
         release.set()
         safety_release.cancel()
+
+
+def test_qualification_service_requests_cooperative_stop_before_grace_detach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    stop_requested = threading.Event()
+    stop = asyncio.Event()
+
+    class Policy:
+        stop_grace_seconds = 0.2
+
+    class Service:
+        def request_stop(self) -> None:
+            stop_requested.set()
+
+        def tick(self, _now: datetime):
+            started.set()
+            assert stop_requested.wait(timeout=1)
+            raise RuntimeError("cooperative qualification stop")
+
+    monkeypatch.setattr(qualification_service_module, "CONTROL_PLANE_DB_POLICY", Policy())
+
+    async def run() -> dict[str, object]:
+        task = asyncio.create_task(
+            run_qualification_service(
+                cast(Any, Service()),
+                interval_seconds=30,
+                stop_event=stop,
+            )
+        )
+        while not started.is_set():
+            await asyncio.sleep(0)
+        stop.set()
+        return await task
+
+    assert asyncio.run(run()) == {"status": "stopped", "ticks": 0}
+    assert stop_requested.is_set()
+
+
+def test_qualification_store_stop_forbids_starting_certificate_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PostgresQualificationServiceStore(lambda: cast(Any, None))
+    store.request_stop()
+    certificate_started = False
+
+    def reject_certificate_io(*_args: object, **_kwargs: object) -> None:
+        nonlocal certificate_started
+        certificate_started = True
+
+    monkeypatch.setattr(
+        qualification_service_module,
+        "insert_qualification_certificate",
+        reject_certificate_io,
+    )
+
+    with pytest.raises(QualificationServiceStopRequested):
+        store.ensure_certificate(cast(Any, SimpleNamespace(state=QualificationState.QUALIFIED)))
+
+    assert certificate_started is False
 
 
 def _policy() -> RollingQualificationPolicy:

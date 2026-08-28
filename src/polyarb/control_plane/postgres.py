@@ -5960,11 +5960,14 @@ class PostgresControlPlane:
             )
             circuit = cursor.fetchone()
             failures = (0 if circuit is None else int(circuit["consecutive_failures"])) + 1
+            retry_budget = runtime_policy(component, 3).retry_budget
             delay_seconds = min(15 * (2 ** (failures - 1)), 300)
             next_attempt_at = now + timedelta(seconds=delay_seconds)
-            circuit_state = "open" if failures >= 3 else "closed"
+            circuit_state = "open" if failures >= retry_budget else "closed"
             opened_at = (
-                now if failures == 3 else (None if circuit is None else circuit["opened_at"])
+                now
+                if failures == retry_budget
+                else (None if circuit is None else circuit["opened_at"])
             )
             cursor.execute(
                 """
@@ -6017,8 +6020,8 @@ class PostgresControlPlane:
             )
             kind = (
                 "circuit-opened"
-                if failures == 3
-                else ("circuit-probe-failed" if failures > 3 else "attempt-failed")
+                if failures == retry_budget
+                else ("circuit-probe-failed" if failures > retry_budget else "attempt-failed")
             )
             self._record_incident_event(
                 cursor,

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "authorization_source_commit": "4aae7b7e4193ad9daf5cb4632eee60b7059efa1e",
+  "status": "superseded-before-machine-rollout",
+  "database_effect": {
+    "before_revision": "030",
+    "after_revision": "031",
+    "outcome": "applied-transactionally"
+  },
+  "post_migration_audit": {
+    "normalized_fact_count": 6572,
+    "epochs_with_legacy_arrays": 0,
+    "compaction_constraint_count": 3,
+    "append_only_trigger_count": 1,
+    "scalar_count_mismatches": 0
+  },
+  "machine_effect": {
+    "updated": 0,
+    "started": 0,
+    "stopped": 0,
+    "config_changed": 0
+  },
+  "superseded_image": "registry.fly.io/polyarb-control-worker-m1@sha256:548cc4c37843dc239f2f04bfd7bbf0802fa2eb49d2f90cd3ef3fa96f9d0243f9",
+  "reason": "the operation-round audit changed role preflight, connection bootstrap, climb resume and qualification batch/stop executable bytes after revision 031 applied",
+  "production_boundary": "revision 031 remains applied; exact Machine topology and pre-rollout states remain unchanged",
+  "next_authorization_requirement": "new source-bound revision-031 image plus fresh topology, role, rollback, full M1, climb and observe-only gates"
+}

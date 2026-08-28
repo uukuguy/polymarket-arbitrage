@@ -24,6 +24,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from polyarb.control_plane import postgres as postgres_module
+from polyarb.control_plane import qualification_service as qualification_service_module
 from polyarb.control_plane import qualification_store as qualification_store_module
 from polyarb.control_plane import runtime_event_writer
 from polyarb.control_plane.alert_delivery import render_runtime_incident_message
@@ -10174,6 +10175,82 @@ def test_qualification_active_epoch_stays_bounded_and_replays_across_pages(
     assert restarted.current.fact_ids == ()
     assert restarted.current.coverage_seconds == 500
     assert restarted.current.last_fact_at == now + timedelta(seconds=500)
+
+
+def test_qualification_store_initializes_once_per_process_without_replaying_history(
+    control_plane: PostgresControlPlane,
+) -> None:
+    policy = RollingQualificationPolicy(
+        release_id="release-single-initialize",
+        config_id="config-single-initialize",
+        role_identity=("m1", "qualification"),
+    )
+    connection_count = 0
+
+    def counted_connection():
+        nonlocal connection_count
+        connection_count += 1
+        return control_plane._connection_factory()
+
+    store = PostgresQualificationServiceStore(counted_connection)
+    store.initialize(policy, now=_now())
+    initialized_connection_count = connection_count
+
+    store.initialize(policy, now=_now() + timedelta(seconds=1))
+
+    assert initialized_connection_count > 0
+    assert connection_count == initialized_connection_count
+
+
+def test_qualification_healthy_batch_uses_one_bulk_fact_append(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    policy = RollingQualificationPolicy(
+        release_id="release-bulk-facts",
+        config_id="config-bulk-facts",
+        role_identity=("m1", "qualification"),
+    )
+    records = tuple(
+        QualificationFactRecord(
+            cursor=FactCursor(
+                now + timedelta(seconds=index),
+                40,
+                f"bulk-{index}",
+                ingest_seq=index + 1,
+            ),
+            fact=QualificationFact.healthy(f"bulk-{index}", now + timedelta(seconds=index)),
+            source="freshness",
+        )
+        for index in range(100)
+    )
+    store = PostgresQualificationServiceStore(control_plane._connection_factory)
+    store.initialize(policy, now=now)
+
+    def reject_per_fact_append(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("healthy batches must not issue one append query per fact")
+
+    monkeypatch.setattr(
+        qualification_service_module,
+        "_append_epoch_fact_cursor",
+        reject_per_fact_append,
+    )
+
+    decision = store.apply_records(
+        policy,
+        records,
+        expected_cursor=None,
+        writer_id="bulk-writer",
+    )
+
+    assert decision.state is QualificationState.ACCUMULATING
+    with control_plane._connection_factory() as connection:
+        row = connection.execute(
+            "SELECT version, runtime_fact_count FROM m1_qualification_epochs WHERE epoch_id = %s",
+            (decision.epoch_id,),
+        ).fetchone()
+    assert row == (101, 100)
 
 
 def test_qualification_terminal_certificate_keeps_epoch_history_bounded(

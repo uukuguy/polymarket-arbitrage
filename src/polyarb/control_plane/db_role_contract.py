@@ -25,9 +25,9 @@ TABLE_PRIVILEGES = (
 )
 SEQUENCE_PRIVILEGES = ("USAGE", "SELECT", "UPDATE")
 CONTROLLED_SEARCH_PATH = ("pg_catalog", "public")
-CONTROLLED_CONNECTION_OPTIONS = "-csearch_path=pg_catalog,public"
-CONTROLLED_STATEMENT_TIMEOUT = CONTROL_PLANE_DB_POLICY.statement_setting
-CONTROLLED_LOCK_TIMEOUT = CONTROL_PLANE_DB_POLICY.lock_setting
+CONTROLLED_CONNECTION_OPTIONS = (
+    "-csearch_path=pg_catalog,public " + CONTROL_PLANE_DB_POLICY.connection_options
+)
 # TEMPORARY is intentionally allowed. PostgreSQL grants it to PUBLIC by default;
 # revoking it globally would change the original four applications. Namespace
 # safety instead comes from qualified daemon SQL plus this controlled path.
@@ -133,27 +133,11 @@ def scoped_connection_factory(dsn: str) -> ConnectionFactory:
     _reject_dsn_namespace_override(dsn)
 
     def connect() -> psycopg.Connection[Any]:
-        connection = psycopg.connect(
+        return psycopg.connect(
             dsn,
             connect_timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds,
             options=CONTROLLED_CONNECTION_OPTIONS,
         )
-        try:
-            connection.execute(
-                "SELECT pg_catalog.set_config('search_path', %s, false), "
-                "pg_catalog.set_config('statement_timeout', %s, false), "
-                "pg_catalog.set_config('lock_timeout', %s, false)",
-                (
-                    ",".join(CONTROLLED_SEARCH_PATH),
-                    CONTROLLED_STATEMENT_TIMEOUT,
-                    CONTROLLED_LOCK_TIMEOUT,
-                ),
-            )
-            connection.commit()
-        except Exception:
-            connection.close()
-            raise
-        return connection
 
     return connect
 
@@ -639,24 +623,25 @@ def verify_effective_database_role_authority(
 def _verify_application_schema_privileges(cursor: Any, subject_role: str) -> None:
     cursor.execute(
         """
-        SELECT namespace.nspname
+        SELECT namespace.nspname,
+               pg_catalog.has_schema_privilege(%s, namespace.oid, 'USAGE') AS can_usage,
+               pg_catalog.has_schema_privilege(%s, namespace.oid, 'CREATE') AS can_create
         FROM pg_catalog.pg_namespace AS namespace
         WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
           AND namespace.nspname !~ '^pg_(toast|temp)(_|$)'
         ORDER BY namespace.nspname
-        """
+        """,
+        (subject_role, subject_role),
     )
     seen_public = False
     for row in cursor.fetchall():
         schema_name = str(_row_value(row, 0, "nspname"))
         if schema_name == "public":
             seen_public = True
-        for privilege in ("USAGE", "CREATE"):
-            effective = _check_privilege(
-                cursor,
-                "has_schema_privilege",
-                (subject_role, schema_name, privilege),
-            )
+        for privilege, effective in (
+            ("USAGE", bool(_row_value(row, 1, "can_usage"))),
+            ("CREATE", bool(_row_value(row, 2, "can_create"))),
+        ):
             expected = schema_name == "public" and privilege == "USAGE"
             if effective and not expected:
                 _fail("database-role.forbidden-privilege-present", "application-schema")
@@ -685,7 +670,14 @@ def _verify_public_relation_privileges(
         SELECT pg_catalog.format('%%I.%%I', namespace.nspname, relation.relname)
                    AS relation_name,
                relation.relname,
-               namespace.nspname
+               namespace.nspname,
+               pg_catalog.has_table_privilege(%s, relation.oid, 'SELECT') AS can_select,
+               pg_catalog.has_table_privilege(%s, relation.oid, 'INSERT') AS can_insert,
+               pg_catalog.has_table_privilege(%s, relation.oid, 'UPDATE') AS can_update,
+               pg_catalog.has_table_privilege(%s, relation.oid, 'DELETE') AS can_delete,
+               pg_catalog.has_table_privilege(%s, relation.oid, 'TRUNCATE') AS can_truncate,
+               pg_catalog.has_table_privilege(%s, relation.oid, 'REFERENCES') AS can_references,
+               pg_catalog.has_table_privilege(%s, relation.oid, 'TRIGGER') AS can_trigger
         FROM pg_catalog.pg_class AS relation
         JOIN pg_catalog.pg_namespace AS namespace
           ON namespace.oid = relation.relnamespace
@@ -695,12 +687,11 @@ def _verify_public_relation_privileges(
           AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
         ORDER BY namespace.nspname, relation.relname
         """,
-        (subject_role,),
+        (subject_role,) * 8,
     )
     allowed_tables = _allowed_tables(contract)
     seen: set[str] = set()
     for row in cursor.fetchall():
-        relation_name = str(_row_value(row, 0, "relation_name"))
         table_name = str(_row_value(row, 1, "relname"))
         schema_name = str(_row_value(row, 2, "nspname"))
         if schema_name == "public":
@@ -708,12 +699,8 @@ def _verify_public_relation_privileges(
         expected = (
             allowed_tables.get(table_name, frozenset()) if schema_name == "public" else frozenset()
         )
-        for privilege in TABLE_PRIVILEGES:
-            effective = _check_privilege(
-                cursor,
-                "has_table_privilege",
-                (subject_role, relation_name, privilege),
-            )
+        for index, privilege in enumerate(TABLE_PRIVILEGES, start=3):
+            effective = bool(_row_value(row, index, f"can_{privilege.lower()}"))
             if effective and privilege not in expected:
                 _fail("database-role.forbidden-privilege-present", "application-relation")
             if not effective and privilege in expected:
@@ -730,7 +717,10 @@ def _verify_public_sequence_privileges(cursor: Any, subject_role: str) -> None:
     cursor.execute(
         """
         SELECT pg_catalog.format('%%I.%%I', namespace.nspname, sequence.relname)
-                   AS sequence_name
+                   AS sequence_name,
+               pg_catalog.has_sequence_privilege(%s, sequence.oid, 'USAGE') AS can_usage,
+               pg_catalog.has_sequence_privilege(%s, sequence.oid, 'SELECT') AS can_select,
+               pg_catalog.has_sequence_privilege(%s, sequence.oid, 'UPDATE') AS can_update
         FROM pg_catalog.pg_class AS sequence
         JOIN pg_catalog.pg_namespace AS namespace
           ON namespace.oid = sequence.relnamespace
@@ -740,16 +730,11 @@ def _verify_public_sequence_privileges(cursor: Any, subject_role: str) -> None:
           AND sequence.relkind = 'S'
         ORDER BY namespace.nspname, sequence.relname
         """,
-        (subject_role,),
+        (subject_role,) * 4,
     )
     for row in cursor.fetchall():
-        sequence_name = str(_row_value(row, 0, "sequence_name"))
-        for privilege in SEQUENCE_PRIVILEGES:
-            if _check_privilege(
-                cursor,
-                "has_sequence_privilege",
-                (subject_role, sequence_name, privilege),
-            ):
+        for index, privilege in enumerate(SEQUENCE_PRIVILEGES, start=1):
+            if bool(_row_value(row, index, f"can_{privilege.lower()}")):
                 _fail("database-role.forbidden-privilege-present", "application-sequence")
 
 
@@ -763,7 +748,8 @@ def _verify_security_definer_execute(
         SELECT pg_catalog.format(
                    '%%I.%%I(%%s)', namespace.nspname, routine.proname,
                    pg_catalog.oidvectortypes(routine.proargtypes)
-               ) AS function_signature
+               ) AS function_signature,
+               pg_catalog.has_function_privilege(%s, routine.oid, 'EXECUTE') AS can_execute
         FROM pg_catalog.pg_proc AS routine
         JOIN pg_catalog.pg_namespace AS namespace
           ON namespace.oid = routine.pronamespace
@@ -773,7 +759,7 @@ def _verify_security_definer_execute(
           AND routine.prosecdef
         ORDER BY function_signature
         """,
-        (subject_role,),
+        (subject_role, subject_role),
     )
     expected = {
         _normalize_function_signature(signature)
@@ -784,11 +770,7 @@ def _verify_security_definer_execute(
         function_signature = str(_row_value(row, 0, "function_signature"))
         normalized = _normalize_function_signature(function_signature)
         seen.add(normalized)
-        effective = _check_privilege(
-            cursor,
-            "has_function_privilege",
-            (subject_role, function_signature, "EXECUTE"),
-        )
+        effective = bool(_row_value(row, 1, "can_execute"))
         if effective and normalized not in expected:
             _fail(
                 "database-role.forbidden-privilege-present",

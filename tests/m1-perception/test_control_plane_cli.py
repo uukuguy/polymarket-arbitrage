@@ -64,15 +64,10 @@ def test_control_plane_connection_factory_bounds_postgres_connect_time(
         "dsn": "postgresql://operator:secret@example.test/control",
         "kwargs": {
             "connect_timeout": 5,
-            "options": "-csearch_path=pg_catalog,public",
+            "options": (
+                "-csearch_path=pg_catalog,public -cstatement_timeout=5000ms -clock_timeout=1000ms"
+            ),
         },
-        "bootstrap": (
-            "SELECT pg_catalog.set_config('search_path', %s, false), "
-            "pg_catalog.set_config('statement_timeout', %s, false), "
-            "pg_catalog.set_config('lock_timeout', %s, false)",
-            ("pg_catalog,public", "5000ms", "1000ms"),
-        ),
-        "bootstrap_committed": True,
     }
 
 
@@ -1064,7 +1059,7 @@ def test_runtime_reconcile_role_contract_failure_stops_before_mutation_and_sanit
     )
     monkeypatch.setattr(
         cli_control_plane,
-        "insert_runtime_observe_decision",
+        "insert_runtime_observe_decisions",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not observe")),
     )
 
@@ -1253,6 +1248,7 @@ def test_runtime_reconcile_once_observe_only_records_every_candidate_without_rec
         _connection_factory = object()
 
     recorded: list[RuntimeObserveDecisionRecord] = []
+    batch_calls = 0
     monkeypatch.setenv("POLYARB_RUNTIME_ROLE", "control-plane")
     monkeypatch.setenv("POLYARB_RUNTIME_RECOVERY_MODE", "observe-only")
     monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
@@ -1262,12 +1258,14 @@ def test_runtime_reconcile_once_observe_only_records_every_candidate_without_rec
         "read_runtime_reconcile_states",
         lambda *a, **k: (candidate_a, candidate_b),
     )
-    monkeypatch.setattr(
-        cli_control_plane,
-        "insert_runtime_observe_decision",
-        lambda _factory, record: recorded.append(record) or record,
-        raising=False,
-    )
+
+    def record_batch(_factory, records, **_kwargs):
+        nonlocal batch_calls
+        batch_calls += 1
+        recorded.extend(records)
+        return tuple(records)
+
+    monkeypatch.setattr(cli_control_plane, "insert_runtime_observe_decisions", record_batch)
     monkeypatch.setattr(
         cli_control_plane,
         "schedule_action",
@@ -1291,6 +1289,7 @@ def test_runtime_reconcile_once_observe_only_records_every_candidate_without_rec
     assert payload["state"] == "observe-only"
     assert payload["outcome"] == "no-mutation"
     assert payload["observed_decision_count"] == 2
+    assert batch_calls == 1
     assert {record.target_id for record in recorded} == {"job-a", "job-b"}
 
 
@@ -1317,8 +1316,8 @@ def test_runtime_reconcile_once_observe_only_records_idle_without_executor(
     monkeypatch.setattr(cli_control_plane, "read_runtime_reconcile_states", lambda *a, **k: ())
     monkeypatch.setattr(
         cli_control_plane,
-        "insert_runtime_observe_decision",
-        lambda _factory, record: recorded.append(record) or record,
+        "insert_runtime_observe_decisions",
+        lambda _factory, records, **_kwargs: recorded.extend(records) or tuple(records),
     )
     monkeypatch.setattr(
         cli_control_plane,
@@ -1464,22 +1463,6 @@ def test_runtime_reconcile_serve_store_conflicts_exit_current_turn(
 
     _install_runtime_reconcile_conflict(monkeypatch, message)
 
-    class StopEvent:
-        def __init__(self):
-            self.stopped = False
-
-        def set(self):
-            self.stopped = True
-
-        def is_set(self):
-            return self.stopped
-
-        async def wait(self):
-            self.set()
-            return True
-
-    monkeypatch.setattr(cli_control_plane.asyncio, "Event", StopEvent)
-
     assert (
         cli_control_plane.main(
             [
@@ -1532,32 +1515,126 @@ def test_runtime_reconcile_serve_stops_cleanly_on_signal_and_is_sequential(monke
         ) -> object:
             raise AssertionError("patched reconcile turn must not execute recovery")
 
-    class StopEvent:
-        def __init__(self):
-            self.stopped = False
-
-        def set(self):
-            self.stopped = True
-
-        def is_set(self):
-            return self.stopped
-
-        async def wait(self):
-            stop_after_first["count"] += 1
-            self.set()
-            return True
-
-    monkeypatch.setattr(cli_control_plane.asyncio, "Event", StopEvent)
-
     monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
     monkeypatch.setattr(
         cli_control_plane,
         "_runtime_reconcile_once",
         lambda *a, **k: {"status": "ok"},
     )
-    result = asyncio.run(cli_control_plane._run_runtime_reconcile_service(ControlPlane(), args))
+    stop = asyncio.Event()
+
+    def stop_after_write(*_args, **_kwargs) -> None:
+        stop_after_first["count"] += 1
+        stop.set()
+
+    monkeypatch.setattr(cli_control_plane, "_write", stop_after_write)
+    result = asyncio.run(
+        cli_control_plane._run_runtime_reconcile_service(ControlPlane(), args, stop_event=stop)
+    )
     assert result == {"status": "stopped", "turns": 1}
     assert stop_after_first["count"] == 1
+
+
+def test_runtime_reconcile_service_detaches_a_stalled_turn_at_database_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import threading
+    from datetime import UTC, datetime
+    from time import monotonic
+
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.recovery_records import RuntimeControllerLease
+
+    args = cli_control_plane._parser().parse_args(
+        ["runtime-reconcile-serve", "--enable", "--interval-seconds", "30"]
+    )
+    started = threading.Event()
+    release = threading.Event()
+    stop = asyncio.Event()
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    controller = RuntimeControllerLease("controller-a", "owner-a", 1, now + timedelta(seconds=90))
+
+    class Policy:
+        stop_grace_seconds = 0.05
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    def stalled_turn(*_args: object, **_kwargs: object) -> dict[str, object]:
+        started.set()
+        release.wait()
+        return {"status": "late"}
+
+    monkeypatch.setattr(cli_control_plane, "RECOVERY_DB_POLICY", Policy())
+    monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
+    monkeypatch.setattr(cli_control_plane, "_runtime_reconcile_once", stalled_turn)
+
+    async def run() -> dict[str, object]:
+        task = asyncio.create_task(
+            cli_control_plane._run_runtime_reconcile_service(ControlPlane(), args, stop_event=stop)
+        )
+        while not started.is_set():
+            await asyncio.sleep(0)
+        stop.set()
+        return await task
+
+    safety_release = threading.Timer(0.4, release.set)
+    safety_release.start()
+    before = monotonic()
+    try:
+        assert asyncio.run(run()) == {"status": "stopped", "turns": 0}
+        assert monotonic() - before < 0.2
+    finally:
+        release.set()
+        safety_release.cancel()
+
+
+def test_alert_service_detaches_a_stalled_turn_at_database_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import threading
+    from time import monotonic
+    from types import SimpleNamespace
+
+    from polyarb import cli_control_plane
+
+    started = threading.Event()
+    release = threading.Event()
+    stop = asyncio.Event()
+
+    class Policy:
+        stop_grace_seconds = 0.05
+
+    class Worker:
+        async def run_once(self):
+            started.set()
+            release.wait()
+            return SimpleNamespace(outbox_id="late", outcome="late")
+
+    monkeypatch.setattr(cli_control_plane, "CONTROL_PLANE_DB_POLICY", Policy())
+
+    async def run() -> dict[str, object]:
+        task = asyncio.create_task(
+            cli_control_plane._run_alert_service(
+                Worker(), interval_seconds=30, as_json=True, stop_event=stop
+            )
+        )
+        while not started.is_set():
+            await asyncio.sleep(0)
+        stop.set()
+        return await task
+
+    safety_release = threading.Timer(0.4, release.set)
+    safety_release.start()
+    before = monotonic()
+    try:
+        assert asyncio.run(run()) == {"status": "stopped", "turns": 0}
+        assert monotonic() - before < 0.2
+    finally:
+        release.set()
+        safety_release.cancel()
 
 
 def test_watchdog_observation_applies_cloud_evidence_freshness_gate(monkeypatch) -> None:
@@ -2121,15 +2198,10 @@ def test_qualification_status_uses_scoped_dsn_and_is_read_only(monkeypatch, caps
         "dsn": "postgresql://qualification:secret@example.test/control",
         "kwargs": {
             "connect_timeout": 5,
-            "options": "-csearch_path=pg_catalog,public",
+            "options": (
+                "-csearch_path=pg_catalog,public -cstatement_timeout=5000ms -clock_timeout=1000ms"
+            ),
         },
-        "bootstrap": (
-            "SELECT pg_catalog.set_config('search_path', %s, false), "
-            "pg_catalog.set_config('statement_timeout', %s, false), "
-            "pg_catalog.set_config('lock_timeout', %s, false)",
-            ("pg_catalog,public", "5000ms", "1000ms"),
-        ),
-        "bootstrap_committed": True,
     }
     assert json.loads(capsys.readouterr().out)["epoch"]["epoch_id"] == "epoch-a"
 

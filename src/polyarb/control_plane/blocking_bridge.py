@@ -130,6 +130,7 @@ async def run_blocking_call_until_stopped[Result](
     stop_event: asyncio.Event,
     grace_seconds: float,
     point_of_no_return: bool = False,
+    request_stop: Callable[[], None] | None = None,
     thread_name: str = "control-plane:stop-aware-call",
     **kwargs: Any,
 ) -> tuple[bool, Result | None]:
@@ -154,6 +155,13 @@ async def run_blocking_call_until_stopped[Result](
         await asyncio.gather(stop_task, return_exceptions=True)
         return True, call_task.result()
 
+    if request_stop is not None:
+        try:
+            request_stop()
+        except Exception:
+            # A best-effort cooperative hint cannot defeat the authoritative
+            # cancellation and grace-expiry path below.
+            pass
     call_task.cancel()
     done, _ = await asyncio.wait((call_task,), timeout=grace_seconds)
     if not done:
