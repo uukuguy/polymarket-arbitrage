@@ -9,13 +9,16 @@ target_metadata = None because migrations use imperative op.create_table()
 (not autogenerate from SQLAlchemy models). Phase 02 Plan 03 only manages
 the narrow dashboard mirror schema; SQLite source-of-truth uses schemas.py DDL.
 """
+
 from __future__ import annotations
 
 import os
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import create_engine, pool
+
+from alembic import context
+from polyarb.control_plane.db_deadlines import MIGRATION_DB_POLICY
 
 # The alembic Config object from alembic.ini (for logging setup)
 config = context.config
@@ -41,7 +44,7 @@ def _get_url() -> str:
     """
     dsn = os.environ.get("POLYARB_SUPABASE_DB_DSN", "")
     if not dsn:
-        raise EnvironmentError(
+        raise OSError(
             "POLYARB_SUPABASE_DB_DSN is not set. "
             "W6 fix: this is the Postgres DSN used ONLY by alembic "
             "(NOT POLYARB_SUPABASE_URL which is the REST URL for supabase-py). "
@@ -92,7 +95,10 @@ def run_migrations_online() -> None:
     connectable = create_engine(
         url,
         poolclass=pool.NullPool,
-        connect_args={"options": "-c statement_timeout=30000"},
+        connect_args={
+            "connect_timeout": MIGRATION_DB_POLICY.connect_timeout_seconds,
+            "options": MIGRATION_DB_POLICY.connection_options,
+        },
     )
 
     with connectable.connect() as connection:

@@ -11021,3 +11021,41 @@ the 86,400-second epoch only after live terminal publication proof.
 exact immutable amd64 image, apply production 029→030, then run the unchanged
 1,800/90/90 observe-only gate before sequential same-Machine rollout. Begin the
 86,400-second certificate only after live terminal publication proof.
+
+### SESSION 321 — 2026-08-28 (post-030 compaction and migration-boundary closure)
+
+- [PRODUCTION / ZERO MACHINE EFFECT] Exact image
+  `sha256:45027299…043ae` was built from `13f2a9a6`, but no Machine received it.
+  Production upgraded transactionally from 029 to 030; coordinator and
+  qualification remained stopped and every Machine ID/state/config stayed at
+  the pre-rollout topology.
+- [PREFLIGHT FINDING] Revision 030 created 6,572 normalized facts over 111
+  epochs, but the active accumulating epoch still retained 2,500
+  `fact_records`, 2,500 `fact_digests` and its legacy recovery array. Runtime
+  replay already read only the normalized relation, so correctness was intact;
+  fixed-row size and update amplification were not yet closed.
+- [REVISION 031] The additive migration fails atomically unless normalized
+  counts, ordinals, payloads, fact-ID indexes and contained-recovery indexes
+  match. It then clears all three arrays and adds CHECK fences forbidding
+  regrowth. Downgrade removes only the fences; canonical fact rows remain.
+- [SECOND WRITER] The complete PostgreSQL gate exposed the legacy
+  `qualification_store` transition API still rewriting growth arrays. It now
+  appends/verifies normalized rows and persists only scalar counts/state; a
+  concurrent state/version CAS test proves exactly one winner and no partial
+  fact from the loser.
+- [TIME AUTHORITY] Alembic's private 30-second statement setting was an
+  incomplete boundary: connect and lock acquisition were unbounded. Migration
+  connect/statement/lock are now one central 10s/30s/1s ordered policy. Formal
+  worker shutdown also rejects a missing lease instead of silently assuming
+  three seconds.
+- [PROOF] Real 030→031 failure-before-clear and success/constraint/round-trip
+  tests pass. The full real PostgreSQL control-plane file passes. Fresh
+  `make test-m1`: 3,963 passed, one skipped, one expected xfail in 1,624.48
+  seconds. `make planning-status` reports no drift and `make climb-check`
+  passes. All changed Python files pass scoped ruff/format and diff checks.
+
+[NEXT] Commit revision 031 and the corrected Plan 209 evidence, build a new
+exact immutable amd64 image, apply production 030→031, verify scoped roles from
+the new qualification runtime, then run the unchanged 1,800/90/90 observe-only
+gate before any Machine rollout. Only successful live terminal flow may start
+the fresh 86,400-second qualification certificate.

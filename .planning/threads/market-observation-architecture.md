@@ -2018,3 +2018,21 @@ success is not user receipt/read evidence.
   session entry. Fenced transactions may tighten the policy to remaining lease
   time, while API request envelopes must cover connect plus statement rather
   than contradict them.
+
+### §2.43 Schema compaction must fence every writer and migration wait (2026-08-28)
+
+- Revision 030 normalized qualification facts but intentionally left legacy
+  arrays populated during backfill. Production preflight found the active
+  2,500-fact epoch still carried both canonical rows and the old growth-bound
+  copy. Revision 031 validates count, ordinal, payload and recovery-index parity
+  before clearing all legacy arrays; CHECK constraints make fixed-size epoch
+  rows a database invariant rather than an application convention.
+- A compatibility writer outside the new qualification service still rewrote
+  `fact_digests` and `contained_recoveries`. The 031 fence exposed it in the
+  full real-Postgres suite. It now appends/verifies normalized rows and updates
+  only scalars; concurrent CAS losers roll back their entire transaction.
+- Migration execution belongs to the same timeout audit. Alembic previously
+  had a private statement timeout but no connection or lock-acquisition bound.
+  Its connect/statement/lock settings now come from the central ordered policy;
+  a migration fails quickly on lock contention instead of becoming a silent
+  deployment singleton.

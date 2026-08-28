@@ -166,7 +166,7 @@ def render_rollout_artifacts(
                 "qualification_worker_app": runtime_apps[1],
                 "runtime_recovery_mode": "observe-only",
                 "runtime_recovery_allowed_targets": list(allowed_targets),
-                "database_revision": "030",
+                "database_revision": "031",
                 "runtime_controller_database_role": "runtime_controller",
                 "qualification_database_role": "qualification_worker",
                 "qualification_release_id": release_id,

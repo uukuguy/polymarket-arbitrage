@@ -14,6 +14,7 @@ class _AsyncWorker:
     def __init__(self, name: str) -> None:
         self.name = name
         self.calls = 0
+        self._lease_seconds = 30
 
     async def run_once(self):
         self.calls += 1
@@ -24,6 +25,7 @@ class _SyncWorker:
     def __init__(self, name: str) -> None:
         self.name = name
         self.calls = 0
+        self._lease_seconds = 30
 
     def run_once(self):
         self.calls += 1
@@ -49,6 +51,14 @@ def test_service_lifecycle_rejects_a_worker_without_declared_grace_policy() -> N
 
     with pytest.raises(ValueError, match="declared terminal grace"):
         terminal_grace_seconds("unregistered-worker", _AsyncWorker("unknown"))
+
+    worker_without_lease = type(
+        "WorkerWithoutLease",
+        (),
+        {"run_once": lambda self: None},
+    )()
+    with pytest.raises(ValueError, match="lease must be a positive integer"):
+        terminal_grace_seconds("quote-batch", worker_without_lease)
 
 
 def test_blocking_io_timeout_detaches_instead_of_waiting_for_executor_shutdown() -> None:
@@ -372,6 +382,8 @@ def test_role_service_cancels_current_async_attempt_when_stop_is_requested() -> 
     stop_event = asyncio.Event()
 
     class _InterruptibleWorker:
+        _lease_seconds = 30
+
         async def run_once(self):
             started.set()
             try:

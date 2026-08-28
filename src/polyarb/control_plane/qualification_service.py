@@ -25,6 +25,7 @@ from .qualification import (
     QualificationFact,
     QualificationState,
     RollingQualificationPolicy,
+    qualification_fact_payload,
 )
 from .qualification_store import (
     QualificationCertificateRecord,
@@ -179,7 +180,7 @@ class QualificationFactRecord:
     def to_json(self) -> dict[str, object]:
         return {
             "cursor": self.cursor.to_json(),
-            "fact": _fact_to_json(self.fact),
+            "fact": qualification_fact_payload(self.fact),
             "source": self.source,
         }
 
@@ -1995,32 +1996,6 @@ def _status_epoch_from_row(row: Mapping[str, object]) -> _QualificationStatusEpo
             else QualificationFactRecord.from_json(cast(Mapping[str, object], last_fact_payload))
         ),
     )
-
-
-def _fact_to_json(fact: QualificationFact) -> dict[str, object]:
-    return {
-        "fact_id": fact.fact_id,
-        "observed_at": fact.observed_at.isoformat(),
-        "reason": fact.reason,
-        "policy_version": fact.policy_version,
-        "release_id": fact.release_id,
-        "config_id": fact.config_id,
-        "role_identity": None if fact.role_identity is None else list(fact.role_identity),
-        "epoch_id": fact.epoch_id,
-        "signature": fact.signature,
-        "progress_count": fact.progress_count,
-        "successful_count": fact.successful_count,
-        "count": fact.count,
-        "evidence_gap_seconds": fact.evidence_gap_seconds,
-        "freshness_seconds": fact.freshness_seconds,
-        "freshness_slo_seconds": fact.freshness_slo_seconds,
-        "freshness_product": fact.freshness_product,
-        "recovery_duration_seconds": fact.recovery_duration_seconds,
-        "recovery_slo_seconds": fact.recovery_slo_seconds,
-        "recovery_confirmed": fact.recovery_confirmed,
-        "resolved": fact.resolved,
-        "evidence_complete": fact.evidence_complete,
-    }
 
 
 def _fact_from_json(value: Mapping[str, object]) -> QualificationFact:

@@ -239,6 +239,7 @@ def test_worker_modules_do_not_define_private_runtime_profiles() -> None:
 def test_database_deadlines_have_one_registry_and_no_private_copies() -> None:
     from polyarb.control_plane.db_deadlines import (
         CONTROL_PLANE_DB_POLICY,
+        MIGRATION_DB_POLICY,
         RECOVERY_DB_POLICY,
     )
 
@@ -249,6 +250,14 @@ def test_database_deadlines_have_one_registry_and_no_private_copies() -> None:
     )
     assert RECOVERY_DB_POLICY.lock_timeout_ms <= RECOVERY_DB_POLICY.statement_timeout_ms
     assert RECOVERY_DB_POLICY.statement_timeout_ms < CONTROL_PLANE_DB_POLICY.statement_timeout_ms
+    assert MIGRATION_DB_POLICY.lock_timeout_ms < MIGRATION_DB_POLICY.statement_timeout_ms
+    assert MIGRATION_DB_POLICY.statement_timeout_ms >= CONTROL_PLANE_DB_POLICY.statement_timeout_ms
+
+    alembic_env = (Path(__file__).parents[2] / "alembic" / "env.py").read_text()
+    assert "MIGRATION_DB_POLICY" in alembic_env
+    assert '"options": MIGRATION_DB_POLICY.connection_options' in alembic_env
+    assert '"connect_timeout": MIGRATION_DB_POLICY.connect_timeout_seconds' in alembic_env
+    assert "statement_timeout=30000" not in alembic_env
 
     root = Path(__file__).parents[2] / "src" / "polyarb" / "control_plane"
     formal_consumers = (

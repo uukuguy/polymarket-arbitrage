@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Revision 029 is live; coordinator canary was rolled back after a second growth-bound status path, and reviewed revision 030 must be committed, migrated and rebuilt before rollout
-last_updated: "2026-08-28T15:01:46+08:00"
+stopped_at: Revision 030 is live with zero Machine changes; post-migration audit found legacy active arrays, and verified revision 031 plus a new immutable image must land before rollout
+last_updated: "2026-08-28T16:03:24+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,7 +19,7 @@ progress:
 ## Current Position
 
 - **Sole authority:** Supabase project `polyarb` (`lgykffpcsebewvobkbdm`),
-  production Alembic revision `029`, and R2 bucket `polyarb-control-plane`.
+  production Alembic revision `030`, and R2 bucket `polyarb-control-plane`.
   The runtime's durable job, receipt, lease, pointer, evidence, and incident
   facts live there.
 
@@ -62,9 +62,10 @@ progress:
   Structure `683e46ea500dd8` and Quote `4d895231f66748` remain started on the
   pre-Plan-209 runtime. The failed coordinator canary was restored to digest
   `sha256:bd21b2d…33df` and its original stopped state without changing its
-  non-image config. Production is revision 029; revision 030 and the replacement
-  image have not been applied. Both app-scoped hidden DSNs remain installed and
-  no ordinary credential env key is present.
+  non-image config. Production is revision 030; revision 031 and its replacement
+  image have not been applied. The revision-030 image was built and verified but
+  never deployed. Both app-scoped hidden DSNs remain installed and no ordinary
+  credential env key is present.
 
 - **Plan 05.6-209 runtime lifecycle repair:** Plan 208's job-specific deadline
   change exposed the wider defect: scheduler/role turn timeouts, worker-local
@@ -100,8 +101,13 @@ progress:
   bridge, makes Quote reader grace expiry authoritative, and moves Structure /
   Quote certifier eligibility into transactional receipt barriers. Real
   501-fact migration/restart, independent PostgreSQL barrier claims, and the
-  full suite pass; revision 030 and its replacement image are not yet in
-  production.
+  full suite pass. Production revision 030 was applied without any Machine
+  change, then read-only audit found the active 2,500-fact epoch still retained
+  the legacy arrays backfilled into normalized rows. Revision 031 validates
+  parity, clears the arrays and fences regrowth; it also closes the remaining
+  compatibility writer and Alembic lock-wait deadline gaps. The fresh full gate
+  remains 3,963 passed / 1 skipped / 1 expected xfail. Revision 031 and a new
+  exact image are not yet in production.
 
 - **Plan 05.6-208 diagnosis (superseded locally by Plan 209):** the initial accumulating epoch was
   later invalidated by repeated Structure freshness gaps. Production evidence

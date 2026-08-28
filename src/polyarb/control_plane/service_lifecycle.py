@@ -35,7 +35,7 @@ def terminal_grace_seconds(worker_name: str, worker: Worker) -> float:
         if not isinstance(declared_grace, int | float) or declared_grace <= 0:
             raise ValueError(f"{worker_name} worker has no declared terminal grace policy")
         return float(declared_grace)
-    lease_seconds = getattr(worker, "_lease_seconds", 3)
+    lease_seconds = getattr(worker, "_lease_seconds", None)
     if not isinstance(lease_seconds, int) or lease_seconds <= 0:
         raise ValueError(f"{worker_name} worker lease must be a positive integer")
     return float(runtime_policy(job_type, lease_seconds).terminal_grace_seconds)

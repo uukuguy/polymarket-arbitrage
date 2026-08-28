@@ -279,6 +279,35 @@ class QualificationFact:
         return cls(fact_id=fact_id, observed_at=observed_at, reason=reason, **kwargs)
 
 
+def qualification_fact_payload(fact: QualificationFact) -> dict[str, object]:
+    """Return the canonical JSON-safe persistence payload for one fact."""
+    if type(fact) is not QualificationFact:
+        raise TypeError("fact must be QualificationFact")
+    return {
+        "fact_id": fact.fact_id,
+        "observed_at": fact.observed_at.isoformat(),
+        "reason": fact.reason,
+        "policy_version": fact.policy_version,
+        "release_id": fact.release_id,
+        "config_id": fact.config_id,
+        "role_identity": None if fact.role_identity is None else list(fact.role_identity),
+        "epoch_id": fact.epoch_id,
+        "signature": fact.signature,
+        "progress_count": fact.progress_count,
+        "successful_count": fact.successful_count,
+        "count": fact.count,
+        "evidence_gap_seconds": fact.evidence_gap_seconds,
+        "freshness_seconds": fact.freshness_seconds,
+        "freshness_slo_seconds": fact.freshness_slo_seconds,
+        "freshness_product": fact.freshness_product,
+        "recovery_duration_seconds": fact.recovery_duration_seconds,
+        "recovery_slo_seconds": fact.recovery_slo_seconds,
+        "recovery_confirmed": fact.recovery_confirmed,
+        "resolved": fact.resolved,
+        "evidence_complete": fact.evidence_complete,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class QualificationDecision:
     """Immutable snapshot after applying zero or more qualification facts."""

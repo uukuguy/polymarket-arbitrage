@@ -8704,6 +8704,10 @@ def test_qualification_read_model_does_not_read_growth_bound_epoch_json(
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
             "ALTER TABLE m1_qualification_epochs "
+            "DROP CONSTRAINT ck_m1_qualification_epochs_fact_records_compact"
+        )
+        cursor.execute(
+            "ALTER TABLE m1_qualification_epochs "
             "DROP CONSTRAINT ck_m1_qualification_epochs_fact_records"
         )
         cursor.execute(
@@ -8723,6 +8727,11 @@ def test_qualification_read_model_does_not_read_growth_bound_epoch_json(
                 "ALTER TABLE m1_qualification_epochs "
                 "ADD CONSTRAINT ck_m1_qualification_epochs_fact_records "
                 "CHECK (jsonb_typeof(fact_records) = 'array')"
+            )
+            cursor.execute(
+                "ALTER TABLE m1_qualification_epochs "
+                "ADD CONSTRAINT ck_m1_qualification_epochs_fact_records_compact "
+                "CHECK (jsonb_array_length(fact_records) = 0)"
             )
 
 
@@ -10055,6 +10064,22 @@ def test_qualification_epoch_transition_is_state_version_cas_and_rolls_back_old_
     assert after_race.version == 2
     assert after_race.invalidated_at == now + timedelta(hours=1)
     assert after_race.invalidation_reason == "lease.expired"
+    with control_plane._connection_factory() as connection:
+        assert connection.execute(
+            """
+            SELECT jsonb_array_length(epoch.fact_records),
+                   jsonb_array_length(epoch.fact_digests),
+                   jsonb_array_length(epoch.contained_recoveries),
+                   epoch.runtime_fact_count,
+                   count(fact.ordinal)
+            FROM m1_qualification_epochs AS epoch
+            LEFT JOIN m1_qualification_epoch_facts AS fact
+              ON fact.epoch_id = epoch.epoch_id
+            WHERE epoch.epoch_id = %s
+            GROUP BY epoch.epoch_id
+            """,
+            (initial.epoch_id,),
+        ).fetchone() == (0, 0, 0, 1, 1)
     with pytest.raises(QualificationEpochConflict, match="state/version"):
         transition_qualification_epoch(
             control_plane._connection_factory,
@@ -10579,6 +10604,10 @@ def test_qualification_status_ignores_bloated_predecessor_evidence(
     malformed_large_records = [{"malformed": "x" * 2_048} for _ in range(2_000)]
     with control_plane._connection_factory() as connection:
         connection.execute(
+            "ALTER TABLE m1_qualification_epochs "
+            "DROP CONSTRAINT ck_m1_qualification_epochs_fact_records_compact"
+        )
+        connection.execute(
             """
             INSERT INTO m1_qualification_epochs (
                 epoch_id, state, identity_key, policy_version, release_id,
@@ -10616,16 +10645,33 @@ def test_qualification_status_ignores_bloated_predecessor_evidence(
             (now, now),
         )
 
-    status = PostgresQualificationServiceStore(control_plane._connection_factory).status(now=now)
+    try:
+        status = PostgresQualificationServiceStore(control_plane._connection_factory).status(
+            now=now
+        )
 
-    assert cast(dict[str, object], status["epoch"])["epoch_id"] == (
-        "qualification-fresh-recovering"
-    )
-    assert status["last_fact"] is None
-    assert status["last_breaker"] == {
-        "observed_at": (now - timedelta(minutes=2)).isoformat(),
-        "reason": "lease.expired",
-    }
+        assert cast(dict[str, object], status["epoch"])["epoch_id"] == (
+            "qualification-fresh-recovering"
+        )
+        assert status["last_fact"] is None
+        assert status["last_breaker"] == {
+            "observed_at": (now - timedelta(minutes=2)).isoformat(),
+            "reason": "lease.expired",
+        }
+    finally:
+        with control_plane._connection_factory() as connection:
+            connection.execute(
+                """
+                UPDATE m1_qualification_epochs
+                SET fact_records = '[]'::jsonb
+                WHERE epoch_id = 'qualification-bloated-predecessor'
+                """
+            )
+            connection.execute(
+                "ALTER TABLE m1_qualification_epochs "
+                "ADD CONSTRAINT ck_m1_qualification_epochs_fact_records_compact "
+                "CHECK (jsonb_array_length(fact_records) = 0)"
+            )
 
 
 def test_qualification_certificate_is_canonical_idempotent_and_conflict_loud(

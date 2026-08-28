@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "authorization_source_commit": "13f2a9a64e68f64e47097c05d49bd0cedecf3877",
+  "status": "superseded-before-machine-rollout",
+  "database_effect": {
+    "before_revision": "029",
+    "after_revision": "030",
+    "outcome": "applied-transactionally"
+  },
+  "machine_effect": {
+    "updated": 0,
+    "started": 0,
+    "stopped": 0,
+    "config_changed": 0
+  },
+  "superseded_image": "registry.fly.io/polyarb-control-worker-m1@sha256:45027299c856fe9c6745d3a151dca7a488808d3754569cdd9ad28280160743ae",
+  "reason": "post-030 audit found legacy qualification arrays remained populated; revision 031 and a new exact image are required",
+  "next_authorization_requirement": "source-bound revision-031 image plus fresh topology, schema, role, rollback and observe-only gates"
+}

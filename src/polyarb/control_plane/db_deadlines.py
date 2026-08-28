@@ -35,6 +35,11 @@ class DatabaseDeadlinePolicy:
         return f"{self.lock_timeout_ms}ms"
 
     @property
+    def connection_options(self) -> str:
+        """libpq session options carrying both ordered server-side bounds."""
+        return f"-cstatement_timeout={self.statement_setting} -clock_timeout={self.lock_setting}"
+
+    @property
     def stop_grace_seconds(self) -> float:
         """Bound shutdown above connect plus one statement, with one tick margin."""
         return float(self.connect_timeout_seconds + (self.statement_timeout_ms + 999) // 1_000 + 1)
@@ -59,9 +64,18 @@ RECOVERY_DB_POLICY = DatabaseDeadlinePolicy(
     lock_timeout_ms=1_000,
 )
 
+# Migrations may scan or validate more data than one runtime transaction, but
+# connection and lock acquisition remain short, explicit, and fail-closed.
+MIGRATION_DB_POLICY = DatabaseDeadlinePolicy(
+    connect_timeout_seconds=10,
+    statement_timeout_ms=30_000,
+    lock_timeout_ms=1_000,
+)
+
 
 __all__ = [
     "CONTROL_PLANE_DB_POLICY",
     "DatabaseDeadlinePolicy",
+    "MIGRATION_DB_POLICY",
     "RECOVERY_DB_POLICY",
 ]

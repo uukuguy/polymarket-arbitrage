@@ -20,6 +20,7 @@ from .qualification import (
     QualificationDecision,
     QualificationFact,
     QualificationState,
+    qualification_fact_payload,
 )
 
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
@@ -205,10 +206,11 @@ def start_qualification_epoch(
                 contained_recoveries, coverage_seconds, max_gap_seconds,
                 progress_count, successful_count, evidence_digest, required_seconds,
                 slo, contained_incident_details, recovery_action_details,
-                source_cursor, fact_records, writer_id
+                source_cursor, fact_records, writer_id, runtime_fact_count,
+                runtime_contained_recovery_count
             ) VALUES (
                 %s, %s, 1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (epoch_id) DO NOTHING
             """,
@@ -226,8 +228,8 @@ def start_qualification_epoch(
                 decision.invalidation_reason,
                 _utc_or_none(decision.qualified_at, "qualified_at"),
                 decision.previous_epoch_id,
-                Jsonb([list(item) for item in decision.fact_digests]),
-                Jsonb(list(decision.contained_recoveries)),
+                Jsonb([]),
+                Jsonb([]),
                 decision.coverage_seconds,
                 decision.max_gap_seconds,
                 decision.progress_count,
@@ -240,8 +242,11 @@ def start_qualification_epoch(
                 None,
                 Jsonb([]),
                 writer_id,
+                len(decision.facts),
+                len(decision.contained_recoveries),
             ),
         )
+        _sync_normalized_epoch_facts_cursor(cursor, decision)
         persisted = _fetch_epoch_cursor(cursor, epoch_id=decision.epoch_id, for_update=False)
         if persisted is None:
             raise QualificationStoreError("qualification epoch insert returned no row")
@@ -273,6 +278,7 @@ def transition_qualification_epoch(
     evidence = _decision_derived_evidence(next_decision)
     with connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
         _set_timeouts(cursor)
+        _sync_normalized_epoch_facts_cursor(cursor, next_decision)
         cursor.execute(
             """
             UPDATE public.m1_qualification_epochs
@@ -289,8 +295,8 @@ def transition_qualification_epoch(
                 invalidation_reason = %s,
                 qualified_at = %s,
                 previous_epoch_id = %s,
-                fact_digests = %s,
-                contained_recoveries = %s,
+                fact_digests = '[]'::jsonb,
+                contained_recoveries = '[]'::jsonb,
                 coverage_seconds = %s,
                 max_gap_seconds = %s,
                 progress_count = %s,
@@ -301,7 +307,9 @@ def transition_qualification_epoch(
                 contained_incident_details = %s,
                 recovery_action_details = %s,
                 source_cursor = COALESCE(source_cursor, %s),
-                fact_records = COALESCE(fact_records, %s),
+                fact_records = '[]'::jsonb,
+                runtime_fact_count = %s,
+                runtime_contained_recovery_count = %s,
                 writer_id = %s,
                 updated_at = clock_timestamp()
             WHERE epoch_id = %s AND state = %s AND version = %s
@@ -320,8 +328,6 @@ def transition_qualification_epoch(
                 next_decision.invalidation_reason,
                 _utc_or_none(next_decision.qualified_at, "qualified_at"),
                 next_decision.previous_epoch_id,
-                Jsonb([list(item) for item in next_decision.fact_digests]),
-                Jsonb(list(next_decision.contained_recoveries)),
                 next_decision.coverage_seconds,
                 next_decision.max_gap_seconds,
                 next_decision.progress_count,
@@ -332,7 +338,8 @@ def transition_qualification_epoch(
                 Jsonb(evidence["contained_incidents"]),
                 Jsonb(evidence["recovery_actions"]),
                 None,
-                Jsonb([]),
+                len(next_decision.facts),
+                len(next_decision.contained_recoveries),
                 writer_id,
                 expected_epoch_id,
                 state_value,
@@ -581,6 +588,67 @@ def _contained_fact_payload(fact: QualificationFact) -> dict[str, object]:
     if fact.signature is not None:
         payload["signature"] = fact.signature
     return payload
+
+
+def _sync_normalized_epoch_facts_cursor(
+    cursor: psycopg.Cursor[Any], decision: QualificationDecision
+) -> None:
+    """Append/verify the compatibility writer against the canonical fact relation."""
+    for ordinal, fact in enumerate(decision.facts, start=1):
+        observed_at = _utc(fact.observed_at, "fact.observed_at")
+        fact_record = {
+            "cursor": {
+                "observed_at": observed_at.isoformat(),
+                "source_rank": 0,
+                "stable_id": fact.fact_id,
+            },
+            "fact": qualification_fact_payload(fact),
+            "source": "qualification-store",
+        }
+        cursor.execute(
+            """
+            INSERT INTO public.m1_qualification_epoch_facts (
+                epoch_id, ordinal, fact_id, reason, observed_at, fact_record
+            ) VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            (
+                decision.epoch_id,
+                ordinal,
+                fact.fact_id,
+                fact.reason,
+                observed_at,
+                Jsonb(fact_record),
+            ),
+        )
+        cursor.execute(
+            """
+            SELECT fact_id, reason, observed_at, fact_record
+            FROM public.m1_qualification_epoch_facts
+            WHERE epoch_id = %s AND ordinal = %s
+            """,
+            (decision.epoch_id, ordinal),
+        )
+        persisted = cursor.fetchone()
+        if (
+            persisted is None
+            or str(persisted["fact_id"]) != fact.fact_id
+            or str(persisted["reason"]) != fact.reason
+            or _utc(cast(datetime, persisted["observed_at"]), "observed_at") != observed_at
+            or persisted["fact_record"] != fact_record
+        ):
+            raise QualificationEpochConflict("qualification epoch normalized fact conflicts")
+    cursor.execute(
+        """
+        SELECT count(*) AS fact_count
+        FROM public.m1_qualification_epoch_facts
+        WHERE epoch_id = %s
+        """,
+        (decision.epoch_id,),
+    )
+    row = cursor.fetchone()
+    if row is None or int(cast(int, row["fact_count"])) != len(decision.facts):
+        raise QualificationEpochConflict("qualification epoch normalized fact count conflicts")
 
 
 def _set_timeouts(cursor: psycopg.Cursor[Any]) -> None:
@@ -859,8 +927,6 @@ def _epoch_matches_decision(
         and record.invalidation_reason == decision.invalidation_reason
         and record.qualified_at == decision.qualified_at
         and record.previous_epoch_id == decision.previous_epoch_id
-        and record.fact_digests == decision.fact_digests
-        and record.contained_recoveries == decision.contained_recoveries
         and record.coverage_seconds == decision.coverage_seconds
         and record.max_gap_seconds == decision.max_gap_seconds
         and record.progress_count == decision.progress_count
