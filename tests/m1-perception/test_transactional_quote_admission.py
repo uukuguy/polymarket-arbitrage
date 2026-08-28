@@ -714,7 +714,7 @@ def test_quote_admitter_scheduler_waits_for_bounded_recovery() -> None:
     assert quote_turn["outcome"] == "admitted:recovery-pending"
 
 
-def test_quote_admitter_terminal_commit_consumes_repeated_cancellation() -> None:
+def test_quote_admitter_terminal_commit_detaches_on_grace_expiry_cancellation() -> None:
     bundle = _bundle()
     control_plane = _BlockingTerminalControlPlane(bundle.sha256)
     objects = _Objects(bundle.payload)
@@ -727,22 +727,21 @@ def test_quote_admitter_terminal_commit_consumes_repeated_cancellation() -> None
         batch_size=100,
     )
 
-    async def exercise() -> QuoteBatchWorkerResult:
+    async def exercise() -> None:
         task = asyncio.create_task(worker.run_once())
         await asyncio.wait_for(asyncio.to_thread(control_plane.terminal_started.wait, 1), timeout=1)
         task.cancel()
         await asyncio.sleep(0.01)
         assert not task.done()
         task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.2)
+        assert not control_plane.terminal_committed.is_set()
+
+    try:
+        asyncio.run(exercise())
+    finally:
         control_plane.release_terminal.set()
-        result = await asyncio.wait_for(task, timeout=1)
-        assert task.cancelling() == 0
-        return result
-
-    result = asyncio.run(exercise())
-
-    assert result.outcome == "admitted"
-    assert control_plane.terminal_committed.is_set()
 
 
 def test_quote_admitter_stops_heartbeat_before_terminal_commit_race() -> None:

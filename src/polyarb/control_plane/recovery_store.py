@@ -21,6 +21,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .alert_delivery import DEFAULT_RUNTIME_DASHBOARD_URL, runtime_incident_transition_payload
+from .db_deadlines import RECOVERY_DB_POLICY
 from .recovery_models import (
     RecoveryActionType,
     RecoveryBudget,
@@ -40,8 +41,6 @@ from .runtime_models import RuntimeDeadlineProfile, RuntimeEventKind
 
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
 
-_RECOVERY_STATEMENT_TIMEOUT_MS = 2_000
-_RECOVERY_LOCK_TIMEOUT_MS = 1_000
 _CLOSED_RESULT_CODES = frozenset({"succeeded", "failed", "stale-noop", "disabled-action"})
 RecoveryActionCallback = Callable[[Cursor[Any], RecoveryActionRecord], object]
 
@@ -138,11 +137,11 @@ def _set_recovery_timeouts(
     now: datetime | None = None,
     deadlines: Sequence[datetime] = (),
 ) -> None:
-    statement_timeout_ms = _RECOVERY_STATEMENT_TIMEOUT_MS
+    statement_timeout_ms = RECOVERY_DB_POLICY.statement_timeout_ms
     if now is not None and deadlines:
         remaining_ms = min(int((deadline - now).total_seconds() * 1000) for deadline in deadlines)
         statement_timeout_ms = min(statement_timeout_ms, max(1, remaining_ms - 1))
-    lock_timeout_ms = min(_RECOVERY_LOCK_TIMEOUT_MS, statement_timeout_ms)
+    lock_timeout_ms = min(RECOVERY_DB_POLICY.lock_timeout_ms, statement_timeout_ms)
     cursor.execute(
         sql.SQL("SET LOCAL statement_timeout = {}").format(sql.Literal(f"{statement_timeout_ms}ms"))
     )

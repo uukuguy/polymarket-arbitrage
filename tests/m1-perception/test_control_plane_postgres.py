@@ -24,6 +24,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from polyarb.control_plane import postgres as postgres_module
+from polyarb.control_plane import qualification_store as qualification_store_module
 from polyarb.control_plane import runtime_event_writer
 from polyarb.control_plane.alert_delivery import render_runtime_incident_message
 from polyarb.control_plane.models import (
@@ -50,9 +51,12 @@ from polyarb.control_plane.qualification import (
     RollingQualificationPolicy,
 )
 from polyarb.control_plane.qualification_service import (
+    FactCursor,
     PostgresQualificationFactSource,
     PostgresQualificationServiceStore,
+    QualificationFactRecord,
     QualificationService,
+    StaticQualificationFactSource,
 )
 from polyarb.control_plane.qualification_store import (
     QualificationCertificateConflict,
@@ -517,9 +521,10 @@ def test_read_soak_observations_uses_bounded_read_only_transaction() -> None:
         def __exit__(self, *args: object) -> None:
             return None
 
-        def execute(self, sql: str, params: object = None) -> None:
-            commands.append(" ".join(sql.split()))
-            if "FROM m1_soak_observations" in sql:
+        def execute(self, sql: object, params: object = None) -> None:
+            rendered = sql if isinstance(sql, str) else sql.as_string(None)  # type: ignore[attr-defined]
+            commands.append(" ".join(rendered.split()))
+            if "FROM m1_soak_observations" in rendered:
                 assert params == ("formal-cloud-v1",)
 
         def fetchall(self):
@@ -546,9 +551,10 @@ def test_read_soak_observations_uses_bounded_read_only_transaction() -> None:
         {"observed_at": "2030-01-01T00:00:00+00:00", "sample": 1},
         {"observed_at": "2030-01-01T00:05:00+00:00", "sample": 2},
     )
-    assert commands[:3] == [
+    assert commands[:4] == [
         "SET TRANSACTION READ ONLY",
         "SET LOCAL statement_timeout = '5000ms'",
+        "SET LOCAL lock_timeout = '1000ms'",
         "SELECT record FROM m1_soak_observations WHERE run_id = %s ORDER BY observed_at ASC",
     ]
 
@@ -2397,6 +2403,56 @@ def test_checkpointed_range_stays_with_original_lease_until_expiry(
     assert replacement.lease_epoch == lease.lease_epoch + 1
 
 
+def test_structure_certifier_claim_waits_for_all_terminal_range_receipts(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    specs = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", "m"), ("markets", "", "")),
+        now=now,
+    )
+
+    assert (
+        control_plane.claim_job(
+            worker_id="too-early",
+            job_types=("structure-certify",),
+            lease_seconds=30,
+            now=now,
+        )
+        is None
+    )
+    for index, spec in enumerate(specs):
+        lease = control_plane.claim_job(
+            worker_id=f"range-{index}",
+            job_types=("structure-normalize",),
+            lease_seconds=30,
+            now=now,
+        )
+        assert lease is not None
+        control_plane.complete_structure_range(
+            lease,
+            range_digest=spec.range_digest,
+            artifact_key=f"structure-ranges/{index}/rows.ndjson",
+            artifact_digest=str(index + 1) * 64,
+            record_count=1,
+            now=now,
+        )
+        certifier = control_plane.claim_job(
+            worker_id=f"certifier-{index}",
+            job_types=("structure-certify",),
+            lease_seconds=30,
+            now=now,
+        )
+        if index == 0:
+            assert certifier is None
+        else:
+            assert certifier is not None
+            assert certifier.job_key == f"{spec.generation_key}:certify"
+
+
 def test_structure_certification_requires_complete_matching_range_receipts(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -2428,16 +2484,7 @@ def test_structure_certification_requires_complete_matching_range_receipts(
         lease_seconds=30,
         now=now,
     )
-    assert certifier is not None
-    with pytest.raises(IncompleteStructureGenerationError):
-        control_plane.certify_structure_generation(
-            certifier,
-            generation_key=specs[0].generation_key,
-            artifact_key="structure-manifests/a/manifest.ndjson",
-            artifact_digest="a" * 64,
-            now=now,
-        )
-    control_plane.finish(certifier, state=JobState.WAITING, now=now)
+    assert certifier is None
     second = control_plane.claim_job(
         worker_id="structure-b", job_types=("structure-normalize",), lease_seconds=30, now=now
     )
@@ -2459,7 +2506,7 @@ def test_structure_certification_requires_complete_matching_range_receipts(
         now=now,
     )
     assert awakened is not None
-    assert awakened.job_key == certifier.job_key
+    assert awakened.job_key == f"{specs[0].generation_key}:certify"
     expected_manifest = sha256(
         canonical_structure_manifest_bytes(
             generation_key=specs[0].generation_key,
@@ -3262,6 +3309,59 @@ def test_quote_worker_takeover_after_upload_before_receipt_has_one_receipt(
     assert pointer == (0,)
 
 
+def test_quote_certifier_claim_waits_for_all_terminal_batch_receipts(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    batches = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        legs=(_leg("token-1"), _leg("token-2")),
+        batch_size=1,
+        now=now,
+    )
+
+    assert (
+        control_plane.claim_job(
+            worker_id="too-early",
+            job_types=("quote-certify",),
+            lease_seconds=30,
+            now=now,
+        )
+        is None
+    )
+    for index, batch in enumerate(batches):
+        lease = control_plane.claim_job(
+            worker_id=f"batch-{index}",
+            job_types=("quote-batch",),
+            lease_seconds=30,
+            now=now,
+        )
+        assert lease is not None
+        control_plane.record_quote_batch(
+            lease,
+            token_range_digest=batch.token_range_digest,
+            quote_digest=str(index + 1) * 64,
+            artifact_key=f"quote-batches/{index}/batch.ndjson",
+            artifact_digest=str(index + 1) * 64,
+            successful_response_count=1,
+            quoted_at=now,
+            now=now,
+            terminal=True,
+        )
+        certifier = control_plane.claim_job(
+            worker_id=f"certifier-{index}",
+            job_types=("quote-certify",),
+            lease_seconds=30,
+            now=now,
+        )
+        if index == 0:
+            assert certifier is None
+        else:
+            assert certifier is not None
+            assert certifier.job_key == f"{batch.generation_key}:certify"
+
+
 def test_transactional_quote_certifier_waits_then_publishes_complete_generation(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -3279,7 +3379,7 @@ def test_transactional_quote_certifier_waits_then_publishes_complete_generation(
         worker_id="certifier",
         now=lambda: clock[0],
     )
-    assert certifier.run_once().outcome == "waiting"
+    assert certifier.run_once().outcome == "idle"
 
     worker = TransactionalQuoteBatchWorker(
         control_plane=control_plane,
@@ -3336,8 +3436,16 @@ def test_incomplete_quote_generation_cannot_switch_current_pointer(
         quoted_at=now,
         now=now,
     )
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            "UPDATE m1_jobs SET state = 'runnable', next_attempt_at = %s WHERE job_key = %s",
+            (now, f"{batches[0].generation_key}:certify"),
+        )
     certifier = control_plane.claim_job(
-        worker_id="certifier", job_types=("quote-certify",), lease_seconds=30, now=now
+        worker_id="certifier",
+        job_types=("quote-certify",),
+        lease_seconds=30,
+        now=now,
     )
     assert certifier is not None
 
@@ -3393,7 +3501,10 @@ def test_complete_quote_generation_certifies_and_publishes_one_pointer(
             now=batch_now + timedelta(milliseconds=1),
         )
     certifier = control_plane.claim_job(
-        worker_id="certifier", job_types=("quote-certify",), lease_seconds=30, now=now
+        worker_id="certifier",
+        job_types=("quote-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=2),
     )
     assert certifier is not None
 
@@ -8585,7 +8696,7 @@ def test_control_plane_route_maps_real_postgres_permission_denied_to_fixed_unava
     }
 
 
-def test_qualification_read_model_rejects_malformed_epoch_json(
+def test_qualification_read_model_does_not_read_growth_bound_epoch_json(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = datetime(2026, 8, 25, 12, tzinfo=UTC)
@@ -8600,8 +8711,8 @@ def test_qualification_read_model_rejects_malformed_epoch_json(
             (Jsonb({"not": "an-array"}), "qualification-runtime-read-current"),
         )
     try:
-        with pytest.raises(ControlPlaneError, match="qualification source is malformed"):
-            control_plane.operational_snapshot(now=now)
+        snapshot = control_plane.operational_snapshot(now=now)
+        assert snapshot["qualification"]["epoch_id"] == "qualification-runtime-read-current"
     finally:
         with control_plane._connection_factory() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -8613,6 +8724,21 @@ def test_qualification_read_model_rejects_malformed_epoch_json(
                 "ADD CONSTRAINT ck_m1_qualification_epochs_fact_records "
                 "CHECK (jsonb_typeof(fact_records) = 'array')"
             )
+
+
+def test_qualification_snapshot_sql_is_growth_independent() -> None:
+    query = postgres_module._QUALIFICATION_SNAPSHOT_SQL
+
+    assert "SELECT *" not in query
+    assert "fact_records" not in query
+    assert "fact_digests" not in query
+    assert "contained_recoveries" not in query
+
+    certificate_query = qualification_store_module._CERTIFICATE_EPOCH_PROJECTION_SQL
+    assert "SELECT *" not in certificate_query
+    assert "fact_records" in certificate_query
+    assert "'[]'::jsonb AS fact_records" in certificate_query
+    assert "'[]'::jsonb AS fact_digests" in certificate_query
 
 
 def test_structure_source_existing_receipt_recovers_terminal_runtime_atomically(
@@ -9962,7 +10088,8 @@ def test_qualification_service_first_tick_initializes_sql_null_cursor(
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT source_cursor, jsonb_typeof(source_cursor), jsonb_array_length(fact_records)
+            SELECT source_cursor, jsonb_typeof(source_cursor),
+                   jsonb_array_length(fact_records), runtime_fact_count
             FROM m1_qualification_epochs
             WHERE epoch_id = %s
             """,
@@ -9972,7 +10099,128 @@ def test_qualification_service_first_tick_initializes_sql_null_cursor(
     assert row is not None
     assert row[0] is None
     assert row[1] is None
-    assert row[2] == 3
+    assert row[2] == 0
+    assert row[3] == 3
+
+
+def test_qualification_active_epoch_stays_bounded_and_replays_across_pages(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    policy = RollingQualificationPolicy(
+        release_id="release-normalized-replay",
+        config_id="config-normalized-replay",
+        role_identity=("m1", "qualification"),
+    )
+    records = tuple(
+        QualificationFactRecord(
+            cursor=FactCursor(
+                now + timedelta(seconds=index),
+                40,
+                f"normalized-{index}",
+                ingest_seq=index + 1,
+            ),
+            fact=QualificationFact.healthy(f"normalized-{index}", now + timedelta(seconds=index)),
+            source="freshness",
+        )
+        for index in range(501)
+    )
+    store = PostgresQualificationServiceStore(control_plane._connection_factory)
+    store.initialize(policy, now=now)
+    decision = store.apply_records(
+        policy, records, expected_cursor=None, writer_id="normalized-writer"
+    )
+
+    with control_plane._connection_factory() as connection:
+        row = connection.execute(
+            """
+            SELECT jsonb_array_length(fact_records), jsonb_array_length(fact_digests),
+                   runtime_fact_count,
+                   (SELECT count(*) FROM m1_qualification_epoch_facts AS fact
+                    WHERE fact.epoch_id = epoch.epoch_id)
+            FROM m1_qualification_epochs AS epoch WHERE epoch_id = %s
+            """,
+            (decision.epoch_id,),
+        ).fetchone()
+    assert row == (0, 0, 501, 501)
+
+    restarted = PostgresQualificationServiceStore(control_plane._connection_factory)
+    restarted.initialize(policy, now=now + timedelta(seconds=501))
+    assert restarted.current.fact_ids == ()
+    assert restarted.current.coverage_seconds == 500
+    assert restarted.current.last_fact_at == now + timedelta(seconds=500)
+
+
+def test_qualification_terminal_certificate_keeps_epoch_history_bounded(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    policy = RollingQualificationPolicy(
+        release_id="release-normalized-certificate",
+        config_id="config-normalized-certificate",
+        role_identity=("m1", "qualification"),
+        max_gap_seconds=3_600,
+    )
+    records = tuple(
+        QualificationFactRecord(
+            cursor=FactCursor(
+                now + timedelta(hours=hour),
+                40,
+                f"normalized-certificate-{hour}",
+                ingest_seq=hour + 1,
+            ),
+            fact=QualificationFact.healthy(
+                f"normalized-certificate-{hour}",
+                now + timedelta(hours=hour),
+                progress_count=hour + 1,
+                successful_count=hour + 1,
+            ),
+            source="freshness",
+        )
+        for hour in range(25)
+    )
+    service = QualificationService(
+        policy=policy,
+        fact_source=StaticQualificationFactSource(records),
+        state_store=PostgresQualificationServiceStore(control_plane._connection_factory),
+        writer_id="normalized-certificate-writer",
+        batch_size=25,
+    )
+
+    first = service.tick(now)
+    qualified = service.tick(now + timedelta(hours=24))
+
+    assert first.state is QualificationState.ACCUMULATING
+    assert qualified.state is QualificationState.QUALIFIED
+    assert qualified.certificate_digest is not None
+    with control_plane._connection_factory() as connection:
+        epoch_row = connection.execute(
+            """
+            SELECT jsonb_array_length(fact_records), jsonb_array_length(fact_digests),
+                   runtime_fact_count,
+                   (SELECT count(*) FROM m1_qualification_epoch_facts AS fact
+                    WHERE fact.epoch_id = epoch.epoch_id)
+            FROM m1_qualification_epochs AS epoch
+            WHERE epoch_id = %s
+            """,
+            (qualified.epoch_id,),
+        ).fetchone()
+        certificate_id_row = connection.execute(
+            """
+            SELECT certificate_id
+            FROM m1_qualification_certificates
+            WHERE epoch_id = %s
+            """,
+            (qualified.epoch_id,),
+        ).fetchone()
+    assert epoch_row == (0, 0, 25, 25)
+    assert certificate_id_row is not None
+    certificate = read_qualification_certificate(
+        control_plane._connection_factory,
+        certificate_id=certificate_id_row[0],
+    )
+    assert certificate is not None
+    assert certificate.certificate_digest == qualified.certificate_digest
 
 
 def test_qualification_new_release_starts_at_live_ledger_high_water(
@@ -10142,7 +10390,8 @@ def test_qualification_recovery_restart_keeps_epoch_fact_history_local(
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT state, jsonb_array_length(fact_records), started_at, last_fact_at
+            SELECT state, jsonb_array_length(fact_records), started_at, last_fact_at,
+                   runtime_fact_count
             FROM m1_qualification_epochs
             ORDER BY started_at, state
             """
@@ -10153,9 +10402,11 @@ def test_qualification_recovery_restart_keeps_epoch_fact_history_local(
     invalidated_row = next(row for row in rows if row[0] == "invalidated")
     accumulating_row = next(row for row in rows if row[0] == "accumulating")
     recovering_row = next(row for row in rows if row[0] == "recovering")
-    assert invalidated_row[1] == 2
+    assert invalidated_row[1] == 0
+    assert invalidated_row[4] == 2
     assert recovering_row[1] == 0
-    assert accumulating_row[1] == 1
+    assert accumulating_row[1] == 0
+    assert accumulating_row[4] == 1
     assert accumulating_row[3] >= accumulating_row[2]
 
 
@@ -10187,14 +10438,14 @@ def test_qualification_same_batch_recovery_keeps_recovering_epoch_empty(
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT state, jsonb_array_length(fact_records)
+            SELECT state, jsonb_array_length(fact_records), runtime_fact_count
             FROM m1_qualification_epochs
             ORDER BY started_at, state
             """
         )
         rows = cursor.fetchall()
-    assert ("recovering", 0) in rows
-    assert ("accumulating", 1) in rows
+    assert ("recovering", 0, 0) in rows
+    assert ("accumulating", 0, 1) in rows
 
 
 def test_qualification_recovering_observes_second_breaker_status_and_restart(

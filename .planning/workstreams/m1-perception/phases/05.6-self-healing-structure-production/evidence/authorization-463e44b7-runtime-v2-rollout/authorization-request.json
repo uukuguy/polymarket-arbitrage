@@ -1,0 +1,95 @@
+{
+  "artifact_version": 1,
+  "prepared_at": "2026-08-28T12:03:42+08:00",
+  "status": "executed-canary-failed-rolled-back-superseded",
+  "authorization_granted": true,
+  "authorization_basis": "The user granted complete authority for all changes required to solve the repeated timeout, sequencing, interruption, recovery, and public.digest exhaustion failures and instructed autonomous completion of M1.",
+  "approved_by": "user",
+  "source_release_sha": "463e44b7a8b6e6388acd1f5f26b8a76da1e6c421",
+  "production_database_before_revision": "028",
+  "target_database_revision": "029",
+  "worker_image": "registry.fly.io/polyarb-control-worker-m1@sha256:06e4404e34e7dcab010f8ab238b5484b2207438c13a5bb588aa167319b2f6ece",
+  "qualification_image": "registry.fly.io/polyarb-qualification-worker-m1@sha256:06e4404e34e7dcab010f8ab238b5484b2207438c13a5bb588aa167319b2f6ece",
+  "image_contract": {
+    "local_image_id": "sha256:b3163eb60373f96b72f6abea0c17b3c9be7e66b0dbdd7ab0e9ee7bb2e1988fc1",
+    "architecture": "amd64",
+    "runtime_uid": 10001,
+    "oci_revision": "463e44b7a8b6e6388acd1f5f26b8a76da1e6c421",
+    "alembic_head": "029",
+    "runtime_policy_version": "runtime-v2",
+    "closed_job_registry_count": 8,
+    "bounded_status_source_smoke": "pass",
+    "cli_smoke": "pass"
+  },
+  "review": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "prior_high_closed": "Status uses stored generated projections and predecessor breaker fallback is scalar-only."
+  },
+  "exact_existing_targets": [
+    "polyarb-control-worker-m1/e82d1220b2d138",
+    "polyarb-control-worker-m1/683e46ea500dd8",
+    "polyarb-control-worker-m1/4d895231f66748",
+    "polyarb-qualification-worker-m1/876077f0274598"
+  ],
+  "protected_unchanged_targets": [
+    "polyarb-control-alert/d891e941a41dd8",
+    "polyarb-control-api/d8d0e27a734158",
+    "polyarb-control-runtime-event-writer/28654e35a73d08",
+    "polyarb-runtime-controller-m1/6e82036dce4958"
+  ],
+  "observed_before": {
+    "exact_topology_status": "pass",
+    "coordinator_state": "stopped",
+    "structure_range_state": "started",
+    "quote_batch_state": "started",
+    "qualification_state": "stopped",
+    "runtime_controller_state": "started",
+    "runtime_controller_recovery_actions": 0,
+    "worker_prior_digest": "sha256:bd21b2d118237c7f1e8c81fd9067985b20d5c23cd085d13251b724cf78b333df",
+    "non_image_config_sha256": {
+      "e82d1220b2d138": "ca793ac25df43bc046e145c696fc26f87915663192453f8c262ed6920f2a81ce",
+      "683e46ea500dd8": "3056b1d5792ba1166d1e76177ee3af4158b449ebf29e8b3fc383602cfe1af7f6",
+      "4d895231f66748": "8f8e8900f7518ea25563c017fcf5c7085db2e5072b84e3bc94838444e6c6cdfc",
+      "876077f0274598": "c8791857b4bcb6b9c745bbf031f3201c04d1136350837b148cd34b1b20583898"
+    }
+  },
+  "ordered_maximum_effect": [
+    "apply only Alembic revision 029, adding three stored generated status projections",
+    "update and start the stopped coordinator on the same Machine ID",
+    "after canary proof, gracefully stop, image-update, and start Structure range on the same Machine ID",
+    "after Structure proof, gracefully stop, image-update, and start Quote batch on the same Machine ID",
+    "after worker and observe-only proof, update the stopped qualification image and only POLYARB_QUALIFICATION_RELEASE_ID, then start the same Machine ID",
+    "begin one new append-only 86400-second qualification epoch and independently reverify its certificate"
+  ],
+  "forbidden_effects": [
+    "no new, deleted, or replaced Fly app or Machine",
+    "no Machine ID, VM, region, volume, IP, service, restart policy, secret value, or hidden secret-set change",
+    "no image change outside the four exact targets",
+    "no runtime-controller update, restart, allowlist expansion, mode change, or recovery action",
+    "no fault injection, wallet, signing, order, balance, or trade action",
+    "no raw provider body or secret value in evidence"
+  ],
+  "rollback": [
+    "a revision 029 failure is contained by transactional DDL and stops before Machine update",
+    "stop qualification if identity, cursor, status, or evidence gates fail",
+    "restore changed Machines to the prior immutable digest in reverse order if process or durable-publication gates fail",
+    "retain additive revision 029 after any new worker executes; do not destructively downgrade live evidence",
+    "reverify exact topology, original IDs, observe-only continuity, zero recovery actions, and append-only evidence"
+  ],
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false,
+  "execution_result": {
+    "database_migration": "028-to-029-pass",
+    "observe_only_gate": "1800-second-window-pass",
+    "coordinator_image_update": "pass",
+    "coordinator_start": "pass",
+    "canary_gate": "failed-control-plane-status-no-result",
+    "root_cause": "operational_snapshot selected growth-bound qualification epoch JSON; active writer also rewrote complete evidence each tick",
+    "rollback": "pass-prior-digest-and-stopped-state-restored",
+    "other_machine_mutations": 0,
+    "superseded_by": "revision-030-normalized-qualification-facts"
+  }
+}

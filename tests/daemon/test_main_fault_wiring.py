@@ -129,16 +129,39 @@ def test_daemon_control_plane_connection_has_bounded_connect_timeout(monkeypatch
     import polyarb.daemon.main as daemon_main
 
     calls: list[tuple[str, dict[str, object]]] = []
-    sentinel = object()
+
+    class Connection:
+        def execute(self, query, params):
+            calls.append((query, {"params": params}))
+
+        def commit(self):
+            calls.append(("commit", {}))
+
+        def close(self):
+            calls.append(("close", {}))
+
+    sentinel = Connection()
 
     def connect(dsn: str, **kwargs: object) -> object:
         calls.append((dsn, kwargs))
         return sentinel
 
-    monkeypatch.setattr(daemon_main.psycopg, "connect", connect)
+    monkeypatch.setattr("polyarb.control_plane.db_role_contract.psycopg.connect", connect)
     control_plane = daemon_main._build_daemon_control_plane("postgresql://control-plane")
 
     assert control_plane is not None
     assert control_plane._connection_factory() is sentinel
-    assert calls == [("postgresql://control-plane", {"connect_timeout": 5})]
+    assert calls == [
+        (
+            "postgresql://control-plane",
+            {"connect_timeout": 5, "options": "-csearch_path=pg_catalog,public"},
+        ),
+        (
+            "SELECT pg_catalog.set_config('search_path', %s, false), "
+            "pg_catalog.set_config('statement_timeout', %s, false), "
+            "pg_catalog.set_config('lock_timeout', %s, false)",
+            {"params": ("pg_catalog,public", "5000ms", "1000ms")},
+        ),
+        ("commit", {}),
+    ]
     assert daemon_main._build_daemon_control_plane("   ") is None

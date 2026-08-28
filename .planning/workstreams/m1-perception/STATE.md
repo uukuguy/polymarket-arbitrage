@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Revision 028 is live with no Machine mutation; reviewed revision 029 stored status projections must be committed, migrated and rebuilt before rollout
-last_updated: "2026-08-28T11:52:00+08:00"
+stopped_at: Revision 029 is live; coordinator canary was rolled back after a second growth-bound status path, and reviewed revision 030 must be committed, migrated and rebuilt before rollout
+last_updated: "2026-08-28T15:01:46+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,7 +19,7 @@ progress:
 ## Current Position
 
 - **Sole authority:** Supabase project `polyarb` (`lgykffpcsebewvobkbdm`),
-  production Alembic revision `028`, and R2 bucket `polyarb-control-plane`.
+  production Alembic revision `029`, and R2 bucket `polyarb-control-plane`.
   The runtime's durable job, receipt, lease, pointer, evidence, and incident
   facts live there.
 
@@ -56,20 +56,15 @@ progress:
   roles use hidden secrets and the Supabase IPv4 Session Pooler, not the
   unreachable direct IPv6 database endpoint.
 
-- **Observe-only production rollout:** `polyarb-runtime-controller-m1`
-  Machine `6e82036dce4958` is started with an empty recovery allowlist. Its latest
-  verifier passed 11,132 seconds / 386 decisions, max gap 32 seconds, one
-  current healthy candidate, and zero recovery actions. Revision 027 repaired
-  the production pgcrypto namespace. The three original worker Machines now run
-  immutable image digest `sha256:95131c…127f`; their Machine IDs and non-image
-  config projection hashes are unchanged. Coordinator and Structure emitted
-  2,202 task runtime events by `16:40:28Z`, and qualification runtime ingress
-  continued advancing without SQLSTATE 42883. Existing qualification Machine
-  `876077f0274598` is started; it consumed the stop-created recovery boundary
-  and opened live accumulating epoch `epoch-fff4fa1ad4f778a9009a4039`, which had
-  301 facts / 133 seconds / max gap 34 seconds at `16:45:50Z`. Both app-scoped hidden DSNs remain installed,
-  no ordinary credential env key is present, and the exact eight-Machine
-  topology audit passes with every Machine started.
+- **Current production boundary:** `polyarb-runtime-controller-m1` Machine
+  `6e82036dce4958` remains started observe-only with an empty recovery allowlist.
+  Coordinator `e82d1220b2d138` and qualification `876077f0274598` are stopped;
+  Structure `683e46ea500dd8` and Quote `4d895231f66748` remain started on the
+  pre-Plan-209 runtime. The failed coordinator canary was restored to digest
+  `sha256:bd21b2d…33df` and its original stopped state without changing its
+  non-image config. Production is revision 029; revision 030 and the replacement
+  image have not been applied. Both app-scoped hidden DSNs remain installed and
+  no ordinary credential env key is present.
 
 - **Plan 05.6-209 runtime lifecycle repair:** Plan 208's job-specific deadline
   change exposed the wider defect: scheduler/role turn timeouts, worker-local
@@ -83,8 +78,8 @@ progress:
   circuits release one controller probe before historical attempt clocks are
   considered. Qualification consumes breaker history for the first identity
   and hands successor releases the live ledger high-water. Full M1 regression
-  is 3,947 passed / 1 skipped / 1 expected xfail; independent final review has
-  zero findings. Production revision 028 is applied; coordinator and
+  is 3,963 passed / 1 skipped / 1 expected xfail; independent final review has
+  zero findings. Production revision 029 is applied; coordinator and
   qualification Machines remain stopped and no Machine has received the new
   runtime image. Pre-rollout proof additionally found that qualification status
   fetched full growing epoch JSON with `SELECT *`. Independent review then
@@ -94,6 +89,19 @@ progress:
   touch only fixed projections/scalars. Unit and real PostgreSQL proof pass,
   including a 4 MB malformed predecessor. The first built
   image is superseded before rollout because this executable fix changed bytes.
+  A coordinator-only canary then exposed the second consumer:
+  `operational_snapshot()` still selected the same growth arrays, and the active
+  qualification writer reread/rewrote them every tick. The Machine was restored
+  to its prior digest and stopped state before any other role changed. Revision
+  030 normalizes active facts into append-only ordered rows, keeps the mutable
+  epoch fixed-size, replays restart state in 500-row pages, and uses a bounded
+  scalar epoch projection for certificate verification. The broader lifecycle
+  audit centralizes DB deadlines, gives blocking work one two-cancellation
+  bridge, makes Quote reader grace expiry authoritative, and moves Structure /
+  Quote certifier eligibility into transactional receipt barriers. Real
+  501-fact migration/restart, independent PostgreSQL barrier claims, and the
+  full suite pass; revision 030 and its replacement image are not yet in
+  production.
 
 - **Plan 05.6-208 diagnosis (superseded locally by Plan 209):** the initial accumulating epoch was
   later invalidated by repeated Structure freshness gaps. Production evidence

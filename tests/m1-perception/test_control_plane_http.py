@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime
+from time import monotonic
+
+import pytest
 
 
 class _AvailableControlPlane:
@@ -161,3 +165,36 @@ def test_control_plane_route_redacts_malformed_read_model_failures(http_test_cli
         "status": "unavailable",
         "reason": "control-plane-read-unavailable",
     }
+
+
+def test_control_plane_route_timeout_does_not_join_a_stalled_database_thread(
+    http_test_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.http import control_plane as control_plane_http
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class Policy:
+        request_timeout_seconds = 0.05
+
+    class StalledControlPlane:
+        def operational_snapshot(self, **_kwargs: object) -> dict[str, object]:
+            started.set()
+            release.wait()
+            return {}
+
+    monkeypatch.setattr(control_plane_http, "CONTROL_PLANE_DB_POLICY", Policy())
+    http_test_client.app.state.control_plane = StalledControlPlane()
+    safety_release = threading.Timer(0.4, release.set)
+    safety_release.start()
+    before = monotonic()
+    try:
+        response = http_test_client.get("/perception/control-plane")
+        assert response.status_code == 503
+        assert started.is_set()
+        assert monotonic() - before < 0.2
+    finally:
+        release.set()
+        safety_release.cancel()

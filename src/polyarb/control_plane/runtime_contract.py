@@ -16,6 +16,7 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from .blocking_bridge import run_blocking_call
 from .models import JobLease
 from .runtime_models import (
     RuntimeDeadlineProfile,
@@ -364,7 +365,6 @@ class AsyncAttemptRuntime(AttemptRuntime):
         self._stopped = asyncio.Event()
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
-        self._heartbeat_call_task: asyncio.Task[Any] | None = None
         self._owner_task: asyncio.Task[Any] | None = None
         self._heartbeat_error: BaseException | None = None
         self._watchdog_error: BaseException | None = None
@@ -540,30 +540,13 @@ class AsyncAttemptRuntime(AttemptRuntime):
             self._stopped.set()
 
     async def _run_heartbeat_call(self, now: datetime) -> JobLease:
-        call_task = asyncio.create_task(
-            asyncio.to_thread(
-                self._store.heartbeat_runtime_attempt,
-                self._lease,
-                now=now,
-                lease_seconds=self._profile.lease_seconds,
-            ),
-            name=f"runtime-heartbeat-call:{self.lease.job_key}",
+        return await run_blocking_call(
+            self._store.heartbeat_runtime_attempt,
+            self._lease,
+            now=now,
+            lease_seconds=self._profile.lease_seconds,
+            thread_name=f"runtime-heartbeat-call:{self.lease.job_key}",
         )
-        self._heartbeat_call_task = call_task
-        try:
-            # Shield the executor future so cancellation of the heartbeat
-            # coroutine cannot abandon a DB call that may still mutate state.
-            return await asyncio.shield(call_task)
-        except asyncio.CancelledError:
-            # A cancelled heartbeat coroutine must still wait for the worker
-            # thread to finish before propagating cancellation.
-            error, _ = await self._drain_task(call_task)
-            if error is not None and self._heartbeat_error is None:
-                self._heartbeat_error = error
-            raise
-        finally:
-            if self._heartbeat_call_task is call_task:
-                self._heartbeat_call_task = None
 
     async def _wait_for_heartbeat_or_stop(self) -> bool:
         if self._sleep is None:
@@ -625,15 +608,18 @@ class AsyncAttemptRuntime(AttemptRuntime):
         return was_cancelled
 
     async def _drain_task(self, task: asyncio.Task[Any]) -> tuple[BaseException | None, bool]:
-        """Await a task to completion without abandoning executor work."""
+        """Drain within one cancellation; a second cancellation is grace expiry."""
         current = asyncio.current_task()
         was_cancelled = current is not None and current.cancelling() > 0
         while not task.done():
             try:
                 await asyncio.shield(task)
             except asyncio.CancelledError:
+                if was_cancelled:
+                    raise
                 was_cancelled = True
-                continue
+                if current is not None and current.cancelling():
+                    current.uncancel()
         try:
             task.result()
         except asyncio.CancelledError:

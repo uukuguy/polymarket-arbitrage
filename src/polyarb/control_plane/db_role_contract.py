@@ -11,6 +11,8 @@ from urllib.parse import parse_qsl, urlsplit
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
 
+from .db_deadlines import CONTROL_PLANE_DB_POLICY
+
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
 TABLE_PRIVILEGES = (
     "SELECT",
@@ -24,6 +26,8 @@ TABLE_PRIVILEGES = (
 SEQUENCE_PRIVILEGES = ("USAGE", "SELECT", "UPDATE")
 CONTROLLED_SEARCH_PATH = ("pg_catalog", "public")
 CONTROLLED_CONNECTION_OPTIONS = "-csearch_path=pg_catalog,public"
+CONTROLLED_STATEMENT_TIMEOUT = CONTROL_PLANE_DB_POLICY.statement_setting
+CONTROLLED_LOCK_TIMEOUT = CONTROL_PLANE_DB_POLICY.lock_setting
 # TEMPORARY is intentionally allowed. PostgreSQL grants it to PUBLIC by default;
 # revoking it globally would change the original four applications. Namespace
 # safety instead comes from qualified daemon SQL plus this controlled path.
@@ -48,6 +52,7 @@ QUALIFICATION_ALLOWED = {
     "m1_qualification_ingress_ledger": frozenset({"SELECT"}),
     "m1_qualification_source_cursors": frozenset({"SELECT", "INSERT", "UPDATE"}),
     "m1_qualification_epochs": frozenset({"SELECT", "INSERT", "UPDATE"}),
+    "m1_qualification_epoch_facts": frozenset({"SELECT", "INSERT"}),
     "m1_qualification_recovery_observations": frozenset({"SELECT", "INSERT"}),
     "m1_qualification_certificates": frozenset({"SELECT"}),
     "m1_publication_pointers": frozenset({"SELECT"}),
@@ -130,13 +135,19 @@ def scoped_connection_factory(dsn: str) -> ConnectionFactory:
     def connect() -> psycopg.Connection[Any]:
         connection = psycopg.connect(
             dsn,
-            connect_timeout=5,
+            connect_timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds,
             options=CONTROLLED_CONNECTION_OPTIONS,
         )
         try:
             connection.execute(
-                "SELECT pg_catalog.set_config('search_path', %s, false)",
-                (",".join(CONTROLLED_SEARCH_PATH),),
+                "SELECT pg_catalog.set_config('search_path', %s, false), "
+                "pg_catalog.set_config('statement_timeout', %s, false), "
+                "pg_catalog.set_config('lock_timeout', %s, false)",
+                (
+                    ",".join(CONTROLLED_SEARCH_PATH),
+                    CONTROLLED_STATEMENT_TIMEOUT,
+                    CONTROLLED_LOCK_TIMEOUT,
+                ),
             )
             connection.commit()
         except Exception:

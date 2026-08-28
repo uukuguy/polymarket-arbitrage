@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
@@ -10,8 +9,10 @@ import psycopg
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from polyarb.control_plane.blocking_bridge import run_blocking_call_with_timeout
+from polyarb.control_plane.db_deadlines import CONTROL_PLANE_DB_POLICY
+
 _SAMPLE_LIMIT = 20
-_READ_TIMEOUT_S = 5.5
 
 
 async def control_plane_status(request: Request) -> JSONResponse:
@@ -27,13 +28,12 @@ async def control_plane_status(request: Request) -> JSONResponse:
             status_code=503,
         )
     try:
-        snapshot = await asyncio.wait_for(
-            asyncio.to_thread(
-                control_plane.operational_snapshot,
-                now=datetime.now(UTC),
-                sample_limit=_SAMPLE_LIMIT,
-            ),
-            timeout=_READ_TIMEOUT_S,
+        snapshot = await run_blocking_call_with_timeout(
+            control_plane.operational_snapshot,
+            now=datetime.now(UTC),
+            sample_limit=_SAMPLE_LIMIT,
+            timeout_seconds=CONTROL_PLANE_DB_POLICY.request_timeout_seconds,
+            thread_name="control-plane-api:status-read",
         )
     except (TimeoutError, OSError, RuntimeError, TypeError, ValueError, psycopg.Error):
         return JSONResponse(

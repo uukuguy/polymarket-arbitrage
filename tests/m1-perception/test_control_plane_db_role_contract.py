@@ -314,6 +314,7 @@ def _allowed_table_privileges(profile: str, table: str) -> frozenset[str]:
             "m1_qualification_ingress_ledger": frozenset({"SELECT"}),
             "m1_qualification_source_cursors": frozenset({"SELECT", "INSERT", "UPDATE"}),
             "m1_qualification_epochs": frozenset({"SELECT", "INSERT", "UPDATE"}),
+            "m1_qualification_epoch_facts": frozenset({"SELECT", "INSERT"}),
             "m1_qualification_recovery_observations": frozenset({"SELECT", "INSERT"}),
             "m1_qualification_certificates": frozenset({"SELECT"}),
             "m1_publication_pointers": frozenset({"SELECT"}),
@@ -350,6 +351,7 @@ def _allowed_table_names(profile: str) -> Iterable[str]:
         "m1_qualification_ingress_ledger",
         "m1_qualification_source_cursors",
         "m1_qualification_epochs",
+        "m1_qualification_epoch_facts",
         "m1_qualification_recovery_observations",
         "m1_qualification_certificates",
         "m1_publication_pointers",
@@ -695,7 +697,7 @@ def test_scoped_connection_factory_rejects_dsn_namespace_override_before_connect
     assert calls == []
 
 
-def test_scoped_connection_factory_binds_controlled_search_path(
+def test_scoped_connection_factory_binds_namespace_and_database_timeouts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from polyarb.control_plane import db_role_contract
@@ -733,8 +735,10 @@ def test_scoped_connection_factory_binds_controlled_search_path(
     ]
     assert bootstrap_calls == [
         (
-            "SELECT pg_catalog.set_config('search_path', %s, false)",
-            ("pg_catalog,public",),
+            "SELECT pg_catalog.set_config('search_path', %s, false), "
+            "pg_catalog.set_config('statement_timeout', %s, false), "
+            "pg_catalog.set_config('lock_timeout', %s, false)",
+            ("pg_catalog,public", "5000ms", "1000ms"),
         ),
         ("commit", ()),
     ]

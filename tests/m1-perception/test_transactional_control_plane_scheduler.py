@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from time import monotonic
 
 import pytest
 
@@ -41,6 +42,89 @@ class _DelayedWorker:
 class _StaleLeaseWorker:
     def run_once(self):
         raise StaleLeaseError("lease is no longer current for quote-batch:test")
+
+
+def test_service_lifecycle_rejects_a_worker_without_declared_grace_policy() -> None:
+    from polyarb.control_plane.service_lifecycle import terminal_grace_seconds
+
+    with pytest.raises(ValueError, match="declared terminal grace"):
+        terminal_grace_seconds("unregistered-worker", _AsyncWorker("unknown"))
+
+
+def test_blocking_io_timeout_detaches_instead_of_waiting_for_executor_shutdown() -> None:
+    from polyarb.control_plane.blocking_bridge import run_blocking_call_with_timeout
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked() -> None:
+        started.set()
+        release.wait()
+
+    async def run() -> None:
+        with pytest.raises(TimeoutError, match="blocking I/O deadline"):
+            await run_blocking_call_with_timeout(
+                blocked,
+                timeout_seconds=0.05,
+                thread_name="test:timed-blocking-call",
+            )
+
+    safety_release = threading.Timer(0.4, release.set)
+    safety_release.start()
+    before = monotonic()
+    try:
+        asyncio.run(run())
+        assert started.is_set()
+        assert monotonic() - before < 0.2
+    finally:
+        release.set()
+        safety_release.cancel()
+
+
+def test_grace_expiry_prevents_a_cancellation_handler_from_starting_new_terminal_io() -> None:
+    from polyarb.control_plane.blocking_bridge import run_blocking_call
+
+    started = threading.Event()
+    release = threading.Event()
+    terminal_started = threading.Event()
+
+    def blocked() -> None:
+        started.set()
+        release.wait()
+
+    def terminal() -> None:
+        terminal_started.set()
+        release.wait()
+
+    async def owner() -> None:
+        try:
+            await run_blocking_call(blocked, thread_name="test:cancelled-call")
+        except asyncio.CancelledError:
+            await run_blocking_call(
+                terminal,
+                point_of_no_return=True,
+                thread_name="test:late-terminal-call",
+            )
+            raise
+
+    async def run() -> None:
+        task = asyncio.create_task(owner())
+        while not started.is_set():
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.2)
+
+    safety_release = threading.Timer(0.4, release.set)
+    safety_release.start()
+    try:
+        asyncio.run(run())
+        assert not terminal_started.is_set()
+    finally:
+        release.set()
+        safety_release.cancel()
 
 
 def test_bounded_tick_runs_only_configured_number_of_turns() -> None:
@@ -688,3 +772,48 @@ def test_scheduler_terminal_grace_reports_stalled_async_terminal_path(
             "outcome": "service-stop-grace-expired",
         }
     ]
+
+
+def test_role_service_grace_is_not_defeated_by_asyncio_executor_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.control_plane import service_lifecycle, structure_source
+    from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
+
+    started = threading.Event()
+    release = threading.Event()
+    stop_event = asyncio.Event()
+
+    class _AsyncWorkerUsingBlockingBridge:
+        _lease_seconds = 3
+
+        async def run_once(self):
+            started.set()
+            await structure_source._to_thread(release.wait)
+            return type("Result", (), {"job_key": "late", "outcome": "late"})()
+
+    loop = TransactionalWorkerLoop(
+        worker_name="structure-source",
+        worker=_AsyncWorkerUsingBlockingBridge(),
+        turns_per_tick=1,
+    )
+    monkeypatch.setattr(service_lifecycle, "terminal_grace_seconds", lambda *_a, **_k: 0.05)
+
+    async def run() -> dict[str, object]:
+        service = asyncio.create_task(
+            loop.run_until_stopped(stop_event=stop_event, interval_seconds=60)
+        )
+        while not started.is_set():
+            await asyncio.sleep(0)
+        stop_event.set()
+        return await service
+
+    safety_release = threading.Timer(0.4, release.set)
+    safety_release.start()
+    before = monotonic()
+    try:
+        assert asyncio.run(run()) == {"status": "stopped", "ticks": 0}
+        assert monotonic() - before < 0.2
+    finally:
+        release.set()
+        safety_release.cancel()

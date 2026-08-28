@@ -23,6 +23,7 @@ from psycopg.rows import dict_row
 
 from alembic import command
 
+from .db_deadlines import CONTROL_PLANE_DB_POLICY
 from .db_role_admin import provision_login_roles
 from .db_role_contract import (
     ROLE_CONTRACTS,
@@ -141,7 +142,11 @@ def run_fault_matrix() -> dict[str, object]:
     matrix_dsn = _dsn_with_database(admin_dsn, database_name)
     created = False
     maintenance_dsn = _dsn_with_database_unchecked(admin_dsn, "postgres")
-    with psycopg.connect(maintenance_dsn, autocommit=True, connect_timeout=5) as maintenance:
+    with psycopg.connect(
+        maintenance_dsn,
+        autocommit=True,
+        connect_timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds,
+    ) as maintenance:
         _lock_runtime_fault_matrix_cluster(maintenance)
         try:
             _assert_migration_cluster_roles_absent(maintenance)
@@ -265,7 +270,11 @@ def _create_isolated_database(admin_dsn: str, matrix_dsn: str, database_name: st
         raise RuntimeFaultMatrixError("refusing to create an unverified database")
     maintenance_dsn = _dsn_with_database_unchecked(admin_dsn, "postgres")
     created = False
-    with psycopg.connect(maintenance_dsn, autocommit=True, connect_timeout=5) as maintenance:
+    with psycopg.connect(
+        maintenance_dsn,
+        autocommit=True,
+        connect_timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds,
+    ) as maintenance:
         _lock_runtime_fault_matrix_cluster(maintenance)
         try:
             _assert_migration_cluster_roles_absent(maintenance)
@@ -309,7 +318,10 @@ def _run_alembic_upgrade(dsn: str) -> None:
 
 
 def _verify_migrated_authority(matrix_dsn: str) -> None:
-    with psycopg.connect(matrix_dsn, connect_timeout=5) as connection:
+    with psycopg.connect(
+        matrix_dsn,
+        connect_timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds,
+    ) as connection:
         table_count = connection.execute(
             """
             SELECT count(*) FROM pg_tables
@@ -340,7 +352,11 @@ def _drop_isolated_database_if_exists(admin_dsn: str, database_name: str) -> Non
     if _DATABASE_RE.fullmatch(database_name) is None:
         raise RuntimeFaultMatrixError("refusing to drop an unverified database")
     maintenance_dsn = _dsn_with_database_unchecked(admin_dsn, "postgres")
-    with psycopg.connect(maintenance_dsn, autocommit=True, connect_timeout=5) as connection:
+    with psycopg.connect(
+        maintenance_dsn,
+        autocommit=True,
+        connect_timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds,
+    ) as connection:
         _drop_isolated_database_with_connection(connection, database_name)
 
 
@@ -507,7 +523,10 @@ def _context(
 
 
 def _connection_factory(dsn: str) -> ConnectionFactory:
-    return lambda: psycopg.connect(dsn, connect_timeout=5)
+    return lambda: psycopg.connect(
+        dsn,
+        connect_timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds,
+    )
 
 
 def _dsn_with_login(dsn: str, username: str, password: str) -> str:

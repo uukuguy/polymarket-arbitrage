@@ -1,0 +1,41 @@
+{
+  "artifact_version": 1,
+  "recorded_at": "2026-08-28T13:00:16+08:00",
+  "status": "rolled-back-and-superseded",
+  "source_release_sha": "463e44b7a8b6e6388acd1f5f26b8a76da1e6c421",
+  "database_revision_after": "029",
+  "observe_only_verification": {
+    "status": "pass",
+    "controller_epoch": 4,
+    "duration_seconds": 1838,
+    "decision_count": 60,
+    "max_gap_seconds": 31,
+    "recovery_action_count": 0
+  },
+  "coordinator_canary": {
+    "machine_id": "e82d1220b2d138",
+    "target_digest_installed": true,
+    "started": true,
+    "required_status_gate": "fail-no-result",
+    "rollback_completed": true,
+    "final_state": "stopped",
+    "final_digest": "sha256:bd21b2d118237c7f1e8c81fd9067985b20d5c23cd085d13251b724cf78b333df",
+    "non_image_config_sha256": "ca793ac25df43bc046e145c696fc26f87915663192453f8c262ed6920f2a81ce"
+  },
+  "untouched_targets": [
+    "polyarb-control-worker-m1/683e46ea500dd8",
+    "polyarb-control-worker-m1/4d895231f66748",
+    "polyarb-qualification-worker-m1/876077f0274598",
+    "polyarb-control-alert/d891e941a41dd8",
+    "polyarb-control-api/d8d0e27a734158",
+    "polyarb-control-runtime-event-writer/28654e35a73d08",
+    "polyarb-runtime-controller-m1/6e82036dce4958"
+  ],
+  "root_cause": {
+    "status_consumer": "operational_snapshot used SELECT * on m1_qualification_epochs",
+    "active_writer": "qualification service reread and rewrote complete growth-bound JSON each tick",
+    "fix_release_requirement": "revision 030 plus a new immutable image"
+  },
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}

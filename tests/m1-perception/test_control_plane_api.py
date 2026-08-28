@@ -103,14 +103,37 @@ def test_control_api_connection_factory_bounds_postgres_connect_time(monkeypatch
     from polyarb.control_plane import api
 
     calls: list[tuple[str, dict[str, object]]] = []
-    sentinel = object()
+
+    class Connection:
+        def execute(self, query, params):
+            calls.append((query, {"params": params}))
+
+        def commit(self):
+            calls.append(("commit", {}))
+
+        def close(self):
+            calls.append(("close", {}))
+
+    sentinel = Connection()
 
     def connect(dsn: str, **kwargs: object) -> object:
         calls.append((dsn, kwargs))
         return sentinel
 
-    monkeypatch.setattr(api.psycopg, "connect", connect)
+    monkeypatch.setattr("polyarb.control_plane.db_role_contract.psycopg.connect", connect)
     control_plane = api._build_control_plane("postgresql://control-plane")
 
     assert control_plane._connection_factory() is sentinel
-    assert calls == [("postgresql://control-plane", {"connect_timeout": 5})]
+    assert calls == [
+        (
+            "postgresql://control-plane",
+            {"connect_timeout": 5, "options": "-csearch_path=pg_catalog,public"},
+        ),
+        (
+            "SELECT pg_catalog.set_config('search_path', %s, false), "
+            "pg_catalog.set_config('statement_timeout', %s, false), "
+            "pg_catalog.set_config('lock_timeout', %s, false)",
+            {"params": ("pg_catalog,public", "5000ms", "1000ms")},
+        ),
+        ("commit", {}),
+    ]

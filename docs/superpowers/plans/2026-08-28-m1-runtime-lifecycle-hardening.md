@@ -104,6 +104,17 @@ cursor handoff.
 - [x] Replace the pre-rollout qualification `SELECT *` status path with revision
   029 stored bounded projections and prove a bloated predecessor cannot re-enter
   growth-bound JSON through recovering status.
+- [x] Close the second status consumer and active-writer gap with revision 030:
+  operational snapshot selects fixed columns, active facts append as normalized
+  rows, restart replays them in 500-row pages, and certificate verification uses
+  a fixed scalar epoch projection.
+- [x] Audit the complete runtime-v2 timeout/stop surface: centralize DB
+  connect/statement/lock envelopes, remove default-executor shutdown joins,
+  enforce first-cancel drain plus second-cancel grace expiry, and prove
+  qualification/watchdog/API shutdown under stalled blocking calls.
+- [x] Move barrier eligibility into PostgreSQL: Structure and Quote certifiers
+  start `waiting` and become `runnable` atomically with the final terminal
+  receipt; prove the boundary using independent real PostgreSQL connections.
 - [ ] Build one immutable image and perform an image-only rollout preserving
   Machine IDs and non-image configuration hashes.
 - [ ] Prove Structure certification, Quote admission, Quote certification, and

@@ -67,8 +67,10 @@ def test_control_plane_connection_factory_bounds_postgres_connect_time(
             "options": "-csearch_path=pg_catalog,public",
         },
         "bootstrap": (
-            "SELECT pg_catalog.set_config('search_path', %s, false)",
-            ("pg_catalog,public",),
+            "SELECT pg_catalog.set_config('search_path', %s, false), "
+            "pg_catalog.set_config('statement_timeout', %s, false), "
+            "pg_catalog.set_config('lock_timeout', %s, false)",
+            ("pg_catalog,public", "5000ms", "1000ms"),
         ),
         "bootstrap_committed": True,
     }
@@ -2122,8 +2124,10 @@ def test_qualification_status_uses_scoped_dsn_and_is_read_only(monkeypatch, caps
             "options": "-csearch_path=pg_catalog,public",
         },
         "bootstrap": (
-            "SELECT pg_catalog.set_config('search_path', %s, false)",
-            ("pg_catalog,public",),
+            "SELECT pg_catalog.set_config('search_path', %s, false), "
+            "pg_catalog.set_config('statement_timeout', %s, false), "
+            "pg_catalog.set_config('lock_timeout', %s, false)",
+            ("pg_catalog,public", "5000ms", "1000ms"),
         ),
         "bootstrap_committed": True,
     }

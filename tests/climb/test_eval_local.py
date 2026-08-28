@@ -162,9 +162,7 @@ def test_checkpointed_structure_recovery_profile_uses_bounded_local_gates() -> N
 
 
 def test_transactional_production_promotion_profile_uses_only_local_proof_gates() -> None:
-    commands = eval_local.gate_commands_for(
-        {"paradigm": "transactional-production-promotion"}
-    )
+    commands = eval_local.gate_commands_for({"paradigm": "transactional-production-promotion"})
 
     flattened = [argument for command in commands.values() for argument in command]
 
@@ -186,9 +184,7 @@ def test_transactional_production_promotion_profile_uses_only_local_proof_gates(
 
 
 def test_event_driven_runtime_self_healing_profile_uses_local_runtime_gates() -> None:
-    commands = eval_local.gate_commands_for(
-        {"paradigm": "event-driven-runtime-self-healing"}
-    )
+    commands = eval_local.gate_commands_for({"paradigm": "event-driven-runtime-self-healing"})
 
     assert commands == {
         "planning": ["make", "planning-status"],
@@ -265,9 +261,7 @@ def test_event_driven_runtime_self_healing_profile_uses_local_runtime_gates() ->
 
 
 def test_fenced_deadline_reconciler_profile_uses_exact_local_recovery_gates() -> None:
-    commands = eval_local.gate_commands_for(
-        {"paradigm": "fenced-deadline-reconciler"}
-    )
+    commands = eval_local.gate_commands_for({"paradigm": "fenced-deadline-reconciler"})
 
     assert commands == {
         "planning": ["make", "planning-status"],
@@ -349,8 +343,7 @@ def test_fenced_deadline_reconciler_profile_uses_exact_local_recovery_gates() ->
     pytest_nodes = [argument for argument in flattened if "::test_" in argument]
     assert len(pytest_nodes) >= 30
     assert all(
-        argument.rsplit("::", maxsplit=1)[-1].startswith("test_")
-        for argument in pytest_nodes
+        argument.rsplit("::", maxsplit=1)[-1].startswith("test_") for argument in pytest_nodes
     )
     assert all(
         any("::test_" in argument for argument in commands[gate])
@@ -375,9 +368,7 @@ def test_fenced_deadline_reconciler_profile_uses_exact_local_recovery_gates() ->
 
 
 def test_fenced_deadline_reconciler_gate_nodes_collect_nonzero() -> None:
-    commands = eval_local.gate_commands_for(
-        {"paradigm": "fenced-deadline-reconciler"}
-    )
+    commands = eval_local.gate_commands_for({"paradigm": "fenced-deadline-reconciler"})
 
     for gate in ("unit", "integration", "cli", "restart"):
         command = [argument for argument in commands[gate] if argument != "-q"]
@@ -397,9 +388,7 @@ def test_fenced_deadline_reconciler_gate_nodes_collect_nonzero() -> None:
 
 
 def test_rolling_qualification_certificates_profile_uses_exact_local_gates() -> None:
-    commands = eval_local.gate_commands_for(
-        {"paradigm": "rolling-qualification-certificates"}
-    )
+    commands = eval_local.gate_commands_for({"paradigm": "rolling-qualification-certificates"})
 
     assert commands == {
         "planning": ["make", "planning-status"],
@@ -520,9 +509,7 @@ def test_rolling_qualification_certificates_profile_uses_exact_local_gates() -> 
 
 
 def test_rolling_qualification_certificates_gate_nodes_collect_nonzero() -> None:
-    commands = eval_local.gate_commands_for(
-        {"paradigm": "rolling-qualification-certificates"}
-    )
+    commands = eval_local.gate_commands_for({"paradigm": "rolling-qualification-certificates"})
 
     for gate in ("unit", "integration", "cli", "restart"):
         command = [argument for argument in commands[gate] if argument != "-q"]
@@ -542,9 +529,7 @@ def test_rolling_qualification_certificates_gate_nodes_collect_nonzero() -> None
 
 
 def test_bounded_operator_truth_surfaces_profile_uses_exact_local_gates() -> None:
-    commands = eval_local.gate_commands_for(
-        {"paradigm": "bounded-operator-truth-surfaces"}
-    )
+    commands = eval_local.gate_commands_for({"paradigm": "bounded-operator-truth-surfaces"})
 
     assert commands == {
         "planning": ["make", "planning-status"],
@@ -556,7 +541,7 @@ def test_bounded_operator_truth_surfaces_profile_uses_exact_local_gates() -> Non
             "tests/m1-perception/test_control_plane_dashboard_contract.py::test_control_plane_decoder_rejects_malformed_operator_facts",
             "tests/m1-perception/test_control_plane_postgres.py::test_runtime_read_model_rejects_unknown_review_vocab_from_postgres",
             "tests/m1-perception/test_control_plane_postgres.py::test_runtime_read_model_rejects_unknown_active_task_registry_values",
-            "tests/m1-perception/test_control_plane_postgres.py::test_qualification_read_model_rejects_malformed_epoch_json",
+            "tests/m1-perception/test_control_plane_qualification_service.py::test_qualification_status_never_transfers_unbounded_epoch_evidence",
             "-q",
         ],
         "integration": [
@@ -635,9 +620,7 @@ def test_bounded_operator_truth_surfaces_profile_uses_exact_local_gates() -> Non
 
 
 def test_bounded_operator_truth_surfaces_gate_nodes_collect_nonzero() -> None:
-    commands = eval_local.gate_commands_for(
-        {"paradigm": "bounded-operator-truth-surfaces"}
-    )
+    commands = eval_local.gate_commands_for({"paradigm": "bounded-operator-truth-surfaces"})
 
     for gate in ("unit", "integration", "cli", "restart"):
         command = [argument for argument in commands[gate] if argument != "-q"]

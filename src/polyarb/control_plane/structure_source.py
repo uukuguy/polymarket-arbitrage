@@ -16,6 +16,8 @@ from polyarb.perception.market_truth import market_truth_mismatch_reason
 from polyarb.snapshot.normalizer import normalize_events, normalize_market
 
 from .alert_delivery import incident_alert_channels
+from .blocking_bridge import run_blocking_call, run_blocking_call_with_timeout
+from .db_deadlines import CONTROL_PLANE_DB_POLICY
 from .models import StructureSourcePageSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .runtime_contract import AsyncAttemptRuntime
@@ -42,51 +44,25 @@ from .structure_worker import StructureWorkerResult
 DEFAULT_MAX_MARKET_BATCHES = 10_000
 
 
-async def _drain_thread_task(task: asyncio.Task[Any]) -> Any:
-    """Await an executor call to completion even after owner cancellation."""
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            continue
-    return task.result()
-
-
 async def _to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Run synchronous control-plane/R2 work without abandoning its thread."""
-    task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        try:
-            await _drain_thread_task(task)
-        except BaseException as error:
-            raise cancellation from error
-        raise
-
-
-def _consume_cancellation() -> None:
-    task = asyncio.current_task()
-    if task is None:
-        return
-    while task.cancelling():
-        task.uncancel()
+    """Run nonterminal blocking work under the shared service boundary."""
+    return await run_blocking_call(
+        call,
+        *args,
+        thread_name="structure-source:blocking-call",
+        **kwargs,
+    )
 
 
 async def _terminal_to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Drain a point-of-no-return call before propagating cancellation."""
-    task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        _consume_cancellation()
-        try:
-            result = await _drain_thread_task(task)
-        except BaseException as error:
-            _consume_cancellation()
-            raise error from cancellation
-        _consume_cancellation()
-        return result
+    """Allow a terminal call to finish only within central stop grace."""
+    return await run_blocking_call(
+        call,
+        *args,
+        point_of_no_return=True,
+        thread_name="structure-source:terminal-call",
+        **kwargs,
+    )
 
 
 async def _progress(
@@ -708,7 +684,6 @@ class TransactionalStructureSourceWorker:
             async with runtime:
                 return await self._run_claimed(runtime)
         except asyncio.CancelledError:
-            _consume_cancellation()
             await _terminal_to_thread(
                 self._control_plane.finish_retryable_with_incident,
                 runtime.current_lease,
@@ -908,14 +883,13 @@ class TransactionalStructureSourceWorker:
 
     async def _upload_artifact(self, artifact: StructureSourcePageArtifact) -> None:
         """Keep synchronous R2 PUT/HEAD from freezing the scheduler event loop."""
-        await asyncio.wait_for(
-            _to_thread(
-                upload_structure_source_page_artifact,
-                self._object_client,
-                bucket=self._bucket,
-                artifact=artifact,
-            ),
-            timeout=self._object_store_timeout_seconds,
+        await run_blocking_call_with_timeout(
+            upload_structure_source_page_artifact,
+            self._object_client,
+            bucket=self._bucket,
+            artifact=artifact,
+            timeout_seconds=self._object_store_timeout_seconds,
+            thread_name="structure-source:r2-upload",
         )
 
 
@@ -980,6 +954,7 @@ class TransactionalStructureSourceAdmitter:
         self._structure_high_water = structure_high_water
         self._quote_high_water = quote_high_water
         self._now = now
+        self._terminal_grace_seconds = CONTROL_PLANE_DB_POLICY.stop_grace_seconds
 
     async def run_once(self) -> StructureWorkerResult:
         decision = await _to_thread(
@@ -1056,7 +1031,6 @@ class TransactionalStructureSourceMaterializer:
             async with runtime:
                 return await self._run_claimed(runtime)
         except asyncio.CancelledError:
-            _consume_cancellation()
             await _terminal_to_thread(
                 self._control_plane.finish_retryable_with_incident,
                 runtime.current_lease,

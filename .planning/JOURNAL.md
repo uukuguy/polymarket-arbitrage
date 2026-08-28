@@ -10961,3 +10961,63 @@ terminal flow without zero restart or orphan attempts before starting a new
 new exact amd64 image, apply revision 029, then sequentially
 roll coordinator → Structure range → Quote batch → qualification on the same
 Machine IDs before beginning the 86,400-second acceptance epoch.
+
+### SESSION 319 — 2026-08-28 (active qualification evidence normalized)
+
+- [CANARY / ROLLBACK] Revision 029 and the 1,800-second observe-only gate passed.
+  Coordinator `e82d1220b2d138` was updated image-only and started, but the
+  required `control-plane-status` gate did not return. The canary was stopped,
+  restored to prior digest `sha256:bd21b2d…33df`, and returned to its original
+  stopped state. Its non-image config hash remained
+  `ca793ac25df43bc…a81ce`; Structure, Quote and qualification were untouched.
+- [ROOT CAUSE] `operational_snapshot()` was a second `SELECT *` consumer of the
+  same 2,500-fact epoch. The active qualification service also reread and
+  rewrote complete `fact_records/fact_digests` on every tick, making the
+  lifecycle O(n²). A longer timeout would only defer the next stoppage.
+- [REVISION 030] Active facts now append to an immutable ordered relation;
+  epoch rows update scalar state/counts only. Invalidated/qualified history is
+  materialized once in memory; certificate DB checks read fixed projections.
+  Restart replays fixed 500-row pages behind cursor and
+  version CAS. Operator snapshot selects fixed columns only; qualification
+  status reads indexed last/recent facts and a scalar recovery count.
+- [PROOF] Real 029→030 migration backfilled 501 ordered facts, rejected update,
+  and round-tripped. A 501-fact service regression keeps both active arrays at
+  zero, stores 501 append-only rows, then reconstructs identical state across a
+  500+1 page restart. Full `make test-m1`: 3,951 passed, one skipped, one xfail
+  in 1,575.30 seconds.
+
+[NEXT] Commit revision 030 and Plan 209 evidence, build a new exact amd64 image,
+apply production 029→030, then restart the sequential coordinator → Structure
+range → Quote batch → qualification rollout from the same Machine IDs. Begin
+the 86,400-second epoch only after live terminal publication proof.
+
+### SESSION 320 — 2026-08-28 (timeout, sequencing and recovery authority audit)
+
+- [TIME AUTHORITY] Formal runtime paths now separate attempt/progress, DB I/O,
+  terminal grace and cadence waits. Connect/statement/lock limits come from one
+  ordered DB registry; request envelopes derive above the inner DB bound.
+- [INTERRUPTIBILITY] All blocking worker/service calls use one non-joining
+  daemon bridge. First cancellation drains only inside central grace; second
+  cancellation detaches and cannot start another terminal I/O. A Quote reader
+  regression proved repeated cancellation no longer hangs service shutdown.
+- [DURABLE SEQUENCE] Structure and Quote certifier jobs now start `waiting`.
+  The final terminal receipt atomically wakes the certifier when receipt/input
+  counts match. Independent real PostgreSQL connections prove no early claim
+  and immediate post-commit eligibility; terminal Structure receipts now use
+  the same wake path as checkpoint receipts.
+- [SERVICE BOUNDS] Qualification handles SIGINT/SIGTERM and stops a stalled DB
+  tick through DB-derived grace. Watchdog observation, control-plane HTTP/API,
+  R2 upload and runtime heartbeat no longer depend on default executor joins.
+- [PROOF] Focused runtime/Structure/Quote/qualification/watchdog/HTTP/migration
+  suites and the full PostgreSQL file pass. The first full M1 run exposed one
+  test-double query-order drift in runtime-event-writer; after preserving its
+  two-statement setup contract, the fresh full gate passed 3,963 tests with one
+  skip and one expected xfail in 1,544.58 seconds.
+- [CLIMB] `climb-check` exposed a revision-029 test selector that revision 030
+  had removed. The bounded-operator gate now targets the normalized bounded
+  status regression; exact-gate collection and the full climb check pass.
+
+[NEXT] Commit revision 030 plus lifecycle audit evidence, build and verify the
+exact immutable amd64 image, apply production 029→030, then run the unchanged
+1,800/90/90 observe-only gate before sequential same-Machine rollout. Begin the
+86,400-second certificate only after live terminal publication proof.

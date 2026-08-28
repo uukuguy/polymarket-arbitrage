@@ -6,17 +6,19 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from threading import Event
+from functools import partial
+from threading import Event, Thread
 from time import monotonic
 from typing import Any, Protocol
 
 from polyarb.config import Settings
 
 from .alert_delivery import incident_alert_channels
+from .blocking_bridge import run_blocking_call
 from .faults import IntentionalStagingRetryFault
 from .models import JobLease, JobState, StructureRangeSpec
 from .postgres import IncompleteStructureGenerationError, PostgresControlPlane, StaleLeaseError
@@ -60,51 +62,25 @@ class StructureWorkerResult:
     outcome: str
 
 
-async def _drain_thread_task(task: asyncio.Task[Any]) -> Any:
-    """Await an executor call to completion even after owner cancellation."""
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            continue
-    return task.result()
-
-
 async def _to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Run blocking range work without abandoning its executor thread."""
-    task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        try:
-            await _drain_thread_task(task)
-        except BaseException as error:
-            raise cancellation from error
-        raise
-
-
-def _consume_cancellation() -> None:
-    task = asyncio.current_task()
-    if task is None:
-        return
-    while task.cancelling():
-        task.uncancel()
+    """Run nonterminal blocking work under the shared service boundary."""
+    return await run_blocking_call(
+        call,
+        *args,
+        thread_name="structure-range:blocking-call",
+        **kwargs,
+    )
 
 
 async def _terminal_to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Drain a point-of-no-return range transaction before cancellation."""
-    task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        _consume_cancellation()
-        try:
-            result = await _drain_thread_task(task)
-        except BaseException as error:
-            _consume_cancellation()
-            raise error from cancellation
-        _consume_cancellation()
-        return result
+    """Allow a terminal range transaction to finish only within stop grace."""
+    return await run_blocking_call(
+        call,
+        *args,
+        point_of_no_return=True,
+        thread_name="structure-range:terminal-call",
+        **kwargs,
+    )
 
 
 def _run_bounded_sync_call[SyncResult](
@@ -127,44 +103,48 @@ def _run_bounded_sync_call[SyncResult](
     """
     if heartbeat_interval_seconds <= 0 or attempt_timeout_seconds <= 0:
         raise ValueError("sync call deadlines must be positive")
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="structure-sync")
-    future = executor.submit(call)
+    future: Future[SyncResult] = Future()
+
+    def invoke() -> None:
+        try:
+            future.set_result(call())
+        except BaseException as error:
+            future.set_exception(error)
+
+    Thread(target=invoke, name="structure-sync", daemon=True).start()
     primary_error: BaseException | None = None
-    try:
-        deadline = monotonic_clock() + attempt_timeout_seconds
-        while True:
-            remaining = deadline - monotonic_clock()
-            if remaining <= 0:
-                primary_error = TimeoutError("structure sync call exceeded attempt deadline")
-                break
+    deadline = monotonic_clock() + attempt_timeout_seconds
+    while True:
+        remaining = deadline - monotonic_clock()
+        if remaining <= 0:
+            primary_error = TimeoutError("structure sync call exceeded attempt deadline")
+            break
+        try:
+            return future.result(timeout=min(heartbeat_interval_seconds, remaining))
+        except FutureTimeoutError:
+            if terminal or heartbeat is None:
+                continue
             try:
-                return future.result(timeout=min(heartbeat_interval_seconds, remaining))
-            except FutureTimeoutError:
-                if terminal or heartbeat is None:
-                    continue
-                try:
-                    heartbeat()
-                except BaseException as error:
-                    primary_error = error
-                    break
+                heartbeat()
             except BaseException as error:
                 primary_error = error
                 break
-
-        # A worker-side timeout/fence/cancellation is only observable after
-        # the underlying call has quiesced.  This is the no-late-effect fence.
-        underlying_error: BaseException | None = None
-        try:
-            future.result()
         except BaseException as error:
-            underlying_error = error
-        if primary_error is None:
-            raise AssertionError("sync call exited without a result or error")
-        if underlying_error is not None:
-            raise primary_error from underlying_error
-        raise primary_error
-    finally:
-        executor.shutdown(wait=True, cancel_futures=False)
+            primary_error = error
+            break
+
+    # A worker-side timeout/fence/cancellation is only observable after
+    # the underlying call has quiesced.  This is the no-late-effect fence.
+    underlying_error: BaseException | None = None
+    try:
+        future.result()
+    except BaseException as error:
+        underlying_error = error
+    if primary_error is None:
+        raise AssertionError("sync call exited without a result or error")
+    if underlying_error is not None:
+        raise primary_error from underlying_error
+    raise primary_error
 
 
 async def _run_bounded_sync_call_async[SyncResult](
@@ -177,25 +157,22 @@ async def _run_bounded_sync_call_async[SyncResult](
     terminal: bool = False,
 ) -> SyncResult:
     """Async owner wrapper for :func:`_run_bounded_sync_call`."""
-    task = asyncio.create_task(
-        asyncio.to_thread(
-            _run_bounded_sync_call,
-            call,
-            heartbeat=heartbeat,
-            heartbeat_interval_seconds=heartbeat_interval_seconds,
-            attempt_timeout_seconds=attempt_timeout_seconds,
-            monotonic_clock=monotonic_clock,
-            terminal=terminal,
-        )
+    bounded_call = partial(
+        _run_bounded_sync_call,
+        call,
+        heartbeat=heartbeat,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+        attempt_timeout_seconds=attempt_timeout_seconds,
+        monotonic_clock=monotonic_clock,
+        terminal=terminal,
     )
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        try:
-            await _drain_thread_task(task)
-        except BaseException as error:
-            raise cancellation from error
-        raise
+    return await run_blocking_call(
+        bounded_call,
+        point_of_no_return=terminal,
+        thread_name=(
+            "structure-range:terminal-bounded-call" if terminal else "structure-range:bounded-call"
+        ),
+    )
 
 
 async def _progress(
@@ -378,7 +355,6 @@ class TransactionalStructureWorker:
                 )
             return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
         except asyncio.CancelledError:
-            _consume_cancellation()
             await _terminal_to_thread(
                 self._control_plane.finish_retryable_with_incident,
                 runtime.current_lease,

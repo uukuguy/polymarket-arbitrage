@@ -12,6 +12,7 @@ from .alert_delivery import (
     render_runtime_incident_message,
     runtime_incident_transition_payload,
 )
+from .blocking_bridge import run_blocking_call_until_stopped
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,11 +100,7 @@ class ProgressGate:
         assert isinstance(leased, int)
         pending = runnable + leased > 0
         started_pending_work = pending and not self._was_pending
-        if (
-            self._last_succeeded is None
-            or succeeded > self._last_succeeded
-            or started_pending_work
-        ):
+        if self._last_succeeded is None or succeeded > self._last_succeeded or started_pending_work:
             self._last_succeeded = succeeded
             self._last_progress_at = now
         self._was_pending = pending
@@ -281,7 +278,16 @@ async def run_watchdog_service(
     alerts = 0
     while not stop_event.is_set():
         tick_at = clock().astimezone(UTC)
-        observation = await asyncio.to_thread(observe)
+        completed, observation = await run_blocking_call_until_stopped(
+            observe,
+            stop_event=stop_event,
+            grace_seconds=0,
+            thread_name="runtime-watchdog:observe",
+        )
+        if not completed:
+            break
+        if not isinstance(observation, RuntimeObservation):
+            raise TypeError("runtime watchdog observer returned an invalid result")
         checks += 1
         if on_check is not None:
             await on_check(observation)

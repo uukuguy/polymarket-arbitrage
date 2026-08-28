@@ -22,6 +22,7 @@ from polyarb.clients.clob_client import ClobReaderClient
 from polyarb.clients.gamma_client import GammaClient
 from polyarb.config import Settings
 from polyarb.control_plane.alert_delivery import TransactionalAlertDeliveryWorker
+from polyarb.control_plane.blocking_bridge import run_blocking_call
 from polyarb.control_plane.db_role_contract import (
     DatabaseRoleContractError,
     scoped_connection_factory,
@@ -749,7 +750,7 @@ async def _send_runtime_watchdog_telegram(settings: Settings, text: str) -> None
         if not isinstance(response_payload, dict) or response_payload.get("ok") is not True:
             raise OSError("Telegram rejected watchdog page")
 
-    await asyncio.to_thread(post)
+    await run_blocking_call(post, thread_name="runtime-watchdog:telegram-post")
 
 
 async def _persist_runtime_watchdog_transition(
@@ -786,7 +787,7 @@ async def _persist_runtime_watchdog_transition(
             raise OSError("runtime-event-writer-invalid-response")
         return response_payload
 
-    return await asyncio.to_thread(post)
+    return await run_blocking_call(post, thread_name="runtime-watchdog:event-writer-post")
 
 
 async def _run_runtime_watchdog_service(

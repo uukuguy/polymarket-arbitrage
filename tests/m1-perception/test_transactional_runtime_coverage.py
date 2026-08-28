@@ -236,6 +236,50 @@ def test_worker_modules_do_not_define_private_runtime_profiles() -> None:
     assert offenders == []
 
 
+def test_database_deadlines_have_one_registry_and_no_private_copies() -> None:
+    from polyarb.control_plane.db_deadlines import (
+        CONTROL_PLANE_DB_POLICY,
+        RECOVERY_DB_POLICY,
+    )
+
+    assert CONTROL_PLANE_DB_POLICY.lock_timeout_ms < CONTROL_PLANE_DB_POLICY.statement_timeout_ms
+    assert CONTROL_PLANE_DB_POLICY.request_timeout_seconds > (
+        CONTROL_PLANE_DB_POLICY.connect_timeout_seconds
+        + CONTROL_PLANE_DB_POLICY.statement_timeout_ms / 1_000
+    )
+    assert RECOVERY_DB_POLICY.lock_timeout_ms <= RECOVERY_DB_POLICY.statement_timeout_ms
+    assert RECOVERY_DB_POLICY.statement_timeout_ms < CONTROL_PLANE_DB_POLICY.statement_timeout_ms
+
+    root = Path(__file__).parents[2] / "src" / "polyarb" / "control_plane"
+    formal_consumers = (
+        "db_role_contract.py",
+        "postgres.py",
+        "qualification_store.py",
+        "qualification_service.py",
+        "recovery_store.py",
+        "runtime_event_writer.py",
+        "api.py",
+    )
+    offenders: list[str] = []
+    for name in formal_consumers:
+        source = (root / name).read_text()
+        if any(
+            private_copy in source
+            for private_copy in (
+                "_STATEMENT_TIMEOUT_MS =",
+                "_LOCK_TIMEOUT_MS =",
+                "_FENCED_MAX_STATEMENT_TIMEOUT_MS =",
+                "_FENCED_MAX_LOCK_TIMEOUT_MS =",
+                "_RECOVERY_STATEMENT_TIMEOUT_MS =",
+                "_RECOVERY_LOCK_TIMEOUT_MS =",
+                "'5000ms'",
+                "'1000ms'",
+            )
+        ):
+            offenders.append(name)
+    assert offenders == []
+
+
 def test_recovery_uses_persisted_policy_instead_of_renewed_deadline_arithmetic() -> None:
     row = {
         "policy_version": "runtime-v2",
@@ -625,12 +669,13 @@ def _complete_quote_certify(control_plane: PostgresControlPlane, *, now: datetim
             now=now + timedelta(seconds=index),
             terminal=True,
         )
-    lease = _claim(control_plane, "quote-certify", now=now)
-    _record_all_progress(control_plane, lease=lease, now=now)
+    certification_now = now + timedelta(seconds=len(batches))
+    lease = _claim(control_plane, "quote-certify", now=certification_now)
+    _record_all_progress(control_plane, lease=lease, now=certification_now)
     artifact_digest = control_plane.certify_quote_generation(
         lease,
         generation_key=batches[0].generation_key,
-        now=now + timedelta(seconds=2),
+        now=certification_now + timedelta(seconds=1),
     )
     assert len(artifact_digest) == 64
     return lease

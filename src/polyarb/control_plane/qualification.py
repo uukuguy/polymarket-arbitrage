@@ -304,6 +304,7 @@ class QualificationDecision:
     successful_count: int | None = None
     signature_counts: tuple[tuple[str, int], ...] = ()
     recovery_confirmed_at: datetime | None = None
+    pending_recovery_started: bool = False
 
     def __post_init__(self) -> None:
         if type(self.state) is not QualificationState:
@@ -344,6 +345,8 @@ class QualificationDecision:
             value = getattr(self, field)
             if value is not None:
                 _non_negative(value, field=field)
+        if type(self.pending_recovery_started) is not bool:
+            raise QualificationError("pending_recovery_started must be a boolean")
         facts = tuple(self.facts)
         if any(type(fact) is not QualificationFact for fact in facts):
             raise QualificationError("facts must contain QualificationFact values")
@@ -359,6 +362,16 @@ class QualificationDecision:
             raise QualificationError("fact digests do not match facts")
         object.__setattr__(self, "facts", facts)
         object.__setattr__(self, "fact_digests", expected_digests)
+        if facts:
+            pending_recovery_started = False
+            for fact in facts:
+                if fact.reason == "recovery.started":
+                    pending_recovery_started = True
+                elif fact.reason in CONTAINED_REASONS or (
+                    fact.reason == "recovery.confirmed" and fact.recovery_confirmed
+                ):
+                    pending_recovery_started = False
+            object.__setattr__(self, "pending_recovery_started", pending_recovery_started)
         if self.last_fact_at is None and facts:
             object.__setattr__(self, "last_fact_at", facts[-1].observed_at)
         if self.state is QualificationState.QUALIFIED and self.qualified_at is None:
@@ -378,6 +391,7 @@ class QualificationDecision:
                 or self.successful_count is not None
                 or self.signature_counts
                 or self.recovery_confirmed_at is not None
+                or self.pending_recovery_started
             ):
                 raise QualificationError(
                     "recovering decision may carry only previous epoch identity"
@@ -707,6 +721,11 @@ class RollingQualificationPolicy:
         contained = current.contained_recoveries
         if fact.reason in CONTAINED_REASONS:
             contained = (*contained, fact.fact_id)
+        pending_recovery_started = current.pending_recovery_started
+        if fact.reason == "recovery.started":
+            pending_recovery_started = True
+        elif fact.reason in CONTAINED_REASONS or self._is_recovery_confirmation(fact):
+            pending_recovery_started = False
         progress_count = current.progress_count
         if fact.progress_count is not None:
             progress_count = fact.progress_count
@@ -727,6 +746,7 @@ class RollingQualificationPolicy:
             progress_count=progress_count,
             successful_count=successful_count,
             signature_counts=tuple(sorted(signatures.items())),
+            pending_recovery_started=pending_recovery_started,
         )
 
     def _open_recovered_epoch(
@@ -782,15 +802,7 @@ class RollingQualificationPolicy:
 
     @staticmethod
     def _has_pending_recovery_start(state: QualificationDecision) -> bool:
-        for fact in reversed(state.facts):
-            if fact.reason == "recovery.started":
-                return True
-            if (
-                fact.reason in CONTAINED_REASONS
-                or RollingQualificationPolicy._is_recovery_confirmation(fact)
-            ):
-                return False
-        return False
+        return state.pending_recovery_started
 
     @staticmethod
     def _derive_epoch_id(

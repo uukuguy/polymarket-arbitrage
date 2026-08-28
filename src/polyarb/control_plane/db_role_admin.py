@@ -24,7 +24,7 @@ from polyarb.control_plane.db_role_contract import (
 
 RUNTIME_PROFILE = "runtime-controller"
 QUALIFICATION_PROFILE = "qualification-worker"
-EXPECTED_REVISION = "029"
+EXPECTED_REVISION = "030"
 ADMIN_DSN_ENV = "POLYARB_CONTROL_PLANE_DB_ADMIN_DSN"
 RUNTIME_PASSWORD_ENV = "POLYARB_RUNTIME_CONTROLLER_DB_PASSWORD"
 QUALIFICATION_PASSWORD_ENV = "POLYARB_QUALIFICATION_WORKER_DB_PASSWORD"
@@ -439,9 +439,7 @@ def _require_capability_roles_safe(
             if login_role in snapshot.roles or require_provisioned
             else frozenset()
         )
-        actual_incoming_options = snapshot.incoming_membership_options.get(
-            role_name, frozenset()
-        )
+        actual_incoming_options = snapshot.incoming_membership_options.get(role_name, frozenset())
         allowed_incoming_options = (
             login_incoming_options,
             login_incoming_options | frozenset({SUPABASE_CREATOR_MEMBERSHIP}),
@@ -484,14 +482,11 @@ def _require_login_roles_safe(snapshot: AdminRoleSnapshot) -> None:
             login_role,
             frozenset(),
         )
-        if (
-            incoming_options
-            not in (
-                frozenset(),
-                frozenset({SUPABASE_CREATOR_MEMBERSHIP}),
-            )
-            or snapshot.incoming_members.get(login_role, frozenset())
-            != frozenset(item[0] for item in incoming_options)
+        if incoming_options not in (
+            frozenset(),
+            frozenset({SUPABASE_CREATOR_MEMBERSHIP}),
+        ) or snapshot.incoming_members.get(login_role, frozenset()) != frozenset(
+            item[0] for item in incoming_options
         ):
             _fail("database-role-admin.membership-unsafe", login_role)
         if snapshot.owned_objects.get(login_role, frozenset()):
@@ -587,9 +582,7 @@ def _create_or_rotate_login(
         _require_single_login_safe(snapshot, login_role, capability_role)
         attributes, _memberships = snapshot
         if not attributes.can_login:
-            cursor.execute(
-                sql.SQL("ALTER ROLE {} LOGIN").format(sql.Identifier(login_role))
-            )
+            cursor.execute(sql.SQL("ALTER ROLE {} LOGIN").format(sql.Identifier(login_role)))
         cursor.execute(
             sql.SQL("ALTER ROLE {} PASSWORD {}").format(
                 sql.Identifier(login_role), sql.Literal(password)

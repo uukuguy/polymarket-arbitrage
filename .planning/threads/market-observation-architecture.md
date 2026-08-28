@@ -1979,3 +1979,42 @@ success is not user receipt/read evidence.
   server execution/lock bounds, and a bounded result shape. Wrapping an
   unbounded read in another arbitrary wall-clock timeout only hides which of
   those contracts failed.
+
+### §2.41 Active evidence must be normalized, not rewritten as state (2026-08-28)
+
+- Fixing one status query did not close the chain. Coordinator canary exposed
+  `operational_snapshot()` selecting the same growth columns, while the active
+  qualification writer still reread and rewrote the complete epoch JSON each
+  tick. That is O(n²) lifecycle work and another delayed single-point failure.
+- Revision 030 separates state from history. Each fact is an immutable ordered
+  row; the epoch mutates only fixed-size lifecycle fields and counters. Restart
+  reconstructs policy state in 500-row pages and verifies the replay against
+  persisted scalars. Cursor CAS rejects source divergence; epoch version CAS
+  rejects a stale in-memory replay even when the cursor happens to match.
+- Terminal history materializes once in memory for invalidated/qualified
+  evidence. Certificate insert/reverify compares only scalar epoch projections;
+  the append-only fact relation remains the independent replay source. A canary failure must roll the Machine back to
+  its prior digest/state before implementation continues; mixed release state
+  is not acceptable evidence.
+
+### §2.42 Timeout authority and DAG eligibility must be durable (2026-08-28)
+
+- The runtime-v2 audit separated four authorities: attempt/progress watchdogs
+  own a claimed attempt, DB deadlines own one I/O, terminal grace owns service
+  exit, and cadence waits own only the next scheduling time. An outer wrapper
+  may not terminate a lower-level lifecycle merely because its number is
+  shorter.
+- `asyncio.to_thread` is unsafe as a last-resort isolation boundary because
+  `asyncio.run()` joins the default executor during shutdown. Formal blocking
+  calls now use one daemon bridge: first cancellation drains within central
+  grace, second cancellation detaches and prevents cleanup from starting new
+  terminal I/O. Quote's async reader obeys the same second-cancel authority.
+- A topological scheduler order cannot prevent sibling processes from claiming
+  a successor. Structure/Quote certifiers now start `waiting`; the final
+  terminal receipt atomically wakes the barrier only when durable receipt and
+  input counts match. Real PostgreSQL connections prove the before/after claim
+  boundary; the certifier still validates every identity as defense in depth.
+- Database connect/statement/lock limits are one ordered policy applied at
+  session entry. Fenced transactions may tighten the policy to remaining lease
+  time, while API request envelopes must cover connect plus statement rather
+  than contradict them.

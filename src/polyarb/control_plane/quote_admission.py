@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from polyarb.config import Settings
 
 from .alert_delivery import incident_alert_channels
+from .blocking_bridge import run_blocking_call
 from .models import QuoteBatchLeg, QuoteBatchSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .quote_artifact import QuoteBatchInputArtifact, upload_quote_batch_artifact
@@ -150,60 +151,25 @@ class _AdmissionCheckpointArtifact:
         return artifact
 
 
-async def _drain_thread_task(task: asyncio.Task[Any]) -> Any:
-    """Await a worker thread to completion, even while cancellation is pending."""
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            continue
-    return task.result()
-
-
 async def _to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Run blocking work without abandoning its thread when the owner cancels."""
-    task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        try:
-            await _drain_thread_task(task)
-        except BaseException as error:
-            # Retrieve the underlying exception so the executor task is never
-            # left unobserved, while preserving the caller's cancellation.
-            raise cancellation from error
-        raise
-
-
-def _consume_cancellation() -> None:
-    """Consume cancellation already delivered to a point-of-no-return owner."""
-    task = asyncio.current_task()
-    if task is None:
-        return
-    while task.cancelling():
-        task.uncancel()
+    """Run nonterminal blocking work under the shared service boundary."""
+    return await run_blocking_call(
+        call,
+        *args,
+        thread_name="quote-admission:blocking-call",
+        **kwargs,
+    )
 
 
 async def _terminal_to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Drain a terminal DB call and return committed success after cancellation.
-
-    Terminal admission is the point of no return: once cancellation reaches
-    the owner, the database call is allowed to finish.  A committed result
-    wins over the cancellation so the scheduler cannot report a timeout for
-    work that is already durable; a real terminal error remains authoritative.
-    """
-    task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        _consume_cancellation()
-        try:
-            result = await _drain_thread_task(task)
-        except BaseException as error:
-            _consume_cancellation()
-            raise error from cancellation
-        _consume_cancellation()
-        return result
+    """Allow a terminal admission call to finish only within stop grace."""
+    return await run_blocking_call(
+        call,
+        *args,
+        point_of_no_return=True,
+        thread_name="quote-admission:terminal-call",
+        **kwargs,
+    )
 
 
 class _ObjectClient(Protocol):
@@ -372,7 +338,6 @@ class TransactionalQuoteAdmitter:
             async with runtime:
                 return await self._run_claimed(runtime)
         except asyncio.CancelledError:
-            _consume_cancellation()
             await _terminal_to_thread(
                 self._control_plane.finish_retryable_with_incident,
                 runtime.current_lease,

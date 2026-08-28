@@ -388,6 +388,30 @@ def test_quote_batch_scheduler_cancellation_drains_reader_without_late_receipt()
     asyncio.run(scenario())
 
 
+def test_quote_reader_second_cancellation_is_terminal_grace_expiry() -> None:
+    from polyarb.control_plane.quote_worker import _await_reader
+
+    async def scenario() -> None:
+        reader = BlockingReader()
+        task = asyncio.create_task(_await_reader(reader, ["token-a"], timeout_seconds=60))
+        await reader.started.wait()
+        loop = asyncio.get_running_loop()
+        safety_release = loop.call_later(0.4, reader.release.set)
+        started_at = loop.time()
+        try:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert loop.time() - started_at < 0.2
+        finally:
+            safety_release.cancel()
+            reader.release.set()
+
+    asyncio.run(scenario())
+
+
 def test_quote_batch_terminal_commit_has_no_heartbeat_race() -> None:
     class TerminalProbeControlPlane(FakeControlPlane):
         terminal_heartbeat_count: int | None = None

@@ -7,7 +7,6 @@ import os
 from collections.abc import Sequence
 from typing import Any
 
-import psycopg
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -16,6 +15,9 @@ from starlette.routing import Route
 
 from polyarb.http.control_plane import control_plane_status
 
+from .blocking_bridge import run_blocking_call_with_timeout
+from .db_deadlines import CONTROL_PLANE_DB_POLICY
+from .db_role_contract import scoped_connection_factory
 from .postgres import PostgresControlPlane
 
 
@@ -44,9 +46,14 @@ async def current_opportunities(request: Request) -> JSONResponse:
         after_group_id = request.query_params.get("after_group_id", "")
         if not 1 <= limit <= 500 or len(after_group_id) > 256 or "\x00" in after_group_id:
             raise ValueError("invalid-opportunity-page")
-        return JSONResponse(
-            control_plane.current_opportunities(limit=limit, after_group_id=after_group_id)
+        projection = await run_blocking_call_with_timeout(
+            control_plane.current_opportunities,
+            limit=limit,
+            after_group_id=after_group_id,
+            timeout_seconds=CONTROL_PLANE_DB_POLICY.request_timeout_seconds,
+            thread_name="control-plane-api:opportunity-read",
         )
+        return JSONResponse(projection)
     except ValueError:
         return JSONResponse({"error": "invalid opportunity page"}, status_code=400)
     except Exception:
@@ -70,8 +77,8 @@ def create_control_plane_app(*, control_plane: Any | None) -> Starlette:
 
 
 def _build_control_plane(dsn: str) -> PostgresControlPlane:
-    """Build the standalone API's Postgres client with a bounded connect."""
-    return PostgresControlPlane(lambda: psycopg.connect(dsn, connect_timeout=5))
+    """Build the API with the same bounded session contract as every daemon."""
+    return PostgresControlPlane(scoped_connection_factory(dsn))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

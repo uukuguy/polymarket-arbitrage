@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,8 +16,11 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from .blocking_bridge import run_blocking_call_until_stopped
+from .db_deadlines import CONTROL_PLANE_DB_POLICY
 from .qualification import (
     BREAKING_REASONS,
+    CONTAINED_REASONS,
     QualificationDecision,
     QualificationFact,
     QualificationState,
@@ -24,7 +28,6 @@ from .qualification import (
 )
 from .qualification_store import (
     QualificationCertificateRecord,
-    QualificationEpochRecord,
     canonical_certificate_bytes,
     certificate_digest,
     insert_qualification_certificate,
@@ -34,8 +37,6 @@ from .qualification_store import (
 
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
 
-_STATEMENT_TIMEOUT_MS = 5_000
-_LOCK_TIMEOUT_MS = 1_000
 _SOURCE_RANK_RUNTIME = 10
 _SOURCE_RANK_INCIDENT = 20
 _SOURCE_RANK_RECOVERY = 30
@@ -233,6 +234,28 @@ class _QualificationStatusEpoch:
     last_fact_record: QualificationFactRecord | None
 
 
+@dataclass(frozen=True, slots=True)
+class _RuntimeEpochProjection:
+    epoch_id: str
+    state: str
+    version: int
+    policy_version: str
+    release_id: str
+    config_id: str
+    role_identity: tuple[str, ...]
+    started_at: datetime
+    last_fact_at: datetime | None
+    invalidated_at: datetime | None
+    invalidation_reason: str | None
+    qualified_at: datetime | None
+    previous_epoch_id: str | None
+    coverage_seconds: int
+    max_gap_seconds: int
+    progress_count: int | None
+    successful_count: int | None
+    runtime_fact_count: int
+
+
 class QualificationFactSource(Protocol):
     def read_after(
         self,
@@ -395,9 +418,9 @@ class InMemoryQualificationStore:
         payload = qualification_certificate_payload(decision)
         digest = certificate_digest(payload)
         for certificate in self.certificates:
-            if certificate["digest"] == digest:
+            if certificate["certificate_digest"] == digest:
                 return certificate
-        certificate = {"digest": digest, "payload": payload}
+        certificate = {"certificate_digest": digest, "payload": payload}
         self.certificates.append(certificate)
         return certificate
 
@@ -479,7 +502,7 @@ class QualificationService:
             epoch_id=decision.epoch_id,
             state=decision.state,
             certificate_digest=(
-                None if certificate is None else cast(str, certificate.get("digest"))
+                None if certificate is None else cast(str, certificate.get("certificate_digest"))
             ),
         )
 
@@ -622,6 +645,7 @@ class PostgresQualificationServiceStore:
         self._current: QualificationDecision | None = None
         self._cursor: FactCursor | None = None
         self._last_applied_count = 0
+        self._version: int | None = None
 
     @property
     def cursor(self) -> FactCursor | None:
@@ -644,17 +668,21 @@ class PostgresQualificationServiceStore:
             connection.cursor(row_factory=dict_row) as cursor,
         ):
             _set_timeouts(cursor)
-            record = _fetch_current_epoch(cursor, policy=policy, for_update=False)
+            record = _fetch_current_runtime_epoch(cursor, policy=policy, for_update=False)
             cursor_record = _ensure_source_cursor_row(cursor, policy=policy, writer_id=None)
             if record is None:
                 decision = policy.new_epoch(started_at=observed_at)
                 _insert_epoch_cursor(
                     cursor, decision, source_cursor=None, fact_records=(), writer_id=None
                 )
-                record = _fetch_epoch(cursor, decision.epoch_id, for_update=False)
+                record = _fetch_runtime_epoch(cursor, decision.epoch_id, for_update=False)
                 if record is None:
                     raise QualificationServiceError("qualification epoch insert returned no row")
-            self._current = _decision_from_epoch(record)
+            records = _load_epoch_fact_records(
+                cursor, epoch_id=record.epoch_id, expected_count=record.runtime_fact_count
+            )
+            self._current = _decision_from_runtime_epoch(policy, record, records)
+            self._version = record.version
             self._cursor = FactCursor.from_json(
                 cast(Mapping[str, object] | None, cursor_record["source_cursor"])
             )
@@ -674,7 +702,7 @@ class PostgresQualificationServiceStore:
             connection.cursor(row_factory=dict_row) as cursor,
         ):
             _set_timeouts(cursor)
-            record = _fetch_current_epoch(cursor, policy=policy, for_update=True)
+            record = _fetch_current_runtime_epoch(cursor, policy=policy, for_update=True)
             if record is None:
                 raise QualificationServiceError("qualification epoch is missing")
             cursor_record = _ensure_source_cursor_row(
@@ -688,8 +716,15 @@ class PostgresQualificationServiceStore:
             )
             if persisted_cursor != expected_cursor:
                 raise QualificationCursorConflict("qualification cursor CAS failed")
-            current = _decision_from_epoch(record)
-            epoch_fact_records = list(_records_from_epoch(record))
+            if (
+                self._current is None
+                or self._version is None
+                or record.epoch_id != self._current.epoch_id
+                or record.version != self._version
+            ):
+                raise QualificationCursorConflict("qualification epoch CAS failed")
+            current = self._current
+            fact_count = record.runtime_fact_count
             source_cursor = persisted_cursor
             applied_count = 0
             for fact_record in sorted(records, key=lambda item: item.cursor):
@@ -716,30 +751,51 @@ class PostgresQualificationServiceStore:
                         raise QualificationServiceError(
                             "recovery confirmation did not open an accumulating epoch"
                         )
-                    epoch_fact_records = [fact_record]
                     _insert_epoch_cursor(
                         cursor,
                         current,
                         source_cursor=None,
-                        fact_records=epoch_fact_records,
+                        fact_records=(fact_record,),
                         writer_id=writer_id,
                     )
+                    current = _compact_active_decision(current)
+                    fact_count = 1
+                    self._version = 1
                 else:
                     current = policy.apply(current, fact_record.fact)
-                    epoch_fact_records.append(fact_record)
+                    fact_count += 1
+                    _append_epoch_fact_cursor(
+                        cursor,
+                        epoch_id=current.epoch_id,
+                        ordinal=fact_count,
+                        fact_record=fact_record,
+                    )
+                    terminal_records: Sequence[QualificationFactRecord] = ()
+                    if current.state in {
+                        QualificationState.INVALIDATED,
+                        QualificationState.QUALIFIED,
+                    }:
+                        terminal_records = _load_epoch_fact_records(
+                            cursor,
+                            epoch_id=current.epoch_id,
+                            expected_count=fact_count,
+                        )
+                        current = _materialize_terminal_decision(current, terminal_records)
+                    else:
+                        current = _compact_active_decision(current)
                     _update_epoch_cursor(
                         cursor,
                         current,
                         source_cursor=None,
-                        fact_records=epoch_fact_records,
+                        fact_count=fact_count,
                         writer_id=writer_id,
                     )
+                    self._version += 1
                     if current.state is QualificationState.INVALIDATED:
                         current = policy.recovering(
                             current,
                             started_at=current.invalidated_at or fact_record.fact.observed_at,
                         )
-                        epoch_fact_records = []
                         _insert_epoch_cursor(
                             cursor,
                             current,
@@ -747,6 +803,8 @@ class PostgresQualificationServiceStore:
                             fact_records=(),
                             writer_id=writer_id,
                         )
+                        fact_count = 0
+                        self._version = 1
                 source_cursor = fact_record.cursor
                 applied_count += 1
                 _update_source_cursor(
@@ -851,9 +909,27 @@ async def run_qualification_service(
     if interval_seconds <= 0:
         raise ValueError("interval_seconds must be positive")
     stop = stop_event or asyncio.Event()
+    if stop_event is None:
+        loop = asyncio.get_running_loop()
+        for stop_signal in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(stop_signal, stop.set)
+            except (NotImplementedError, RuntimeError):
+                pass
     ticks = 0
     while not stop.is_set():
-        result = await asyncio.to_thread(service.tick, datetime.now(UTC))
+        completed, result = await run_blocking_call_until_stopped(
+            service.tick,
+            datetime.now(UTC),
+            stop_event=stop,
+            grace_seconds=CONTROL_PLANE_DB_POLICY.stop_grace_seconds,
+            point_of_no_return=True,
+            thread_name="qualification:tick",
+        )
+        if not completed:
+            break
+        if not isinstance(result, QualificationTickResult):
+            raise TypeError("qualification tick returned an invalid result")
         ticks += 1
         if emit is not None:
             emit(_tick_payload(result))
@@ -1105,32 +1181,238 @@ def _is_recovery_confirmation_fact(fact: QualificationFact) -> bool:
 def _set_timeouts(cursor: psycopg.Cursor[Any]) -> None:
     cursor.execute(
         sql.SQL("SET LOCAL statement_timeout = {}").format(
-            sql.Literal(f"{_STATEMENT_TIMEOUT_MS}ms")
+            sql.Literal(CONTROL_PLANE_DB_POLICY.statement_setting)
         )
     )
     cursor.execute(
-        sql.SQL("SET LOCAL lock_timeout = {}").format(sql.Literal(f"{_LOCK_TIMEOUT_MS}ms"))
+        sql.SQL("SET LOCAL lock_timeout = {}").format(
+            sql.Literal(CONTROL_PLANE_DB_POLICY.lock_setting)
+        )
     )
 
 
-def _fetch_current_epoch(
+def _fetch_current_runtime_epoch(
     cursor: psycopg.Cursor[dict[str, Any]],
     *,
     policy: RollingQualificationPolicy,
     for_update: bool,
-) -> QualificationEpochRecord | None:
+) -> _RuntimeEpochProjection | None:
     identity_key = _identity_key(policy)
     cursor.execute(
-        "SELECT * FROM public.m1_qualification_epochs AS epoch WHERE identity_key = %s "
-        "AND (state IN ('accumulating', 'recovering') "
-        "OR (state = 'qualified' AND NOT EXISTS ("
-        "SELECT 1 FROM public.m1_qualification_certificates AS certificate "
-        "WHERE certificate.epoch_id = epoch.epoch_id))) "
-        "ORDER BY started_at DESC, epoch_id DESC LIMIT 1" + (" FOR UPDATE" if for_update else ""),
+        """
+        SELECT epoch_id, state, version, policy_version, release_id, config_id,
+               role_identity, started_at, last_fact_at, invalidated_at,
+               invalidation_reason, qualified_at, previous_epoch_id,
+               coverage_seconds, max_gap_seconds, progress_count, successful_count,
+               runtime_fact_count
+        FROM public.m1_qualification_epochs AS epoch
+        WHERE identity_key = %s
+          AND (state IN ('accumulating', 'recovering')
+               OR (state = 'qualified' AND NOT EXISTS (
+                   SELECT 1 FROM public.m1_qualification_certificates AS certificate
+                   WHERE certificate.epoch_id = epoch.epoch_id
+               )))
+        ORDER BY started_at DESC, epoch_id DESC
+        LIMIT 1
+        """
+        + (" FOR UPDATE" if for_update else ""),
         (identity_key,),
     )
     row = cursor.fetchone()
-    return None if row is None else _epoch_from_row(row)
+    return None if row is None else _runtime_epoch_from_row(row)
+
+
+def _fetch_runtime_epoch(
+    cursor: psycopg.Cursor[dict[str, Any]], epoch_id: str, *, for_update: bool
+) -> _RuntimeEpochProjection | None:
+    cursor.execute(
+        """
+        SELECT epoch_id, state, version, policy_version, release_id, config_id,
+               role_identity, started_at, last_fact_at, invalidated_at,
+               invalidation_reason, qualified_at, previous_epoch_id,
+               coverage_seconds, max_gap_seconds, progress_count, successful_count,
+               runtime_fact_count
+        FROM public.m1_qualification_epochs
+        WHERE epoch_id = %s
+        """
+        + (" FOR UPDATE" if for_update else ""),
+        (epoch_id,),
+    )
+    row = cursor.fetchone()
+    return None if row is None else _runtime_epoch_from_row(row)
+
+
+def _runtime_epoch_from_row(row: Mapping[str, object]) -> _RuntimeEpochProjection:
+    return _RuntimeEpochProjection(
+        epoch_id=str(row["epoch_id"]),
+        state=str(row["state"]),
+        version=int(cast(int, row["version"])),
+        policy_version=str(row["policy_version"]),
+        release_id=str(row["release_id"]),
+        config_id=str(row["config_id"]),
+        role_identity=tuple(str(value) for value in cast(Sequence[object], row["role_identity"])),
+        started_at=_require_aware(cast(datetime, row["started_at"]), "started_at"),
+        last_fact_at=(
+            None
+            if row["last_fact_at"] is None
+            else _require_aware(cast(datetime, row["last_fact_at"]), "last_fact_at")
+        ),
+        invalidated_at=(
+            None
+            if row["invalidated_at"] is None
+            else _require_aware(cast(datetime, row["invalidated_at"]), "invalidated_at")
+        ),
+        invalidation_reason=(
+            None if row["invalidation_reason"] is None else str(row["invalidation_reason"])
+        ),
+        qualified_at=(
+            None
+            if row["qualified_at"] is None
+            else _require_aware(cast(datetime, row["qualified_at"]), "qualified_at")
+        ),
+        previous_epoch_id=(
+            None if row["previous_epoch_id"] is None else str(row["previous_epoch_id"])
+        ),
+        coverage_seconds=int(cast(int, row["coverage_seconds"])),
+        max_gap_seconds=int(cast(int, row["max_gap_seconds"])),
+        progress_count=(
+            None if row["progress_count"] is None else int(cast(int, row["progress_count"]))
+        ),
+        successful_count=(
+            None if row["successful_count"] is None else int(cast(int, row["successful_count"]))
+        ),
+        runtime_fact_count=int(cast(int, row["runtime_fact_count"])),
+    )
+
+
+def _load_epoch_fact_records(
+    cursor: psycopg.Cursor[dict[str, Any]], *, epoch_id: str, expected_count: int
+) -> tuple[QualificationFactRecord, ...]:
+    records: list[QualificationFactRecord] = []
+    after_ordinal = 0
+    while len(records) < expected_count:
+        cursor.execute(
+            """
+            SELECT ordinal, fact_record
+            FROM public.m1_qualification_epoch_facts
+            WHERE epoch_id = %s AND ordinal > %s
+            ORDER BY ordinal
+            LIMIT 500
+            """,
+            (epoch_id, after_ordinal),
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            break
+        for row in rows:
+            after_ordinal = int(cast(int, row["ordinal"]))
+            records.append(
+                QualificationFactRecord.from_json(cast(Mapping[str, object], row["fact_record"]))
+            )
+    if len(records) != expected_count:
+        raise QualificationServiceError("qualification epoch fact count conflicts")
+    return tuple(records)
+
+
+def _decision_from_runtime_epoch(
+    policy: RollingQualificationPolicy,
+    record: _RuntimeEpochProjection,
+    records: Sequence[QualificationFactRecord],
+) -> QualificationDecision:
+    if record.state == QualificationState.RECOVERING.value:
+        decision = QualificationDecision(
+            state=QualificationState.RECOVERING,
+            epoch_id=record.epoch_id,
+            started_at=record.started_at,
+            policy_version=record.policy_version,
+            release_id=record.release_id,
+            config_id=record.config_id,
+            role_identity=record.role_identity,
+            previous_epoch_id=record.previous_epoch_id,
+        )
+    else:
+        decision = QualificationDecision(
+            state=QualificationState.ACCUMULATING,
+            epoch_id=record.epoch_id,
+            started_at=record.started_at,
+            policy_version=record.policy_version,
+            release_id=record.release_id,
+            config_id=record.config_id,
+            role_identity=record.role_identity,
+            previous_epoch_id=record.previous_epoch_id,
+        )
+        for fact_record in records:
+            decision = policy.apply(decision, fact_record.fact)
+            if decision.state not in {
+                QualificationState.INVALIDATED,
+                QualificationState.QUALIFIED,
+            }:
+                decision = _compact_active_decision(decision)
+        if decision.state in {QualificationState.INVALIDATED, QualificationState.QUALIFIED}:
+            decision = _materialize_terminal_decision(decision, records)
+    if (
+        decision.state.value != record.state
+        or decision.last_fact_at != record.last_fact_at
+        or decision.coverage_seconds != record.coverage_seconds
+        or decision.max_gap_seconds != record.max_gap_seconds
+        or decision.progress_count != record.progress_count
+        or decision.successful_count != record.successful_count
+    ):
+        raise QualificationServiceError("qualification epoch replay conflicts")
+    return decision
+
+
+def _compact_active_decision(decision: QualificationDecision) -> QualificationDecision:
+    if decision.state in {QualificationState.INVALIDATED, QualificationState.QUALIFIED}:
+        return decision
+    return QualificationDecision(
+        state=decision.state,
+        epoch_id=decision.epoch_id,
+        started_at=decision.started_at,
+        policy_version=decision.policy_version,
+        release_id=decision.release_id,
+        config_id=decision.config_id,
+        role_identity=decision.role_identity,
+        last_fact_at=decision.last_fact_at,
+        previous_epoch_id=decision.previous_epoch_id,
+        contained_recoveries=decision.contained_recoveries,
+        max_gap_seconds=decision.max_gap_seconds,
+        coverage_seconds=decision.coverage_seconds,
+        progress_count=decision.progress_count,
+        successful_count=decision.successful_count,
+        signature_counts=decision.signature_counts,
+        recovery_confirmed_at=decision.recovery_confirmed_at,
+        pending_recovery_started=decision.pending_recovery_started,
+    )
+
+
+def _materialize_terminal_decision(
+    decision: QualificationDecision,
+    records: Sequence[QualificationFactRecord],
+) -> QualificationDecision:
+    return QualificationDecision(
+        state=decision.state,
+        epoch_id=decision.epoch_id,
+        started_at=decision.started_at,
+        policy_version=decision.policy_version,
+        release_id=decision.release_id,
+        config_id=decision.config_id,
+        role_identity=decision.role_identity,
+        last_fact_at=decision.last_fact_at,
+        invalidated_at=decision.invalidated_at,
+        invalidation_reason=decision.invalidation_reason,
+        qualified_at=decision.qualified_at,
+        previous_epoch_id=decision.previous_epoch_id,
+        facts=tuple(record.fact for record in records),
+        contained_recoveries=decision.contained_recoveries,
+        max_gap_seconds=decision.max_gap_seconds,
+        coverage_seconds=decision.coverage_seconds,
+        progress_count=decision.progress_count,
+        successful_count=decision.successful_count,
+        signature_counts=decision.signature_counts,
+        recovery_confirmed_at=decision.recovery_confirmed_at,
+        pending_recovery_started=decision.pending_recovery_started,
+    )
 
 
 def _fetch_latest_status_epoch(
@@ -1141,13 +1423,31 @@ def _fetch_latest_status_epoch(
         SELECT epoch.epoch_id, epoch.state, epoch.version, epoch.started_at,
                epoch.last_fact_at, epoch.invalidated_at, epoch.invalidation_reason,
                epoch.qualified_at, epoch.previous_epoch_id, epoch.max_gap_seconds,
-               epoch.status_last_fact_record AS last_fact_record,
-               epoch.status_recent_recoveries AS contained_recoveries,
-               epoch.status_recovery_count AS contained_recovery_count
+               latest.fact_record AS last_fact_record,
+               COALESCE(recent.fact_ids, '[]'::jsonb) AS contained_recoveries,
+               epoch.runtime_contained_recovery_count AS contained_recovery_count
         FROM public.m1_qualification_epochs AS epoch
+        LEFT JOIN LATERAL (
+            SELECT fact_record
+            FROM public.m1_qualification_epoch_facts
+            WHERE epoch_id = epoch.epoch_id
+            ORDER BY ordinal DESC
+            LIMIT 1
+        ) AS latest ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT jsonb_agg(fact_id ORDER BY ordinal) AS fact_ids
+            FROM (
+                SELECT fact_id, ordinal
+                FROM public.m1_qualification_epoch_facts
+                WHERE epoch_id = epoch.epoch_id AND reason = ANY(%s)
+                ORDER BY ordinal DESC
+                LIMIT 20
+            ) AS bounded_recoveries
+        ) AS recent ON TRUE
         ORDER BY epoch.updated_at DESC, epoch.epoch_id DESC
         LIMIT 1
-        """
+        """,
+        (list(CONTAINED_REASONS),),
     )
     row = cursor.fetchone()
     return None if row is None else _status_epoch_from_row(row)
@@ -1175,18 +1475,6 @@ def _fetch_epoch_breaker(
             else _require_aware(cast(datetime, row["invalidated_at"]), "invalidated_at").isoformat()
         ),
     }
-
-
-def _fetch_epoch(
-    cursor: psycopg.Cursor[dict[str, Any]], epoch_id: str, *, for_update: bool
-) -> QualificationEpochRecord | None:
-    cursor.execute(
-        "SELECT * FROM public.m1_qualification_epochs WHERE epoch_id = %s"
-        + (" FOR UPDATE" if for_update else ""),
-        (epoch_id,),
-    )
-    row = cursor.fetchone()
-    return None if row is None else _epoch_from_row(row)
 
 
 def _ensure_source_cursor_row(
@@ -1337,18 +1625,26 @@ def _insert_epoch_cursor(
             invalidation_reason, qualified_at, previous_epoch_id, fact_digests,
             contained_recoveries, coverage_seconds, max_gap_seconds, progress_count,
             successful_count, evidence_digest, required_seconds, slo,
-            contained_incident_details, recovery_action_details, writer_id,
+            contained_incident_details, recovery_action_details,
+            runtime_fact_count, runtime_contained_recovery_count, writer_id,
             source_cursor, fact_records
         ) VALUES (
             %s, %s, 1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
         )
         ON CONFLICT (epoch_id) DO NOTHING
         """,
         _epoch_values(
-            decision, source_cursor=source_cursor, fact_records=fact_records, writer_id=writer_id
+            decision,
+            source_cursor=source_cursor,
+            fact_count=len(fact_records),
+            writer_id=writer_id,
         ),
     )
+    for ordinal, fact_record in enumerate(fact_records, start=1):
+        _append_epoch_fact_cursor(
+            cursor, epoch_id=decision.epoch_id, ordinal=ordinal, fact_record=fact_record
+        )
 
 
 def _update_epoch_cursor(
@@ -1356,11 +1652,14 @@ def _update_epoch_cursor(
     decision: QualificationDecision,
     *,
     source_cursor: FactCursor | None,
-    fact_records: Sequence[QualificationFactRecord],
+    fact_count: int,
     writer_id: str,
 ) -> None:
     values = _epoch_values(
-        decision, source_cursor=source_cursor, fact_records=fact_records, writer_id=writer_id
+        decision,
+        source_cursor=source_cursor,
+        fact_count=fact_count,
+        writer_id=writer_id,
     )
     cursor.execute(
         """
@@ -1373,6 +1672,7 @@ def _update_epoch_cursor(
             coverage_seconds = %s, max_gap_seconds = %s, progress_count = %s,
             successful_count = %s, evidence_digest = %s, required_seconds = %s,
             slo = %s, contained_incident_details = %s, recovery_action_details = %s,
+            runtime_fact_count = %s, runtime_contained_recovery_count = %s,
             writer_id = %s, source_cursor = %s, fact_records = %s,
             updated_at = clock_timestamp()
         WHERE epoch_id = %s
@@ -1387,7 +1687,7 @@ def _epoch_values(
     decision: QualificationDecision,
     *,
     source_cursor: FactCursor | None,
-    fact_records: Sequence[QualificationFactRecord],
+    fact_count: int,
     writer_id: str | None,
 ) -> tuple[object, ...]:
     evidence = _derived_epoch_evidence(decision)
@@ -1405,8 +1705,8 @@ def _epoch_values(
         decision.invalidation_reason,
         decision.qualified_at,
         decision.previous_epoch_id,
-        Jsonb([list(item) for item in decision.fact_digests]),
-        Jsonb(list(decision.contained_recoveries)),
+        Jsonb([]),
+        Jsonb([]),
         decision.coverage_seconds,
         decision.max_gap_seconds,
         decision.progress_count,
@@ -1416,41 +1716,53 @@ def _epoch_values(
         Jsonb(evidence["slo"]),
         Jsonb(evidence["contained_incidents"]),
         Jsonb(evidence["recovery_actions"]),
+        fact_count,
+        len(decision.contained_recoveries),
         writer_id,
         None if source_cursor is None else Jsonb(source_cursor.to_json()),
-        Jsonb([record.to_json() for record in fact_records]),
+        Jsonb([]),
     )
 
 
-def _decision_from_epoch(record: QualificationEpochRecord) -> QualificationDecision:
-    facts = tuple(record.fact for record in _records_from_epoch(record))
-    return QualificationDecision(
-        state=QualificationState(record.state),
-        epoch_id=record.epoch_id,
-        started_at=record.started_at,
-        policy_version=record.policy_version,
-        release_id=record.release_id,
-        config_id=record.config_id,
-        role_identity=record.role_identity,
-        last_fact_at=record.last_fact_at,
-        invalidated_at=record.invalidated_at,
-        invalidation_reason=record.invalidation_reason,
-        qualified_at=record.qualified_at,
-        previous_epoch_id=record.previous_epoch_id,
-        facts=facts,
-        contained_recoveries=record.contained_recoveries,
-        max_gap_seconds=record.max_gap_seconds,
-        coverage_seconds=record.coverage_seconds,
-        progress_count=record.progress_count,
-        successful_count=record.successful_count,
+def _append_epoch_fact_cursor(
+    cursor: psycopg.Cursor[dict[str, Any]],
+    *,
+    epoch_id: str,
+    ordinal: int,
+    fact_record: QualificationFactRecord,
+) -> None:
+    payload = fact_record.to_json()
+    cursor.execute(
+        """
+        INSERT INTO public.m1_qualification_epoch_facts (
+            epoch_id, ordinal, fact_id, reason, observed_at, fact_record
+        ) VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (epoch_id, ordinal) DO NOTHING
+        """,
+        (
+            epoch_id,
+            ordinal,
+            fact_record.fact.fact_id,
+            fact_record.fact.reason,
+            fact_record.fact.observed_at,
+            Jsonb(payload),
+        ),
     )
-
-
-def _records_from_epoch(record: QualificationEpochRecord) -> tuple[QualificationFactRecord, ...]:
-    return tuple(
-        QualificationFactRecord.from_json(cast(Mapping[str, object], value))
-        for value in cast(Sequence[object], record.fact_records)
+    cursor.execute(
+        """
+        SELECT fact_id, fact_record
+        FROM public.m1_qualification_epoch_facts
+        WHERE epoch_id = %s AND ordinal = %s
+        """,
+        (epoch_id, ordinal),
     )
+    persisted = cursor.fetchone()
+    if (
+        persisted is None
+        or str(persisted["fact_id"]) != fact_record.fact.fact_id
+        or persisted["fact_record"] != payload
+    ):
+        raise QualificationCursorConflict("qualification epoch fact conflicts")
 
 
 def _derived_epoch_evidence(decision: QualificationDecision) -> dict[str, object]:
@@ -1485,12 +1797,6 @@ def _derived_epoch_evidence(decision: QualificationDecision) -> dict[str, object
         "contained_incidents": [],
         "recovery_actions": [],
     }
-
-
-def _epoch_from_row(row: Mapping[str, object]) -> QualificationEpochRecord:
-    from .qualification_store import _epoch_from_row as store_epoch_from_row
-
-    return store_epoch_from_row(row)
 
 
 def _identity_key(value: RollingQualificationPolicy | QualificationDecision) -> str:
@@ -1564,7 +1870,7 @@ def _last_fact_projection(records: Sequence[QualificationFactRecord]) -> dict[st
 
 
 def _epoch_breaker_projection(
-    record: QualificationEpochRecord | _QualificationStatusEpoch,
+    record: _QualificationStatusEpoch,
 ) -> dict[str, object] | None:
     if record.invalidation_reason is None:
         return None

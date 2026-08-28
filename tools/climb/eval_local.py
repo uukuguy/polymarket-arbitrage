@@ -509,7 +509,7 @@ BOUNDED_OPERATOR_TRUTH_SURFACES_GATE_COMMANDS = {
         "tests/m1-perception/test_control_plane_dashboard_contract.py::test_control_plane_decoder_rejects_malformed_operator_facts",
         "tests/m1-perception/test_control_plane_postgres.py::test_runtime_read_model_rejects_unknown_review_vocab_from_postgres",
         "tests/m1-perception/test_control_plane_postgres.py::test_runtime_read_model_rejects_unknown_active_task_registry_values",
-        "tests/m1-perception/test_control_plane_postgres.py::test_qualification_read_model_rejects_malformed_epoch_json",
+        "tests/m1-perception/test_control_plane_qualification_service.py::test_qualification_status_never_transfers_unbounded_epoch_evidence",
         "-q",
     ],
     "integration": [

@@ -14,6 +14,7 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from .db_deadlines import CONTROL_PLANE_DB_POLICY
 from .qualification import (
     CONTAINED_REASONS,
     QualificationDecision,
@@ -23,8 +24,6 @@ from .qualification import (
 
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
 
-_STATEMENT_TIMEOUT_MS = 5_000
-_LOCK_TIMEOUT_MS = 1_000
 _CERTIFICATE_REQUIRED_KEYS = frozenset(
     {
         "identity",
@@ -37,6 +36,20 @@ _CERTIFICATE_REQUIRED_KEYS = frozenset(
         "policy_version",
     }
 )
+_CERTIFICATE_EPOCH_PROJECTION_SQL = """
+    SELECT epoch_id, state, version, identity_key, policy_version, release_id,
+           config_id, role_identity, started_at, last_fact_at, invalidated_at,
+           invalidation_reason, qualified_at, previous_epoch_id,
+           '[]'::jsonb AS fact_digests,
+           '[]'::jsonb AS contained_recoveries,
+           coverage_seconds, max_gap_seconds, progress_count, successful_count,
+           evidence_digest, required_seconds, slo, contained_incident_details,
+           recovery_action_details, source_cursor,
+           '[]'::jsonb AS fact_records,
+           writer_id, created_at, updated_at
+    FROM public.m1_qualification_epochs
+    WHERE epoch_id = %s
+"""
 _IDENTITY_REQUIRED_KEYS = frozenset(
     {"epoch_id", "policy_version", "release_id", "config_id", "role_identity"}
 )
@@ -370,12 +383,12 @@ def insert_qualification_certificate(
     evidence_digest = cast(str, normalized["evidence_digest"])
     with connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
         _set_timeouts(cursor)
-        epoch = _fetch_epoch_cursor(cursor, epoch_id=epoch_id, for_update=True)
+        epoch = _fetch_certificate_epoch_cursor(cursor, epoch_id=epoch_id, for_update=True)
         if epoch is None:
             raise QualificationStoreError(f"qualification epoch {epoch_id!r} is missing")
         if epoch.state != QualificationState.QUALIFIED.value or epoch.qualified_at is None:
             raise QualificationCertificateConflict("qualification epoch is not qualified")
-        if not _epoch_matches_decision(epoch, decision, _epoch_identity_key(decision)):
+        if not _epoch_matches_certificate_decision(epoch, decision, _epoch_identity_key(decision)):
             raise QualificationCertificateConflict("qualification decision conflicts with epoch")
         _assert_certificate_matches_epoch(normalized, epoch)
         existing = _fetch_certificate_by_identity_cursor(cursor, identity_key=identity_key)
@@ -573,11 +586,13 @@ def _contained_fact_payload(fact: QualificationFact) -> dict[str, object]:
 def _set_timeouts(cursor: psycopg.Cursor[Any]) -> None:
     cursor.execute(
         sql.SQL("SET LOCAL statement_timeout = {}").format(
-            sql.Literal(f"{_STATEMENT_TIMEOUT_MS}ms")
+            sql.Literal(CONTROL_PLANE_DB_POLICY.statement_setting)
         )
     )
     cursor.execute(
-        sql.SQL("SET LOCAL lock_timeout = {}").format(sql.Literal(f"{_LOCK_TIMEOUT_MS}ms"))
+        sql.SQL("SET LOCAL lock_timeout = {}").format(
+            sql.Literal(CONTROL_PLANE_DB_POLICY.lock_setting)
+        )
     )
 
 
@@ -809,7 +824,7 @@ def _verify_certificate_record(
         raise QualificationCertificateConflict("qualification certificate id conflict")
     if record.identity_key != identity_key:
         raise QualificationCertificateConflict("qualification certificate identity key conflict")
-    epoch = _fetch_epoch_cursor(cursor, epoch_id=record.epoch_id, for_update=False)
+    epoch = _fetch_certificate_epoch_cursor(cursor, epoch_id=record.epoch_id, for_update=False)
     if epoch is None:
         raise QualificationCertificateConflict("qualification certificate epoch is missing")
     _assert_certificate_matches_epoch(normalized, epoch)
@@ -858,6 +873,37 @@ def _epoch_matches_decision(
     )
 
 
+def _epoch_matches_certificate_decision(
+    record: QualificationEpochRecord,
+    decision: QualificationDecision,
+    identity_key: str,
+) -> bool:
+    evidence = _decision_derived_evidence(decision)
+    return (
+        record.state == decision.state.value
+        and record.identity_key == identity_key
+        and record.policy_version == decision.policy_version
+        and record.release_id == decision.release_id
+        and record.config_id == decision.config_id
+        and record.role_identity == decision.role_identity
+        and record.started_at == decision.started_at
+        and record.last_fact_at == decision.last_fact_at
+        and record.invalidated_at == decision.invalidated_at
+        and record.invalidation_reason == decision.invalidation_reason
+        and record.qualified_at == decision.qualified_at
+        and record.previous_epoch_id == decision.previous_epoch_id
+        and record.coverage_seconds == decision.coverage_seconds
+        and record.max_gap_seconds == decision.max_gap_seconds
+        and record.progress_count == decision.progress_count
+        and record.successful_count == decision.successful_count
+        and record.evidence_digest == evidence["evidence_digest"]
+        and record.required_seconds == evidence["required_seconds"]
+        and record.slo == evidence["slo"]
+        and list(record.contained_incident_details) == evidence["contained_incidents"]
+        and list(record.recovery_action_details) == evidence["recovery_actions"]
+    )
+
+
 def _fetch_epoch_cursor(
     cursor: psycopg.Cursor[Any],
     *,
@@ -867,6 +913,20 @@ def _fetch_epoch_cursor(
     cursor.execute(
         "SELECT * FROM public.m1_qualification_epochs WHERE epoch_id = %s"
         + (" FOR UPDATE" if for_update else ""),
+        (epoch_id,),
+    )
+    row = cursor.fetchone()
+    return None if row is None else _epoch_from_row(row)
+
+
+def _fetch_certificate_epoch_cursor(
+    cursor: psycopg.Cursor[Any],
+    *,
+    epoch_id: str,
+    for_update: bool,
+) -> QualificationEpochRecord | None:
+    cursor.execute(
+        _CERTIFICATE_EPOCH_PROJECTION_SQL + (" FOR UPDATE" if for_update else ""),
         (epoch_id,),
     )
     row = cursor.fetchone()

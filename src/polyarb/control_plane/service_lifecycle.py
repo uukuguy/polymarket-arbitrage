@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import threading
 from collections.abc import Awaitable
 from typing import Any, Protocol
 
+from .blocking_bridge import run_blocking_call
 from .runtime_deadlines import runtime_policy
 
 
@@ -25,14 +25,16 @@ _WORKER_JOB_TYPES = {
     "quote-certify": "quote-certify",
     "opportunity-certify": "opportunity-certify",
 }
-_UNFENCED_ADMISSION_GRACE_SECONDS = 3
 
 
 def terminal_grace_seconds(worker_name: str, worker: Worker) -> float:
     """Resolve stop grace from the same policy as the worker's durable lease."""
     job_type = _WORKER_JOB_TYPES.get(worker_name)
     if job_type is None:
-        return float(_UNFENCED_ADMISSION_GRACE_SECONDS)
+        declared_grace = getattr(worker, "_terminal_grace_seconds", None)
+        if not isinstance(declared_grace, int | float) or declared_grace <= 0:
+            raise ValueError(f"{worker_name} worker has no declared terminal grace policy")
+        return float(declared_grace)
     lease_seconds = getattr(worker, "_lease_seconds", 3)
     if not isinstance(lease_seconds, int) or lease_seconds <= 0:
         raise ValueError(f"{worker_name} worker lease must be a positive integer")
@@ -51,41 +53,16 @@ async def run_worker(worker: Worker) -> Any:
     if inspect.iscoroutinefunction(worker.run_once):
         return await worker.run_once()
 
-    loop = asyncio.get_running_loop()
-    bridge: asyncio.Future[Any] = loop.create_future()
+    def invoke() -> Any:
+        return_value = worker.run_once()
+        if isinstance(return_value, Awaitable):
+            return asyncio.run(return_value)
+        return return_value
 
-    def publish_result(result: Any = None, error: BaseException | None = None) -> None:
-        if bridge.done():
-            return
-        if error is None:
-            bridge.set_result(result)
-        else:
-            bridge.set_exception(error)
-
-    def schedule_result(result: Any = None, error: BaseException | None = None) -> None:
-        try:
-            loop.call_soon_threadsafe(publish_result, result, error)
-        except RuntimeError:
-            # The service already returned after grace and its loop is closed.
-            # The durable lease fence, not this in-memory result, is authority.
-            pass
-
-    def invoke() -> None:
-        try:
-            result = worker.run_once()
-            if isinstance(result, Awaitable):
-                result = asyncio.run(result)
-        except BaseException as error:
-            schedule_result(None, error)
-        else:
-            schedule_result(result, None)
-
-    threading.Thread(
-        target=invoke,
-        name=f"transactional-worker:{type(worker).__name__}",
-        daemon=True,
-    ).start()
-    return await bridge
+    return await run_blocking_call(
+        invoke,
+        thread_name=f"transactional-worker:{type(worker).__name__}",
+    )
 
 
 async def drain_worker_task(
@@ -98,8 +75,9 @@ async def drain_worker_task(
     request_stop = getattr(worker, "request_stop", None)
     if callable(request_stop):
         request_stop()
-    if inspect.iscoroutinefunction(worker.run_once):
-        task.cancel()
+    # First cancellation requests the worker's safe terminal path. Blocking
+    # bridges and async workers both receive exactly the same grace window.
+    task.cancel()
 
     done, _pending = await asyncio.wait(
         (task,), timeout=terminal_grace_seconds(worker_name, worker)
@@ -108,21 +86,16 @@ async def drain_worker_task(
         await asyncio.gather(task, return_exceptions=True)
         return True
 
-    # A sync call cannot be killed safely inside CPython.  Detach only after
-    # its centrally-derived grace; its still-current lease and checkpoints are
-    # the recoverable fact, and fencing prevents a late terminal commit after
-    # takeover.  Cancelling the bridge lets the service event loop terminate.
+    # The second cancellation is the one authoritative grace-expiry signal.
+    # Blocking calls detach their daemon bridge; async cleanup may no longer
+    # begin another terminal I/O call. Durable lease fencing owns late work.
     task.cancel()
-    await asyncio.sleep(0)
-    if not task.done():
-        task.add_done_callback(_consume_task_result)
+    await asyncio.gather(task, return_exceptions=True)
     return False
 
 
-def _consume_task_result(task: asyncio.Task[Any]) -> None:
-    if task.cancelled():
-        return
-    task.exception()
-
-
-__all__ = ["drain_worker_task", "run_worker", "terminal_grace_seconds"]
+__all__ = [
+    "drain_worker_task",
+    "run_worker",
+    "terminal_grace_seconds",
+]

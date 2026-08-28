@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
-from threading import Event
+from threading import Event, Thread
 from time import monotonic
 from typing import Any, Protocol, cast
 
@@ -17,6 +17,7 @@ from polyarb.routing.neg_risk_quote_collector import BooksReader, _build_termina
 from polyarb.routing.neg_risk_quote_store import UniverseLeg
 
 from .alert_delivery import incident_alert_channels
+from .blocking_bridge import run_blocking_call
 from .faults import IntentionalStagingRetryFault
 from .models import JobLease, JobState, QuoteBatchSpec
 from .postgres import (
@@ -48,50 +49,48 @@ class _ObjectClient(Protocol):
 
 
 async def _drain_task(task: asyncio.Task[Any]) -> Any:
-    """Drain a task after cancellation so no external effect is abandoned."""
+    """Drain once; a repeated cancellation is terminal-grace expiry."""
+    current = asyncio.current_task()
+    was_cancelled = current is not None and current.cancelling() > 0
     while not task.done():
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
-            continue
+            if was_cancelled:
+                task.cancel()
+                task.add_done_callback(_consume_task_result)
+                raise
+            was_cancelled = True
+            if current is not None and current.cancelling():
+                current.uncancel()
     return task.result()
 
 
-async def _to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Run blocking R2/DB work without abandoning its executor thread."""
-    task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        try:
-            await _drain_task(task)
-        except BaseException as error:
-            raise cancellation from error
-        raise
-
-
-def _consume_cancellation() -> None:
-    task = asyncio.current_task()
-    if task is None:
+def _consume_task_result(task: asyncio.Task[Any]) -> None:
+    if task.cancelled():
         return
-    while task.cancelling():
-        task.uncancel()
+    task.exception()
+
+
+async def _to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run nonterminal blocking work under the shared service boundary."""
+    return await run_blocking_call(
+        call,
+        *args,
+        thread_name="quote-batch:blocking-call",
+        **kwargs,
+    )
 
 
 async def _terminal_to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Drain a point-of-no-return transaction before returning its result."""
-    task = asyncio.create_task(asyncio.to_thread(call, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        _consume_cancellation()
-        try:
-            result = await _drain_task(task)
-        except BaseException as error:
-            _consume_cancellation()
-            raise error from cancellation
-        _consume_cancellation()
-        return result
+    """Allow a terminal transaction to finish only within stop grace."""
+    return await run_blocking_call(
+        call,
+        *args,
+        point_of_no_return=True,
+        thread_name="quote-batch:terminal-call",
+        **kwargs,
+    )
 
 
 async def _await_reader(
@@ -125,49 +124,51 @@ def _run_bounded_sync_call(
     terminal: bool,
 ) -> Any:
     """Run sync R2/DB work while polling the fenced runtime heartbeat."""
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quote-sync")
-    future = executor.submit(call)
+    future: Future[Any] = Future()
+
+    def invoke() -> None:
+        try:
+            future.set_result(call())
+        except BaseException as error:
+            future.set_exception(error)
+
+    Thread(target=invoke, name="quote-sync", daemon=True).start()
     primary_error: BaseException | None = None
-    try:
-        deadline = monotonic() + runtime.remaining_attempt_seconds()
-        while True:
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                primary_error = TimeoutError("quote sync call exceeded attempt deadline")
-                break
+    deadline = monotonic() + runtime.remaining_attempt_seconds()
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            primary_error = TimeoutError("quote sync call exceeded attempt deadline")
+            break
+        try:
+            return future.result(timeout=min(float(runtime.profile.heartbeat_seconds), remaining))
+        except FutureTimeoutError:
             try:
-                return future.result(
-                    timeout=min(float(runtime.profile.heartbeat_seconds), remaining)
-                )
-            except FutureTimeoutError:
-                try:
-                    runtime.heartbeat_if_due()
-                except BaseException as error:
-                    if terminal:
-                        # A terminal transaction owns the point of no return;
-                        # drain it to a committed result before deciding which
-                        # error is authoritative.
-                        primary_error = error
-                        continue
-                    primary_error = error
-                    break
+                runtime.heartbeat_if_due()
             except BaseException as error:
+                if terminal:
+                    # A terminal transaction owns the point of no return;
+                    # drain it to a committed result before deciding which
+                    # error is authoritative.
+                    primary_error = error
+                    continue
                 primary_error = error
                 break
-        underlying_error: BaseException | None = None
-        underlying_result: Any = None
-        try:
-            underlying_result = future.result()
         except BaseException as error:
-            underlying_error = error
-        if underlying_error is not None:
-            raise primary_error from underlying_error
-        if terminal and primary_error is not None:
-            return underlying_result
-        assert primary_error is not None
-        raise primary_error
-    finally:
-        executor.shutdown(wait=True, cancel_futures=False)
+            primary_error = error
+            break
+    underlying_error: BaseException | None = None
+    underlying_result: Any = None
+    try:
+        underlying_result = future.result()
+    except BaseException as error:
+        underlying_error = error
+    if underlying_error is not None:
+        raise primary_error from underlying_error
+    if terminal and primary_error is not None:
+        return underlying_result
+    assert primary_error is not None
+    raise primary_error
 
 
 def _runtime_sync_call(
@@ -363,7 +364,6 @@ class TransactionalQuoteBatchWorker:
                     outcome="succeeded",
                 )
         except asyncio.CancelledError:
-            _consume_cancellation()
             await _terminal_to_thread(
                 self._control_plane.finish_retryable_with_incident,
                 runtime.current_lease,

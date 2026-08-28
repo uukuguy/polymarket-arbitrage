@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 from typing import Any, cast
 
 import pytest
@@ -25,11 +28,54 @@ from polyarb.control_plane.qualification_service import (
     incident_event_row_to_fact_record,
     ledger_row_to_fact_record,
     recovery_action_row_to_fact_record,
+    run_qualification_service,
     runtime_event_row_to_fact_record,
 )
 from polyarb.control_plane.qualification_store import certificate_digest
 
 NOW = datetime(2026, 8, 25, 0, 0, tzinfo=UTC)
+
+
+def test_qualification_service_stop_detaches_a_stalled_tick_after_database_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    stop = asyncio.Event()
+
+    class Policy:
+        stop_grace_seconds = 0.05
+
+    class Service:
+        def tick(self, _now: datetime):
+            started.set()
+            release.wait()
+            raise AssertionError("detached tick result must not re-enter the stopped service")
+
+    monkeypatch.setattr(qualification_service_module, "CONTROL_PLANE_DB_POLICY", Policy())
+
+    async def run() -> dict[str, object]:
+        task = asyncio.create_task(
+            run_qualification_service(
+                cast(Any, Service()),
+                interval_seconds=30,
+                stop_event=stop,
+            )
+        )
+        while not started.is_set():
+            await asyncio.sleep(0)
+        stop.set()
+        return await task
+
+    safety_release = threading.Timer(0.4, release.set)
+    safety_release.start()
+    before = monotonic()
+    try:
+        assert asyncio.run(run()) == {"status": "stopped", "ticks": 0}
+        assert monotonic() - before < 0.2
+    finally:
+        release.set()
+        safety_release.cancel()
 
 
 def _policy() -> RollingQualificationPolicy:
@@ -530,8 +576,8 @@ def test_virtual_26h_recovery_replay_seals_one_reproducible_certificate() -> Non
     payload = cast(Mapping[str, object], left.certificates[0]["payload"])
     identity = cast(Mapping[str, object], payload["identity"])
     assert identity["epoch_id"] == left.epochs[2].epoch_id
-    assert left.certificates[0]["digest"] == certificate_digest(payload)
-    assert left.certificates[0]["digest"] == right.certificates[0]["digest"]
+    assert left.certificates[0]["certificate_digest"] == certificate_digest(payload)
+    assert left.certificates[0]["certificate_digest"] == right.certificates[0]["certificate_digest"]
 
 
 def test_tick_cursor_is_total_ordered_and_crash_replay_is_exact() -> None:
@@ -721,7 +767,7 @@ def test_qualified_without_certificate_is_sealed_on_next_tick() -> None:
     sealed = service.tick(NOW + timedelta(hours=25))
 
     assert sealed.applied == 0
-    assert sealed.certificate_digest == store.certificates[0]["digest"]
+    assert sealed.certificate_digest == store.certificates[0]["certificate_digest"]
 
 
 class _FreshnessCursor:
@@ -780,9 +826,9 @@ def test_qualification_status_never_transfers_unbounded_epoch_evidence(
     assert "fact_records" not in epoch_query
     assert "fact_digests" not in epoch_query
     assert "jsonb_array_elements" not in epoch_query
-    assert "status_last_fact_record" in epoch_query
-    assert "status_recent_recoveries" in epoch_query
-    assert "status_recovery_count" in epoch_query
+    assert "m1_qualification_epoch_facts" in epoch_query
+    assert "runtime_contained_recovery_count" in epoch_query
+    assert "LIMIT 20" in epoch_query
     assert status["last_fact"] == {
         "fact_id": "freshness:001",
         "reason": "healthy",

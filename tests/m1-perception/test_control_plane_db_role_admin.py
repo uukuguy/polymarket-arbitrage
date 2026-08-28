@@ -79,7 +79,7 @@ class FakeConnection:
 class FakeAdminFactory:
     def __init__(self) -> None:
         self.database = "role_test"
-        self.revision = "029"
+        self.revision = "030"
         self.roles: dict[str, dict[str, Any]] = {
             RUNTIME_CAPABILITY: {
                 "can_login": False,
@@ -453,10 +453,13 @@ def test_preflight_accepts_exact_supabase_creator_membership() -> None:
         "password": None,
     }
 
-    assert preflight_capability_roles(
-        _as_connection_factory(factory),
-        expected_database="role_test",
-    )["status"] == "ready"
+    assert (
+        preflight_capability_roles(
+            _as_connection_factory(factory),
+            expected_database="role_test",
+        )["status"]
+        == "ready"
+    )
 
 
 def test_preflight_accepts_exact_supabase_creator_membership_on_scoped_logins() -> None:
@@ -490,10 +493,13 @@ def test_preflight_accepts_exact_supabase_creator_membership_on_scoped_logins() 
         "password": None,
     }
 
-    assert preflight_capability_roles(
-        _as_connection_factory(factory),
-        expected_database="role_test",
-    )["status"] == "ready"
+    assert (
+        preflight_capability_roles(
+            _as_connection_factory(factory),
+            expected_database="role_test",
+        )["status"]
+        == "ready"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1287,7 +1293,7 @@ def postgres_026_dsn() -> Iterator[str]:
     with PostgresContainer("postgres:16-alpine") as postgres:
         dsn = _normalize_dsn(postgres.get_connection_url())
         _create_supabase_roles(dsn)
-        _run_alembic(dsn, "upgrade", "029")
+        _run_alembic(dsn, "upgrade", "030")
         yield dsn
 
 

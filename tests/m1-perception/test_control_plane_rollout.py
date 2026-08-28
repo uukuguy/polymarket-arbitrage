@@ -49,9 +49,10 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
     assert (
         'app = "polyarb-control-alert-staging"' in (tmp_path / "fly-control-alert.toml").read_text()
     )
-    assert 'app = "polyarb-control-runtime-event-writer-staging"' in (
-        tmp_path / "fly-runtime-event-writer.toml"
-    ).read_text()
+    assert (
+        'app = "polyarb-control-runtime-event-writer-staging"'
+        in (tmp_path / "fly-runtime-event-writer.toml").read_text()
+    )
     runtime_controller_config = (tmp_path / "fly-runtime-controller.toml").read_text()
     qualification_config = (tmp_path / "fly-qualification-worker.toml").read_text()
     assert 'app = "polyarb-runtime-controller-staging"' in runtime_controller_config
@@ -60,10 +61,9 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
     assert 'POLYARB_DB_EXPECTED_DATABASE = "control_plane_staging"' in qualification_config
     assert 'POLYARB_RUNTIME_RECOVERY_MODE = "observe-only"' in runtime_controller_config
     assert (
-        'POLYARB_RUNTIME_RECOVERY_ALLOWED_TARGETS = '
+        "POLYARB_RUNTIME_RECOVERY_ALLOWED_TARGETS = "
         '"polyarb-control-worker-staging/fly-control-plane-coordinator,'
-        'polyarb-control-worker-staging/fly-control-plane-quote-batch"'
-        in runtime_controller_config
+        'polyarb-control-worker-staging/fly-control-plane-quote-batch"' in runtime_controller_config
     )
     config_payload = qualification_config_payload(
         interval_seconds=30,
@@ -82,15 +82,11 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
         'POLYARB_QUALIFICATION_ROLE_IDENTITY = "opportunity,quote,structure"'
         in qualification_config
     )
+    assert 'POLYARB_QUALIFICATION_RUNTIME_RECOVERY_MODE = "observe-only"' in qualification_config
     assert (
-        'POLYARB_QUALIFICATION_RUNTIME_RECOVERY_MODE = "observe-only"'
-        in qualification_config
-    )
-    assert (
-        'POLYARB_QUALIFICATION_RUNTIME_RECOVERY_ALLOWED_TARGETS = '
+        "POLYARB_QUALIFICATION_RUNTIME_RECOVERY_ALLOWED_TARGETS = "
         '"polyarb-control-worker-staging/fly-control-plane-coordinator,'
-        'polyarb-control-worker-staging/fly-control-plane-quote-batch"'
-        in qualification_config
+        'polyarb-control-worker-staging/fly-control-plane-quote-batch"' in qualification_config
     )
     for rendered_text in (runtime_controller_config, qualification_config):
         assert "__" not in rendered_text
@@ -138,7 +134,7 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
     assert checklist["qualification_config_id"] == config_id
     assert checklist["qualification_database_role"] == "qualification_worker"
     assert checklist["runtime_controller_database_role"] == "runtime_controller"
-    assert checklist["database_revision"] == "029"
+    assert checklist["database_revision"] == "030"
     assert checklist["rendered_secret_values"] is False
     assert checklist["cloud_actions_performed"] is False
     assert checklist["steps"] == [
@@ -258,8 +254,9 @@ def test_rollout_renderer_keeps_production_recovery_allowlist_empty(tmp_path: Pa
         output_dir=tmp_path,
     )
 
-    assert 'POLYARB_RUNTIME_RECOVERY_ALLOWED_TARGETS = ""' in (
-        tmp_path / "fly-runtime-controller.toml"
-    ).read_text()
+    assert (
+        'POLYARB_RUNTIME_RECOVERY_ALLOWED_TARGETS = ""'
+        in (tmp_path / "fly-runtime-controller.toml").read_text()
+    )
     qualification_config = (tmp_path / "fly-qualification-worker.toml").read_text()
     assert 'POLYARB_QUALIFICATION_RUNTIME_RECOVERY_ALLOWED_TARGETS = ""' in qualification_config

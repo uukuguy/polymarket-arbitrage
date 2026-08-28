@@ -3,7 +3,49 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import UTC, datetime, timedelta
+from time import monotonic
+
+
+def test_watchdog_stop_detaches_a_stalled_read_only_observation() -> None:
+    from polyarb.control_plane.watchdog import run_watchdog_service
+
+    started = threading.Event()
+    release = threading.Event()
+    stop = asyncio.Event()
+
+    def observe():
+        started.set()
+        release.wait()
+        raise AssertionError("detached observation must not re-enter the stopped service")
+
+    async def send(_text: str) -> None:
+        raise AssertionError("no incomplete observation may page")
+
+    async def run() -> dict[str, object]:
+        task = asyncio.create_task(
+            run_watchdog_service(
+                observe=observe,
+                send=send,
+                interval_seconds=30,
+                stop_event=stop,
+            )
+        )
+        while not started.is_set():
+            await asyncio.sleep(0)
+        stop.set()
+        return await task
+
+    safety_release = threading.Timer(0.4, release.set)
+    safety_release.start()
+    before = monotonic()
+    try:
+        assert asyncio.run(run()) == {"status": "stopped", "checks": 0, "alerts": 0}
+        assert monotonic() - before < 0.2
+    finally:
+        release.set()
+        safety_release.cancel()
 
 
 def test_watchdog_classifies_database_backed_api_timeout_and_stopped_machine() -> None:
@@ -95,9 +137,7 @@ def test_watchdog_rejects_active_collection_without_fresh_cloud_usage() -> None:
         RuntimeObservation(True, ()),
         {
             "job_counts": {"succeeded": 1},
-            "cloud_usage": {
-                "latest_observation": {"observed_at": "2026-08-18T14:00:00+00:00"}
-            },
+            "cloud_usage": {"latest_observation": {"observed_at": "2026-08-18T14:00:00+00:00"}},
         },
         now=now,
     )
@@ -109,9 +149,7 @@ def test_watchdog_rejects_active_collection_without_fresh_cloud_usage() -> None:
 def test_watchdog_rejects_a_fresh_sample_from_the_wrong_formal_run() -> None:
     from polyarb.control_plane.watchdog import RuntimeObservation, SoakEvidenceGate
 
-    gate = SoakEvidenceGate(
-        max_age=timedelta(minutes=15), expected_run_id="m1-formal-required"
-    )
+    gate = SoakEvidenceGate(max_age=timedelta(minutes=15), expected_run_id="m1-formal-required")
     observation = gate.apply(
         RuntimeObservation(healthy=True, failures=()),
         {

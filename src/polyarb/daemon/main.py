@@ -31,11 +31,11 @@ import uuid
 from collections.abc import Callable
 from uuid import UUID
 
-import psycopg
 import uvicorn
 from loguru import logger
 
 from polyarb.config import load_settings
+from polyarb.control_plane.db_role_contract import scoped_connection_factory
 from polyarb.control_plane.postgres import PostgresControlPlane
 from polyarb.daemon.generation_cleanup_worker import StructureGenerationCleanupWorker
 from polyarb.daemon.opportunity_watcher import (
@@ -94,11 +94,11 @@ from polyarb.storage.sqlite_store import SQLiteStore
 
 
 def _build_daemon_control_plane(control_plane_dsn: str) -> PostgresControlPlane | None:
-    """Build the optional Postgres plane with a bounded connection attempt."""
+    """Build the optional Postgres plane with the shared session contract."""
     dsn = control_plane_dsn.strip()
     if not dsn:
         return None
-    return PostgresControlPlane(lambda: psycopg.connect(dsn, connect_timeout=5))
+    return PostgresControlPlane(scoped_connection_factory(dsn))
 
 
 def _build_daemon_fault_runtime(
@@ -743,13 +743,10 @@ async def main() -> int:
     try:
         current_structure = sqlite_store.current_structure_generation()
         if current_structure is not None:
-            structure_incidents.record_success(
-                int(current_structure["snapshot_id"])
-            )
+            structure_incidents.record_success(int(current_structure["snapshot_id"]))
     except (KeyError, TypeError, ValueError, sqlite3.Error) as error:
         logger.warning(
-            "structure incident startup reconciliation unavailable "
-            f"kind={type(error).__name__}"
+            f"structure incident startup reconciliation unavailable kind={type(error).__name__}"
         )
     cleanup_worker = _build_generation_cleanup_worker(
         settings,

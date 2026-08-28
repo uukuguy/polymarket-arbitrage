@@ -17,6 +17,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .alert_delivery import DEFAULT_RUNTIME_DASHBOARD_URL, runtime_incident_transition_payload
+from .db_deadlines import CONTROL_PLANE_DB_POLICY
 from .models import (
     AlertDeliveryLease,
     CheckpointReceipt,
@@ -136,8 +137,6 @@ def _persisted_legs(value: object) -> tuple[QuoteBatchLeg, ...]:
 
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
 
-_FENCED_MAX_STATEMENT_TIMEOUT_MS = 5_000
-_FENCED_MAX_LOCK_TIMEOUT_MS = 1_000
 _SNAPSHOT_RUNTIME_CONTROLLER_ID = "m1-runtime-reconciler"
 _SNAPSHOT_RUNTIME_INITIAL_STAGE = "started"
 _SNAPSHOT_ACTIVE_TASK_STATES = frozenset({"active", "suspect", "recovering"})
@@ -164,6 +163,15 @@ _SNAPSHOT_ACTION_RESULTS = frozenset({"succeeded", "failed", "stale-noop", "disa
 _SNAPSHOT_QUALIFICATION_STATES = frozenset(
     {"accumulating", "invalidated", "recovering", "qualified"}
 )
+_QUALIFICATION_SNAPSHOT_SQL = """
+    SELECT epoch_id, state, role_identity, started_at, last_fact_at,
+           required_seconds, coverage_seconds, max_gap_seconds,
+           policy_version, release_id, config_id, previous_epoch_id
+    FROM m1_qualification_epochs
+    ORDER BY CASE WHEN state IN ('accumulating', 'recovering') THEN 0 ELSE 1 END,
+             updated_at DESC, epoch_id DESC
+    LIMIT 1
+"""
 _ALERT_BOUNDED_TEXT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:/._ @#=+-]{0,255}$")
 _ALERT_SECRET_WORDS = ("secret", "token", "password", "api_key", "apikey", "authorization")
 _ALERT_ACTIONS = frozenset(
@@ -276,12 +284,12 @@ def _set_structure_read_timeouts(cursor: psycopg.Cursor[Any], *, read_only: bool
         cursor.execute("SET TRANSACTION READ ONLY")
     cursor.execute(
         sql.SQL("SET LOCAL statement_timeout = {}").format(
-            sql.Literal(f"{_FENCED_MAX_STATEMENT_TIMEOUT_MS}ms")
+            sql.Literal(CONTROL_PLANE_DB_POLICY.statement_setting)
         )
     )
     cursor.execute(
         sql.SQL("SET LOCAL lock_timeout = {}").format(
-            sql.Literal(f"{_FENCED_MAX_LOCK_TIMEOUT_MS}ms")
+            sql.Literal(CONTROL_PLANE_DB_POLICY.lock_setting)
         )
     )
 
@@ -304,8 +312,8 @@ def _set_fenced_transaction_timeouts(
         raise StaleLeaseError(
             f"lease is no longer current or has no safe terminal budget for {lease.job_key}"
         )
-    statement_timeout_ms = min(_FENCED_MAX_STATEMENT_TIMEOUT_MS, remaining_ms - 1)
-    lock_timeout_ms = min(_FENCED_MAX_LOCK_TIMEOUT_MS, statement_timeout_ms)
+    statement_timeout_ms = min(CONTROL_PLANE_DB_POLICY.statement_timeout_ms, remaining_ms - 1)
+    lock_timeout_ms = min(CONTROL_PLANE_DB_POLICY.lock_timeout_ms, statement_timeout_ms)
     cursor.execute(
         sql.SQL("SET LOCAL statement_timeout = {}").format(sql.Literal(f"{statement_timeout_ms}ms"))
     )
@@ -317,16 +325,8 @@ def _set_fenced_transaction_timeouts(
 
 def _set_snapshot_read_timeouts(cursor: psycopg.Cursor[Any]) -> None:
     cursor.execute("SET TRANSACTION READ ONLY")
-    cursor.execute(
-        sql.SQL("SET LOCAL statement_timeout = {}").format(
-            sql.Literal(f"{_FENCED_MAX_STATEMENT_TIMEOUT_MS}ms")
-        )
-    )
-    cursor.execute(
-        sql.SQL("SET LOCAL lock_timeout = {}").format(
-            sql.Literal(f"{_FENCED_MAX_LOCK_TIMEOUT_MS}ms")
-        )
-    )
+    cursor.execute(f"SET LOCAL statement_timeout = '{CONTROL_PLANE_DB_POLICY.statement_setting}'")
+    cursor.execute(f"SET LOCAL lock_timeout = '{CONTROL_PLANE_DB_POLICY.lock_setting}'")
 
 
 def _snapshot_aware(value: object, field: str) -> datetime:
@@ -858,8 +858,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            cursor.execute("SET TRANSACTION READ ONLY")
-            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
+            _set_snapshot_read_timeouts(cursor)
             cursor.execute(
                 """
                 SELECT record FROM m1_soak_observations
@@ -912,8 +911,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            cursor.execute("SET TRANSACTION READ ONLY")
-            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
+            _set_snapshot_read_timeouts(cursor)
             cursor.execute(
                 "SELECT current_database() AS database_name, version() AS postgres_version"
             )
@@ -2202,6 +2200,7 @@ class PostgresControlPlane:
                 job_type="quote-certify",
                 input_identity=f"{generation_key}:{universe_hash}",
                 now=now,
+                initial_state=JobState.WAITING,
             )
         return batches
 
@@ -2212,9 +2211,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            cursor.execute("SET TRANSACTION READ ONLY")
-            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
-            cursor.execute("SET LOCAL lock_timeout = '1000ms'")
+            _set_snapshot_read_timeouts(cursor)
             cursor.execute(
                 """
                 SELECT generation_key, bundle_key, bundle_digest
@@ -3012,6 +3009,7 @@ class PostgresControlPlane:
             job_type="quote-certify",
             input_identity=f"{generation_key}:{batches[0].universe_hash}",
             now=now,
+            initial_state=JobState.WAITING,
         )
 
     def enqueue_structure_generation(
@@ -3105,6 +3103,7 @@ class PostgresControlPlane:
                 job_type="structure-certify",
                 input_identity=generation_key,
                 now=now,
+                initial_state=JobState.WAITING,
             )
         return specs
 
@@ -3193,6 +3192,7 @@ class PostgresControlPlane:
             job_type="structure-certify",
             input_identity=generation_key,
             now=now,
+            initial_state=JobState.WAITING,
         )
         return specs
 
@@ -3461,16 +3461,27 @@ class PostgresControlPlane:
         job_type: str,
         input_identity: str,
         now: datetime,
+        initial_state: JobState = JobState.RUNNABLE,
     ) -> None:
+        if initial_state not in {JobState.RUNNABLE, JobState.WAITING}:
+            raise ValueError("new jobs must start runnable or waiting")
         cursor.execute(
             """
             INSERT INTO m1_jobs (
                 job_key, job_type, input_identity, state, next_attempt_at,
                 created_at, updated_at
-            ) VALUES (%s, %s, %s, 'runnable', %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (job_key) DO NOTHING
             """,
-            (job_key, job_type, input_identity, now, now, now),
+            (
+                job_key,
+                job_type,
+                input_identity,
+                initial_state.value,
+                now if initial_state is JobState.RUNNABLE else None,
+                now,
+                now,
+            ),
         )
         cursor.execute(
             "SELECT job_type, input_identity FROM m1_jobs WHERE job_key = %s",
@@ -3481,6 +3492,50 @@ class PostgresControlPlane:
             raise ControlPlaneError("job insert was not durable")
         if existing["job_type"] != job_type or existing["input_identity"] != input_identity:
             raise JobIdentityConflict(f"job key {job_key!r} names another input")
+
+    @staticmethod
+    def _wake_structure_certifier_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]], *, generation_key: str, now: datetime
+    ) -> None:
+        cursor.execute(
+            """
+            UPDATE m1_jobs SET state = 'runnable', next_attempt_at = %s,
+                last_error_class = NULL, updated_at = %s
+            WHERE job_key = %s AND state = 'waiting'
+              AND (SELECT count(*) FROM m1_structure_range_receipts AS receipt
+                   JOIN m1_structure_range_inputs AS input
+                     ON input.job_key = receipt.job_key
+                   WHERE input.generation_key = %s)
+                = (SELECT count(*) FROM m1_structure_range_inputs
+                   WHERE generation_key = %s)
+            """,
+            (now, now, f"{generation_key}:certify", generation_key, generation_key),
+        )
+
+    @staticmethod
+    def _wake_quote_certifier_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]], *, generation_key: str, now: datetime
+    ) -> None:
+        cursor.execute(
+            """
+            UPDATE m1_jobs SET state = 'runnable', next_attempt_at = %s,
+                last_error_class = NULL, updated_at = %s
+            WHERE job_key = %s AND state = 'waiting'
+              AND (SELECT count(*) FROM m1_quote_batch_receipts AS receipt
+                   JOIN m1_quote_batch_inputs AS input
+                     ON input.job_key = receipt.job_key
+                   WHERE input.job_key LIKE %s)
+                = (SELECT count(*) FROM m1_quote_batch_inputs
+                   WHERE job_key LIKE %s)
+            """,
+            (
+                now,
+                now,
+                f"{generation_key}:certify",
+                f"{generation_key}:batch:%",
+                f"{generation_key}:batch:%",
+            ),
+        )
 
     def record_quote_batch(
         self,
@@ -3640,6 +3695,11 @@ class PostgresControlPlane:
                 """,
                 (now, lease.job_key, lease.lease_epoch),
             )
+            self._wake_quote_certifier_cursor(
+                cursor,
+                generation_key=f"quote:{structure_digest}",
+                now=now,
+            )
             if terminal:
                 self._finish_quote_batch_terminal_cursor(
                     cursor,
@@ -3705,6 +3765,10 @@ class PostgresControlPlane:
         allow_historical: bool = False,
     ) -> None:
         """Seal a Quote batch and its runtime success under one cursor."""
+        structure_digest, _universe_hash, _ordinal, _range_digest = (
+            PostgresControlPlane._quote_batch_identity(lease.input_identity)
+        )
+        generation_key = f"quote:{structure_digest}"
         cursor.execute(
             """
             SELECT state, lease_owner, lease_epoch, checkpoint_cursor, checkpoint_digest
@@ -3736,6 +3800,11 @@ class PostgresControlPlane:
                 stage="commit-receipt",
                 component="quote-batch",
                 data_product="market-snapshot",
+                now=now,
+            )
+            PostgresControlPlane._wake_quote_certifier_cursor(
+                cursor,
+                generation_key=generation_key,
                 now=now,
             )
             return
@@ -3779,6 +3848,11 @@ class PostgresControlPlane:
             WHERE job_key = %s AND lease_epoch = %s AND state IN ('running', 'checkpointed')
             """,
             (now, lease.job_key, lease.lease_epoch),
+        )
+        PostgresControlPlane._wake_quote_certifier_cursor(
+            cursor,
+            generation_key=generation_key,
+            now=now,
         )
 
     def record_structure_range(
@@ -4006,27 +4080,11 @@ class PostgresControlPlane:
                     lease.lease_epoch,
                 ),
             )
-            if not terminal:
-                cursor.execute(
-                    """
-                    UPDATE m1_jobs SET state = 'runnable', next_attempt_at = %s,
-                        last_error_class = NULL, updated_at = %s
-                    WHERE job_key = %s AND state = 'waiting'
-                      AND (SELECT count(*) FROM m1_structure_range_receipts AS receipt
-                           JOIN m1_structure_range_inputs AS input
-                             ON input.job_key = receipt.job_key
-                           WHERE input.generation_key = %s)
-                        = (SELECT count(*) FROM m1_structure_range_inputs
-                           WHERE generation_key = %s)
-                    """,
-                    (
-                        now,
-                        now,
-                        f"{spec.generation_key}:certify",
-                        spec.generation_key,
-                        spec.generation_key,
-                    ),
-                )
+            self._wake_structure_certifier_cursor(
+                cursor,
+                generation_key=spec.generation_key,
+                now=now,
+            )
             return receipt
 
     def certify_structure_generation(
@@ -6841,15 +6899,7 @@ class PostgresControlPlane:
                 (sample_limit,),
             )
             recovery_action_rows = cursor.fetchall()
-            cursor.execute(
-                """
-                SELECT *
-                FROM m1_qualification_epochs
-                ORDER BY CASE WHEN state IN ('accumulating', 'recovering') THEN 0 ELSE 1 END,
-                         updated_at DESC, epoch_id DESC
-                LIMIT 1
-                """
-            )
+            cursor.execute(_QUALIFICATION_SNAPSHOT_SQL)
             qualification_epoch = cursor.fetchone()
             qualification_certificate = None
             qualification_breaker = None
@@ -7322,7 +7372,6 @@ class PostgresControlPlane:
         if state not in _SNAPSHOT_QUALIFICATION_STATES:
             raise ControlPlaneError("qualification state is malformed")
         role_identity = _snapshot_role_identity(epoch["role_identity"])
-        _snapshot_json_array(epoch["fact_records"], "fact_records")
         started_at = _snapshot_aware(epoch["started_at"], "qualification_started_at")
         if started_at > observed_at:
             raise ControlPlaneError("qualification time source is malformed")
@@ -7402,8 +7451,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            cursor.execute("SET TRANSACTION READ ONLY")
-            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
+            _set_snapshot_read_timeouts(cursor)
             cursor.execute(
                 """
                 SELECT projection.generation_key, projection.record_count
@@ -7739,8 +7787,7 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
-            cursor.execute("SET TRANSACTION READ ONLY")
-            cursor.execute("SET LOCAL statement_timeout = '5000ms'")
+            _set_snapshot_read_timeouts(cursor)
             cursor.execute(
                 """SELECT pointer.generation_key,
                           admission.generation_key AS structure_generation_key,
