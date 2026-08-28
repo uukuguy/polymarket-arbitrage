@@ -959,6 +959,49 @@ def test_runtime_observe_verify_derives_exact_current_identity_and_never_mutates
     assert captured["controller_epoch"] == 4
 
 
+def test_runtime_observe_verify_reports_safe_actionable_gate_reason(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.runtime_observe import RuntimeObserveVerificationError
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    monkeypatch.setenv(
+        "POLYARB_SUPABASE_DB_DSN",
+        "postgresql://operator:secret@example.test/control",
+    )
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(
+        cli_control_plane,
+        "read_runtime_controller_status",
+        lambda *_args, **_kwargs: {
+            "controller": {
+                "controller_id": "controller-a",
+                "owner_id": "owner-a",
+                "lease_epoch": 4,
+                "lease_active": True,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "verify_runtime_observe_window",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeObserveVerificationError(
+                "observe-only window lacks boundary anchor "
+                "(available_seconds=101, required_seconds=120)"
+            )
+        ),
+    )
+
+    assert cli_control_plane.main(["runtime-observe-verify", "--json"]) == 1
+    error = capsys.readouterr().err
+    assert "available_seconds=101" in error
+    assert "required_seconds=120" in error
+    assert "postgresql://" not in error
+    assert "secret" not in error
+
+
 def test_runtime_reconcile_once_requires_enable_before_database_or_controller(
     monkeypatch, capsys
 ) -> None:

@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Probe-release retry authority repair passed the fresh full M1 gate; final climb/planning checks and a new exact-image rebuild remain
-last_updated: "2026-08-28T21:08:00+08:00"
+stopped_at: Actionable observe-gate diagnostics passed the fresh full M1 gate; final climb/planning checks, commit and exact-image rebuild remain
+last_updated: "2026-08-28T21:45:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -57,9 +57,11 @@ progress:
   unreachable direct IPv6 database endpoint.
 
 - **Current production boundary:** `polyarb-runtime-controller-m1` Machine
-  `6e82036dce4958` is restored to prior immutable digest
-  `sha256:698344a7…3086`, started observe-only with an empty recovery allowlist
-  and unchanged non-image config hash.
+  `6e82036dce4958` runs controller-only candidate `352cb3ca`, digest
+  `sha256:45668021…c8d`, started observe-only with an empty recovery allowlist,
+  lease epoch 8 and unchanged non-image config hash `4504c4…b4a4`. It passed
+  124-second and 311-second zero-action gates but is superseded before sibling
+  rollout because expected observe-gate failures hid their actionable reason.
   Coordinator `e82d1220b2d138` and qualification `876077f0274598` are stopped;
   Structure `683e46ea500dd8` and Quote `4d895231f66748` remain started on the
   pre-Plan-209 runtime. The failed coordinator canary was restored to digest

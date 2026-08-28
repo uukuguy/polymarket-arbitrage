@@ -203,6 +203,12 @@ head and full command vector. An interrupted identical run resumes only the
 unfinished suffix; malformed, stale, or command-mismatched progress fails
 closed and is never promoted to final evidence.
 
+Observe-only production gates remain fail-closed, but their expected policy
+failures are operator-readable. An insufficient evidence boundary reports the
+measured and required seconds; freshness, gap, replay and parity failures keep
+their predefined safe reason. Unknown exceptions remain type-only so an
+actionable gate cannot become a DSN or provider-body exfiltration path.
+
 ## Qualification restart semantics
 
 A new qualification release must not silently replay from ledger offset zero

@@ -74,6 +74,7 @@ from polyarb.control_plane.rollout import render_rollout_artifacts
 from polyarb.control_plane.runtime_deadlines import runtime_policy
 from polyarb.control_plane.runtime_fault_matrix import RuntimeFaultMatrixError, run_fault_matrix
 from polyarb.control_plane.runtime_observe import (
+    RuntimeObserveVerificationError,
     build_runtime_observe_decision_record,
     build_runtime_observe_idle_record,
     insert_runtime_observe_decisions,
@@ -2370,6 +2371,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         _write({"status": "ok", **snapshot}, as_json=args.json)
         return 0
+    except RuntimeObserveVerificationError as error:
+        print(f"runtime observe verification failed: {error}", file=sys.stderr)
+        return 1
     except DatabaseRoleContractError as error:
         if args.command in {"runtime-reconcile-once", "runtime-reconcile-serve"}:
             print(f"runtime reconciliation unavailable: {error}", file=sys.stderr)

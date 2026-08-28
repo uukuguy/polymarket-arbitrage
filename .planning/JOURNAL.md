@@ -11204,3 +11204,32 @@ new 86,400-second certificate after live terminal publication.
 build and verify a new exact image, then restart controller canary and the full
 1,800/90/90 window from its new lease epoch. No sibling rollout before that
 gate; fresh 86,400-second qualification begins only after live terminal flow.
+
+### SESSION 326 — 2026-08-28 (actionable observe-gate failure semantics)
+
+- [CONTROLLER-ONLY CANARY] Commit `352cb3ca`, immutable digest
+  `sha256:45668021…c8d`, replaced only controller Machine `6e82036dce4958`.
+  Same ID, started state, observe-only mode, empty allowlist and non-image
+  config hash `4504c4…b4a4` were verified. Lease epoch 8 passed 124-second / 10
+  decision and 311-second / 22 decision gates with max gap 31 seconds and zero
+  recovery actions.
+- [NEW ROOT CAUSE] Early boundary checks failed closed correctly, but the CLI
+  printed only `RuntimeObserveVerificationError`. The verifier already knew
+  whether the cause was insufficient coverage, freshness, gap, replay or
+  parity; erasing that reason forced wall-clock guessing and repeated runs.
+- [TDD REPAIR] Window failures now include measured `available_seconds` and
+  `required_seconds`. The CLI preserves only predefined safe observe-gate
+  reasons and continues to redact unknown errors, DSNs and provider bodies.
+  Focused observe/CLI/runtime/scheduler suites pass. The candidate is
+  superseded before any sibling Machine update; controller remains safe in
+  observe-only mode with an empty allowlist.
+- [FRESH FULL PROOF] `make test-m1` passed 3,987 tests, one skip and one
+  expected xfail in 1,544.26 seconds. The long performance group stayed
+  CPU-active during its quiet interval and completed naturally without an
+  outer timeout or restart. Climb 50/50, planning no-drift, Ruff, format, JSON
+  and diff gates also pass.
+
+[NEXT] Run the fresh full M1/climb/planning/static gates, commit the actionable
+gate repair, build and verify its exact image, then restart the controller-only
+canary and 1,800/90/90 window from a new lease epoch. No sibling rollout before
+that gate.

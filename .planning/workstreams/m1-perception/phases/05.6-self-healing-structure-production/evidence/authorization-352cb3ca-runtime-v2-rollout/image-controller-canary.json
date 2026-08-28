@@ -1,0 +1,54 @@
+{
+  "artifact_version": 1,
+  "recorded_at": "2026-08-28T21:16:00+08:00",
+  "status": "superseded-during-gate-diagnostics-audit",
+  "source_release_sha": "352cb3cab0fbaa9d6ebb4368affef26fbbed2617",
+  "production_database_revision": "031",
+  "image": {
+    "local_id": "sha256:d7634a14b14dd560427803a996aaa6ccb2fea589b8ee795185d42a72c460386f",
+    "worker": "registry.fly.io/polyarb-control-worker-m1@sha256:45668021a994bf93820fbe315dfce6b1eb91d032528048925d74f2c781c03c8d",
+    "qualification": "registry.fly.io/polyarb-qualification-worker-m1@sha256:45668021a994bf93820fbe315dfce6b1eb91d032528048925d74f2c781c03c8d",
+    "architecture": "amd64",
+    "runtime_uid": 10001,
+    "oci_revision": "352cb3cab0fbaa9d6ebb4368affef26fbbed2617",
+    "runtime_policy_version": "runtime-v2",
+    "closed_job_registry_count": 8,
+    "provider_attempts": 1,
+    "alembic_head": "031",
+    "cli_smoke": "pass"
+  },
+  "controller_canary": {
+    "app": "polyarb-runtime-controller-m1",
+    "machine_id": "6e82036dce4958",
+    "prior_digest": "sha256:98742341d28fcee8af5441bfa9f3113ff1b1baf8735e92e420e99503f9eb66ce",
+    "candidate_digest": "sha256:45668021a994bf93820fbe315dfce6b1eb91d032528048925d74f2c781c03c8d",
+    "non_image_config_hash_before_and_after": "4504c4b458bc12831d872cb04b12f3ab6307a7fc4946efa8e29bd1d8b445b4a4",
+    "state": "started",
+    "mode": "observe-only",
+    "recovery_allowlist": "empty",
+    "lease_epoch": 8,
+    "short_gate_120_90_90": {
+      "status": "pass",
+      "duration_seconds": 124,
+      "decision_count": 10,
+      "current_candidate_count": 2,
+      "max_gap_seconds": 31,
+      "recovery_action_count": 0
+    },
+    "short_gate_300_90_90": {
+      "status": "pass",
+      "duration_seconds": 311,
+      "decision_count": 22,
+      "current_candidate_count": 2,
+      "max_gap_seconds": 31,
+      "recovery_action_count": 0
+    },
+    "full_gate_1800_90_90": "superseded-before-completion"
+  },
+  "superseded_reason": "expected runtime-observe policy failures were collapsed to an opaque exception class, forcing operator wall-clock guessing instead of exposing safe measured coverage",
+  "next_release_requirement": "commit actionable fail-closed diagnostics, build a new exact image and restart controller canary from a new lease epoch",
+  "sibling_machine_updates": 0,
+  "recovery_actions": 0,
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}

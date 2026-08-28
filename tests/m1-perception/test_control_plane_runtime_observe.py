@@ -346,7 +346,10 @@ def test_verifier_fails_on_gap_recovery_mutation_mixed_identity_or_replay_mismat
             max_gap_seconds=30,
         )
 
-    with pytest.raises(RuntimeObserveVerificationError, match="boundary anchor"):
+    with pytest.raises(
+        RuntimeObserveVerificationError,
+        match=r"boundary anchor \(available_seconds=0, required_seconds=1800\)",
+    ):
         verify_runtime_observe_window(
             _fake_factory(FakeConnection(rows=[_row(record)], recovery_action_count=0)),
             controller_id=CONTROLLER_ID,

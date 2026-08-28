@@ -571,12 +571,16 @@ def verify_runtime_observe_window(
             raise RuntimeObserveVerificationError("observe-only evidence mixes controller identity")
     latest = records[-1]
     earliest = records[0]
-    if earliest.observed_at > start_at:
-        raise RuntimeObserveVerificationError("observe-only window lacks boundary anchor")
     duration = int((latest.observed_at - earliest.observed_at).total_seconds())
+    if earliest.observed_at > start_at:
+        raise RuntimeObserveVerificationError(
+            "observe-only window lacks boundary anchor "
+            f"(available_seconds={duration}, required_seconds={minimum_seconds})"
+        )
     if duration < minimum_seconds:
         raise RuntimeObserveVerificationError(
-            "observe-only window is shorter than minimum duration"
+            "observe-only window is shorter than minimum duration "
+            f"(available_seconds={duration}, required_seconds={minimum_seconds})"
         )
     freshness = int((now - latest.observed_at).total_seconds())
     if freshness > max_freshness_seconds:

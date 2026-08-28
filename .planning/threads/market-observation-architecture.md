@@ -2144,3 +2144,18 @@ success is not user receipt/read evidence.
 - Observe-only success cannot certify code that diverges only after mutation is
   enabled. Reverse execution-path audits must include the write side of every
   proposed recovery action before the image can advance to sibling rollout.
+
+### §2.49 A fail-closed gate still needs actionable failure truth (2026-08-28)
+
+- Collapsing every expected policy rejection to an exception class is not safe
+  observability. The operator cannot distinguish insufficient evidence from a
+  stale controller, decision gap, replay mismatch or parity break, so a
+  deterministic gate degenerates into wall-clock guessing and repeated runs.
+- Expected observe-gate errors are a closed, safe vocabulary. Insufficient
+  windows now include measured and required seconds; the CLI preserves those
+  predefined reasons while unknown exceptions remain type-only. This adds
+  actionability without exposing DSNs or provider bodies.
+- Evidence duration is a qualification lower bound, not an execution timeout.
+  The gate remains nonzero and never waits, relaxes policy or kills the observed
+  controller; interruption only discards the operator read and the durable
+  lease-epoch evidence continues accumulating.

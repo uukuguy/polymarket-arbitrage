@@ -193,3 +193,17 @@ cursor handoff.
   the same budget/base/cap authority and current failure count.
 - [ ] Re-run focused/full gates, commit, rebuild the exact image and restart the
   controller canary/1,800-second evidence window from a new lease epoch.
+
+## Task 11: Actionable evidence-window failure semantics
+
+- [x] Add RED tests proving an insufficient observe window reports its measured
+  available seconds and required seconds without exposing the scoped DSN.
+- [x] Preserve the predefined `RuntimeObserveVerificationError` reason at the
+  CLI boundary while continuing to redact unknown runtime/provider failures.
+- [x] Keep the gate fail-closed and nonzero; diagnostics must never auto-relax
+  freshness, gap, replay, parity, recovery-action, or duration requirements.
+- [x] Re-run the full M1 gate: 3,987 passed, one skipped and one expected xfail
+  in 1,544.26 seconds with no outer timeout.
+- [x] Pass climb 50/50, planning no-drift, Ruff, format, JSON and diff gates.
+- [ ] Commit, supersede `352cb3ca`, and restart the exact
+  image/controller evidence window before any sibling Machine update.
