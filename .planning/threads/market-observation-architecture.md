@@ -2265,3 +2265,45 @@ success is not user receipt/read evidence.
   version, exact Machine ID/region, exact non-release config and the intended
   stop contract; only Fly's image digest resolution may differ. Template tests
   and remote-object verification guard distinct links in the chain.
+
+### §2.57 Recovery authority must be proven with the deployed login (2026-08-29)
+
+- Observe-only decisions repeatedly and correctly selected one due source
+  circuit, but an isolated execute one-shot failed at `m1_recovery_actions`
+  INSERT. Revision 026 had intentionally provisioned only observation
+  authority; admin-backed executor tests could not prove the production chain.
+- Revision 032 grants only the SELECT / INSERT / UPDATE operations used by the
+  fenced schedule-and-execute transaction. DELETE, TRUNCATE, sequences and all
+  publication writes remain forbidden. A real PG16 test now runs the complete
+  circuit probe using the scoped login and asserts zero pointer mutations.
+- Operator one-shots must pin target type, exact durable job key and expected
+  action. Any missing target or decision mismatch fails before scheduling.
+  Production service mode remains observe-only with an empty Machine allowlist.
+
+### §2.58 Diagnostics share the process resource envelope (2026-08-29)
+
+- Starting a second Python interpreter through SSH on the 256MB controller
+  OOM-killed the main process twice. `restart=always` restored the Machine, but
+  reset controller epochs and invalidated continuity evidence. An SSH channel
+  is not a free execution plane.
+- Recovery one-shots therefore run in an isolated 512MB, same-app, auto-removed
+  Machine after the observe controller stops. This preserves scoped-secret
+  identity while separating memory and controller-lease ownership.
+- The live Quote attempt independently proved checkpoint recovery: epoch 7
+  reached shard 156 and expired with checkpoint 150; epoch 8 resumed at 151.
+  Attempt deadlines bound ownership rather than erase completed work.
+
+### §2.59 Exact operator selection must fence the executor claim (2026-08-29)
+
+- Exact target type, target ID and expected action originally constrained the
+  reconcile and schedule stages, but the generic executor still claimed the
+  oldest pending action. A historical queue entry could therefore make a
+  source-pinned one-shot execute a different durable action.
+- Operator-selected turns now carry the newly scheduled `action_id` into the
+  `SKIP LOCKED` claim predicate. A missing/unclaimable ID returns no action and
+  never falls back to the queue head. Resident service turns omit the fence and
+  preserve deterministic oldest-first draining.
+- Unit proof covers two ordered pending actions; real PostgreSQL proof requests
+  a nonexistent exact ID and confirms the actual pending action remains
+  untouched. Exactness now spans fact → decision → schedule → claim →
+  execute instead of stopping halfway through the chain.

@@ -55,16 +55,18 @@ SUPABASE_CREATOR_MEMBERSHIP = ("postgres", True, False, False)
 RUNTIME_ALLOWED = {
     "m1_runtime_controller_leases": frozenset({"SELECT", "INSERT", "UPDATE"}),
     "m1_runtime_observe_decisions": frozenset({"SELECT", "INSERT"}),
-    "m1_job_runtime_state": frozenset({"SELECT"}),
-    "m1_jobs": frozenset({"SELECT"}),
-    "m1_job_circuits": frozenset({"SELECT"}),
-    "m1_job_attempts": frozenset({"SELECT"}),
-    "m1_recovery_target_budgets": frozenset({"SELECT"}),
-    "m1_recovery_actions": frozenset({"SELECT"}),
-    "m1_job_runtime_events": frozenset(),
-    "m1_incidents": frozenset(),
-    "m1_incident_events": frozenset(),
-    "m1_alert_outbox": frozenset(),
+    "m1_job_runtime_state": frozenset({"SELECT", "UPDATE"}),
+    "m1_jobs": frozenset({"SELECT", "UPDATE"}),
+    "m1_job_circuits": frozenset({"SELECT", "INSERT", "UPDATE"}),
+    "m1_job_attempts": frozenset({"SELECT", "UPDATE"}),
+    "m1_recovery_target_budgets": frozenset({"SELECT", "INSERT", "UPDATE"}),
+    "m1_recovery_actions": frozenset({"SELECT", "INSERT", "UPDATE"}),
+    "m1_job_runtime_events": frozenset({"SELECT", "INSERT"}),
+    "m1_incidents": frozenset({"SELECT", "INSERT", "UPDATE"}),
+    "m1_incident_events": frozenset({"SELECT", "INSERT"}),
+    # INSERT .. ON CONFLICT uses the unique incident/channel key and therefore
+    # also requires SELECT even though recovery never reads alert payload rows.
+    "m1_alert_outbox": frozenset({"SELECT", "INSERT"}),
 }
 QUALIFICATION_ALLOWED = {
     "m1_qualification_ingress_ledger": frozenset({"SELECT"}),

@@ -190,6 +190,29 @@ def test_make_runtime_mutation_target_has_enable_guard() -> None:
         assert "enable=1" in result.stderr
 
 
+def test_make_runtime_reconcile_once_forwards_exact_target_selector() -> None:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            "runtime-reconcile-once",
+            "enable=1",
+            "target_type=circuit",
+            "target_id=structure-source:window:fetch:events:162",
+            "expected_action=probe-circuit",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '--target-type "circuit"' in result.stdout
+    assert '--target-id "structure-source:window:fetch:events:162"' in result.stdout
+    assert '--expected-action "probe-circuit"' in result.stdout
+
+
 def test_make_render_machine_update_uses_local_contract_translator() -> None:
     result = subprocess.run(
         [
@@ -201,6 +224,7 @@ def test_make_render_machine_update_uses_local_contract_translator() -> None:
             "expected_app=polyarb-runtime-controller-m1",
             "machine_id=6e82036dce4958",
             "target_image=registry.fly.io/example:new",
+            "update_env_from_fly=POLYARB_QUALIFICATION_RELEASE_ID",
             "output=/tmp/update.json",
         ],
         capture_output=True,
@@ -216,6 +240,7 @@ def test_make_render_machine_update_uses_local_contract_translator() -> None:
     assert '--expected-app "polyarb-runtime-controller-m1"' in result.stdout
     assert '--expected-machine-id "6e82036dce4958"' in result.stdout
     assert '--target-image "registry.fly.io/example:new"' in result.stdout
+    assert '--update-env-from-fly "POLYARB_QUALIFICATION_RELEASE_ID"' in result.stdout
     assert '--output "/tmp/update.json"' in result.stdout
     assert "flyctl" not in result.stdout.lower()
     assert "curl" not in result.stdout.lower()

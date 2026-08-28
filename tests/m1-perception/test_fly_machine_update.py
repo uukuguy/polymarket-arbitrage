@@ -80,6 +80,7 @@ def test_machine_update_maps_toml_lifecycle_to_api_stop_config_and_preserves_res
         "kill_timeout_seconds": 40,
         "preserved_config_sha256": proof["preserved_config_sha256"],
         "target_image": target_image,
+        "updated_env_keys": [],
     }
     assert len(proof["preserved_config_sha256"]) == 64
 
@@ -221,4 +222,61 @@ def test_machine_update_verifier_requires_exact_remote_config_except_resolved_im
             update_payload=payload,
             expected_machine_id="6e82036dce4958",
             expected_region="ams",
+        )
+
+
+def test_machine_update_allows_only_explicit_qualification_release_identity_overlay(
+    tmp_path: Path,
+) -> None:
+    from polyarb.control_plane.fly_machine_update import (
+        FlyMachineUpdateContractError,
+        render_machine_update_payload,
+    )
+
+    current = _machine()
+    current_config = current["config"]
+    assert isinstance(current_config, dict)
+    current_env = current_config["env"]
+    assert isinstance(current_env, dict)
+    current_env["POLYARB_QUALIFICATION_RELEASE_ID"] = "old-release"
+    config_path = tmp_path / "qualification.toml"
+    config_path.write_text(
+        "\n".join(
+            (
+                'app = "polyarb-qualification-worker-m1"',
+                'kill_signal = "SIGTERM"',
+                "kill_timeout = 40",
+                "[env]",
+                'POLYARB_QUALIFICATION_RELEASE_ID = "new-release"',
+                'MODE = "must-not-overlay"',
+                "",
+            )
+        )
+    )
+
+    payload, proof = render_machine_update_payload(
+        current_machine=current,
+        fly_config_path=config_path,
+        expected_app="polyarb-qualification-worker-m1",
+        expected_machine_id="6e82036dce4958",
+        target_image="registry.fly.io/example:new",
+        update_env_from_fly=("POLYARB_QUALIFICATION_RELEASE_ID",),
+    )
+
+    assert payload["config"]["env"] == {
+        "MODE": "observe-only",
+        "ALLOWED": "",
+        "POLYARB_QUALIFICATION_RELEASE_ID": "new-release",
+    }
+    assert proof["updated_env_keys"] == ["POLYARB_QUALIFICATION_RELEASE_ID"]
+    assert "new-release" not in json.dumps(proof)
+
+    with pytest.raises(FlyMachineUpdateContractError):
+        render_machine_update_payload(
+            current_machine=current,
+            fly_config_path=config_path,
+            expected_app="polyarb-qualification-worker-m1",
+            expected_machine_id="6e82036dce4958",
+            target_image="registry.fly.io/example:new",
+            update_env_from_fly=("MODE",),
         )

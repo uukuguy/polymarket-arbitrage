@@ -20,9 +20,7 @@ from .postgres import StaleLeaseError
 from .recovery_models import RecoveryActionType
 from .recovery_records import RecoveryActionRecord, RuntimeControllerLease
 
-_STORE_CLOSED_RESULT_CODES = frozenset(
-    {"succeeded", "failed", "stale-noop", "disabled-action"}
-)
+_STORE_CLOSED_RESULT_CODES = frozenset({"succeeded", "failed", "stale-noop", "disabled-action"})
 _MACHINE_STORE_RESULT_BY_OUTCOME = {
     "restarted": "succeeded",
     "stale-noop": "stale-noop",
@@ -105,6 +103,7 @@ class _RecoveryStore(Protocol):
         controller: RuntimeControllerLease,
         lease_seconds: int,
         now: datetime,
+        expected_action_id: str | None = None,
     ) -> RecoveryActionRecord | None: ...
 
     def execute_claimed_action(
@@ -172,13 +171,20 @@ class RecoveryExecutor:
         self._action_lease_seconds = action_lease_seconds
         self._heartbeat_lease_seconds = heartbeat_lease_seconds
 
-    def run_once(self, *, now: datetime) -> RecoveryActionResult | None:
+    def run_once(
+        self,
+        *,
+        now: datetime,
+        expected_action_id: str | None = None,
+    ) -> RecoveryActionResult | None:
         """Execute at most one claimable action.
 
         A control-plane exception is intentionally allowed to escape.  The
         action remains ``running`` until its worker lease expires, so a later
         executor turn can reclaim it.  Only a stale job fence is converted to a
-        durable ``stale-noop`` completion.
+        durable ``stale-noop`` completion.  Operator-selected turns may bind
+        the claim to the exact action they just scheduled; ordinary service
+        turns retain oldest-first queue behavior.
         """
 
         action = self._store.claim_action(
@@ -186,6 +192,7 @@ class RecoveryExecutor:
             controller=self._controller,
             lease_seconds=self._action_lease_seconds,
             now=now,
+            expected_action_id=expected_action_id,
         )
         if action is None:
             return None

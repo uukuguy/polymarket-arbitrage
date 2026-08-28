@@ -562,10 +562,10 @@ def _runtime_deadline_profile(row: Mapping[str, object]) -> RuntimeDeadlineProfi
     ):
         return RuntimeDeadlineProfile(
             policy_version=str(row["policy_version"]),
-            lease_seconds=int(row["profile_lease_seconds"]),
-            heartbeat_seconds=int(row["profile_heartbeat_seconds"]),
-            progress_seconds=int(row["profile_progress_seconds"]),
-            attempt_seconds=int(row["profile_attempt_seconds"]),
+            lease_seconds=int(cast(int, row["profile_lease_seconds"])),
+            heartbeat_seconds=int(cast(int, row["profile_heartbeat_seconds"])),
+            progress_seconds=int(cast(int, row["profile_progress_seconds"])),
+            attempt_seconds=int(cast(int, row["profile_attempt_seconds"])),
         )
     started_at = _require_aware(cast(datetime, row["started_at"]), "started_at")
     heartbeat_at = _require_aware(cast(datetime, row["last_heartbeat_at"]), "last_heartbeat_at")
@@ -1465,9 +1465,17 @@ def claim_action(
     controller: RuntimeControllerLease,
     lease_seconds: int,
     now: datetime,
+    expected_action_id: str | None = None,
 ) -> RecoveryActionRecord | None:
-    """Claim one pending or expired-running action using SKIP LOCKED."""
+    """Claim one pending or expired-running action using SKIP LOCKED.
+
+    ``expected_action_id`` is an operator-turn fence.  It prevents an exact
+    reconcile command from draining an unrelated older queue entry after it
+    has scheduled the requested action.
+    """
     _require_nonempty(worker_id=worker_id)
+    if expected_action_id is not None:
+        _require_nonempty(expected_action_id=expected_action_id)
     observed_at = _require_aware(now, "now")
     if lease_seconds <= 0:
         raise ValueError("lease_seconds must be positive")
@@ -1482,6 +1490,7 @@ def claim_action(
             FROM public.m1_recovery_actions
             WHERE controller_id = %s
               AND expected_controller_epoch = %s
+              AND (%s::text IS NULL OR action_id = %s)
               AND (
                   state = 'pending'
                   OR (state = 'running' AND worker_lease_expires_at <= %s)
@@ -1490,7 +1499,13 @@ def claim_action(
             FOR UPDATE SKIP LOCKED
             LIMIT 1
             """,
-            (controller.controller_id, controller.lease_epoch, observed_at),
+            (
+                controller.controller_id,
+                controller.lease_epoch,
+                expected_action_id,
+                expected_action_id,
+                observed_at,
+            ),
         )
         row = cursor.fetchone()
         if row is None:

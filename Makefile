@@ -687,10 +687,10 @@ control-plane-render-rollout:
 	@printf '%s\n' "$(release_id)" | grep -Eq '^[0-9a-f]{40}$$' || (echo "release_id=<40-char-lowercase-git-sha> is required" >&2; exit 2)
 	@uv run python -m polyarb.cli_control_plane render-rollout --enable --api-app "$(api_app)" --worker-app "$(worker_app)" --alert-app "$(alert_app)" --runtime-event-writer-app "$(runtime_event_writer_app)" --runtime-controller-app "$(runtime_controller_app)" --qualification-worker-app "$(qualification_worker_app)" --release-id "$(release_id)" $(foreach target,$(runtime_recovery_allowed_targets),--runtime-recovery-allowed-target "$(target)") --expected-database "$(expected_database)" --output-dir "$(output_dir)" --json
 
-## control-plane-render-machine-update: Translate one fresh Machine GET plus rendered Fly TOML into a full optimistic Machines API payload; local-only and redacted.
+## control-plane-render-machine-update: Translate one fresh Machine GET plus rendered Fly TOML into a full optimistic Machines API payload; qualification release-id overlay is explicit; local-only and redacted.
 control-plane-render-machine-update:
-	@test -n "$(current_machine)" -a -n "$(fly_config)" -a -n "$(expected_app)" -a -n "$(machine_id)" -a -n "$(target_image)" -a -n "$(output)" || (echo "usage: make control-plane-render-machine-update current_machine=<fresh-machine.json> fly_config=<rendered-fly.toml> expected_app=<app> machine_id=<id> target_image=<image> output=<new-update.json>" >&2; exit 2)
-	@uv run python -m polyarb.control_plane.fly_machine_update render --current-machine "$(current_machine)" --fly-config "$(fly_config)" --expected-app "$(expected_app)" --expected-machine-id "$(machine_id)" --target-image "$(target_image)" --output "$(output)" --json
+	@test -n "$(current_machine)" -a -n "$(fly_config)" -a -n "$(expected_app)" -a -n "$(machine_id)" -a -n "$(target_image)" -a -n "$(output)" || (echo "usage: make control-plane-render-machine-update current_machine=<fresh-machine.json> fly_config=<rendered-fly.toml> expected_app=<app> machine_id=<id> target_image=<image> output=<new-update.json> [update_env_from_fly=POLYARB_QUALIFICATION_RELEASE_ID]" >&2; exit 2)
+	@uv run python -m polyarb.control_plane.fly_machine_update render --current-machine "$(current_machine)" --fly-config "$(fly_config)" --expected-app "$(expected_app)" --expected-machine-id "$(machine_id)" --target-image "$(target_image)" $(foreach key,$(update_env_from_fly),--update-env-from-fly "$(key)") --output "$(output)" --json
 
 ## control-plane-verify-machine-update: Fail closed unless a fresh Machine GET exactly matches a rendered update, allowing only Fly's image digest resolution; local-only and redacted.
 control-plane-verify-machine-update:
@@ -777,10 +777,11 @@ runtime-controller-status:
 runtime-observe-verify:
 	@uv run python -m polyarb.cli_control_plane runtime-observe-verify --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --minimum-seconds "$(or $(minimum_seconds),1800)" --max-freshness-seconds "$(or $(max_freshness_seconds),90)" --max-gap-seconds "$(or $(max_gap_seconds),90)" --limit "$(or $(limit),500)" --json
 
-## runtime-reconcile-once: Evaluate runtime facts in observe-only mode by default; set POLYARB_RUNTIME_RECOVERY_MODE=execute for one fenced recovery action.
+## runtime-reconcile-once: Evaluate runtime facts in observe-only mode by default; execute mode may pin one exact target/action.
 runtime-reconcile-once:
-	@test "$(enable)" = "1" || (echo "usage: make runtime-reconcile-once enable=1 [controller_id=m1-runtime-reconciler]" >&2; exit 2)
-	@uv run python -m polyarb.cli_control_plane runtime-reconcile-once --enable --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --owner-id "$(or $(owner_id),runtime-reconcile-once)" --worker-id "$(or $(worker_id),runtime-recovery-executor)" --limit "$(or $(limit),100)" --json
+	@test "$(enable)" = "1" || (echo "usage: make runtime-reconcile-once enable=1 [controller_id=m1-runtime-reconciler] [target_type=circuit target_id=<exact-job-key> expected_action=probe-circuit]" >&2; exit 2)
+	@test -z "$(target_type)$(target_id)$(expected_action)" -o ( -n "$(target_type)" -a -n "$(target_id)" -a -n "$(expected_action)" ) || (echo "target_type, target_id and expected_action must be provided together" >&2; exit 2)
+	@uv run python -m polyarb.cli_control_plane runtime-reconcile-once --enable --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --owner-id "$(or $(owner_id),runtime-reconcile-once)" --worker-id "$(or $(worker_id),runtime-recovery-executor)" --limit "$(or $(limit),100)" $(if $(target_id),--target-type "$(target_type)" --target-id "$(target_id)" --expected-action "$(expected_action)") --json
 
 ## runtime-reconcile-serve: Run sequential observe-only reconciliation by default; explicit execute mode allows one-action recovery turns.
 runtime-reconcile-serve:

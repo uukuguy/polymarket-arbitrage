@@ -76,7 +76,10 @@ class FakeStore:
 
     def claim_action(self, **kwargs: Any) -> RecoveryActionRecord | None:
         now = kwargs["now"]
+        expected_action_id = kwargs.get("expected_action_id")
         for index, action in enumerate(self.actions):
+            if expected_action_id is not None and action.action_id != expected_action_id:
+                continue
             if action.state == "completed":
                 continue
             if action.state == "running":
@@ -126,9 +129,7 @@ class FakeStore:
         raise AssertionError("action missing")
 
     def execute_claimed_action(self, **kwargs: Any) -> RecoveryActionRecord:
-        action = next(
-            action for action in self.actions if action.action_id == kwargs["action_id"]
-        )
+        action = next(action for action in self.actions if action.action_id == kwargs["action_id"])
         if (
             action.state != "running"
             or action.worker_id != kwargs["worker_id"]
@@ -275,9 +276,26 @@ def test_only_allowlisted_job_actions_dispatch_to_control_plane(
     assert result.outcome == "succeeded"
     assert control_plane.calls == [(method, "job-1")]
     assert all(
-        name not in {"publish_receipt", "publish_pointer"}
-        for name, _ in control_plane.calls
+        name not in {"publish_receipt", "publish_pointer"} for name, _ in control_plane.calls
     )
+
+
+def test_exact_action_claim_does_not_execute_an_older_pending_action() -> None:
+    older = _action(RecoveryActionType.CANCEL_JOB, action_id="action-older")
+    selected = _action(RecoveryActionType.PROBE_CIRCUIT, action_id="action-selected")
+    store = FakeStore([older, selected])
+    control_plane = FakeControlPlane()
+
+    result = _executor(store, control_plane).run_once(
+        now=NOW + timedelta(seconds=1),
+        expected_action_id=selected.action_id,
+    )
+
+    assert result is not None
+    assert result.action_id == selected.action_id
+    assert [action.action_id for action in store.claimed] == [selected.action_id]
+    assert store.actions[0] == older
+    assert control_plane.calls == [("probe", "job-1")]
 
 
 def test_heartbeat_lease_seconds_are_forwarded_to_the_typed_adapter() -> None:

@@ -1,0 +1,57 @@
+{
+  "captured_at": "2026-08-29T03:18:00+08:00",
+  "runtime_release": "282480ecefb216e140be02c3a8c7ec7c0327f9d8",
+  "machines": {
+    "controller": {
+      "id": "6e82036dce4958",
+      "version": "01M14S7MT04KBYMPZ7KHA8C1N4"
+    },
+    "coordinator": {
+      "id": "e82d1220b2d138",
+      "version": "01M14VJG5PSJ29HAD2AHQ4JY7R"
+    },
+    "structure": {
+      "id": "683e46ea500dd8",
+      "version": "01M14VQSBMEB3C35AF7S12YE34"
+    },
+    "quote": {
+      "id": "4d895231f66748",
+      "version": "01M14VS3G26195M0K82X7M0JP8"
+    },
+    "qualification": {
+      "id": "876077f0274598",
+      "version": "01M14VXZHVAAH1NH9SXS2K48ZF"
+    }
+  },
+  "machine_contract": {
+    "state": "pass",
+    "stop_signal": "SIGTERM",
+    "stop_timeout": "40s",
+    "stopped_update_requires_explicit_start": true,
+    "qualification_updated_env_keys": [
+      "POLYARB_QUALIFICATION_RELEASE_ID"
+    ]
+  },
+  "quote_admit_recovery": {
+    "job_key": "structure:18daa4bd2efa3ea8a72b9b3994dfb8021dba39c6249a2299cb361c6ae8c8dec5:quote-admit",
+    "expired_attempt_id": "cfc88a47-7dc1-480a-8bcd-8ec26267b373",
+    "expired_lease_epoch": 7,
+    "last_progress": 156,
+    "checkpoint_cursor": "runtime-v2:18daa4bd2efa3ea8a72b9b3994dfb8021dba39c6249a2299cb361c6ae8c8dec5:150",
+    "resumed_attempt_id": "ea191447-4bac-4e63-be16-2d8a9909ba5d",
+    "resumed_lease_epoch": 8,
+    "first_resumed_shard": 151,
+    "state": "checkpoint-resumed"
+  },
+  "recovery_chain_audit": {
+    "target_id": "structure-source:300:5959460:fetch:events:162",
+    "recommended_action": "probe-circuit",
+    "production_action_count": 0,
+    "scoped_role_pre_032": "permission-denied:m1_recovery_actions",
+    "live_ssh_attempts": 2,
+    "live_ssh_outcome": "controller-oom-restarted-no-action",
+    "repair": "revision-032-plus-exact-target-selector",
+    "real_scoped_role_test": "pass",
+    "publication_pointer_mutations": 0
+  }
+}

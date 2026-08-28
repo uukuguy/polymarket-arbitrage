@@ -1196,7 +1196,8 @@ def test_runtime_reconcile_once_evaluates_schedules_and_executes_one_action(
             assert kwargs["controller"] == controller
             assert kwargs["worker_id"] == "executor-a"
 
-        def run_once(self, *, now):
+        def run_once(self, *, now, expected_action_id):
+            assert expected_action_id == "action-a"
             return cli_control_plane.RecoveryActionResult(
                 action_id="action-a",
                 action_type="heartbeat-job",
@@ -1233,6 +1234,12 @@ def test_runtime_reconcile_once_evaluates_schedules_and_executes_one_action(
                 "--enable",
                 "--worker-id",
                 "executor-a",
+                "--target-type",
+                "job",
+                "--target-id",
+                "job-a",
+                "--expected-action",
+                "heartbeat-job",
                 "--json",
             ]
         )
@@ -1467,6 +1474,34 @@ def _install_runtime_reconcile_conflict(monkeypatch, message: str) -> None:
         raise RecoveryActionConflict(message)
 
     monkeypatch.setattr(cli_control_plane, "schedule_action", conflict)
+
+
+def test_runtime_reconcile_once_exact_selector_fails_before_wrong_action(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    _install_runtime_reconcile_conflict(monkeypatch, "must not schedule a mismatched action")
+
+    assert (
+        cli_control_plane.main(
+            [
+                "runtime-reconcile-once",
+                "--enable",
+                "--target-type",
+                "job",
+                "--target-id",
+                "job-a",
+                "--expected-action",
+                "probe-circuit",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert "requested recovery action does not match current facts" in captured.err
+    assert "must not schedule" not in captured.err
 
 
 @pytest.mark.parametrize(

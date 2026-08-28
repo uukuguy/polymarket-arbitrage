@@ -25,6 +25,7 @@ class FlyMachineUpdateContractError(ValueError):
 
 _FORMAL_KILL_SIGNAL = "SIGTERM"
 _FORMAL_KILL_TIMEOUT_SECONDS = 40
+_ALLOWED_ENV_UPDATES = frozenset({"POLYARB_QUALIFICATION_RELEASE_ID"})
 
 
 def render_machine_update_payload(
@@ -34,6 +35,7 @@ def render_machine_update_payload(
     expected_app: str,
     expected_machine_id: str,
     target_image: str,
+    update_env_from_fly: Sequence[str] = (),
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return a full optimistic Machines API update and redacted proof.
 
@@ -59,6 +61,12 @@ def render_machine_update_payload(
     if fly_config.get("kill_timeout") != _FORMAL_KILL_TIMEOUT_SECONDS:
         raise FlyMachineUpdateContractError("formal Fly config must declare a 40-second drain")
 
+    updated_env_keys = tuple(sorted(set(update_env_from_fly)))
+    if len(updated_env_keys) != len(update_env_from_fly):
+        raise FlyMachineUpdateContractError("Machine env update keys must be unique")
+    if any(key not in _ALLOWED_ENV_UPDATES for key in updated_env_keys):
+        raise FlyMachineUpdateContractError("Machine env update key is outside rollout policy")
+
     candidate_config: dict[str, Any] = deepcopy(dict(current_config))
     candidate_config.pop("kill_signal", None)
     candidate_config.pop("kill_timeout", None)
@@ -67,6 +75,12 @@ def render_machine_update_payload(
         "signal": _FORMAL_KILL_SIGNAL,
         "timeout": f"{_FORMAL_KILL_TIMEOUT_SECONDS}s",
     }
+    if updated_env_keys:
+        current_env = dict(_required_mapping(candidate_config, "env", "Machine config"))
+        rendered_env = _required_mapping(fly_config, "env", "rendered Fly config")
+        for key in updated_env_keys:
+            current_env[key] = _required_string(rendered_env, key, "rendered Fly config env")
+        candidate_config["env"] = current_env
 
     preserved_current = deepcopy(dict(current_config))
     preserved_current.pop("image", None)
@@ -76,6 +90,12 @@ def render_machine_update_payload(
     preserved_candidate = deepcopy(candidate_config)
     preserved_candidate.pop("image", None)
     preserved_candidate.pop("stop_config", None)
+    for preserved in (preserved_current, preserved_candidate):
+        if updated_env_keys:
+            preserved_env = dict(_required_mapping(preserved, "env", "preserved config"))
+            for key in updated_env_keys:
+                preserved_env.pop(key, None)
+            preserved["env"] = preserved_env
     if preserved_candidate != preserved_current:
         raise FlyMachineUpdateContractError("candidate changed non-release Machine config")
     preserved_hash = hashlib.sha256(
@@ -99,6 +119,7 @@ def render_machine_update_payload(
         "kill_timeout_seconds": _FORMAL_KILL_TIMEOUT_SECONDS,
         "preserved_config_sha256": preserved_hash,
         "target_image": target_image,
+        "updated_env_keys": list(updated_env_keys),
     }
     return payload, proof
 
@@ -171,6 +192,7 @@ def _parser() -> argparse.ArgumentParser:
     render.add_argument("--expected-app", required=True)
     render.add_argument("--expected-machine-id", required=True)
     render.add_argument("--target-image", required=True)
+    render.add_argument("--update-env-from-fly", action="append", default=[])
     render.add_argument("--output", type=Path, required=True)
     render.add_argument("--json", action="store_true")
     verify = subcommands.add_parser(
@@ -194,6 +216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_app=args.expected_app,
             expected_machine_id=args.expected_machine_id,
             target_image=args.target_image,
+            update_env_from_fly=args.update_env_from_fly,
         )
         with args.output.open("x") as handle:
             json.dump(payload, handle, sort_keys=True, indent=2)

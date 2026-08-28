@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -80,7 +81,7 @@ class FakeConnection:
 class FakeAdminFactory:
     def __init__(self) -> None:
         self.database = "role_test"
-        self.revision = "031"
+        self.revision = "032"
         self.roles: dict[str, dict[str, Any]] = {
             RUNTIME_CAPABILITY: {
                 "can_login": False,
@@ -1243,6 +1244,124 @@ def test_real_postgres_provisions_verifies_rotates_and_disables_roles(
         assert _memberships(admin, QUALIFICATION_LOGIN) == [QUALIFICATION_CAPABILITY]
 
 
+def test_real_scoped_runtime_role_executes_one_fenced_circuit_probe(
+    postgres_026_dsn: str,
+) -> None:
+    """Prove the deployed login contract can cross the entire execute chain."""
+    from polyarb.control_plane.db_role_admin import provision_login_roles
+    from polyarb.control_plane.db_role_contract import scoped_connection_factory
+    from polyarb.control_plane.postgres import PostgresControlPlane
+    from polyarb.control_plane.reconciler import RuntimeReconciler
+    from polyarb.control_plane.recovery_executor import RecoveryExecutor
+    from polyarb.control_plane.recovery_models import RecoveryActionType
+    from polyarb.control_plane.recovery_store import (
+        claim_controller,
+        read_runtime_reconcile_states,
+        schedule_action,
+    )
+
+    def admin_factory() -> psycopg.Connection[object]:
+        return psycopg.connect(postgres_026_dsn)
+
+    runtime_password = "runtime-execute-chain-secret"
+    provision_login_roles(
+        admin_factory,
+        expected_database="test",
+        runtime_password=runtime_password,
+        qualification_password="qualification-execute-chain-secret",
+    )
+    runtime_factory = scoped_connection_factory(
+        _role_dsn(postgres_026_dsn, RUNTIME_LOGIN, runtime_password)
+    )
+    admin_control_plane = PostgresControlPlane(admin_factory)
+    runtime_control_plane = PostgresControlPlane(runtime_factory)
+    now = datetime.now(UTC).replace(microsecond=0)
+    job_key = "runtime-role-chain:structure-fetch"
+    admin_control_plane.enqueue_job(
+        job_key=job_key,
+        job_type="structure-fetch",
+        input_identity="runtime-role-chain",
+        now=now,
+    )
+    lease = admin_control_plane.claim_job(
+        worker_id="runtime-role-chain-worker",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    with admin_factory() as connection:
+        connection.execute(
+            "UPDATE public.m1_jobs SET state = 'retryable', lease_owner = NULL, "
+            "lease_expires_at = NULL, next_attempt_at = %s WHERE job_key = %s",
+            (now, job_key),
+        )
+        connection.execute(
+            "INSERT INTO public.m1_job_circuits "
+            "(job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at) "
+            "VALUES (%s, 3, 'open', %s, %s, %s)",
+            (job_key, now - timedelta(minutes=2), now - timedelta(seconds=1), now),
+        )
+
+    controller = claim_controller(
+        runtime_factory,
+        controller_id="runtime-role-chain-controller",
+        owner_id="runtime-role-chain-owner",
+        lease_seconds=60,
+        now=now,
+    )
+    candidate = next(
+        item
+        for item in read_runtime_reconcile_states(
+            runtime_factory,
+            controller_id=controller.controller_id,
+            now=now,
+            sample_limit=100,
+        )
+        if item.target_id == job_key
+    )
+    decision = RuntimeReconciler().evaluate(candidate.runtime_state, now=now)
+    assert decision.action is RecoveryActionType.PROBE_CIRCUIT
+    scheduled = schedule_action(
+        runtime_factory,
+        controller=controller,
+        decision=decision,
+        incident_key=candidate.incident_key,
+        component=candidate.component,
+        target_type=candidate.target_type,
+        target_id=candidate.target_id,
+        expected_attempt_id=candidate.runtime_state.attempt_id,
+        expected_lease_epoch=candidate.runtime_state.lease_epoch,
+        recovery_budget_remaining=candidate.runtime_state.recovery_budget.remaining_actions,
+        cooldown_seconds=candidate.cooldown_seconds,
+        channels=candidate.channels,
+        now=now,
+    )
+    result = RecoveryExecutor(
+        connection_factory=runtime_factory,
+        control_plane=runtime_control_plane,
+        controller=controller,
+        worker_id="runtime-role-chain-executor",
+    ).run_once(now=now + timedelta(seconds=1))
+
+    assert result is not None
+    assert result.action_id == scheduled.action_id
+    assert result.action_type == RecoveryActionType.PROBE_CIRCUIT.value
+    assert result.outcome == "succeeded"
+    with admin_factory() as connection:
+        assert connection.execute(
+            "SELECT state, result_code FROM public.m1_recovery_actions WHERE action_id = %s",
+            (scheduled.action_id,),
+        ).fetchone() == ("completed", "succeeded")
+        assert connection.execute(
+            "SELECT state, next_attempt_at <= %s FROM public.m1_jobs WHERE job_key = %s",
+            (now + timedelta(seconds=1), job_key),
+        ).fetchone() == ("retryable", True)
+        assert connection.execute(
+            "SELECT count(*) FROM public.m1_publication_pointers",
+        ).fetchone() == (0,)
+
+
 def test_real_cli_admin_scoped_verify_admin_disable_handoff(
     postgres_026_dsn: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -1314,7 +1433,7 @@ def postgres_026_dsn() -> Iterator[str]:
     with PostgresContainer("postgres:16-alpine") as postgres:
         dsn = _normalize_dsn(postgres.get_connection_url())
         _create_supabase_roles(dsn)
-        _run_alembic(dsn, "upgrade", "031")
+        _run_alembic(dsn, "upgrade", "032")
         yield dsn
 
 

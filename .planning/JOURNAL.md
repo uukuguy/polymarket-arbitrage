@@ -11393,3 +11393,57 @@ preflight may controller `6e82036dce4958` receive image + SIGTERM/40.
 → qualification sequential rollout on the same Machine IDs. Do not start the
 fresh 86,400-second qualification epoch until publication freshness and zero
 recovery actions pass after all four roles.
+
+### SESSION 332 — 2026-08-29 (sequential rollout and executable recovery chain)
+
+- [ROLLOUT] Coordinator, Structure, Quote and qualification were updated
+  sequentially on their original IDs to exact release `282480ec`. Fresh remote
+  verification proves `SIGTERM/40s` and invariant non-release config. Fly leaves
+  stopped Machines stopped after update, so each required an explicit start.
+  Qualification's only allowed env overlay is its full release ID.
+- [RECOVERY PROOF] Long `quote-admit` epoch 7 progressed to shard 156, persisted
+  checkpoint 150, hit its absolute attempt boundary and transitioned to epoch
+  8, which resumed at shard 151. No outer timeout, from-zero restart or retry
+  exhaustion occurred.
+- [CHAIN-TRUTH DEFECT] The sole open source circuit produced the correct
+  observe-only `probe-circuit` decision, but revision 031's runtime role could
+  not INSERT the action ledger. Two SSH one-shots on the 256MB controller also
+  OOM-killed the main interpreter; Fly restarted it and zero actions executed.
+- [TDD REPAIR] Revision 032 adds only fenced recovery SELECT/INSERT/UPDATE
+  authority; DELETE/TRUNCATE/sequences/publication writes stay forbidden.
+  Exact target type/ID/action selectors fail closed before scheduling. A real
+  scoped-login PG16 test now completes the full circuit probe and asserts zero
+  publication pointer writes.
+
+[NEXT] Finish local gates and commit Task 16, build its exact amd64 image, stop
+the observe controller, apply revision 032 transactionally, execute only
+`probe-circuit` for `structure-source:300:5959460:fetch:events:162` in an
+isolated 512MB auto-removed Machine, then update/restart the controller and
+prove end-to-end freshness before starting the 86,400-second epoch.
+
+### SESSION 333 — 2026-08-29 (recovery authority and exact execution chain)
+
+- [ROOT CAUSE] Production observe-only repeatedly selected the due source
+  circuit, but revision 031's scoped runtime role could not insert a recovery
+  action. The code path existed while its deployed identity made execution
+  impossible.
+- [REPAIR] Revision 032 grants only the fenced recovery transaction's exact
+  SELECT/INSERT/UPDATE matrix. DELETE, TRUNCATE, sequences and publication
+  writes remain forbidden. A real scoped-login PostgreSQL chain schedules,
+  claims and completes one circuit probe with zero pointer mutations.
+- [SEQUENCE AUDIT] Exact target/type/action initially fenced only decision and
+  scheduling. The generic executor could still claim an older pending action.
+  Operator turns now carry the scheduled `action_id` through claim; no-match
+  returns empty, while resident service turns preserve oldest-first behavior.
+- [FINAL LOCAL GATE] Fresh `make test-m1` passed **4,019 tests, one skip and one
+  expected xfail in 1,456.38 seconds** without an outer timeout. Focused real
+  PostgreSQL, CLI, executor and role tests plus Ruff/format/Pyright pass.
+- [BOUNDARY] Production remains revision 031. Controller is started
+  observe-only with an empty allowlist; no recovery action has executed. The
+  three user-owned SDD files remain outside staging scope.
+
+[NEXT] Run climb/planning gates and commit Task 16; build and verify the exact
+revision-032 amd64 image. Then stop controller, migrate transactionally, run
+only the exact source `probe-circuit` in an isolated 512MB auto-removed Machine,
+restore controller observe-only, and verify publication freshness before the
+86,400-second qualification epoch.

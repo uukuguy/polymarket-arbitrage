@@ -5686,6 +5686,18 @@ def test_recovery_action_single_active_target_claim_and_finish_are_fenced(
     )
     assert duplicate == scheduled
 
+    assert (
+        claim_action(
+            control_plane._connection_factory,
+            worker_id="exact-action-worker",
+            controller=controller,
+            lease_seconds=30,
+            now=now + timedelta(seconds=2),
+            expected_action_id="not-the-scheduled-action",
+        )
+        is None
+    )
+
     claim = claim_action(
         control_plane._connection_factory,
         worker_id="action-worker",

@@ -367,75 +367,29 @@ def _param(params: object, index: int) -> object:
 
 
 def _allowed_table_privileges(profile: str, table: str) -> frozenset[str]:
-    allowed: dict[str, dict[str, frozenset[str]]] = {
-        "runtime-controller": {
-            "m1_runtime_controller_leases": frozenset({"SELECT", "INSERT", "UPDATE"}),
-            "m1_runtime_observe_decisions": frozenset({"SELECT", "INSERT"}),
-            "m1_job_runtime_state": frozenset({"SELECT"}),
-            "m1_jobs": frozenset({"SELECT"}),
-            "m1_job_circuits": frozenset({"SELECT"}),
-            "m1_job_attempts": frozenset({"SELECT"}),
-            "m1_recovery_target_budgets": frozenset({"SELECT"}),
-            "m1_recovery_actions": frozenset({"SELECT"}),
-            "m1_job_runtime_events": frozenset(),
-            "m1_incidents": frozenset(),
-            "m1_incident_events": frozenset(),
-            "m1_alert_outbox": frozenset(),
-        },
-        "qualification-worker": {
-            "m1_qualification_ingress_ledger": frozenset({"SELECT"}),
-            "m1_qualification_source_cursors": frozenset({"SELECT", "INSERT", "UPDATE"}),
-            "m1_qualification_epochs": frozenset({"SELECT", "INSERT", "UPDATE"}),
-            "m1_qualification_epoch_facts": frozenset({"SELECT", "INSERT"}),
-            "m1_qualification_recovery_observations": frozenset({"SELECT", "INSERT"}),
-            "m1_qualification_certificates": frozenset({"SELECT"}),
-            "m1_publication_pointers": frozenset({"SELECT"}),
-            "m1_generation_manifests": frozenset({"SELECT"}),
-            "m1_opportunity_publication_pointers": frozenset({"SELECT"}),
-            "m1_opportunity_projections": frozenset({"SELECT"}),
-            "m1_job_runtime_events": frozenset(),
-            "m1_incidents": frozenset(),
-            "m1_incident_events": frozenset(),
-            "m1_recovery_actions": frozenset(),
-            "m1_alert_outbox": frozenset(),
-        },
+    from polyarb.control_plane.db_role_contract import (
+        QUALIFICATION_ALLOWED,
+        RUNTIME_ALLOWED,
+    )
+
+    allowed = {
+        "runtime-controller": RUNTIME_ALLOWED,
+        "qualification-worker": QUALIFICATION_ALLOWED,
     }
     return allowed[profile].get(table, frozenset())
 
 
 def _allowed_table_names(profile: str) -> Iterable[str]:
-    if profile == "runtime-controller":
-        return (
-            "m1_runtime_controller_leases",
-            "m1_runtime_observe_decisions",
-            "m1_job_runtime_state",
-            "m1_jobs",
-            "m1_job_circuits",
-            "m1_job_attempts",
-            "m1_recovery_target_budgets",
-            "m1_recovery_actions",
-            "m1_job_runtime_events",
-            "m1_incidents",
-            "m1_incident_events",
-            "m1_alert_outbox",
-        )
-    return (
-        "m1_qualification_ingress_ledger",
-        "m1_qualification_source_cursors",
-        "m1_qualification_epochs",
-        "m1_qualification_epoch_facts",
-        "m1_qualification_recovery_observations",
-        "m1_qualification_certificates",
-        "m1_publication_pointers",
-        "m1_generation_manifests",
-        "m1_opportunity_publication_pointers",
-        "m1_opportunity_projections",
-        "m1_job_runtime_events",
-        "m1_incidents",
-        "m1_incident_events",
-        "m1_recovery_actions",
-        "m1_alert_outbox",
+    from polyarb.control_plane.db_role_contract import (
+        QUALIFICATION_ALLOWED,
+        RUNTIME_ALLOWED,
     )
+
+    allowed = {
+        "runtime-controller": RUNTIME_ALLOWED,
+        "qualification-worker": QUALIFICATION_ALLOWED,
+    }
+    return allowed[profile]
 
 
 def _allowed_functions(profile: str) -> Iterable[str]:

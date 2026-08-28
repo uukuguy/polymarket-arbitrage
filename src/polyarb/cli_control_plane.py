@@ -410,6 +410,12 @@ def _parser() -> argparse.ArgumentParser:
     runtime_once.add_argument("--action-lease-seconds", type=int, default=30)
     runtime_once.add_argument("--heartbeat-lease-seconds", type=int, default=30)
     runtime_once.add_argument("--limit", type=int, default=100)
+    runtime_once.add_argument("--target-type", choices=("job", "circuit"))
+    runtime_once.add_argument("--target-id")
+    runtime_once.add_argument(
+        "--expected-action",
+        choices=tuple(action.value for action in RecoveryActionType),
+    )
     runtime_once.add_argument("--json", action="store_true")
     runtime_serve = subcommands.add_parser(
         "runtime-reconcile-serve",
@@ -1447,6 +1453,16 @@ def _runtime_reconcile_once(
         raise ValueError("heartbeat lease seconds must be positive")
     if args.limit <= 0 or args.limit > 100:
         raise ValueError("limit must be in 1..100")
+    target_type = getattr(args, "target_type", None)
+    target_id = getattr(args, "target_id", None)
+    expected_action = getattr(args, "expected_action", None)
+    selector_values = (target_type, target_id, expected_action)
+    if any(value is not None for value in selector_values) and not all(
+        isinstance(value, str) and value.strip() for value in selector_values
+    ):
+        raise ValueError("target-type, target-id, and expected-action must be provided together")
+    if target_id is not None and recovery_mode != "execute":
+        raise ValueError("an exact recovery target is valid only in execute mode")
     _raise_if_runtime_reconcile_stopped(stop_requested)
     now = datetime.now(UTC)
     connection_factory = control_plane._connection_factory
@@ -1463,6 +1479,14 @@ def _runtime_reconcile_once(
         now=now,
         sample_limit=args.limit,
     )
+    if target_id is not None:
+        candidates = tuple(
+            candidate
+            for candidate in candidates
+            if candidate.target_type == target_type and candidate.target_id == target_id
+        )
+        if len(candidates) != 1:
+            raise RuntimeError("requested recovery target is not uniquely active")
     _raise_if_runtime_reconcile_stopped(stop_requested)
     reconciler = RuntimeReconciler()
     evaluated: list[tuple[RuntimeReconcileCandidate, RecoveryDecision]] = []
@@ -1490,6 +1514,12 @@ def _runtime_reconcile_once(
     observed_decision_count = 0
     if selected is not None:
         candidate, decision = selected
+    if expected_action is not None:
+        actual_action = (
+            None if decision is None or decision.action is None else decision.action.value
+        )
+        if actual_action != expected_action:
+            raise RuntimeError("requested recovery action does not match current facts")
     if recovery_mode == "observe-only":
         if evaluated:
             observe_records = tuple(
@@ -1562,7 +1592,10 @@ def _runtime_reconcile_once(
             action_lease_seconds=args.action_lease_seconds,
             heartbeat_lease_seconds=args.heartbeat_lease_seconds,
         )
-        result = executor.run_once(now=now)
+        if expected_action is not None and scheduled is not None:
+            result = executor.run_once(now=now, expected_action_id=scheduled.action_id)
+        else:
+            result = executor.run_once(now=now)
     decision_action = None if decision is None else getattr(decision, "action", None)
     reason = "runtime.no-active-attempts" if decision is None else decision.reason_code
     if recovery_mode == "observe-only":
@@ -1966,12 +1999,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command in {"cloud-soak-start", "cloud-soak-sample"}:
             try:
+                observation = _record_cloud_soak_observation(
+                    control_plane,
+                    args,
+                    baseline=args.command == "cloud-soak-start",
+                )
+                if observation is None:
+                    raise RuntimeError("cloud soak observation stopped before completion")
                 _write(
-                    _record_cloud_soak_observation(
-                        control_plane,
-                        args,
-                        baseline=args.command == "cloud-soak-start",
-                    ),
+                    observation,
                     as_json=args.json,
                 )
             except (OSError, SoakEvidenceError, ValueError) as error:

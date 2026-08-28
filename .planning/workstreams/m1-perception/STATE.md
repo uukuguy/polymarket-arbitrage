@@ -337,3 +337,24 @@ progress:
    `make qualification-certificates` and
    independently reverify the immutable certificate before marking Phase 05.6
    and M1 complete. Fault and recovery mutation remain separately gated.
+
+## 2026-08-29 sequential rollout and executable recovery audit
+
+- All five runtime-v2 Machine roles now run release `282480ec` on their original
+  IDs with persisted `stop_config=SIGTERM/40s`; qualification release identity
+  matches. Stopped updates require explicit start.
+- Quote admission epoch 7 expired after shard 156 with checkpoint 150; epoch 8
+  resumed at shard 151. This is fresh production proof of bounded attempt plus
+  checkpoint recovery, not retry exhaustion.
+- One source circuit remains open. Observe-only correctly proposes exact
+  `probe-circuit`, but revision 031 scoped authority cannot write the action
+  ledger. Two in-place SSH one-shots OOM-restarted the 256MB controller and
+  executed zero actions.
+- Revision 032 and exact target/action selectors pass a real scoped-role PG16
+  chain. Next: commit/build exact 032 image, stop controller, migrate, run one
+  isolated 512MB one-shot, update/restart controller, then verify source →
+  Structure → Quote → opportunity freshness before starting 86,400 seconds.
+- Exact selection now fences the executor claim with the scheduled `action_id`;
+  no-match returns empty instead of draining an older pending action. The final
+  source version passed 4,019 tests, one skip and one expected xfail in
+  1,456.38 seconds without an outer timeout.
