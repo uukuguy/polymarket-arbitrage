@@ -747,6 +747,7 @@ class TransactionalStructureSourceWorker:
                     "structure source transport replacement failed: {}",
                     type(reset_error).__name__,
                 )
+            failure_stage = runtime.current_stage or "started"
             await _to_thread(
                 self._control_plane.finish_retryable_with_incident,
                 runtime.current_lease,
@@ -759,8 +760,9 @@ class TransactionalStructureSourceWorker:
                     "job_key": lease.job_key,
                     "lease_epoch": lease.lease_epoch,
                     "error_class": type(error).__name__,
+                    "stage": failure_stage,
                     "failure_fingerprint": retry_failure_fingerprint(
-                        error, component="structure-fetch"
+                        error, component=f"structure-fetch:{failure_stage}"
                     ),
                 },
                 channels=incident_alert_channels(Settings()),
@@ -792,6 +794,10 @@ class TransactionalStructureSourceWorker:
         artifact, next_cursor, completed, record_count = await self._fetch_artifact(
             spec, runtime=runtime
         )
+        # The fenced terminal receipt is the authoritative completion fact.
+        # Persist only that commit work has started before any commit-side DB
+        # I/O; never claim 1/1 before the receipt itself exists.
+        await _progress(runtime, stage="commit-page", current=0, total=1)
         decision = await _to_thread(
             self._control_plane.record_cloud_usage,
             source="gamma",
@@ -805,7 +811,6 @@ class TransactionalStructureSourceWorker:
         )
         if not decision.allowed:
             raise StructureSourceError("cloud-egress-budget-exhausted")
-        await _progress(runtime, stage="commit-page", current=1, total=1)
         await runtime.stop()
         event_embedded_markets = spec.stream == "events" and completed
         await _terminal_to_thread(
@@ -839,6 +844,7 @@ class TransactionalStructureSourceWorker:
         self, spec: StructureSourcePageSpec, *, runtime: AsyncAttemptRuntime
     ) -> tuple[StructureSourcePageArtifact, str | None, bool, int]:
         page: EventPage | MarketPage
+        await _progress(runtime, stage="fetch-page", current=0, total=1)
         if spec.stream == "events":
             page = await asyncio.wait_for(
                 self._gamma.fetch_active_event_page(spec.requested_cursor, self._page_limit),
@@ -852,6 +858,8 @@ class TransactionalStructureSourceWorker:
                 timeout=self._object_store_timeout_seconds,
             )
             finished_at_ms = int(self._now().timestamp() * 1_000)
+            await _progress(runtime, stage="fetch-page", current=1, total=1)
+            await _progress(runtime, stage="validate-page", current=0, total=1)
             artifact = StructureSourcePageArtifact.from_page(
                 spec=spec,
                 records=records,
@@ -860,8 +868,8 @@ class TransactionalStructureSourceWorker:
                 started_at_ms=started_at_ms,
                 finished_at_ms=finished_at_ms,
             )
-            await _progress(runtime, stage="fetch-page", current=1, total=1)
             await _progress(runtime, stage="validate-page", current=1, total=1)
+            await _progress(runtime, stage="upload-page", current=0, total=1)
             await self._upload_artifact(artifact)
             await _progress(runtime, stage="upload-page", current=1, total=1)
             return artifact, None, True, len(records)
@@ -871,9 +879,10 @@ class TransactionalStructureSourceWorker:
                 timeout=self._object_store_timeout_seconds,
             )
             records = page.markets
+        await _progress(runtime, stage="fetch-page", current=1, total=1)
+        await _progress(runtime, stage="validate-page", current=0, total=1)
         if page.requested_cursor != spec.requested_cursor:
             raise StructureSourceError("source page requested cursor mismatch")
-        await _progress(runtime, stage="fetch-page", current=1, total=1)
         artifact = StructureSourcePageArtifact.from_page(
             spec=spec,
             records=records,
@@ -883,6 +892,7 @@ class TransactionalStructureSourceWorker:
             finished_at_ms=page.finished_at_ms,
         )
         await _progress(runtime, stage="validate-page", current=1, total=1)
+        await _progress(runtime, stage="upload-page", current=0, total=1)
         await self._upload_artifact(artifact)
         await _progress(runtime, stage="upload-page", current=1, total=1)
         return artifact, page.next_cursor, page.completed, len(records)

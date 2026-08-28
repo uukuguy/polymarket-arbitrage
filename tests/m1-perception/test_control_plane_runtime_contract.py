@@ -185,6 +185,39 @@ def test_progress_is_monotonic_and_heartbeat_does_not_advance_progress() -> None
     assert runtime.lease.lease_expires_at == NOW + timedelta(seconds=150)
 
 
+def test_current_stage_advances_only_after_progress_is_durable() -> None:
+    class FailSecondProgressStore(FakeStore):
+        def record_runtime_progress(
+            self,
+            lease: JobLease,
+            *,
+            progress: RuntimeProgress,
+            now: datetime,
+            detail: dict[str, object] | None = None,
+        ) -> None:
+            if len(self.progresses) == 1:
+                raise TimeoutError("progress persistence failed")
+            super().record_runtime_progress(
+                lease,
+                progress=progress,
+                now=now,
+                detail=detail,
+            )
+
+    store = FailSecondProgressStore()
+    runtime = AttemptRuntime(store=store, lease=LEASE, profile=PROFILE, clock=VirtualClock())
+
+    assert runtime.current_stage is None
+    runtime.progress(stage="read-manifest", current=0, total=1)
+    assert runtime.current_stage == "read-manifest"
+
+    with pytest.raises(TimeoutError, match="progress persistence failed"):
+        runtime.progress(stage="read-shards", current=0, total=1)
+
+    assert runtime.current_stage == "read-manifest"
+    assert runtime.progress_sequence == 1
+
+
 def test_progress_rejects_unknown_stage_before_persistence() -> None:
     clock = VirtualClock()
     store = FakeStore()

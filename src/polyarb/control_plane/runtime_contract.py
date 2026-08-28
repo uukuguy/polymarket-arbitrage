@@ -225,6 +225,7 @@ class AttemptRuntime:
         self._profile = profile
         self._clock = clock
         self._sequence = 0
+        self._current_stage: str | None = None
         self._last_heartbeat_at = _read_clock(clock)
         self._started_at = self._last_heartbeat_at
 
@@ -241,6 +242,11 @@ class AttemptRuntime:
     @property
     def progress_sequence(self) -> int:
         return self._sequence
+
+    @property
+    def current_stage(self) -> str | None:
+        """Return the last stage whose progress fact persisted successfully."""
+        return self._current_stage
 
     @property
     def last_heartbeat_at(self) -> datetime:
@@ -300,6 +306,7 @@ class AttemptRuntime:
             kwargs["detail"] = dict(detail)
         self._store.record_runtime_progress(self._lease, **kwargs)
         self._sequence = sequence
+        self._current_stage = stage
 
     def heartbeat_if_due(self) -> None:
         """Renew the lease only after the configured heartbeat interval."""

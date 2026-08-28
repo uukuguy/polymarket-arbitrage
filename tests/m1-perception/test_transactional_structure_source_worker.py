@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import pytest
 
 from polyarb.clients.gamma_client import EventPage, MarketPage, PaginationIntegrityError
+from polyarb.control_plane.failure_identity import retry_failure_fingerprint
 from polyarb.control_plane.models import (
     CloudUsageDecision,
     JobLease,
@@ -147,7 +148,8 @@ class FakeGamma:
 
 class FailingGamma(FakeGamma):
     async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage:
-        raise TimeoutError("Gamma unavailable")
+        self.failure = TimeoutError("Gamma unavailable")
+        raise self.failure
 
 
 class ResetFailingGamma(FailingGamma):
@@ -547,19 +549,26 @@ def test_source_worker_reports_all_fenced_page_lifecycle_stages() -> None:
     )
 
     assert asyncio.run(worker.run_once()).outcome == "succeeded"
-    assert [item["progress"].stage for item in control_plane.runtime_progress] == [
-        "fetch-page",
-        "validate-page",
-        "upload-page",
-        "commit-page",
+    assert [
+        (item["progress"].stage, item["progress"].current, item["progress"].total)
+        for item in control_plane.runtime_progress
+    ] == [
+        ("fetch-page", 0, 1),
+        ("fetch-page", 1, 1),
+        ("validate-page", 0, 1),
+        ("validate-page", 1, 1),
+        ("upload-page", 0, 1),
+        ("upload-page", 1, 1),
+        ("commit-page", 0, 1),
     ]
 
 
 def test_source_worker_marks_only_current_page_retryable_when_gamma_fails() -> None:
     control_plane = FakeControlPlane(_event_spec())
+    gamma = FailingGamma()
     worker = TransactionalStructureSourceWorker(
         control_plane=control_plane,
-        gamma=FailingGamma(),
+        gamma=gamma,
         object_client=FakeObjectClient(),
         bucket="source-pages",
         worker_id="source-worker-a",
@@ -583,6 +592,7 @@ def test_source_worker_marks_only_current_page_retryable_when_gamma_fails() -> N
                 "job_key": "source-window:one:fetch:events:0",
                 "lease_epoch": 1,
                 "error_class": "TimeoutError",
+                "stage": "fetch-page",
                 "failure_fingerprint": control_plane.retry_incidents[0]["detail"][
                     "failure_fingerprint"
                 ],
@@ -591,7 +601,16 @@ def test_source_worker_marks_only_current_page_retryable_when_gamma_fails() -> N
             "now": NOW,
         }
     ]
-    assert control_plane.retry_incidents[0]["detail"]["failure_fingerprint"].startswith("sha256:")
+    assert control_plane.retry_incidents[0]["detail"]["failure_fingerprint"] == (
+        retry_failure_fingerprint(
+            gamma.failure,
+            component="structure-fetch:fetch-page",
+        )
+    )
+    assert [
+        (item["progress"].stage, item["progress"].current)
+        for item in control_plane.runtime_progress
+    ] == [("fetch-page", 0)]
     assert worker._gamma.reset_calls == 1
 
 
