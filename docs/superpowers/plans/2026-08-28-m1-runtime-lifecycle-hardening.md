@@ -235,3 +235,44 @@ cursor handoff.
   no-drift, Pyright/Ruff/format/JSON/diff checks pass.
 - [ ] Commit the amended Plan 209 evidence, rebuild the exact image, and restart controller canary from
   a fresh lease epoch before resuming coordinator rollout.
+
+## Task 13: Formal Fly platform-shutdown authority
+
+**Files:**
+
+- Modify: `deploy/control-plane/fly-control-alert-delivery.toml.template`
+- Modify: `deploy/control-plane/fly-control-alert.toml.template`
+- Modify: `deploy/control-plane/fly-control-api.toml.template`
+- Modify: `deploy/control-plane/fly-control-worker.toml.template`
+- Modify: `deploy/control-plane/fly-qualification-worker.toml.template`
+- Modify: `deploy/control-plane/fly-runtime-controller.toml.template`
+- Modify: `deploy/control-plane/fly-runtime-event-writer.toml.template`
+- Test: `tests/m1-perception/test_control_plane_deployment_templates.py`
+- Test: `tests/m1-perception/test_control_plane_rollout.py`
+
+**Interfaces:**
+
+- Consumes: the Task 12 internal maximum shutdown owner of 30 seconds.
+- Produces: every rendered formal service declares `kill_signal = "SIGTERM"`
+  and `kill_timeout = 40`; controller rollout permits only image plus those two
+  lifecycle fields to differ.
+
+- [x] Add a RED parameterized template test loading all seven TOML files and
+  asserting SIGTERM plus 40 seconds, and a renderer test proving the fields
+  survive substitution.
+- [x] Run
+  `uv run pytest -q tests/m1-perception/test_control_plane_deployment_templates.py tests/m1-perception/test_control_plane_rollout.py`
+  and require failure because formal templates currently inherit Fly's
+  five-second default.
+- [x] Add the two top-level fields to all seven templates with a comment that
+  40 = 30 seconds maximum internal owner + 10 seconds terminal/interpreter
+  margin; do not change env, process, VM, restart, HTTP, secret, or role scope.
+- [x] Re-run the focused tests and require all pass; then run the complete M1,
+  climb, planning, Pyright/Ruff/format/JSON/diff gates without an outer timeout.
+- [ ] Mark remote digest `sha256:9bb6ebde…c1989` superseded before deployment,
+  commit Task 13 with the Plan 209 summary, build/push/verify the new exact
+  amd64 image, and update only controller Machine `6e82036dce4958`.
+- [ ] Prove controller Machine ID, region, env, guest, restart policy,
+  observe-only mode and empty allowlist are unchanged; only image,
+  `kill_signal`, and `kill_timeout` may differ. Start a fresh lease epoch and
+  pass 120/300/1,800-second observe gates before any sibling rollout.

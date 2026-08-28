@@ -4,6 +4,9 @@
 # its code path uses that token only for status reads.
 app = "__CONTROL_PLANE_ALERT_APP__"
 primary_region = "ams"
+# Platform backstop: 30s maximum internal owner plus 10s terminal/interpreter margin.
+kill_signal = "SIGTERM"
+kill_timeout = 40
 
 [env]
 POLYARB_RUNTIME_ROLE = "control-plane"

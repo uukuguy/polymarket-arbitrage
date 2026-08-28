@@ -3,9 +3,29 @@
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from polyarb.control_plane.db_role_admin import PROFILE_DSN_ENV
 
 ROOT = Path(__file__).resolve().parents[2]
+
+FORMAL_LONG_RUNNING_TEMPLATES = (
+    "fly-control-alert-delivery.toml.template",
+    "fly-control-alert.toml.template",
+    "fly-control-api.toml.template",
+    "fly-control-worker.toml.template",
+    "fly-qualification-worker.toml.template",
+    "fly-runtime-controller.toml.template",
+    "fly-runtime-event-writer.toml.template",
+)
+
+
+@pytest.mark.parametrize("template_name", FORMAL_LONG_RUNNING_TEMPLATES)
+def test_formal_service_template_declares_platform_shutdown_backstop(template_name: str) -> None:
+    payload = tomllib.loads((ROOT / "deploy/control-plane" / template_name).read_text())
+
+    assert payload["kill_signal"] == "SIGTERM"
+    assert payload["kill_timeout"] == 40
 
 
 def test_docker_build_context_excludes_local_distribution_artifacts() -> None:
@@ -47,7 +67,7 @@ def test_control_worker_template_has_three_fixed_transactional_roles() -> None:
         ),
         "structure_range": (
             "/bin/sh -ec 'exec python -m polyarb.cli_control_plane serve --enable "
-            "--worker-id \"fly-control-plane-structure-range:${FLY_MACHINE_ID:?}\" "
+            '--worker-id "fly-control-plane-structure-range:${FLY_MACHINE_ID:?}" '
             "--worker-role structure-range --pool-turns 2 --interval-seconds 2 --json'"
         ),
         "quote_batch": (
@@ -99,9 +119,8 @@ def test_control_alert_template_is_a_database_independent_runtime_watchdog() -> 
     assert '"$POLYARB_EVIDENCE_MACHINE_ID"' in watchdog
     assert '"$POLYARB_WATCHDOG_SOAK_RUN_ID_V2"' in watchdog
     assert (
-        '--secondary-target '
-        '"$POLYARB_RUNTIME_EVENT_WRITER_APP/$POLYARB_RUNTIME_EVENT_WRITER_MACHINE_ID"'
-        in watchdog
+        "--secondary-target "
+        '"$POLYARB_RUNTIME_EVENT_WRITER_APP/$POLYARB_RUNTIME_EVENT_WRITER_MACHINE_ID"' in watchdog
     )
     assert payload["vm"][0]["processes"] == ["watchdog"]
     assert payload["restart"] == [{"policy": "always"}]

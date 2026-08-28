@@ -11303,3 +11303,36 @@ gate passes.
 the exact immutable amd64 image, then restart only the controller canary and a
 fresh 1,800/90/90 observe gate. Do not restart coordinator or update sibling
 workers before that gate passes.
+
+### SESSION 329 — 2026-08-29 (Task 13 formal platform shutdown authority)
+
+- [PREFLIGHT / STOP] Task 12 image commit `4eb0af23` was built amd64 and pushed
+  to both runtime registries as immutable digest `sha256:9bb6ebde…c1989`, but
+  no Machine received it. Read-only controller preflight returned
+  `kill_signal=null / kill_timeout=null`, proving the formal templates still
+  inherited Fly's historical five-second process kill default and could preempt
+  the new 30-second internal shutdown owner. Rollout stopped before mutation.
+- [DESIGN / TDD] Chose one uniform platform backstop for all seven formal
+  long-running templates: `SIGTERM + 40s`, derived from 15s TERM + 15s
+  KILL/reap + 10s terminal/interpreter margin. Parameterized source-template
+  and rendered-config tests were RED on the missing field, then passed after
+  the seven TOML changes. No env, process, guest, restart, HTTP, secret or role
+  scope changed.
+- [INFRA RECOVERY] The first full run failed during fixture setup because
+  OrbStack Docker became unresponsive. Docker Desktop 4.15 also failed to start
+  its VM. To avoid interrupting the unrelated running `ubuntu-fusion-control`
+  VM, created isolated Colima profile `polyarb-tests`, explicitly bound Python
+  Docker SDK/Ryuk to its socket, and preloaded PostgreSQL/Ryuk images. A real
+  revision-031 PostgreSQL smoke then passed.
+- [FINAL LOCAL GATE] Fresh `make test-m1` passed **4,004 tests, one skip and one
+  expected xfail in 1,477.06 seconds** without an outer timeout. The long
+  Structure performance case remained near 100% CPU in SQLite B-tree work and
+  completed naturally. Production stayed unchanged; controller remains safe
+  observe-only, coordinator/qualification stopped, Structure/Quote on the old
+  digest, and zero recovery actions executed.
+
+[NEXT] Finish climb/planning/static gates, commit Task 13 without the three
+protected user SDD files, build and push a new exact amd64 image, then update
+only controller `6e82036dce4958` with exact image plus `SIGTERM + 40s`. Prove
+all other config invariant and pass fresh 120/300/1,800-second observe gates
+before any sibling rollout.

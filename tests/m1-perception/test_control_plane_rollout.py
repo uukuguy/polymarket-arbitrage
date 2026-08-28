@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,17 @@ def test_rollout_renderer_writes_six_isolated_apps_and_staged_checklist(tmp_path
         '"polyarb-control-worker-staging/fly-control-plane-coordinator,'
         'polyarb-control-worker-staging/fly-control-plane-quote-batch"' in qualification_config
     )
+    for config_name in (
+        "fly-control-api.toml",
+        "fly-control-worker.toml",
+        "fly-control-alert.toml",
+        "fly-runtime-event-writer.toml",
+        "fly-runtime-controller.toml",
+        "fly-qualification-worker.toml",
+    ):
+        payload = tomllib.loads((tmp_path / config_name).read_text())
+        assert payload["kill_signal"] == "SIGTERM"
+        assert payload["kill_timeout"] == 40
     for rendered_text in (runtime_controller_config, qualification_config):
         assert "__" not in rendered_text
     assert "FLY_API_TOKEN" not in qualification_config

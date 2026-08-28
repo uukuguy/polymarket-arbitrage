@@ -4,6 +4,9 @@
 # scheduler, Telegram, or browser credentials.
 app = "__RUNTIME_EVENT_WRITER_APP__"
 primary_region = "ams"
+# Platform backstop: 30s maximum internal owner plus 10s terminal/interpreter margin.
+kill_signal = "SIGTERM"
+kill_timeout = 40
 
 [env]
 POLYARB_RUNTIME_ROLE = "control-plane"

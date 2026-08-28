@@ -2217,3 +2217,21 @@ success is not user receipt/read evidence.
   numeric, list and text fields are validated before domain conversion. A
   malformed observation must fail as a bounded read error, not cascade into a
   second ambiguous recovery failure.
+
+### §2.54 Platform shutdown configuration is part of lifecycle authority (2026-08-29)
+
+- Internal shutdown correctness is insufficient if the deployment layer can
+  preempt it earlier. Read-only Fly preflight found the live controller with
+  `kill_signal=null` and `kill_timeout=null`, so formal runtime-v2 still
+  inherited the platform's historical five-second termination default while
+  the child cleanup owner required up to 30 seconds.
+- All seven formal long-running templates now declare `SIGTERM` and a uniform
+  40-second platform backstop. The value is derived from the maximum 15-second
+  TERM plus 15-second KILL/reap owner and a 10-second terminal-evidence /
+  interpreter-exit margin. It is not an operation timeout and does not delay a
+  process that exits normally.
+- Template and rendered-config tests fence the field at both source and rollout
+  boundaries. A controller update may change only exact image plus these two
+  lifecycle fields; Machine identity, region, env, guest, restart policy,
+  observe-only mode and empty allowlist remain invariant. Discovery of the gap
+  superseded the pushed candidate before any Machine mutation.

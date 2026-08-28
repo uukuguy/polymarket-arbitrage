@@ -2,6 +2,9 @@
 # deployed directly. Give this app only a read-only Postgres DSN secret.
 app = "__CONTROL_PLANE_API_APP__"
 primary_region = "ams"
+# Platform backstop: 30s maximum internal owner plus 10s terminal/interpreter margin.
+kill_signal = "SIGTERM"
+kill_timeout = 40
 
 [env]
 POLYARB_RUNTIME_ROLE = "control-plane"

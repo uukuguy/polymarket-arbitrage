@@ -1,0 +1,28 @@
+{
+  "schema": "polyarb.runtime-v2.formal-platform-shutdown-preflight.v1",
+  "recorded_at": "2026-08-29T01:46:54+08:00",
+  "task12_candidate": {
+    "source_commit": "4eb0af237b7cec37479291e8cbc0db4dce63b6a1",
+    "local_image_id": "sha256:41e24b76542f90eb3ab6063adbbd2dda5184d086a363b5dc2feb5d0385fde26c",
+    "remote_digest": "sha256:9bb6ebde2083d10b3b5304741aa453e8ab344168fc198fa48899e3d27b5c1989",
+    "deployed": false,
+    "disposition": "superseded-before-deployment"
+  },
+  "controller_preflight": {
+    "app": "polyarb-control-worker-m1",
+    "machine_id": "6e82036dce4958",
+    "region": "ams",
+    "state": "started",
+    "kill_signal": null,
+    "kill_timeout": null,
+    "inferred_platform_default_seconds": 5
+  },
+  "repair_contract": {
+    "kill_signal": "SIGTERM",
+    "kill_timeout_seconds": 40,
+    "derivation": "15s TERM + 15s KILL/reap + 10s terminal/interpreter margin",
+    "formal_template_count": 7
+  },
+  "production_mutation": false,
+  "recovery_actions_executed": 0
+}

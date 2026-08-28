@@ -7,6 +7,9 @@
 # HTTP authority.
 app = "__RUNTIME_CONTROLLER_APP__"
 primary_region = "ams"
+# Platform backstop: 30s maximum internal owner plus 10s terminal/interpreter margin.
+kill_signal = "SIGTERM"
+kill_timeout = 40
 
 [env]
 POLYARB_DB_EXPECTED_DATABASE = "__EXPECTED_DATABASE__"

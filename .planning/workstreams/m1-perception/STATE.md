@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Task 12 audit and all local gates passed; commit and exact-image rebuild remain before fresh controller canary
-last_updated: "2026-08-29T00:15:35+08:00"
+stopped_at: Task 13 formal Fly shutdown templates and full local gate passed; commit and exact-image rebuild remain before fresh controller canary
+last_updated: "2026-08-29T01:46:54+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -70,14 +70,18 @@ progress:
   the failure was an early client clock plus roughly 45 later
   `READ COMMITTED` queries, then found the same request-round mismatch in
   opportunity pagination and contradictory nested shutdown deadlines in the
-  compatibility daemon. The local repair uses one database-owned repeatable-read
+  compatibility daemon. A final deployment-layer preflight then proved all
+  formal runtime-v2 templates still inherited Fly's historical five-second
+  process kill default despite the internal 30-second owner. All seven templates
+  now declare uniform `SIGTERM + 40s`, derived as 30 seconds internal cleanup plus
+  10 seconds terminal/interpreter margin, and both source/rendered TOML contracts
+  are tested. The local repair uses one database-owned repeatable-read
   clock/data statement per public read and one task-owned bounded TERM/KILL
   sequence. Independent review found no Critical issue; its changed-line type
   boundary finding is closed with validated JSON scalars/arrays, behavioral
   result-set tests and already-exited process-race coverage. The final local
-  gate passed 3,997 tests, one skip and one expected xfail in 1,555.91 seconds;
-  climb 50/50, planning no-drift, Pyright, Ruff, format, JSON and diff checks
-  pass. Commit, exact-image rebuild and a fresh controller gate are required
+  Task 13's fresh local gate passed 4,004 tests, one skip and one expected xfail
+  in 1,477.06 seconds without an outer timeout. Commit, exact-image rebuild and a fresh controller gate are required
   before coordinator restarts; `b3a47506` and its continuity evidence are
   superseded because executable bytes changed.
 - **Plan 05.6-209 runtime lifecycle repair:** Plan 208's job-specific deadline
