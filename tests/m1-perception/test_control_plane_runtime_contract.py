@@ -15,7 +15,9 @@ from polyarb.control_plane.postgres import StaleLeaseError
 from polyarb.control_plane.runtime_contract import (
     RUNTIME_STAGE_REGISTRY,
     AsyncAttemptRuntime,
+    AttemptDeadlineExceeded,
     AttemptRuntime,
+    ProgressDeadlineExceeded,
 )
 from polyarb.control_plane.runtime_models import (
     RuntimeDeadlineProfile,
@@ -194,6 +196,21 @@ def test_progress_rejects_unknown_stage_before_persistence() -> None:
     assert store.progresses == []
 
 
+def test_sync_runtime_enforces_one_absolute_attempt_budget_across_calls() -> None:
+    clock = VirtualClock()
+    store = FakeStore()
+    runtime = AttemptRuntime(store=store, lease=LEASE, profile=PROFILE, clock=clock)
+
+    assert runtime.remaining_attempt_seconds() == 120
+    clock.advance(seconds=119)
+    assert runtime.remaining_attempt_seconds() == 1
+    clock.advance(seconds=1)
+    with pytest.raises(AttemptDeadlineExceeded, match="attempt deadline"):
+        runtime.progress(stage="read-shards", current=1, total=1)
+
+    assert store.progresses == []
+
+
 def test_progress_rejects_non_exact_runtime_values() -> None:
     clock = VirtualClock()
     runtime = AttemptRuntime(store=FakeStore(), lease=LEASE, profile=PROFILE, clock=clock)
@@ -306,6 +323,50 @@ async def test_heartbeat_failure_cancels_body_and_surfaces_original_error() -> N
     assert raised.value is failure
     assert runtime.heartbeat_task is not None
     assert runtime.heartbeat_task.done()
+
+
+@pytest.mark.asyncio
+async def test_progress_watchdog_cancels_owner_with_typed_error() -> None:
+    profile = RuntimeDeadlineProfile(
+        policy_version="test",
+        lease_seconds=3,
+        heartbeat_seconds=1,
+        progress_seconds=1,
+        attempt_seconds=3,
+    )
+    runtime = AsyncAttemptRuntime(
+        store=FakeStore(),
+        lease=replace(LEASE, lease_expires_at=NOW + timedelta(seconds=3)),
+        profile=profile,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(ProgressDeadlineExceeded, match="progress deadline"):
+        async with runtime:
+            await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+async def test_attempt_watchdog_wins_while_progress_remains_live() -> None:
+    profile = RuntimeDeadlineProfile(
+        policy_version="test",
+        lease_seconds=3,
+        heartbeat_seconds=1,
+        progress_seconds=1,
+        attempt_seconds=2,
+    )
+    runtime = AsyncAttemptRuntime(
+        store=FakeStore(),
+        lease=replace(LEASE, lease_expires_at=NOW + timedelta(seconds=3)),
+        profile=profile,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(AttemptDeadlineExceeded, match="attempt deadline"):
+        async with runtime:
+            while True:
+                runtime.progress(stage="read-shards", current=1, total=2)
+                await asyncio.sleep(0.2)
 
 
 @pytest.mark.asyncio

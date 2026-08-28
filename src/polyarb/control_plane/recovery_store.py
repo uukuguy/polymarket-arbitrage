@@ -551,6 +551,23 @@ def _runtime_failure_class(value: object) -> RecoveryFailureClass | None:
 
 
 def _runtime_deadline_profile(row: Mapping[str, object]) -> RuntimeDeadlineProfile:
+    if all(
+        key in row
+        for key in (
+            "policy_version",
+            "profile_lease_seconds",
+            "profile_heartbeat_seconds",
+            "profile_progress_seconds",
+            "profile_attempt_seconds",
+        )
+    ):
+        return RuntimeDeadlineProfile(
+            policy_version=str(row["policy_version"]),
+            lease_seconds=int(row["profile_lease_seconds"]),
+            heartbeat_seconds=int(row["profile_heartbeat_seconds"]),
+            progress_seconds=int(row["profile_progress_seconds"]),
+            attempt_seconds=int(row["profile_attempt_seconds"]),
+        )
     started_at = _require_aware(cast(datetime, row["started_at"]), "started_at")
     heartbeat_at = _require_aware(cast(datetime, row["last_heartbeat_at"]), "last_heartbeat_at")
     progress_at = _require_aware(cast(datetime, row["last_progress_at"]), "last_progress_at")
@@ -606,6 +623,9 @@ def read_runtime_reconcile_states(
                    r.progress_sequence, r.progress_current, r.progress_total,
                    r.lease_deadline_at, r.heartbeat_deadline_at,
                    r.progress_deadline_at, r.attempt_deadline_at, r.recovery_state,
+                   r.policy_version, r.profile_lease_seconds,
+                   r.profile_heartbeat_seconds, r.profile_progress_seconds,
+                   r.profile_attempt_seconds,
                    c.state AS circuit_state, c.opened_at AS circuit_opened_at,
                    c.next_probe_at AS circuit_next_probe_at,
                    a.error_class AS attempt_error_class,

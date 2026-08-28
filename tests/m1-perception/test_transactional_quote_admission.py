@@ -199,6 +199,9 @@ class _ObjectMap:
 
     def put_object(self, **kwargs: object) -> None:
         self.puts.append(kwargs)
+        body = kwargs["Body"]
+        assert isinstance(body, bytes)
+        self._payloads[str(kwargs["Key"])] = body
 
     def head_object(self, **kwargs: object) -> dict[str, object]:
         matching = next(item for item in self.puts if item["Key"] == kwargs["Key"])
@@ -222,21 +225,40 @@ class _ControlPlane:
         self.terminal_leases: list[JobLease] = []
         self.expired_observations: list[str] = []
         self._current_lease: JobLease | None = None
+        self.checkpoints: list[tuple[str, str, str, str]] = []
+        self.claim_count = 0
 
     def claim_job(self, **kwargs: object) -> JobLease:
         assert kwargs["job_types"] == ("quote-admit",)
+        self.claim_count += 1
+        latest = self.checkpoints[-1] if self.checkpoints else None
         lease = JobLease(
             job_key="structure:digest:quote-admit",
             job_type="quote-admit",
             input_identity="structure:digest:bundles/current.ndjson:" + self.digest,
             lease_owner="quote-admitter",
-            lease_epoch=1,
+            lease_epoch=self.claim_count,
             lease_expires_at=NOW + timedelta(seconds=120),
-            checkpoint_cursor=None,
-            checkpoint_digest=None,
+            checkpoint_cursor=None if latest is None else latest[0],
+            checkpoint_digest=None if latest is None else latest[1],
         )
         self._current_lease = lease
         return lease
+
+    def record_running_checkpoint(self, lease: JobLease, **kwargs: object) -> object:
+        record = (
+            str(kwargs["checkpoint_cursor"]),
+            str(kwargs["checkpoint_digest"]),
+            str(kwargs["artifact_key"]),
+            str(kwargs["idempotency_key"]),
+        )
+        if record not in self.checkpoints:
+            self.checkpoints.append(record)
+        return object()
+
+    def running_checkpoints(self, job_key: str) -> tuple[tuple[str, str, str], ...]:
+        assert job_key == "structure:digest:quote-admit"
+        return tuple(record[:3] for record in self.checkpoints)
 
     def quote_admission_input(self, job_key: str) -> tuple[str, str, str]:
         assert job_key == "structure:digest:quote-admit"
@@ -316,9 +338,7 @@ class _TerminalRaceControlPlane(_ControlPlane):
         if self.terminal_committed.is_set():
             self.heartbeat_after_terminal += 1
             raise StaleLeaseError("heartbeat raced terminal admission")
-        return super().heartbeat_runtime_attempt(
-            lease, now=now, lease_seconds=lease_seconds
-        )
+        return super().heartbeat_runtime_attempt(lease, now=now, lease_seconds=lease_seconds)
 
     def admit_quote_generation(self, lease: JobLease, **kwargs: object) -> None:
         self.terminal_committed.set()
@@ -456,8 +476,7 @@ def test_quote_admitter_long_runtime_keeps_lease_live_for_207_simulated_seconds(
         range(1, len(control_plane.progress) + 1)
     )
     assert {
-        (progress.stage, progress.current, progress.total)
-        for progress in control_plane.progress
+        (progress.stage, progress.current, progress.total) for progress in control_plane.progress
     } >= {
         ("read-manifest", 1, 1),
         ("read-shards", 1, 1),
@@ -556,9 +575,7 @@ def test_quote_admitter_stale_heartbeat_drains_blocking_upload_before_return() -
 
     async def exercise() -> None:
         task = asyncio.create_task(worker.run_once())
-        await asyncio.wait_for(
-            asyncio.to_thread(objects.put_started.wait, 1), timeout=1
-        )
+        await asyncio.wait_for(asyncio.to_thread(objects.put_started.wait, 1), timeout=1)
         clock.advance(31)
         for _ in range(100):
             if control_plane.heartbeats:
@@ -606,11 +623,13 @@ def test_quote_admitter_external_cancellation_drains_blocking_read_before_return
 
     asyncio.run(exercise())
     assert control_plane.admitted is None
-    assert control_plane.retry_incidents == []
+    assert len(control_plane.retry_incidents) == 1
+    assert control_plane.retry_incidents[0]["error_class"] == "ServiceStopRequested"
+    assert control_plane.retry_incidents[0]["detail"]["reason_code"] == "service-stop"
     assert control_plane.recoveries == []
 
 
-def test_quote_admitter_terminal_commit_wins_scheduler_timeout() -> None:
+def test_quote_admitter_scheduler_waits_for_terminal_commit() -> None:
     bundle = _bundle()
     control_plane = _BlockingTerminalControlPlane(bundle.sha256)
     objects = _Objects(bundle.payload)
@@ -634,16 +653,13 @@ def test_quote_admitter_terminal_commit_wins_scheduler_timeout() -> None:
         quote_certifier=idle,
         max_turns=6,
         include_quote_batch=False,
-        turn_timeout_seconds=0.05,
     )
 
     async def exercise() -> dict[str, object]:
         tick = asyncio.create_task(scheduler.run_tick())
-        await asyncio.wait_for(
-            asyncio.to_thread(control_plane.terminal_started.wait, 1), timeout=1
-        )
+        await asyncio.wait_for(asyncio.to_thread(control_plane.terminal_started.wait, 1), timeout=1)
         await asyncio.sleep(0.08)
-        assert not tick.done(), "scheduler must await a terminal commit it cancelled"
+        assert not tick.done(), "scheduler must not invent a terminal-call timeout"
         control_plane.release_terminal.set()
         return await asyncio.wait_for(tick, timeout=1)
 
@@ -656,7 +672,7 @@ def test_quote_admitter_terminal_commit_wins_scheduler_timeout() -> None:
     assert quote_turn["outcome"] == "admitted"
 
 
-def test_quote_admitter_blocking_recovery_reports_pending_after_terminal_success() -> None:
+def test_quote_admitter_scheduler_waits_for_bounded_recovery() -> None:
     bundle = _bundle()
     control_plane = _BlockingRecoveryControlPlane(bundle.sha256)
     objects = _Objects(bundle.payload)
@@ -680,14 +696,11 @@ def test_quote_admitter_blocking_recovery_reports_pending_after_terminal_success
         quote_certifier=idle,
         max_turns=6,
         include_quote_batch=False,
-        turn_timeout_seconds=0.05,
     )
 
     async def exercise() -> dict[str, object]:
         tick = asyncio.create_task(scheduler.run_tick())
-        await asyncio.wait_for(
-            asyncio.to_thread(control_plane.recovery_started.wait, 1), timeout=1
-        )
+        await asyncio.wait_for(asyncio.to_thread(control_plane.recovery_started.wait, 1), timeout=1)
         await asyncio.sleep(0.08)
         assert not tick.done(), "scheduler must drain the bounded recovery call"
         control_plane.release_recovery.set()
@@ -716,9 +729,7 @@ def test_quote_admitter_terminal_commit_consumes_repeated_cancellation() -> None
 
     async def exercise() -> QuoteBatchWorkerResult:
         task = asyncio.create_task(worker.run_once())
-        await asyncio.wait_for(
-            asyncio.to_thread(control_plane.terminal_started.wait, 1), timeout=1
-        )
+        await asyncio.wait_for(asyncio.to_thread(control_plane.terminal_started.wait, 1), timeout=1)
         task.cancel()
         await asyncio.sleep(0.01)
         assert not task.done()
@@ -806,9 +817,7 @@ def test_quote_admitter_v3_manifest_reports_each_shard_and_batch() -> None:
         StructureShardReceipt("markets", index, shard.key, shard.sha256, 1)
         for index, shard in enumerate(shards)
     )
-    manifest_payload = canonical_structure_shard_manifest_bytes(
-        identity=identity, shards=receipts
-    )
+    manifest_payload = canonical_structure_shard_manifest_bytes(identity=identity, shards=receipts)
     manifest = StructureBundleArtifact.from_bytes(manifest_payload)
     clock = _VirtualClock()
     control_plane = _ControlPlane(manifest.sha256)
@@ -848,8 +857,103 @@ def test_quote_admitter_v3_manifest_reports_each_shard_and_batch() -> None:
         ("upload-batches", 2, 2),
         ("commit-admission", 1, 1),
     ]
-    assert len(objects.puts) == 2
+    assert len(objects.puts) == 3
+    assert len(control_plane.checkpoints) == 1
     assert len(control_plane.recoveries) == 1
+
+
+def test_quote_admitter_resumes_231_shards_after_last_durable_checkpoint() -> None:
+    markets = tuple(
+        {
+            "market_id": f"market-{index}",
+            "condition_id": f"condition-{index}",
+            "slug": f"market-{index}",
+            "yes_token_id": f"yes-{index}",
+            "event_id": "event-a",
+            "active": True,
+            "closed": False,
+            "neg_risk": True,
+            "neg_risk_market_id": "neg-risk-a",
+        }
+        for index in range(231)
+    )
+    identity = StructureBundleIdentity(
+        publication_id="publication-resume",
+        window_id="window-resume",
+        snapshot_id=1,
+        comparison_receipt_digest="a" * 64,
+        normalization_contract_version="v3",
+        component_counts={
+            "events": 0,
+            "event_tags": 0,
+            "memberships": 0,
+            "group_truth": 0,
+            "markets": 231,
+            "issues": 0,
+        },
+        source_kind="gamma-source-window-events-v3-sharded",
+    )
+    shards = tuple(
+        StructureShardArtifact.from_bytes(
+            canonical_structure_shard_bytes(
+                window_key="window-resume",
+                source_digest="a" * 64,
+                component="markets",
+                ordinal=index,
+                rows=(market,),
+            )
+        )
+        for index, market in enumerate(markets)
+    )
+    receipts = tuple(
+        StructureShardReceipt("markets", index, shard.key, shard.sha256, 1)
+        for index, shard in enumerate(shards)
+    )
+    manifest = StructureBundleArtifact.from_bytes(
+        canonical_structure_shard_manifest_bytes(identity=identity, shards=receipts)
+    )
+
+    class _FailOnceObjectMap(_ObjectMap):
+        def __init__(self, payloads: dict[str, bytes], fail_key: str) -> None:
+            super().__init__(payloads)
+            self.fail_key = fail_key
+            self.failed = False
+            self.read_counts: dict[str, int] = {}
+
+        def get_object(self, **kwargs: object) -> dict[str, object]:
+            key = str(kwargs["Key"])
+            self.read_counts[key] = self.read_counts.get(key, 0) + 1
+            if key == self.fail_key and not self.failed:
+                self.failed = True
+                raise TimeoutError("simulated shard interruption")
+            return super().get_object(**kwargs)
+
+    control_plane = _ControlPlane(manifest.sha256)
+    objects = _FailOnceObjectMap(
+        {
+            "bundles/current.ndjson": manifest.payload,
+            **{shard.key: shard.payload for shard in shards},
+        },
+        shards[128].key,
+    )
+    worker = TransactionalQuoteAdmitter(
+        control_plane=cast(Any, control_plane),
+        object_client=objects,
+        bucket="artifacts",
+        worker_id="quote-admitter",
+        now=lambda: NOW,
+        batch_size=20,
+    )
+
+    with pytest.raises(QuoteAdmissionError, match="bundle digest or contract"):
+        asyncio.run(worker.run_once())
+    assert len(control_plane.checkpoints) == 12
+    assert control_plane.checkpoints[-1][0].endswith(":120")
+
+    assert asyncio.run(worker.run_once()).outcome == "admitted"
+    assert all(objects.read_counts[shard.key] == 1 for shard in shards[:120])
+    assert all(objects.read_counts[shard.key] == 2 for shard in shards[120:129])
+    assert all(objects.read_counts[shard.key] == 1 for shard in shards[129:])
 
 
 def test_quote_admitter_retries_without_batches_when_bundle_digest_is_wrong() -> None:
@@ -892,22 +996,29 @@ def test_v3_quote_admission_rejects_even_identical_duplicate_yes_tokens() -> Non
     }
     first = StructureShardArtifact.from_bytes(
         canonical_structure_shard_bytes(
-            window_key="window-v3", source_digest="a" * 64, component="markets", ordinal=0,
+            window_key="window-v3",
+            source_digest="a" * 64,
+            component="markets",
+            ordinal=0,
             rows=(market,),
         )
     )
     second = StructureShardArtifact.from_bytes(
         canonical_structure_shard_bytes(
-            window_key="window-v3", source_digest="a" * 64, component="markets", ordinal=1,
+            window_key="window-v3",
+            source_digest="a" * 64,
+            component="markets",
+            ordinal=1,
             rows=(market,),
         )
     )
     worker = TransactionalQuoteAdmitter(
         control_plane=cast(Any, object()),
-        object_client=cast(Any, _ObjectMap(
-            {first.key: first.payload, second.key: second.payload}
-        )),
-        bucket="artifacts", worker_id="quote-admitter", now=lambda: NOW, batch_size=100,
+        object_client=cast(Any, _ObjectMap({first.key: first.payload, second.key: second.payload})),
+        bucket="artifacts",
+        worker_id="quote-admitter",
+        now=lambda: NOW,
+        batch_size=100,
     )
 
     with pytest.raises(QuoteAdmissionError, match="duplicate YES token"):

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from .postgres import StaleLeaseError
+from .service_lifecycle import drain_worker_task, run_worker
 
 
 class _Worker(Protocol):
@@ -23,14 +23,12 @@ class TransactionalWorkerLoop:
         worker_name: str,
         worker: _Worker,
         turns_per_tick: int,
-        turn_timeout_seconds: float = 105,
     ) -> None:
-        if not worker_name or turns_per_tick <= 0 or turn_timeout_seconds <= 0:
+        if not worker_name or turns_per_tick <= 0:
             raise ValueError("worker loop bounds are invalid")
         self._worker_name = worker_name
         self._worker = worker
         self._turns_per_tick = turns_per_tick
-        self._turn_timeout_seconds = turn_timeout_seconds
         self._running = asyncio.Lock()
 
     async def run_tick(self) -> dict[str, object]:
@@ -42,16 +40,9 @@ class TransactionalWorkerLoop:
 
     async def _run_turn(self) -> dict[str, object]:
         try:
-            result = self._worker.run_once()
+            result = await run_worker(self._worker)
         except StaleLeaseError:
             return {"worker": self._worker_name, "job_key": None, "outcome": "stale-lease"}
-        if inspect.isawaitable(result):
-            try:
-                result = await asyncio.wait_for(result, timeout=self._turn_timeout_seconds)
-            except TimeoutError:
-                return {"worker": self._worker_name, "job_key": None, "outcome": "timed-out"}
-            except StaleLeaseError:
-                return {"worker": self._worker_name, "job_key": None, "outcome": "stale-lease"}
         return {
             "worker": self._worker_name,
             "job_key": result.job_key,
@@ -69,7 +60,41 @@ class TransactionalWorkerLoop:
             raise ValueError("interval_seconds must be positive")
         ticks = 0
         while not stop_event.is_set():
-            outcome = await self.run_tick()
+            tick_task = asyncio.create_task(
+                self.run_tick(), name=f"worker-loop-tick:{self._worker_name}"
+            )
+            stop_task = asyncio.create_task(stop_event.wait())
+            await asyncio.wait(
+                (tick_task, stop_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not stop_task.done():
+                stop_task.cancel()
+            await asyncio.gather(stop_task, return_exceptions=True)
+            if stop_event.is_set() and not tick_task.done():
+                closed = await drain_worker_task(
+                    tick_task,
+                    worker_name=self._worker_name,
+                    worker=self._worker,
+                )
+                if not closed and on_tick is not None:
+                    await on_tick(
+                        {
+                            "status": "ok",
+                            "turns": [
+                                {
+                                    "worker": self._worker_name,
+                                    "job_key": None,
+                                    "outcome": "service-stop-grace-expired",
+                                }
+                            ],
+                        }
+                    )
+                break
+            try:
+                outcome = tick_task.result()
+            except asyncio.CancelledError:
+                break
             ticks += 1
             if on_tick is not None:
                 await on_tick(outcome)
@@ -86,5 +111,5 @@ class TransactionalWorkerLoop:
         if closer is None:
             return
         result = closer()
-        if inspect.isawaitable(result):
+        if isinstance(result, Awaitable):
             await result

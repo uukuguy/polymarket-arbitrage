@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Plan 05.6-208 locally repairs the Structure certifier deadline loop and qualification freshness source; verified image rollout is next
-last_updated: "2026-08-28T07:55:15+08:00"
+stopped_at: Plan 05.6-209 closes the competing-timeout, task-lane, bounded-stop, reclaim, checkpoint and qualification-cursor defects locally; revision 028 plus immutable rollout is next
+last_updated: "2026-08-28T11:24:06+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
-  total_plans: 73
-  completed_plans: 73
+  total_plans: 74
+  completed_plans: 74
   percent: 99
 ---
 
@@ -23,8 +23,9 @@ progress:
   The runtime's durable job, receipt, lease, pointer, evidence, and incident
   facts live there.
 
-- **Transactional collection:** `polyarb-control-worker-m1` has three fixed,
-  started 1GB roles on the current layered runtime image: coordinator `e82d1220b2d138`, Structure range worker
+- **Transactional collection:** `polyarb-control-worker-m1` has three fixed
+  1GB roles on the current layered runtime image: coordinator `e82d1220b2d138` is
+  deliberately stopped pending Plan 05.6-209 rollout; Structure range worker
   `683e46ea500dd8`, and Quote batch worker `4d895231f66748`. Fenced Postgres
   leases and idempotent receipts make process replacement safe; Structure and
   Quote are not competing for a local SQLite writer.
@@ -70,7 +71,23 @@ progress:
   no ordinary credential env key is present, and the exact eight-Machine
   topology audit passes with every Machine started.
 
-- **Plan 05.6-208 local liveness repair:** the initial accumulating epoch was
+- **Plan 05.6-209 runtime lifecycle repair:** Plan 208's job-specific deadline
+  change exposed the wider defect: scheduler/role turn timeouts, worker-local
+  profiles, relative I/O budgets and durable attempt deadlines could all kill
+  the same task. `runtime-v2` now centrally derives all clocks, retry/checkpoint
+  policy and the validated eight-job DAG. Scheduler lanes are independent and
+  own cadence only; service stop consumes central terminal grace and preserves
+  fenced lease/checkpoint facts for takeover. Reclaim closes expired attempts,
+  revision 028 releases legacy leased orphans and orders checkpoints, and the
+  1,117-range/231-shard reducers resume instead of restarting at zero. Open
+  circuits release one controller probe before historical attempt clocks are
+  considered. Qualification consumes breaker history for the first identity
+  and hands successor releases the live ledger high-water. Full M1 regression
+  is 3,947 passed / 1 skipped / 1 expected xfail; independent final review has
+  zero findings. Coordinator and qualification Machines remain stopped;
+  production is still revision 027 and has not received this code.
+
+- **Plan 05.6-208 diagnosis (superseded locally by Plan 209):** the initial accumulating epoch was
   later invalidated by repeated Structure freshness gaps. Production evidence
   proved one 1,117-range `structure-certify` job was heartbeat/progress healthy
   but hit the generic 300-second attempt deadline at roughly range 290 on every
@@ -80,7 +97,8 @@ progress:
   the certified manifest named by `quote:current`, not absent legacy
   `structure:current`; both Structure and Quote freshness reject any generation
   identity outside exact lowercase 64-hex grammar. The verified code has not
-  yet been rolled out.
+  yet been rolled out; its proposed rollout envelope was explicitly superseded
+  before mutation because it did not include the lifecycle repair or revision 028.
 
 ## Local Event-Driven Recovery Closure (2026-08-25)
 

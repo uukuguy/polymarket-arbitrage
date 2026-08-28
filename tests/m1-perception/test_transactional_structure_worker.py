@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from polyarb.control_plane import structure_worker as structure_worker_module
 from polyarb.control_plane.faults import IntentionalStagingRetryFault
 from polyarb.control_plane.models import (
     JobLease,
@@ -382,7 +383,7 @@ def test_structure_retry_fault_uses_existing_retry_incident_path() -> None:
         worker_id="worker-a",
         now=lambda: NOW,
         retry_fault_before_receipt=lambda _lease: (_ for _ in ()).throw(
-                IntentionalStagingRetryFault("intentional staging retry")
+            IntentionalStagingRetryFault("intentional staging retry")
         ),
     )
 
@@ -780,6 +781,185 @@ def test_structure_certifier_renews_while_parity_read_exceeds_lease() -> None:
     assert result.outcome == "certified"
     assert control_plane.certified
     assert len(control_plane.heartbeats) >= 3
+
+
+def test_structure_certifier_resumes_1117_ranges_after_durable_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        structure_worker_module,
+        "_run_bounded_sync_call",
+        lambda call, **_kwargs: call(),
+    )
+    identity = StructureBundleIdentity(
+        publication_id="source-window:resume",
+        window_id="resume",
+        snapshot_id=0,
+        comparison_receipt_digest="a" * 64,
+        normalization_contract_version="gamma-source-window-events-v3-sharded",
+        component_counts={
+            "events": 1117,
+            "event_tags": 0,
+            "memberships": 0,
+            "group_truth": 0,
+            "markets": 0,
+            "issues": 0,
+        },
+        source_kind="gamma-source-window-events-v3-sharded",
+    )
+    shards = tuple(
+        StructureShardArtifact.from_bytes(
+            canonical_structure_shard_bytes(
+                window_key="resume",
+                source_digest="a" * 64,
+                component="events",
+                ordinal=index,
+                rows=({"id": f"event-{index:04d}"},),
+            )
+        )
+        for index in range(1117)
+    )
+    shard_receipts = tuple(
+        StructureShardReceipt("events", index, shard.key, shard.sha256, 1)
+        for index, shard in enumerate(shards)
+    )
+    manifest = StructureBundleArtifact.from_bytes(
+        canonical_structure_shard_manifest_bytes(identity=identity, shards=shard_receipts)
+    )
+    ranges: list[tuple[StructureRangeSpec, StructureRangeReceipt]] = []
+    payloads = {manifest.key: manifest.payload, **{shard.key: shard.payload for shard in shards}}
+    for index, shard in enumerate(shards):
+        spec = StructureRangeSpec.create(
+            bundle_key=manifest.key,
+            bundle_digest=manifest.sha256,
+            component="events",
+            ordinal=index,
+            range_start=f"shard:{index:08d}",
+            range_end=f"shard:{index + 1:08d}",
+        )
+        artifact = StructureRangeArtifact.from_bytes(
+            canonical_structure_range_bytes(
+                bundle_digest=manifest.sha256,
+                component="events",
+                range_digest=spec.range_digest,
+                rows=({"id": f"event-{index:04d}"},),
+            )
+        )
+        payloads[artifact.key] = artifact.payload
+        ranges.append(
+            (
+                spec,
+                StructureRangeReceipt(
+                    job_key=spec.job_key,
+                    bundle_digest=spec.bundle_digest,
+                    component=spec.component,
+                    range_digest=spec.range_digest,
+                    artifact_key=artifact.key,
+                    artifact_digest=artifact.sha256,
+                    record_count=1,
+                ),
+            )
+        )
+
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.claims = 0
+            self.checkpoints: list[tuple[str, str, str, str]] = []
+            self.certified = False
+
+        def claim_job(self, **kwargs: object) -> JobLease:
+            self.claims += 1
+            latest = self.checkpoints[-1] if self.checkpoints else None
+            return JobLease(
+                job_key=manifest.key.replace("structure-manifests/", "structure:").replace(
+                    "/manifest.ndjson", ":certify"
+                ),
+                job_type="structure-certify",
+                input_identity="structure:" + manifest.sha256,
+                lease_owner="certifier-a",
+                lease_epoch=self.claims,
+                lease_expires_at=NOW + timedelta(seconds=30),
+                checkpoint_cursor=None if latest is None else latest[0],
+                checkpoint_digest=None if latest is None else latest[1],
+            )
+
+        def structure_generation_receipts(self, generation_key: str):
+            return tuple(ranges)
+
+        def running_checkpoints(self, job_key: str):
+            return tuple(record[:3] for record in self.checkpoints)
+
+        def record_running_checkpoint(self, lease: JobLease, **kwargs: object) -> object:
+            record = (
+                str(kwargs["checkpoint_cursor"]),
+                str(kwargs["checkpoint_digest"]),
+                str(kwargs["artifact_key"]),
+                str(kwargs["idempotency_key"]),
+            )
+            if record not in self.checkpoints:
+                self.checkpoints.append(record)
+            return object()
+
+        def structure_manifest_payload(self, generation_key: str) -> bytes:
+            return b'{"kind":"structure-manifest"}\n'
+
+        def record_runtime_progress(self, lease: JobLease, **kwargs: object) -> None:
+            return None
+
+        def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
+            return lease
+
+        def finish_retryable_with_incident(self, lease: JobLease, **kwargs: object) -> None:
+            return None
+
+        def certify_structure_generation(self, lease: JobLease, **kwargs: object) -> str:
+            self.certified = True
+            return str(kwargs["artifact_digest"])
+
+        def record_job_recovery(self, lease: JobLease, **kwargs: object) -> bool:
+            return False
+
+    class Objects:
+        def __init__(self) -> None:
+            self.failed = False
+            self.read_counts: dict[str, int] = {}
+            self.upload: dict[str, object] = {}
+
+        def get_object(self, **kwargs: object) -> dict[str, object]:
+            key = str(kwargs["Key"])
+            self.read_counts[key] = self.read_counts.get(key, 0) + 1
+            if key == shards[300].key and not self.failed:
+                self.failed = True
+                raise TimeoutError("simulated parity interruption")
+            return {"Body": _Body(payloads[key])}
+
+        def put_object(self, **kwargs: object) -> None:
+            self.upload = kwargs
+
+        def head_object(self, **kwargs: object) -> dict[str, object]:
+            return {
+                "ContentLength": len(self.upload["Body"]),
+                "Metadata": self.upload["Metadata"],
+            }
+
+    control_plane = ControlPlane()
+    objects = Objects()
+    certifier = TransactionalStructureCertifier(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="structure",
+        worker_id="certifier-a",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(TimeoutError, match="parity interruption"):
+        certifier.run_once()
+    assert control_plane.checkpoints[-1][0].endswith(":300")
+
+    assert certifier.run_once().outcome == "certified"
+    assert all(objects.read_counts[shard.key] == 1 for shard in shards[:300])
+    assert objects.read_counts[shards[300].key] == 2
+    assert all(objects.read_counts[shard.key] == 1 for shard in shards[301:])
 
 
 def test_structure_certifier_waits_for_missing_range_receipts_without_incident() -> None:

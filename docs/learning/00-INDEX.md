@@ -104,6 +104,7 @@
 | 90 | [可达权限与无秘密拓扑审计](90-可达权限与无秘密拓扑审计.md) | schema→object 可达链 / Supabase ambient ACL / 全局 namespace 门 / raw provider JSON 收缩 / 普通 credential env fail-closed |
 | 91 | [二次故障与运行镜像漂移](91-二次故障与运行镜像漂移.md) | 原始故障与二次故障 / trigger chain / pgcrypto namespace / image digest 漂移 / runtime-event chain-truth |
 | 92 | [资格计时为何会被健康任务打断](92-资格计时为何会被健康任务打断.md) | lease/heartbeat/progress/attempt 四时钟 / 健康推进活锁 / Quote→Structure freshness truth / 最小权限 fail-closed join |
+| 93 | [任务生命周期为何不能由多个时钟共同决定](93-任务生命周期为何不能由多个时钟共同决定.md) | 单一 lifecycle authority / DAG lane / bounded stop / lease reclaim / circuit probe / qualification cursor handoff |
 
 ## Phase 02.1 教学增量（2026-05）
 

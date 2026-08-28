@@ -45,9 +45,7 @@ def state(
         if lease_expired
         else NOW + timedelta(seconds=lease_remaining_seconds)
     )
-    circuit_opened_at = (
-        NOW - timedelta(seconds=circuit_open_age) if open_circuit else None
-    )
+    circuit_opened_at = NOW - timedelta(seconds=circuit_open_age) if open_circuit else None
     return RecoveryRuntimeState(
         job_key="quote:test:batch:1",
         attempt_id="attempt-1",
@@ -132,13 +130,6 @@ def test_missing_heartbeat_waits_for_fence_before_reclaim() -> None:
         state(heartbeat_age=5, progress_age=5, attempt_age=300, lease_remaining_seconds=-1),
         state(heartbeat_age=5, progress_age=90, lease_remaining_seconds=-1),
         state(heartbeat_age=30, progress_age=5, lease_remaining_seconds=-1),
-        state(
-            heartbeat_age=5,
-            progress_age=5,
-            lease_remaining_seconds=-1,
-            open_circuit=True,
-            circuit_open_age=60,
-        ),
     ],
 )
 def test_expired_lease_fence_outranks_owner_authority_actions(
@@ -150,6 +141,23 @@ def test_expired_lease_fence_outranks_owner_authority_actions(
     assert decision.reason_code == "job.lease-expired"
     assert decision.incident_severity == "critical"
     assert decision.qualification_breaking is True
+
+
+def test_due_open_circuit_owns_recovery_even_when_last_attempt_lease_expired() -> None:
+    runtime_state = state(
+        heartbeat_age=30,
+        progress_age=90,
+        lease_remaining_seconds=-1,
+        open_circuit=True,
+        circuit_open_age=60,
+    )
+
+    decision = RuntimeReconciler().evaluate(runtime_state, now=NOW)
+
+    assert decision.action is RecoveryActionType.PROBE_CIRCUIT
+    assert decision.reason_code == "circuit.probe-due"
+    assert decision.incident_severity == "warning"
+    assert decision.qualification_breaking is False
 
 
 def test_expired_lease_respects_higher_precedence_no_action_safety_branches() -> None:

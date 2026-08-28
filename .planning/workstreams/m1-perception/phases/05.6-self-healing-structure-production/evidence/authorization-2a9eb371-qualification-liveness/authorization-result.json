@@ -1,0 +1,13 @@
+{
+  "artifact_version": 1,
+  "recorded_at": "2026-08-28T03:20:00Z",
+  "request_status": "superseded-before-production-mutation",
+  "production_mutation_performed": false,
+  "reason": "pre-rollout liveness verification exposed competing scheduler timeout ownership, missing reducer resume, orphan attempt recovery gaps, and a required revision 028; the reviewed Plan 208 image and no-schema-mutation envelope were therefore no longer sufficient",
+  "coordinator_machine_state": "stopped",
+  "qualification_machine_state": "stopped",
+  "database_revision": "027",
+  "replacement_plan": "05.6-209",
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}

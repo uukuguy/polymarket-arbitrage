@@ -601,8 +601,9 @@ def _grant_current_database_connect(role: str) -> None:
         f"""
         DO $$
         BEGIN
-            EXECUTE pg_catalog.format('GRANT CONNECT ON DATABASE %I TO {role}',
-                                      pg_catalog.current_database());
+            EXECUTE 'GRANT CONNECT ON DATABASE '
+                || pg_catalog.quote_ident(pg_catalog.current_database())
+                || ' TO {role}';
         END;
         $$;
         """
@@ -614,8 +615,9 @@ def _revoke_current_database_connect(role: str) -> None:
         f"""
         DO $$
         BEGIN
-            EXECUTE pg_catalog.format('REVOKE CONNECT ON DATABASE %I FROM {role}',
-                                      pg_catalog.current_database());
+            EXECUTE 'REVOKE CONNECT ON DATABASE '
+                || pg_catalog.quote_ident(pg_catalog.current_database())
+                || ' FROM {role}';
         END;
         $$;
         """
@@ -858,7 +860,7 @@ def _create_incident_projection(*, security_definer: bool, search_path: str | No
         {security}
         AS $$
         DECLARE
-            incident_row public.m1_incidents%ROWTYPE;
+            incident_row public.m1_incidents;
         BEGIN
             SELECT * INTO incident_row
             FROM public.m1_incidents
@@ -931,7 +933,7 @@ def _create_certificate_verifier(
         {security}
         AS $$
         DECLARE
-            epoch_row public.m1_qualification_epochs%ROWTYPE;
+            epoch_row public.m1_qualification_epochs;
             canonical_json jsonb;
             canonical_digest text;
             canonical_identity_key text;

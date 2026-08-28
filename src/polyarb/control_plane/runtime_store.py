@@ -17,6 +17,7 @@ from uuid import uuid4
 from psycopg import Cursor
 from psycopg.types.json import Jsonb
 
+from .runtime_deadlines import runtime_deadline_profile
 from .runtime_models import (
     RuntimeDeadlineProfile,
     RuntimeEvent,
@@ -169,7 +170,10 @@ def _current_runtime_state(
                started_at, last_heartbeat_at, last_progress_at,
                progress_sequence, progress_current, progress_total,
                lease_deadline_at, heartbeat_deadline_at, progress_deadline_at,
-               attempt_deadline_at, recovery_state, updated_at
+               attempt_deadline_at, recovery_state, updated_at,
+               policy_version, profile_lease_seconds,
+               profile_heartbeat_seconds, profile_progress_seconds,
+               profile_attempt_seconds
         FROM public.m1_job_runtime_state
         WHERE job_key = %s
         """
@@ -312,24 +316,6 @@ def append_runtime_event_cursor(cursor: Cursor[Any], event: RuntimeEvent) -> Run
     return normalized
 
 
-def runtime_deadline_profile(job_type: str, lease_seconds: int) -> RuntimeDeadlineProfile:
-    """Build the bounded deadline profile for one transactional job type."""
-    if not job_type.strip():
-        raise ValueError("job_type must be non-empty")
-    bounded_lease = max(3, int(lease_seconds))
-    heartbeat = max(1, min(30, bounded_lease // 3))
-    progress = max(bounded_lease, heartbeat * 3)
-    attempt_multiplier = 120 if job_type == "structure-certify" else 10
-    attempt = max(progress, bounded_lease * attempt_multiplier)
-    return RuntimeDeadlineProfile(
-        policy_version="runtime-v1",
-        lease_seconds=bounded_lease,
-        heartbeat_seconds=heartbeat,
-        progress_seconds=progress,
-        attempt_seconds=attempt,
-    )
-
-
 def start_runtime_attempt_cursor(
     cursor: Cursor[Any],
     *,
@@ -375,9 +361,12 @@ def start_runtime_attempt_cursor(
             started_at, last_heartbeat_at, last_progress_at,
             progress_sequence, progress_current, progress_total,
             lease_deadline_at, heartbeat_deadline_at, progress_deadline_at,
-            attempt_deadline_at, recovery_state, updated_at
+            attempt_deadline_at, recovery_state, updated_at,
+            policy_version, profile_lease_seconds,
+            profile_heartbeat_seconds, profile_progress_seconds,
+            profile_attempt_seconds
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, 0, NULL, %s, %s, %s, %s,
-                  'active', %s)
+                  'active', %s, %s, %s, %s, %s, %s)
         ON CONFLICT (job_key) DO UPDATE SET
             attempt_id = EXCLUDED.attempt_id,
             lease_epoch = EXCLUDED.lease_epoch,
@@ -394,7 +383,12 @@ def start_runtime_attempt_cursor(
             progress_deadline_at = EXCLUDED.progress_deadline_at,
             attempt_deadline_at = EXCLUDED.attempt_deadline_at,
             recovery_state = EXCLUDED.recovery_state,
-            updated_at = EXCLUDED.updated_at
+            updated_at = EXCLUDED.updated_at,
+            policy_version = EXCLUDED.policy_version,
+            profile_lease_seconds = EXCLUDED.profile_lease_seconds,
+            profile_heartbeat_seconds = EXCLUDED.profile_heartbeat_seconds,
+            profile_progress_seconds = EXCLUDED.profile_progress_seconds,
+            profile_attempt_seconds = EXCLUDED.profile_attempt_seconds
         """,
         (
             job_key,
@@ -410,6 +404,11 @@ def start_runtime_attempt_cursor(
             progress_deadline,
             attempt_deadline,
             started,
+            selected_profile.policy_version,
+            selected_profile.lease_seconds,
+            selected_profile.heartbeat_seconds,
+            selected_profile.progress_seconds,
+            selected_profile.attempt_seconds,
         ),
     )
     return append_runtime_event_cursor(
@@ -469,8 +468,7 @@ def update_runtime_heartbeat_cursor(
     if observed_at >= attempt_deadline:
         raise RuntimeFenceError(f"attempt deadline has elapsed for {job_key}")
     effective_lease_deadline = min(observed_at + timedelta(seconds=lease_seconds), attempt_deadline)
-    bounded_lease = max(3, lease_seconds)
-    heartbeat_seconds = max(1, min(30, bounded_lease // 3))
+    heartbeat_seconds = int(_row_value(state, "profile_heartbeat_seconds", 19))
     heartbeat_deadline = min(
         observed_at + timedelta(seconds=heartbeat_seconds), effective_lease_deadline
     )
@@ -577,17 +575,7 @@ def update_runtime_progress_cursor(
     )
     if observed_at >= attempt_deadline:
         raise RuntimeFenceError(f"attempt deadline has elapsed for {normalized.job_key}")
-    previous_progress_at = _require_aware(
-        _row_value(state, "last_progress_at", 7),
-        "last_progress_at",  # type: ignore[arg-type]
-    )
-    previous_progress_deadline = _require_aware(
-        _row_value(state, "progress_deadline_at", 13),
-        "progress_deadline_at",  # type: ignore[arg-type]
-    )
-    configured_progress_window = max(
-        1, int((previous_progress_deadline - previous_progress_at).total_seconds())
-    )
+    configured_progress_window = int(_row_value(state, "profile_progress_seconds", 20))
     progress_deadline = min(
         observed_at + timedelta(seconds=configured_progress_window),
         attempt_deadline,

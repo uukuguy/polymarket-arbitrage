@@ -10870,3 +10870,58 @@ accumulating epoch before restarting the 86,400-second acceptance window.
 [NEXT] Commit the reviewed Plan `05.6-208` local closure, build the exact commit
 image, pass image/revision/CLI smoke, and execute the bounded worker image-only
 rollout with unchanged Machine IDs/config hashes.
+
+### SESSION 317 — 2026-08-28 (runtime lifecycle authority unified locally)
+
+- [SYSTEMIC ROOT CAUSE] Plan 208 fixed one too-short absolute deadline, then
+  pre-rollout verification exposed the same failure shape in `quote-admit`: a
+  scheduler-owned 105-second wrapper cancelled a valid longer attempt, bypassed
+  normal finalization and restarted 231 shards from zero. The audit found five
+  competing clock owners, event-loop starvation by sync turns, timestamp-only
+  checkpoints, current leased orphans, circuit target/action contradiction and
+  successor qualification releases replaying old history.
+- [SINGLE POLICY / DAG] `runtime-v2` is now the exact closed registry for all
+  eight transactional jobs. It derives lease, heartbeat, progress, absolute
+  attempt, I/O, terminal grace, retry budget and checkpoint cadence. The same
+  closed set defines and validates the acyclic successor DAG; scheduler lanes
+  run independently while durable receipts/pointers remain dependency truth.
+- [INTERRUPT / RESUME] Attempt and no-progress watchdogs use absolute time.
+  Service stop stops claims, requests/cancels current work, drains only through
+  central terminal grace and emits `service-stop-grace-expired`. Sync work uses
+  a non-joining daemon bridge; lease epoch and checkpoint facts, not thread
+  cancellation, prevent late terminal effects. Structure certification resumes
+  across 1,117 ranges and Quote admission across 231 shards from locked numeric
+  checkpoint sequence with generation/digest/policy validation.
+- [RECOVERY CHAIN] Expired reclaim atomically closes the prior attempt and
+  writes its retryable event before a new epoch. Revision 028 repairs historical
+  running attempts and current leased jobs with no runtime row, snapshots exact
+  policy with no server defaults, and adds monotonic checkpoint sequence. Open
+  circuit is evaluated before the historical attempt clocks; ordinary workers
+  cannot self-probe, while controller observe→schedule→execute releases exactly
+  one claim in real PostgreSQL.
+- [QUALIFICATION BOUNDARY] The first identity in a database consumes current
+  breaker history. Only a later identity detects a predecessor and starts at
+  live ingress high-water. Certificate insertion remains denied to broad
+  `service_role` and succeeds only through
+  `m1_qualification_worker_capability`.
+- [FULL VERIFICATION] Full `make test-m1` completed naturally, including the
+  120k/166,926-row performance/golden group: 3,947 passed, one skipped and one
+  expected xfail in 1,519.17 seconds. The full PostgreSQL control-plane file,
+  focused 026/028 migrations, circuit, checkpoint, runtime and qualification
+  suites pass. Ruff, format for Plan 209 files, diff check, planning-status and
+  climb-check pass.
+- [REVIEW] Three independent review rounds closed all prior HIGH findings. A
+  final follow-up reports zero CRITICAL/HIGH/MEDIUM/LOW findings and approves
+  rollout. Chapter 93 and architecture thread §2.39 preserve the lifecycle
+  mental model.
+- [PRODUCTION BOUNDARY] Coordinator `e82d1220b2d138` and qualification
+  `876077f0274598` remain stopped. Production remains revision 027. The Plan 208
+  authorization result records no mutation and is superseded; revision 028,
+  immutable Plan 209 image and sequential restart have not run.
+
+[NEXT] Commit Plan `05.6-209`, build its exact immutable amd64 image, verify the
+image/revision/CLI contract, apply revision 028 before workers, then update and
+start only the existing coordinator and qualification Machines under unchanged
+non-image config. Prove Structure→Quote admission→Quote certification→opportunity
+terminal flow without zero restart or orphan attempts before starting a new
+86,400-second qualification epoch.

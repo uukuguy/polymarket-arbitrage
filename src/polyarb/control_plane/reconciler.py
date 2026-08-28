@@ -53,10 +53,30 @@ class RuntimeReconciler:
                 breaking=True,
             )
 
-        heartbeat_missing = (
-            now
-            >= state.last_heartbeat_at
-            + timedelta(seconds=state.profile.missed_heartbeat_incident_seconds)
+        # An open circuit owns the job's lifecycle until one controller-released
+        # probe is due.  Its runtime row intentionally describes the last failed
+        # attempt and may therefore have expired heartbeats and leases.  Testing
+        # those stale attempt clocks first would incorrectly schedule a job
+        # reclaim against a circuit target and permanently strand the action.
+        if state.open_circuit:
+            assert state.circuit_opened_at is not None
+            probe_at = state.circuit_opened_at + timedelta(seconds=state.circuit_cooldown_seconds)
+            if now >= probe_at:
+                return self._decision(
+                    RecoveryActionType.PROBE_CIRCUIT,
+                    "circuit.probe-due",
+                    now=now,
+                    next_check_at=now,
+                )
+            return self._decision(
+                None,
+                "circuit.cooldown",
+                now=now,
+                next_check_at=probe_at,
+            )
+
+        heartbeat_missing = now >= state.last_heartbeat_at + timedelta(
+            seconds=state.profile.missed_heartbeat_incident_seconds
         )
         if heartbeat_missing:
             if now >= state.lease_expires_at:
@@ -85,25 +105,6 @@ class RuntimeReconciler:
                 next_check_at=now,
                 critical=True,
                 breaking=True,
-            )
-
-        if state.open_circuit:
-            assert state.circuit_opened_at is not None
-            probe_at = state.circuit_opened_at + timedelta(
-                seconds=state.circuit_cooldown_seconds
-            )
-            if now >= probe_at:
-                return self._decision(
-                    RecoveryActionType.PROBE_CIRCUIT,
-                    "circuit.probe-due",
-                    now=now,
-                    next_check_at=now,
-                )
-            return self._decision(
-                None,
-                "circuit.cooldown",
-                now=now,
-                next_check_at=probe_at,
             )
 
         if now >= state.attempt_started_at + timedelta(seconds=state.profile.attempt_seconds):
@@ -159,8 +160,7 @@ class RuntimeReconciler:
             or now
             >= state.last_heartbeat_at
             + timedelta(seconds=state.profile.missed_heartbeat_incident_seconds)
-            or now
-            >= state.last_heartbeat_at + timedelta(seconds=state.profile.heartbeat_seconds)
+            or now >= state.last_heartbeat_at + timedelta(seconds=state.profile.heartbeat_seconds)
             or now >= state.lease_expires_at
             or now >= state.lease_expires_at - timedelta(seconds=state.profile.heartbeat_seconds)
         )

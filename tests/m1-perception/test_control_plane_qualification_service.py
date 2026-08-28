@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -572,6 +573,20 @@ def test_tick_cursor_is_total_ordered_and_crash_replay_is_exact() -> None:
         FactCursor(at, 3, "incident:003"),
         FactCursor(at + timedelta(minutes=1), 4, "freshness:004"),
     )
+
+
+def test_new_release_cursor_is_seeded_from_current_ledger_high_water() -> None:
+    source = Path("src/polyarb/control_plane/qualification_service.py").read_text()
+    ensure = source[source.index("def _ensure_source_cursor_row") :]
+
+    assert "FROM public.m1_qualification_ingress_ledger AS ledger" in ensure
+    assert "FROM public.m1_qualification_source_cursors AS predecessor" in ensure
+    assert "predecessor.identity_key <> %s" in ensure
+    assert "ELSE NULL END" in ensure
+    assert "ORDER BY ledger.ingest_seq DESC" in ensure
+    assert "'stable_id', 'baseline:' || %s" in ensure
+    assert "'ingest_seq', ledger.ingest_seq" in ensure
+    assert "ON CONFLICT (identity_key) DO NOTHING" in ensure
 
 
 def test_recovering_nonconfirmation_facts_are_observed_without_entering_epoch() -> None:

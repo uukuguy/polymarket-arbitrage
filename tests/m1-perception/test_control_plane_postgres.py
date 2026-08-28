@@ -71,6 +71,7 @@ from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
 )
+from polyarb.control_plane.reconciler import RuntimeReconciler
 from polyarb.control_plane.recovery_executor import RecoveryExecutor
 from polyarb.control_plane.recovery_models import RecoveryActionType, RecoveryDecision
 from polyarb.control_plane.recovery_records import RecoveryActionRecord
@@ -902,7 +903,7 @@ class _MemoryObjects:
 def test_structure_worker_takeover_after_upload_before_receipt_has_one_receipt(
     control_plane: PostgresControlPlane,
 ) -> None:
-    """A crash after deterministic R2 upload leaves only a reclaimable lease."""
+    """A crash after deterministic R2 upload leaves an authoritative retry."""
     now = _now()
     bundle = StructureBundleArtifact.from_bytes(
         canonical_structure_bundle_bytes(
@@ -976,7 +977,7 @@ def test_structure_worker_takeover_after_upload_before_receipt_has_one_receipt(
         object_client=objects,
         bucket="structure",
         worker_id="replacement-worker",
-        now=lambda: now + timedelta(seconds=2),
+        now=lambda: now + timedelta(seconds=16),
         lease_seconds=30,
     )
     assert asyncio.run(recovered.run_once()).outcome == "succeeded"
@@ -3855,8 +3856,118 @@ def test_claim_reclaim_and_epoch_fencing(control_plane: PostgresControlPlane) ->
     )
     assert second is not None
     assert second.lease_epoch == 2
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT lease_epoch, state, finished_at, error_class
+            FROM m1_job_attempts
+            WHERE job_key = 'structure:alpha'
+            ORDER BY lease_epoch
+            """
+        )
+        attempts = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT lease_epoch, kind, detail ->> 'reason_code'
+            FROM m1_job_runtime_events
+            WHERE job_key = 'structure:alpha'
+            ORDER BY lease_epoch, event_sequence
+            """
+        )
+        events = cursor.fetchall()
+    assert attempts[0][0:] == (1, "retryable", now + timedelta(seconds=31), "LeaseExpired")
+    assert attempts[1][0:2] == (2, "running")
+    assert sum(attempt[1] == "running" for attempt in attempts) == 1
+    assert (1, "job.retryable-failed", "job.lease-expired") in events
     with pytest.raises(StaleLeaseError):
         control_plane.heartbeat(first, now=now + timedelta(seconds=31))
+
+
+def test_running_checkpoint_preserves_lease_and_resumes_next_epoch(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="structure:checkpoint:quote-admit",
+        job_type="quote-admit",
+        input_identity="structure:checkpoint",
+        now=now,
+    )
+    first = control_plane.claim_job(
+        worker_id="worker-a", job_types=("quote-admit",), lease_seconds=30, now=now
+    )
+    assert first is not None
+
+    first_receipt = control_plane.record_running_checkpoint(
+        first,
+        checkpoint_cursor="runtime-v2:" + "a" * 64 + ":10",
+        checkpoint_digest="b" * 64,
+        artifact_key="quote-admission-checkpoints/b/legs.ndjson",
+        idempotency_key="quote-admit:checkpoint:10",
+        now=now + timedelta(seconds=1),
+    )
+    control_plane.record_running_checkpoint(
+        first,
+        checkpoint_cursor="runtime-v2:" + "a" * 64 + ":20",
+        checkpoint_digest="c" * 64,
+        artifact_key="quote-admission-checkpoints/c/legs.ndjson",
+        idempotency_key="quote-admit:checkpoint:20",
+        now=now + timedelta(seconds=1),
+    )
+    third_receipt = control_plane.record_running_checkpoint(
+        first,
+        checkpoint_cursor="runtime-v2:" + "a" * 64 + ":30",
+        checkpoint_digest="d" * 64,
+        artifact_key="quote-admission-checkpoints/d/legs.ndjson",
+        idempotency_key="quote-admit:checkpoint:30",
+        now=now + timedelta(seconds=1),
+    )
+
+    assert first_receipt.checkpoint_cursor.endswith(":10")
+    assert (
+        control_plane.claim_job(
+            worker_id="worker-b",
+            job_types=("quote-admit",),
+            lease_seconds=30,
+            now=now + timedelta(seconds=2),
+        )
+        is None
+    )
+    assert control_plane.running_checkpoints(first.job_key) == (
+        (
+            "runtime-v2:" + "a" * 64 + ":10",
+            "b" * 64,
+            "quote-admission-checkpoints/b/legs.ndjson",
+        ),
+        (
+            "runtime-v2:" + "a" * 64 + ":20",
+            "c" * 64,
+            "quote-admission-checkpoints/c/legs.ndjson",
+        ),
+        (
+            "runtime-v2:" + "a" * 64 + ":30",
+            "d" * 64,
+            "quote-admission-checkpoints/d/legs.ndjson",
+        ),
+    )
+    second = control_plane.claim_job(
+        worker_id="worker-b",
+        job_types=("quote-admit",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=31),
+    )
+    assert second is not None
+    assert second.checkpoint_cursor == third_receipt.checkpoint_cursor
+    assert second.checkpoint_digest == third_receipt.checkpoint_digest
+    with pytest.raises(StaleLeaseError):
+        control_plane.record_running_checkpoint(
+            first,
+            checkpoint_cursor=first_receipt.checkpoint_cursor,
+            checkpoint_digest=first_receipt.checkpoint_digest,
+            artifact_key="quote-admission-checkpoints/b/legs.ndjson",
+            idempotency_key=first_receipt.idempotency_key,
+            now=now + timedelta(seconds=32),
+        )
 
 
 def test_claim_commits_runtime_state_and_started_event_together(
@@ -3883,7 +3994,10 @@ def test_claim_commits_runtime_state_and_started_event_together(
             """
             SELECT attempt_id, lease_epoch, worker_id, stage, progress_sequence,
                    last_heartbeat_at, last_progress_at, lease_deadline_at,
-                   heartbeat_deadline_at, progress_deadline_at, attempt_deadline_at
+                   heartbeat_deadline_at, progress_deadline_at, attempt_deadline_at,
+                   policy_version, profile_lease_seconds,
+                   profile_heartbeat_seconds, profile_progress_seconds,
+                   profile_attempt_seconds
             FROM m1_job_runtime_state WHERE job_key = %s
             """,
             (lease.job_key,),
@@ -3899,6 +4013,26 @@ def test_claim_commits_runtime_state_and_started_event_together(
             (lease.job_key,),
         )
         events = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT column_name, column_default
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'm1_job_runtime_state'
+              AND column_name = ANY(%s)
+            ORDER BY column_name
+            """,
+            (
+                [
+                    "policy_version",
+                    "profile_lease_seconds",
+                    "profile_heartbeat_seconds",
+                    "profile_progress_seconds",
+                    "profile_attempt_seconds",
+                ],
+            ),
+        )
+        policy_defaults = cursor.fetchall()
 
     assert state is not None
     assert isinstance(state[0], str) and state[0]
@@ -3906,6 +4040,9 @@ def test_claim_commits_runtime_state_and_started_event_together(
     assert state[4] == 0
     assert state[5] == state[6] == now
     assert all(value is not None for value in state[7:])
+    assert state[11:] == ("runtime-v2", 30, 10, 30, 300)
+    assert len(policy_defaults) == 5
+    assert all(default is None for _column, default in policy_defaults)
     assert len(events) == 1
     assert events[0][0:5] == (
         state[0],
@@ -4522,7 +4659,8 @@ def test_runtime_stale_exact_replay_is_read_only_and_conflicts_do_not_mutate(
             "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s",
             (second.job_key,),
         )
-        assert cursor.fetchone() == (3,)
+        # started + progress + authoritative lease-expired + replacement started
+        assert cursor.fetchone() == (4,)
 
 
 def test_stale_runtime_update_does_not_mutate_current_attempt(
@@ -4571,7 +4709,8 @@ def test_stale_runtime_update_does_not_mutate_current_attempt(
             "SELECT count(*) FROM m1_job_runtime_events WHERE job_key = %s",
             (second.job_key,),
         )
-        assert cursor.fetchone() == (2,)
+        # initial started + authoritative lease-expired + replacement started
+        assert cursor.fetchone() == (3,)
 
 
 def test_runtime_events_are_immutable_and_timestamp_detail_is_utc(
@@ -6724,10 +6863,10 @@ def test_action_terminal_uses_db_clock_and_rolls_back_after_worker_lease_expires
 def test_checkpoint_is_idempotent_and_fenced(control_plane: PostgresControlPlane) -> None:
     now = _now()
     control_plane.enqueue_job(
-        job_key="quote:alpha", job_type="quote-scan", input_identity="alpha", now=now
+        job_key="quote:alpha", job_type="quote-batch", input_identity="alpha", now=now
     )
     lease = control_plane.claim_job(
-        worker_id="worker-a", job_types=("quote-scan",), lease_seconds=30, now=now
+        worker_id="worker-a", job_types=("quote-batch",), lease_seconds=30, now=now
     )
     assert lease is not None
     receipt = control_plane.checkpoint(
@@ -6756,7 +6895,7 @@ def test_checkpoint_is_idempotent_and_fenced(control_plane: PostgresControlPlane
 
     later = control_plane.claim_job(
         worker_id="worker-b",
-        job_types=("quote-scan",),
+        job_types=("quote-batch",),
         lease_seconds=30,
         now=now + timedelta(seconds=3),
     )
@@ -7188,7 +7327,7 @@ def test_retry_circuit_opens_on_third_failure_with_bounded_probe_delay(
         now=now,
     )
     delays: list[timedelta] = []
-    for attempt in range(1, 8):
+    for attempt in range(1, 4):
         attempted_at = now + sum(delays, timedelta())
         lease = control_plane.claim_job(
             worker_id=f"worker-{attempt}",
@@ -7214,11 +7353,16 @@ def test_retry_circuit_opens_on_third_failure_with_bounded_probe_delay(
         timedelta(seconds=15),
         timedelta(seconds=30),
         timedelta(seconds=60),
-        timedelta(seconds=120),
-        timedelta(seconds=240),
-        timedelta(seconds=300),
-        timedelta(seconds=300),
     ]
+    assert (
+        control_plane.claim_job(
+            worker_id="ordinary-worker-must-not-probe",
+            job_types=("structure-fetch",),
+            lease_seconds=30,
+            now=now + sum(delays, timedelta()),
+        )
+        is None
+    )
     connection = control_plane._connection_factory()
     try:
         with connection.cursor() as cursor:
@@ -7226,7 +7370,7 @@ def test_retry_circuit_opens_on_third_failure_with_bounded_probe_delay(
                 "SELECT consecutive_failures, state FROM m1_job_circuits WHERE job_key = %s",
                 ("structure:window-a:fetch:events:0",),
             )
-            assert cursor.fetchone() == (7, "open")
+            assert cursor.fetchone() == (3, "open")
             cursor.execute(
                 "SELECT kind FROM m1_incident_events ORDER BY occurred_at, incident_event_id"
             )
@@ -7234,13 +7378,62 @@ def test_retry_circuit_opens_on_third_failure_with_bounded_probe_delay(
                 "attempt-failed",
                 "attempt-failed",
                 "circuit-opened",
-                "circuit-probe-failed",
-                "circuit-probe-failed",
-                "circuit-probe-failed",
-                "circuit-probe-failed",
             ]
     finally:
         connection.close()
+
+    due_at = now + sum(delays, timedelta())
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="circuit-probe-controller",
+        lease_seconds=30,
+        now=due_at,
+    )
+    candidates = read_runtime_reconcile_states(
+        control_plane._connection_factory,
+        controller_id=controller.controller_id,
+        now=due_at,
+        sample_limit=10,
+    )
+    candidate = next(
+        item for item in candidates if item.target_id == "structure:window-a:fetch:events:0"
+    )
+    decision = RuntimeReconciler().evaluate(candidate.runtime_state, now=due_at)
+    assert candidate.target_type == "circuit"
+    assert decision.action is RecoveryActionType.PROBE_CIRCUIT
+    assert decision.reason_code == "circuit.probe-due"
+    scheduled = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=decision,
+        incident_key=candidate.incident_key,
+        component=candidate.component,
+        target_type=candidate.target_type,
+        target_id=candidate.target_id,
+        expected_attempt_id=candidate.runtime_state.attempt_id,
+        expected_lease_epoch=candidate.runtime_state.lease_epoch,
+        recovery_budget_remaining=candidate.runtime_state.recovery_budget.remaining_actions,
+        cooldown_seconds=candidate.cooldown_seconds,
+        channels=candidate.channels,
+        now=due_at + timedelta(seconds=1),
+    )
+    result = RecoveryExecutor(
+        connection_factory=control_plane._connection_factory,
+        control_plane=control_plane,
+        controller=controller,
+        worker_id="circuit-probe-executor",
+    ).run_once(now=due_at + timedelta(seconds=2))
+    assert result is not None and result.outcome == "succeeded"
+    assert result.action_id == scheduled.action_id
+    released_probe = control_plane.claim_job(
+        worker_id="controller-released-probe",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=due_at + timedelta(seconds=3),
+    )
+    assert released_probe is not None
+    assert released_probe.job_key == candidate.target_id
 
 
 def test_successful_terminal_job_closes_circuit_and_resolves_retry_incident(
@@ -9782,6 +9975,43 @@ def test_qualification_service_first_tick_initializes_sql_null_cursor(
     assert row[2] == 3
 
 
+def test_qualification_new_release_starts_at_live_ledger_high_water(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    _seed_freshness_pointers(control_plane, published_at=now)
+    assert _qualification_service(control_plane, batch_size=20).tick(now).applied == 3
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT max(ingest_seq) FROM m1_qualification_ingress_ledger")
+        high_water = cursor.fetchone()[0]
+    assert isinstance(high_water, int)
+
+    policy = RollingQualificationPolicy(
+        policy_version="m1-rolling-qualification-v1",
+        release_id="release-b",
+        config_id="config-a",
+        role_identity=("m1", "structure"),
+        max_gap_seconds=900,
+    )
+    store = PostgresQualificationServiceStore(control_plane._connection_factory)
+    store.initialize(policy, now=now + timedelta(seconds=1))
+
+    assert store.cursor is not None
+    assert store.cursor.ingest_seq == high_water
+    assert store.cursor.stable_id.startswith("baseline:")
+
+    result = QualificationService(
+        policy=policy,
+        fact_source=PostgresQualificationFactSource(control_plane._connection_factory),
+        state_store=store,
+        writer_id="qualification-release-b",
+        batch_size=20,
+    ).tick(now + timedelta(seconds=1))
+    assert result.applied == 3
+    assert result.cursor is not None
+    assert result.cursor.ingest_seq == high_water + 3
+
+
 def test_qualification_malformed_quote_pointer_fails_structure_freshness_closed(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -10256,11 +10486,15 @@ def test_qualification_certificate_function_privileges_and_derived_ids(
 
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute("SET ROLE service_role")
-        service_row = _execute_certificate_function(cursor, payload)
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            _execute_certificate_function(cursor, payload)
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute("SET ROLE m1_qualification_worker_capability")
+        qualification_row = _execute_certificate_function(cursor, payload)
         replay_row = _execute_certificate_function(cursor, payload)
-        assert service_row == replay_row
-        assert service_row == (expected_certificate_id, expected_identity_key, digest)
-        cursor.execute("RESET ROLE")
+        assert qualification_row == replay_row
+        assert qualification_row == (expected_certificate_id, expected_identity_key, digest)
 
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         with pytest.raises(psycopg.errors.UndefinedFunction):

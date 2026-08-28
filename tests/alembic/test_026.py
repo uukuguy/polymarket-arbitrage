@@ -479,7 +479,9 @@ def test_026_real_pg16_exact_authority_adversarial_matrix() -> None:
     with PostgresContainer("postgres:16-alpine") as postgres:
         dsn = _normalize_dsn(postgres.get_connection_url())
         _create_supabase_roles(dsn)
-        _run_alembic(dsn, "upgrade", "026")
+        # The authority matrix is introduced by 026, while the live admin
+        # contract intentionally requires the repository's current revision.
+        _run_alembic(dsn, "upgrade", "028")
 
         def admin_factory() -> psycopg.Connection[Any]:
             return psycopg.connect(dsn)

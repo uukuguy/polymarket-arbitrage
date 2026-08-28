@@ -1,0 +1,59 @@
+{
+  "artifact_version": 1,
+  "prepared_at": "2026-08-28T00:38:37Z",
+  "status": "authorized-by-user-autonomous-repair-grant",
+  "authorization_granted": true,
+  "authorization_basis": "user instructed autonomous M1 completion, approved the authorization package, approved all required authorization, and explicitly directed that solutions to both defects be implemented",
+  "source_release_sha": "2a9eb371ea8c082872306e203f76e12e35530723",
+  "target_image_digest": "sha256:bd21b2d118237c7f1e8c81fd9067985b20d5c23cd085d13251b724cf78b333df",
+  "exact_existing_targets": [
+    "polyarb-control-worker-m1/e82d1220b2d138",
+    "polyarb-control-worker-m1/683e46ea500dd8",
+    "polyarb-control-worker-m1/4d895231f66748",
+    "polyarb-qualification-worker-m1/876077f0274598"
+  ],
+  "preflight": {
+    "production_database_revision": "027",
+    "exact_eight_machine_topology": "pass",
+    "all_expected_machines_started": true,
+    "required_secret_names_present": true,
+    "runtime_controller_mode": "observe-only",
+    "runtime_controller_duration_seconds": 15154,
+    "runtime_controller_max_gap_seconds": 31,
+    "runtime_controller_recovery_action_count": 0,
+    "current_structure_certifier_attempt_count": 98,
+    "current_structure_certifier_progress": "114/1117",
+    "current_structure_certifier_attempt_deadline_seconds": 300
+  },
+  "local_image_gates": {
+    "local_image_id": "sha256:e596e7a33b575c032c5b4c6f1b5bfe38de7f0f89648e99ae437f52d553f269bb",
+    "architecture": "amd64",
+    "runtime_profile_smoke": "pass",
+    "qualification_code_smoke": "pass",
+    "revision_027_present": true,
+    "cli_smoke": "pass"
+  },
+  "maximum_effect": [
+    "sequentially stop, image-update and restart only the four exact existing Machines",
+    "preserve every Machine ID, process command, process group, VM size, region, secret set, restart policy, private IP and no-volume topology",
+    "change only the image field on the three worker Machines",
+    "change only the image field and POLYARB_QUALIFICATION_RELEASE_ID on the qualification Machine so immutable certificates bind to the executable release",
+    "leave the runtime controller started in observe-only mode with an empty recovery allowlist",
+    "observe the current certifier through progress 300 and terminal success, then verify fresh Structure, Quote and opportunity evidence and a new accumulating epoch"
+  ],
+  "forbidden_effects": [
+    "no new, deleted or replaced app or Machine",
+    "no schema, role, credential, privilege, owner, search-path, extension or secret mutation",
+    "no runtime-controller stop, restart, update, recovery allowlist or recovery-mode change",
+    "no recovery action or fault injection",
+    "no wallet, signing, order, balance or trade action"
+  ],
+  "rollback": [
+    "stop qualification if its post-update identity or first-tick gate fails",
+    "restore each changed Machine to its prior immutable image in reverse order if its process or evidence gate fails",
+    "restore the prior qualification release ID together with its prior image if qualification rollback is required",
+    "reverify exact topology, original Machine IDs, observe-only continuity and zero recovery actions"
+  ],
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}

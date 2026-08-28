@@ -33,6 +33,7 @@ from .models import (
 )
 from .recovery_records import RecoveryActionRecord
 from .runtime_contract import RUNTIME_STAGE_REGISTRY
+from .runtime_deadlines import runtime_policy
 from .runtime_models import RuntimeEvent, RuntimeEventKind, RuntimeProgress
 from .runtime_store import (
     RuntimeEventConflict,
@@ -416,6 +417,11 @@ _RUNTIME_COLUMNS: dict[str, dict[str, tuple[str, bool, str | None]]] = {
         "attempt_deadline_at": ("timestamp with time zone", True, None),
         "recovery_state": ("text", True, "'active'::text"),
         "updated_at": ("timestamp with time zone", True, "clock_timestamp()"),
+        "policy_version": ("text", True, None),
+        "profile_lease_seconds": ("integer", True, None),
+        "profile_heartbeat_seconds": ("integer", True, None),
+        "profile_progress_seconds": ("integer", True, None),
+        "profile_attempt_seconds": ("integer", True, None),
     },
     "m1_job_runtime_events": {
         "event_id": ("text", True, None),
@@ -500,6 +506,11 @@ _RUNTIME_CHECK_CONSTRAINTS = {
     ("m1_job_runtime_state", "ck_m1_runtime_state_recovery"): (
         "CHECK (recovery_state = ANY (ARRAY['active'::text, 'suspect'::text, "
         "'recovering'::text, 'recovered'::text, 'terminal'::text]))"
+    ),
+    ("m1_job_runtime_state", "ck_m1_runtime_state_policy_profile"): (
+        "CHECK (policy_version <> ''::text AND profile_lease_seconds > 0 AND "
+        "profile_heartbeat_seconds > 0 AND profile_progress_seconds > 0 AND "
+        "profile_attempt_seconds >= profile_progress_seconds)"
     ),
     ("m1_job_runtime_events", "ck_m1_runtime_events_detail_size"): (
         "CHECK (jsonb_typeof(detail) = 'object'::text AND "
@@ -2807,6 +2818,9 @@ class PostgresControlPlane:
         elif "progress" in normalized_error or "stalled" in normalized_error:
             failure_signature = "progress.stalled"
             reason_code = "invalid-input"
+        elif "service" in normalized_error or "cancel" in normalized_error:
+            failure_signature = "service.interrupted"
+            reason_code = "service-stop"
         else:
             failure_signature = "validation.failed"
             reason_code = "invalid-input"
@@ -4573,9 +4587,16 @@ class PostgresControlPlane:
             cursor.execute(
                 """
                 SELECT job_key, job_type, input_identity, checkpoint_cursor,
-                       checkpoint_digest, lease_epoch
+                       checkpoint_digest, lease_epoch, state, attempt_count
                 FROM m1_jobs
                 WHERE job_type = ANY(%s)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM m1_job_circuits AS circuit
+                      WHERE circuit.job_key = m1_jobs.job_key
+                        AND circuit.state = 'open'
+                        AND circuit.next_probe_at <= %s
+                  )
                   AND (
                       job_type <> 'structure-fetch'
                       OR NOT EXISTS (
@@ -4605,11 +4626,129 @@ class PostgresControlPlane:
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
                 """,
-                (list(job_types), now, now, now),
+                (list(job_types), now, now, now, now),
             )
             job = cursor.fetchone()
             if job is None:
                 return None
+            if str(job["state"]) == "leased":
+                cursor.execute(
+                    """
+                    SELECT runtime.attempt_id, runtime.worker_id, runtime.stage,
+                           runtime.progress_sequence, runtime.progress_current,
+                           runtime.progress_total, attempt.state AS attempt_state
+                    FROM m1_job_runtime_state AS runtime
+                    JOIN m1_job_attempts AS attempt
+                      ON attempt.attempt_id = runtime.attempt_id
+                    WHERE runtime.job_key = %s AND runtime.lease_epoch = %s
+                    FOR UPDATE
+                    """,
+                    (job["job_key"], job["lease_epoch"]),
+                )
+                expired_runtime = cursor.fetchone()
+                if expired_runtime is None:
+                    raise ControlPlaneError(
+                        f"expired lease has no runtime attempt: {job['job_key']}"
+                    )
+                attempt_state = str(expired_runtime["attempt_state"])
+                if attempt_state not in {"running", "checkpointed"}:
+                    raise ControlPlaneError(
+                        f"expired lease attempt cannot be reclaimed: {job['job_key']}"
+                    )
+                if attempt_state == "running":
+                    cursor.execute(
+                        """
+                        UPDATE m1_job_attempts
+                        SET state = 'retryable', finished_at = %s,
+                            error_class = 'LeaseExpired',
+                            error_detail = %s
+                        WHERE attempt_id = %s AND job_key = %s
+                          AND lease_epoch = %s AND state = 'running'
+                        """,
+                        (
+                            now,
+                            Jsonb({"reason_code": "job.lease-expired"}),
+                            expired_runtime["attempt_id"],
+                            job["job_key"],
+                            job["lease_epoch"],
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ControlPlaneError(
+                            f"expired running attempt changed during reclaim: {job['job_key']}"
+                        )
+                cursor.execute(
+                    """
+                    SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
+                    FROM m1_job_runtime_events
+                    WHERE attempt_id = %s
+                    """,
+                    (expired_runtime["attempt_id"],),
+                )
+                sequence_row = cursor.fetchone()
+                if sequence_row is None:
+                    raise ControlPlaneError("runtime event sequence query returned no row")
+                progress_sequence = int(expired_runtime["progress_sequence"])
+                progress = (
+                    None
+                    if progress_sequence == 0
+                    else RuntimeProgress(
+                        sequence=progress_sequence,
+                        current=int(expired_runtime["progress_current"]),
+                        total=(
+                            None
+                            if expired_runtime["progress_total"] is None
+                            else int(expired_runtime["progress_total"])
+                        ),
+                        stage=str(expired_runtime["stage"]),
+                    )
+                )
+                expired_event = RuntimeEvent(
+                    job_key=str(job["job_key"]),
+                    attempt_id=str(expired_runtime["attempt_id"]),
+                    lease_epoch=int(job["lease_epoch"]),
+                    worker_id=str(expired_runtime["worker_id"]),
+                    event_sequence=int(sequence_row["next_sequence"]),
+                    kind=RuntimeEventKind.RETRYABLE_FAILED,
+                    stage=str(expired_runtime["stage"]),
+                    progress=progress,
+                    detail={
+                        "component": str(job["job_type"]),
+                        "failure_signature": "upstream.timeout",
+                        "qualification_impact": "delayed",
+                        "reason_code": "job.lease-expired",
+                        "recovery_policy": "reclaim-job",
+                        "retry_count": int(job["attempt_count"]),
+                    },
+                    occurred_at=now,
+                    idempotency_key=(f"runtime:{expired_runtime['attempt_id']}:lease-expired"),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO m1_job_runtime_events (
+                        event_id, job_key, attempt_id, lease_epoch, worker_id,
+                        event_sequence, kind, stage, progress_sequence,
+                        progress_current, progress_total, detail, occurred_at,
+                        idempotency_key
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        str(uuid4()),
+                        expired_event.job_key,
+                        expired_event.attempt_id,
+                        expired_event.lease_epoch,
+                        expired_event.worker_id,
+                        expired_event.event_sequence,
+                        expired_event.kind.value,
+                        expired_event.stage,
+                        None if progress is None else progress.sequence,
+                        None if progress is None else progress.current,
+                        None if progress is None else progress.total,
+                        Jsonb(dict(expired_event.detail)),
+                        expired_event.occurred_at,
+                        expired_event.idempotency_key,
+                    ),
+                )
             epoch = int(job["lease_epoch"]) + 1
             cursor.execute(
                 """
@@ -4828,10 +4967,13 @@ class PostgresControlPlane:
         )
         circuit = cursor.fetchone()
         failures = (0 if circuit is None else int(circuit["consecutive_failures"])) + 1
+        retry_budget = runtime_policy(component, 3).retry_budget
         delay_seconds = min(15 * (2 ** (failures - 1)), 300)
         next_attempt_at = now + timedelta(seconds=delay_seconds)
-        circuit_state = "open" if failures >= 3 else "closed"
-        opened_at = now if failures == 3 else (None if circuit is None else circuit["opened_at"])
+        circuit_state = "open" if failures >= retry_budget else "closed"
+        opened_at = (
+            now if failures == retry_budget else (None if circuit is None else circuit["opened_at"])
+        )
         cursor.execute(
             """
             INSERT INTO public.m1_job_circuits (
@@ -4883,8 +5025,8 @@ class PostgresControlPlane:
         )
         kind = (
             "circuit-opened"
-            if failures == 3
-            else ("circuit-probe-failed" if failures > 3 else "attempt-failed")
+            if failures == retry_budget
+            else ("circuit-probe-failed" if failures > retry_budget else "attempt-failed")
         )
         self._record_incident_event(
             cursor,
@@ -5474,6 +5616,153 @@ class PostgresControlPlane:
                 (now, lease.job_key, lease.lease_epoch),
             )
             return receipt
+
+    def record_running_checkpoint(
+        self,
+        lease: JobLease,
+        *,
+        checkpoint_cursor: str,
+        checkpoint_digest: str,
+        artifact_key: str,
+        idempotency_key: str,
+        now: datetime,
+    ) -> CheckpointReceipt:
+        """Persist resumable work without releasing the current lease."""
+        self._validate_nonempty(
+            checkpoint_cursor=checkpoint_cursor,
+            checkpoint_digest=checkpoint_digest,
+            artifact_key=artifact_key,
+            idempotency_key=idempotency_key,
+        )
+        self._validate_aware(now, "now")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+            cursor.execute(
+                """
+                SELECT lease_epoch
+                FROM m1_jobs
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+                  AND state = 'leased' AND lease_expires_at > %s
+                FOR UPDATE
+                """,
+                (
+                    lease.job_key,
+                    lease.lease_owner,
+                    lease.lease_epoch,
+                    now,
+                ),
+            )
+            if cursor.fetchone() is None:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            cursor.execute(
+                """
+                SELECT receipt_id, job_key, lease_epoch, idempotency_key,
+                       checkpoint_cursor, checkpoint_digest, artifact_key, committed_at
+                FROM m1_checkpoint_receipts WHERE idempotency_key = %s
+                """,
+                (idempotency_key,),
+            )
+            existing = cursor.fetchone()
+            if existing is not None:
+                receipt = self._receipt(existing)
+                if (
+                    receipt.job_key != lease.job_key
+                    or receipt.checkpoint_cursor != checkpoint_cursor
+                    or receipt.checkpoint_digest != checkpoint_digest
+                    or str(existing["artifact_key"]) != artifact_key
+                ):
+                    raise CheckpointConflictError(f"idempotency conflict for {idempotency_key!r}")
+                return receipt
+            cursor.execute(
+                """
+                UPDATE m1_jobs
+                SET checkpoint_cursor = %s, checkpoint_digest = %s, updated_at = %s
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+                  AND state = 'leased' AND lease_expires_at > %s
+                """,
+                (
+                    checkpoint_cursor,
+                    checkpoint_digest,
+                    now,
+                    lease.job_key,
+                    lease.lease_owner,
+                    lease.lease_epoch,
+                    now,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            cursor.execute(
+                """
+                SELECT COALESCE(MAX(checkpoint_sequence), 0) + 1 AS next_sequence
+                FROM m1_checkpoint_receipts
+                WHERE job_key = %s AND checkpoint_sequence IS NOT NULL
+                """,
+                (lease.job_key,),
+            )
+            sequence_row = cursor.fetchone()
+            if sequence_row is None:
+                raise ControlPlaneError("checkpoint sequence query returned no row")
+            checkpoint_sequence = int(sequence_row["next_sequence"])
+            receipt = CheckpointReceipt(
+                receipt_id=str(uuid4()),
+                job_key=lease.job_key,
+                lease_epoch=lease.lease_epoch,
+                idempotency_key=idempotency_key,
+                checkpoint_cursor=checkpoint_cursor,
+                checkpoint_digest=checkpoint_digest,
+                committed_at=now,
+            )
+            cursor.execute(
+                """
+                INSERT INTO m1_checkpoint_receipts (
+                    receipt_id, job_key, lease_epoch, idempotency_key,
+                    checkpoint_cursor, checkpoint_digest, artifact_key, committed_at,
+                    checkpoint_sequence
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    receipt.receipt_id,
+                    receipt.job_key,
+                    receipt.lease_epoch,
+                    receipt.idempotency_key,
+                    receipt.checkpoint_cursor,
+                    receipt.checkpoint_digest,
+                    artifact_key,
+                    receipt.committed_at,
+                    checkpoint_sequence,
+                ),
+            )
+            return receipt
+
+    def running_checkpoints(self, job_key: str) -> tuple[tuple[str, str, str], ...]:
+        """Return immutable resumable artifacts in their committed order."""
+        self._validate_nonempty(job_key=job_key)
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT checkpoint_cursor, checkpoint_digest, artifact_key
+                FROM m1_checkpoint_receipts
+                WHERE job_key = %s AND checkpoint_sequence IS NOT NULL
+                ORDER BY checkpoint_sequence
+                """,
+                (job_key,),
+            )
+            rows = cursor.fetchall()
+        return tuple(
+            (
+                str(row["checkpoint_cursor"]),
+                str(row["checkpoint_digest"]),
+                str(row["artifact_key"]),
+            )
+            for row in rows
+        )
 
     def finish(
         self,

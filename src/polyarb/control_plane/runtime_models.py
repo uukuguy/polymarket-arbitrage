@@ -92,7 +92,7 @@ _DETAIL_CODE_REGISTRIES: dict[str, frozenset[str]] = {
     "data_product": frozenset({"market-snapshot", "structure-sync"}),
     "deadline_kind": frozenset({"attempt", "heartbeat", "lease", "progress"}),
     "failure_signature": frozenset(
-        {"progress.stalled", "upstream.timeout", "validation.failed"}
+        {"progress.stalled", "service.interrupted", "upstream.timeout", "validation.failed"}
     ),
     "job_type": frozenset(
         {
@@ -130,6 +130,7 @@ _DETAIL_CODE_REGISTRIES: dict[str, frozenset[str]] = {
             "job.progress-stalled",
             "recovery.budget-exhausted",
             "recovery.stale-fence",
+            "service-stop",
             "timeout",
         }
     ),
@@ -382,8 +383,7 @@ def _freeze_runtime_detail(
     unknown_keys = detail_keys - allowed_keys
     if unknown_keys:
         raise ValueError(
-            f"runtime event detail keys are not allowed for {kind.value}: "
-            f"{sorted(unknown_keys)!r}"
+            f"runtime event detail keys are not allowed for {kind.value}: {sorted(unknown_keys)!r}"
         )
     frozen = _FrozenRuntimeDetail()
     for key, value in detail.items():

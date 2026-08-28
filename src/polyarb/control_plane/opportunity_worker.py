@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from threading import Event
 from typing import Any, Protocol, cast
 
 from polyarb.config import Settings
@@ -19,8 +20,9 @@ from .postgres import (
     StaleLeaseError,
 )
 from .quote_artifact import QuoteArtifactError, parse_quote_batch_input_bytes
-from .quote_worker import _runtime_profile, _runtime_sync_call
-from .runtime_contract import AttemptRuntime
+from .quote_worker import _runtime_sync_call
+from .runtime_contract import AttemptRuntime, ServiceStopRequested
+from .runtime_deadlines import runtime_deadline_profile
 
 
 class _Body(Protocol):
@@ -58,6 +60,11 @@ class TransactionalOpportunityCertifier:
         self._worker_id = worker_id
         self._lease_seconds = lease_seconds
         self._now = now
+        self._stop_requested = Event()
+
+    def request_stop(self) -> None:
+        """Stop projection assembly at its next immutable batch boundary."""
+        self._stop_requested.set()
 
     def run_once(self) -> OpportunityCertifierResult:
         lease = self._control_plane.claim_job(
@@ -76,13 +83,15 @@ class TransactionalOpportunityCertifier:
             AttemptRuntime(
                 store=self._control_plane,
                 lease=lease,
-                profile=_runtime_profile(self._lease_seconds),
+                profile=runtime_deadline_profile("opportunity-certify", self._lease_seconds),
                 clock=self._now,
             )
             if runtime_available
             else None
         )
         try:
+            if self._stop_requested.is_set():
+                raise ServiceStopRequested("opportunity-certify service stop requested")
             if runtime is not None:
                 runtime.progress(stage="read-current-quote", current=1, total=1)
                 quote_generation, structure_generation, batches = _runtime_sync_call(
@@ -165,6 +174,8 @@ class TransactionalOpportunityCertifier:
             quoted_at_ms = 0
             total_batches = len(batches)
             for batch_index, (legs, receipt, quoted_at) in enumerate(batches, start=1):
+                if self._stop_requested.is_set():
+                    raise ServiceStopRequested("opportunity-certify service stop requested")
                 reference_reader = getattr(self._control_plane, "quote_batch_input_reference", None)
                 reference_fn = (
                     cast(Callable[[str], tuple[str, str, int] | None], reference_reader)
@@ -191,9 +202,7 @@ class TransactionalOpportunityCertifier:
                     input_payload = (
                         _runtime_sync_call(
                             runtime,
-                            lambda: self._read_object(
-                                input_key, label="quote-input-artifact"
-                            ),
+                            lambda: self._read_object(input_key, label="quote-input-artifact"),
                         )
                         if runtime is not None
                         else self._read_object(input_key, label="quote-input-artifact")

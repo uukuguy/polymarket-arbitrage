@@ -17,13 +17,19 @@ from psycopg.types.json import Jsonb
 
 from polyarb.control_plane.models import JobLease, QuoteBatchLeg
 from polyarb.control_plane.postgres import PostgresControlPlane
+from polyarb.control_plane.recovery_store import _runtime_deadline_profile
 from polyarb.control_plane.runtime_contract import RUNTIME_STAGE_REGISTRY, AttemptRuntime
+from polyarb.control_plane.runtime_deadlines import (
+    RUNTIME_JOB_ORDER,
+    RUNTIME_JOB_SUCCESSORS,
+    runtime_deadline_profile,
+    runtime_policy,
+)
 from polyarb.control_plane.runtime_models import (
     RuntimeDeadlineProfile,
     RuntimeEventKind,
     RuntimeProgress,
 )
-from polyarb.control_plane.runtime_store import runtime_deadline_profile
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
@@ -191,6 +197,68 @@ def test_structure_certifier_gets_bounded_long_attempt_without_weakening_livenes
     assert (certifier.heartbeat_seconds, certifier.progress_seconds) == (10, 30)
     assert certifier.attempt_seconds == 3_600
     assert normalizer.attempt_seconds == 300
+
+
+def test_runtime_policy_is_closed_and_orders_every_timeout() -> None:
+    assert tuple(RUNTIME_STAGE_REGISTRY) == REQUIRED_JOB_TYPES
+    for job_type in REQUIRED_JOB_TYPES:
+        policy = runtime_policy(job_type, 120)
+        assert policy.job_type == job_type
+        assert policy.policy_version == "runtime-v2"
+        assert 3 * policy.deadlines.heartbeat_seconds <= policy.deadlines.lease_seconds
+        assert policy.io_timeout_seconds < policy.deadlines.progress_seconds
+        assert policy.io_timeout_seconds < policy.terminal_grace_seconds
+        assert policy.deadlines.progress_seconds <= policy.deadlines.attempt_seconds
+        assert policy.terminal_grace_seconds > 0
+        assert policy.retry_budget > 0
+        assert policy.checkpoint_interval > 0
+
+    with pytest.raises(ValueError, match="unknown runtime job type"):
+        runtime_policy("quote-adimt", 120)
+
+
+def test_runtime_job_dag_is_closed_acyclic_and_topologically_ordered() -> None:
+    assert set(RUNTIME_JOB_SUCCESSORS) == set(RUNTIME_STAGE_REGISTRY)
+    assert set(RUNTIME_JOB_ORDER) == set(RUNTIME_STAGE_REGISTRY)
+    position = {job_type: index for index, job_type in enumerate(RUNTIME_JOB_ORDER)}
+    for job_type, successors in RUNTIME_JOB_SUCCESSORS.items():
+        assert all(position[job_type] < position[successor] for successor in successors)
+
+
+def test_worker_modules_do_not_define_private_runtime_profiles() -> None:
+    root = Path(__file__).parents[2] / "src" / "polyarb" / "control_plane"
+    offenders = []
+    for path in root.glob("*.py"):
+        if path.name == "runtime_deadlines.py":
+            continue
+        if "def _runtime_profile(" in path.read_text():
+            offenders.append(path.name)
+    assert offenders == []
+
+
+def test_recovery_uses_persisted_policy_instead_of_renewed_deadline_arithmetic() -> None:
+    row = {
+        "policy_version": "runtime-v2",
+        "profile_lease_seconds": 30,
+        "profile_heartbeat_seconds": 10,
+        "profile_progress_seconds": 30,
+        "profile_attempt_seconds": 3600,
+        "started_at": NOW,
+        "last_heartbeat_at": NOW + timedelta(seconds=1200),
+        "last_progress_at": NOW + timedelta(seconds=1200),
+        "lease_deadline_at": NOW + timedelta(seconds=1230),
+        "heartbeat_deadline_at": NOW + timedelta(seconds=1210),
+        "progress_deadline_at": NOW + timedelta(seconds=1230),
+        "attempt_deadline_at": NOW + timedelta(seconds=3600),
+    }
+
+    assert _runtime_deadline_profile(row) == RuntimeDeadlineProfile(
+        policy_version="runtime-v2",
+        lease_seconds=30,
+        heartbeat_seconds=10,
+        progress_seconds=30,
+        attempt_seconds=3600,
+    )
 
 
 def test_runtime_coverage_gate_uses_real_terminal_boundaries_and_fails_closed() -> None:

@@ -245,7 +245,7 @@ def test_quote_retry_fault_uses_existing_retry_incident_path() -> None:
         worker_id="worker-a",
         now=lambda: NOW,
         retry_fault_before_receipt=lambda _lease: (_ for _ in ()).throw(
-                IntentionalStagingRetryFault("intentional staging retry")
+            IntentionalStagingRetryFault("intentional staging retry")
         ),
     )
 
@@ -376,7 +376,9 @@ def test_quote_batch_scheduler_cancellation_drains_reader_without_late_receipt()
             await task
         assert control_plane.recorded is None
         assert control_plane.finished == []
-        assert control_plane.retry_incidents == []
+        assert len(control_plane.retry_incidents) == 1
+        assert control_plane.retry_incidents[0]["error_class"] == "ServiceStopRequested"
+        assert control_plane.retry_incidents[0]["detail"]["reason_code"] == "service-stop"
         assert not any(
             item.get_name().startswith("runtime-heartbeat")
             for item in asyncio.all_tasks()

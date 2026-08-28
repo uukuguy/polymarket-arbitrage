@@ -19,7 +19,7 @@ from .alert_delivery import incident_alert_channels
 from .models import StructureSourcePageSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .runtime_contract import AsyncAttemptRuntime
-from .runtime_models import RuntimeDeadlineProfile
+from .runtime_deadlines import runtime_deadline_profile, runtime_policy
 from .structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
@@ -98,20 +98,6 @@ async def _progress(
 ) -> None:
     """Persist progress off the event loop and retain cancellation draining."""
     await _to_thread(runtime.progress, stage=stage, current=current, total=total)
-
-
-def _runtime_profile(lease_seconds: int) -> RuntimeDeadlineProfile:
-    bounded_lease = max(3, int(lease_seconds))
-    heartbeat = max(1, min(30, bounded_lease // 3))
-    progress = max(bounded_lease, heartbeat * 3)
-    attempt = max(progress, bounded_lease * 10)
-    return RuntimeDeadlineProfile(
-        policy_version="runtime-v1",
-        lease_seconds=bounded_lease,
-        heartbeat_seconds=heartbeat,
-        progress_seconds=progress,
-        attempt_seconds=attempt,
-    )
 
 
 class StructureSourceError(RuntimeError):
@@ -329,8 +315,7 @@ def market_batches_from_event_records(
     if not market_ids:
         raise StructureSourceError("sealed events contain no open market members")
     batches = tuple(
-        market_ids[start : start + batch_size]
-        for start in range(0, len(market_ids), batch_size)
+        market_ids[start : start + batch_size] for start in range(0, len(market_ids), batch_size)
     )
     if len(batches) > max_batches:
         raise StructureSourceBatchLimitError(
@@ -659,7 +644,7 @@ class TransactionalStructureSourceWorker:
         market_batch_size: int = 25,
         max_market_batches: int = DEFAULT_MAX_MARKET_BATCHES,
         lease_seconds: int = 120,
-        object_store_timeout_seconds: float = 90,
+        object_store_timeout_seconds: float | None = None,
         retry_delay: timedelta = timedelta(seconds=15),
         daily_egress_budget_bytes: int = 3_500_000_000,
         runtime_sleep: Callable[[float], Awaitable[None]] | None = None,
@@ -674,7 +659,7 @@ class TransactionalStructureSourceWorker:
             raise ValueError("market batch bounds must be positive")
         if (
             lease_seconds <= 0
-            or object_store_timeout_seconds <= 0
+            or (object_store_timeout_seconds is not None and object_store_timeout_seconds <= 0)
             or retry_delay.total_seconds() <= 0
             or daily_egress_budget_bytes <= 0
         ):
@@ -690,7 +675,11 @@ class TransactionalStructureSourceWorker:
         self._market_batch_size = market_batch_size
         self._max_market_batches = max_market_batches
         self._lease_seconds = lease_seconds
-        self._object_store_timeout_seconds = object_store_timeout_seconds
+        self._object_store_timeout_seconds = (
+            float(runtime_policy("structure-fetch", lease_seconds).io_timeout_seconds)
+            if object_store_timeout_seconds is None
+            else object_store_timeout_seconds
+        )
         self._retry_delay = retry_delay
         self._daily_egress_budget_bytes = daily_egress_budget_bytes
         self._runtime_sleep = runtime_sleep
@@ -711,13 +700,33 @@ class TransactionalStructureSourceWorker:
         runtime = AsyncAttemptRuntime(
             store=self._control_plane,
             lease=lease,
-            profile=_runtime_profile(self._lease_seconds),
+            profile=runtime_deadline_profile("structure-fetch", self._lease_seconds),
             clock=self._now,
             sleep=self._runtime_sleep,
         )
         try:
             async with runtime:
                 return await self._run_claimed(runtime)
+        except asyncio.CancelledError:
+            _consume_cancellation()
+            await _terminal_to_thread(
+                self._control_plane.finish_retryable_with_incident,
+                runtime.current_lease,
+                error_class="ServiceStopRequested",
+                incident_key=f"incident:job-retry:{lease.job_key}",
+                dedupe_key=f"job-retry:{lease.job_key}",
+                component="structure-fetch",
+                summary="structure-fetch interrupted by service stop",
+                detail={
+                    "job_key": lease.job_key,
+                    "lease_epoch": lease.lease_epoch,
+                    "error_class": "ServiceStopRequested",
+                    "reason_code": "service-stop",
+                },
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
+            raise
         except StructureSourceBatchLimitError:
             await _terminal_to_thread(
                 self._control_plane.quarantine_structure_source_page,
@@ -743,9 +752,9 @@ class TransactionalStructureSourceWorker:
                 )
             except Exception:
                 error_spec = None
-            exact_batch_integrity_failure = isinstance(
-                error, PaginationIntegrityError
-            ) and bool(getattr(error_spec, "market_ids", ()))
+            exact_batch_integrity_failure = isinstance(error, PaginationIntegrityError) and bool(
+                getattr(error_spec, "market_ids", ())
+            )
             if exact_batch_integrity_failure and (
                 str(error) == "exact-id market response is not open" or lease.lease_epoch >= 3
             ):
@@ -851,9 +860,7 @@ class TransactionalStructureSourceWorker:
         page: EventPage | MarketPage
         if spec.stream == "events":
             page = await asyncio.wait_for(
-                self._gamma.fetch_active_event_page(
-                    spec.requested_cursor, self._page_limit
-                ),
+                self._gamma.fetch_active_event_page(spec.requested_cursor, self._page_limit),
                 timeout=self._object_store_timeout_seconds,
             )
             records = page.events
@@ -879,9 +886,7 @@ class TransactionalStructureSourceWorker:
             return artifact, None, True, len(records)
         else:
             page = await asyncio.wait_for(
-                self._gamma.fetch_active_market_page(
-                    spec.requested_cursor, self._page_limit
-                ),
+                self._gamma.fetch_active_market_page(spec.requested_cursor, self._page_limit),
                 timeout=self._object_store_timeout_seconds,
             )
             records = page.markets
@@ -912,6 +917,7 @@ class TransactionalStructureSourceWorker:
             ),
             timeout=self._object_store_timeout_seconds,
         )
+
 
 class TransactionalStructureSourcePool:
     """Bound concurrent exact-ID source work without weakening durable leases."""
@@ -976,7 +982,8 @@ class TransactionalStructureSourceAdmitter:
         self._now = now
 
     async def run_once(self) -> StructureWorkerResult:
-        decision = self._control_plane.admit_due_structure_source_window(
+        decision = await _to_thread(
+            self._control_plane.admit_due_structure_source_window,
             cadence_seconds=self._cadence_seconds,
             structure_high_water=self._structure_high_water,
             quote_high_water=self._quote_high_water,
@@ -1041,13 +1048,33 @@ class TransactionalStructureSourceMaterializer:
         runtime = AsyncAttemptRuntime(
             store=self._control_plane,
             lease=lease,
-            profile=_runtime_profile(self._lease_seconds),
+            profile=runtime_deadline_profile("structure-materialize", self._lease_seconds),
             clock=self._now,
             sleep=self._runtime_sleep,
         )
         try:
             async with runtime:
                 return await self._run_claimed(runtime)
+        except asyncio.CancelledError:
+            _consume_cancellation()
+            await _terminal_to_thread(
+                self._control_plane.finish_retryable_with_incident,
+                runtime.current_lease,
+                error_class="ServiceStopRequested",
+                incident_key=f"incident:job-retry:{lease.job_key}",
+                dedupe_key=f"job-retry:{lease.job_key}",
+                component="structure-materialize",
+                summary="structure-materialize interrupted by service stop",
+                detail={
+                    "job_key": lease.job_key,
+                    "lease_epoch": lease.lease_epoch,
+                    "error_class": "ServiceStopRequested",
+                    "reason_code": "service-stop",
+                },
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
+            raise
         except StaleLeaseError:
             raise
         except Exception as error:
@@ -1126,11 +1153,7 @@ class TransactionalStructureSourceMaterializer:
         # Checkpoints use fixed-width offsets so lexical receipt order remains
         # the durable source order. A fresh lease begins at zero.
         checkpoint_cursor = getattr(lease, "checkpoint_cursor")
-        start = (
-            0
-            if checkpoint_cursor is None
-            else int(str(checkpoint_cursor).split(":", 1)[1]) + 1
-        )
+        start = 0 if checkpoint_cursor is None else int(str(checkpoint_cursor).split(":", 1)[1]) + 1
         selected = source_pages[start : start + self._shard_page_batch_size]
         if not selected:
             return await self._finalize_event_shard_manifest(runtime, source_pages)
@@ -1191,7 +1214,7 @@ class TransactionalStructureSourceMaterializer:
                 start_ordinal=selected[0][0].ordinal,
                 end_ordinal=selected[-1][0].ordinal + 1,
                 shards=receipts,
-            )
+            ),
         )
         await _to_thread(
             upload_structure_shard_batch_artifact,
@@ -1295,9 +1318,7 @@ class TransactionalStructureSourceMaterializer:
             spec: StructureSourcePageSpec, key: str, digest: str
         ) -> tuple[StructureSourcePageSpec, StructureSourcePageArtifact]:
             async with semaphore:
-                artifact = await _to_thread(
-                    self._read_page_artifact, key=key, digest=digest
-                )
+                artifact = await _to_thread(self._read_page_artifact, key=key, digest=digest)
             return spec, artifact
 
         pages = list(

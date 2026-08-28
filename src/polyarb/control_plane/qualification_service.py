@@ -823,7 +823,7 @@ async def run_qualification_service(
     stop = stop_event or asyncio.Event()
     ticks = 0
     while not stop.is_set():
-        result = service.tick(datetime.now(UTC))
+        result = await asyncio.to_thread(service.tick, datetime.now(UTC))
         ticks += 1
         if emit is not None:
             emit(_tick_payload(result))
@@ -1137,7 +1137,25 @@ def _ensure_source_cursor_row(
         INSERT INTO public.m1_qualification_source_cursors (
             identity_key, policy_version, release_id, config_id,
             role_identity, source_cursor, writer_id
-        ) VALUES (%s, %s, %s, %s, %s, NULL, %s)
+        ) VALUES (
+            %s, %s, %s, %s, %s,
+            CASE WHEN EXISTS (
+                SELECT 1
+                FROM public.m1_qualification_source_cursors AS predecessor
+                WHERE predecessor.identity_key <> %s
+            ) THEN (
+                SELECT jsonb_build_object(
+                    'observed_at', ledger.ingested_at,
+                    'source_rank', 0,
+                    'stable_id', 'baseline:' || %s,
+                    'ingest_seq', ledger.ingest_seq
+                )
+                FROM public.m1_qualification_ingress_ledger AS ledger
+                ORDER BY ledger.ingest_seq DESC
+                LIMIT 1
+            ) ELSE NULL END,
+            %s
+        )
         ON CONFLICT (identity_key) DO NOTHING
         """,
         (
@@ -1146,6 +1164,8 @@ def _ensure_source_cursor_row(
             policy.release_id,
             policy.config_id,
             Jsonb(list(policy.role_identity)),
+            identity_key,
+            identity_key,
             writer_id,
         ),
     )

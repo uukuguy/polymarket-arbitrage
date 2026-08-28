@@ -1926,3 +1926,36 @@ success is not user receipt/read evidence.
   `structure:bad` rows look internally consistent. Both freshness queries now
   require the exact lowercase 64-hex Quote generation grammar; a real
   PostgreSQL regression proves malformed pairs become gaps.
+
+### §2.39 A task may have many clocks but only one lifecycle authority (2026-08-28)
+
+- Plan 05.6-208 increased one deadline and exposed the deeper defect: durable
+  attempt, worker-local profile, scheduler turn timeout, I/O timeout and service
+  shutdown were independently allowed to terminate the same work. The repair is
+  not a larger number. `runtime-v2` is a closed eight-job registry that derives
+  heartbeat, progress, absolute attempt, I/O, terminal grace, retry budget and
+  checkpoint cadence from one lease-bound policy persisted with the attempt.
+- Scheduler order is not dependency truth. A validated acyclic successor graph
+  supplies lane construction, while downstream eligibility still comes only
+  from durable predecessor receipts/pointers. Independent lanes repeat at their
+  own cadence, so a long certifier cannot starve source admission or Quote.
+- Service stop has a three-step contract: stop claims, request/cancel work, then
+  drain only through policy terminal grace. A non-cooperative sync call runs
+  behind a non-joining daemon bridge; after grace, the still-current lease and
+  checkpoint are the recoverable fact. A late terminal write loses the epoch
+  fence after takeover. Both coordinator and role-local loops emit
+  `service-stop-grace-expired` rather than disappearing silently.
+- Open circuit is a parent lifecycle state, not another property of the last
+  attempt. Its cooldown/probe decision must precede the expired heartbeat/lease
+  clocks stored in that historical runtime row. The controller releases exactly
+  one probe and moves `next_probe_at` forward; ordinary claim cannot self-probe.
+- Migration is part of recovery semantics. Revision 028 closes superseded
+  running attempts, releases a current leased job that has no matching runtime
+  row, persists exact policy snapshots without server defaults, and introduces
+  per-job monotonic checkpoint sequence. A real 027→028→027→028 test proves the
+  orphan is claimable rather than permanently leased.
+- Qualification cursor handoff is identity-sensitive. The first identity in a
+  database consumes existing breaker history; a later release detects a
+  predecessor cursor identity and starts at current ledger high-water. This
+  prevents both missed startup failures and offset-zero history being counted as
+  new-release live coverage.

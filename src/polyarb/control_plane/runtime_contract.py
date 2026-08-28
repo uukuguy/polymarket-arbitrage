@@ -49,6 +49,18 @@ Clock = Callable[[], datetime]
 Sleeper = Callable[[float], Awaitable[None]]
 
 
+class AttemptDeadlineExceeded(TimeoutError):
+    """The single authoritative absolute attempt deadline elapsed."""
+
+
+class ProgressDeadlineExceeded(TimeoutError):
+    """The attempt produced no durable progress within its policy window."""
+
+
+class ServiceStopRequested(RuntimeError):
+    """The service requested a cooperative stop at the next safe boundary."""
+
+
 async def _await_sleep(awaitable: Awaitable[None]) -> None:
     await awaitable
 
@@ -213,6 +225,7 @@ class AttemptRuntime:
         self._clock = clock
         self._sequence = 0
         self._last_heartbeat_at = _read_clock(clock)
+        self._started_at = self._last_heartbeat_at
 
     @property
     def lease(self) -> JobLease:
@@ -236,6 +249,15 @@ class AttemptRuntime:
     def profile(self) -> RuntimeDeadlineProfile:
         """Return the immutable deadline contract used by this attempt."""
         return self._profile
+
+    def remaining_attempt_seconds(self) -> float:
+        """Return the remaining absolute attempt budget or fail authoritatively."""
+        now = _read_clock(self._clock)
+        _validate_clock_progression(now, self._started_at)
+        remaining = self._profile.attempt_seconds - (now - self._started_at).total_seconds()
+        if remaining <= 0:
+            raise AttemptDeadlineExceeded(f"attempt deadline exceeded for {self._lease.job_key}")
+        return remaining
 
     def progress(
         self,
@@ -266,9 +288,11 @@ class AttemptRuntime:
             total=total,
             stage=stage,
         )
+        now = _read_clock(self._clock)
+        self._require_attempt_live(now)
         kwargs: dict[str, Any] = {
             "progress": progress,
-            "now": _read_clock(self._clock),
+            "now": now,
         }
         if detail is not None:
             # Do not let a store retain a caller-owned mutable detail object.
@@ -297,6 +321,7 @@ class AttemptRuntime:
         self._renew_heartbeat(now)
 
     def _renew_heartbeat(self, now: datetime) -> None:
+        self._require_attempt_live(now)
         renewed = self._store.heartbeat_runtime_attempt(
             self._lease,
             now=now,
@@ -306,6 +331,11 @@ class AttemptRuntime:
             raise TypeError("heartbeat store must return JobLease")
         self._lease = renewed
         self._last_heartbeat_at = now
+
+    def _require_attempt_live(self, now: datetime) -> None:
+        _validate_clock_progression(now, self._started_at)
+        if (now - self._started_at).total_seconds() >= self._profile.attempt_seconds:
+            raise AttemptDeadlineExceeded(f"attempt deadline exceeded for {self._lease.job_key}")
 
 
 class AsyncAttemptRuntime(AttemptRuntime):
@@ -333,9 +363,14 @@ class AsyncAttemptRuntime(AttemptRuntime):
         self._sleep = sleep
         self._stopped = asyncio.Event()
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._watchdog_task: asyncio.Task[None] | None = None
         self._heartbeat_call_task: asyncio.Task[Any] | None = None
         self._owner_task: asyncio.Task[Any] | None = None
         self._heartbeat_error: BaseException | None = None
+        self._watchdog_error: BaseException | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._started_monotonic: float | None = None
+        self._last_progress_monotonic: float | None = None
         self._stop_complete = False
 
     @property
@@ -347,6 +382,24 @@ class AsyncAttemptRuntime(AttemptRuntime):
     def heartbeat_error(self) -> BaseException | None:
         return self._heartbeat_error
 
+    @property
+    def watchdog_error(self) -> BaseException | None:
+        return self._watchdog_error
+
+    def progress(
+        self,
+        *,
+        stage: str,
+        current: int,
+        total: int | None,
+        detail: dict[str, object] | None = None,
+    ) -> None:
+        """Persist progress and reset the in-process progress watchdog."""
+        super().progress(stage=stage, current=current, total=total, detail=detail)
+        loop = self._loop
+        if loop is not None:
+            self._last_progress_monotonic = loop.time()
+
     async def start(self) -> AsyncAttemptRuntime:
         """Start exactly one heartbeat task owned by the current task."""
         if self._heartbeat_task is not None or self._stop_complete:
@@ -355,13 +408,22 @@ class AsyncAttemptRuntime(AttemptRuntime):
         if owner is None:
             raise RuntimeError("attempt runtime requires an owning task")
         self._owner_task = owner
+        self._loop = asyncio.get_running_loop()
+        self._started_monotonic = self._loop.time()
+        self._last_progress_monotonic = self._started_monotonic
         self._stopped.clear()
         try:
             self._heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(),
                 name=f"runtime-heartbeat:{self.lease.job_key}",
             )
+            self._watchdog_task = asyncio.create_task(
+                self._watchdog_loop(),
+                name=f"runtime-watchdog:{self.lease.job_key}",
+            )
         except BaseException:
+            if self._heartbeat_task is not None:
+                self._heartbeat_task.cancel()
             self._owner_task = None
             raise
         return self
@@ -376,11 +438,14 @@ class AsyncAttemptRuntime(AttemptRuntime):
                 raise self._heartbeat_error
             return
         self._stopped.set()
-        was_cancelled = await self._drain_heartbeat_task()
+        heartbeat_cancelled = await self._drain_heartbeat_task()
+        watchdog_cancelled = await self._drain_watchdog_task()
         self._stop_complete = True
         if self._heartbeat_error is not None:
             raise self._heartbeat_error
-        if was_cancelled:
+        if self._watchdog_error is not None:
+            raise self._watchdog_error
+        if heartbeat_cancelled or watchdog_cancelled:
             raise asyncio.CancelledError
 
     async def __aenter__(self) -> AsyncAttemptRuntime:
@@ -396,6 +461,8 @@ class AsyncAttemptRuntime(AttemptRuntime):
             # A heartbeat failure is the authoritative reason for stopping,
             # even when it reached the body as CancelledError.
             raise self._heartbeat_error
+        if self._watchdog_error is not None:
+            raise self._watchdog_error
         if stop_error is not None:
             raise stop_error
         return False
@@ -424,6 +491,46 @@ class AsyncAttemptRuntime(AttemptRuntime):
             raise
         except BaseException as error:
             self._heartbeat_error = error
+            self._stopped.set()
+            owner = self._owner_task
+            if owner is not None and owner is not asyncio.current_task():
+                owner.cancel()
+            raise
+        finally:
+            self._stopped.set()
+
+    async def _watchdog_loop(self) -> None:
+        try:
+            loop = self._loop
+            started = self._started_monotonic
+            if loop is None or started is None:
+                raise RuntimeError("attempt watchdog started without an event loop")
+            while not self._stopped.is_set():
+                now = loop.time()
+                last_progress = self._last_progress_monotonic
+                if last_progress is None:
+                    raise RuntimeError("attempt watchdog has no progress baseline")
+                attempt_remaining = self._profile.attempt_seconds - (now - started)
+                progress_remaining = self._profile.progress_seconds - (now - last_progress)
+                if attempt_remaining <= 0:
+                    raise AttemptDeadlineExceeded(
+                        f"attempt deadline exceeded for {self.lease.job_key}"
+                    )
+                if progress_remaining <= 0:
+                    raise ProgressDeadlineExceeded(
+                        f"progress deadline exceeded for {self.lease.job_key}"
+                    )
+                try:
+                    await asyncio.wait_for(
+                        self._stopped.wait(),
+                        timeout=min(attempt_remaining, progress_remaining),
+                    )
+                except TimeoutError:
+                    continue
+        except asyncio.CancelledError:
+            raise
+        except BaseException as error:
+            self._watchdog_error = error
             self._stopped.set()
             owner = self._owner_task
             if owner is not None and owner is not asyncio.current_task():
@@ -475,9 +582,7 @@ class AsyncAttemptRuntime(AttemptRuntime):
         stop_task = asyncio.create_task(self._stopped.wait())
         tasks = (sleep_task, stop_task)
         try:
-            done, _ = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             if sleep_task in done:
                 # Retrieve sleeper exceptions instead of leaving an unobserved
                 # task behind.
@@ -510,9 +615,16 @@ class AsyncAttemptRuntime(AttemptRuntime):
             self._heartbeat_error = error
         return was_cancelled
 
-    async def _drain_task(
-        self, task: asyncio.Task[Any]
-    ) -> tuple[BaseException | None, bool]:
+    async def _drain_watchdog_task(self) -> bool:
+        task = self._watchdog_task
+        if task is None or task is asyncio.current_task():
+            return False
+        error, was_cancelled = await self._drain_task(task)
+        if error is not None and self._watchdog_error is None:
+            self._watchdog_error = error
+        return was_cancelled
+
+    async def _drain_task(self, task: asyncio.Task[Any]) -> tuple[BaseException | None, bool]:
         """Await a task to completion without abandoning executor work."""
         current = asyncio.current_task()
         was_cancelled = current is not None and current.cancelling() > 0
@@ -534,7 +646,10 @@ class AsyncAttemptRuntime(AttemptRuntime):
 __all__ = [
     "ALL_RUNTIME_STAGES",
     "AsyncAttemptRuntime",
+    "AttemptDeadlineExceeded",
     "AttemptRuntime",
+    "ProgressDeadlineExceeded",
     "RUNTIME_STAGE_REGISTRY",
     "RuntimeStore",
+    "ServiceStopRequested",
 ]

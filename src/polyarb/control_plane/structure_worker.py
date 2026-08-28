@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from threading import Event
 from time import monotonic
 from typing import Any, Protocol
 
@@ -17,8 +20,8 @@ from .alert_delivery import incident_alert_channels
 from .faults import IntentionalStagingRetryFault
 from .models import JobLease, JobState, StructureRangeSpec
 from .postgres import IncompleteStructureGenerationError, PostgresControlPlane, StaleLeaseError
-from .runtime_contract import AttemptRuntime
-from .runtime_models import RuntimeDeadlineProfile
+from .runtime_contract import AttemptRuntime, ServiceStopRequested
+from .runtime_deadlines import runtime_deadline_profile, runtime_policy
 from .structure_artifact import (
     StructureBundleError,
     StructureManifestArtifact,
@@ -55,20 +58,6 @@ class _ObjectClient(Protocol):
 class StructureWorkerResult:
     job_key: str | None
     outcome: str
-
-
-def _runtime_profile(lease_seconds: int) -> RuntimeDeadlineProfile:
-    bounded_lease = max(3, int(lease_seconds))
-    heartbeat = max(1, min(30, bounded_lease // 3))
-    progress = max(bounded_lease, heartbeat * 3)
-    attempt = max(progress, bounded_lease * 10)
-    return RuntimeDeadlineProfile(
-        policy_version="runtime-v1",
-        lease_seconds=bounded_lease,
-        heartbeat_seconds=heartbeat,
-        progress_seconds=progress,
-        attempt_seconds=attempt,
-    )
 
 
 async def _drain_thread_task(task: asyncio.Task[Any]) -> Any:
@@ -234,7 +223,7 @@ async def _runtime_sync_call_async[SyncResult](
         call,
         heartbeat=None if terminal else runtime.heartbeat_if_due,
         heartbeat_interval_seconds=float(profile.heartbeat_seconds),
-        attempt_timeout_seconds=float(profile.attempt_seconds),
+        attempt_timeout_seconds=runtime.remaining_attempt_seconds(),
         terminal=terminal,
     )
 
@@ -283,14 +272,12 @@ class TransactionalStructureWorker:
         runtime = AttemptRuntime(
             store=self._control_plane,
             lease=lease,
-            profile=_runtime_profile(self._lease_seconds),
+            profile=runtime_deadline_profile("structure-normalize", self._lease_seconds),
             clock=self._now,
         )
         prior = await _runtime_sync_call_async(
             runtime,
-            lambda: self._control_plane.structure_range_receipt(
-                runtime.current_lease.job_key
-            ),
+            lambda: self._control_plane.structure_range_receipt(runtime.current_lease.job_key),
         )
         if prior is not None:
             await _progress(runtime, stage="read-range", current=1, total=1)
@@ -311,9 +298,7 @@ class TransactionalStructureWorker:
         try:
             spec = await _runtime_sync_call_async(
                 runtime,
-                lambda: self._control_plane.structure_range_spec(
-                    runtime.current_lease.job_key
-                ),
+                lambda: self._control_plane.structure_range_spec(runtime.current_lease.job_key),
             )
             await _progress(runtime, stage="read-range", current=1, total=1)
             await _heartbeat(runtime)
@@ -392,6 +377,26 @@ class TransactionalStructureWorker:
                     job_key=lease.job_key, outcome="succeeded:recovery-pending"
                 )
             return StructureWorkerResult(job_key=lease.job_key, outcome="succeeded")
+        except asyncio.CancelledError:
+            _consume_cancellation()
+            await _terminal_to_thread(
+                self._control_plane.finish_retryable_with_incident,
+                runtime.current_lease,
+                error_class="ServiceStopRequested",
+                incident_key=f"incident:job-retry:{lease.job_key}",
+                dedupe_key=f"job-retry:{lease.job_key}",
+                component="structure-normalize",
+                summary="structure-normalize interrupted by service stop",
+                detail={
+                    "job_key": lease.job_key,
+                    "lease_epoch": lease.lease_epoch,
+                    "error_class": "ServiceStopRequested",
+                    "reason_code": "service-stop",
+                },
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
+            raise
         except (StructureBundleError, StructureWorkerError):
             await _runtime_sync_call_async(
                 runtime,
@@ -518,9 +523,7 @@ class TransactionalStructureWorker:
         payload = _read_object_bytes(
             self._object_client, bucket=self._bucket, key=shard.artifact_key
         )
-        header, rows = parse_structure_shard_bytes(
-            payload, expected_sha256=shard.artifact_digest
-        )
+        header, rows = parse_structure_shard_bytes(payload, expected_sha256=shard.artifact_digest)
         if header.component != spec.component or header.ordinal != shard.ordinal:
             raise StructureWorkerError("structure-v3-range-shard-identity-invalid")
         if heartbeat is not None:
@@ -556,6 +559,11 @@ class TransactionalStructureCertifier:
         self._retry_delay = retry_delay
         self._monotonic_clock = monotonic_clock
         self._heartbeat_interval_seconds = max(0.1, lease_seconds / 3)
+        self._stop_requested = Event()
+
+    def request_stop(self) -> None:
+        """Stop the synchronous parity pass at its next range boundary."""
+        self._stop_requested.set()
 
     def run_once(self) -> StructureWorkerResult:
         lease = self._control_plane.claim_job(
@@ -569,7 +577,7 @@ class TransactionalStructureCertifier:
         runtime = AttemptRuntime(
             store=self._control_plane,
             lease=lease,
-            profile=_runtime_profile(self._lease_seconds),
+            profile=runtime_deadline_profile("structure-certify", self._lease_seconds),
             clock=self._now,
         )
         generation_key = lease.job_key.removesuffix(":certify")
@@ -577,35 +585,32 @@ class TransactionalStructureCertifier:
 
         def heartbeat_if_due() -> None:
             nonlocal last_heartbeat
+            if self._stop_requested.is_set():
+                raise ServiceStopRequested("structure-certify service stop requested")
             current_monotonic = self._monotonic_clock()
             if current_monotonic - last_heartbeat < self._heartbeat_interval_seconds:
                 return
             runtime.heartbeat()
             last_heartbeat = current_monotonic
 
-        def sync_call(
-            call: Callable[[], Any], *, terminal: bool = False
-        ) -> Any:
+        def sync_call(call: Callable[[], Any], *, terminal: bool = False) -> Any:
             profile = runtime.profile
             return _run_bounded_sync_call(
                 call,
                 heartbeat=None if terminal else heartbeat_if_due,
                 heartbeat_interval_seconds=float(profile.heartbeat_seconds),
-                attempt_timeout_seconds=float(profile.attempt_seconds),
+                attempt_timeout_seconds=runtime.remaining_attempt_seconds(),
                 monotonic_clock=self._monotonic_clock,
                 terminal=terminal,
             )
 
         def report_progress(current: int, total: int) -> None:
-            sync_call(
-                lambda: runtime.progress(
-                    stage="verify-parity", current=current, total=total
-                )
-            )
+            sync_call(lambda: runtime.progress(stage="verify-parity", current=current, total=total))
 
         try:
             self._verify_content_parity(
                 generation_key,
+                runtime=runtime,
                 heartbeat=heartbeat_if_due,
                 progress=report_progress,
                 sync_call=sync_call,
@@ -615,21 +620,15 @@ class TransactionalStructureCertifier:
                 lambda: self._control_plane.structure_manifest_payload(generation_key)
             )
             artifact = StructureManifestArtifact.from_bytes(payload)
-            sync_call(
-                lambda: runtime.progress(stage="build-manifest", current=1, total=1)
-            )
+            sync_call(lambda: runtime.progress(stage="build-manifest", current=1, total=1))
             heartbeat_if_due()
             sync_call(
                 lambda: upload_structure_manifest_artifact(
                     self._object_client, bucket=self._bucket, artifact=artifact
                 )
             )
-            sync_call(
-                lambda: runtime.progress(stage="upload-manifest", current=1, total=1)
-            )
-            sync_call(
-                lambda: runtime.progress(stage="commit-certification", current=1, total=1)
-            )
+            sync_call(lambda: runtime.progress(stage="upload-manifest", current=1, total=1))
+            sync_call(lambda: runtime.progress(stage="commit-certification", current=1, total=1))
             heartbeat_if_due()
             sync_call(
                 lambda: self._control_plane.certify_structure_generation(
@@ -694,6 +693,7 @@ class TransactionalStructureCertifier:
         self,
         generation_key: str,
         *,
+        runtime: AttemptRuntime,
         heartbeat: Callable[[], None],
         progress: Callable[[int, int], None],
         sync_call: Callable[..., Any],
@@ -721,6 +721,8 @@ class TransactionalStructureCertifier:
             self._verify_v3_content_parity(
                 ranges,
                 shards,
+                generation_key=generation_key,
+                runtime=runtime,
                 heartbeat=heartbeat,
                 progress=progress,
                 sync_call=sync_call,
@@ -768,13 +770,39 @@ class TransactionalStructureCertifier:
         ranges: Sequence[tuple[StructureRangeSpec, object]],
         shards: tuple[StructureShardReceipt, ...],
         *,
+        generation_key: str,
+        runtime: AttemptRuntime,
         heartbeat: Callable[[], None],
         progress: Callable[[int, int], None],
         sync_call: Callable[..., Any],
     ) -> None:
         by_identity = {(shard.component, shard.ordinal): shard for shard in shards}
         total_ranges = len(ranges)
-        for index, (spec, receipt) in enumerate(ranges, start=1):
+        prefix_digests = _parity_prefix_digests(generation_key, ranges)
+        resume_index = 0
+        cursor_prefix = f"runtime-v2:{generation_key}:"
+        checkpoints = sync_call(
+            lambda: self._control_plane.running_checkpoints(runtime.current_lease.job_key)
+        )
+        for cursor, digest, artifact_key in checkpoints:
+            if not cursor.startswith(cursor_prefix):
+                raise StructureWorkerError("structure-parity-checkpoint-cursor")
+            try:
+                checkpoint_index = int(cursor.removeprefix(cursor_prefix))
+            except ValueError as error:
+                raise StructureWorkerError("structure-parity-checkpoint-cursor") from error
+            if (
+                checkpoint_index <= resume_index
+                or checkpoint_index > total_ranges
+                or digest != prefix_digests[checkpoint_index - 1]
+                or artifact_key != str(getattr(ranges[checkpoint_index - 1][1], "artifact_key"))
+            ):
+                raise StructureWorkerError("structure-parity-checkpoint-proof")
+            resume_index = checkpoint_index
+        checkpoint_interval = runtime_policy(
+            "structure-certify", lease_seconds=runtime.profile.lease_seconds
+        ).checkpoint_interval
+        for index, (spec, receipt) in enumerate(ranges[resume_index:], start=resume_index + 1):
             heartbeat()
             ordinal = int(spec.range_start.removeprefix("shard:"))
             shard = by_identity.get((spec.component, ordinal))
@@ -804,6 +832,49 @@ class TransactionalStructureCertifier:
             if actual_rows != expected_rows or len(actual_rows) != getattr(receipt, "record_count"):
                 raise StructureWorkerError("structure-v3-content-parity-range-content")
             progress(index, total_ranges)
+            if index % checkpoint_interval == 0 or index == total_ranges:
+
+                def persist_checkpoint(
+                    checkpoint_index: int = index,
+                    checkpoint_receipt: object = receipt,
+                ) -> object:
+                    return self._control_plane.record_running_checkpoint(
+                        runtime.current_lease,
+                        checkpoint_cursor=f"{cursor_prefix}{checkpoint_index}",
+                        checkpoint_digest=prefix_digests[checkpoint_index - 1],
+                        artifact_key=str(getattr(checkpoint_receipt, "artifact_key")),
+                        idempotency_key=(
+                            "structure-parity-checkpoint:"
+                            f"{runtime.current_lease.job_key}:runtime-v2:{checkpoint_index}"
+                        ),
+                        now=self._now(),
+                    )
+
+                sync_call(persist_checkpoint)
+
+
+def _parity_prefix_digests(
+    generation_key: str,
+    ranges: Sequence[tuple[StructureRangeSpec, object]],
+) -> tuple[str, ...]:
+    """Hash immutable receipt metadata into resumable prefix proofs."""
+    rolling = hashlib.sha256(f"runtime-v2:{generation_key}".encode()).digest()
+    digests: list[str] = []
+    for spec, receipt in ranges:
+        record = json.dumps(
+            {
+                "artifact_digest": str(getattr(receipt, "artifact_digest")),
+                "artifact_key": str(getattr(receipt, "artifact_key")),
+                "component": spec.component,
+                "range_digest": spec.range_digest,
+                "record_count": int(getattr(receipt, "record_count")),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        rolling = hashlib.sha256(rolling + record).digest()
+        digests.append(rolling.hex())
+    return tuple(digests)
 
 
 def _in_range(cursor: str, spec: StructureRangeSpec) -> bool:

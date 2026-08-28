@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
+from threading import Event
 from time import monotonic
 from typing import Any, Protocol, cast
 
@@ -30,8 +31,8 @@ from .quote_artifact import (
     parse_quote_batch_input_bytes,
     upload_quote_batch_artifact,
 )
-from .runtime_contract import AsyncAttemptRuntime, AttemptRuntime
-from .runtime_models import RuntimeDeadlineProfile
+from .runtime_contract import AsyncAttemptRuntime, AttemptRuntime, ServiceStopRequested
+from .runtime_deadlines import runtime_deadline_profile, runtime_policy
 
 
 class QuoteBatchWorkerError(RuntimeError):
@@ -44,20 +45,6 @@ class _ObjectClient(Protocol):
     def put_object(self, **kwargs: Any) -> Any: ...
 
     def head_object(self, **kwargs: Any) -> dict[str, Any]: ...
-
-
-def _runtime_profile(lease_seconds: int) -> RuntimeDeadlineProfile:
-    bounded_lease = max(3, int(lease_seconds))
-    heartbeat = max(1, min(30, bounded_lease // 3))
-    progress = max(bounded_lease, heartbeat * 3)
-    attempt = max(progress, bounded_lease * 10)
-    return RuntimeDeadlineProfile(
-        policy_version="runtime-v1",
-        lease_seconds=bounded_lease,
-        heartbeat_seconds=heartbeat,
-        progress_seconds=progress,
-        attempt_seconds=attempt,
-    )
 
 
 async def _drain_task(task: asyncio.Task[Any]) -> Any:
@@ -142,7 +129,7 @@ def _run_bounded_sync_call(
     future = executor.submit(call)
     primary_error: BaseException | None = None
     try:
-        deadline = monotonic() + runtime.profile.attempt_seconds
+        deadline = monotonic() + runtime.remaining_attempt_seconds()
         while True:
             remaining = deadline - monotonic()
             if remaining <= 0:
@@ -247,7 +234,7 @@ class TransactionalQuoteBatchWorker:
         runtime = AsyncAttemptRuntime(
             store=self._control_plane,
             lease=lease,
-            profile=_runtime_profile(self._lease_seconds),
+            profile=runtime_deadline_profile("quote-batch", self._lease_seconds),
             clock=self._now,
             sleep=self._runtime_sleep,
         )
@@ -305,12 +292,10 @@ class TransactionalQuoteBatchWorker:
                 books = await _await_reader(
                     self._reader,
                     list(batch.token_ids),
-                    timeout_seconds=max(
-                        1.0,
-                        min(
-                            float(runtime.profile.attempt_seconds),
-                            float(max(self._lease_seconds - 5, 1)),
-                        ),
+                    timeout_seconds=float(
+                        runtime_policy(
+                            "quote-batch", runtime.profile.lease_seconds
+                        ).io_timeout_seconds
                     ),
                 )
                 await _to_thread(
@@ -377,6 +362,26 @@ class TransactionalQuoteBatchWorker:
                     job_key=runtime.current_lease.job_key,
                     outcome="succeeded",
                 )
+        except asyncio.CancelledError:
+            _consume_cancellation()
+            await _terminal_to_thread(
+                self._control_plane.finish_retryable_with_incident,
+                runtime.current_lease,
+                error_class="ServiceStopRequested",
+                incident_key=f"incident:job-retry:{lease.job_key}",
+                dedupe_key=f"job-retry:{lease.job_key}",
+                component="quote-batch",
+                summary="quote-batch interrupted by service stop",
+                detail={
+                    "job_key": lease.job_key,
+                    "lease_epoch": lease.lease_epoch,
+                    "error_class": "ServiceStopRequested",
+                    "reason_code": "service-stop",
+                },
+                channels=incident_alert_channels(Settings()),
+                now=self._now(),
+            )
+            raise
         except StaleLeaseError:
             raise
 
@@ -491,6 +496,11 @@ class TransactionalQuoteCertifier:
         self._now = now
         self._lease_seconds = lease_seconds
         self._retry_delay = retry_delay
+        self._stop_requested = Event()
+
+    def request_stop(self) -> None:
+        """Stop before the next fenced certification boundary."""
+        self._stop_requested.set()
 
     def run_once(self) -> QuoteBatchWorkerResult:
         lease = self._control_plane.claim_job(
@@ -510,13 +520,15 @@ class TransactionalQuoteCertifier:
             AttemptRuntime(
                 store=self._control_plane,
                 lease=lease,
-                profile=_runtime_profile(self._lease_seconds),
+                profile=runtime_deadline_profile("quote-certify", self._lease_seconds),
                 clock=self._now,
             )
             if runtime_available
             else None
         )
         try:
+            if self._stop_requested.is_set():
+                raise ServiceStopRequested("quote-certify service stop requested")
             if runtime is not None:
                 runtime.progress(stage="verify-batches", current=1, total=1)
                 runtime.heartbeat_if_due()
@@ -537,20 +549,24 @@ class TransactionalQuoteCertifier:
             if not isinstance(artifact_digest, str):
                 raise TypeError("Quote certification must return its artifact digest")
             try:
-                recovery = _runtime_sync_call(
-                    runtime,
-                    lambda: self._control_plane.record_job_recovery(
-                        lease if runtime is None else runtime.current_lease,
+                recovery = (
+                    _runtime_sync_call(
+                        runtime,
+                        lambda: self._control_plane.record_job_recovery(
+                            lease if runtime is None else runtime.current_lease,
+                            component="quote-certify",
+                            channels=incident_alert_channels(Settings()),
+                            now=self._now(),
+                        ),
+                        terminal=True,
+                    )
+                    if runtime is not None
+                    else self._control_plane.record_job_recovery(
+                        lease,
                         component="quote-certify",
                         channels=incident_alert_channels(Settings()),
                         now=self._now(),
-                    ),
-                    terminal=True,
-                ) if runtime is not None else self._control_plane.record_job_recovery(
-                    lease,
-                    component="quote-certify",
-                    channels=incident_alert_channels(Settings()),
-                    now=self._now(),
+                    )
                 )
             except Exception:
                 return QuoteBatchWorkerResult(
