@@ -1,0 +1,97 @@
+{
+  "artifact_version": 1,
+  "prepared_at": "2026-08-28T11:35:49+08:00",
+  "status": "superseded-before-machine-rollout-after-database-migration",
+  "authorization_granted": true,
+  "authorization_basis": "The user granted complete authority for the changes required to diagnose and solve the repeated timeout, task sequencing, interruption, recovery, and public.digest exhaustion failures, then instructed autonomous completion of M1.",
+  "approved_by": "user",
+  "approval_text": [
+    "批准并完全授权",
+    "要找出同一 public.digest 缺陷耗尽重试并停止的原因并解决，需要的授权都批准。",
+    "发现两个问题的修复方案，就动手处理掉",
+    "全面检查梳理一下超时、任务序列、可中断可恢复等的设计问题"
+  ],
+  "operator": "Codex",
+  "source_release_sha": "a3b1d9824603b2c019a0a49b4e43d01c7810016f",
+  "production_database_before_revision": "027",
+  "target_database_revision": "028",
+  "worker_image": "registry.fly.io/polyarb-control-worker-m1@sha256:98f3102f5b429faf2b0279254698840df3f0f8690ff5708eecb799d263848610",
+  "qualification_image": "registry.fly.io/polyarb-qualification-worker-m1@sha256:98f3102f5b429faf2b0279254698840df3f0f8690ff5708eecb799d263848610",
+  "image_contract": {
+    "local_image_id": "sha256:b56ebdee1611475feb200f59819d4c2650b5a6389dde647fd3b29642a0485bde",
+    "architecture": "amd64",
+    "runtime_uid": 10001,
+    "oci_revision": "a3b1d9824603b2c019a0a49b4e43d01c7810016f",
+    "alembic_head": "028",
+    "runtime_policy_version": "runtime-v2",
+    "closed_job_registry_count": 8,
+    "cli_smoke": "pass"
+  },
+  "exact_existing_targets": [
+    "polyarb-control-worker-m1/e82d1220b2d138",
+    "polyarb-control-worker-m1/683e46ea500dd8",
+    "polyarb-control-worker-m1/4d895231f66748",
+    "polyarb-qualification-worker-m1/876077f0274598"
+  ],
+  "protected_unchanged_targets": [
+    "polyarb-control-alert/d891e941a41dd8",
+    "polyarb-control-api/d8d0e27a734158",
+    "polyarb-control-runtime-event-writer/28654e35a73d08",
+    "polyarb-runtime-controller-m1/6e82036dce4958"
+  ],
+  "observed_before": {
+    "coordinator_state": "stopped",
+    "structure_range_state": "started",
+    "quote_batch_state": "started",
+    "qualification_state": "stopped",
+    "runtime_controller_state": "started",
+    "runtime_controller_recovery_actions": 0,
+    "open_watchdog_incident_reason": "the intentionally stopped coordinator remains unavailable",
+    "non_image_config_sha256": {
+      "e82d1220b2d138": "ca793ac25df43bc046e145c696fc26f87915663192453f8c262ed6920f2a81ce",
+      "683e46ea500dd8": "3056b1d5792ba1166d1e76177ee3af4158b449ebf29e8b3fc383602cfe1af7f6",
+      "4d895231f66748": "8f8e8900f7518ea25563c017fcf5c7085db2e5072b84e3bc94838444e6c6cdfc",
+      "876077f0274598": "c8791857b4bcb6b9c745bbf031f3201c04d1136350837b148cd34b1b20583898"
+    }
+  },
+  "ordered_maximum_effect": [
+    "apply only Alembic revision 028 with the existing production migration DSN; its transactional repair may close orphan leased jobs and attempts and backfill the runtime policy snapshot",
+    "update the stopped coordinator image on the same Machine ID and start it",
+    "after the coordinator gate passes, gracefully stop, image-update, and start the structure-range Machine on the same ID",
+    "after the structure gate passes, gracefully stop, image-update, and start the quote-batch Machine on the same ID",
+    "after all worker and observe-only gates pass, update the stopped qualification Machine image and only its POLYARB_QUALIFICATION_RELEASE_ID to the source release SHA, then start the same Machine ID",
+    "begin one new append-only 86400-second qualification epoch and independently reverify its immutable certificate"
+  ],
+  "required_gates": [
+    "database revision is exactly 027 before and exactly 028 after migration",
+    "all three worker Machines use the same immutable digest and retain their exact IDs and image-excluded configuration",
+    "the two running lanes are changed one at a time and only after bounded service-stop evidence or lease preservation is observed",
+    "the runtime controller remains observe-only with its empty recovery allowlist and zero recovery actions",
+    "Structure fetch/materialize/normalize/certify, Quote admit/batch/certify, and opportunity certify reach valid durable states without orphan running attempts or restart exhaustion",
+    "qualification successor identity starts at the live ingress high-water mark and only current-release evidence enters its accumulating window"
+  ],
+  "forbidden_effects": [
+    "no new, deleted, or replaced Fly app or Machine",
+    "no Machine ID, VM, region, volume, IP, service, restart policy, secret value, or hidden secret-set change",
+    "no image change outside the four exact targets",
+    "no runtime-controller update, restart, recovery allowlist expansion, recovery-mode change, or recovery action",
+    "no fault injection, wallet, signing, order, balance, or trade action",
+    "no raw provider response or secret value in evidence"
+  ],
+  "rollback": [
+    "a migration failure is contained by PostgreSQL transactional DDL and stops rollout before any Machine update",
+    "stop qualification immediately if its identity, first-tick, cursor, or evidence gate fails",
+    "restore changed Machines to the prior immutable image in reverse order if their process or durable-publication gate fails",
+    "retain additive revision 028 after any worker has executed it; do not destructively downgrade live runtime-v2 evidence",
+    "reverify exact topology, original Machine IDs, observe-only continuity, zero recovery actions, and append-only evidence"
+  ],
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false,
+  "execution_result": {
+    "database_migration": "027-to-028-pass",
+    "machine_updates": 0,
+    "machine_starts_or_stops": 0,
+    "superseded_reason": "Pre-rollout production proof found qualification-status transferring unbounded epoch evidence. The executable fix changes image bytes, so this digest is forbidden from rollout.",
+    "superseded_worker_image_digest": "sha256:98f3102f5b429faf2b0279254698840df3f0f8690ff5708eecb799d263848610"
+  }
+}

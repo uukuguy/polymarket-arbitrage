@@ -10925,3 +10925,39 @@ start only the existing coordinator and qualification Machines under unchanged
 non-image config. Prove Structure→Quote admission→Quote certification→opportunity
 terminal flow without zero restart or orphan attempts before starting a new
 86,400-second qualification epoch.
+
+### SESSION 318 — 2026-08-28 (bounded operator reads discovered before rollout)
+
+- [PRODUCTION PREFLIGHT] Exact eight-Machine topology passed; coordinator and
+  qualification remained stopped, Structure/Quote lanes remained started, and
+  the runtime controller stayed started observe-only with zero recovery
+  actions. The first Plan 209 amd64 image passed UID 10001, OCI revision,
+  Alembic 028, runtime-v2 eight-job registry and CLI smoke.
+- [MIGRATION] Production upgraded transactionally from revision 027 to 028 and
+  Alembic verified head. No Machine image, state, ID or non-image configuration
+  changed. Local combined DB/R2 preflight reached R2 `HeadBucket` then received
+  403 from stale local R2 credentials; it performed no object write and is not
+  used as a database failure.
+- [NEW ROOT CAUSE] The post-migration `qualification-status` query did not
+  finish after 90 seconds. `pg_stat_activity` showed the query result complete
+  while the client remained in receive: status used `SELECT *` on a 2,500-fact
+  epoch and transferred all growing `fact_records`/`fact_digests`. Server
+  statement timeout cannot bound transfer of an already-completed result.
+- [REVIEW CORRECTION] The first TDD fix bounded network transfer and returned
+  production status in 11.9 seconds, but review raised HIGH: JSONB dereference
+  and expansion still made database work growth-bound, and recovering fallback
+  could re-enter a bloated predecessor. Rollout remained paused.
+- [REVISION 029 / PROOF] Three `STORED GENERATED` epoch columns now persist final
+  fact, recovery total and last 20 recovery summaries at write time. Status
+  reads only fixed projections; predecessor fallback reads invalidation reason
+  and time only. A real 4 MB malformed predecessor + fresh recovering epoch and
+  real 028→029→028→029 generated-column round trip pass. Full certificate and
+  transition evidence remain unchanged.
+- [FAIL-CLOSED RELEASE] Digest `sha256:98f3102f…8610` is superseded before any
+  Machine rollout because the fix changed executable bytes. Its authorization
+  evidence records only the successful 028 migration and zero Machine effects.
+
+[NEXT] Commit the bounded status fix with the updated Plan 209 SUMMARY, build a
+new exact amd64 image, apply revision 029, then sequentially
+roll coordinator → Structure range → Quote batch → qualification on the same
+Machine IDs before beginning the 86,400-second acceptance epoch.

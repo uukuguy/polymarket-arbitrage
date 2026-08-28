@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Plan 05.6-209 closes the competing-timeout, task-lane, bounded-stop, reclaim, checkpoint and qualification-cursor defects locally; revision 028 plus immutable rollout is next
-last_updated: "2026-08-28T11:24:06+08:00"
+stopped_at: Revision 028 is live with no Machine mutation; reviewed revision 029 stored status projections must be committed, migrated and rebuilt before rollout
+last_updated: "2026-08-28T11:52:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -19,7 +19,7 @@ progress:
 ## Current Position
 
 - **Sole authority:** Supabase project `polyarb` (`lgykffpcsebewvobkbdm`),
-  production Alembic revision `027`, and R2 bucket `polyarb-control-plane`.
+  production Alembic revision `028`, and R2 bucket `polyarb-control-plane`.
   The runtime's durable job, receipt, lease, pointer, evidence, and incident
   facts live there.
 
@@ -84,8 +84,16 @@ progress:
   considered. Qualification consumes breaker history for the first identity
   and hands successor releases the live ledger high-water. Full M1 regression
   is 3,947 passed / 1 skipped / 1 expected xfail; independent final review has
-  zero findings. Coordinator and qualification Machines remain stopped;
-  production is still revision 027 and has not received this code.
+  zero findings. Production revision 028 is applied; coordinator and
+  qualification Machines remain stopped and no Machine has received the new
+  runtime image. Pre-rollout proof additionally found that qualification status
+  fetched full growing epoch JSON with `SELECT *`. Independent review then
+  rejected an initial transfer-only fix because SQL still evaluated those
+  arrays. Revision 029 now persists final fact, recovery count and last 20
+  recoveries as stored generated columns; status and predecessor-breaker reads
+  touch only fixed projections/scalars. Unit and real PostgreSQL proof pass,
+  including a 4 MB malformed predecessor. The first built
+  image is superseded before rollout because this executable fix changed bytes.
 
 - **Plan 05.6-208 diagnosis (superseded locally by Plan 209):** the initial accumulating epoch was
   later invalidated by repeated Structure freshness gaps. Production evidence

@@ -70,8 +70,8 @@ def test_026_allows_only_exact_supabase_creator_membership() -> None:
     text = MIGRATION_PATH.read_text()
 
     assert "CREATE ROLE {role} {CAPABILITY_ATTRIBUTES};" in text
-    assert "SUPABASE_ROLE_CREATOR = \"postgres\"" in text
-    assert "SUPABASE_ROLE_GRANTOR = \"supabase_admin\"" in text
+    assert 'SUPABASE_ROLE_CREATOR = "postgres"' in text
+    assert 'SUPABASE_ROLE_GRANTOR = "supabase_admin"' in text
     assert text.count("membership.admin_option") >= 2
     assert text.count("NOT membership.inherit_option") >= 2
     assert text.count("NOT membership.set_option") >= 2
@@ -154,12 +154,10 @@ def test_026_accepts_ambient_acl_only_in_an_unreachable_schema() -> None:
             admin.execute("CREATE SCHEMA extensions")
             admin.execute("REVOKE ALL ON SCHEMA extensions FROM PUBLIC")
             admin.execute(
-                "CREATE VIEW extensions.pg_stat_statements AS "
-                "SELECT 1::bigint AS queryid"
+                "CREATE VIEW extensions.pg_stat_statements AS SELECT 1::bigint AS queryid"
             )
             admin.execute(
-                "CREATE VIEW extensions.pg_stat_statements_info AS "
-                "SELECT 1::bigint AS dealloc"
+                "CREATE VIEW extensions.pg_stat_statements_info AS SELECT 1::bigint AS dealloc"
             )
             admin.execute(
                 "GRANT SELECT ON extensions.pg_stat_statements, "
@@ -481,7 +479,7 @@ def test_026_real_pg16_exact_authority_adversarial_matrix() -> None:
         _create_supabase_roles(dsn)
         # The authority matrix is introduced by 026, while the live admin
         # contract intentionally requires the repository's current revision.
-        _run_alembic(dsn, "upgrade", "028")
+        _run_alembic(dsn, "upgrade", "029")
 
         def admin_factory() -> psycopg.Connection[Any]:
             return psycopg.connect(dsn)

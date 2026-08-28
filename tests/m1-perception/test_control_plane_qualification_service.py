@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 
+import polyarb.control_plane.qualification_service as qualification_service_module
 from polyarb.control_plane.qualification import (
     QualificationFact,
     QualificationState,
@@ -16,6 +17,7 @@ from polyarb.control_plane.qualification_service import (
     FactCursor,
     InMemoryQualificationStore,
     PostgresQualificationFactSource,
+    PostgresQualificationServiceStore,
     QualificationFactRecord,
     QualificationService,
     StaticQualificationFactSource,
@@ -734,3 +736,104 @@ class _FreshnessCursor:
         if not self._rows:
             return None
         return self._rows.pop(0)
+
+
+def test_qualification_status_never_transfers_unbounded_epoch_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    last_record = _record("freshness", 1, NOW, progress_count=1, successful_count=1)
+    cursor = _StatusCursor(
+        {
+            "epoch_id": "epoch-status",
+            "state": "accumulating",
+            "version": 7,
+            "started_at": NOW - timedelta(minutes=5),
+            "last_fact_at": NOW,
+            "invalidated_at": None,
+            "invalidation_reason": None,
+            "qualified_at": None,
+            "previous_epoch_id": None,
+            "max_gap_seconds": 3,
+            "contained_recoveries": ["recovery.retry"],
+            "contained_recovery_count": 1,
+            "last_fact_record": last_record.to_json(),
+        }
+    )
+    connection = _StatusConnection(cursor)
+
+    def list_certificates(_factory: object, *, limit: int) -> list[object]:
+        assert limit == 1
+        assert connection.closed is True
+        return []
+
+    monkeypatch.setattr(
+        qualification_service_module,
+        "list_qualification_certificates",
+        list_certificates,
+    )
+
+    connection_factory = cast(Any, lambda: connection)
+    status = PostgresQualificationServiceStore(connection_factory).status(now=NOW)
+
+    epoch_query = next(query for query in cursor.queries if "m1_qualification_epochs" in query)
+    assert "SELECT *" not in epoch_query
+    assert "fact_records" not in epoch_query
+    assert "fact_digests" not in epoch_query
+    assert "jsonb_array_elements" not in epoch_query
+    assert "status_last_fact_record" in epoch_query
+    assert "status_recent_recoveries" in epoch_query
+    assert "status_recovery_count" in epoch_query
+    assert status["last_fact"] == {
+        "fact_id": "freshness:001",
+        "reason": "healthy",
+        "observed_at": NOW.isoformat(),
+        "source": "freshness",
+        "cursor": last_record.cursor.to_json(),
+    }
+    assert status["contained_recoveries"] == ["recovery.retry"]
+    assert status["contained_recovery_count"] == 1
+    assert status["contained_recoveries_truncated"] is False
+
+
+class _StatusConnection:
+    def __init__(self, cursor: _StatusCursor) -> None:
+        self._cursor = cursor
+        self.closed = False
+
+    def __enter__(self) -> _StatusConnection:
+        self.closed = False
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.closed = True
+        return None
+
+    def cursor(self, **_kwargs: object) -> _StatusCursor:
+        return self._cursor
+
+
+class _StatusCursor:
+    def __init__(self, epoch_row: Mapping[str, object]) -> None:
+        self._epoch_row = epoch_row
+        self._next_row: Mapping[str, object] | None = None
+        self.queries: list[str] = []
+
+    def __enter__(self) -> _StatusCursor:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, statement: object, _params: object = None) -> None:
+        query = str(statement)
+        self.queries.append(query)
+        if "m1_qualification_epochs" in query:
+            assert "SELECT *" not in query
+            self._next_row = self._epoch_row
+        else:
+            self._next_row = None
+
+    def fetchone(self) -> Mapping[str, object] | None:
+        row = self._next_row
+        self._next_row = None
+        return row

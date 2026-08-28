@@ -10321,6 +10321,62 @@ def test_qualification_freshness_reobserves_same_pointer_and_invalidates_on_agin
         assert cursor.fetchone() == ("freshness.structure",)
 
 
+def test_qualification_status_ignores_bloated_predecessor_evidence(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    malformed_large_records = [{"malformed": "x" * 2_048} for _ in range(2_000)]
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            """
+            INSERT INTO m1_qualification_epochs (
+                epoch_id, state, identity_key, policy_version, release_id,
+                config_id, role_identity, started_at, last_fact_at,
+                invalidated_at, invalidation_reason, max_gap_seconds,
+                fact_records, updated_at
+            ) VALUES (
+                'qualification-bloated-predecessor', 'invalidated',
+                'qualification-bloated-identity', 'qualification-policy',
+                'release-before', 'config-a', '["structure"]'::jsonb,
+                %s, %s, %s, 'lease.expired', 900, %s, %s
+            )
+            """,
+            (
+                now - timedelta(minutes=10),
+                now - timedelta(minutes=2),
+                now - timedelta(minutes=2),
+                Jsonb(malformed_large_records),
+                now - timedelta(seconds=1),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO m1_qualification_epochs (
+                epoch_id, state, identity_key, policy_version, release_id,
+                config_id, role_identity, started_at, previous_epoch_id,
+                max_gap_seconds, updated_at
+            ) VALUES (
+                'qualification-fresh-recovering', 'recovering',
+                'qualification-recovering-identity', 'qualification-policy',
+                'release-after', 'config-a', '["structure"]'::jsonb,
+                %s, 'qualification-bloated-predecessor', 900, %s
+            )
+            """,
+            (now, now),
+        )
+
+    status = PostgresQualificationServiceStore(control_plane._connection_factory).status(now=now)
+
+    assert cast(dict[str, object], status["epoch"])["epoch_id"] == (
+        "qualification-fresh-recovering"
+    )
+    assert status["last_fact"] is None
+    assert status["last_breaker"] == {
+        "observed_at": (now - timedelta(minutes=2)).isoformat(),
+        "reason": "lease.expired",
+    }
+
+
 def test_qualification_certificate_is_canonical_idempotent_and_conflict_loud(
     control_plane: PostgresControlPlane,
 ) -> None:

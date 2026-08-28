@@ -101,6 +101,9 @@ cursor handoff.
 - [x] Run focused suites, full `make test-m1`, Ruff, format, migration tests,
   `make planning-status`, and `make climb-check`.
 - [x] Obtain independent code review with no CRITICAL/HIGH findings.
+- [x] Replace the pre-rollout qualification `SELECT *` status path with revision
+  029 stored bounded projections and prove a bloated predecessor cannot re-enter
+  growth-bound JSON through recovering status.
 - [ ] Build one immutable image and perform an image-only rollout preserving
   Machine IDs and non-image configuration hashes.
 - [ ] Prove Structure certification, Quote admission, Quote certification, and

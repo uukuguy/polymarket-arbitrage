@@ -1959,3 +1959,23 @@ success is not user receipt/read evidence.
   predecessor cursor identity and starts at current ledger high-water. This
   prevents both missed startup failures and offset-zero history being counted as
   new-release live coverage.
+
+### §2.40 Read timeouts do not bound result transfer (2026-08-28)
+
+- A production pre-rollout `qualification-status` read exposed a different
+  unbounded lifecycle: PostgreSQL had completed the query and waited in
+  `ClientRead`, while psycopg was still receiving the latest epoch's full
+  `fact_records` and `fact_digests` selected by `SELECT *`. A server-side
+  statement timeout cannot interrupt time spent transferring an already
+  completed, monotonically growing result.
+- Operator projections and evidence projections are different contracts.
+  An initial network-bounded query still used JSONB dereference/expansion and
+  was rejected in review because database work remained growth-bound. Revision
+  029 instead stores generated final-fact, recovery-count and last-20-recovery
+  columns at write time. Status reads those fixed columns; predecessor breaker
+  fallback selects only `invalidated_at` and `invalidation_reason`. Certificate
+  and state-transition paths retain full evidence and independent verification.
+- Bounded interruptibility therefore requires all three: a connection bound,
+  server execution/lock bounds, and a bounded result shape. Wrapping an
+  unbounded read in another arbitrary wall-clock timeout only hides which of
+  those contracts failed.

@@ -214,6 +214,25 @@ class QualificationTickResult:
     certificate_digest: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _QualificationStatusEpoch:
+    """Bounded epoch projection used by operator status reads."""
+
+    epoch_id: str
+    state: str
+    version: int
+    started_at: datetime
+    last_fact_at: datetime | None
+    invalidated_at: datetime | None
+    invalidation_reason: str | None
+    qualified_at: datetime | None
+    previous_epoch_id: str | None
+    max_gap_seconds: int
+    contained_recoveries: tuple[str, ...]
+    contained_recovery_count: int
+    last_fact_record: QualificationFactRecord | None
+
+
 class QualificationFactSource(Protocol):
     def read_after(
         self,
@@ -759,7 +778,7 @@ class PostgresQualificationServiceStore:
         ):
             cursor.execute("SET TRANSACTION READ ONLY")
             _set_timeouts(cursor)
-            record = _fetch_latest_epoch(cursor)
+            record = _fetch_latest_status_epoch(cursor)
             if record is None:
                 return {
                     "epoch": None,
@@ -768,13 +787,16 @@ class PostgresQualificationServiceStore:
                     "last_fact": None,
                     "last_breaker": None,
                     "contained_recoveries": [],
+                    "contained_recovery_count": 0,
+                    "contained_recoveries_truncated": False,
                     "certificate": None,
                 }
-            certificates = list_qualification_certificates(self._connection_factory, limit=1)
-            last_fact = _last_fact_projection(_records_from_epoch(record))
+            last_fact = _last_fact_projection(
+                () if record.last_fact_record is None else (record.last_fact_record,)
+            )
             recovery_status = _recovery_observation_status(cursor, record)
             last_breaker = recovery_status["last_breaker"] or _epoch_breaker_projection(record)
-            return {
+            status_payload: dict[str, object] = {
                 "epoch": {
                     "epoch_id": record.epoch_id,
                     "state": record.state,
@@ -799,8 +821,16 @@ class PostgresQualificationServiceStore:
                 "last_recovery_breaking_observation": recovery_status["last_breaking_observation"],
                 "recovery_observation_count": recovery_status["count"],
                 "contained_recoveries": list(record.contained_recoveries),
-                "certificate": None if not certificates else _certificate_payload(certificates[0]),
+                "contained_recovery_count": record.contained_recovery_count,
+                "contained_recoveries_truncated": (
+                    record.contained_recovery_count > len(record.contained_recoveries)
+                ),
             }
+        certificates = list_qualification_certificates(self._connection_factory, limit=1)
+        status_payload["certificate"] = (
+            None if not certificates else _certificate_payload(certificates[0])
+        )
+        return status_payload
 
     def certificates(self, *, limit: int) -> list[dict[str, object]]:
         return [
@@ -1103,13 +1133,48 @@ def _fetch_current_epoch(
     return None if row is None else _epoch_from_row(row)
 
 
-def _fetch_latest_epoch(cursor: psycopg.Cursor[dict[str, Any]]) -> QualificationEpochRecord | None:
+def _fetch_latest_status_epoch(
+    cursor: psycopg.Cursor[dict[str, Any]],
+) -> _QualificationStatusEpoch | None:
     cursor.execute(
-        "SELECT * FROM public.m1_qualification_epochs "
-        "ORDER BY updated_at DESC, epoch_id DESC LIMIT 1"
+        """
+        SELECT epoch.epoch_id, epoch.state, epoch.version, epoch.started_at,
+               epoch.last_fact_at, epoch.invalidated_at, epoch.invalidation_reason,
+               epoch.qualified_at, epoch.previous_epoch_id, epoch.max_gap_seconds,
+               epoch.status_last_fact_record AS last_fact_record,
+               epoch.status_recent_recoveries AS contained_recoveries,
+               epoch.status_recovery_count AS contained_recovery_count
+        FROM public.m1_qualification_epochs AS epoch
+        ORDER BY epoch.updated_at DESC, epoch.epoch_id DESC
+        LIMIT 1
+        """
     )
     row = cursor.fetchone()
-    return None if row is None else _epoch_from_row(row)
+    return None if row is None else _status_epoch_from_row(row)
+
+
+def _fetch_epoch_breaker(
+    cursor: psycopg.Cursor[dict[str, Any]], epoch_id: str
+) -> dict[str, object] | None:
+    cursor.execute(
+        """
+        SELECT invalidated_at, invalidation_reason
+        FROM public.m1_qualification_epochs
+        WHERE epoch_id = %s
+        """,
+        (epoch_id,),
+    )
+    row = cursor.fetchone()
+    if row is None or row["invalidation_reason"] is None:
+        return None
+    return {
+        "reason": str(row["invalidation_reason"]),
+        "observed_at": (
+            None
+            if row["invalidated_at"] is None
+            else _require_aware(cast(datetime, row["invalidated_at"]), "invalidated_at").isoformat()
+        ),
+    }
 
 
 def _fetch_epoch(
@@ -1498,7 +1563,9 @@ def _last_fact_projection(records: Sequence[QualificationFactRecord]) -> dict[st
     }
 
 
-def _epoch_breaker_projection(record: QualificationEpochRecord) -> dict[str, object] | None:
+def _epoch_breaker_projection(
+    record: QualificationEpochRecord | _QualificationStatusEpoch,
+) -> dict[str, object] | None:
     if record.invalidation_reason is None:
         return None
     return {
@@ -1509,7 +1576,7 @@ def _epoch_breaker_projection(record: QualificationEpochRecord) -> dict[str, obj
 
 def _recovery_observation_status(
     cursor: psycopg.Cursor[dict[str, Any]],
-    record: QualificationEpochRecord,
+    record: _QualificationStatusEpoch,
 ) -> dict[str, object]:
     if record.state != QualificationState.RECOVERING.value:
         return {
@@ -1561,8 +1628,7 @@ def _recovery_observation_status(
             ).isoformat(),
         }
     elif record.previous_epoch_id is not None:
-        previous = _fetch_epoch(cursor, record.previous_epoch_id, for_update=False)
-        last_breaker = None if previous is None else _epoch_breaker_projection(previous)
+        last_breaker = _fetch_epoch_breaker(cursor, record.previous_epoch_id)
     else:
         last_breaker = None
     return {
@@ -1582,6 +1648,47 @@ def _observation_projection(row: Mapping[str, object]) -> dict[str, object]:
         ).isoformat(),
         "reason": str(row["reason"]),
     }
+
+
+def _status_epoch_from_row(row: Mapping[str, object]) -> _QualificationStatusEpoch:
+    last_fact_payload = row["last_fact_record"]
+    return _QualificationStatusEpoch(
+        epoch_id=str(row["epoch_id"]),
+        state=str(row["state"]),
+        version=int(cast(int, row["version"])),
+        started_at=_require_aware(cast(datetime, row["started_at"]), "started_at"),
+        last_fact_at=(
+            None
+            if row["last_fact_at"] is None
+            else _require_aware(cast(datetime, row["last_fact_at"]), "last_fact_at")
+        ),
+        invalidated_at=(
+            None
+            if row["invalidated_at"] is None
+            else _require_aware(cast(datetime, row["invalidated_at"]), "invalidated_at")
+        ),
+        invalidation_reason=(
+            None if row["invalidation_reason"] is None else str(row["invalidation_reason"])
+        ),
+        qualified_at=(
+            None
+            if row["qualified_at"] is None
+            else _require_aware(cast(datetime, row["qualified_at"]), "qualified_at")
+        ),
+        previous_epoch_id=(
+            None if row["previous_epoch_id"] is None else str(row["previous_epoch_id"])
+        ),
+        max_gap_seconds=int(cast(int, row["max_gap_seconds"])),
+        contained_recoveries=tuple(
+            str(value) for value in cast(Sequence[object], row["contained_recoveries"])
+        ),
+        contained_recovery_count=int(cast(int, row["contained_recovery_count"])),
+        last_fact_record=(
+            None
+            if last_fact_payload is None
+            else QualificationFactRecord.from_json(cast(Mapping[str, object], last_fact_payload))
+        ),
+    )
 
 
 def _fact_to_json(fact: QualificationFact) -> dict[str, object]:
