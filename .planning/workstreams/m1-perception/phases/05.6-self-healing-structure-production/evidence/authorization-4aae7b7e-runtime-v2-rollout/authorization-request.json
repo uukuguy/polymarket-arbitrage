@@ -1,0 +1,108 @@
+{
+  "artifact_version": 1,
+  "prepared_at": "2026-08-28T16:12:00+08:00",
+  "status": "authorized-preflight-passed-ready-for-execution",
+  "authorization_granted": true,
+  "authorization_basis": "The user granted complete authority for all changes required to solve the repeated timeout, task sequencing, interruption, recovery, and public.digest exhaustion failures and instructed autonomous completion of M1.",
+  "approved_by": "user",
+  "operator": "Codex",
+  "source_release_sha": "4aae7b7e4193ad9daf5cb4632eee60b7059efa1e",
+  "production_database_before_revision": "030",
+  "target_database_revision": "031",
+  "worker_image": "registry.fly.io/polyarb-control-worker-m1@sha256:548cc4c37843dc239f2f04bfd7bbf0802fa2eb49d2f90cd3ef3fa96f9d0243f9",
+  "qualification_image": "registry.fly.io/polyarb-qualification-worker-m1@sha256:548cc4c37843dc239f2f04bfd7bbf0802fa2eb49d2f90cd3ef3fa96f9d0243f9",
+  "image_contract": {
+    "local_image_id": "sha256:b9f350019431e700e7842158723adfaa182b256e5d3a92923c50d999a37d30a7",
+    "architecture": "amd64",
+    "runtime_uid": 10001,
+    "oci_revision": "4aae7b7e4193ad9daf5cb4632eee60b7059efa1e",
+    "alembic_head": "031",
+    "runtime_policy_version": "runtime-v2",
+    "closed_job_registry_count": 8,
+    "cli_smoke": "pass"
+  },
+  "local_verification": {
+    "full_m1": "3963-passed-1-skipped-1-xfailed",
+    "full_m1_seconds": 1624.48,
+    "postgres_control_plane": "pass",
+    "changed_python_ruff_and_format": "pass",
+    "whole_repository_ruff_baseline_findings": 24,
+    "planning_status": "pass-no-drift",
+    "climb_check": "pass"
+  },
+  "production_read_only_preflight": {
+    "revision": "030",
+    "epoch_count": 111,
+    "normalized_fact_count": 6572,
+    "epochs_with_legacy_arrays": 56,
+    "count_or_ordinal_mismatches": 0,
+    "payload_mismatches": 0,
+    "digest_index_mismatches": 0,
+    "recovery_index_mismatches": 0,
+    "append_only_trigger_count": 1
+  },
+  "exact_existing_targets": [
+    "polyarb-control-worker-m1/e82d1220b2d138",
+    "polyarb-control-worker-m1/683e46ea500dd8",
+    "polyarb-control-worker-m1/4d895231f66748",
+    "polyarb-qualification-worker-m1/876077f0274598"
+  ],
+  "protected_unchanged_targets": [
+    "polyarb-control-alert/d891e941a41dd8",
+    "polyarb-control-api/d8d0e27a734158",
+    "polyarb-control-runtime-event-writer/28654e35a73d08",
+    "polyarb-runtime-controller-m1/6e82036dce4958"
+  ],
+  "observed_before": {
+    "exact_topology_and_required_secret_names": "pass",
+    "coordinator_state": "stopped",
+    "structure_range_state": "started",
+    "quote_batch_state": "started",
+    "qualification_state": "stopped",
+    "runtime_controller_state": "started",
+    "runtime_controller_mode": "observe-only",
+    "runtime_controller_recovery_allowlist": "empty",
+    "worker_prior_digest": "sha256:bd21b2d118237c7f1e8c81fd9067985b20d5c23cd085d13251b724cf78b333df",
+    "non_image_config_sha256": {
+      "e82d1220b2d138": "ca793ac25df43bc046e145c696fc26f87915663192453f8c262ed6920f2a81ce",
+      "683e46ea500dd8": "3056b1d5792ba1166d1e76177ee3af4158b449ebf29e8b3fc383602cfe1af7f6",
+      "4d895231f66748": "8f8e8900f7518ea25563c017fcf5c7085db2e5072b84e3bc94838444e6c6cdfc",
+      "876077f0274598": "c8791857b4bcb6b9c745bbf031f3201c04d1136350837b148cd34b1b20583898"
+    }
+  },
+  "ordered_maximum_effect": [
+    "apply only additive Alembic revision 031 and verify zero legacy arrays, exact normalized counts, three compaction constraints, append-only trigger, and scoped role authority",
+    "run the unchanged 1800/90/90 observe-only gate with zero recovery actions",
+    "update and start the stopped coordinator on the same Machine ID",
+    "after coordinator terminal-publication proof, gracefully stop, image-update, and start Structure range on the same Machine ID",
+    "after Structure proof, gracefully stop, image-update, and start Quote batch on the same Machine ID",
+    "after worker proof, update the stopped qualification image and only POLYARB_QUALIFICATION_RELEASE_ID, then start the same Machine ID",
+    "begin one new append-only 86400-second qualification epoch and independently reverify its immutable certificate"
+  ],
+  "required_gates": [
+    "database revision is exactly 030 before and exactly 031 after migration",
+    "all normalized parity mismatches remain zero and every legacy epoch array becomes empty",
+    "qualification capability has SELECT and INSERT but no UPDATE or DELETE authority on normalized facts",
+    "all four target Machines retain their exact IDs and image-excluded configuration",
+    "runtime controller remains observe-only with empty allowlist and zero recovery actions",
+    "Structure certify, Quote admit, Quote certify, and opportunity certify reach terminal durable states without orphan running attempts or restart exhaustion",
+    "qualification starts a successor identity at live ingress high-water and only current-release evidence enters the new window"
+  ],
+  "forbidden_effects": [
+    "no new, deleted, or replaced Fly app or Machine",
+    "no Machine ID, VM, region, volume, IP, service, restart policy, secret value, or hidden secret-set change",
+    "no image change outside the four exact targets",
+    "no runtime-controller update, restart, allowlist expansion, mode change, or recovery action",
+    "no fault injection, wallet, signing, order, balance, or trade action",
+    "no raw provider body or secret value in evidence"
+  ],
+  "rollback": [
+    "a revision 031 failure is contained by transactional DDL and stops before Machine update",
+    "stop qualification if identity, cursor, role, status, or evidence gates fail",
+    "restore changed Machines to the prior immutable digest in reverse order if process or durable-publication gates fail",
+    "retain additive revision 031 after any new worker executes; do not destructively recreate legacy arrays",
+    "reverify exact topology, original IDs, observe-only continuity, zero recovery actions, and append-only evidence"
+  ],
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}
