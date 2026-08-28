@@ -182,3 +182,14 @@ cursor handoff.
   bounded by the central database policy; close on timeout or mismatch.
 - [ ] Build the superseding image, canary it on the unchanged controller, then
   require a fresh 1,800/90/90 gate on its new lease epoch before sibling updates.
+
+## Task 10: Probe-release retry authority
+
+- [x] Add a real-PostgreSQL RED test proving a due circuit probe derives its
+  next holdoff from the job's central retry policy rather than five minutes.
+- [x] Separate lease-independent `RuntimeRetryPolicy` from attempt deadlines;
+  remove placeholder lease values from both failure transactions.
+- [x] Route ordinary retry, composed recovery retry and probe release through
+  the same budget/base/cap authority and current failure count.
+- [ ] Re-run focused/full gates, commit, rebuild the exact image and restart the
+  controller canary/1,800-second evidence window from a new lease epoch.

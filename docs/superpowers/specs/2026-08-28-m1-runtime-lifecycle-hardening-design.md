@@ -178,6 +178,15 @@ timeout fit below database-derived stop grace, which fits below the outbox
 lease. Retry cadence schedules future work only and cannot extend an active
 claim.
 
+All remaining clocks are classified by authority. Attempt/progress deadlines
+may end leased work; provider/DB deadlines classify one I/O; terminal grace
+drains one current effect; cadence only schedules a future tick; acceptance
+windows only determine when evidence is sufficient. Operator read bounds are
+retryable observation envelopes and cannot classify a worker or restart a
+Machine. Production templates expose only transactional runtime-v2 processes,
+so legacy SQLite/L3 retry policies cannot become a second production lifecycle
+controller without a new explicit deployment contract.
+
 Production preflight is resource-aware. Read-only permission proof runs from
 the operator host through the fixed-round admin catalog path; Fly topology
 binds required secret names without exposing values. It must not start an

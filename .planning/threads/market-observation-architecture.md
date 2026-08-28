@@ -2130,3 +2130,17 @@ success is not user receipt/read evidence.
 - Release gates must preserve previously established provider-specific facts.
   A locally valid simplification cannot delete a production workaround unless
   the new path re-proves the same provider boundary end to end.
+
+### §2.48 Retry authority includes probe-release holdoff (2026-08-28)
+
+- Centralizing ordinary retry transitions is insufficient when recovery
+  execution can write its own next-probe clock. The formal `probe-circuit`
+  transaction still used a literal five-minute holdoff, so observe-only replay
+  and enabled recovery would have consumed different circuit timing authority.
+- Retry policy is now lease-independent and resolved directly by job type.
+  Both retryable-failure transactions and probe release use the same budget,
+  exponential backoff and cap with the current consecutive-failure count. No
+  caller invents a minimum lease merely to obtain retry settings.
+- Observe-only success cannot certify code that diverges only after mutation is
+  enabled. Reverse execution-path audits must include the write side of every
+  proposed recovery action before the image can advance to sibling rollout.

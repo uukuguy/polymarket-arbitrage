@@ -1,0 +1,65 @@
+{
+  "artifact_version": 1,
+  "recorded_at": "2026-08-28T20:26:00+08:00",
+  "status": "superseded-during-timeout-audit",
+  "authorization_granted": true,
+  "authorization_basis": "The user granted complete authority for changes required to solve timeout, sequencing, interruption and recovery failures and instructed autonomous M1 completion.",
+  "source_release_sha": "bf10201096573f1f48b4ea4c775991054e23b2a1",
+  "production_database_revision": "031",
+  "image": {
+    "local_id": "sha256:8cdca661aeb3eef4a478a96eef96f269cd68e776bf2809c84a257e71f8ca3e20",
+    "worker": "registry.fly.io/polyarb-control-worker-m1@sha256:98742341d28fcee8af5441bfa9f3113ff1b1baf8735e92e420e99503f9eb66ce",
+    "qualification": "registry.fly.io/polyarb-qualification-worker-m1@sha256:98742341d28fcee8af5441bfa9f3113ff1b1baf8735e92e420e99503f9eb66ce",
+    "architecture": "amd64",
+    "runtime_uid": 10001,
+    "oci_revision": "bf10201096573f1f48b4ea4c775991054e23b2a1",
+    "runtime_policy_version": "runtime-v2",
+    "closed_job_registry_count": 8,
+    "provider_attempts": 1,
+    "alembic_head": "031",
+    "cli_smoke": "pass"
+  },
+  "local_verification": {
+    "full_m1": "3986-passed-1-skipped-1-xfailed",
+    "full_m1_seconds": 1554.43,
+    "climb_check": "50-passed",
+    "changed_python_ruff_and_format": "pass",
+    "planning_status": "pass-no-drift",
+    "diff_check": "pass"
+  },
+  "controller_canary": {
+    "app": "polyarb-runtime-controller-m1",
+    "machine_id": "6e82036dce4958",
+    "prior_digest": "sha256:698344a73c3349de526ca7becef7b7ac87ee9e9ec8109244d9ece204dc3b3086",
+    "candidate_digest": "sha256:98742341d28fcee8af5441bfa9f3113ff1b1baf8735e92e420e99503f9eb66ce",
+    "non_image_config_hash_before_and_after": "4504c4b458bc12831d872cb04b12f3ab6307a7fc4946efa8e29bd1d8b445b4a4",
+    "state": "started",
+    "mode": "observe-only",
+    "recovery_allowlist": "empty",
+    "lease_epoch": 7,
+    "first_live_decision": "probe-circuit/circuit.probe-due/no-mutation",
+    "short_gate_120_90_90": {
+      "status": "pass",
+      "duration_seconds": 125,
+      "decision_count": 10,
+      "current_candidate_count": 2,
+      "max_gap_seconds": 31,
+      "recovery_action_count": 0
+    },
+    "short_gate_300_90_90": {
+      "status": "pass",
+      "duration_seconds": 312,
+      "decision_count": 22,
+      "current_candidate_count": 2,
+      "max_gap_seconds": 31,
+      "recovery_action_count": 0
+    },
+    "full_gate_1800_90_90": "superseded-before-completion"
+  },
+  "superseded_reason": "formal probe-circuit execution still wrote a module-local five-minute next_probe_at holdoff instead of consuming the central durable retry policy",
+  "next_release_requirement": "commit the lease-independent retry policy repair, build a new exact image and restart controller canary from a new lease epoch",
+  "sibling_machine_updates": 0,
+  "recovery_actions": 0,
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}

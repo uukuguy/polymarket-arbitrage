@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Bounded dual-layer Session Pooler repair passed the fresh full M1 gate; final climb/planning checks and exact-image rebuild remain
-last_updated: "2026-08-28T20:42:00+08:00"
+stopped_at: Probe-release retry authority repair passed the fresh full M1 gate; final climb/planning checks and a new exact-image rebuild remain
+last_updated: "2026-08-28T21:08:00+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -134,6 +134,12 @@ progress:
   The bounded dual-layer repair's final full gate passed 3,986 tests, one skip
   and one expected xfail in 1,554.43 seconds; the 120k/166,926 scale gate
   completed naturally without an outer timeout.
+  Reverse enabled-action audit then found `probe-circuit` still wrote a literal
+  five-minute holdoff. `RuntimeRetryPolicy` is now lease-independent and all
+  three retry/probe transactions share its current-failure backoff. The new
+  full gate passed 3,986 tests, one skip and one expected xfail in 1,613.02
+  seconds. The running `bf102010` controller remains safe observe-only but its
+  image and partial 1,800-second window are superseded; no sibling was updated.
 
 - **Plan 05.6-208 diagnosis (superseded locally by Plan 209):** the initial accumulating epoch was
   later invalidated by repeated Structure freshness gaps. Production evidence
@@ -315,8 +321,8 @@ progress:
 
 ## Resume
 
-1. Finish the fresh Plan `05.6-209` full gate, commit the bounded Session Pooler
-   bootstrap repair, then build and verify a superseding exact amd64 image.
+1. Finish Plan `05.6-209` climb/planning/static gates, commit the probe-release
+   retry authority repair, then build and verify a superseding exact amd64 image.
 2. Canary only the unchanged controller; after active role verification and a
    new lease epoch succeed, run the full 1,800/90/90 observe-only replay gate.
 3. Roll coordinator → Structure → Quote → qualification sequentially on

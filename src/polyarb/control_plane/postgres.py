@@ -34,7 +34,7 @@ from .models import (
 )
 from .recovery_records import RecoveryActionRecord
 from .runtime_contract import RUNTIME_STAGE_REGISTRY
-from .runtime_deadlines import runtime_policy
+from .runtime_deadlines import runtime_retry_policy
 from .runtime_models import RuntimeEvent, RuntimeEventKind, RuntimeProgress
 from .runtime_store import (
     RuntimeEventConflict,
@@ -5025,7 +5025,7 @@ class PostgresControlPlane:
         )
         circuit = cursor.fetchone()
         failures = (0 if circuit is None else int(circuit["consecutive_failures"])) + 1
-        retry_policy = runtime_policy(component, 3)
+        retry_policy = runtime_retry_policy(component)
         retry_budget = retry_policy.retry_budget
         delay_seconds = retry_policy.retry_backoff_seconds(failures)
         next_attempt_at = now + timedelta(seconds=delay_seconds)
@@ -5387,7 +5387,8 @@ class PostgresControlPlane:
         cursor.execute(
             """
             SELECT c.state AS circuit_state, c.next_probe_at,
-                   j.state AS job_state, j.lease_epoch,
+                   c.consecutive_failures, j.state AS job_state, j.job_type,
+                   j.lease_epoch,
                    r.attempt_id, r.lease_epoch AS runtime_epoch,
                    r.worker_id, r.stage
             FROM public.m1_job_circuits AS c
@@ -5415,6 +5416,8 @@ class PostgresControlPlane:
             raise StaleLeaseError(f"circuit probe is not due for {action.target_id}")
         if row["job_state"] not in {JobState.RETRYABLE.value, JobState.RUNNABLE.value}:
             raise StaleLeaseError(f"circuit target is not retryable for {action.target_id}")
+        retry_policy = runtime_retry_policy(str(row["job_type"]))
+        probe_delay_seconds = retry_policy.retry_backoff_seconds(int(row["consecutive_failures"]))
         cursor.execute(
             """
             SELECT event_id FROM public.m1_job_runtime_events
@@ -5441,7 +5444,7 @@ class PostgresControlPlane:
             SET next_probe_at = %s, updated_at = %s
             WHERE job_key = %s AND state = 'open'
             """,
-            (now + timedelta(minutes=5), now, action.target_id),
+            (now + timedelta(seconds=probe_delay_seconds), now, action.target_id),
         )
         if cursor.rowcount != 1:
             raise StaleLeaseError(f"circuit changed during probe release for {action.target_id}")
@@ -5961,7 +5964,7 @@ class PostgresControlPlane:
             )
             circuit = cursor.fetchone()
             failures = (0 if circuit is None else int(circuit["consecutive_failures"])) + 1
-            retry_policy = runtime_policy(component, 3)
+            retry_policy = runtime_retry_policy(component)
             retry_budget = retry_policy.retry_budget
             delay_seconds = retry_policy.retry_backoff_seconds(failures)
             next_attempt_at = now + timedelta(seconds=delay_seconds)

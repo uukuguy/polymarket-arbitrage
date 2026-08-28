@@ -11176,3 +11176,31 @@ dual-layer bootstrap repair, build and verify a new exact amd64 image, then
 controller-canary and run a fresh 1,800/90/90 gate from its new lease epoch.
 Only then roll coordinator → Structure → Quote → qualification and begin the
 new 86,400-second certificate after live terminal publication.
+
+### SESSION 325 — 2026-08-28 (probe-release retry authority closure)
+
+- [HEALTHY BUT SUPERSEDED CANARY] Commit `bf102010`, immutable digest
+  `sha256:98742341…66ce`, successfully replaced only controller Machine
+  `6e82036dce4958`; digest, same ID, observe-only, empty allowlist and non-image
+  config hash `4504c4…b4a4` were verified. Lease epoch 7 emitted canonical
+  `probe-circuit/circuit.probe-due/no-mutation`. Read-only gates passed at 125
+  seconds/10 decisions and 312 seconds/22 decisions, max gap 31 seconds and
+  zero recovery actions.
+- [ENABLED-PATH ROOT CAUSE] Reverse recovery-write audit found
+  `_release_one_circuit_probe_cursor` still set `next_probe_at` to a literal five
+  minutes. Observe-only replay could not expose this mutation-only split clock,
+  so the otherwise healthy image and its partial 1,800-second window were
+  superseded before any sibling Machine update.
+- [TDD REPAIR] A real-PostgreSQL RED test proved the old 300-second value
+  disagreed with the third-failure central backoff of 60 seconds. Retry/circuit
+  authority is now a lease-independent `RuntimeRetryPolicy`; both failure
+  transactions and probe release consume the same job-type budget/base/cap and
+  current failure count. Placeholder lease `3` calls were removed.
+- [FRESH FULL PROOF] `make test-m1` passed 3,986 tests, one skip and one expected
+  xfail in 1,613.02 seconds. The 120k/166,926 scale gate again completed
+  naturally without an outer timeout.
+
+[NEXT] Run final climb/planning/static gates, commit the probe-release repair,
+build and verify a new exact image, then restart controller canary and the full
+1,800/90/90 window from its new lease epoch. No sibling rollout before that
+gate; fresh 86,400-second qualification begins only after live terminal flow.

@@ -24,6 +24,7 @@ from polyarb.control_plane.runtime_deadlines import (
     RUNTIME_JOB_SUCCESSORS,
     runtime_deadline_profile,
     runtime_policy,
+    runtime_retry_policy,
 )
 from polyarb.control_plane.runtime_models import (
     RuntimeDeadlineProfile,
@@ -216,6 +217,9 @@ def test_runtime_policy_is_closed_and_orders_every_timeout() -> None:
         assert policy.retry_backoff_seconds(1) == 15
         assert policy.retry_backoff_seconds(2) == 30
         assert policy.retry_backoff_seconds(99) == 300
+        retry_policy = runtime_retry_policy(job_type)
+        assert retry_policy.retry_budget == policy.retry_budget
+        assert retry_policy.retry_backoff_seconds(3) == 60
         assert policy.checkpoint_interval > 0
 
     with pytest.raises(ValueError, match="unknown runtime job type"):
@@ -244,8 +248,8 @@ def test_worker_modules_do_not_define_private_runtime_profiles() -> None:
 def test_retry_circuit_budget_and_backoff_have_one_runtime_policy_authority() -> None:
     source = (Path(__file__).parents[2] / "src/polyarb/control_plane/postgres.py").read_text()
 
-    assert source.count("retry_policy = runtime_policy(component, 3)") == 2
-    assert source.count("delay_seconds = retry_policy.retry_backoff_seconds(failures)") == 2
+    assert source.count("retry_policy = runtime_retry_policy(") == 3
+    assert source.count("retry_policy.retry_backoff_seconds(") == 3
     assert 'circuit_state = "open" if failures >= 3' not in source
     assert "now if failures == 3" not in source
     assert "min(15 * (2 ** (failures - 1)), 300)" not in source

@@ -90,6 +90,7 @@ from polyarb.control_plane.recovery_store import (
     read_runtime_reconcile_states,
     schedule_action,
 )
+from polyarb.control_plane.runtime_deadlines import runtime_retry_policy
 from polyarb.control_plane.runtime_models import RuntimeEvent, RuntimeEventKind, RuntimeProgress
 from polyarb.control_plane.runtime_store import (
     RuntimeEventConflict,
@@ -6690,10 +6691,17 @@ def test_recovery_executor_releases_one_due_circuit_probe(
         )
         assert cursor.fetchone() == ("retryable", now + timedelta(seconds=2))
         cursor.execute(
-            "SELECT state, next_probe_at > %s FROM m1_job_circuits WHERE job_key = %s",
-            (now + timedelta(seconds=2), lease.job_key),
+            "SELECT state, next_probe_at FROM m1_job_circuits WHERE job_key = %s",
+            (lease.job_key,),
         )
-        assert cursor.fetchone() == ("open", True)
+        assert cursor.fetchone() == (
+            "open",
+            now
+            + timedelta(seconds=2)
+            + timedelta(
+                seconds=runtime_retry_policy("structure-normalize").retry_backoff_seconds(3)
+            ),
+        )
         cursor.execute(
             "SELECT state, result_code FROM m1_recovery_actions WHERE action_id = %s",
             (scheduled.action_id,),

@@ -20,6 +20,41 @@ class _RuntimePolicySpec:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeRetryPolicy:
+    """Lease-independent durable retry/circuit policy for one job type."""
+
+    job_type: str
+    retry_budget: int
+    retry_backoff_base_seconds: int
+    retry_backoff_cap_seconds: int
+
+    def __post_init__(self) -> None:
+        if self.job_type not in RUNTIME_STAGE_REGISTRY:
+            raise ValueError("unknown runtime job type")
+        if (
+            min(
+                self.retry_budget,
+                self.retry_backoff_base_seconds,
+                self.retry_backoff_cap_seconds,
+            )
+            <= 0
+        ):
+            raise ValueError("runtime retry policy values must be positive")
+        if self.retry_backoff_base_seconds > self.retry_backoff_cap_seconds:
+            raise ValueError("retry backoff base cannot exceed its cap")
+
+    def retry_backoff_seconds(self, failure_count: int) -> int:
+        """Return the sole durable exponential backoff for a failed attempt."""
+        if failure_count <= 0:
+            raise ValueError("failure_count must be positive")
+        exponent = min(failure_count - 1, 62)
+        return min(
+            self.retry_backoff_base_seconds * (2**exponent),
+            self.retry_backoff_cap_seconds,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimePolicy:
     """Resolved lifecycle policy persisted and consumed by one job attempt."""
 
@@ -65,13 +100,12 @@ class RuntimePolicy:
 
     def retry_backoff_seconds(self, failure_count: int) -> int:
         """Return the single durable exponential backoff for one failed attempt."""
-        if failure_count <= 0:
-            raise ValueError("failure_count must be positive")
-        exponent = min(failure_count - 1, 62)
-        return min(
-            self.retry_backoff_base_seconds * (2**exponent),
-            self.retry_backoff_cap_seconds,
-        )
+        return RuntimeRetryPolicy(
+            job_type=self.job_type,
+            retry_budget=self.retry_budget,
+            retry_backoff_base_seconds=self.retry_backoff_base_seconds,
+            retry_backoff_cap_seconds=self.retry_backoff_cap_seconds,
+        ).retry_backoff_seconds(failure_count)
 
 
 _POLICY_VERSION: Final = "runtime-v2"
@@ -137,12 +171,27 @@ def runtime_job_order() -> tuple[str, ...]:
 RUNTIME_JOB_ORDER = runtime_job_order()
 
 
+def runtime_retry_policy(job_type: str) -> RuntimeRetryPolicy:
+    """Resolve retry/circuit authority without inventing a placeholder lease."""
+    try:
+        spec = _POLICY_SPECS[job_type]
+    except KeyError as error:
+        raise ValueError(f"unknown runtime job type: {job_type}") from error
+    return RuntimeRetryPolicy(
+        job_type=job_type,
+        retry_budget=spec.retry_budget,
+        retry_backoff_base_seconds=spec.retry_backoff_base_seconds,
+        retry_backoff_cap_seconds=spec.retry_backoff_cap_seconds,
+    )
+
+
 def runtime_policy(job_type: str, lease_seconds: int) -> RuntimePolicy:
     """Resolve the only accepted lifecycle policy for one claimed job."""
     try:
         spec = _POLICY_SPECS[job_type]
     except KeyError as error:
         raise ValueError(f"unknown runtime job type: {job_type}") from error
+    retry_policy = runtime_retry_policy(job_type)
     bounded_lease = max(3, int(lease_seconds))
     heartbeat = max(1, min(30, bounded_lease // 3))
     progress = max(bounded_lease, heartbeat * 3)
@@ -162,12 +211,12 @@ def runtime_policy(job_type: str, lease_seconds: int) -> RuntimePolicy:
         deadlines=deadlines,
         io_timeout_seconds=io_timeout,
         terminal_grace_seconds=terminal_grace,
-        retry_budget=spec.retry_budget,
+        retry_budget=retry_policy.retry_budget,
         checkpoint_interval=spec.checkpoint_interval,
         provider_attempts=1,
         provider_timeout_seconds=max(0.5, min(15.0, io_timeout - 0.5)),
-        retry_backoff_base_seconds=spec.retry_backoff_base_seconds,
-        retry_backoff_cap_seconds=spec.retry_backoff_cap_seconds,
+        retry_backoff_base_seconds=retry_policy.retry_backoff_base_seconds,
+        retry_backoff_cap_seconds=retry_policy.retry_backoff_cap_seconds,
     )
 
 
@@ -180,7 +229,9 @@ __all__ = [
     "RUNTIME_JOB_ORDER",
     "RUNTIME_JOB_SUCCESSORS",
     "RuntimePolicy",
+    "RuntimeRetryPolicy",
     "runtime_deadline_profile",
     "runtime_job_order",
     "runtime_policy",
+    "runtime_retry_policy",
 ]
