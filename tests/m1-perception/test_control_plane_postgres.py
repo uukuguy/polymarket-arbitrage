@@ -6453,6 +6453,99 @@ def test_recovery_action_cooldown_is_checked_from_persisted_target_state(
     assert blocked.result_code == "disabled-action"
 
 
+def test_circuit_recovery_rejects_a_second_cooldown_authority(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-action:circuit-single-clock",
+        job_type="structure-normalize",
+        input_identity="recovery-action:circuit-single-clock",
+        now=now,
+    )
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        owner_id="controller-circuit-single-clock",
+        lease_seconds=30,
+        now=now,
+    )
+
+    with pytest.raises(ValueError, match="circuit recovery cooldown"):
+        schedule_action(
+            control_plane._connection_factory,
+            controller=controller,
+            decision=RecoveryDecision(
+                action=RecoveryActionType.PROBE_CIRCUIT,
+                reason_code="circuit.probe-due",
+                incident_severity="warning",
+                qualification_breaking=False,
+                next_check_at=now,
+            ),
+            incident_key=f"incident:{lease.job_key}",
+            component="structure-normalize",
+            target_type="circuit",
+            target_id=lease.job_key,
+            expected_attempt_id=_runtime_attempt_id(control_plane, lease.job_key),
+            expected_lease_epoch=lease.lease_epoch,
+            recovery_budget_remaining=1,
+            cooldown_seconds=60,
+            channels=("dashboard",),
+            now=now,
+        )
+
+
+def test_runtime_candidate_preserves_absolute_circuit_probe_time(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="recovery-action:absolute-circuit-clock",
+        job_type="structure-normalize",
+        input_identity="recovery-action:absolute-circuit-clock",
+        now=now,
+    )
+    next_probe_at = now + timedelta(seconds=300)
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            "UPDATE m1_jobs SET state = 'retryable', lease_owner = NULL, "
+            "lease_expires_at = NULL, next_attempt_at = %s WHERE job_key = %s",
+            (next_probe_at, lease.job_key),
+        )
+        connection.execute(
+            "INSERT INTO m1_job_circuits "
+            "(job_key, consecutive_failures, state, opened_at, next_probe_at, updated_at, "
+            "failure_fingerprint) VALUES (%s, 3, 'open', %s, %s, %s, %s)",
+            (
+                lease.job_key,
+                now - timedelta(days=1),
+                next_probe_at,
+                now,
+                "sha256:" + "0" * 64,
+            ),
+        )
+
+    candidate = next(
+        item
+        for item in read_runtime_reconcile_states(
+            control_plane._connection_factory,
+            controller_id="m1-runtime-reconciler",
+            now=now,
+        )
+        if item.target_id == lease.job_key
+    )
+    decision = RuntimeReconciler().evaluate(candidate.runtime_state, now=now)
+
+    assert candidate.target_type == "circuit"
+    assert candidate.cooldown_seconds == 0
+    assert candidate.runtime_state.circuit_next_probe_at == next_probe_at
+    assert decision.action is None
+    assert decision.reason_code == "circuit.cooldown"
+    assert decision.next_check_at == next_probe_at
+
+
 def test_recovery_started_detail_uses_actual_progress_stalled_decision(
     control_plane: PostgresControlPlane,
 ) -> None:

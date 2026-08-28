@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: market-perception
 current_phase: 05.6
 status: in_progress
-stopped_at: Plan 210 local failure-identity and interruption repair verified; commit and build revision-033 release before exact source recovery
-last_updated: "2026-08-29T18:30:00+08:00"
+stopped_at: Plan 211 single-authority circuit timing verified; commit and build revision-034 release before exact source recovery
+last_updated: "2026-08-29T06:25:32+08:00"
 progress:
   total_phases: 14
   completed_phases: 13
@@ -55,16 +55,24 @@ progress:
   roles use hidden secrets and the Supabase IPv4 Session Pooler, not the
   unreachable direct IPv6 database endpoint.
 
-- **Current production boundary:** Production is revision 032. Controller
-  `6e82036dce4958` and coordinator `e82d1220b2d138` run exact release
-  `814913451581a13b1d3fcb5e13ae90f3116f2e03`; controller is observe-only with
-  an empty allowlist. Structure `683e46ea500dd8`, Quote `4d895231f66748` and
+- **Current production boundary:** Production is revision 033. Coordinator
+  `e82d1220b2d138` runs exact release
+  `65cee5b9f05cfd4481b37ec59d1174f61927796a`; controller
+  `6e82036dce4958` is stopped. Structure `683e46ea500dd8`, Quote `4d895231f66748` and
   qualification `876077f0274598` remain on prior release `282480ec`. Two exact
   isolated source probes executed only `probe-circuit` for
   `structure-source:300:5959460:fetch:events:162`; zero publication pointers
   mutated. The circuit is open after five mixed failures and one manual recovery
-  action remains. Do not execute it until revision 033 and the new coordinator
-  image are live. Every formal Machine retains `SIGTERM/40s`.
+  action remains. Its budget carries an erroneous 16-hour derived cooldown;
+  do not execute it until revision 034 and Plan 211 coordinator bytes are live.
+  Every formal Machine retains `SIGTERM/40s`.
+- **Plan 05.6-211 circuit timing repair:** `next_probe_at - opened_at` was
+  incorrectly converted back into `now + cooldown`, compounding elapsed open
+  age into a second recovery clock. Runtime reconciliation now consumes the
+  absolute `next_probe_at`; circuit budgets count actions with zero cooldown
+  and revision 034 clears only their derived deadlines. Real migration,
+  one-day-open integration and the 15-case fault matrix pass. Fresh full M1
+  proof is 4,030 passed, one skip and one expected xfail in 1,574.08 seconds.
 - **Plan 05.6-210 failure identity repair:** an isolated exact source probe
   succeeded, but its resumed attempt produced a mixed sequence of Timeout and
   ValueError failures. The old circuit counted all failures on a job as one

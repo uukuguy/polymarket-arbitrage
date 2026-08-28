@@ -800,21 +800,8 @@ def _read_runtime_reconcile_states_in_snapshot(
         owner_is_current = job_state == "leased" or circuit_open
         remaining = 3 if row["remaining_actions"] is None else int(row["remaining_actions"])
         circuit_opened_at = row["circuit_opened_at"]
-        cooldown_seconds = 60
-        if (
-            circuit_open
-            and circuit_opened_at is not None
-            and row["circuit_next_probe_at"] is not None
-        ):
-            cooldown_seconds = max(
-                0,
-                int(
-                    (
-                        _aware(row["circuit_next_probe_at"], "circuit_next_probe_at")
-                        - _aware(circuit_opened_at, "circuit_opened_at")
-                    ).total_seconds()
-                ),
-            )
+        circuit_next_probe_at = row["circuit_next_probe_at"]
+        cooldown_seconds = 0 if circuit_open else 60
         target_type = "circuit" if circuit_open else "job"
         target_id = str(row["job_key"])
         candidates.append(
@@ -837,10 +824,14 @@ def _read_runtime_reconcile_states_in_snapshot(
                     open_circuit=circuit_open,
                     circuit_opened_at=(
                         None
-                        if circuit_opened_at is None
+                        if not circuit_open or circuit_opened_at is None
                         else _aware(circuit_opened_at, "circuit_opened_at")
                     ),
-                    circuit_cooldown_seconds=cooldown_seconds,
+                    circuit_next_probe_at=(
+                        None
+                        if not circuit_open or circuit_next_probe_at is None
+                        else _aware(circuit_next_probe_at, "circuit_next_probe_at")
+                    ),
                 ),
                 job_type=job_type,
                 job_state=job_state,
@@ -948,7 +939,9 @@ def _runtime_state_payload(state: RecoveryRuntimeState) -> dict[str, object]:
         "circuit_opened_at": None
         if state.circuit_opened_at is None
         else _dt(state.circuit_opened_at),
-        "circuit_cooldown_seconds": state.circuit_cooldown_seconds,
+        "circuit_next_probe_at": None
+        if state.circuit_next_probe_at is None
+        else _dt(state.circuit_next_probe_at),
     }
 
 
@@ -956,6 +949,26 @@ def _runtime_state_from_payload(payload: Mapping[str, object]) -> RecoveryRuntim
     profile = _mapping(payload.get("profile"), "profile")
     budget = _mapping(payload.get("recovery_budget"), "recovery_budget")
     failure_class = payload.get("failure_class")
+    circuit_opened_at = (
+        None
+        if payload.get("circuit_opened_at") is None
+        else _parse_dt(str(payload["circuit_opened_at"]))
+    )
+    circuit_next_probe_at = (
+        None
+        if payload.get("circuit_next_probe_at") is None
+        else _parse_dt(str(payload["circuit_next_probe_at"]))
+    )
+    # Historical observe records used opened_at plus a relative duration.
+    # Convert them once during replay; live state never rebuilds the clock.
+    if (
+        circuit_next_probe_at is None
+        and circuit_opened_at is not None
+        and payload.get("circuit_cooldown_seconds") is not None
+    ):
+        circuit_next_probe_at = circuit_opened_at + timedelta(
+            seconds=_object_to_int(payload["circuit_cooldown_seconds"])
+        )
     return RecoveryRuntimeState(
         job_key=str(payload["job_key"]),
         attempt_id=str(payload["attempt_id"]),
@@ -978,10 +991,8 @@ def _runtime_state_from_payload(payload: Mapping[str, object]) -> RecoveryRuntim
         ),
         failure_class=None if failure_class is None else RecoveryFailureClass(str(failure_class)),
         open_circuit=bool(payload["open_circuit"]),
-        circuit_opened_at=None
-        if payload.get("circuit_opened_at") is None
-        else _parse_dt(str(payload["circuit_opened_at"])),
-        circuit_cooldown_seconds=_object_to_int(payload["circuit_cooldown_seconds"]),
+        circuit_opened_at=circuit_opened_at,
+        circuit_next_probe_at=circuit_next_probe_at,
     )
 
 

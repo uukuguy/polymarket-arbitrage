@@ -142,7 +142,7 @@ class RecoveryRuntimeState:
     failure_class: RecoveryFailureClass | None = None
     open_circuit: bool = False
     circuit_opened_at: datetime | None = None
-    circuit_cooldown_seconds: int = 60
+    circuit_next_probe_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.job_key or not self.attempt_id:
@@ -165,14 +165,16 @@ class RecoveryRuntimeState:
             raise TypeError("open_circuit must be bool")
         if self.circuit_opened_at is not None:
             require_timezone_aware(self.circuit_opened_at, field_name="circuit_opened_at")
-        require_exact_non_negative_int(
-            self.circuit_cooldown_seconds,
-            field_name="circuit_cooldown_seconds",
-        )
-        if self.open_circuit and self.circuit_opened_at is None:
-            raise ValueError("open circuit requires circuit_opened_at")
-        if not self.open_circuit and self.circuit_opened_at is not None:
-            raise ValueError("closed circuit cannot carry circuit_opened_at")
+        if self.circuit_next_probe_at is not None:
+            require_timezone_aware(self.circuit_next_probe_at, field_name="circuit_next_probe_at")
+        if self.open_circuit and (
+            self.circuit_opened_at is None or self.circuit_next_probe_at is None
+        ):
+            raise ValueError("open circuit requires opened_at and next_probe_at")
+        if not self.open_circuit and (
+            self.circuit_opened_at is not None or self.circuit_next_probe_at is not None
+        ):
+            raise ValueError("closed circuit cannot carry circuit timestamps")
 
 
 @dataclass(frozen=True, slots=True)

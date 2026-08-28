@@ -81,7 +81,7 @@ class FakeConnection:
 class FakeAdminFactory:
     def __init__(self) -> None:
         self.database = "role_test"
-        self.revision = "033"
+        self.revision = "034"
         self.roles: dict[str, dict[str, Any]] = {
             RUNTIME_CAPABILITY: {
                 "can_login": False,
@@ -1439,7 +1439,7 @@ def postgres_026_dsn() -> Iterator[str]:
     with PostgresContainer("postgres:16-alpine") as postgres:
         dsn = _normalize_dsn(postgres.get_connection_url())
         _create_supabase_roles(dsn)
-        _run_alembic(dsn, "upgrade", "033")
+        _run_alembic(dsn, "upgrade", "034")
         yield dsn
 
 

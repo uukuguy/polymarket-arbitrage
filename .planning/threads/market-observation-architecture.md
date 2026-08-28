@@ -2324,3 +2324,18 @@ success is not user receipt/read evidence.
   immediately resumable while preserving, but neither increasing nor erasing,
   the preceding defect streak. Ordinary defect retry rejects
   `service.interrupted` so future call sites cannot silently rejoin the models.
+
+### §2.61 Absolute deadlines cannot be copied into relative recovery clocks (2026-08-29)
+
+- Production exposed a remaining circuit action whose budget cooldown was
+  about sixteen hours, despite a central retry cap of 300 seconds. The live
+  projection subtracted the original `opened_at` from the current
+  `next_probe_at`, then the scheduler added that growing interval to `now`.
+- Circuit timing now has one durable authority:
+  `m1_job_circuits.next_probe_at`. Reconciliation carries and compares that
+  absolute timestamp directly. Circuit action budgets count attempts only and
+  reject every nonzero cooldown; job-target cooldowns retain their own policy.
+- Revision 034 clears only the derived circuit-budget deadlines. It preserves
+  remaining action counts and all job deadlines. Historical observe payloads
+  are translated only during replay; stale timestamps on a closed circuit are
+  ignored because state gates interpretation.

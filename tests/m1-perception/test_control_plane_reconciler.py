@@ -37,15 +37,17 @@ def state(
     retry_count: int = 0,
     failure_class: RecoveryFailureClass | None = None,
     open_circuit: bool = False,
-    circuit_open_age: int = 120,
-    circuit_cooldown_seconds: int = 60,
+    circuit_probe_delay_seconds: int = -60,
 ) -> RecoveryRuntimeState:
     lease_expires_at = (
         NOW - timedelta(seconds=1)
         if lease_expired
         else NOW + timedelta(seconds=lease_remaining_seconds)
     )
-    circuit_opened_at = NOW - timedelta(seconds=circuit_open_age) if open_circuit else None
+    circuit_opened_at = NOW - timedelta(days=1) if open_circuit else None
+    circuit_next_probe_at = (
+        NOW + timedelta(seconds=circuit_probe_delay_seconds) if open_circuit else None
+    )
     return RecoveryRuntimeState(
         job_key="quote:test:batch:1",
         attempt_id="attempt-1",
@@ -61,7 +63,7 @@ def state(
         failure_class=failure_class,
         open_circuit=open_circuit,
         circuit_opened_at=circuit_opened_at,
-        circuit_cooldown_seconds=circuit_cooldown_seconds,
+        circuit_next_probe_at=circuit_next_probe_at,
     )
 
 
@@ -87,11 +89,11 @@ def state(
         ),
         (state(attempt_age=301), RecoveryActionType.CANCEL_JOB, "job.attempt-deadline"),
         (
-            state(open_circuit=True, circuit_open_age=61),
+            state(open_circuit=True, circuit_probe_delay_seconds=-1),
             RecoveryActionType.PROBE_CIRCUIT,
             "circuit.probe-due",
         ),
-        (state(open_circuit=True, circuit_open_age=59), None, "circuit.cooldown"),
+        (state(open_circuit=True, circuit_probe_delay_seconds=1), None, "circuit.cooldown"),
         (
             state(heartbeat_age=121, lease_expired=True, recovery_budget_remaining=0),
             None,
@@ -149,7 +151,7 @@ def test_due_open_circuit_owns_recovery_even_when_last_attempt_lease_expired() -
         progress_age=90,
         lease_remaining_seconds=-1,
         open_circuit=True,
-        circuit_open_age=60,
+        circuit_probe_delay_seconds=0,
     )
 
     decision = RuntimeReconciler().evaluate(runtime_state, now=NOW)
@@ -158,6 +160,16 @@ def test_due_open_circuit_owns_recovery_even_when_last_attempt_lease_expired() -
     assert decision.reason_code == "circuit.probe-due"
     assert decision.incident_severity == "warning"
     assert decision.qualification_breaking is False
+
+
+def test_circuit_uses_absolute_next_probe_time_not_accumulated_open_age() -> None:
+    runtime_state = state(open_circuit=True, circuit_probe_delay_seconds=300)
+
+    decision = RuntimeReconciler().evaluate(runtime_state, now=NOW)
+
+    assert decision.action is None
+    assert decision.reason_code == "circuit.cooldown"
+    assert decision.next_check_at == NOW + timedelta(seconds=300)
 
 
 def test_expired_lease_respects_higher_precedence_no_action_safety_branches() -> None:
@@ -210,7 +222,9 @@ def test_exact_deadline_boundaries_are_inclusive_at_policy_thresholds() -> None:
     assert attempt.action is RecoveryActionType.CANCEL_JOB
     assert attempt.reason_code == "job.attempt-deadline"
 
-    probe = reconciler.evaluate(state(open_circuit=True, circuit_open_age=60), now=NOW)
+    probe = reconciler.evaluate(
+        state(open_circuit=True, circuit_probe_delay_seconds=0), now=NOW
+    )
     assert probe.action is RecoveryActionType.PROBE_CIRCUIT
     assert probe.reason_code == "circuit.probe-due"
 
@@ -244,7 +258,9 @@ def test_deadline_boundaries_are_not_triggered_before_policy_thresholds() -> Non
     assert attempt.action is None
     assert attempt.reason_code == "job.healthy"
 
-    cooldown = reconciler.evaluate(state(open_circuit=True, circuit_open_age=59), now=NOW)
+    cooldown = reconciler.evaluate(
+        state(open_circuit=True, circuit_probe_delay_seconds=1), now=NOW
+    )
     assert cooldown.action is None
     assert cooldown.reason_code == "circuit.cooldown"
 

@@ -59,8 +59,8 @@ class RuntimeReconciler:
         # those stale attempt clocks first would incorrectly schedule a job
         # reclaim against a circuit target and permanently strand the action.
         if state.open_circuit:
-            assert state.circuit_opened_at is not None
-            probe_at = state.circuit_opened_at + timedelta(seconds=state.circuit_cooldown_seconds)
+            assert state.circuit_next_probe_at is not None
+            probe_at = state.circuit_next_probe_at
             if now >= probe_at:
                 return self._decision(
                     RecoveryActionType.PROBE_CIRCUIT,

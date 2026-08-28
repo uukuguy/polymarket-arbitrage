@@ -1,0 +1,25 @@
+{
+  "schema": "polyarb.m1.circuit-clock-compounding-audit.v1",
+  "recorded_at": "2026-08-28T22:25:32Z",
+  "production_revision": "033",
+  "coordinator_release": "65cee5b9f05cfd4481b37ec59d1174f61927796a",
+  "target_type": "circuit",
+  "target_id": "structure-source:300:5959460:fetch:events:162",
+  "central_retry_cap_seconds": 300,
+  "remaining_actions": 1,
+  "observed_last_next_allowed_at": "2026-08-29T12:42:48.877848Z",
+  "root_cause": "next_probe_at-minus-opened_at was added to now as a second recovery-budget clock",
+  "repair_revision": "034",
+  "repair": {
+    "live_authority": "m1_job_circuits.next_probe_at",
+    "circuit_budget_cooldown_seconds": 0,
+    "clears_only_circuit_budget_deadlines": true,
+    "preserves_job_budget_deadlines": true,
+    "preserves_remaining_actions": true
+  },
+  "production_mutation": false,
+  "recovery_actions_executed": 0,
+  "publication_pointer_mutations": 0,
+  "secret_values_recorded": false,
+  "raw_provider_bodies_recorded": false
+}

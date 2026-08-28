@@ -659,21 +659,11 @@ def read_runtime_reconcile_states(
         owner_is_current = job_state == "leased" or circuit_open
         remaining = 3 if row["remaining_actions"] is None else int(row["remaining_actions"])
         circuit_opened_at = row["circuit_opened_at"]
-        cooldown_seconds = 60
-        if (
-            circuit_open
-            and circuit_opened_at is not None
-            and row["circuit_next_probe_at"] is not None
-        ):
-            cooldown_seconds = max(
-                0,
-                int(
-                    (
-                        _require_aware(row["circuit_next_probe_at"], "circuit_next_probe_at")
-                        - _require_aware(circuit_opened_at, "circuit_opened_at")
-                    ).total_seconds()
-                ),
-            )
+        circuit_next_probe_at = row["circuit_next_probe_at"]
+        # The circuit row owns its absolute probe time.  A recovery budget
+        # counts actions only; giving it another relative cooldown compounds
+        # elapsed open time every time a probe fails.
+        cooldown_seconds = 0 if circuit_open else 60
         target_type = "circuit" if circuit_open else "job"
         target_id = str(row["job_key"])
         candidates.append(
@@ -696,10 +686,14 @@ def read_runtime_reconcile_states(
                     open_circuit=circuit_open,
                     circuit_opened_at=(
                         None
-                        if circuit_opened_at is None
+                        if not circuit_open or circuit_opened_at is None
                         else _require_aware(circuit_opened_at, "circuit_opened_at")
                     ),
-                    circuit_cooldown_seconds=cooldown_seconds,
+                    circuit_next_probe_at=(
+                        None
+                        if not circuit_open or circuit_next_probe_at is None
+                        else _require_aware(circuit_next_probe_at, "circuit_next_probe_at")
+                    ),
                 ),
                 job_type=job_type,
                 job_state=job_state,
@@ -1251,6 +1245,8 @@ def schedule_action(
         raise ValueError("recovery_budget_remaining must be an exact non-negative int")
     if cooldown_seconds < 0:
         raise ValueError("cooldown_seconds must be non-negative")
+    if target_type == "circuit" and cooldown_seconds != 0:
+        raise ValueError("circuit recovery cooldown is owned by next_probe_at")
     if not channels or any(not channel.strip() for channel in channels):
         raise ValueError("channels must contain non-empty values")
     if len(set(channels)) != len(channels):

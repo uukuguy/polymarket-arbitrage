@@ -11480,3 +11480,31 @@ image, apply migration 033 transactionally, roll coordinator, then run only the
 final exact source probe. Restore controller observe-only, verify downstream
 publication freshness, roll sibling workers/qualification, and start a new
 86,400-second qualification window.
+
+### SESSION 335 — 2026-08-29 (single-authority circuit timing)
+
+- [PRODUCTION EVIDENCE] Revision 033 was applied transactionally and
+  coordinator `e82d1220b2d138` was updated in place to exact release
+  `65cee5b9`, preserving `SIGTERM/40s`. The exact probe preflight found one
+  remaining action but `last_next_allowed_at=2026-08-29T12:42:48.877848Z`,
+  about sixteen hours after a policy whose cap is 300 seconds.
+- [ROOT CAUSE] Live recovery projection derived cooldown as
+  `next_probe_at - opened_at`; action scheduling then added that accumulated
+  open age to `now`, creating a second, compounding time authority.
+- [TDD REPAIR] Runtime state now carries absolute `next_probe_at`.
+  Reconciliation compares it directly, circuit action budgets use zero
+  cooldown and reject nonzero callers, and revision 034 clears only circuit
+  budget deadlines while preserving job cooldowns and action counts.
+- [PROOF] Real 033→034→033 PostgreSQL migration, one-day-open/300-second-probe
+  integration, observe replay and the 15-case runtime fault matrix pass. Fresh
+  `make test-m1` passed **4,030 tests, one skip and one expected xfail in
+  1,574.08 seconds** without an outer timeout.
+- [BOUNDARY] Production remains revision 033. Coordinator runs `65cee5b9`;
+  controller is stopped and Structure/Quote/qualification remain on
+  `282480ec`. No Plan 211 production mutation or recovery action has executed.
+
+[NEXT] Commit Plan 05.6-211, build/verify/push its exact amd64 image, stop the
+coordinator, apply revision 034, roll coordinator, and execute only
+`probe-circuit` for `structure-source:300:5959460:fetch:events:162` in an
+isolated 512MB auto-removed Machine. Then restore controller observe-only,
+roll siblings, verify freshness and start a fresh 86,400-second qualification.
