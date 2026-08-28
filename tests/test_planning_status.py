@@ -77,6 +77,38 @@ def test_plan_without_summary_is_reported_as_drift(
     assert [(row.phase, row.plan, row.verdict) for row in rows] == [("05.6", "207", "DRIFT")]
 
 
+def test_collect_reads_git_history_once_for_multiple_plans(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _init_repo(tmp_path)
+    phase_dir = tmp_path / ".planning/workstreams/m1-perception/phases/05.6-test"
+    phase_dir.mkdir(parents=True)
+    (phase_dir / "05.6-207-PLAN.md").write_text("# Plan 207\n")
+    (phase_dir / "05.6-208-PLAN.md").write_text("# Plan 208\n")
+    assert _git(tmp_path, "add", ".").returncode == 0
+    assert _git(tmp_path, "commit", "-qm", "docs: add plans").returncode == 0
+    for plan in ("207", "208"):
+        implementation = tmp_path / f"implementation-{plan}.py"
+        implementation.write_text(f"value = {plan}\n")
+        assert _git(tmp_path, "add", implementation.name).returncode == 0
+        assert _git(tmp_path, "commit", "-qm", f"feat(05.6-{plan}): implement").returncode == 0
+
+    monkeypatch.chdir(tmp_path)
+    real_check_output = subprocess.check_output
+    with patch(
+        "scripts.planning_status.subprocess.check_output",
+        wraps=real_check_output,
+    ) as history_read:
+        rows = planning_status.collect()
+
+    assert history_read.call_count == 1
+    assert [(row.plan, row.verdict) for row in rows] == [
+        ("207", "DRIFT"),
+        ("208", "DRIFT"),
+    ]
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],

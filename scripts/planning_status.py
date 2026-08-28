@@ -102,11 +102,160 @@ class PlanRow:
         return dim("NOT-STARTED")
 
 
+@dataclass(frozen=True, slots=True)
+class _GitCommit:
+    sha: str
+    short_sha: str
+    parents: tuple[str, ...]
+    subject: str
+    changes: tuple[tuple[str, ...], ...]
+
+
+@dataclass(slots=True)
+class _GitHistory:
+    """One immutable Git read indexed for every planning row."""
+
+    commits: tuple[_GitCommit, ...]
+    creation_by_path: dict[str, str]
+    _ancestors_by_sha: dict[str, frozenset[str]]
+
+    @property
+    def head_sha(self) -> str | None:
+        return None if not self.commits else self.commits[0].sha
+
+    def creation_sha(self, path: Path) -> str | None:
+        return self.creation_by_path.get(path.as_posix())
+
+    def ancestors(self, sha: str) -> frozenset[str]:
+        cached = self._ancestors_by_sha.get(sha)
+        if cached is not None:
+            return cached
+        parents_by_sha = {commit.sha: commit.parents for commit in self.commits}
+        reached: set[str] = set()
+        pending = [sha]
+        while pending:
+            current = pending.pop()
+            if current in reached:
+                continue
+            reached.add(current)
+            pending.extend(parents_by_sha.get(current, ()))
+        frozen = frozenset(reached)
+        self._ancestors_by_sha[sha] = frozen
+        return frozen
+
+    def scoped_commits(
+        self,
+        *,
+        phase: str,
+        plan: str,
+        plan_md: Path,
+        summary_md: Path,
+    ) -> list[tuple[str, str]]:
+        plan_creation_sha = self.creation_sha(plan_md)
+        if plan_creation_sha is None:
+            return []
+        upper_sha = self.creation_sha(summary_md) or self.head_sha
+        if upper_sha is None:
+            return []
+        eligible = self.ancestors(upper_sha) - self.ancestors(plan_creation_sha)
+        scope = re.compile(rf"^[a-z]+\({re.escape(phase)}-{re.escape(plan)}\):")
+        return [
+            (commit.short_sha, commit.subject)
+            for commit in self.commits
+            if commit.sha in eligible and scope.match(commit.subject)
+        ]
+
+
+def _load_git_history() -> _GitHistory:
+    """Read commit graph, subjects, additions and renames in one subprocess."""
+    try:
+        out = subprocess.check_output(
+            [
+                "git",
+                "log",
+                "--format=%x1e%H%x1f%h%x1f%P%x1f%s",
+                "--name-status",
+                "--find-renames",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return _GitHistory((), {}, {})
+
+    commits: list[_GitCommit] = []
+    for block in out.split("\x1e"):
+        lines = block.lstrip("\n").splitlines()
+        if not lines:
+            continue
+        fields = lines[0].split("\x1f", 3)
+        if len(fields) != 4:
+            continue
+        sha, short_sha, parents, subject = fields
+        changes: list[tuple[str, ...]] = []
+        for line in lines[1:]:
+            if not line:
+                continue
+            parts = tuple(line.split("\t"))
+            if len(parts) >= 2:
+                changes.append(parts)
+        commits.append(
+            _GitCommit(
+                sha=sha,
+                short_sha=short_sha,
+                parents=tuple(parent for parent in parents.split() if parent),
+                subject=subject,
+                changes=tuple(changes),
+            )
+        )
+
+    aliases: dict[str, str] = {}
+
+    def find(path: str) -> str:
+        root = aliases.setdefault(path, path)
+        while aliases[root] != root:
+            root = aliases[root]
+        while aliases[path] != path:
+            parent = aliases[path]
+            aliases[path] = root
+            path = parent
+        return root
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            aliases[right_root] = left_root
+
+    for commit in commits:
+        for change in commit.changes:
+            if change[0].startswith("R") and len(change) == 3:
+                union(change[1], change[2])
+
+    oldest_addition_by_alias: dict[str, tuple[int, str]] = {}
+    for index, commit in enumerate(commits):
+        for change in commit.changes:
+            if change[0] != "A" or len(change) != 2:
+                continue
+            root = find(change[1])
+            prior = oldest_addition_by_alias.get(root)
+            if prior is None or index > prior[0]:
+                oldest_addition_by_alias[root] = (index, commit.sha)
+    creation_by_path = {
+        path: oldest_addition_by_alias[root][1]
+        for path in aliases
+        if (root := find(path)) in oldest_addition_by_alias
+    }
+    return _GitHistory(tuple(commits), creation_by_path, {})
+
+
 def _git_log_for(
     phase: str,
     plan: str,
     plan_md: Path,
     summary_md: Path | None = None,
+    *,
+    history: _GitHistory | None = None,
 ) -> list[tuple[str, str]]:
     """Return scoped commits inside this exact plan's documented lifetime.
 
@@ -116,6 +265,15 @@ def _git_log_for(
     creation is the upper boundary. A later workstream may safely reuse the
     numeric scope. An uncommitted plan has no code commits by definition.
     """
+    if history is not None:
+        return history.scoped_commits(
+            phase=phase,
+            plan=plan,
+            plan_md=plan_md,
+            summary_md=summary_md
+            or plan_md.with_name(SUMMARY_TPL.format(phase=phase, plan=plan)),
+        )
+
     pattern = rf"^[a-z]+\({re.escape(phase)}-{re.escape(plan)}\):"
 
     def creation_sha(path: Path) -> str | None:
@@ -207,6 +365,8 @@ def collect() -> list[PlanRow]:
     if legacy_phases.exists():
         search_roots.append(("(legacy)", legacy_phases))
 
+    history = _load_git_history()
+
     seen: set[tuple[Path, str, str]] = set()
     for ws_name, phases_dir in search_roots:
         for phase_dir in sorted(phases_dir.iterdir()):
@@ -229,7 +389,7 @@ def collect() -> list[PlanRow]:
                         plan_md=plan_md,
                         summary_md=summary_md,
                         summary_exists=summary_md.exists(),
-                        commits=_git_log_for(phase, plan, plan_md),
+                        commits=_git_log_for(phase, plan, plan_md, history=history),
                     )
                 )
             for summary_md in sorted(phase_dir.iterdir()):
@@ -254,7 +414,13 @@ def collect() -> list[PlanRow]:
                         summary_md=summary_md,
                         summary_exists=True,
                         commits=(
-                            _git_log_for(phase, plan, plan_source, summary_md)
+                            _git_log_for(
+                                phase,
+                                plan,
+                                plan_source,
+                                summary_md,
+                                history=history,
+                            )
                             if anchor_exists
                             else []
                         ),
