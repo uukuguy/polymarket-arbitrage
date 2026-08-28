@@ -170,14 +170,40 @@ class GammaClient:
         # aiolimiter: token bucket. Polymarket Gamma published limit is ~300/10s;
         # we configure 280/10s as a conservative floor.
         self._limiter = AsyncLimiter(settings.gamma_rate_per_10s, 10)
-        self._http = httpx.AsyncClient(
-            timeout=settings.http_timeout_s,
+        self._http = self._build_http_client()
+
+    def _build_http_client(self) -> httpx.AsyncClient:
+        """Create one replaceable HTTP transport generation."""
+        return httpx.AsyncClient(
+            timeout=self._settings.http_timeout_s,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
             headers={"User-Agent": "polyarb/0.1"},
             http2=True,
             # F-2 SECURITY: explicit even though it's httpx's current default.
             follow_redirects=False,
         )
+
+    async def reset_transport(self) -> None:
+        """Retire a failed HTTP generation without resetting rate-limit state.
+
+        Closing the old pool is cleanup, not another attempt deadline. A close
+        timeout or close error cannot prevent installation of the fresh pool.
+        """
+        failed_http = self._http
+        try:
+            await asyncio.wait_for(
+                failed_http.aclose(),
+                timeout=GAMMA_CANCELLED_CLOSE_TIMEOUT_S,
+            )
+        except TimeoutError:
+            logger.warning("gamma transport generation close timed out during replacement")
+        except Exception as error:
+            logger.warning(
+                "gamma transport generation close failed during replacement: {}",
+                type(error).__name__,
+            )
+        finally:
+            self._http = self._build_http_client()
 
     async def aclose(self) -> None:
         """Close the underlying HTTP client (idempotent)."""

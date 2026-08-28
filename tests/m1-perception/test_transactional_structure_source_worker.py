@@ -110,6 +110,7 @@ class FakeGamma:
         self.event_calls: list[tuple[str | None, int]] = []
         self.market_calls: list[tuple[str | None, int]] = []
         self.exact_market_calls: list[tuple[str, ...]] = []
+        self.reset_calls = 0
 
     async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage:
         self.event_calls.append((cursor, limit))
@@ -140,10 +141,19 @@ class FakeGamma:
             for market_id in market_ids
         )
 
+    async def reset_transport(self) -> None:
+        self.reset_calls += 1
+
 
 class FailingGamma(FakeGamma):
     async def fetch_active_event_page(self, cursor: str | None, limit: int) -> EventPage:
         raise TimeoutError("Gamma unavailable")
+
+
+class ResetFailingGamma(FailingGamma):
+    async def reset_transport(self) -> None:
+        self.reset_calls += 1
+        raise ValueError("replacement close failed")
 
 
 class ClosedExactMarketGamma(FakeGamma):
@@ -582,6 +592,25 @@ def test_source_worker_marks_only_current_page_retryable_when_gamma_fails() -> N
         }
     ]
     assert control_plane.retry_incidents[0]["detail"]["failure_fingerprint"].startswith("sha256:")
+    assert worker._gamma.reset_calls == 1
+
+
+def test_transport_reset_failure_does_not_replace_original_durable_failure() -> None:
+    control_plane = FakeControlPlane(_event_spec())
+    gamma = ResetFailingGamma()
+    worker = TransactionalStructureSourceWorker(
+        control_plane=control_plane,
+        gamma=gamma,
+        object_client=FakeObjectClient(),
+        bucket="source-pages",
+        worker_id="source-worker-a",
+        now=lambda: NOW,
+    )
+
+    assert asyncio.run(worker.run_once()).outcome == "retryable"
+    assert gamma.reset_calls == 1
+    assert control_plane.retry_incidents[0]["error_class"] == "TimeoutError"
+    assert control_plane.retry_incidents[0]["detail"]["error_class"] == "TimeoutError"
 
 
 def test_source_worker_quarantines_window_when_frozen_market_becomes_inactive() -> None:

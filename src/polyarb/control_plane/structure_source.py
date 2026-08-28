@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
+from loguru import logger
+
 from polyarb.clients.gamma_client import EventPage, MarketPage, PaginationIntegrityError
 from polyarb.config import Settings
 from polyarb.perception.market_truth import market_truth_mismatch_reason
@@ -91,6 +93,8 @@ class _GammaReader(Protocol):
     async def fetch_active_market_page(self, cursor: str | None, limit: int) -> MarketPage: ...
 
     async def fetch_markets_by_ids(self, market_ids: tuple[str, ...]) -> tuple[dict, ...]: ...
+
+    async def reset_transport(self) -> None: ...
 
     async def aclose(self) -> None: ...
 
@@ -731,6 +735,18 @@ class TransactionalStructureSourceWorker:
                     now=self._now(),
                 )
                 return StructureWorkerResult(job_key=lease.job_key, outcome="quarantined")
+            try:
+                await self._gamma.reset_transport()
+            except asyncio.CancelledError:
+                raise
+            except Exception as reset_error:
+                # Test doubles and future client implementations may still
+                # fail here. Preserve the original durable failure identity;
+                # a cleanup failure is secondary and body-free.
+                logger.warning(
+                    "structure source transport replacement failed: {}",
+                    type(reset_error).__name__,
+                )
             await _to_thread(
                 self._control_plane.finish_retryable_with_incident,
                 runtime.current_lease,

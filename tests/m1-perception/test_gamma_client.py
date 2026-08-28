@@ -52,6 +52,21 @@ async def test_gamma_cancelled_context_exit_bounds_hung_http_close(
     await client.__aexit__(asyncio.CancelledError, None, None)
 
 
+@pytest.mark.asyncio
+async def test_reset_transport_replaces_http_generation_and_preserves_limiter() -> None:
+    client = GammaClient(Settings(scan_shared_secret="test"))
+    original_http = client._http
+    original_limiter = client._limiter
+
+    await client.reset_transport()
+
+    assert original_http.is_closed is True
+    assert client._http is not original_http
+    assert client._http.is_closed is False
+    assert client._limiter is original_limiter
+    await client.aclose()
+
+
 def _fast_settings() -> Settings:
     """Settings with retry waits compressed to ~ms so tests stay fast."""
     return Settings(retry_min_wait_s=0.001, retry_max_wait_s=0.01)
