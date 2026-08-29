@@ -64,6 +64,85 @@ def test_l2_shutdown_uses_one_budget_below_the_platform_window() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_startup_gate_is_shared_deadline_based_and_stop_aware() -> None:
+    from polyarb.daemon.lifecycle import wait_for_http_server_startup
+
+    class PendingServer:
+        started = False
+
+        async def serve(self) -> None:
+            await asyncio.Event().wait()
+
+    server = PendingServer()
+    server_task = asyncio.create_task(server.serve(), name="pending-http-server")
+    stop_event = asyncio.Event()
+    stop_event.set()
+    try:
+        assert (
+            await wait_for_http_server_startup(
+                server,
+                server_task,
+                stop_event,
+                timeout_s=60.0,
+            )
+            is False
+        )
+    finally:
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+
+
+def test_l1_and_l2_startup_use_the_same_named_authority() -> None:
+    from polyarb.daemon import l2_main
+    from polyarb.daemon import main as l1_main
+    from polyarb.daemon.lifecycle import DAEMON_HTTP_STARTUP_BUDGET_SECONDS
+
+    l1_source = inspect.getsource(l1_main.main)
+    l1_gate_source = inspect.getsource(l1_main._wait_for_http_startup)
+    l2_source = inspect.getsource(l2_main.main)
+
+    assert DAEMON_HTTP_STARTUP_BUDGET_SECONDS > 0
+    assert "_wait_for_http_startup(" in l1_source
+    assert "wait_for_http_server_startup(" in l1_gate_source
+    assert "wait_for_http_server_startup(" in l2_source
+    assert "timeout_s=10.0" not in l1_source
+    assert "range(100)" not in l2_source
+
+
+@pytest.mark.asyncio
+async def test_daemon_task_exit_wins_the_l1_supervision_race_without_orphan_waiter() -> None:
+    from polyarb.daemon.lifecycle import wait_for_daemon_stop_or_task_exit
+
+    stop_event = asyncio.Event()
+
+    async def _failed_server() -> None:
+        await asyncio.sleep(0)
+        raise OSError("listener failed")
+
+    server_task = asyncio.create_task(_failed_server(), name="failed-http-server")
+    outcome = await wait_for_daemon_stop_or_task_exit(
+        stop_event=stop_event,
+        tasks=(server_task,),
+    )
+
+    assert outcome is not None
+    exited_task, error = outcome
+    assert exited_task is server_task
+    assert isinstance(error, OSError)
+    assert not [task for task in asyncio.all_tasks() if task.get_name() == "daemon-stop-wait"]
+
+
+def test_l1_main_supervises_all_daemon_tasks_after_the_startup_commit() -> None:
+    from polyarb.daemon import main as l1_main
+
+    source = inspect.getsource(l1_main.main)
+
+    assert "wait_for_daemon_stop_or_task_exit(" in source
+    assert "tasks=shutdown_tasks" in source
+    assert "return 1 if unexpected_exit is not None else 0" in source
+
+
+@pytest.mark.asyncio
 async def test_supervisor_sigkill_wait_and_output_drain_are_bounded() -> None:
     from polyarb.perception.supervisor import ProducerSupervisor
 

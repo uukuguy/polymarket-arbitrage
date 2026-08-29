@@ -4,7 +4,7 @@ Phase 03 Plan 03 — L2 daemon entry. Mirrors src/polyarb/daemon/main.py (L1)
 but uses Sentry tag service=polyarb-l2 and Mock-shaped ws_consumer placeholder.
 
 Phase 02 LEARNINGS cited:
-- L5: 100-iter / 0.1s server-started polling gate is MANDATORY
+- L5: the shared, deadline-based server-started gate is MANDATORY
 - L9: patch at IMPORT SITE (polyarb.daemon.l2_main.*) not definition site
 - F-04: CancelledError MUST propagate (not be swallowed)
 
@@ -193,6 +193,7 @@ async def test_main_binds_http_before_rejected_boot_and_never_starts_promoter():
 
     async def _append_boot(_record):
         calls.append("boot")
+        stop_event.set()
         return False
 
     store.append_boot = AsyncMock(side_effect=_append_boot)
@@ -205,7 +206,6 @@ async def test_main_binds_http_before_rejected_boot_and_never_starts_promoter():
 
     server.serve = _serve
     stop_event = asyncio.Event()
-    stop_event.set()
     promoter = MagicMock(name="run_periodic")
 
     with (
@@ -1075,18 +1075,28 @@ async def test_server_gate_timeout_cleans_server_and_never_starts_boot_or_runtim
 
     server.serve = _serve
     append_boot = AsyncMock(return_value=True)
-    real_sleep = asyncio.sleep
+    real_wait_for_startup = l2_main.wait_for_http_server_startup
 
-    async def _yield_only(_delay):
-        await real_sleep(0)
+    async def _wait_for_startup(server_arg, server_task_arg, stop_event_arg):
+        return await real_wait_for_startup(
+            server_arg,
+            server_task_arg,
+            stop_event_arg,
+            timeout_s=0.01,
+        )
 
     common = _patch_minimal_l2_main(l2_main, settings=settings, server=server, store=store)
     with ExitStack() as stack:
         for context in common:
             stack.enter_context(context)
         stack.enter_context(patch("polyarb.daemon.l2_main._append_l3_boot", append_boot))
-        stack.enter_context(patch("polyarb.daemon.l2_main.asyncio.sleep", side_effect=_yield_only))
-        with pytest.raises(TimeoutError, match="server.*start"):
+        stack.enter_context(
+            patch(
+                "polyarb.daemon.l2_main.wait_for_http_server_startup",
+                new=_wait_for_startup,
+            )
+        )
+        with pytest.raises(RuntimeError, match="readiness-timeout"):
             await asyncio.wait_for(l2_main.main(), timeout=1.0)
 
     append_boot.assert_not_awaited()
@@ -1113,11 +1123,13 @@ async def test_server_gate_propagates_serve_failure_before_boot_or_runtime_tasks
         for context in common:
             stack.enter_context(context)
         stack.enter_context(patch("polyarb.daemon.l2_main._append_l3_boot", append_boot))
-        with pytest.raises(RuntimeError, match="bind failed"):
+        with pytest.raises(RuntimeError, match="http-server-startup-failed") as caught:
             await asyncio.wait_for(l2_main.main(), timeout=1.0)
 
     append_boot.assert_not_awaited()
     assert server.should_exit is True
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert str(caught.value.__cause__) == "bind failed"
 
 
 @pytest.mark.asyncio
@@ -1345,14 +1357,14 @@ async def test_init_order():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_server_started_gate_polled():
-    """Grep-style assertion: l2_main.py source contains range(100) + sleep(0.1) gate."""
+def test_server_started_gate_uses_shared_interruptible_policy():
+    """L2 must not copy a loop-count timeout beside the L1 startup gate."""
     src_path = Path(__file__).resolve().parents[2] / "src" / "polyarb" / "daemon" / "l2_main.py"
     assert src_path.exists(), f"l2_main.py not found at {src_path}"
     text = src_path.read_text()
-    assert "range(100)" in text, "P9 invariant missing: range(100) polling loop"
-    assert "server.started" in text, "P9 invariant missing: server.started gate"
-    assert "asyncio.sleep(0.1)" in text, "P9 invariant missing: 0.1s sleep granularity"
+    assert "wait_for_http_server_startup(" in text
+    assert "range(100)" not in text
+    assert "asyncio.sleep(0.1)" not in text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1448,13 +1460,14 @@ async def test_logger_first_line_is_polyarb_l2(loguru_sink):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def test_shutdown_uses_one_five_second_drain_deadline():
-    """Server, writer, and peers share one bounded shutdown deadline (F-04)."""
+async def test_shutdown_uses_shared_daemon_drain_authority():
+    """Server, writer, and peers share the named daemon drain policy."""
     src_path = Path(__file__).resolve().parents[2] / "src" / "polyarb" / "daemon" / "l2_main.py"
     assert src_path.exists()
     text = src_path.read_text()
     assert "async def _drain_daemon_tasks(" in text
-    assert "timeout_s: float = 5.0" in text
+    assert "timeout_s: float = DAEMON_TASK_DRAIN_BUDGET_SECONDS" in text
+    assert "timeout_s: float = 5.0" not in text
     assert "producers_done.set()" in text
     assert "deadline - loop.time()" in text
     assert "await _drain_daemon_tasks(" in text

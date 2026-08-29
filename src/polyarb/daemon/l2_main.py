@@ -24,8 +24,7 @@ Architecture:
     5. create_l2_app(...) — Starlette factory
     6. uvicorn.Server(...) — bound but not yet listening
     7. server_task = _create_daemon_task(server.serve(), name="l2-http-server")
-    8. P9 server-started gate: for _ in range(100): if server.started: break
-                                       else: await asyncio.sleep(0.1)
+    8. Shared P9 server-started gate: one monotonic deadline, stop-aware
     9. await stop_event.wait() — signal-driven shutdown
     10. server.should_exit = True
     11. drain writer/server/peers under the shared daemon deadline — F-04 bounded shutdown
@@ -58,7 +57,10 @@ from loguru import logger
 # All imports below are patched at IMPORT SITE (polyarb.daemon.l2_main.*)
 # by tests — Phase 02 L9. Never patch at definition site.
 from polyarb.config import load_settings
-from polyarb.daemon.lifecycle import DAEMON_TASK_DRAIN_BUDGET_SECONDS
+from polyarb.daemon.lifecycle import (
+    DAEMON_TASK_DRAIN_BUDGET_SECONDS,
+    wait_for_http_server_startup,
+)
 from polyarb.daemon.ws_consumer import WsConsumer
 from polyarb.daemon.ws_watchdog import WsWatchdog
 from polyarb.events.listener import listen_snapshot_complete
@@ -970,18 +972,16 @@ async def main() -> int:
     stop_wait_task: asyncio.Task[bool] | None = None
     normal_shutdown = False
     try:
-        # P9 server-started gate — MANDATORY per Phase 02 L5.  The task is
-        # already inside this cleanup scope, so every timeout, serve failure,
-        # and cancellation path observes it before returning.
-        for _ in range(100):
-            if server.started is True:
-                break
-            if server_task.done():
-                await server_task
-                raise RuntimeError("HTTP server exited before reporting started")
-            await asyncio.sleep(0.1)
-        else:
-            raise TimeoutError("HTTP server did not start within the P9 gate")
+        # P9 server-started gate — MANDATORY per Phase 02 L5. One shared
+        # monotonic deadline owns L1/L2 readiness, while SIGTERM remains
+        # responsive before the server binds.
+        if not await wait_for_http_server_startup(
+            server,
+            server_task,
+            stop_event,
+        ):
+            normal_shutdown = True
+            return 0
 
         logger.info(
             f"polyarb-l2 daemon running: http on :{settings.http_port}, "

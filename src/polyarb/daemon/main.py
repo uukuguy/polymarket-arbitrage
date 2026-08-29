@@ -38,6 +38,11 @@ from polyarb.config import load_settings
 from polyarb.control_plane.db_role_contract import scoped_connection_factory
 from polyarb.control_plane.postgres import PostgresControlPlane
 from polyarb.daemon.generation_cleanup_worker import StructureGenerationCleanupWorker
+from polyarb.daemon.lifecycle import (
+    DAEMON_HTTP_STARTUP_BUDGET_SECONDS,
+    wait_for_daemon_stop_or_task_exit,
+    wait_for_http_server_startup,
+)
 from polyarb.daemon.opportunity_watcher import (
     OpportunityWatcher,
     build_focused_opportunity_watcher,
@@ -315,18 +320,21 @@ def _start_reconciliation(
     return asyncio.create_task(reconciliation.run(stop_event))
 
 
-async def _wait_for_http_startup(server, server_task, *, timeout_s: float = 10.0) -> None:
-    deadline = asyncio.get_running_loop().time() + timeout_s
-    while not server.started:
-        if server_task.done():
-            if server_task.cancelled():
-                raise RuntimeError("http-server-startup-failed:cancelled")
-            error = server_task.exception()
-            detail = "exited" if error is None else type(error).__name__
-            raise RuntimeError(f"http-server-startup-failed:{detail}") from error
-        if asyncio.get_running_loop().time() >= deadline:
-            raise RuntimeError("http-server-startup-failed:readiness-timeout")
-        await asyncio.sleep(0.05)
+async def _wait_for_http_startup(
+    server,
+    server_task,
+    *,
+    stop_event: asyncio.Event | None = None,
+    timeout_s: float = DAEMON_HTTP_STARTUP_BUDGET_SECONDS,
+) -> bool:
+    """Compatibility seam around the shared L1/L2 startup authority."""
+
+    return await wait_for_http_server_startup(
+        server,
+        server_task,
+        asyncio.Event() if stop_event is None else stop_event,
+        timeout_s=timeout_s,
+    )
 
 
 async def _abort_http_startup(
@@ -816,7 +824,11 @@ async def main() -> int:
     # work must not begin if uvicorn exits, fails to bind, or never becomes
     # ready.
     try:
-        await _wait_for_http_startup(server, server_task, timeout_s=10.0)
+        http_started = await _wait_for_http_startup(
+            server,
+            server_task,
+            stop_event=stop_event,
+        )
     except RuntimeError as error:
         await _abort_http_startup(
             server,
@@ -826,6 +838,13 @@ async def main() -> int:
         )
         logger.error("daemon HTTP startup failed; producers were not started")
         return 1
+    if not http_started:
+        server.should_exit = True
+        if not server_task.done():
+            server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        logger.info("daemon stopped during HTTP startup; producers were not started")
+        return 0
     logger.info(f"daemon running: http server on :{settings.http_port}, starting scheduler")
 
     scheduler_task = (
@@ -870,7 +889,33 @@ async def main() -> int:
         else None
     )
 
-    await stop_event.wait()
+    shutdown_tasks = (
+        server_task,
+        *([scheduler_task] if scheduler_task is not None else []),
+        *([focused_watcher_task] if focused_watcher_task is not None else []),
+        *([quote_worker_task] if quote_worker_task is not None else []),
+        *([quote_feed_hydrator_task] if quote_feed_hydrator_task is not None else []),
+        *([cleanup_worker_task] if cleanup_worker_task is not None else []),
+        *([capacity_worker_task] if capacity_worker_task is not None else []),
+        *([candidate_watcher_task] if candidate_watcher_task is not None else []),
+        *([discovery_task] if discovery_task is not None else []),
+        *([reconciliation_task] if reconciliation_task is not None else []),
+        *supervised_tasks,
+        *([resource_task] if resource_task is not None else []),
+        *([http_probe_task] if http_probe_task is not None else []),
+    )
+    unexpected_exit = await wait_for_daemon_stop_or_task_exit(
+        stop_event=stop_event,
+        tasks=shutdown_tasks,
+    )
+    if unexpected_exit is not None:
+        exited_task, exit_error = unexpected_exit
+        logger.error(
+            "daemon task exited unexpectedly; stopping siblings task={} error_type={}",
+            exited_task.get_name(),
+            type(exit_error).__name__,
+        )
+        stop_event.set()
     logger.info("stop_event set, shutting down server")
     server.should_exit = True
 
@@ -903,22 +948,6 @@ async def main() -> int:
     if http_probe_task is not None:
         http_probe_task.cancel()
 
-    shutdown_tasks = (
-        server_task,
-        *([scheduler_task] if scheduler_task is not None else []),
-        *([focused_watcher_task] if focused_watcher_task is not None else []),
-        *([quote_worker_task] if quote_worker_task is not None else []),
-        *([quote_feed_hydrator_task] if quote_feed_hydrator_task is not None else []),
-        *([cleanup_worker_task] if cleanup_worker_task is not None else []),
-        *([capacity_worker_task] if capacity_worker_task is not None else []),
-        *([candidate_watcher_task] if candidate_watcher_task is not None else []),
-        *([discovery_task] if discovery_task is not None else []),
-        *([reconciliation_task] if reconciliation_task is not None else []),
-        *supervised_tasks,
-        *([resource_task] if resource_task is not None else []),
-        *([http_probe_task] if http_probe_task is not None else []),
-    )
-
     async def report_slow_shutdown() -> None:
         await asyncio.sleep(STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S)
         pending = sorted(task.get_name() for task in shutdown_tasks if not task.done())
@@ -935,8 +964,11 @@ async def main() -> int:
         warning_task.cancel()
         await asyncio.gather(warning_task, return_exceptions=True)
 
-    logger.info("polyarb daemon stopped cleanly")
-    return 0
+    if unexpected_exit is None:
+        logger.info("polyarb daemon stopped cleanly")
+    else:
+        logger.error("polyarb daemon stopped after unexpected task exit")
+    return 1 if unexpected_exit is not None else 0
 
 
 if __name__ == "__main__":
