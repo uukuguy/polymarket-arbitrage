@@ -6093,12 +6093,16 @@ class PostgresControlPlane:
             """
             SELECT c.state AS circuit_state, c.next_probe_at,
                    c.consecutive_failures, j.state AS job_state, j.job_type,
-                   j.lease_epoch,
+                   j.lease_epoch, j.lease_owner, j.lease_expires_at,
                    r.attempt_id, r.lease_epoch AS runtime_epoch,
-                   r.worker_id, r.stage
+                   r.worker_id, r.stage, a.state AS attempt_state
             FROM public.m1_job_circuits AS c
             JOIN public.m1_jobs AS j ON j.job_key = c.job_key
             JOIN public.m1_job_runtime_state AS r ON r.job_key = c.job_key
+            JOIN public.m1_job_attempts AS a
+              ON a.attempt_id = r.attempt_id
+             AND a.job_key = r.job_key
+             AND a.lease_epoch = r.lease_epoch
             WHERE c.job_key = %s
               AND r.attempt_id = %s
               AND r.lease_epoch = %s
@@ -6119,7 +6123,79 @@ class PostgresControlPlane:
             raise StaleLeaseError(f"circuit is not open for {action.target_id}")
         if row["next_probe_at"] > now:
             raise StaleLeaseError(f"circuit probe is not due for {action.target_id}")
-        if row["job_state"] not in {JobState.RETRYABLE.value, JobState.RUNNABLE.value}:
+        job_state = str(row["job_state"])
+        reclaimed_expired_lease = False
+        if job_state == JobState.LEASED.value:
+            if (
+                row["lease_owner"] is None
+                or row["lease_expires_at"] is None
+                or row["lease_expires_at"] > now
+                or row["attempt_state"] not in {"running", "checkpointed"}
+            ):
+                raise StaleLeaseError(f"circuit target lease is active for {action.target_id}")
+            cursor.execute(
+                """
+                UPDATE public.m1_jobs
+                SET state = 'retryable', next_attempt_at = %s,
+                    last_error_class = 'RecoveryLeaseExpired', lease_owner = NULL,
+                    lease_expires_at = NULL, updated_at = %s
+                WHERE job_key = %s AND state = 'leased'
+                  AND lease_epoch = %s AND lease_owner = %s
+                  AND lease_expires_at <= %s
+                """,
+                (
+                    now,
+                    now,
+                    action.target_id,
+                    action.expected_lease_epoch,
+                    row["lease_owner"],
+                    now,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(
+                    f"circuit target changed during expired reclaim for {action.target_id}"
+                )
+            if row["attempt_state"] == "running":
+                cursor.execute(
+                    """
+                    UPDATE public.m1_job_attempts
+                    SET state = 'retryable', finished_at = %s,
+                        error_class = 'RecoveryLeaseExpired'
+                    WHERE attempt_id = %s AND job_key = %s AND lease_epoch = %s
+                      AND state = 'running'
+                    """,
+                    (
+                        now,
+                        action.expected_attempt_id,
+                        action.target_id,
+                        action.expected_lease_epoch,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleLeaseError(
+                        f"circuit attempt changed during expired reclaim for {action.target_id}"
+                    )
+            cursor.execute(
+                """
+                UPDATE public.m1_job_runtime_state
+                SET recovery_state = 'recovered', updated_at = %s
+                WHERE job_key = %s AND attempt_id = %s AND lease_epoch = %s
+                """,
+                (
+                    now,
+                    action.target_id,
+                    action.expected_attempt_id,
+                    action.expected_lease_epoch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(
+                    f"circuit runtime changed during expired reclaim for {action.target_id}"
+                )
+            job_state = JobState.RETRYABLE.value
+            reclaimed_expired_lease = True
+        if job_state not in {JobState.RETRYABLE.value, JobState.RUNNABLE.value}:
             raise StaleLeaseError(f"circuit target is not retryable for {action.target_id}")
         retry_policy = runtime_retry_policy(str(row["job_type"]))
         probe_delay_seconds = retry_policy.retry_backoff_seconds(int(row["consecutive_failures"]))
@@ -6187,6 +6263,7 @@ class PostgresControlPlane:
                         "next_decision_at": now.isoformat(),
                         "reason_code": action.detail.get("reason_code", "circuit.probe-due"),
                         "recovery_policy": "probe-circuit",
+                        "reclaimed_expired_lease": reclaimed_expired_lease,
                         "retry_count": 0,
                     }
                 ),

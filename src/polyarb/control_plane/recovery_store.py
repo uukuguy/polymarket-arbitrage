@@ -628,9 +628,7 @@ def read_runtime_reconcile_states(
     with connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute("SET TRANSACTION READ ONLY")
         _set_recovery_timeouts(cursor)
-        target_predicate = (
-            sql.SQL("AND j.job_key = %s") if target_id is not None else sql.SQL("")
-        )
+        target_predicate = sql.SQL("AND j.job_key = %s") if target_id is not None else sql.SQL("")
         query = sql.SQL(
             """
             SELECT j.job_key, j.job_type, j.state AS job_state, j.attempt_count,
@@ -1032,8 +1030,12 @@ def _raise_if_probe_worker_lane_busy(
             JOIN public.m1_job_runtime_state AS runtime
               ON runtime.job_key = job.job_key
             WHERE job.state = 'leased'
-              AND job.job_key <> %s
               AND runtime.worker_id = %s
+              AND (
+                  job.job_key <> %s
+                  OR job.lease_expires_at IS NULL
+                  OR job.lease_expires_at > %s
+              )
 
             UNION ALL
 
@@ -1056,7 +1058,7 @@ def _raise_if_probe_worker_lane_busy(
         ORDER BY priority, blocking_target_id
         LIMIT 1
         """,
-        (target_id, worker_id, target_id, worker_id, target_id, worker_id, now, now),
+        (target_id, worker_id, worker_id, target_id, now, target_id, worker_id, now, now),
     )
     row = cursor.fetchone()
     if row is not None:

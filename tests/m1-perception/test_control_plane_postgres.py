@@ -7039,6 +7039,7 @@ def test_recovery_budget_isolated_by_circuit_failure_episode(
         job_type="structure-normalize",
         input_identity="recovery-action:circuit-episodes",
         now=now,
+        lease_seconds=1,
     )
     attempt_id = _runtime_attempt_id(control_plane, lease.job_key)
     controller = claim_controller(
@@ -7895,6 +7896,136 @@ def test_probe_lane_admission_lock_is_nonblocking() -> None:
 
     assert "pg_try_advisory_xact_lock" in source
     assert "pg_advisory_xact_lock(hashtextextended" not in source
+
+
+def test_circuit_probe_atomically_reclaims_its_own_expired_lease(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """An open circuit must not strand the expired attempt it is fencing."""
+    now = _now()
+    job_key = "recovery-probe:expired-own-lease"
+    fingerprint = "sha256:" + "e" * 64
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key=job_key,
+        job_type="structure-certify",
+        input_identity=f"{job_key}:input",
+        now=now,
+        lease_seconds=30,
+    )
+    attempt_id = _runtime_attempt_id(control_plane, job_key)
+    with control_plane._connection_factory() as connection:
+        connection.execute(
+            "INSERT INTO m1_job_circuits "
+            "(job_key, consecutive_failures, state, opened_at, next_probe_at, "
+            "updated_at, failure_fingerprint) "
+            "VALUES (%s, 3, 'open', %s, %s, %s, %s)",
+            (job_key, now, now, now, fingerprint),
+        )
+
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler-expired-probe",
+        owner_id="controller-expired-probe",
+        lease_seconds=120,
+        now=now,
+    )
+    decision = RecoveryDecision(
+        action=RecoveryActionType.PROBE_CIRCUIT,
+        reason_code="circuit.probe-due",
+        incident_severity="warning",
+        qualification_breaking=False,
+        next_check_at=now,
+    )
+    with pytest.raises(recovery_store_module.RecoveryProbeLaneBusy) as live:
+        schedule_action(
+            control_plane._connection_factory,
+            controller=controller,
+            decision=decision,
+            incident_key=f"incident:{job_key}",
+            component="structure-certify",
+            target_type="circuit",
+            target_id=job_key,
+            recovery_episode_key=fingerprint,
+            expected_attempt_id=attempt_id,
+            expected_lease_epoch=lease.lease_epoch,
+            recovery_budget_remaining=2,
+            cooldown_seconds=0,
+            channels=("dashboard",),
+            now=now + timedelta(seconds=1),
+        )
+    assert live.value.blocking_target_id == job_key
+    assert live.value.blocking_kind == "leased-job"
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM m1_recovery_actions WHERE target_id = %s",
+            (job_key,),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_recovery_target_budgets WHERE target_id = %s",
+            (job_key,),
+        )
+        assert cursor.fetchone() == (0,)
+
+    scheduled = schedule_action(
+        control_plane._connection_factory,
+        controller=controller,
+        decision=decision,
+        incident_key=f"incident:{job_key}",
+        component="structure-certify",
+        target_type="circuit",
+        target_id=job_key,
+        recovery_episode_key=fingerprint,
+        expected_attempt_id=attempt_id,
+        expected_lease_epoch=lease.lease_epoch,
+        recovery_budget_remaining=2,
+        cooldown_seconds=0,
+        channels=("dashboard",),
+        now=now + timedelta(seconds=31),
+    )
+
+    result = RecoveryExecutor(
+        connection_factory=control_plane._connection_factory,
+        control_plane=control_plane,
+        controller=controller,
+        worker_id="executor-expired-probe",
+    ).run_once(now=now + timedelta(seconds=32), expected_action_id=scheduled.action_id)
+
+    assert result is not None and result.outcome == "succeeded"
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state, lease_owner, lease_expires_at, next_attempt_at, last_error_class "
+            "FROM m1_jobs WHERE job_key = %s",
+            (job_key,),
+        )
+        assert cursor.fetchone() == (
+            "retryable",
+            None,
+            None,
+            now + timedelta(seconds=32),
+            "RecoveryLeaseExpired",
+        )
+        cursor.execute(
+            "SELECT state, finished_at, error_class FROM m1_job_attempts WHERE attempt_id = %s",
+            (attempt_id,),
+        )
+        assert cursor.fetchone() == (
+            "retryable",
+            now + timedelta(seconds=32),
+            "RecoveryLeaseExpired",
+        )
+        cursor.execute(
+            "SELECT recovery_state FROM m1_job_runtime_state WHERE job_key = %s",
+            (job_key,),
+        )
+        assert cursor.fetchone() == ("recovered",)
+        cursor.execute(
+            "SELECT remaining_actions FROM m1_recovery_target_budgets "
+            "WHERE target_id = %s AND episode_key = %s",
+            (job_key, fingerprint),
+        )
+        assert cursor.fetchone() == (1,)
 
 
 def test_recovery_action_old_worker_cannot_mutate_after_action_lease_reclaim(

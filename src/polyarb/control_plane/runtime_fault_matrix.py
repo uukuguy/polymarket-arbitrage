@@ -758,7 +758,7 @@ def _recovery_episode_isolation_case(
     now: datetime,
 ) -> dict[str, object]:
     fault_class = "recovery-episode-isolation"
-    lease = _seed_claimed_job(context, fault_class=fault_class, now=now)
+    lease = _seed_claimed_job(context, fault_class=fault_class, now=now, lease_seconds=1)
     _open_circuit(context, lease.job_key, now=now)
     controller = claim_controller(
         context.admin_factory,
@@ -848,6 +848,8 @@ def _recovery_episode_isolation_case(
         dashboard_projection=_dashboard_projection(snapshot),
         qualification_impact="pending-db-ingress",
     )
+
+
 def _writer_failure_case(context: _RuntimeContext, *, now: datetime) -> dict[str, object]:
     lease = _seed_claimed_job(context, fault_class="database-event-writer-failure", now=now)
     progress = RuntimeProgress(sequence=1, current=1, total=2, stage="upload-range")
@@ -1030,7 +1032,12 @@ def _reconciler_case(
     fault_class: str,
     now: datetime,
 ) -> dict[str, object]:
-    lease = _seed_claimed_job(context, fault_class=fault_class, now=now, lease_seconds=120)
+    lease = _seed_claimed_job(
+        context,
+        fault_class=fault_class,
+        now=now,
+        lease_seconds=1 if fault_class == "circuit-probe" else 120,
+    )
     if fault_class == "progress-stall":
         _age_runtime(context, lease.job_key, now=now, progress_seconds=130, lease_seconds=60)
     elif fault_class == "heartbeat-loss":
