@@ -58,11 +58,11 @@ STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S = 15
 STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S = 2 * STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S
 
 
-def structure_drift_subprocess_timeout_s(max_elapsed_s: float) -> float:
-    """Derive the parent envelope from child work plus owned shutdown."""
+def structure_subprocess_timeout_s(max_elapsed_s: float) -> float:
+    """Derive a Structure slice parent envelope from work plus owned shutdown."""
 
     if max_elapsed_s <= 0:
-        raise ValueError("structure drift slice must be positive")
+        raise ValueError("structure slice must be positive")
     return max_elapsed_s + STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S
 
 
@@ -347,7 +347,7 @@ async def run_structure_event_members_in_subprocess(
     max_chunks: int = 100,
     max_elapsed_s: float = 45.0,
     spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = asyncio.create_subprocess_exec,
-    timeout_s: float = 75.0,
+    timeout_s: float | None = None,
     terminate_timeout_s: float = STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S,
 ) -> IsolatedStructureEventMemberCheckpoint:
     """Run one bounded event-member slice outside the resident scheduler."""
@@ -371,6 +371,9 @@ async def run_structure_event_members_in_subprocess(
     )
     started = time.monotonic()
     communicate_task = asyncio.create_task(process.communicate())
+    effective_timeout_s = (
+        structure_subprocess_timeout_s(max_elapsed_s) if timeout_s is None else timeout_s
+    )
 
     async def terminate_then_kill() -> tuple[bytes, bytes]:
         return await _terminate_then_kill_subprocess(
@@ -380,7 +383,9 @@ async def run_structure_event_members_in_subprocess(
         )
 
     try:
-        stdout, stderr = await asyncio.wait_for(asyncio.shield(communicate_task), timeout=timeout_s)
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communicate_task), timeout=effective_timeout_s
+        )
     except asyncio.CancelledError:
         await terminate_then_kill()
         raise
@@ -500,7 +505,7 @@ async def run_structure_drift_in_subprocess(
         return result
 
     effective_timeout_s = (
-        structure_drift_subprocess_timeout_s(max_elapsed_s) if timeout_s is None else timeout_s
+        structure_subprocess_timeout_s(max_elapsed_s) if timeout_s is None else timeout_s
     )
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -1710,7 +1715,6 @@ class SnapshotScheduler:
                     max_rows=500,
                     max_chunks=100,
                     max_elapsed_s=45.0,
-                    timeout_s=75.0,
                     terminate_timeout_s=STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S,
                 )
             except SnapshotSubprocessError as error:

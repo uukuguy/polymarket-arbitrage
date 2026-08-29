@@ -1453,21 +1453,33 @@ async def test_structure_drift_child_parser_accepts_bounded_slice() -> None:
     )
 
 
-def test_structure_drift_outer_budget_is_derived_from_slice_and_shutdown() -> None:
+def test_structure_slice_outer_budget_is_derived_from_work_and_shutdown() -> None:
     from polyarb.daemon.scheduler import (
         STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S,
-        structure_drift_subprocess_timeout_s,
+        run_structure_drift_in_subprocess,
+        run_structure_event_members_in_subprocess,
+        structure_subprocess_timeout_s,
     )
 
-    assert structure_drift_subprocess_timeout_s(45.0) == (
+    assert structure_subprocess_timeout_s(45.0) == (
         45.0 + STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S
     )
-    assert structure_drift_subprocess_timeout_s(5.0) == (
+    assert structure_subprocess_timeout_s(5.0) == (
         5.0 + STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S
     )
-    assert "timeout_s=75.0" not in inspect.getsource(
-        SnapshotScheduler._maybe_advance_structure_drift
+    assert inspect.signature(run_structure_drift_in_subprocess).parameters[
+        "timeout_s"
+    ].default is None
+    assert inspect.signature(run_structure_event_members_in_subprocess).parameters[
+        "timeout_s"
+    ].default is None
+    production_source = "\n".join(
+        (
+            inspect.getsource(SnapshotScheduler._maybe_advance_structure_drift),
+            inspect.getsource(SnapshotScheduler._maybe_advance_structure_event_members),
+        )
     )
+    assert "timeout_s=75.0" not in production_source
 
 
 @pytest.mark.asyncio
