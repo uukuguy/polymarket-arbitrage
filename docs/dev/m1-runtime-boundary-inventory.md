@@ -42,6 +42,7 @@ qualification 86,400 s -- acceptance observation window; it is not a process tim
 | Circuit probe | `m1_job_circuits.next_probe_at` | a recovery action opens one bounded claim window; trusted service interruption renews that window without another action or defect | circuit row and action ledger | revision 034 and circuit/interruption PostgreSQL tests |
 | Recovery action count | revision 035 episode row | no reset on controller reclaim; new episode gets a separate row | `(controller,target,episode)` budget | revision 035 and episode fault case |
 | Scheduler cadence | caller `interval_seconds` | never cancels an active lane; recomputes remaining time after observer work | completed turn callback | scheduler service tests |
+| Daemon startup and steady supervision | `daemon.lifecycle` startup policy plus owned task set | SIGTERM before bind is a clean stop; any task exit after bind stops and drains all siblings before nonzero process exit | process log and platform restart; job recovery remains lease-fenced | L1/L2 startup and daemon-shutdown tests |
 | Terminal shutdown | `service_lifecycle.terminal_grace_seconds()` | first cancel requests drain; second cancel detaches; fence owns late result | `ServiceStopRequested` or terminal receipt | service lifecycle and interruption tests |
 | Operator observation | watchdog/Fly read policy constants | daemon reader is abandoned after the derived observation round | watchdog transition, never a job mutation | CLI/watchdog tests |
 | Control API readiness | `CONTROL_PLANE_HEALTH_DB_POLICY` below Fly's 5 s check | detach the read-only probe at 3.5 s; platform never owns the DB call | no mutation; typed 503 | API, deployment-contract and real PostgreSQL tests |
@@ -167,6 +168,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Runtime-authority test fixed the number of policy consumers at three | adding a legitimate interruption consumer failed the full suite even though it reused the sole policy and introduced no private clock | assert every backoff use has a central-policy lookup and forbid copied formulas, without constraining how many lifecycle paths consume the authority |
 | L2 top-of-book writes ran in an anonymous background task | handler return raced the write under host load, tests passed by scheduler luck, and shutdown had no owner to drain the last coalesced batch | an explicit callable dispatcher owns pending rows and its one drain generation; tests wait for idle and daemon cleanup closes it after stopping producers on every exit path |
 | L2 task drain used a private five-second default while Fly declared no stop contract | cooperative cleanup could be force-cancelled early or the platform could choose an implicit signal/window, making the actual ordering deployment-dependent | one daemon lifecycle policy owns a 30-second drain below an explicit `SIGTERM/40s` platform window; the executable config/signature contract rejects drift |
+| L1/L2 copied HTTP startup loops and L1 stopped observing tasks after bind | loop count and sleep cadence formed a second nominal 10-second clock; a later uvicorn/producer exit left the process alive with missing capability | one monotonic stop-aware startup helper owns both entrypoints; L1 supervises every resident task and turns any unexpected exit into ordered sibling drain plus nonzero process exit |
 
 ## Prohibited patterns
 
@@ -202,6 +204,8 @@ structure-fetch -> structure-materialize -> structure-normalize
   that can expose idle state and drain after producers stop.
 - Giving a daemon a private shutdown timeout without an explicit, longer
   platform termination window and a tested ordering relationship.
+- Encoding startup duration as `loop count * sleep`, or waiting only for a
+  signal after readiness without supervising every long-lived resident task.
 
 ## Verification map
 

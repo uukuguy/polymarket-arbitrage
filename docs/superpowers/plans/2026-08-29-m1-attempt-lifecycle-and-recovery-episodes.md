@@ -883,6 +883,34 @@
 - [x] Confirm the amended lifecycle gate and include it in the next exact
   runtime image before starting the 86,400-second qualification window.
 
+### Task 33: Unify HTTP startup and supervise resident daemon tasks
+
+**Files:**
+
+- Modify: `src/polyarb/daemon/lifecycle.py`
+- Modify: `src/polyarb/daemon/main.py`
+- Modify: `src/polyarb/daemon/l2_main.py`
+- Modify: `tests/m1-perception/test_daemon_shutdown.py`
+- Modify: `tests/daemon/test_l2_main_startup.py`
+- Modify: `tools/climb/eval_local.py`
+- Modify: `tests/climb/test_eval_local.py`
+
+**Interfaces:**
+
+- L1 and L2 share one monotonic, stop-aware HTTP startup authority instead of
+  separate 10-second formulas.
+- After readiness, every L1 resident task participates in one stop-or-exit
+  supervision race; an unexpected clean, failed or cancelled task exit stops
+  siblings, drains them and returns nonzero.
+
+- [x] Reproduce the duplicated `10.0` versus `range(100) * sleep(0.1)` startup
+  contracts and the stale test that still required the removed five-second
+  drain literal.
+- [x] Add RED contracts for shared startup, pre-bind SIGTERM, exact task exit
+  ownership and no orphan stop waiter; implement the shared lifecycle helpers.
+- [x] Pass the complete L1/L2 lifecycle group and add the exact contracts to
+  the Climb restart gate before the next full M1 regression.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
@@ -894,7 +922,7 @@
   candidate reads, pre-limit exact selection, bounded transport cleanup and
   lease-independent attempt ceilings, exact image identity and half-open
   interruption continuity and deterministic concurrency watchdogs all map to
-  Tasks 1–32.
+  Tasks 1–33.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and
