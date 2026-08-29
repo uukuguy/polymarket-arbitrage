@@ -565,7 +565,7 @@
 - [x] Add real-PostgreSQL RED tests for the pre-range materializer gap,
   post-range/pre-certifier gap, two materializer contenders and prior-generation
   certification ordering.
-- [ ] Implement one fixed pipeline-backlog predicate in admission and
+- [x] Implement one fixed pipeline-backlog predicate in admission and
   materializer claim eligibility, then run focused and complete gates.
 - [ ] Restore coordinator only on an exact canary release that proves no fourth
   generation is admitted/materialized while prior generations are unfinished.
