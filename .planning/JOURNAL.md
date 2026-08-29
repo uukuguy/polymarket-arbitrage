@@ -11508,3 +11508,39 @@ coordinator, apply revision 034, roll coordinator, and execute only
 `probe-circuit` for `structure-source:300:5959460:fetch:events:162` in an
 isolated 512MB auto-removed Machine. Then restore controller observe-only,
 roll siblings, verify freshness and start a fresh 86,400-second qualification.
+
+### SESSION 336 — 2026-08-30 (OrbStack-only runtime and terminal recovery chain)
+
+- [RUNTIME OWNERSHIP] M1 has no Colima requirement. The temporary
+  `colima-polyarb-tests` workaround, VM, Docker context, Colima package and its
+  today-installed Lima dependency were removed. Global and all project Docker
+  paths are explicitly `orbstack`; only recoverable dangling images were
+  pruned, and no other-project container, volume or tagged image was removed.
+- [TIMEOUT / SEQUENCE REPAIRS] v20 fixed watchdog progress authority and split
+  process liveness from DB readiness. v21 moved payload-sized Structure parsing,
+  comparison, digest and reassembly into the existing lease-renewing boundary
+  without enlarging a timeout. v22 closed the deterministic open-circuit /
+  expired-lease deadlock: live leases defer before budget mutation, while an
+  exact expired own lease is reclaimed atomically inside probe release.
+- [EXACT GATE] Release `5c3ee3cd` passed 5,118 tests, one skip and one expected
+  xfail in 2,298.69 seconds with no outer timeout. Independent OrbStack pull
+  verified amd64, UID 10001, migration 036, pinned Supercronic, Python 3.12.14
+  and image digest `sha256:fc9fb14bd6eb5973597d0cdc1df918004277f0c4cd27e8be807f3148efc8b4a3`.
+- [PRODUCTION RECOVERY] All eight Machines rolled to exact v22. Structure
+  action `a2d171b2` replaced stale epoch 4 with epoch 5, crossed the prior
+  `756/1117` stop, certified and closed its circuit. Quote action `b4a03fbd`
+  completed its batch, certifier and downstream `147/147` opportunity publish.
+  All circuits are closed; the exact one-time Machines auto-removed.
+- [FINAL LIVE STATE] Eight of eight formal Machines are started on v22.
+  Resident controller is healthy, observe-only and empty-allowlist; independent
+  watchdog is healthy. Stable control API audit passed 20/20 reads (1.128s mean,
+  1.562s max). Fresh v22 qualification is accumulating and advanced 0→31
+  eligible seconds with no breaker or active overdue task. Raw Machine/env
+  artifacts and obsolete v20/v21 ops directories were securely removed.
+
+[NEXT] Do not change the exact runtime release. Monitor the fresh v22 epoch via
+the full `https://polyarb-control-api.fly.dev/perception/control-plane` endpoint
+until `eligible_seconds >= 86400`. Then run `make qualification-status`,
+`make qualification-certificates`, the eight-Machine topology audit and the
+full-endpoint watchdog verifier independently. M1 remains incomplete until the
+immutable 86,400-second certificate and its independent revalidation both pass.
