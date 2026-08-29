@@ -1306,11 +1306,11 @@ def test_runtime_reconcile_once_evaluates_schedules_and_executes_one_action(
     monkeypatch.setenv("POLYARB_RUNTIME_RECOVERY_MODE", "execute")
     monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
     monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
-    monkeypatch.setattr(
-        cli_control_plane,
-        "read_runtime_reconcile_states",
-        lambda *a, **k: (candidate,),
-    )
+    def read_exact_target(*_args, **kwargs):
+        assert kwargs["target_id"] == "job-a"
+        return (candidate,)
+
+    monkeypatch.setattr(cli_control_plane, "read_runtime_reconcile_states", read_exact_target)
     decision = RecoveryDecision(
         action=RecoveryActionType.HEARTBEAT_JOB,
         reason_code="job.lease-at-risk",

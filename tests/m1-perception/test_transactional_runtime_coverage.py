@@ -193,10 +193,12 @@ def test_runtime_registry_has_exact_eight_job_types_with_meaningful_stage_names(
 
 def test_structure_certifier_gets_bounded_long_attempt_without_weakening_liveness() -> None:
     certifier = runtime_deadline_profile("structure-certify", 30)
+    certifier_with_longer_lease = runtime_deadline_profile("structure-certify", 120)
     normalizer = runtime_deadline_profile("structure-normalize", 30)
 
     assert (certifier.heartbeat_seconds, certifier.progress_seconds) == (10, 30)
     assert certifier.attempt_seconds == 3_600
+    assert certifier_with_longer_lease.attempt_seconds == 3_600
     assert normalizer.attempt_seconds == 300
 
 

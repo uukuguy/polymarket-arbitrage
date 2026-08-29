@@ -1501,6 +1501,7 @@ def _runtime_reconcile_once(
         controller_id=selected_controller.controller_id,
         now=now,
         sample_limit=args.limit,
+        target_id=target_id,
     )
     if target_id is not None:
         candidates = tuple(

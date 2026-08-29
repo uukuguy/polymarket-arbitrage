@@ -47,9 +47,28 @@ async def test_gamma_cancelled_context_exit_bounds_hung_http_close(
         await closed.wait()
 
     monkeypatch.setattr(client._http, "aclose", hung_close)
-    monkeypatch.setattr(gamma_module, "GAMMA_CANCELLED_CLOSE_TIMEOUT_S", 0.001)
+    monkeypatch.setattr(gamma_module, "GAMMA_CLOSE_TIMEOUT_S", 0.001)
 
     await client.__aexit__(asyncio.CancelledError, None, None)
+
+
+@pytest.mark.asyncio
+async def test_gamma_explicit_close_bounds_hung_http_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal service cleanup must be bounded just like cancellation cleanup."""
+    from polyarb.clients import gamma_client as gamma_module
+
+    client = GammaClient(Settings(scan_shared_secret="test"))
+    never_closed = asyncio.Event()
+
+    async def hung_close() -> None:
+        await never_closed.wait()
+
+    monkeypatch.setattr(client._http, "aclose", hung_close)
+    monkeypatch.setattr(gamma_module, "GAMMA_CLOSE_TIMEOUT_S", 0.001)
+
+    await asyncio.wait_for(client.aclose(), timeout=0.1)
 
 
 @pytest.mark.asyncio

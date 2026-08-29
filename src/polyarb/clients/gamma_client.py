@@ -52,7 +52,7 @@ from tenacity import (
 
 from polyarb.config import Settings
 
-GAMMA_CANCELLED_CLOSE_TIMEOUT_S = 2.0
+GAMMA_CLOSE_TIMEOUT_S = 2.0
 
 
 class _NonRetryableHTTPError(Exception):
@@ -193,7 +193,7 @@ class GammaClient:
         try:
             await asyncio.wait_for(
                 failed_http.aclose(),
-                timeout=GAMMA_CANCELLED_CLOSE_TIMEOUT_S,
+                timeout=GAMMA_CLOSE_TIMEOUT_S,
             )
         except TimeoutError:
             logger.warning("gamma transport generation close timed out during replacement")
@@ -206,8 +206,19 @@ class GammaClient:
             self._http = self._build_http_client()
 
     async def aclose(self) -> None:
-        """Close the underlying HTTP client (idempotent)."""
-        await self._http.aclose()
+        """Close the HTTP client without letting cleanup own process lifetime."""
+        try:
+            await asyncio.wait_for(
+                self._http.aclose(),
+                timeout=GAMMA_CLOSE_TIMEOUT_S,
+            )
+        except TimeoutError:
+            logger.warning("gamma transport close timed out during cleanup")
+        except Exception as error:
+            logger.warning(
+                "gamma transport close failed during cleanup: {}",
+                type(error).__name__,
+            )
 
     async def __aenter__(self) -> GammaClient:
         return self
@@ -217,7 +228,7 @@ class GammaClient:
             try:
                 await asyncio.wait_for(
                     self.aclose(),
-                    timeout=GAMMA_CANCELLED_CLOSE_TIMEOUT_S,
+                    timeout=GAMMA_CLOSE_TIMEOUT_S,
                 )
             except TimeoutError:
                 # A bounded Structure child is about to report its real page

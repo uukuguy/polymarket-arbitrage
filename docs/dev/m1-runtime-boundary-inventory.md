@@ -51,7 +51,7 @@ qualification 86,400 s -- acceptance observation window; it is not a process tim
 
 | Surface | Inner bound | Outer bound | Attempts | Notes |
 |---|---:|---:|---:|---|
-| Gamma keyset/exact-ID HTTP | `provider_timeout_seconds` in `GammaClient` | Structure `io_timeout_seconds` | 1 | A failed durable attempt replaces the HTTP transport generation but preserves the service limiter. Cleanup uses `GAMMA_CANCELLED_CLOSE_TIMEOUT_S`; it cannot become another attempt deadline. |
+| Gamma keyset/exact-ID HTTP | `provider_timeout_seconds` in `GammaClient` | Structure `io_timeout_seconds` | 1 | A failed durable attempt replaces the HTTP transport generation but preserves the service limiter. Replacement, cancellation and normal service cleanup all use `GAMMA_CANCELLED_CLOSE_TIMEOUT_S`; cleanup cannot become another attempt deadline or outlive SIGTERM. |
 | Structure R2 PUT+HEAD | botocore connect/read split derived by `control_plane_r2_config()` | `run_blocking_call_with_timeout(io_timeout_seconds)` | 1 | Timed-out daemon thread cannot publish a fenced receipt. |
 | Quote CLOB books | client request inside `_await_reader()` | Quote `io_timeout_seconds` | 1 | cancellation drains the owned request task; no scheduler wrapper timeout. |
 | Quote/Structure R2 reads and writes | botocore request bounds | remaining absolute attempt budget for synchronous bridge | 1 | periodic waits only drive lease heartbeat; they do not extend the absolute deadline. |
@@ -123,6 +123,10 @@ structure-fetch -> structure-materialize -> structure-normalize
 - Job recovery episode identity is the exact attempt ID. Circuit episode
   identity is the exact failure fingerprint. Legacy target-only exhaustion
   stays under `legacy` and is never refilled or deleted.
+- An execute-only exact recovery selector is applied by PostgreSQL before
+  `LIMIT`; the normal bounded observation sample cannot hide the requested job.
+- Structure certification has one absolute 3,600-second attempt ceiling. Lease
+  changes may alter fencing cadence but cannot scale that lifetime.
 - Process and Machine recovery remain explicit-enable actions. The normal
   controller is observe-only with an empty allowlist.
 
@@ -150,6 +154,10 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Fast sub-calls never reached heartbeat polling | a long Opportunity/Structure sequence of healthy sub-30-second calls silently expired its cumulative lease and surfaced `stale-lease` | check the runtime's due heartbeat after every successful nonterminal call boundary as well as while one call blocks |
 | Fly readiness ran the full operator snapshot | a 5 s platform check wrapped a 10.5 s application envelope whose formula also omitted session bootstrap, producing recurring 16–56 s health flaps | use a one-statement durable-authority probe with a dedicated 3.5 s full-sequence policy; derive default request/stop envelopes from connect + bootstrap + data statement |
 | Local SSH waiter outlived an already completed remote Machine | operator process appeared hung despite completed remote work | exact waiter can be interrupted safely; remote durable state is re-read before retry |
+| Operator snapshot `LIMIT` still scanned history | status crossed its five-second statement boundary as attempts/outbox grew | revision 036 adds concurrent latest-attempt and pending-outbox access paths; the deadline is unchanged |
+| Exact recovery target was filtered after the 100-row sample | a valid pinned action disappeared behind unrelated candidates | apply exact `job_key` in SQL before ordering and limit, then verify target type/action in memory |
+| Normal Gamma cleanup had no bound | durable stop could finish but `scheduler.aclose()` could hold the process until platform kill | explicit close uses the same two-second fail-soft transport cleanup boundary |
+| Certifier's nominal absolute hour was `lease * 120` | a deployment lease change silently changed total attempt lifetime | represent the 3,600-second ceiling as a distinct policy authority and reject incompatible leases |
 
 ## Prohibited patterns
 
@@ -167,6 +175,12 @@ structure-fetch -> structure-materialize -> structure-normalize
   cumulative lease age must also be checked when each fast call returns.
 - Reusing an operator/report query as a platform readiness probe, or comparing
   an outer timeout against a budget that omits mandatory bootstrap work.
+- Filtering an exact mutation/recovery target after applying a generic sample
+  limit.
+- Expressing an absolute deadline as a multiplier of lease, cadence or retry
+  settings.
+- Calling an unbounded provider/client close after the worker stop grace has
+  already completed.
 
 ## Verification map
 

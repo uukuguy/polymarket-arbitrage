@@ -5970,6 +5970,43 @@ def test_runtime_reconcile_candidates_use_the_indexed_positive_job_state_set() -
     ) in source
 
 
+def test_runtime_reconcile_exact_target_is_filtered_before_sample_limit(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    first = _seed_claimed_job(
+        control_plane,
+        job_key="runtime-reconcile:sample-first",
+        job_type="structure-normalize",
+        input_identity="runtime-reconcile:sample-first",
+        now=now,
+    )
+    target = _seed_claimed_job(
+        control_plane,
+        job_key="runtime-reconcile:exact-target",
+        job_type="structure-normalize",
+        input_identity="runtime-reconcile:exact-target",
+        now=now + timedelta(seconds=1),
+    )
+
+    sampled = read_runtime_reconcile_states(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        now=now + timedelta(seconds=2),
+        sample_limit=1,
+    )
+    exact = read_runtime_reconcile_states(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler",
+        now=now + timedelta(seconds=2),
+        sample_limit=1,
+        target_id=target.job_key,
+    )
+
+    assert [candidate.target_id for candidate in sampled] == [first.job_key]
+    assert [candidate.target_id for candidate in exact] == [target.job_key]
+
+
 def test_recovery_action_stale_controller_does_not_create_budget_or_poison_schedule(
     control_plane: PostgresControlPlane,
 ) -> None:

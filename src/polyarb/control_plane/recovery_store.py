@@ -606,16 +606,22 @@ def read_runtime_reconcile_states(
     controller_id: str,
     now: datetime,
     sample_limit: int = 100,
+    target_id: str | None = None,
 ) -> tuple[RuntimeReconcileCandidate, ...]:
     """Read bounded non-terminal runtime facts without changing any row."""
     _require_nonempty(controller_id=controller_id)
+    if target_id is not None:
+        _require_nonempty(target_id=target_id)
     _require_aware(now, "now")
     if not 1 <= sample_limit <= 100:
         raise ValueError("sample_limit must be in 1..100")
     with connection_factory() as connection, connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute("SET TRANSACTION READ ONLY")
         _set_recovery_timeouts(cursor)
-        cursor.execute(
+        target_predicate = (
+            sql.SQL("AND j.job_key = %s") if target_id is not None else sql.SQL("")
+        )
+        query = sql.SQL(
             """
             SELECT j.job_key, j.job_type, j.state AS job_state, j.attempt_count,
                    j.last_error_class, r.attempt_id, r.lease_epoch, r.worker_id,
@@ -647,11 +653,16 @@ def read_runtime_reconcile_states(
                 'runnable', 'leased', 'retryable', 'waiting', 'checkpointed'
             )
               AND r.recovery_state <> 'terminal'
+              {target_predicate}
             ORDER BY r.updated_at ASC, j.job_key ASC
             LIMIT %s
-            """,
-            (controller_id, sample_limit),
-        )
+            """
+        ).format(target_predicate=target_predicate)
+        parameters: list[object] = [controller_id]
+        if target_id is not None:
+            parameters.append(target_id)
+        parameters.append(sample_limit)
+        cursor.execute(query, parameters)
         rows = cursor.fetchall()
 
     candidates: list[RuntimeReconcileCandidate] = []

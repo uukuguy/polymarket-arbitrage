@@ -12,11 +12,24 @@ from .runtime_models import RuntimeDeadlineProfile
 
 @dataclass(frozen=True, slots=True)
 class _RuntimePolicySpec:
-    attempt_multiplier: int
+    attempt_multiplier: int | None
     retry_budget: int
     checkpoint_interval: int
     retry_backoff_base_seconds: int = 15
     retry_backoff_cap_seconds: int = 300
+    attempt_ceiling_seconds: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.attempt_multiplier is None) == (self.attempt_ceiling_seconds is None):
+            raise ValueError("runtime policy must choose one attempt authority")
+        attempt_value = (
+            self.attempt_multiplier
+            if self.attempt_multiplier is not None
+            else self.attempt_ceiling_seconds
+        )
+        assert attempt_value is not None
+        if min(attempt_value, self.retry_budget, self.checkpoint_interval) <= 0:
+            raise ValueError("runtime policy spec values must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +132,12 @@ _POLICY_SPECS = MappingProxyType(
         "structure-fetch": _DEFAULT_SPEC,
         "structure-materialize": _DEFAULT_SPEC,
         "structure-normalize": _DEFAULT_SPEC,
-        "structure-certify": _RuntimePolicySpec(120, 3, 25),
+        "structure-certify": _RuntimePolicySpec(
+            None,
+            3,
+            25,
+            attempt_ceiling_seconds=3_600,
+        ),
         "quote-admit": _RuntimePolicySpec(10, 3, 10),
         "quote-batch": _DEFAULT_SPEC,
         "quote-certify": _DEFAULT_SPEC,
@@ -195,7 +213,13 @@ def runtime_policy(job_type: str, lease_seconds: int) -> RuntimePolicy:
     bounded_lease = max(3, int(lease_seconds))
     heartbeat = max(1, min(30, bounded_lease // 3))
     progress = max(bounded_lease, heartbeat * 3)
-    attempt = max(progress, bounded_lease * spec.attempt_multiplier)
+    if spec.attempt_ceiling_seconds is not None:
+        if progress > spec.attempt_ceiling_seconds:
+            raise ValueError("runtime lease exceeds the absolute attempt ceiling")
+        attempt = spec.attempt_ceiling_seconds
+    else:
+        assert spec.attempt_multiplier is not None
+        attempt = max(progress, bounded_lease * spec.attempt_multiplier)
     deadlines = RuntimeDeadlineProfile(
         policy_version=_POLICY_VERSION,
         lease_seconds=bounded_lease,

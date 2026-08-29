@@ -677,6 +677,66 @@
 - [ ] Build the exact image and rerun the same isolated, execute-only,
   target/action-pinned circuit probe before rolling the resident controller.
 
+### Task 24: Apply the exact recovery selector before the sample bound
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/recovery_store.py`
+- Modify: `src/polyarb/cli_control_plane.py`
+- Modify: `tests/m1-perception/test_control_plane_postgres.py`
+- Modify: `tests/m1-perception/test_control_plane_cli.py`
+
+**Interfaces:**
+
+- An execute-only exact target is a database predicate, not an in-memory filter
+  over the normal 100-row observation sample.
+- The normal observe-only path retains its bounded oldest-first sample; target
+  type and expected action are still verified after reading the exact job.
+
+- [x] Reproduce a target outside `sample_limit=1` disappearing when filtering
+  occurred after SQL `LIMIT`.
+- [x] Push `target_id` into the read projection, prove the exact target is
+  returned with the same limit, and prove the CLI forwards it before action
+  matching or scheduling.
+
+### Task 25: Bound normal transport cleanup inside process shutdown
+
+**Files:**
+
+- Modify: `src/polyarb/clients/gamma_client.py`
+- Modify: `tests/m1-perception/test_gamma_client.py`
+
+**Interfaces:**
+
+- Explicit/normal `aclose()` uses the same two-second transport cleanup bound
+  as replacement and cancellation cleanup.
+- Timeout or close failure is redacted cleanup evidence and cannot replace a
+  completed durable stop result or keep the process alive until platform kill.
+
+- [x] Reproduce explicit `aclose()` hanging beyond an outer 100ms test bound
+  while the configured cleanup authority was 1ms.
+- [x] Make explicit close bounded and fail-soft; normal and cancelled cleanup
+  contracts plus the complete Gamma suite pass.
+
+### Task 26: Make the certifier attempt ceiling independent of lease duration
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/runtime_deadlines.py`
+- Modify: `tests/m1-perception/test_transactional_runtime_coverage.py`
+
+**Interfaces:**
+
+- `structure-certify` owns one explicit 3,600-second absolute attempt ceiling;
+  changing its lease changes heartbeat/progress fencing, not total lifetime.
+- A lease whose derived progress boundary exceeds the ceiling is rejected
+  instead of silently enlarging the ceiling.
+
+- [x] Reproduce lease 30 producing 3,600 seconds while lease 120 silently
+  produced 14,400 seconds from the old multiplier.
+- [x] Split relative multiplier and absolute-ceiling policy authorities and
+  prove both lease values resolve to exactly 3,600 seconds.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
@@ -685,7 +745,8 @@
   connection ownership, worker-identity capacity and producer commit
   independence, cross-shape generation ordering, explicit capacity rollout,
   bounded operator observation, executable recovery entrypoints and bounded
-  candidate reads all map to Tasks 1–23.
+  candidate reads, pre-limit exact selection, bounded transport cleanup and
+  lease-independent attempt ceilings all map to Tasks 1–26.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and
