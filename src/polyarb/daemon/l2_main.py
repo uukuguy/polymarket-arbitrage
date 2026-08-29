@@ -657,69 +657,79 @@ def _book_levels_rows_from_frame(frame: dict, max_levels: int = 10) -> list[dict
     return rows
 
 
-def make_l2_event_handler(
-    l2_mirror: L2SupabaseMirror | None,
-    *,
-    book_levels_required: Callable[[str], bool] | None = None,
-) -> Callable[[dict], Awaitable[FrameDispatchResult]]:
-    """Build a non-blocking production WS dispatcher with mirror-write truth.
+class L2EventDispatcher:
+    """Own coalesced mirror tasks from first frame through terminal drain."""
 
-    Top-of-book traffic is coalesced by asset and drained in bulk.  Awaiting one
-    PostgREST request per frame made an initial 110-asset dump occupy the receive
-    loop for minutes, which in turn made subscription control miss its live
-    socket.  Depth writes remain awaited because they are the durable evidence
-    boundary for L3 promotion.
-    """
+    def __init__(
+        self,
+        l2_mirror: L2SupabaseMirror | None,
+        *,
+        book_levels_required: Callable[[str], bool] | None = None,
+    ) -> None:
+        self._l2_mirror = l2_mirror
+        self._book_levels_required = book_levels_required
+        self._pending_tob: dict[str, dict] = {}
+        self._latest_depth: dict[str, tuple[object, object]] = {}
+        self._tob_drain_task: asyncio.Task[None] | None = None
+        self._closed = False
 
-    pending_tob: dict[str, dict] = {}
-    latest_depth: dict[str, tuple[object, object]] = {}
-    tob_drain_task: asyncio.Task[None] | None = None
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending_tob)
 
-    async def drain_top_of_book() -> None:
-        while pending_tob:
-            rows = list(pending_tob.values())
-            pending_tob.clear()
-            await asyncio.to_thread(l2_mirror.push_top_of_book, rows)
+    async def _drain_top_of_book(self) -> None:
+        assert self._l2_mirror is not None
+        while self._pending_tob:
+            rows = list(self._pending_tob.values())
+            self._pending_tob.clear()
+            try:
+                await asyncio.to_thread(self._l2_mirror.push_top_of_book, rows)
+            except Exception as exc:  # pragma: no cover - mirror is fail-soft
+                logger.warning(
+                    "l2 top-of-book drain failed type={}",
+                    type(exc).__name__,
+                )
 
-    def enqueue_top_of_book(row: dict) -> None:
-        nonlocal tob_drain_task
+    def _enqueue_top_of_book(self, row: dict) -> None:
         asset_id = str(row.get("asset_id") or "")
         if not asset_id:
             return
         depth = (row.get("depth_yes_usd"), row.get("depth_no_usd"))
         if depth[0] is not None or depth[1] is not None:
-            latest_depth[asset_id] = depth
-        elif asset_id in latest_depth:
+            self._latest_depth[asset_id] = depth
+        elif asset_id in self._latest_depth:
             # A best_bid_ask frame carries fresh prices but no order-book
             # depth. Preserve the last real book depth so "latest per asset"
             # remains eligible for the L3 recipe instead of being overwritten
             # by NULLs immediately after every initial dump.
             row = {
                 **row,
-                "depth_yes_usd": latest_depth[asset_id][0],
-                "depth_no_usd": latest_depth[asset_id][1],
+                "depth_yes_usd": self._latest_depth[asset_id][0],
+                "depth_no_usd": self._latest_depth[asset_id][1],
             }
-        pending_tob[asset_id] = row
-        if tob_drain_task is None or tob_drain_task.done():
-            tob_drain_task = asyncio.create_task(
-                drain_top_of_book(),
+        self._pending_tob[asset_id] = row
+        if self._tob_drain_task is None or self._tob_drain_task.done():
+            self._tob_drain_task = asyncio.create_task(
+                self._drain_top_of_book(),
                 name="l2-tob-mirror-drain",
             )
 
-            def consume_failure(task: asyncio.Task[None]) -> None:
-                try:
-                    task.result()
-                except asyncio.CancelledError:
-                    return
-                except Exception as exc:  # pragma: no cover - mirror is fail-soft
-                    logger.warning(
-                        "l2 top-of-book drain failed type={}",
-                        type(exc).__name__,
-                    )
+    async def wait_idle(self) -> None:
+        """Wait for the currently owned drain generation and any successor."""
+        while self._tob_drain_task is not None:
+            task = self._tob_drain_task
+            await asyncio.shield(task)
+            if task is self._tob_drain_task and not self._pending_tob:
+                return
 
-            tob_drain_task.add_done_callback(consume_failure)
+    async def aclose(self) -> None:
+        """Reject new frames and durably drain all coalesced mirror work."""
+        self._closed = True
+        await self.wait_idle()
 
-    async def _on_event(frame: dict) -> FrameDispatchResult:
+    async def __call__(self, frame: dict) -> FrameDispatchResult:
+        if self._closed:
+            raise RuntimeError("L2 event dispatcher is closed")
         event_type = frame.get("event_type", "unknown")
         asset_id_raw = frame.get("asset_id") or ""
         observed_at_raw = _isoformat_ts(frame.get("timestamp") or frame.get("ts"))
@@ -729,7 +739,7 @@ def make_l2_event_handler(
             else None
         )
         logger.debug(f"ws frame type={event_type} asset={asset_id_raw[:16]}")
-        if l2_mirror is None:
+        if self._l2_mirror is None:
             return FrameDispatchResult(False, False, observed_at)
 
         if event_type in ("price_change", "best_bid_ask", "book"):
@@ -737,18 +747,18 @@ def make_l2_event_handler(
             tob_written = False
             book_levels_written = False
             if row is not None:
-                enqueue_top_of_book(row)
+                self._enqueue_top_of_book(row)
             if event_type == "book":
                 if (
                     asset_id_raw
-                    and book_levels_required is not None
-                    and book_levels_required(str(asset_id_raw))
+                    and self._book_levels_required is not None
+                    and self._book_levels_required(str(asset_id_raw))
                 ):
                     book_rows = _book_levels_rows_from_frame(frame, max_levels=10)
                     if book_rows:
                         book_levels_written = (
                             await asyncio.to_thread(
-                                l2_mirror.push_book_levels,
+                                self._l2_mirror.push_book_levels,
                                 book_rows,
                             )
                         ) is True
@@ -756,10 +766,28 @@ def make_l2_event_handler(
         if event_type == "last_trade_price":
             row = _trade_row_from_frame(frame)
             if row is not None:
-                await asyncio.to_thread(l2_mirror.push_trades, [row])
+                await asyncio.to_thread(self._l2_mirror.push_trades, [row])
         return FrameDispatchResult(False, False, observed_at)
 
-    return _on_event
+
+def make_l2_event_handler(
+    l2_mirror: L2SupabaseMirror | None,
+    *,
+    book_levels_required: Callable[[str], bool] | None = None,
+) -> L2EventDispatcher:
+    """Build a non-blocking production WS dispatcher with owned mirror work.
+
+    Top-of-book traffic is coalesced by asset and drained in bulk. Awaiting one
+    PostgREST request per frame made an initial 110-asset dump occupy the receive
+    loop for minutes, which in turn made subscription control miss its live
+    socket. Depth writes remain awaited because they are the durable evidence
+    boundary for L3 promotion. The returned owner must be closed after the WS
+    producer stops so no coalesced write becomes an orphan task.
+    """
+    return L2EventDispatcher(
+        l2_mirror,
+        book_levels_required=book_levels_required,
+    )
 
 
 async def main() -> int:
@@ -1062,23 +1090,26 @@ async def main() -> int:
     finally:
         logger.info("polyarb-l2 daemon stopping")
         server.should_exit = True
-        await _drain_daemon_tasks(
-            server_task=server_task,
-            event_writer_task=l3_event_writer_task,
-            peer_tasks=(
-                watchdog_task,
-                consumer_task,
-                quiet_refresh_task,
-                listener_task,
-                pump_task,
-                l3_promoter_task,
-                l3_sampler_task,
-                l3_boot_task,
-                stop_wait_task,
-            ),
-            normal_shutdown=normal_shutdown,
-            producers_done=l3_producers_done,
-        )
+        try:
+            await _drain_daemon_tasks(
+                server_task=server_task,
+                event_writer_task=l3_event_writer_task,
+                peer_tasks=(
+                    watchdog_task,
+                    consumer_task,
+                    quiet_refresh_task,
+                    listener_task,
+                    pump_task,
+                    l3_promoter_task,
+                    l3_sampler_task,
+                    l3_boot_task,
+                    stop_wait_task,
+                ),
+                normal_shutdown=normal_shutdown,
+                producers_done=l3_producers_done,
+            )
+        finally:
+            await _on_event.aclose()
 
     logger.info("polyarb-l2 daemon stopped cleanly")
     return 0

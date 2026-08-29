@@ -499,6 +499,8 @@ FENCED_DEADLINE_RECONCILER_GATE_COMMANDS = {
         "tests/m1-perception/test_control_plane_recovery_executor.py::test_expired_old_action_worker_cannot_execute_after_reclaim_epoch_bump",
         "tests/m1-perception/test_control_plane_recovery_executor.py::test_process_and_machine_actions_are_durable_disabled_noops",
         "tests/m1-perception/test_control_plane_recovery_executor.py::test_recovery_action_result_never_exposes_receipt_or_pointer_postconditions",
+        "tests/m1-perception/test_l2_main_book_levels.py::test_dispatch_reports_tob_and_depth_outcomes_separately",
+        "tests/m1-perception/test_l2_main_book_levels.py::test_dispatcher_close_owns_and_drains_pending_top_of_book",
         "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_claim_reclaims_expired_worker_lease_and_unwedges_active_index",
         "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_old_worker_cannot_mutate_after_action_lease_reclaim",
         "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_atomic_rollback_keeps_business_and_action_running",

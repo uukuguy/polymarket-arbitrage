@@ -63,4 +63,5 @@ def test_listener_and_pump_share_runtime_state_and_stop_independently():
     assert "ReconciliationState()" in src
     assert "state=reconciliation_state" in src
     assert "await _drain_daemon_tasks(" in src
+    assert "await _on_event.aclose()" in src
     assert "pump_task," in src

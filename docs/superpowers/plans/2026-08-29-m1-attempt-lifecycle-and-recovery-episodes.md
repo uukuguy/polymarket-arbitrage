@@ -835,6 +835,30 @@
   private-formula prohibitions; pass the exact authority and certifier tests.
 - [x] Confirm the amended Climb gate before rerunning the full M1 suite.
 
+### Task 31: Give coalesced L2 mirror work an explicit lifecycle owner
+
+**Files:**
+
+- Modify: `src/polyarb/daemon/l2_main.py`
+- Modify: `tests/m1-perception/test_l2_main_book_levels.py`
+- Modify: `tests/m1-perception/test_l2_startup_prime.py`
+- Modify: `tools/climb/eval_local.py`
+- Modify: `tests/climb/test_eval_local.py`
+
+**Interfaces:**
+
+- `make_l2_event_handler()` returns a callable `L2EventDispatcher` with
+  deterministic `wait_idle()` and idempotent `aclose()` lifecycle methods.
+- The WS producer is stopped before dispatcher close; close rejects new frames
+  and drains the final coalesced top-of-book generation on every daemon exit.
+
+- [x] Reproduce a full-suite scheduling race where the handler returned before
+  `push_top_of_book` started and pytest destroyed the still-pending task.
+- [x] Add RED contracts for explicit idle observation, terminal drain and
+  post-close rejection; implement the minimal owner and pass all L2 dispatcher,
+  startup and daemon-shutdown tests.
+- [ ] Confirm the lifecycle through Climb and a fresh complete M1 gate.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
@@ -846,7 +870,7 @@
   candidate reads, pre-limit exact selection, bounded transport cleanup and
   lease-independent attempt ceilings, exact image identity and half-open
   interruption continuity and deterministic concurrency watchdogs all map to
-  Tasks 1–30.
+  Tasks 1–31.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

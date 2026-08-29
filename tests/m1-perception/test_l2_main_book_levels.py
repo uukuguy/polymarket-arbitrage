@@ -313,7 +313,7 @@ def test_on_event_book_with_non_l3_asset_does_not_call_push_book_levels() -> Non
 
 
 @pytest.mark.asyncio
-async def test_production_dispatch_reports_tob_and_depth_outcomes_separately() -> None:
+async def test_dispatch_reports_tob_and_depth_outcomes_separately() -> None:
     from polyarb.daemon.l2_main import make_l2_event_handler
     from polyarb.observation import l3_promote
 
@@ -324,9 +324,10 @@ async def test_production_dispatch_reports_tob_and_depth_outcomes_separately() -
         mirror.push_top_of_book.return_value = True
         mirror.push_book_levels.return_value = False
 
-        result = await make_l2_event_handler(
+        dispatcher = make_l2_event_handler(
             mirror, book_levels_required=lambda asset_id: asset_id == "0xasset-1"
-        )(
+        )
+        result = await dispatcher(
             _make_book_frame(
                 asset_id="0xasset-1",
                 bids=[_lvl(0.5, 100)],
@@ -334,6 +335,7 @@ async def test_production_dispatch_reports_tob_and_depth_outcomes_separately() -
                 timestamp="2026-07-23T01:02:03Z",
             )
         )
+        await dispatcher.wait_idle()
 
         assert result == FrameDispatchResult(
             tob_written=False,
@@ -352,7 +354,8 @@ async def test_non_book_dispatch_has_explicit_false_depth_outcome() -> None:
 
     mirror = MagicMock()
     mirror.push_top_of_book.return_value = True
-    result = await make_l2_event_handler(mirror)(
+    dispatcher = make_l2_event_handler(mirror)
+    result = await dispatcher(
         {
             "event_type": "best_bid_ask",
             "asset_id": "asset-a",
@@ -361,6 +364,7 @@ async def test_non_book_dispatch_has_explicit_false_depth_outcome() -> None:
             "timestamp": "2026-07-23T01:02:03+00:00",
         }
     )
+    await dispatcher.wait_idle()
 
     assert result == FrameDispatchResult(
         tob_written=False,
@@ -370,6 +374,38 @@ async def test_non_book_dispatch_has_explicit_false_depth_outcome() -> None:
     await asyncio.sleep(0.01)
     mirror.push_top_of_book.assert_called_once()
     mirror.push_book_levels.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_close_owns_and_drains_pending_top_of_book() -> None:
+    from polyarb.daemon.l2_main import make_l2_event_handler
+
+    mirror = MagicMock()
+    mirror.push_top_of_book.return_value = True
+    dispatcher = make_l2_event_handler(mirror)
+
+    await dispatcher(
+        {
+            "event_type": "best_bid_ask",
+            "asset_id": "asset-before-stop",
+            "best_bid": "0.4",
+            "best_ask": "0.6",
+            "timestamp": "2026-07-23T01:02:03+00:00",
+        }
+    )
+    await dispatcher.aclose()
+
+    mirror.push_top_of_book.assert_called_once()
+    assert dispatcher.pending_count == 0
+    with pytest.raises(RuntimeError, match="dispatcher is closed"):
+        await dispatcher(
+            {
+                "event_type": "best_bid_ask",
+                "asset_id": "asset-after-stop",
+                "best_bid": "0.4",
+                "best_ask": "0.6",
+            }
+        )
 
 
 # ── Quick task 260601-depth-yes-usd: _tob_row_from_frame depth fill ────────

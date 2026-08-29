@@ -58,6 +58,7 @@ qualification 86,400 s -- acceptance observation window; it is not a process tim
 | Telegram outbox delivery | `ALERT_DELIVERY_POLICY.provider_timeout_seconds` | stop grace below alert lease | 1 | failure is a durable retryable outbox delivery. |
 | Runtime watchdog control API / Fly API | 10 s individual read | derived 21 s parallel observation round | 1 | read-only, bounded target sets; a missed round becomes an observation failure, never a Machine mutation. |
 | Runtime watchdog page / private event writer | 5 s request | blocking bridge obeys service cancellation | 1 | watchdog remains independent from the transactional DB path. |
+| L2 top-of-book mirror | PostgREST client request bound | dispatcher owner drains after WS producer stops | 1 per coalesced batch | latest row per asset is coalesced; `wait_idle()` is deterministic evidence and `aclose()` prevents orphan tasks. |
 | Control API `/healthz` | 1 s connect, 1 s bootstrap, one 1 s `SELECT 1` | 3.5 s application envelope below Fly 5 s | 1 | readiness never builds the operator snapshot; `/perception/control-plane` retains the full read model. |
 | Local Fly CLI soak read | 30 s operator read | command process timeout | 1 | operator evidence only. Long-running deployment/certificate commands do not receive this bound. |
 
@@ -164,6 +165,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | A long half-open probe outlived its short claim window | a healthy probe interrupted by deployment became retryable behind an already-expired open circuit and required another recovery action, so repeated normal stops could exhaust the episode budget | the fenced interruption transaction renews the existing policy-derived claim window without closing the circuit, changing its defect history or consuming another action |
 | Concurrent PostgreSQL tests used 5/10-second magic barriers, including one unbounded barrier | a healthy lost-wakeup test failed only under full-suite host load, while a missing peer could make another test hang forever | every real-PostgreSQL concurrency barrier uses one named diagnostic watchdog derived from the control-plane full transaction/stop envelope; wall time is not a product assertion |
 | Runtime-authority test fixed the number of policy consumers at three | adding a legitimate interruption consumer failed the full suite even though it reused the sole policy and introduced no private clock | assert every backoff use has a central-policy lookup and forbid copied formulas, without constraining how many lifecycle paths consume the authority |
+| L2 top-of-book writes ran in an anonymous background task | handler return raced the write under host load, tests passed by scheduler luck, and shutdown had no owner to drain the last coalesced batch | an explicit callable dispatcher owns pending rows and its one drain generation; tests wait for idle and daemon cleanup closes it after stopping producers on every exit path |
 
 ## Prohibited patterns
 
@@ -195,6 +197,8 @@ structure-fetch -> structure-materialize -> structure-normalize
   service stop.
 - Encoding ad-hoc wall-clock assertions in concurrency test barriers; diagnostic
   watchdogs must reuse the named database envelope and must not be unbounded.
+- Creating fire-and-forget mirror tasks from a frame handler without an owner
+  that can expose idle state and drain after producers stop.
 
 ## Verification map
 

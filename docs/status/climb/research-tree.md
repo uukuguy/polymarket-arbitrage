@@ -37,6 +37,7 @@
 - **H-027** [confirmed]: A trusted interruption of an authorized half-open probe can renew one bounded claim window without closing the circuit, changing defect history, or consuming another recovery action.
 - **H-028** [confirmed]: Real-PostgreSQL concurrency gates can use one policy-derived diagnostic watchdog without turning host scheduling latency into a product timeout or allowing a missing peer to hang validation forever.
 - **H-029** [confirmed]: Runtime authority contracts can prove central-policy dataflow and reject private formulas without freezing the number of legitimate lifecycle consumers.
+- **H-030** [pending]: Coalesced L2 mirror writes can remain non-blocking while an explicit dispatcher owner exposes deterministic idle and drains the final generation after producers stop.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
