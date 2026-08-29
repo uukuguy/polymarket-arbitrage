@@ -431,6 +431,12 @@ SELECT
                    AS heartbeat_age_seconds,
                extract(epoch FROM (s.observed_at - runtime.last_progress_at))
                    AS progress_age_seconds,
+               extract(epoch FROM greatest(s.observed_at - runtime.heartbeat_deadline_at,
+                                            interval '0 seconds'))
+                   AS heartbeat_overdue_seconds,
+               extract(epoch FROM greatest(s.observed_at - runtime.progress_deadline_at,
+                                            interval '0 seconds'))
+                   AS progress_overdue_seconds,
                extract(epoch FROM greatest(s.observed_at - runtime.lease_deadline_at,
                                             interval '0 seconds')) AS lease_overdue_seconds,
                extract(epoch FROM greatest(s.observed_at - runtime.attempt_deadline_at,
@@ -7791,6 +7797,12 @@ class PostgresControlPlane:
                     ),
                     "progress_age_seconds": _snapshot_seconds(
                         row["progress_age_seconds"], "progress_age_seconds"
+                    ),
+                    "heartbeat_overdue_seconds": _snapshot_seconds(
+                        row["heartbeat_overdue_seconds"], "heartbeat_overdue_seconds"
+                    ),
+                    "progress_overdue_seconds": _snapshot_seconds(
+                        row["progress_overdue_seconds"], "progress_overdue_seconds"
                     ),
                     "lease_overdue_seconds": _snapshot_seconds(
                         row["lease_overdue_seconds"], "lease_overdue_seconds"

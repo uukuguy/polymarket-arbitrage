@@ -25,6 +25,8 @@ min_machines_running = 0
 processes = ["api"]
 
   [[http_service.checks]]
+  # Process liveness only. Strict Postgres readiness is exposed at /health and
+  # the independent watchdog reads /perception/control-plane directly.
   grace_period = "30s"
   interval = "15s"
   method = "GET"

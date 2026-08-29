@@ -98,7 +98,10 @@ def test_watchdog_pages_when_runnable_work_stops_making_durable_progress() -> No
     gate = ProgressGate(max_stall=timedelta(minutes=5))
     healthy = RuntimeObservation(healthy=True, failures=())
     started = datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
-    pending = {"job_counts": {"runnable": 2, "leased": 1, "succeeded": 100}}
+    pending = {
+        "job_counts": {"runnable": 2, "leased": 0, "succeeded": 100},
+        "active_tasks": {"total": 0, "items": []},
+    }
 
     assert gate.apply(healthy, pending, now=started) == healthy
     assert gate.apply(healthy, pending, now=started + timedelta(minutes=4)) == healthy
@@ -106,6 +109,117 @@ def test_watchdog_pages_when_runnable_work_stops_making_durable_progress() -> No
     stalled = gate.apply(healthy, pending, now=started + timedelta(minutes=5, seconds=1))
 
     assert stalled.healthy is False
+    assert stalled.failures == ("control-api:job-progress-stalled:301s",)
+
+
+def test_watchdog_accepts_long_running_job_while_durable_progress_advances() -> None:
+    from polyarb.control_plane.watchdog import ProgressGate, RuntimeObservation
+
+    gate = ProgressGate(max_stall=timedelta(minutes=5))
+    healthy = RuntimeObservation(healthy=True, failures=())
+    started = datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
+
+    def payload(current: int, progress_overdue_seconds: float = 0.0) -> dict[str, object]:
+        return {
+            "job_counts": {"runnable": 1, "leased": 1, "succeeded": 100},
+            "active_tasks": {
+                "total": 1,
+                "items": [
+                    {
+                        "job_key": "structure:generation:certify",
+                        "attempt_id": "attempt-1",
+                        "stage": "verify-parity",
+                        "progress": {"current": current, "total": 1_117},
+                        "heartbeat_overdue_seconds": 0.0,
+                        "progress_overdue_seconds": progress_overdue_seconds,
+                        "lease_overdue_seconds": 0.0,
+                        "attempt_overdue_seconds": 0.0,
+                    }
+                ],
+            },
+        }
+
+    assert gate.apply(healthy, payload(1), now=started) == healthy
+    assert gate.apply(
+        healthy,
+        payload(500),
+        now=started + timedelta(minutes=6),
+    ) == healthy
+    assert gate.apply(
+        healthy,
+        payload(1_000),
+        now=started + timedelta(minutes=12),
+    ) == healthy
+
+
+def test_watchdog_uses_persisted_task_deadlines_instead_of_fixed_wall_clock() -> None:
+    from polyarb.control_plane.watchdog import ProgressGate, RuntimeObservation
+
+    gate = ProgressGate(max_stall=timedelta(minutes=5))
+    healthy = RuntimeObservation(healthy=True, failures=())
+    started = datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
+    payload = {
+        "job_counts": {"leased": 1, "succeeded": 100},
+        "active_tasks": {
+            "total": 1,
+            "items": [
+                {
+                    "job_key": "structure:generation:certify",
+                    "attempt_id": "attempt-1",
+                    "stage": "verify-parity",
+                    "progress": {"current": 500, "total": 1_117},
+                    "heartbeat_overdue_seconds": 0.0,
+                    "progress_overdue_seconds": 31.0,
+                    "lease_overdue_seconds": 0.0,
+                    "attempt_overdue_seconds": 0.0,
+                }
+            ],
+        },
+    }
+
+    observation = gate.apply(healthy, payload, now=started)
+
+    assert observation.healthy is False
+    assert observation.failures == ("control-api:job-progress-overdue:31s",)
+
+
+def test_watchdog_falls_back_to_progress_tokens_during_api_rollout() -> None:
+    from polyarb.control_plane.watchdog import ProgressGate, RuntimeObservation
+
+    gate = ProgressGate(max_stall=timedelta(minutes=5))
+    healthy = RuntimeObservation(healthy=True, failures=())
+    started = datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
+
+    def old_api_payload(current: int) -> dict[str, object]:
+        return {
+            "job_counts": {"leased": 1, "succeeded": 100},
+            "active_tasks": {
+                "total": 1,
+                "items": [
+                    {
+                        "job_key": "structure:generation:certify",
+                        "attempt_id": "attempt-1",
+                        "stage": "verify-parity",
+                        "progress": {"current": current, "total": 1_117},
+                        "lease_overdue_seconds": 0.0,
+                        "attempt_overdue_seconds": 0.0,
+                    }
+                ],
+            },
+        }
+
+    assert gate.apply(healthy, old_api_payload(1), now=started) == healthy
+    assert gate.apply(
+        healthy,
+        old_api_payload(500),
+        now=started + timedelta(minutes=6),
+    ) == healthy
+    stalled = gate.apply(
+        healthy,
+        old_api_payload(500),
+        now=started + timedelta(minutes=11, seconds=1),
+    )
+
     assert stalled.failures == ("control-api:job-progress-stalled:301s",)
 
 

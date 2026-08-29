@@ -21,8 +21,13 @@ from .db_role_contract import scoped_connection_factory
 from .postgres import PostgresControlPlane
 
 
-async def control_plane_healthz(request: Request) -> JSONResponse:
-    """Expose readiness only when the durable authority is readable."""
+async def control_plane_healthz(_request: Request) -> JSONResponse:
+    """Keep Fly routing attached while the HTTP process can answer requests."""
+    return JSONResponse({"status": "ok", "service": "control-plane-api"})
+
+
+async def control_plane_health(request: Request) -> JSONResponse:
+    """Expose strict readiness only when the durable authority is readable."""
     control_plane = getattr(request.app.state, "control_plane", None)
     if control_plane is None or not hasattr(control_plane, "readiness"):
         return JSONResponse(
@@ -87,6 +92,7 @@ def create_control_plane_app(*, control_plane: Any | None) -> Starlette:
     app = Starlette(
         routes=[
             Route("/healthz", control_plane_healthz, methods=["GET"]),
+            Route("/health", control_plane_health, methods=["GET"]),
             Route("/perception/control-plane", control_plane_status, methods=["GET"]),
             Route("/perception/opportunities", current_opportunities, methods=["GET"]),
         ]

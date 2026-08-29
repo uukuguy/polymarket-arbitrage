@@ -61,7 +61,7 @@ class RestartEventGate:
 
 
 class ProgressGate:
-    """Page when durable work is pending but successful-job progress stalls."""
+    """Page only when durable task deadlines or fallback progress actually stall."""
 
     def __init__(self, *, max_stall: timedelta) -> None:
         if max_stall.total_seconds() <= 0:
@@ -69,6 +69,7 @@ class ProgressGate:
         self._max_stall = max_stall
         self._last_succeeded: int | None = None
         self._last_progress_at: datetime | None = None
+        self._last_active_progress: tuple[tuple[object, ...], ...] | None = None
         self._was_pending = False
 
     def apply(
@@ -100,10 +101,34 @@ class ProgressGate:
         assert isinstance(leased, int)
         pending = runnable + leased > 0
         started_pending_work = pending and not self._was_pending
-        if self._last_succeeded is None or succeeded > self._last_succeeded or started_pending_work:
+        active_progress, deadline_failures, deadlines_authoritative = (
+            self._active_task_progress(control_api_payload)
+        )
+        if deadline_failures is None:
+            return RuntimeObservation(
+                healthy=False,
+                failures=(*observation.failures, "control-api:invalid-active-tasks"),
+            )
+        if deadline_failures:
+            return RuntimeObservation(
+                healthy=False,
+                failures=(*observation.failures, *deadline_failures),
+            )
+        active_progress_changed = (
+            active_progress is not None and active_progress != self._last_active_progress
+        )
+        if (
+            self._last_succeeded is None
+            or succeeded > self._last_succeeded
+            or started_pending_work
+            or active_progress_changed
+        ):
             self._last_succeeded = succeeded
             self._last_progress_at = now
+        self._last_active_progress = active_progress
         self._was_pending = pending
+        if active_progress is not None and deadlines_authoritative:
+            return observation
         if not pending or self._last_progress_at is None:
             return observation
         elapsed = now - self._last_progress_at
@@ -116,6 +141,106 @@ class ProgressGate:
                 f"control-api:job-progress-stalled:{int(elapsed.total_seconds())}s",
             ),
         )
+
+    @staticmethod
+    def _active_task_progress(
+        control_api_payload: Mapping[str, object],
+    ) -> tuple[
+        tuple[tuple[object, ...], ...] | None,
+        tuple[str, ...] | None,
+        bool,
+    ]:
+        """Return a stable progress token and deadline failures.
+
+        ``None`` progress preserves compatibility with an older control API that
+        does not expose active tasks.  Once active tasks are present their
+        persisted per-attempt deadlines are authoritative; the watchdog must not
+        replace them with a second, unrelated wall-clock timeout.
+        """
+        active_tasks = control_api_payload.get("active_tasks")
+        if active_tasks is None:
+            return None, (), False
+        if not isinstance(active_tasks, Mapping):
+            return None, None, False
+        items = active_tasks.get("items")
+        total = active_tasks.get("total")
+        if (
+            not isinstance(items, Sequence)
+            or isinstance(items, (str, bytes))
+            or not isinstance(total, int)
+            or isinstance(total, bool)
+            or total < 0
+        ):
+            return None, None, False
+        if total == 0:
+            return (None, (), False) if not items else (None, None, False)
+        if not items or total < len(items):
+            return None, None, False
+
+        tokens: list[tuple[object, ...]] = []
+        failures: list[str] = []
+        deadlines_authoritative = True
+        for item in items:
+            if not isinstance(item, Mapping):
+                return None, None, False
+            job_key = item.get("job_key")
+            attempt_id = item.get("attempt_id")
+            stage = item.get("stage")
+            progress = item.get("progress")
+            if (
+                not isinstance(job_key, str)
+                or not job_key
+                or not isinstance(attempt_id, str)
+                or not attempt_id
+                or not isinstance(stage, str)
+                or not stage
+                or not isinstance(progress, Mapping)
+            ):
+                return None, None, False
+            current = progress.get("current")
+            progress_total = progress.get("total")
+            if (
+                not isinstance(current, int)
+                or isinstance(current, bool)
+                or current < 0
+                or (
+                    progress_total is not None
+                    and (
+                        not isinstance(progress_total, int)
+                        or isinstance(progress_total, bool)
+                        or progress_total < current
+                    )
+                )
+            ):
+                return None, None, False
+            tokens.append((job_key, attempt_id, stage, current, progress_total))
+
+            deadlines_authoritative = deadlines_authoritative and all(
+                field in item
+                for field in ("heartbeat_overdue_seconds", "progress_overdue_seconds")
+            )
+
+            for field, reason in (
+                ("heartbeat_overdue_seconds", "job-heartbeat-overdue"),
+                ("progress_overdue_seconds", "job-progress-overdue"),
+                ("lease_overdue_seconds", "job-lease-overdue"),
+                ("attempt_overdue_seconds", "job-attempt-overdue"),
+            ):
+                overdue = item.get(field)
+                if overdue is None and field in {
+                    "heartbeat_overdue_seconds",
+                    "progress_overdue_seconds",
+                }:
+                    continue
+                if (
+                    not isinstance(overdue, (int, float))
+                    or isinstance(overdue, bool)
+                    or overdue < 0
+                ):
+                    return None, None, False
+                if overdue > 0:
+                    failures.append(f"control-api:{reason}:{int(overdue)}s")
+        return tuple(sorted(tokens)), tuple(failures), deadlines_authoritative
 
 
 class SoakEvidenceGate:

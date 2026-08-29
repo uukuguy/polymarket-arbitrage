@@ -66,8 +66,11 @@ def test_standalone_control_api_health_uses_only_the_minimal_readiness_probe() -
             raise AssertionError(f"health must not build the operator snapshot: {sample_limit}")
 
     with TestClient(create_control_plane_app(control_plane=HealthFocusedControlPlane())) as client:
-        health = client.get("/healthz")
+        platform = client.get("/healthz")
+        health = client.get("/health")
 
+    assert platform.status_code == 200
+    assert platform.json() == {"status": "ok", "service": "control-plane-api"}
     assert health.status_code == 200
     assert health.json() == {"status": "ok", "control_plane": "available"}
     assert calls == ["readiness"]
@@ -77,10 +80,13 @@ def test_standalone_control_api_is_readable_without_legacy_daemon_dependencies()
     from polyarb.control_plane.api import create_control_plane_app
 
     with TestClient(create_control_plane_app(control_plane=_AvailableControlPlane())) as client:
-        health = client.get("/healthz")
+        platform = client.get("/healthz")
+        health = client.get("/health")
         operator = client.get("/perception/control-plane")
         opportunities = client.get("/perception/opportunities?limit=1")
 
+    assert platform.status_code == 200
+    assert platform.json() == {"status": "ok", "service": "control-plane-api"}
     assert health.status_code == 200
     assert health.json() == {"status": "ok", "control_plane": "available"}
     assert operator.status_code == 200
@@ -117,10 +123,13 @@ def test_standalone_control_api_fails_readiness_when_postgres_is_unavailable() -
     from polyarb.control_plane.api import create_control_plane_app
 
     with TestClient(create_control_plane_app(control_plane=None)) as client:
-        health = client.get("/healthz")
+        platform = client.get("/healthz")
+        health = client.get("/health")
         operator = client.get("/perception/control-plane")
         opportunities = client.get("/perception/opportunities")
 
+    assert platform.status_code == 200
+    assert platform.json() == {"status": "ok", "service": "control-plane-api"}
     assert health.status_code == 503
     assert health.json() == {"status": "unavailable", "reason": "control-plane-read-unavailable"}
     assert operator.status_code == 503
@@ -151,12 +160,15 @@ def test_standalone_control_api_health_detaches_a_stalled_readiness_probe(
     try:
         app = api.create_control_plane_app(control_plane=StalledControlPlane())
         with TestClient(app) as client:
-            health = client.get("/healthz")
+            health = client.get("/health")
+            platform = client.get("/healthz")
         assert health.status_code == 503
         assert health.json() == {
             "status": "unavailable",
             "reason": "control-plane-read-unavailable",
         }
+        assert platform.status_code == 200
+        assert platform.json() == {"status": "ok", "service": "control-plane-api"}
         assert started.is_set()
         assert monotonic() - before < 0.2
     finally:

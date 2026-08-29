@@ -58,9 +58,10 @@ CONTROL_PLANE_DB_POLICY = DatabaseDeadlinePolicy(
     lock_timeout_ms=1_000,
 )
 
-# Fly allows five seconds for the control API readiness request.  This policy
-# covers the complete connection -> bootstrap -> SELECT 1 sequence below that
-# platform boundary, rather than reusing the heavier operator-snapshot budget.
+# The strict control API readiness route has a deliberately small database
+# envelope.  Fly probes the process-only /healthz route instead, so a transient
+# database failure remains externally readable through /health and the typed
+# operator endpoints rather than removing the sole API Machine from routing.
 CONTROL_PLANE_HEALTH_DB_POLICY = DatabaseDeadlinePolicy(
     connect_timeout_seconds=1,
     statement_timeout_ms=1_000,

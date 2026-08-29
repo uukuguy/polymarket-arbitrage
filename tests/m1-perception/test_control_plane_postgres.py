@@ -9676,6 +9676,8 @@ def test_runtime_read_model_projects_self_healing_state_bounded_and_read_only(
             "attempt_deadline_at": (now + timedelta(seconds=1180)).isoformat(),
             "heartbeat_age_seconds": 20.0,
             "progress_age_seconds": 7.0,
+            "heartbeat_overdue_seconds": 0.0,
+            "progress_overdue_seconds": 0.0,
             "lease_overdue_seconds": 0.0,
             "attempt_overdue_seconds": 0.0,
         }
