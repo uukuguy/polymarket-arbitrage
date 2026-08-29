@@ -364,7 +364,7 @@
   existing slow-call polling, drain-before-error and terminal semantics.
 - [x] Run the complete affected Quote, Opportunity and Structure suites, Ruff
   and Pyright.
-- [ ] Roll an exact release and prove the interrupted Opportunity job reclaims,
+- [x] Roll an exact release and prove the interrupted Opportunity job reclaims,
   publishes a fresh pointer, and allows one uninterrupted qualification epoch.
 
 ### Task 13: Separate platform readiness from the operator snapshot
@@ -395,7 +395,7 @@
   policy; detach stalled reads and return typed 503 without provider detail.
 - [x] Run API, deployment, DB-role, alert-clock, Ruff, Pyright and real
   PostgreSQL focused gates.
-- [ ] Roll the exact API image and prove a sustained healthy platform window
+- [x] Roll the exact API image and prove a sustained healthy platform window
   while the full operator endpoint remains available.
 
 ### Task 14: Isolate health-contract tests from host disk pressure
@@ -418,13 +418,77 @@
 - [x] Scope deterministic volume evidence to HTTP/Quote health contracts while
   preserving the explicit threshold test.
 - [x] Run both complete affected health files and Ruff GREEN.
-- [ ] Run a fresh complete M1 suite without an outer timeout.
+- [x] Run a fresh complete M1 suite without an outer timeout.
+
+### Task 15: Separate Structure range capacity from generational admission
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/structure_worker.py`
+- Modify: `src/polyarb/control_plane/structure_source.py`
+- Modify: `src/polyarb/control_plane/postgres.py`
+- Modify: `src/polyarb/control_plane/scheduler.py`
+- Modify: `src/polyarb/cli_control_plane.py`
+- Modify: `src/polyarb/config.py`
+- Test: `tests/m1-perception/test_transactional_structure_worker.py`
+- Test: `tests/m1-perception/test_transactional_structure_source_worker.py`
+- Test: `tests/m1-perception/test_control_plane_cli.py`
+- Test: `tests/m1-perception/test_control_plane_postgres.py`
+
+**Interfaces:**
+
+- `TransactionalStructureRangePool` owns a bounded set of independently
+  fenced range lanes and exposes their common lease policy to service shutdown.
+- `structure_range_max_concurrency` is the sole Structure range capacity
+  authority; `pool-turns` remains a wave budget.
+- `structure_high_water=1` is the default generational admission barrier and
+  does not alter attempt, lease or freshness deadlines.
+
+- [x] Measure the production contradiction: 1,115 ranges at 8.2 ranges/minute
+  project to roughly 136 minutes against a 15-minute freshness gate.
+- [x] Prove the 2,000-job high-water admits overlapping generations.
+- [x] Add RED tests for simultaneous lane entry, distinct identities, shared
+  clients, common lease validation, sibling drain and default high-water.
+- [x] Implement twelve bounded lanes from `ceil(136 / 15) + 2` and one-range
+  generational backpressure without changing lifecycle deadlines.
+- [x] Run focused worker/source/CLI/PostgreSQL/settings suites, Ruff and
+  modified-file Pyright.
+- [x] Run the complete M1 suite without an outer timeout.
+- [ ] Build an exact release, canary only the Structure range Machine and prove
+  twelve simultaneous distinct leases plus a projected generation drain below
+  900 seconds before rolling sibling roles.
+
+### Task 16: Give high-frequency SQLite drift readers explicit ownership
+
+**Files:**
+
+- Modify: `src/polyarb/storage/sqlite_store.py`
+- Modify: `tests/m1-perception/test_structure_drift_performance.py`
+
+**Interfaces:**
+
+- `_connect_structure_drift_read()` owns and explicitly closes each page-local
+  connection on success, early return and exception.
+- Classifier benchmark observers also close their direct SQLite probes; test
+  instrumentation may not become a second resource leak.
+
+- [x] Observe roughly 600 descriptors during the 120k production-shaped gate
+  and distinguish transaction context exit from connection close.
+- [x] Add a RED/GREEN real-connection wrapper proof requiring ten opens and ten
+  closes across ten pages.
+- [x] Route high-frequency event/source/projection/member/truth/evidence reads
+  through the explicit owner without changing page or transaction boundaries.
+- [x] Run complete drift classification, projection and end-to-end suites,
+  Ruff, and the full M1 suite without an outer timeout.
+- [x] Complete the standalone 120k gate with direct benchmark observers closed
+  and record bounded descriptor evidence.
 
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
   sequencing, cancellation, event-loop claim isolation, fan-in wakeup repair,
-  inventory, operator wait and production proof all map to Tasks 1–12.
+  inventory, operator wait, production proof, capacity/backpressure and
+  connection ownership all map to Tasks 1–16.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

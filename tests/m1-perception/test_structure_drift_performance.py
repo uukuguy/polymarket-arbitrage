@@ -7,6 +7,7 @@ import statistics
 import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1011,7 +1012,10 @@ def _run_production_shaped_classifier_benchmark(
         started_total = time.perf_counter()
         terminal = ""
         for chunk_index in range(2_000):
-            with sqlite3.connect(sample_path) as con:
+            # The phase probe is an observer, not part of the classifier
+            # transaction. sqlite3's context manager does not close, so this
+            # 2,000-turn loop needs an explicit connection owner too.
+            with closing(sqlite3.connect(sample_path)) as con:
                 phase = str(
                     con.execute(
                         "SELECT phase FROM structure_generation_drift_progress "
@@ -1042,7 +1046,7 @@ def _run_production_shaped_classifier_benchmark(
         else:
             pytest.fail("120k classifier-v2 benchmark did not reach terminal state")
         total = time.perf_counter() - started_total
-        with sqlite3.connect(sample_path) as con:
+        with closing(sqlite3.connect(sample_path)) as con:
             terminal_receipts = int(
                 con.execute(
                     "SELECT COUNT(*) FROM structure_generation_drift_terminal_receipts "

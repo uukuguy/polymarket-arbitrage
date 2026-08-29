@@ -2508,3 +2508,22 @@ success is not user receipt/read evidence.
 - A lifecycle test wraps real SQLite connections, performs ten pages and
   requires ten observed closes. Resource lifetime must be tested as behavior,
   not inferred from `with` syntax.
+- Test observers are part of the same resource graph. After production readers
+  were fixed, the 120k benchmark's per-chunk phase probe still retained roughly
+  160 direct SQLite connections. Those probes now use explicit `closing()`;
+  instrumentation cannot be exempt from the lifecycle contract it measures.
+- The standalone 120k gate then passed in 902.94 seconds. Repeated process
+  samples across calibration and all three measured databases peaked at four
+  `lsof` entries over three DB/WAL/SHM paths with no per-chunk growth.
+
+### §2.74 Emergency backpressure may stop admission but cannot prove capacity (2026-08-29)
+
+- The old v11 coordinator was safely restarted with only
+  `--structure-high-water 1` added. It exited code 0 within the declared
+  `SIGTERM/40s` contract and immediately reported `backpressured:structure`.
+- This prevents a third generation from entering while preserving both
+  admitted generations, their leases and checkpoints. It is a reversible
+  queue-growth stopgap, not acceptance evidence for the twelve-lane worker.
+- Capacity is accepted only after an exact-image Structure-only canary proves
+  distinct concurrent leases, bounded memory and projected complete-generation
+  drain below the unchanged 900-second freshness gate.
