@@ -4857,14 +4857,12 @@ async def test_actual_drift_child_parser_resumes_committed_chunk(
         max_rows=1,
         max_chunks=1,
         max_elapsed_s=5.0,
-        timeout_s=10.0,
     )
     second = await run_structure_drift_in_subprocess(
         db_path=store.db_path,
         max_rows=1,
         max_chunks=1,
         max_elapsed_s=5.0,
-        timeout_s=10.0,
     )
 
     assert first.chunks_processed == 1
@@ -5012,7 +5010,6 @@ async def test_actual_drift_child_defers_on_real_sqlite_writer_contention(
             max_rows=1,
             max_chunks=100,
             max_elapsed_s=45.0,
-            timeout_s=10.0,
         )
     finally:
         blocker.execute("ROLLBACK")
@@ -5117,7 +5114,6 @@ async def test_production_shaped_845_848_children_resume_to_sealed(
             max_rows=1,
             max_chunks=3,
             max_elapsed_s=5.0,
-            timeout_s=10.0,
         )
         process_count += 1
         total_chunks += checkpoint.chunks_processed

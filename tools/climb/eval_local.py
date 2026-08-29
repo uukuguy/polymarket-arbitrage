@@ -507,6 +507,8 @@ FENCED_DEADLINE_RECONCILER_GATE_COMMANDS = {
         "tests/m1-perception/test_daemon_shutdown.py::test_daemon_task_exit_wins_the_l1_supervision_race_without_orphan_waiter",
         "tests/m1-perception/test_daemon_shutdown.py::test_l1_main_supervises_all_daemon_tasks_after_the_startup_commit",
         "tests/daemon/test_l2_main_startup.py::test_shutdown_uses_shared_daemon_drain_authority",
+        "tests/m1-perception/test_scheduler.py::test_structure_drift_outer_budget_is_derived_from_slice_and_shutdown",
+        "tests/m1-perception/test_structure_drift_end_to_end.py::test_actual_drift_child_defers_on_real_sqlite_writer_contention",
         "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_claim_reclaims_expired_worker_lease_and_unwedges_active_index",
         "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_old_worker_cannot_mutate_after_action_lease_reclaim",
         "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_atomic_rollback_keeps_business_and_action_running",

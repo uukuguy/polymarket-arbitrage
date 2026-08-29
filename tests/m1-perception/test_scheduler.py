@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import json
 import signal
 import sqlite3
@@ -1452,6 +1453,23 @@ async def test_structure_drift_child_parser_accepts_bounded_slice() -> None:
     )
 
 
+def test_structure_drift_outer_budget_is_derived_from_slice_and_shutdown() -> None:
+    from polyarb.daemon.scheduler import (
+        STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S,
+        structure_drift_subprocess_timeout_s,
+    )
+
+    assert structure_drift_subprocess_timeout_s(45.0) == (
+        45.0 + STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S
+    )
+    assert structure_drift_subprocess_timeout_s(5.0) == (
+        5.0 + STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S
+    )
+    assert "timeout_s=75.0" not in inspect.getsource(
+        SnapshotScheduler._maybe_advance_structure_drift
+    )
+
+
 @pytest.mark.asyncio
 async def test_structure_drift_child_cancel_terminates_then_kills() -> None:
     from polyarb.daemon.scheduler import run_structure_drift_in_subprocess
@@ -2478,7 +2496,6 @@ async def test_pending_structure_drift_slice_precedes_snapshot_child(
         max_rows=500,
         max_chunks=100,
         max_elapsed_s=45.0,
-        timeout_s=75.0,
         terminate_timeout_s=15.0,
     )
     assert producer_lock.locked() is False

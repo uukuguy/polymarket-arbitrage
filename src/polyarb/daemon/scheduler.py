@@ -58,6 +58,14 @@ STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S = 15
 STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S = 2 * STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S
 
 
+def structure_drift_subprocess_timeout_s(max_elapsed_s: float) -> float:
+    """Derive the parent envelope from child work plus owned shutdown."""
+
+    if max_elapsed_s <= 0:
+        raise ValueError("structure drift slice must be positive")
+    return max_elapsed_s + STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S
+
+
 class SchedulerState(StrEnum):
     """Producer lifecycle; RECOVERING remains active but is health-visible."""
 
@@ -441,7 +449,7 @@ async def run_structure_drift_in_subprocess(
     max_chunks: int,
     max_elapsed_s: float,
     spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = (asyncio.create_subprocess_exec),
-    timeout_s: float = 75.0,
+    timeout_s: float | None = None,
     terminate_timeout_s: float = STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S,
 ) -> IsolatedStructureDriftCheckpoint:
     """Run one cooperative drift slice outside the scheduler event loop."""
@@ -491,10 +499,13 @@ async def run_structure_drift_in_subprocess(
         result.stderr_tail = safe_marker
         return result
 
+    effective_timeout_s = (
+        structure_drift_subprocess_timeout_s(max_elapsed_s) if timeout_s is None else timeout_s
+    )
     try:
         stdout, stderr = await asyncio.wait_for(
             asyncio.shield(communicate_task),
-            timeout=timeout_s,
+            timeout=effective_timeout_s,
         )
     except asyncio.CancelledError as error:
         _, stderr = await terminate_then_kill()
@@ -1478,7 +1489,6 @@ class SnapshotScheduler:
                     max_rows=max_rows,
                     max_chunks=max_chunks,
                     max_elapsed_s=slice_s,
-                    timeout_s=75.0,
                     terminate_timeout_s=STRUCTURE_SUBPROCESS_TERMINATE_STAGE_S,
                 )
             except asyncio.CancelledError as error:
