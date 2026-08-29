@@ -860,6 +860,29 @@
 - [x] Confirm the lifecycle through Climb and pass the fresh complete M1 gate
   before exact-image build.
 
+### Task 32: Align L2 daemon drain with the platform termination contract
+
+**Files:**
+
+- Add: `src/polyarb/daemon/lifecycle.py`
+- Modify: `src/polyarb/daemon/l2_main.py`
+- Modify: `fly-l2.toml`
+- Modify: `tests/m1-perception/test_daemon_shutdown.py`
+
+**Interfaces:**
+
+- One named policy pair owns the 30-second cooperative daemon drain and the
+  40-second Fly termination window.
+- `fly-l2.toml` explicitly requests `SIGTERM/40s`; L2 no longer relies on a
+  provider default or a private five-second deadline.
+
+- [x] Add a RED contract proving the L2 drain default, signal and platform
+  window share one ordered authority.
+- [x] Replace the local five-second default, declare the Fly lifecycle and pass
+  the complete L2 plus daemon-shutdown regression group.
+- [x] Confirm the amended lifecycle gate and include it in the next exact
+  runtime image before starting the 86,400-second qualification window.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
@@ -871,7 +894,7 @@
   candidate reads, pre-limit exact selection, bounded transport cleanup and
   lease-independent attempt ceilings, exact image identity and half-open
   interruption continuity and deterministic concurrency watchdogs all map to
-  Tasks 1–31.
+  Tasks 1–32.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

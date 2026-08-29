@@ -844,3 +844,28 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-031
+  description: An L2 daemon can use one explicit process-level drain budget beneath
+    a longer declared Fly termination window, eliminating provider-default and private
+    shutdown clocks.
+  parent_paradigm: fenced-deadline-reconciler
+  expected_lift: Make L2 interruption ordering executable and stable across platform
+    defaults while preserving deterministic producer, writer and dispatcher drain.
+  cost_h: 0.25
+  ranking: 1.0
+  status: confirmed
+  created_at: '2026-08-29T18:25:00+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 34
+    run: 20260829-103017-h-031
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed

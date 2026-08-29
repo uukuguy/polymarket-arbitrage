@@ -166,6 +166,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Concurrent PostgreSQL tests used 5/10-second magic barriers, including one unbounded barrier | a healthy lost-wakeup test failed only under full-suite host load, while a missing peer could make another test hang forever | every real-PostgreSQL concurrency barrier uses one named diagnostic watchdog derived from the control-plane full transaction/stop envelope; wall time is not a product assertion |
 | Runtime-authority test fixed the number of policy consumers at three | adding a legitimate interruption consumer failed the full suite even though it reused the sole policy and introduced no private clock | assert every backoff use has a central-policy lookup and forbid copied formulas, without constraining how many lifecycle paths consume the authority |
 | L2 top-of-book writes ran in an anonymous background task | handler return raced the write under host load, tests passed by scheduler luck, and shutdown had no owner to drain the last coalesced batch | an explicit callable dispatcher owns pending rows and its one drain generation; tests wait for idle and daemon cleanup closes it after stopping producers on every exit path |
+| L2 task drain used a private five-second default while Fly declared no stop contract | cooperative cleanup could be force-cancelled early or the platform could choose an implicit signal/window, making the actual ordering deployment-dependent | one daemon lifecycle policy owns a 30-second drain below an explicit `SIGTERM/40s` platform window; the executable config/signature contract rejects drift |
 
 ## Prohibited patterns
 
@@ -199,6 +200,8 @@ structure-fetch -> structure-materialize -> structure-normalize
   watchdogs must reuse the named database envelope and must not be unbounded.
 - Creating fire-and-forget mirror tasks from a frame handler without an owner
   that can expose idle state and drain after producers stop.
+- Giving a daemon a private shutdown timeout without an explicit, longer
+  platform termination window and a tested ordering relationship.
 
 ## Verification map
 
