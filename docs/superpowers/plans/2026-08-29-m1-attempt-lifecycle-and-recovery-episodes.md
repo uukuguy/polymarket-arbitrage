@@ -508,7 +508,7 @@
   round before the existing claim query.
 - [x] Run the complete PostgreSQL/Structure/Quote/scheduler regression group,
   Ruff and modified-file Pyright.
-- [ ] Build a new exact image and repeat the isolated Structure canary; require
+- [x] Build a new exact image and repeat the isolated Structure canary; require
   live leases `<= 12`, no retry storm and projected generation drain below 900
   seconds before any sibling rollout.
 
@@ -537,7 +537,7 @@
   and Quote terminal producers attempt to commit.
 - [x] Make direct wake non-blocking and prove both producers commit, the
   successor remains waiting, and bounded repair advances it from durable facts.
-- [ ] Run the complete PostgreSQL/worker/full-M1 gates, build an exact image and
+- [x] Run the complete PostgreSQL/worker/full-M1 gates, build an exact image and
   repeat the Structure-only canary before any sibling rollout.
 
 ### Task 19: Close the source-to-materializer generation admission gap
@@ -567,7 +567,7 @@
   certification ordering.
 - [x] Implement one fixed pipeline-backlog predicate in admission and
   materializer claim eligibility, then run focused and complete gates.
-- [ ] Restore coordinator only on an exact canary release that proves no fourth
+- [x] Restore coordinator only on an exact canary release that proves no fourth
   generation is admitted/materialized while prior generations are unfinished.
 
 ### Task 20: Make production capacity changes explicit and reversible
@@ -596,9 +596,40 @@
   1.589s commit/finish on average.
 - [x] Add RED/GREEN contracts for one complete guest-shape update, rejection of
   partial/invalid shapes, immutable input and redacted old/new resource proof.
-- [ ] Run a shared-2x Structure-only A/B canary and accept it only if a fresh
+- [x] Run a shared-2x Structure-only A/B canary and accept it only if a fresh
   five-minute window exceeds 74.3 successes/minute without ownership growth,
   repeated operational failures, expired leases or open circuits.
+
+### Task 21: Keep the operator snapshot bounded as history grows
+
+**Files:**
+
+- Create: `alembic/versions/036_m1_operator_snapshot_indexes.py`
+- Create: `tests/alembic/test_036.py`
+- Modify: `src/polyarb/control_plane/db_role_admin.py`
+- Modify: `src/polyarb/control_plane/rollout.py`
+
+**Interfaces:**
+
+- `attempts LIMIT N` is backed by global `(started_at DESC, attempt_id DESC)`;
+  it must not scan all historical attempts to return at most 100 rows.
+- pending outbox sampling is backed by a partial
+  `(created_at DESC, outbox_id DESC) WHERE state='pending'` index; delivery's
+  existing `(state, next_attempt_at)` authority remains unchanged.
+- Production index builds and drops use PostgreSQL `CONCURRENTLY` inside an
+  Alembic autocommit block. An observation repair may not block writers.
+- The five-second data-statement deadline remains unchanged; schema revision
+  036 makes the work fit the boundary instead of enlarging it.
+
+- [x] Reproduce `control-plane status` as `QueryCanceled` under 12-lane load.
+- [x] Capture a read-only production `EXPLAIN ANALYZE`: 2.337s warm execution,
+  including a 630.683ms pending-outbox sequential scan and a parallel
+  111k-row attempt-history scan.
+- [x] Add RED/GREEN revision tests for concurrent DDL, exact definitions,
+  downgrade and real PostgreSQL planner use of both indexes.
+- [ ] Apply revision 036, repeat the production plan/status probe under load,
+  and require an index-backed result within the unchanged five-second statement
+  boundary before rolling the new exact runtime image.
 
 ## Self-review
 
@@ -607,7 +638,7 @@
   inventory, operator wait, production proof, capacity/backpressure and
   connection ownership, worker-identity capacity and producer commit
   independence, cross-shape generation ordering and explicit capacity rollout
-  all map to Tasks 1–20.
+  and bounded operator observation all map to Tasks 1–21.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and
