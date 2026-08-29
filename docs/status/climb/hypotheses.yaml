@@ -967,3 +967,28 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-036
+  description: Platform-exact readiness grace and release-input identity checks can
+    keep declared daemon startup behavior equal to the configuration Fly actually
+    executes.
+  parent_paradigm: fenced-deadline-reconciler
+  expected_lift: Eliminate silent provider timeout normalization and prevent dirty
+    Fly config from being pushed under an older immutable Git revision label.
+  cost_h: 0.25
+  ranking: 1.0
+  status: confirmed
+  created_at: '2026-08-29T20:45:00+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 39
+    run: 20260829-124527-h-036
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed

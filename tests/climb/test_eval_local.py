@@ -348,6 +348,8 @@ def test_fenced_deadline_reconciler_profile_uses_exact_local_recovery_gates() ->
             "tests/daemon/test_l2_main_startup.py::test_shutdown_uses_shared_daemon_drain_authority",
             "tests/m1-perception/test_scheduler.py::test_structure_slice_outer_budget_is_derived_from_work_and_shutdown",
             "tests/m1-perception/test_makefile_contract.py::test_docker_targets_scope_context_without_mutating_global_default",
+            "tests/m1-perception/test_daemon_shutdown.py::test_daemon_readiness_grace_matches_platform_cap_and_outlives_startup",
+            "tests/m1-perception/test_makefile_contract.py::test_runtime_image_build_treats_fly_config_as_release_input",
             "tests/m1-perception/test_structure_drift_end_to_end.py::test_actual_drift_child_defers_on_real_sqlite_writer_contention",
             "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_claim_reclaims_expired_worker_lease_and_unwedges_active_index",
             "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_old_worker_cannot_mutate_after_action_lease_reclaim",
