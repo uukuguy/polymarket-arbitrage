@@ -4,7 +4,7 @@
 
 ## Session
 
-- Last cycle: 36
+- Last cycle: 38
 - Next action: rank next pending hypothesis
 
 ## In flight
@@ -41,6 +41,8 @@
 - **H-031** [confirmed]: An L2 daemon can use one explicit process-level drain budget beneath a longer declared Fly termination window, eliminating provider-default and private shutdown clocks.
 - **H-032** [confirmed]: One stop-aware startup deadline plus continuous supervision of every resident daemon task can eliminate copied readiness clocks and partially alive processes without weakening durable recovery.
 - **H-033** [confirmed]: A Structure drift parent can derive its sole normal subprocess envelope from the cooperative child slice plus the existing owned shutdown budget, eliminating shorter test clocks and copied production constants.
+- **H-034** [confirmed]: Every cooperative Structure subprocess parent can derive its only normal outer envelope from the child work slice plus one shared owned shutdown budget.
+- **H-035** [confirmed]: Command-scoped Docker context selection plus daemon and VM capacity reads can isolate M1 builds without mutating the user-global Docker default.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
@@ -85,3 +87,5 @@
 - 20260829-103017-h-031: 100.0 (confirmed)
 - 20260829-104600-h-032: 100.0 (confirmed)
 - 20260829-113048-h-033: 100.0 (confirmed)
+- 20260829-120923-h-034: 100.0 (confirmed)
+- 20260829-121031-h-035: 100.0 (confirmed)

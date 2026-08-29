@@ -919,3 +919,51 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-034
+  description: Every cooperative Structure subprocess parent can derive its only normal
+    outer envelope from the child work slice plus one shared owned shutdown budget.
+  parent_paradigm: fenced-deadline-reconciler
+  expected_lift: Prevent sibling Structure paths from reintroducing copied outer clocks
+    while preserving explicit tiny overrides for deterministic reap tests.
+  cost_h: 0.25
+  ranking: 1.0
+  status: confirmed
+  created_at: '2026-08-29T20:20:00+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 37
+    run: 20260829-120923-h-034
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
+- id: H-035
+  description: Command-scoped Docker context selection plus daemon and VM capacity
+    reads can isolate M1 builds without mutating the user-global Docker default.
+  parent_paradigm: fenced-deadline-reconciler
+  expected_lift: Prevent cross-project Docker routing and full-VM failures while keeping
+    cleanup exact, read-before-write, and recoverable from remote immutable images.
+  cost_h: 0.25
+  ranking: 1.0
+  status: confirmed
+  created_at: '2026-08-29T20:21:00+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 38
+    run: 20260829-121031-h-035
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
