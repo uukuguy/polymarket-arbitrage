@@ -4,7 +4,7 @@
 
 ## Session
 
-- Last cycle: 35
+- Last cycle: 36
 - Next action: rank next pending hypothesis
 
 ## In flight
@@ -40,6 +40,7 @@
 - **H-030** [confirmed]: Coalesced L2 mirror writes can remain non-blocking while an explicit dispatcher owner exposes deterministic idle and drains the final generation after producers stop.
 - **H-031** [confirmed]: An L2 daemon can use one explicit process-level drain budget beneath a longer declared Fly termination window, eliminating provider-default and private shutdown clocks.
 - **H-032** [confirmed]: One stop-aware startup deadline plus continuous supervision of every resident daemon task can eliminate copied readiness clocks and partially alive processes without weakening durable recovery.
+- **H-033** [confirmed]: A Structure drift parent can derive its sole normal subprocess envelope from the cooperative child slice plus the existing owned shutdown budget, eliminating shorter test clocks and copied production constants.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts
@@ -83,3 +84,4 @@
 - 20260829-093503-h-030: 100.0 (confirmed)
 - 20260829-103017-h-031: 100.0 (confirmed)
 - 20260829-104600-h-032: 100.0 (confirmed)
+- 20260829-113048-h-033: 100.0 (confirmed)

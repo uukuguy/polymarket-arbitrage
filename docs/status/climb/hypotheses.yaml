@@ -894,3 +894,28 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-033
+  description: A Structure drift parent can derive its sole normal subprocess envelope
+    from the cooperative child slice plus the existing owned shutdown budget, eliminating
+    shorter test clocks and copied production constants.
+  parent_paradigm: fenced-deadline-reconciler
+  expected_lift: Prevent host-load false timeouts while retaining deterministic TERM/KILL
+    reaping and real SQLite writer-contention deferral.
+  cost_h: 0.25
+  ranking: 1.0
+  status: confirmed
+  created_at: '2026-08-29T19:35:00+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 36
+    run: 20260829-113048-h-033
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
