@@ -761,6 +761,34 @@
   label, architecture, UID, revision 036, Supercronic checksum and eight-job
   order before any Machine update.
 
+### Task 28: Preserve half-open recovery authority across trusted interruption
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/postgres.py`
+- Modify: `tests/m1-perception/test_control_plane_postgres.py`
+- Modify: `docs/dev/m1-runtime-boundary-inventory.md`
+- Modify: `tools/climb/eval_local.py`
+- Modify: `tests/climb/test_eval_local.py`
+
+**Interfaces:**
+
+- `finish_interrupted()` keeps an open circuit's failure identity and count,
+  but renews `next_probe_at` from the existing component retry policy in the
+  same fenced transaction.
+- Trusted interruption never closes the circuit, creates a new episode or
+  consumes another recovery action; the replacement worker must claim within
+  the renewed bounded window.
+
+- [x] Reproduce production deployment interruption after an authorized
+  certifier probe had outlived its 60-second claim window: the attempt became
+  retryable but could not be reclaimed without a second action.
+- [x] Add a real-PostgreSQL RED/GREEN contract that runs a half-open attempt
+  beyond the original window, interrupts it, immediately reclaims epoch N+1,
+  and proves circuit count/state plus episode budget are unchanged.
+- [ ] Run the complete control-plane, Climb lifecycle and full M1 gates before
+  rebuilding and rolling the exact image.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
@@ -770,8 +798,8 @@
   independence, cross-shape generation ordering, explicit capacity rollout,
   bounded operator observation, executable recovery entrypoints and bounded
   candidate reads, pre-limit exact selection, bounded transport cleanup and
-  lease-independent attempt ceilings and exact image identity all map to Tasks
-  1–27.
+  lease-independent attempt ceilings, exact image identity and half-open
+  interruption continuity all map to Tasks 1–28.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

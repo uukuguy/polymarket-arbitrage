@@ -6587,12 +6587,22 @@ class PostgresControlPlane:
         """Release a stopped attempt for immediate resume without defect accounting."""
         self._validate_aware(now, "now")
         self._validate_nonempty(component=component)
-        runtime_retry_policy(component)
+        retry_policy = runtime_retry_policy(component)
         with (
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
             _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+            cursor.execute(
+                """
+                SELECT consecutive_failures, state
+                FROM m1_job_circuits
+                WHERE job_key = %s
+                FOR UPDATE
+                """,
+                (lease.job_key,),
+            )
+            circuit = cursor.fetchone()
             self._append_retry_runtime_events_cursor(
                 cursor,
                 lease=lease,
@@ -6616,6 +6626,26 @@ class PostgresControlPlane:
             )
             if cursor.rowcount != 1:
                 raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            if circuit is not None and circuit["state"] == "open":
+                probe_delay_seconds = retry_policy.retry_backoff_seconds(
+                    int(circuit["consecutive_failures"])
+                )
+                cursor.execute(
+                    """
+                    UPDATE m1_job_circuits
+                    SET next_probe_at = %s, updated_at = %s
+                    WHERE job_key = %s AND state = 'open'
+                    """,
+                    (
+                        now + timedelta(seconds=probe_delay_seconds),
+                        now,
+                        lease.job_key,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StaleLeaseError(
+                        f"circuit changed during interruption for {lease.job_key}"
+                    )
             cursor.execute(
                 """
                 UPDATE m1_job_attempts

@@ -39,7 +39,7 @@ qualification 86,400 s -- acceptance observation window; it is not a process tim
 | Worker claim bridge | `service_lifecycle.claim_worker_job()` delegates to database policy without another timer | first service cancellation drains; grace expiry detaches and the lease fence owns a late result | claimed lease and attempt row, or no mutation | blocking-claim event-loop test plus static async-worker audit |
 | Terminal fan-in | predecessor terminal transaction plus certifier-row lock | concurrent siblings serialize their final eligibility read; claim-time repair advances at most one lost wakeup | every input has receipt and matching job is `succeeded` | concurrent PostgreSQL barrier and historical-repair tests |
 | Durable retry | `RuntimeRetryPolicy` | no in-process retry sleep; writes `next_attempt_at` | attempt, circuit and incident rows | retry/circuit PostgreSQL tests |
-| Circuit probe | `m1_job_circuits.next_probe_at` | no recovery-budget-derived clock | circuit row and action ledger | revision 034 and circuit-clock tests |
+| Circuit probe | `m1_job_circuits.next_probe_at` | a recovery action opens one bounded claim window; trusted service interruption renews that window without another action or defect | circuit row and action ledger | revision 034 and circuit/interruption PostgreSQL tests |
 | Recovery action count | revision 035 episode row | no reset on controller reclaim; new episode gets a separate row | `(controller,target,episode)` budget | revision 035 and episode fault case |
 | Scheduler cadence | caller `interval_seconds` | never cancels an active lane; recomputes remaining time after observer work | completed turn callback | scheduler service tests |
 | Terminal shutdown | `service_lifecycle.terminal_grace_seconds()` | first cancel requests drain; second cancel detaches; fence owns late result | `ServiceStopRequested` or terminal receipt | service lifecycle and interruption tests |
@@ -116,7 +116,9 @@ structure-fetch -> structure-materialize -> structure-normalize
   commit completion.
 - Normal cancellation calls `finish_interrupted`, writes
   `ServiceStopRequested`, schedules immediate resume, and does not increment a
-  circuit defect streak.
+  circuit defect streak. If the attempt was an authorized half-open probe, the
+  same transaction renews one bounded claim window while keeping the circuit
+  open, its failure fingerprint/count unchanged, and its episode budget intact.
 - Failed source attempts retire their Gamma transport generation before the
   next attempt. They keep the shared limiter, so replacement cannot evade rate
   policy.
@@ -159,6 +161,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Normal Gamma cleanup had no bound | durable stop could finish but `scheduler.aclose()` could hold the process until platform kill | explicit close uses the same two-second fail-soft transport cleanup boundary |
 | Certifier's nominal absolute hour was `lease * 120` | a deployment lease change silently changed total attempt lifetime | represent the 3,600-second ceiling as a distinct policy authority and reject incompatible leases |
 | Ad-hoc runtime build omitted the OCI revision label | correct bytes could be pushed under a plausible tag without an independently inspectable Git identity | one Make target derives full HEAD, rejects dirty image inputs, writes the OCI revision label and never deploys |
+| A long half-open probe outlived its short claim window | a healthy probe interrupted by deployment became retryable behind an already-expired open circuit and required another recovery action, so repeated normal stops could exhaust the episode budget | the fenced interruption transaction renews the existing policy-derived claim window without closing the circuit, changing its defect history or consuming another action |
 
 ## Prohibited patterns
 
@@ -185,6 +188,9 @@ structure-fetch -> structure-materialize -> structure-normalize
 - Building a production runtime image with an ad-hoc `flyctl deploy` command;
   the exact Make entrypoint owns source cleanliness, build-only mode and the
   full OCI revision label.
+- Spending a second recovery action merely because an authorized half-open
+  attempt ran longer than its original claim window and then received a trusted
+  service stop.
 
 ## Verification map
 
@@ -200,3 +206,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 - Integrated durable effects: fault matrix v3 contains 16 cases, including
   transport replacement, pre-I/O timeout, service interruption and recovery
   episode isolation.
+- Half-open interruption continuity:
+  `test_retry_circuit_opens_on_third_failure_with_bounded_probe_delay` proves
+  immediate replacement claim, preserved open-circuit identity and unchanged
+  episode budget after a probe runs beyond its original window.

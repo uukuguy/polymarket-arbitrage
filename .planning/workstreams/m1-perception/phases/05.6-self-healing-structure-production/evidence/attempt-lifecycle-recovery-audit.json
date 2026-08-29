@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-29T02:12:07Z",
+  "plan": "05.6-212",
+  "release": {
+    "git_head": "c0fa2c2be4df970a89664634ff46fb803715b2fe",
+    "image_tag": "m1-runtime-v11-c0fa2c2be4df",
+    "image_index_digest": "sha256:ff14383b8e916032d55a41b5210340dc067256275bb13df0102994ef5a2fd5d2",
+    "linux_amd64_manifest_digest": "sha256:ad92667df1c695897bcf1e06aae4c400d7a9400fe8aa5e8434ac71891d0d206c",
+    "image_config_digest": "sha256:c01b3400c1a32f3d0b681f209d1a46fa67669667b28dd3d595717a5ac488691e",
+    "production_revision": "035",
+    "runtime_user_uid": 10001,
+    "revision_label_verified": true
+  },
+  "superseded_artifacts": [
+    {
+      "tag": "m1-runtime-v11-c0fa2c2b",
+      "reason": "image bytes were correct but the OCI revision label did not equal the exact Git commit; no Machine received this artifact"
+    }
+  ],
+  "audit_scope": [
+    "provider and database I/O deadlines",
+    "attempt, lease, heartbeat and progress deadlines",
+    "scheduler cadence, capacity and durable dependency ordering",
+    "SIGTERM, terminal grace and platform stop contracts",
+    "lease-fenced interruption and checkpoint recovery",
+    "circuit retry identity, timing and episode budgets",
+    "fan-in terminal eligibility and lost-wakeup repair",
+    "qualification release, breaker and operator continuity"
+  ],
+  "root_causes": [
+    {
+      "id": "poisoned-http-transport-generation",
+      "finding": "A failed Structure source attempt reused the same long-lived Gamma HTTP transport generation.",
+      "repair": "Reset only the failed transport generation while retaining the service-owned rate limiter."
+    },
+    {
+      "id": "shared-event-loop-db-claim-starvation",
+      "finding": "Five asynchronous workers called synchronous claim_job on the coordinator event loop, delaying unrelated timers and cancellation.",
+      "repair": "All asynchronous claim sites use the shared cancellable daemon blocking bridge; database policy remains the only claim I/O deadline."
+    },
+    {
+      "id": "target-lifetime-recovery-budget",
+      "finding": "A new failure fingerprint inherited an exhausted recovery budget from an older defect on the same target.",
+      "repair": "Revision 035 keys recovery budgets by immutable failure episode while retaining legacy exhaustion history."
+    },
+    {
+      "id": "pre-io-stage-ambiguity",
+      "finding": "A timeout before the first completed provider step collapsed to a generic started state.",
+      "repair": "Persist stage-start facts before fetch, validation, upload and commit; terminal receipt remains the only completion authority."
+    },
+    {
+      "id": "quote-capacity-serialized-as-turns",
+      "finding": "The advertised 12-lane Quote role executed 148 batches serially and contradicted the 900-second freshness gate.",
+      "repair": "Independent fenced lanes derive concurrency from the existing CLOB resource authority and contain one lane failure locally."
+    },
+    {
+      "id": "terminal-fanin-lost-wakeup",
+      "finding": "Concurrent final producers could each miss the sibling's uncommitted receipt and permanently leave a complete certifier waiting.",
+      "repair": "Terminal transition precedes a serialized successor-row check that requires receipt plus succeeded producer; claim-time repair handles historical gaps."
+    },
+    {
+      "id": "recovery-incident-chain-truth",
+      "finding": "Successful actions and terminal jobs could coexist with open reconciler recovery incidents; later episodes could remain falsely resolved.",
+      "repair": "Lease-fenced target recovery closes all bounded incident forms, and new episodes explicitly reopen their current projection."
+    },
+    {
+      "id": "pool-wrapper-lifecycle-authority",
+      "finding": "The Structure source pool hid its lanes' common lease, so SIGTERM grace resolution raised ValueError and exited the coordinator with code 1.",
+      "repair": "The pool validates and exposes one positive common lease; central runtime policy remains the only grace authority."
+    },
+    {
+      "id": "fast-call-sequence-never-heartbeats",
+      "finding": "A long sequence of individually sub-heartbeat R2 calls never entered the timeout polling branch and silently expired its cumulative lease.",
+      "repair": "Both synchronous bridges check heartbeat_if_due after every successful nonterminal call boundary as well as during a slow call."
+    },
+    {
+      "id": "half-open-probe-interruption-window",
+      "finding": "An authorized long-running circuit probe outlived its short claim window; a trusted deployment interruption made the job retryable behind the already-expired open circuit, requiring another action from the same recovery episode.",
+      "repair": "The fenced interruption transaction renews the existing policy-derived claim window while preserving open state, failure identity/count and episode budget."
+    }
+  ],
+  "local_verification": {
+    "focused_quote_opportunity_structure_suites": "passed",
+    "runtime_fault_matrix": "16/16 passed",
+    "modified_production_ruff": "passed",
+    "modified_production_pyright_errors": 0,
+    "climb_check": "50/50 passed",
+    "planning_status": "zero drift",
+    "half_open_interruption_postgres_regression": "passed",
+    "pre_task12_full_m1_suite": "4055 passed, 1 skipped, 1 xfailed in 1653.81 seconds",
+    "exact_release_full_m1_suite": "running 4059 tests without an outer timeout"
+  },
+  "production_probes": {
+    "isolated_exact_source_page": {
+      "records": 100,
+      "elapsed_seconds": 0.164,
+      "result": "succeeded"
+    },
+    "quote_pool_drain": {
+      "batches": 148,
+      "elapsed_seconds_approx": 95,
+      "unfinished_after": 0,
+      "role_survived_lane_operational_error": true
+    },
+    "terminal_fanin_repair": {
+      "manual_sql": false,
+      "published_generation": "quote:18daa4bd2efa3ea8a72b9b3994dfb8021dba39c6249a2299cb361c6ae8c8dec5",
+      "published_at": "2026-08-29T01:28:58.611674+00:00",
+      "record_count": 67195
+    },
+    "pooled_source_shutdown": {
+      "active_job": "structure-source:300:5959887:fetch:events:120",
+      "signal": "SIGTERM",
+      "service_stopped_included_structure_source": true,
+      "main_exit_code": 0,
+      "main_exit_seconds_approx": 3,
+      "restart_seconds_approx": 1
+    },
+    "historical_runtime_incident_repair": {
+      "method": "record_job_recovery",
+      "open_runtime_incidents_after": 0,
+      "open_circuits_after": 0,
+      "pending_or_running_actions_after": 0
+    },
+    "fast_sequence_lease_renewal": {
+      "job_key": "quote:18daa4bd2efa3ea8a72b9b3994dfb8021dba39c6249a2299cb361c6ae8c8dec5:opportunity-certify",
+      "lease_epoch": 19,
+      "started_at": "2026-08-29T02:02:19.121625+00:00",
+      "heartbeat_after_nominal_lease_at": "2026-08-29T02:05:21.841883+00:00",
+      "published_at": "2026-08-29T02:05:51.670185+00:00",
+      "elapsed_seconds_approx": 212,
+      "nominal_lease_seconds": 120,
+      "job_state": "succeeded",
+      "attempt_state": "succeeded",
+      "open_opportunity_incidents_after": 0
+    }
+  },
+  "operator_incident": {
+    "finding": "A read-only SSH qualification-status launched a second Python interpreter on the 256 MiB qualification Machine and OOM-killed the resident daemon.",
+    "occurred_at": "2026-08-29T01:42:07Z",
+    "repair": "Do not run diagnostic interpreters inside 256 MiB resident Machines; use the independent API, bounded direct reads or isolated disposable Machines.",
+    "continuity_effect": "The affected qualification epoch is invalid and cannot be reused."
+  },
+  "rollout": {
+    "runtime_controller": "6e82036dce4958",
+    "coordinator": "e82d1220b2d138",
+    "structure_worker": "683e46ea500dd8",
+    "quote_worker": "4d895231f66748",
+    "qualification_worker": "876077f0274598",
+    "all_formal_machines_on_exact_child_digest": true,
+    "stop_contract": "SIGTERM/40s",
+    "resident_recovery_mode": "observe-only",
+    "resident_allowed_targets": [],
+    "qualification_release_id": "c0fa2c2be4df970a89664634ff46fb803715b2fe",
+    "qualification_state": "recovering while historical facts and the new Structure pipeline converge",
+    "qualification_certificate": null
+  },
+  "completion_boundary": "M1 is not complete until this exact release earns a fresh continuous 86400-second qualification certificate and that immutable certificate is independently reverified."
+}

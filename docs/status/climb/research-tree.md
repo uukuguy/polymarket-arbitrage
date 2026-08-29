@@ -34,6 +34,7 @@
 - **H-024** [confirmed]: A scoped connection factory can preserve an exact namespace across managed Session Poolers by actively bootstrapping and committing a schema-qualified session setting instead of trusting libpq startup options.
 - **H-025** [confirmed]: Exact recovery selection, transport cleanup, and absolute attempt ceilings can be made independent of sample size, platform kill timing, and lease configuration so the recovery controller remains executable under production history and interruption.
 - **H-026** [confirmed]: A single executable runtime-image build entrypoint can bind clean image inputs to the full Git revision while remaining incapable of deployment.
+- **H-027** [pending]: A trusted interruption of an authorized half-open probe can renew one bounded claim window without closing the circuit, changing defect history, or consuming another recovery action.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts

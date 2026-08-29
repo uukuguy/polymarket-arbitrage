@@ -745,3 +745,16 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-027
+  description: A trusted interruption of an authorized half-open probe can renew
+    one bounded claim window without closing the circuit, changing defect history,
+    or consuming another recovery action.
+  parent_paradigm: fenced-deadline-reconciler
+  expected_lift: Prevent healthy long-running recovery attempts from becoming
+    unreclaimable after deployment and exhausting an episode budget through normal
+    process replacement.
+  cost_h: 0.5
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-29T16:55:00+08:00'
+  results: []

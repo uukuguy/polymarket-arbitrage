@@ -8588,6 +8588,47 @@ def test_retry_circuit_opens_on_third_failure_with_bounded_probe_delay(
     assert released_probe is not None
     assert released_probe.job_key == candidate.target_id
 
+    # A healthy half-open probe can run far beyond the short release window.
+    # Deployment interruption must renew that same authorization instead of
+    # spending another recovery action from the failure episode.
+    long_probe = control_plane.heartbeat_runtime_attempt(
+        released_probe,
+        now=due_at + timedelta(seconds=20),
+        lease_seconds=120,
+    )
+    interrupted_at = due_at + timedelta(seconds=110)
+    control_plane.finish_interrupted(
+        long_probe,
+        component="structure-fetch",
+        now=interrupted_at,
+    )
+    resumed_probe = control_plane.claim_job(
+        worker_id="replacement-after-deploy",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=interrupted_at + timedelta(seconds=1),
+    )
+    assert resumed_probe is not None
+    assert resumed_probe.job_key == candidate.target_id
+    assert resumed_probe.lease_epoch == long_probe.lease_epoch + 1
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT consecutive_failures, state, next_probe_at "
+            "FROM m1_job_circuits WHERE job_key = %s",
+            (candidate.target_id,),
+        )
+        assert cursor.fetchone() == (
+            3,
+            "open",
+            interrupted_at + timedelta(seconds=60),
+        )
+        cursor.execute(
+            "SELECT remaining_actions FROM m1_recovery_target_budgets "
+            "WHERE controller_id = %s AND target_type = 'circuit' AND target_id = %s",
+            (controller.controller_id, candidate.target_id),
+        )
+        assert cursor.fetchone() == (2,)
+
 
 def test_retry_circuit_counts_only_consecutive_same_failure_identity(
     control_plane: PostgresControlPlane,
