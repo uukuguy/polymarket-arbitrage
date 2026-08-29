@@ -869,3 +869,28 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-032
+  description: One stop-aware startup deadline plus continuous supervision of every
+    resident daemon task can eliminate copied readiness clocks and partially alive
+    processes without weakening durable recovery.
+  parent_paradigm: fenced-deadline-reconciler
+  expected_lift: Make startup interruption and post-bind task failure converge through
+    one owned sibling-drain sequence followed by a nonzero process exit.
+  cost_h: 0.5
+  ranking: 1.0
+  status: confirmed
+  created_at: '2026-08-29T18:50:00+08:00'
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 35
+    run: 20260829-104600-h-032
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
