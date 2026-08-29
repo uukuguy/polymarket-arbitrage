@@ -814,6 +814,27 @@
 - [x] Confirm the new Climb gate; restart the complete M1 regression after the
   confirmed state is committed.
 
+### Task 30: Test policy ownership without freezing consumer count
+
+**Files:**
+
+- Modify: `tests/m1-perception/test_transactional_runtime_coverage.py`
+- Modify: `tools/climb/eval_local.py`
+- Modify: `tests/climb/test_eval_local.py`
+
+**Interfaces:**
+
+- The static authority contract requires every PostgreSQL retry backoff use to
+  come from `runtime_retry_policy()` and continues to reject copied formulas.
+- Adding a legitimate lifecycle consumer does not require weakening or
+  renumbering a product deadline.
+
+- [x] Reproduce the full-suite-only failure caused by a hard-coded count of
+  three after trusted interruption became the fourth policy consumer.
+- [x] Replace exact consumer cardinality with lookup/use parity plus existing
+  private-formula prohibitions; pass the exact authority and certifier tests.
+- [ ] Confirm the amended Climb gate before rerunning the full M1 suite.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
@@ -825,7 +846,7 @@
   candidate reads, pre-limit exact selection, bounded transport cleanup and
   lease-independent attempt ceilings, exact image identity and half-open
   interruption continuity and deterministic concurrency watchdogs all map to
-  Tasks 1–29.
+  Tasks 1–30.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

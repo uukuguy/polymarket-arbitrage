@@ -283,6 +283,7 @@ def test_fenced_deadline_reconciler_profile_uses_exact_local_recovery_gates() ->
             "tests/m1-perception/test_control_plane_reconciler.py::test_recovery_decision_allows_only_exact_action_reason_pairs",
             "tests/m1-perception/test_control_plane_reconciler.py::test_recovery_decision_rejects_wrong_action_reason_pairs",
             "tests/m1-perception/test_control_plane_reconciler.py::test_next_check_at_is_deterministic_from_inputs",
+            "tests/m1-perception/test_transactional_runtime_coverage.py::test_retry_circuit_budget_and_backoff_have_one_runtime_policy_authority",
             "tests/m1-perception/test_transactional_runtime_coverage.py::test_structure_certifier_gets_bounded_long_attempt_without_weakening_liveness",
             "tests/m1-perception/test_gamma_client.py::test_gamma_explicit_close_bounds_hung_http_close",
             "-q",

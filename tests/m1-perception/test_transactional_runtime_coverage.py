@@ -250,8 +250,10 @@ def test_worker_modules_do_not_define_private_runtime_profiles() -> None:
 def test_retry_circuit_budget_and_backoff_have_one_runtime_policy_authority() -> None:
     source = (Path(__file__).parents[2] / "src/polyarb/control_plane/postgres.py").read_text()
 
-    assert source.count("retry_policy = runtime_retry_policy(") == 3
-    assert source.count("retry_policy.retry_backoff_seconds(") == 3
+    policy_lookup_count = source.count("retry_policy = runtime_retry_policy(")
+    backoff_use_count = source.count("retry_policy.retry_backoff_seconds(")
+    assert policy_lookup_count >= 3
+    assert backoff_use_count == policy_lookup_count
     assert 'circuit_state = "open" if failures >= 3' not in source
     assert "now if failures == 3" not in source
     assert "min(15 * (2 ** (failures - 1)), 300)" not in source

@@ -163,6 +163,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Ad-hoc runtime build omitted the OCI revision label | correct bytes could be pushed under a plausible tag without an independently inspectable Git identity | one Make target derives full HEAD, rejects dirty image inputs, writes the OCI revision label and never deploys |
 | A long half-open probe outlived its short claim window | a healthy probe interrupted by deployment became retryable behind an already-expired open circuit and required another recovery action, so repeated normal stops could exhaust the episode budget | the fenced interruption transaction renews the existing policy-derived claim window without closing the circuit, changing its defect history or consuming another action |
 | Concurrent PostgreSQL tests used 5/10-second magic barriers, including one unbounded barrier | a healthy lost-wakeup test failed only under full-suite host load, while a missing peer could make another test hang forever | every real-PostgreSQL concurrency barrier uses one named diagnostic watchdog derived from the control-plane full transaction/stop envelope; wall time is not a product assertion |
+| Runtime-authority test fixed the number of policy consumers at three | adding a legitimate interruption consumer failed the full suite even though it reused the sole policy and introduced no private clock | assert every backoff use has a central-policy lookup and forbid copied formulas, without constraining how many lifecycle paths consume the authority |
 
 ## Prohibited patterns
 
