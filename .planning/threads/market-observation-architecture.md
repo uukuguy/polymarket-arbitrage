@@ -2398,3 +2398,18 @@ success is not user receipt/read evidence.
   continues. Service stop is intentionally different: cancellation reaches all
   active lanes, each writes its own interruption transition, and the common
   lease policy derives the terminal drain grace.
+
+### §2.66 Recovery incident projection must close on durable target progress (2026-08-29)
+
+- Worker failures and reconciler actions use separate bounded dedupe families:
+  `job-retry:<job>` and `recovery:{job|circuit}:<job>`. Production proved that
+  closing only the first leaves an impossible projection: terminal job, closed
+  circuit, successful action, but open `recovery-started` incident.
+- The current lease's terminal success or durable checkpoint is the chain-truth
+  closure authority. One transaction now resolves all three bounded incident
+  forms, emits an idempotent recovered event and alert for each, and closes a
+  positive circuit streak. No action completion alone claims target recovery.
+- Incident rows are mutable current projections over append-only events. A new
+  recovery episode for the same target must set the projection back to open and
+  clear `resolved_at`; otherwise a genuinely new recovery would be hidden by a
+  prior episode's resolved row.

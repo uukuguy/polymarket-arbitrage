@@ -6674,7 +6674,7 @@ class PostgresControlPlane:
         now: datetime,
         acceptance_run_id: str | None = None,
     ) -> bool:
-        """Close a failed job's circuit after durable forward progress.
+        """Close a failed job's circuit and recovery incidents after progress.
 
         The prior retry and this recovery are independently committed because a
         worker can crash between them.  A terminal success or a durable
@@ -6691,7 +6691,6 @@ class PostgresControlPlane:
             raise ValueError("channels must be unique")
         if acceptance_run_id is not None and not acceptance_run_id:
             raise ValueError("acceptance_run_id must be non-empty when provided")
-        dedupe_key = f"job-retry:{lease.job_key}"
         with (
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
@@ -6721,86 +6720,111 @@ class PostgresControlPlane:
                 (lease.job_key,),
             )
             circuit = cursor.fetchone()
-            if circuit is None or int(circuit["consecutive_failures"]) == 0:
-                return False
-            cursor.execute(
-                """
-                UPDATE m1_job_circuits
-                SET consecutive_failures = 0, state = 'closed', opened_at = NULL,
-                    next_probe_at = NULL, updated_at = %s, failure_fingerprint = NULL
-                WHERE job_key = %s
-                """,
-                (now, lease.job_key),
-            )
-            cursor.execute(
-                """
-                UPDATE m1_incidents
-                SET state = 'resolved', resolved_at = %s, updated_at = %s
-                WHERE dedupe_key = %s AND state <> 'resolved'
-                RETURNING incident_key
-                """,
-                (now, now, dedupe_key),
-            )
-            incident = cursor.fetchone()
-            if incident is None:
-                return False
-            incident_key = str(incident["incident_key"])
-            idempotency_key = f"job-recovery:{lease.job_key}:{lease.lease_epoch}"
-            cursor.execute(
-                "SELECT incident_event_id FROM m1_incident_events WHERE idempotency_key = %s",
-                (idempotency_key,),
-            )
-            if cursor.fetchone() is not None:
-                return True
-            event_id = str(uuid4())
-            detail_payload = {
-                "job_key": lease.job_key,
-                "lease_epoch": lease.lease_epoch,
-                "component": component,
-                "reason": "runtime-healthy",
-                "action_type": "none",
-                "qualification_impact": "none",
-            }
-            cursor.execute(
-                """
-                INSERT INTO m1_incident_events (
-                    incident_event_id, incident_key, kind, detail, idempotency_key, occurred_at
-                ) VALUES (%s, %s, 'recovered', %s, %s, %s)
-                """,
-                (
-                    event_id,
-                    incident_key,
-                    Jsonb(detail_payload),
-                    idempotency_key,
-                    now,
-                ),
-            )
-            alert_payload = _incident_alert_payload(
-                incident_key=incident_key,
-                component=component,
-                kind="recovered",
-                detail=detail_payload,
-                now=now,
-                acceptance_run_id=acceptance_run_id,
-            )
-            for channel in channels:
+            if circuit is not None and int(circuit["consecutive_failures"]) > 0:
                 cursor.execute(
                     """
-                    INSERT INTO m1_alert_outbox (
-                        outbox_id, incident_event_id, channel, payload, state,
-                        next_attempt_at, created_at
-                    ) VALUES (%s, %s, %s, %s, 'pending', %s, %s)
-                    ON CONFLICT (incident_event_id, channel) DO NOTHING
+                    UPDATE m1_job_circuits
+                    SET consecutive_failures = 0, state = 'closed', opened_at = NULL,
+                        next_probe_at = NULL, updated_at = %s, failure_fingerprint = NULL
+                    WHERE job_key = %s
+                    """,
+                    (now, lease.job_key),
+                )
+            incident_dedupe_keys = (
+                f"job-retry:{lease.job_key}",
+                f"recovery:job:{lease.job_key}",
+                f"recovery:circuit:{lease.job_key}",
+            )
+            cursor.execute(
+                """
+                SELECT incident_key, dedupe_key
+                FROM m1_incidents
+                WHERE dedupe_key = ANY(%s) AND state <> 'resolved'
+                ORDER BY dedupe_key
+                FOR UPDATE
+                """,
+                (list(incident_dedupe_keys),),
+            )
+            incidents = cursor.fetchall()
+            if not incidents:
+                return False
+            suffix_by_dedupe = {
+                incident_dedupe_keys[0]: "",
+                incident_dedupe_keys[1]: ":runtime-job",
+                incident_dedupe_keys[2]: ":runtime-circuit",
+            }
+            for incident in incidents:
+                incident_key = str(incident["incident_key"])
+                incident_dedupe_key = str(incident["dedupe_key"])
+                cursor.execute(
+                    """
+                    UPDATE m1_incidents
+                    SET state = 'resolved', resolved_at = %s, updated_at = %s
+                    WHERE incident_key = %s AND state <> 'resolved'
+                    """,
+                    (now, now, incident_key),
+                )
+                idempotency_key = (
+                    f"job-recovery:{lease.job_key}:{lease.lease_epoch}"
+                    f"{suffix_by_dedupe[incident_dedupe_key]}"
+                )
+                cursor.execute(
+                    "SELECT incident_event_id FROM m1_incident_events "
+                    "WHERE idempotency_key = %s",
+                    (idempotency_key,),
+                )
+                if cursor.fetchone() is not None:
+                    continue
+                event_id = str(uuid4())
+                detail_payload = {
+                    "job_key": lease.job_key,
+                    "lease_epoch": lease.lease_epoch,
+                    "component": component,
+                    "reason": "runtime-healthy",
+                    "action_type": "none",
+                    "qualification_impact": "none",
+                }
+                cursor.execute(
+                    """
+                    INSERT INTO m1_incident_events (
+                        incident_event_id, incident_key, kind, detail,
+                        idempotency_key, occurred_at
+                    ) VALUES (%s, %s, 'recovered', %s, %s, %s)
                     """,
                     (
-                        str(uuid4()),
                         event_id,
-                        channel,
-                        Jsonb(alert_payload),
-                        now,
+                        incident_key,
+                        Jsonb(detail_payload),
+                        idempotency_key,
                         now,
                     ),
                 )
+                alert_payload = _incident_alert_payload(
+                    incident_key=incident_key,
+                    component=component,
+                    kind="recovered",
+                    detail=detail_payload,
+                    now=now,
+                    acceptance_run_id=acceptance_run_id,
+                )
+                for channel in channels:
+                    cursor.execute(
+                        """
+                        INSERT INTO m1_alert_outbox (
+                            outbox_id, incident_event_id, channel, payload, state,
+                            next_attempt_at, created_at
+                        ) VALUES (%s, %s, %s, %s, 'pending', %s, %s)
+                        ON CONFLICT (incident_event_id, channel) DO NOTHING
+                        """,
+                        (
+                            str(uuid4()),
+                            event_id,
+                            channel,
+                            Jsonb(alert_payload),
+                            now,
+                            now,
+                        ),
+                    )
             return True
 
     def finish_alert_delivery(

@@ -27,6 +27,7 @@ from starlette.testclient import TestClient
 from polyarb.control_plane import postgres as postgres_module
 from polyarb.control_plane import qualification_service as qualification_service_module
 from polyarb.control_plane import qualification_store as qualification_store_module
+from polyarb.control_plane import recovery_store as recovery_store_module
 from polyarb.control_plane import runtime_event_writer
 from polyarb.control_plane.alert_delivery import render_runtime_incident_message
 from polyarb.control_plane.models import (
@@ -8146,6 +8147,99 @@ def test_successful_terminal_job_closes_circuit_and_resolves_retry_incident(
     assert "runtime-healthy" in body
     assert "none" in body
     assert "staging-retry-fault-20260815" not in body
+
+
+def test_successful_job_closes_runtime_recovery_incident_and_next_episode_reopens_it(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    job_key = "structure:runtime-recovery-incident:fetch:events:0"
+    recovered = _seed_succeeded_recovery_job(
+        control_plane,
+        job_key=job_key,
+        job_type="structure-fetch",
+        now=now,
+    )
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="runtime-recovery-incident-controller",
+        owner_id="runtime-recovery-incident-owner",
+        lease_seconds=60,
+        now=now + timedelta(seconds=15),
+    )
+    decision = RecoveryDecision(
+        action=RecoveryActionType.PROBE_CIRCUIT,
+        reason_code="circuit.probe-due",
+        incident_severity="warning",
+        qualification_breaking=False,
+        next_check_at=now + timedelta(seconds=45),
+    )
+    incident_key = f"recovery:circuit:{job_key}"
+
+    def record_runtime_episode(*, observed_at: datetime, idempotency_key: str) -> None:
+        with (
+            control_plane._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            recovery_store_module._record_recovery_incident(
+                cursor,
+                incident_key=incident_key,
+                component="structure-fetch",
+                target_type="circuit",
+                target_id=job_key,
+                decision=decision,
+                controller=controller,
+                expected_lease_epoch=recovered.lease_epoch,
+                channels=("dashboard",),
+                now=observed_at,
+                idempotency_key=idempotency_key,
+            )
+
+    record_runtime_episode(
+        observed_at=now + timedelta(seconds=15),
+        idempotency_key="runtime-recovery-incident:episode:1",
+    )
+    assert control_plane.record_job_recovery(
+        recovered,
+        component="structure-fetch",
+        channels=("dashboard",),
+        now=now + timedelta(seconds=16),
+    )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state, resolved_at IS NOT NULL FROM m1_incidents "
+            "WHERE dedupe_key = %s",
+            (f"recovery:circuit:{job_key}",),
+        )
+        assert cursor.fetchone() == ("resolved", True)
+        cursor.execute(
+            "SELECT kind FROM m1_incident_events WHERE incident_key = %s "
+            "ORDER BY occurred_at, incident_event_id",
+            (incident_key,),
+        )
+        assert [row[0] for row in cursor.fetchall()] == ["recovery-started", "recovered"]
+
+    record_runtime_episode(
+        observed_at=now + timedelta(seconds=17),
+        idempotency_key="runtime-recovery-incident:episode:2",
+    )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state, resolved_at FROM m1_incidents WHERE dedupe_key = %s",
+            (f"recovery:circuit:{job_key}",),
+        )
+        assert cursor.fetchone() == ("open", None)
+        cursor.execute(
+            "SELECT kind FROM m1_incident_events WHERE incident_key = %s "
+            "ORDER BY occurred_at, incident_event_id",
+            (incident_key,),
+        )
+        assert [row[0] for row in cursor.fetchall()] == [
+            "recovery-started",
+            "recovered",
+            "recovery-started",
+        ]
 
 
 def test_job_recovery_lock_timeout_rolls_back_circuit_incident_event_and_alert(

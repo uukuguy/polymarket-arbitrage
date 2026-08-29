@@ -1136,7 +1136,7 @@ def _record_recovery_incident(
         ) VALUES (%s, %s, %s, %s, 'open', %s, %s, %s)
         ON CONFLICT (dedupe_key) DO UPDATE
         SET severity = EXCLUDED.severity, summary = EXCLUDED.summary,
-            updated_at = EXCLUDED.updated_at
+            state = 'open', resolved_at = NULL, updated_at = EXCLUDED.updated_at
         RETURNING incident_key
         """,
         (

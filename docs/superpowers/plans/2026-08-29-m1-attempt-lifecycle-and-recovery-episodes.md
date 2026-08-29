@@ -260,6 +260,30 @@
 - [ ] Build and roll the exact release, prove backlog drain inside 900 seconds,
   then restart the release-bound qualification epoch.
 
+### Task 9: Close the reconciler incident lifecycle on durable recovery
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/postgres.py`
+- Modify: `src/polyarb/control_plane/recovery_store.py`
+- Modify: `tests/m1-perception/test_control_plane_postgres.py`
+
+**Interfaces:**
+
+- `record_job_recovery()` remains the lease-fenced closure authority and now
+  resolves worker plus reconciler incident projections.
+- `_record_recovery_incident()` reopens the current projection for a new
+  immutable recovery-started event.
+
+- [x] Reproduce terminal jobs and closed circuits with still-open production
+  recovery incidents.
+- [x] Write a real-PostgreSQL RED test for open → recovered → reopened ordering.
+- [x] Resolve the three bounded dedupe forms atomically and emit one idempotent
+  recovered event/alert per incident.
+- [x] Preserve lock/statement timeout rollback and checkpoint recovery proofs.
+- [ ] Roll the exact release, repair the two historical projections through the
+  same durable method, and require zero contradictory runtime incidents.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
