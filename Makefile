@@ -946,22 +946,42 @@ tail-logs-local:
 # tail-logs          — tail Fly daemon stdout
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: docker-build docker-run-local docker-smoke runtime-image-build deploy smoke-test tail-logs
+.PHONY: docker-build docker-run-local docker-smoke docker-context-status runtime-image-build deploy smoke-test tail-logs
+
+# Docker contexts are user-global state.  Project commands accept an optional
+# command-scoped context and must never switch the user's global default.
+DOCKER = docker$(if $(strip $(docker_context)), --context $(strip $(docker_context)),)
 
 ## docker-build: Build daemon Docker image locally (no push)
 docker-build:
 	@echo ">> docker-build — multi-stage uv build"
-	docker build -t polyarb-l1:local .
+	$(DOCKER) build -t polyarb-l1:local .
 
 ## docker-run-local: Run daemon container locally (host:8088 → container:8080)
 docker-run-local:
 	@echo ">> docker-run-local — daemon at http://localhost:8088/health"
-	docker run --rm -p 8088:8080 -e POLYARB_ALLOW_EMPTY_SECRET=1 -e POLYARB_ALLOW_EXTERNAL_PATHS=1 polyarb-l1:local
+	$(DOCKER) run --rm -p 8088:8080 -e POLYARB_ALLOW_EMPTY_SECRET=1 -e POLYARB_ALLOW_EXTERNAL_PATHS=1 polyarb-l1:local
 
 ## docker-smoke: Build image + run + curl /health + tear down (Plan 04 Wave 0 contract)
 docker-smoke:
 	@echo ">> docker-smoke — full build + run + health probe"
-	bash tests/m1-perception/test_docker_smoke.sh
+	@if [ -n "$(strip $(docker_context))" ]; then \
+		DOCKER_CONTEXT="$(strip $(docker_context))" bash tests/m1-perception/test_docker_smoke.sh; \
+	else \
+		bash tests/m1-perception/test_docker_smoke.sh; \
+	fi
+
+## docker-context-status: Read-only context/capacity audit. Usage: make docker-context-status docker_context=<name> [colima_profile=<profile>]
+docker-context-status:
+	@test -n "$(strip $(docker_context))" || { echo "usage: make docker-context-status docker_context=<name> [colima_profile=<profile>]" >&2; exit 2; }
+	@CTX="$(strip $(docker_context))"; \
+		echo ">> global-default=$$(docker context show) target=$$CTX"; \
+		docker context inspect "$$CTX" --format 'endpoint={{.Endpoints.docker.Host}}'; \
+		docker --context "$$CTX" system df; \
+		if [ -n "$(strip $(colima_profile))" ]; then \
+			command -v colima >/dev/null || { echo "ERROR: colima CLI not found" >&2; exit 1; }; \
+			colima ssh --profile $(strip $(colima_profile)) -- df -h /mnt/lima-colima-$(strip $(colima_profile)); \
+		fi
 
 # Phase 03.1 Plan 03 (GAP-4): every flyctl invocation in this Makefile is
 # prefixed with `FLY_API_TOKEN= ` to force flyctl to fall back to the
@@ -983,6 +1003,7 @@ runtime-image-build:
 		echo "ERROR: runtime image inputs differ from HEAD; commit or remove those changes before building" >&2; exit 2; \
 	fi
 	@RELEASE_ID="$$(git rev-parse HEAD)"; \
+		if [ -n "$(strip $(docker_context))" ]; then export DOCKER_CONTEXT="$(strip $(docker_context))"; fi; \
 		echo ">> runtime-image-build — build-only image=$(image_tag) release=$$RELEASE_ID"; \
 		FLY_API_TOKEN= NO_COLOR=1 flyctl deploy $(FLY_BUILD_MODE) \
 			--app "$(or $(fly_app),polyarb-control-worker-m1)" --config fly.toml \

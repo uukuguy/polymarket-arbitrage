@@ -217,6 +217,20 @@ CLAUDE.md 是**契约**，状态在别处：
 - `make help` 始终列出所有可用命令
 - 当 phase plan 包含新命令时，plan 必须显式列出"Makefile target 名称"作为产出之一
 
+## Docker context 隔离（强制）
+
+Docker 的 `currentContext` 是用户级全局状态，不随仓库或 worktree 隔离。
+
+- 项目操作禁止调用 `docker context use`；必须使用 `docker --context <name> ...`、
+  `DOCKER_CONTEXT=<name> <command>` 或 Make 的 `docker_context=<name>` 参数。
+- `colima start --profile ...` 可能自动改全局 context。启动前必须记录当前值，启动后立即
+  恢复；更优先使用已运行的专用 profile。
+- 本地 build/pull 前运行
+  `make docker-context-status docker_context=<name> [colima_profile=<profile>]`；Colima 容量
+  以 VM filesystem 的 `df` 为真，不得只信 `docker system df`。
+- 清理只能针对已确认无运行容器引用、且已有远端不可变副本的本项目旧镜像；
+  不得对共享 daemon 做无差别 prune。
+
 ## chaos 工具 image-aware 设计（强制）
 
 Phase 03 Inj L2-1 教训：`python:3.12-slim` 不含 `pkill` / `ps` / `dig` / `ping` / `which`。任何 chaos primitive 在 plan 落地前必须验证：

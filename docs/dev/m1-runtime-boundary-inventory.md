@@ -62,6 +62,7 @@ qualification 86,400 s -- acceptance observation window; it is not a process tim
 | L2 top-of-book mirror | PostgREST client request bound | dispatcher owner drains after WS producer stops | 1 per coalesced batch | latest row per asset is coalesced; `wait_idle()` is deterministic evidence and `aclose()` prevents orphan tasks. |
 | Control API `/healthz` | 1 s connect, 1 s bootstrap, one 1 s `SELECT 1` | 3.5 s application envelope below Fly 5 s | 1 | readiness never builds the operator snapshot; `/perception/control-plane` retains the full read model. |
 | Local Fly CLI soak read | 30 s operator read | command process timeout | 1 | operator evidence only. Long-running deployment/certificate commands do not receive this bound. |
+| Local Docker build/pull | command-scoped `docker_context` / `DOCKER_CONTEXT` | owning CLI process only | 1 | Docker's user-global default is never mutated. `docker-context-status` checks Docker accounting and, for Colima, the VM filesystem before large transfers. |
 
 The legacy snapshot-only R2 helper retains its historical standard retry
 policy. Formal runtime-v2 paths must use `control_plane_r2_config()`, whose
@@ -171,6 +172,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | L1/L2 copied HTTP startup loops and L1 stopped observing tasks after bind | loop count and sleep cadence formed a second nominal 10-second clock; a later uvicorn/producer exit left the process alive with missing capability | one monotonic stop-aware startup helper owns both entrypoints; L1 supervises every resident task and turns any unexpected exit into ordered sibling drain plus nonzero process exit |
 | Real Structure drift child had a 45-second cooperative slice inside a test-local 10-second parent timeout | full-suite host load let the outer test clock kill a healthy child before it could report `writer-busy`; production separately copied `75.0` | derive the normal parent envelope as `child slice + 30-second owned TERM/KILL budget`; production and real-child tests no longer pass another number |
 | Structure event-member child still copied `75.0` in both its helper default and production caller | the sibling slice path could drift from its 45-second cooperative window or from the shared TERM/KILL protocol despite the drift path being fixed | one Structure subprocess derivation now owns both slice parents; production passes work limits only and fake-process reap tests are the sole explicit timeout overrides |
+| Starting a dedicated Colima profile left it as Docker's user-global default | an unrelated repository silently pulled into the 59 GiB M1 VM; containerd content/snapshots filled it although `docker system df` under-reported the filesystem usage | restore the prior OrbStack default, use command-scoped contexts only, expose a read-only Make status target, and treat the Colima VM `df` as capacity truth before build/pull |
 
 ## Prohibited patterns
 

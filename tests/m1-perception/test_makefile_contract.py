@@ -1827,6 +1827,46 @@ def test_make_docker_build_dry_run() -> None:
     )
 
 
+def test_docker_targets_scope_context_without_mutating_global_default() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    assert "docker context use" not in makefile
+
+    build = subprocess.run(
+        [
+            "make",
+            "-n",
+            "docker-build",
+            "docker_context=colima-polyarb-tests",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+    status = subprocess.run(
+        [
+            "make",
+            "-n",
+            "docker-context-status",
+            "docker_context=colima-polyarb-tests",
+            "colima_profile=polyarb-tests",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert build.returncode == 0, build.stderr
+    assert "docker --context colima-polyarb-tests build" in build.stdout
+    assert status.returncode == 0, status.stderr
+    assert "docker context show" in status.stdout
+    assert 'docker --context "$CTX" system df' in status.stdout
+    assert "colima ssh --profile polyarb-tests -- df" in status.stdout
+
+
 def test_make_deploy_dry_run() -> None:
     """`make -n deploy` resolves to a flyctl deploy command."""
     result = subprocess.run(
