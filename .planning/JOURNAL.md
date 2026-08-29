@@ -11575,3 +11575,37 @@ immutable 86,400-second certificate and its independent revalidation both pass.
 v23 through OrbStack only. Canary the stopped qualification Machine first,
 prove monotonic multi-tick accumulation with no restart, then roll all eight
 formal Machines to one exact release and begin a new 86,400-second window.
+
+### SESSION 338 — 2026-08-30 (transient heartbeat lease continuity)
+
+- [PRODUCTION EVIDENCE] Exact-v23 qualification did not restart, but correctly
+  entered recovery when `freshness.structure` opened. Two of three transient
+  PostgreSQL connection circuits recovered through exact probes. The last large
+  events target claimed a fresh attempt, then its heartbeat and lease expired
+  while payload computation continued without a process restart.
+- [ROOT CAUSE] The bounded sync wrapper treated one heartbeat exception as
+  terminal and then drained the still-running payload for no-late-effect
+  safety. That drain sent no further heartbeat. The same temporary connection
+  outage therefore became an unbounded no-heartbeat interval and stranded the
+  attempt; increasing a lease or timeout would only move the failure point.
+- [TDD REPAIR] Heartbeat operational failures now use a typed, secret-safe
+  retryable contract. Sync and async runtimes retry at one-third of the existing
+  heartbeat cadence, restore normal cadence after success, stop at the locally
+  known persisted lease deadline, and retain no-late-effect draining for stale
+  fences and nonretryable errors. Async successful stop must also recover a
+  pending renewal before terminal commit.
+- [LOCAL PROOF] Runtime, Structure, Quote, source, admission, opportunity and
+  full real-PostgreSQL contract suites pass. Ruff and Pyright pass. A full M1
+  run reached 4,109 passed, one skip and one expected xfail in 1,604.81 seconds;
+  its only failure was the exact-image guard correctly rejecting dirty runtime
+  inputs before this implementation commit.
+- [RUNTIME OWNERSHIP] M1 remains OrbStack-only. Colima is not required, is not
+  installed, and is not referenced by the project Docker entry points.
+
+[NEXT] Commit Plan 05.6-217 without protected user files, then rerun the full
+M1 gate against exact HEAD so the image-build contract can pass. Build and
+independently inspect exact v24 through OrbStack only; recover the expired final
+Structure target through the exact controller action, certify fresh Structure /
+Quote / opportunity publication, roll all eight formal Machines, and start a
+new 86,400-second qualification identity. M1 remains incomplete until its
+immutable certificate and independent reverification pass.

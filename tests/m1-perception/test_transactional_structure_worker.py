@@ -17,7 +17,7 @@ from polyarb.control_plane.models import (
     StructureRangeSpec,
 )
 from polyarb.control_plane.postgres import IncompleteStructureGenerationError, StaleLeaseError
-from polyarb.control_plane.runtime_contract import ServiceStopRequested
+from polyarb.control_plane.runtime_contract import RetryableHeartbeatError, ServiceStopRequested
 from polyarb.control_plane.structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
@@ -247,13 +247,17 @@ class FakeControlPlane:
         self.runtime_heartbeats: list[dict[str, object]] = []
 
     def claim_job(self, **kwargs: object) -> JobLease:
+        now = kwargs["now"]
+        lease_seconds = kwargs["lease_seconds"]
+        assert isinstance(now, datetime)
+        assert isinstance(lease_seconds, int)
         return JobLease(
             job_key=self.spec.job_key,
             job_type="structure-normalize",
             input_identity=self.spec.input_identity,
             lease_owner="worker-a",
             lease_epoch=1,
-            lease_expires_at=NOW,
+            lease_expires_at=now + timedelta(seconds=lease_seconds),
             checkpoint_cursor=None,
             checkpoint_digest=None,
         )
@@ -290,13 +294,17 @@ class FakeControlPlane:
 
     def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
         self.runtime_heartbeats.append(kwargs)
+        now = kwargs["now"]
+        lease_seconds = kwargs["lease_seconds"]
+        assert isinstance(now, datetime)
+        assert isinstance(lease_seconds, int)
         return JobLease(
             job_key=lease.job_key,
             job_type=lease.job_type,
             input_identity=lease.input_identity,
             lease_owner=lease.lease_owner,
             lease_epoch=lease.lease_epoch,
-            lease_expires_at=kwargs["now"],
+            lease_expires_at=now + timedelta(seconds=lease_seconds),
             checkpoint_cursor=lease.checkpoint_cursor,
             checkpoint_digest=lease.checkpoint_digest,
         )
@@ -361,6 +369,45 @@ def test_structure_worker_renews_while_normalize_read_exceeds_lease() -> None:
 
     assert result.outcome == "succeeded"
     assert len(control_plane.runtime_heartbeats) >= 3
+    assert control_plane.completed is not None
+
+
+def test_structure_worker_retries_transient_heartbeat_while_normalize_read_blocks() -> None:
+    bundle = _bundle()
+    objects = BlockingRangeObjectClient(bundle)
+
+    class TransientHeartbeatControlPlane(FakeControlPlane):
+        def __init__(self, spec: StructureRangeSpec) -> None:
+            super().__init__(spec)
+            self.heartbeat_calls = 0
+
+        def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
+            self.heartbeat_calls += 1
+            if self.heartbeat_calls == 1:
+                raise RetryableHeartbeatError("transient heartbeat connection failure")
+            return super().heartbeat_runtime_attempt(lease, **kwargs)
+
+    control_plane = TransientHeartbeatControlPlane(_spec(bundle))
+    worker = TransactionalStructureWorker(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="structure",
+        worker_id="worker-a",
+        now=_elapsed_clock(),
+        lease_seconds=3,
+    )
+
+    async def run() -> StructureWorkerResult:
+        task = asyncio.create_task(worker.run_once())
+        assert await asyncio.to_thread(objects.started.wait, 2)
+        await _wait_for_heartbeats(control_plane, 1)
+        objects.release.set()
+        return await task
+
+    result = asyncio.run(run())
+
+    assert result.outcome == "succeeded"
+    assert control_plane.heartbeat_calls >= 2
     assert control_plane.completed is not None
 
 
@@ -627,14 +674,14 @@ def test_structure_certifier_service_stop_uses_interruption_not_defect_retry() -
         def __init__(self) -> None:
             self.interruption = None
 
-        def claim_job(self, **_kwargs: object) -> JobLease:
+        def claim_job(self, **kwargs: object) -> JobLease:
             return JobLease(
                 job_key="structure:" + "a" * 64 + ":certify",
                 job_type="structure-certify",
                 input_identity="structure:" + "a" * 64,
                 lease_owner="certifier-a",
                 lease_epoch=1,
-                lease_expires_at=NOW,
+                lease_expires_at=NOW + timedelta(seconds=int(kwargs["lease_seconds"])),
                 checkpoint_cursor=None,
                 checkpoint_digest=None,
             )
@@ -705,7 +752,7 @@ def test_structure_certifier_heartbeats_during_parity_before_fenced_commit() -> 
                 input_identity="structure:" + "a" * 64,
                 lease_owner="certifier-a",
                 lease_epoch=1,
-                lease_expires_at=NOW,
+                lease_expires_at=NOW + timedelta(seconds=int(kwargs["lease_seconds"])),
                 checkpoint_cursor=None,
                 checkpoint_digest=None,
             )
@@ -847,7 +894,7 @@ def test_structure_certifier_renews_while_parity_read_exceeds_lease() -> None:
                 input_identity="structure:" + "a" * 64,
                 lease_owner="certifier-a",
                 lease_epoch=1,
-                lease_expires_at=NOW,
+                lease_expires_at=NOW + timedelta(seconds=int(kwargs["lease_seconds"])),
                 checkpoint_cursor=None,
                 checkpoint_digest=None,
             )
@@ -1321,7 +1368,7 @@ def test_structure_certifier_waits_for_missing_range_receipts_without_incident()
                 input_identity="structure:" + "a" * 64,
                 lease_owner="certifier-a",
                 lease_epoch=1,
-                lease_expires_at=NOW,
+                lease_expires_at=NOW + timedelta(seconds=int(kwargs["lease_seconds"])),
                 checkpoint_cursor=None,
                 checkpoint_digest=None,
             )
@@ -1385,7 +1432,7 @@ def test_structure_certifier_refuses_range_content_that_does_not_reassemble_bund
                 input_identity=spec.generation_key,
                 lease_owner="certifier-a",
                 lease_epoch=1,
-                lease_expires_at=NOW,
+                lease_expires_at=NOW + timedelta(seconds=int(kwargs["lease_seconds"])),
                 checkpoint_cursor=None,
                 checkpoint_digest=None,
             )

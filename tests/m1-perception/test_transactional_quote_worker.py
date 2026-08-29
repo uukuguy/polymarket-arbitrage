@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -131,7 +132,7 @@ class FakeControlPlane:
             input_identity=self.batch.input_identity,
             lease_owner="worker-a",
             lease_epoch=1,
-            lease_expires_at=NOW,
+            lease_expires_at=kwargs["now"] + timedelta(seconds=kwargs["lease_seconds"]),
             checkpoint_cursor=None,
             checkpoint_digest=None,
         )
@@ -165,7 +166,10 @@ class FakeControlPlane:
 
     def heartbeat_runtime_attempt(self, lease, **kwargs):
         self.runtime_heartbeats.append(kwargs)
-        return lease
+        return replace(
+            lease,
+            lease_expires_at=kwargs["now"] + timedelta(seconds=kwargs["lease_seconds"]),
+        )
 
 
 class FakeReader:

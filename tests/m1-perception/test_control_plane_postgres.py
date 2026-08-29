@@ -93,6 +93,7 @@ from polyarb.control_plane.recovery_store import (
     read_runtime_reconcile_states,
     schedule_action,
 )
+from polyarb.control_plane.runtime_contract import RetryableHeartbeatError
 from polyarb.control_plane.runtime_deadlines import runtime_retry_policy
 from polyarb.control_plane.runtime_models import RuntimeEvent, RuntimeEventKind, RuntimeProgress
 from polyarb.control_plane.runtime_store import (
@@ -5162,6 +5163,36 @@ def test_runtime_heartbeat_sets_fenced_timeouts_before_first_query(monkeypatch) 
     ]
 
 
+def test_runtime_heartbeat_classifies_connection_outage_without_error_text() -> None:
+    now = _now()
+    lease = JobLease(
+        job_key="runtime:heartbeat-outage",
+        job_type="structure-normalize",
+        input_identity="runtime-heartbeat-outage",
+        lease_owner="runtime-worker",
+        lease_epoch=1,
+        lease_expires_at=now + timedelta(seconds=30),
+        checkpoint_cursor=None,
+        checkpoint_digest=None,
+    )
+
+    def unavailable() -> psycopg.Connection[Any]:
+        raise psycopg.OperationalError("provider body must not escape")
+
+    with pytest.raises(
+        RetryableHeartbeatError,
+        match="^heartbeat database unavailable$",
+    ) as raised:
+        PostgresControlPlane(unavailable).heartbeat_runtime_attempt(
+            lease,
+            now=now + timedelta(seconds=1),
+            lease_seconds=30,
+        )
+
+    assert "provider body" not in str(raised.value)
+    assert isinstance(raised.value.__cause__, psycopg.OperationalError)
+
+
 def test_runtime_heartbeat_lock_timeout_rolls_back_liveness(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -5181,8 +5212,9 @@ def test_runtime_heartbeat_lock_timeout_rolls_back_liveness(
                 (lease.job_key,),
             )
         started = time.monotonic()
-        with pytest.raises(psycopg.errors.LockNotAvailable):
+        with pytest.raises(RetryableHeartbeatError) as raised:
             control_plane.heartbeat_runtime_attempt(lease, now=now, lease_seconds=30)
+        assert isinstance(raised.value.__cause__, psycopg.errors.LockNotAvailable)
         assert time.monotonic() - started < 3
     finally:
         blocker.rollback()
@@ -5234,8 +5266,9 @@ def test_runtime_heartbeat_statement_timeout_rolls_back_liveness(
     )
     try:
         started = time.monotonic()
-        with pytest.raises(psycopg.errors.QueryCanceled):
+        with pytest.raises(RetryableHeartbeatError) as raised:
             control_plane.heartbeat_runtime_attempt(lease, now=now, lease_seconds=30)
+        assert isinstance(raised.value.__cause__, psycopg.errors.QueryCanceled)
         assert time.monotonic() - started < 3
     finally:
         _remove_sleep_trigger(

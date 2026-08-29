@@ -33,7 +33,7 @@ from .models import (
     StructureSourcePageSpec,
 )
 from .recovery_records import RecoveryActionRecord
-from .runtime_contract import RUNTIME_STAGE_REGISTRY
+from .runtime_contract import RUNTIME_STAGE_REGISTRY, RetryableHeartbeatError
 from .runtime_deadlines import runtime_retry_policy
 from .runtime_models import RuntimeEvent, RuntimeEventKind, RuntimeProgress
 from .runtime_store import (
@@ -5531,33 +5531,38 @@ class PostgresControlPlane:
         self._validate_aware(now, "now")
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
-        with (
-            self._connection_factory() as connection,
-            connection.cursor(row_factory=dict_row) as cursor,
-        ):
-            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
-            cursor.execute(
-                """
-                SELECT attempt_id FROM m1_job_runtime_state
-                WHERE job_key = %s AND lease_epoch = %s AND worker_id = %s
-                """,
-                (lease.job_key, lease.lease_epoch, lease.lease_owner),
-            )
-            runtime_state = cursor.fetchone()
-            if runtime_state is None:
-                raise StaleLeaseError(f"runtime attempt is no longer current for {lease.job_key}")
-            try:
-                heartbeat = update_runtime_heartbeat_cursor(
-                    cursor,
-                    job_key=lease.job_key,
-                    attempt_id=str(runtime_state["attempt_id"]),
-                    lease_epoch=lease.lease_epoch,
-                    worker_id=lease.lease_owner,
-                    now=now,
-                    lease_seconds=lease_seconds,
+        try:
+            with (
+                self._connection_factory() as connection,
+                connection.cursor(row_factory=dict_row) as cursor,
+            ):
+                _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+                cursor.execute(
+                    """
+                    SELECT attempt_id FROM m1_job_runtime_state
+                    WHERE job_key = %s AND lease_epoch = %s AND worker_id = %s
+                    """,
+                    (lease.job_key, lease.lease_epoch, lease.lease_owner),
                 )
-            except RuntimeFenceError as error:
-                raise StaleLeaseError(str(error)) from error
+                runtime_state = cursor.fetchone()
+                if runtime_state is None:
+                    raise StaleLeaseError(
+                        f"runtime attempt is no longer current for {lease.job_key}"
+                    )
+                try:
+                    heartbeat = update_runtime_heartbeat_cursor(
+                        cursor,
+                        job_key=lease.job_key,
+                        attempt_id=str(runtime_state["attempt_id"]),
+                        lease_epoch=lease.lease_epoch,
+                        worker_id=lease.lease_owner,
+                        now=now,
+                        lease_seconds=lease_seconds,
+                    )
+                except RuntimeFenceError as error:
+                    raise StaleLeaseError(str(error)) from error
+        except psycopg.OperationalError as error:
+            raise RetryableHeartbeatError("heartbeat database unavailable") from error
         expires_at = heartbeat["lease_deadline_at"]
         return JobLease(
             job_key=lease.job_key,

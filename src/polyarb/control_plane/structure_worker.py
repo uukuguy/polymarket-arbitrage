@@ -23,7 +23,7 @@ from .failure_identity import retry_failure_fingerprint
 from .faults import IntentionalStagingRetryFault
 from .models import JobLease, JobState, StructureRangeSpec
 from .postgres import IncompleteStructureGenerationError, PostgresControlPlane, StaleLeaseError
-from .runtime_contract import AttemptRuntime, ServiceStopRequested
+from .runtime_contract import AttemptRuntime, RetryableHeartbeatError, ServiceStopRequested
 from .runtime_deadlines import runtime_deadline_profile, runtime_policy
 from .service_lifecycle import claim_worker_job
 from .structure_artifact import (
@@ -141,9 +141,11 @@ def _run_bounded_sync_call[SyncResult](
 ) -> SyncResult:
     """Run one blocking call while the current thread polls its lease.
 
-    The call owns a dedicated executor future.  Heartbeat or cancellation
-    errors never abandon that future: the runner drains it before surfacing
-    the error, so a late R2/DB mutation cannot outlive the worker decision.
+    The call owns a dedicated executor future.  A transient heartbeat-store
+    outage retries at one-third of the policy heartbeat cadence while the
+    known lease remains live.  Fence, deadline, or cancellation errors never
+    abandon the future: the runner drains it before surfacing the error, so a
+    late R2/DB mutation cannot outlive the worker decision.
     Terminal calls deliberately skip heartbeat polling after the caller has
     crossed its point of no return (the transaction itself remains bounded by
     the attempt/underlying timeout).
@@ -161,30 +163,46 @@ def _run_bounded_sync_call[SyncResult](
     Thread(target=invoke, name="structure-sync", daemon=True).start()
     primary_error: BaseException | None = None
     deadline = monotonic_clock() + attempt_timeout_seconds
+    completed = False
+    result_box: list[SyncResult] = []
+    retry_heartbeat = False
     while True:
         remaining = deadline - monotonic_clock()
         if remaining <= 0:
             primary_error = TimeoutError("structure sync call exceeded attempt deadline")
             break
-        try:
-            result = future.result(timeout=min(heartbeat_interval_seconds, remaining))
-            # Check cumulative lease age at every completed sub-call boundary.
-            # Otherwise a long attempt made only of fast calls never enters the
-            # timeout branch below and silently expires its lease.
-            if not terminal and heartbeat is not None:
-                heartbeat()
-            return result
-        except FutureTimeoutError:
-            if terminal or heartbeat is None:
-                continue
+        interval = (
+            heartbeat_interval_seconds / 3 if retry_heartbeat else heartbeat_interval_seconds
+        )
+        if not completed:
             try:
-                heartbeat()
+                result_box.append(future.result(timeout=min(interval, remaining)))
+                completed = True
+            except FutureTimeoutError:
+                pass
             except BaseException as error:
                 primary_error = error
                 break
+        else:
+            Event().wait(min(interval, remaining))
+
+        if terminal or heartbeat is None:
+            if completed:
+                return result_box[0]
+            continue
+        try:
+            # Also renew after a fast completed call.  Otherwise cumulative
+            # fast sub-calls can silently consume the lease without polling.
+            heartbeat()
+        except RetryableHeartbeatError:
+            retry_heartbeat = True
+            continue
         except BaseException as error:
             primary_error = error
             break
+        retry_heartbeat = False
+        if completed:
+            return result_box[0]
 
     # A worker-side timeout/fence/cancellation is only observable after
     # the underlying call has quiesced.  This is the no-late-effect fence.

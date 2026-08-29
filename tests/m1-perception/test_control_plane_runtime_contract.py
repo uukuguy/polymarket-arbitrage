@@ -17,7 +17,9 @@ from polyarb.control_plane.runtime_contract import (
     AsyncAttemptRuntime,
     AttemptDeadlineExceeded,
     AttemptRuntime,
+    LeaseDeadlineExceeded,
     ProgressDeadlineExceeded,
+    RetryableHeartbeatError,
 )
 from polyarb.control_plane.runtime_models import (
     RuntimeDeadlineProfile,
@@ -66,11 +68,13 @@ class VirtualSleeper:
     def __init__(self) -> None:
         self._wakeups: asyncio.Queue[None] = asyncio.Queue()
         self.started = asyncio.Event()
+        self.requested_seconds: list[float] = []
 
     def wake(self) -> None:
         self._wakeups.put_nowait(None)
 
     async def __call__(self, seconds: float) -> None:  # noqa: ARG002
+        self.requested_seconds.append(seconds)
         self.started.set()
         await self._wakeups.get()
 
@@ -305,6 +309,19 @@ def test_sync_heartbeat_rejects_wall_clock_regression_before_store_call() -> Non
     assert len(store.heartbeats) == 1
 
 
+def test_sync_heartbeat_rejects_local_lease_expiry_before_store_call() -> None:
+    clock = VirtualClock()
+    store = FakeStore()
+    lease = replace(LEASE, lease_expires_at=NOW + timedelta(seconds=30))
+    runtime = AttemptRuntime(store=store, lease=lease, profile=PROFILE, clock=clock)
+
+    clock.advance(seconds=30)
+    with pytest.raises(LeaseDeadlineExceeded, match="lease deadline"):
+        runtime.heartbeat()
+
+    assert store.heartbeats == []
+
+
 @pytest.mark.asyncio
 async def test_async_runtime_heartbeats_with_bounded_virtual_time_and_exposes_lease() -> None:
     clock = VirtualClock()
@@ -356,6 +373,128 @@ async def test_heartbeat_failure_cancels_body_and_surfaces_original_error() -> N
     assert raised.value is failure
     assert runtime.heartbeat_task is not None
     assert runtime.heartbeat_task.done()
+
+
+@pytest.mark.asyncio
+async def test_retryable_async_heartbeat_uses_derived_retry_cadence_then_recovers() -> None:
+    class FlakyStore(FakeStore):
+        def heartbeat_runtime_attempt(
+            self,
+            lease: JobLease,
+            *,
+            now: datetime,
+            lease_seconds: int,
+        ) -> JobLease:
+            if not self.heartbeats:
+                self.heartbeats.append((lease, now, lease_seconds))
+                raise RetryableHeartbeatError("heartbeat database unavailable")
+            return super().heartbeat_runtime_attempt(
+                lease,
+                now=now,
+                lease_seconds=lease_seconds,
+            )
+
+    clock = VirtualClock()
+    sleeper = VirtualSleeper()
+    clock.sleeper = sleeper
+    store = FlakyStore()
+    runtime = AsyncAttemptRuntime(
+        store=store,
+        lease=LEASE,
+        profile=replace(PROFILE, heartbeat_seconds=3),
+        clock=clock,
+        sleep=sleeper,
+    )
+
+    async with runtime:
+        await asyncio.wait_for(sleeper.started.wait(), timeout=0.2)
+        await clock.advance_async(seconds=3)
+        await _yield_until(lambda: len(store.heartbeats) == 1)
+        await _yield_until(lambda: sleeper.requested_seconds == [3.0, 1.0])
+        await clock.advance_async(seconds=1)
+        await _yield_until(lambda: len(store.heartbeats) == 2)
+
+    assert runtime.heartbeat_error is None
+    assert runtime.lease.lease_expires_at == NOW + timedelta(seconds=124)
+
+
+@pytest.mark.asyncio
+async def test_retryable_async_heartbeat_stops_at_local_lease_deadline() -> None:
+    clock = VirtualClock()
+    sleeper = VirtualSleeper()
+    clock.sleeper = sleeper
+    store = FakeStore(
+        fail_heartbeats=RetryableHeartbeatError("heartbeat database unavailable")
+    )
+    runtime = AsyncAttemptRuntime(
+        store=store,
+        lease=replace(LEASE, lease_expires_at=NOW + timedelta(seconds=4)),
+        profile=replace(PROFILE, heartbeat_seconds=3),
+        clock=clock,
+        sleep=sleeper,
+    )
+
+    with pytest.raises(LeaseDeadlineExceeded, match="lease deadline"):
+        async with runtime:
+            await asyncio.wait_for(sleeper.started.wait(), timeout=0.2)
+            await clock.advance_async(seconds=3)
+            await _yield_until(lambda: len(store.heartbeats) == 1)
+            await _yield_until(lambda: sleeper.requested_seconds == [3.0, 1.0])
+            await clock.advance_async(seconds=1)
+            await _yield_until(lambda: runtime.heartbeat_error is not None)
+
+    assert len(store.heartbeats) == 1
+
+
+@pytest.mark.asyncio
+async def test_success_stop_waits_for_retryable_heartbeat_proof() -> None:
+    class FlakyStore(FakeStore):
+        def heartbeat_runtime_attempt(
+            self,
+            lease: JobLease,
+            *,
+            now: datetime,
+            lease_seconds: int,
+        ) -> JobLease:
+            if not self.heartbeats:
+                self.heartbeats.append((lease, now, lease_seconds))
+                raise RetryableHeartbeatError("heartbeat database unavailable")
+            return super().heartbeat_runtime_attempt(
+                lease,
+                now=now,
+                lease_seconds=lease_seconds,
+            )
+
+    clock = VirtualClock()
+    sleeper = VirtualSleeper()
+    clock.sleeper = sleeper
+    store = FlakyStore()
+    runtime = AsyncAttemptRuntime(
+        store=store,
+        lease=LEASE,
+        profile=replace(PROFILE, heartbeat_seconds=3),
+        clock=clock,
+        sleep=sleeper,
+    )
+
+    async with runtime:
+        await asyncio.wait_for(sleeper.started.wait(), timeout=0.2)
+        await clock.advance_async(seconds=3)
+        await _yield_until(lambda: len(store.heartbeats) == 1)
+        await _yield_until(lambda: sleeper.requested_seconds == [3.0, 1.0])
+
+        async def release_retry() -> None:
+            await asyncio.sleep(0)
+            assert runtime.heartbeat_task is not None
+            assert not runtime.heartbeat_task.done()
+            await clock.advance_async(seconds=1)
+
+        release_task = asyncio.create_task(release_retry())
+        await runtime.stop()
+        await release_task
+
+    assert len(store.heartbeats) == 2
+    assert runtime.lease.lease_expires_at == NOW + timedelta(seconds=124)
 
 
 @pytest.mark.asyncio

@@ -58,6 +58,14 @@ class ProgressDeadlineExceeded(TimeoutError):
     """The attempt produced no durable progress within its policy window."""
 
 
+class LeaseDeadlineExceeded(TimeoutError):
+    """The locally known fenced lease deadline elapsed before renewal."""
+
+
+class RetryableHeartbeatError(RuntimeError):
+    """Heartbeat persistence was temporarily unavailable and may be retried."""
+
+
 class ServiceStopRequested(RuntimeError):
     """The service requested a cooperative stop at the next safe boundary."""
 
@@ -330,6 +338,7 @@ class AttemptRuntime:
 
     def _renew_heartbeat(self, now: datetime) -> None:
         self._require_attempt_live(now)
+        self._require_lease_live(now)
         renewed = self._store.heartbeat_runtime_attempt(
             self._lease,
             now=now,
@@ -339,6 +348,12 @@ class AttemptRuntime:
             raise TypeError("heartbeat store must return JobLease")
         self._lease = renewed
         self._last_heartbeat_at = now
+
+    def _require_lease_live(self, now: datetime) -> None:
+        if now >= self._lease.lease_expires_at:
+            raise LeaseDeadlineExceeded(
+                f"lease deadline exceeded for {self._lease.job_key}"
+            )
 
     def _require_attempt_live(self, now: datetime) -> None:
         _validate_clock_progression(now, self._started_at)
@@ -375,6 +390,9 @@ class AsyncAttemptRuntime(AttemptRuntime):
         self._owner_task: asyncio.Task[Any] | None = None
         self._heartbeat_error: BaseException | None = None
         self._watchdog_error: BaseException | None = None
+        self._heartbeat_call_inflight = False
+        self._heartbeat_retry_pending = False
+        self._stop_after_heartbeat = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started_monotonic: float | None = None
         self._last_progress_monotonic: float | None = None
@@ -435,8 +453,14 @@ class AsyncAttemptRuntime(AttemptRuntime):
             raise
         return self
 
-    async def stop(self) -> None:
-        """Stop and reap the heartbeat task; repeated calls are harmless."""
+    async def stop(self, *, require_heartbeat_proof: bool = True) -> None:
+        """Stop and reap owned tasks; retain a pending renewal on success.
+
+        Successful worker paths require a current heartbeat proof before they
+        can cross into their terminal fenced transaction.  Error/cancellation
+        exits may stop after draining an already in-flight store call because
+        they will not attempt a terminal mutation.
+        """
         if self._heartbeat_task is None:
             raise RuntimeError("attempt runtime has not been started")
         self._require_owner()
@@ -444,7 +468,12 @@ class AsyncAttemptRuntime(AttemptRuntime):
             if self._heartbeat_error is not None:
                 raise self._heartbeat_error
             return
-        self._stopped.set()
+        if require_heartbeat_proof and (
+            self._heartbeat_call_inflight or self._heartbeat_retry_pending
+        ):
+            self._stop_after_heartbeat = True
+        else:
+            self._stopped.set()
         heartbeat_cancelled = await self._drain_heartbeat_task()
         watchdog_cancelled = await self._drain_watchdog_task()
         self._stop_complete = True
@@ -461,7 +490,7 @@ class AsyncAttemptRuntime(AttemptRuntime):
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
         stop_error: BaseException | None = None
         try:
-            await self.stop()
+            await self.stop(require_heartbeat_proof=exc is None)
         except BaseException as error:  # preserve cancellation/body error below
             stop_error = error
         if self._heartbeat_error is not None:
@@ -480,19 +509,32 @@ class AsyncAttemptRuntime(AttemptRuntime):
 
     async def _heartbeat_loop(self) -> None:
         try:
+            wait_seconds = float(self._profile.heartbeat_seconds)
             while not self._stopped.is_set():
-                if not await self._wait_for_heartbeat_or_stop():
+                if not await self._wait_for_heartbeat_or_stop(wait_seconds):
                     break
                 if self._stopped.is_set():
                     break
                 now = _read_clock(self._clock)
                 _validate_clock_progression(now, self._last_heartbeat_at)
-                renewed = await self._run_heartbeat_call(now)
+                self._require_attempt_live(now)
+                self._require_lease_live(now)
+                self._heartbeat_call_inflight = True
+                try:
+                    renewed = await self._run_heartbeat_call(now)
+                except RetryableHeartbeatError:
+                    self._heartbeat_retry_pending = True
+                    wait_seconds = self._profile.heartbeat_seconds / 3
+                    continue
+                finally:
+                    self._heartbeat_call_inflight = False
                 if type(renewed) is not JobLease:
                     raise TypeError("heartbeat store must return JobLease")
                 self._lease = renewed
                 self._last_heartbeat_at = now
-                if self._stopped.is_set():
+                self._heartbeat_retry_pending = False
+                wait_seconds = float(self._profile.heartbeat_seconds)
+                if self._stop_after_heartbeat or self._stopped.is_set():
                     break
         except asyncio.CancelledError:
             raise
@@ -555,17 +597,17 @@ class AsyncAttemptRuntime(AttemptRuntime):
             thread_name=f"runtime-heartbeat-call:{self.lease.job_key}",
         )
 
-    async def _wait_for_heartbeat_or_stop(self) -> bool:
+    async def _wait_for_heartbeat_or_stop(self, wait_seconds: float) -> bool:
         if self._sleep is None:
             try:
                 await asyncio.wait_for(
-                    self._stopped.wait(), timeout=self._profile.heartbeat_seconds
+                    self._stopped.wait(), timeout=wait_seconds
                 )
             except TimeoutError:
                 return True
             return False
 
-        sleep_result = self._sleep(float(self._profile.heartbeat_seconds))
+        sleep_result = self._sleep(wait_seconds)
         if not inspect.isawaitable(sleep_result):
             raise TypeError("runtime sleeper must return an awaitable")
         sleep_task = asyncio.create_task(_await_sleep(sleep_result))
@@ -641,8 +683,10 @@ __all__ = [
     "AsyncAttemptRuntime",
     "AttemptDeadlineExceeded",
     "AttemptRuntime",
+    "LeaseDeadlineExceeded",
     "ProgressDeadlineExceeded",
     "RUNTIME_STAGE_REGISTRY",
     "RuntimeStore",
+    "RetryableHeartbeatError",
     "ServiceStopRequested",
 ]
