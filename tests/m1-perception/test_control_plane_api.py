@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import threading
+from time import monotonic
+
+import pytest
 from starlette.testclient import TestClient
 
 
 class _AvailableControlPlane:
+    def readiness(self) -> bool:
+        return True
+
     def operational_snapshot(self, *, sample_limit: int) -> dict[str, object]:
         assert sample_limit in {1, 20}
         return {
@@ -43,6 +50,27 @@ class _AvailableControlPlane:
             "limit": 1,
             "next_after_group_id": None,
         }
+
+
+def test_standalone_control_api_health_uses_only_the_minimal_readiness_probe() -> None:
+    from polyarb.control_plane.api import create_control_plane_app
+
+    calls: list[str] = []
+
+    class HealthFocusedControlPlane:
+        def readiness(self) -> bool:
+            calls.append("readiness")
+            return True
+
+        def operational_snapshot(self, *, sample_limit: int) -> dict[str, object]:
+            raise AssertionError(f"health must not build the operator snapshot: {sample_limit}")
+
+    with TestClient(create_control_plane_app(control_plane=HealthFocusedControlPlane())) as client:
+        health = client.get("/healthz")
+
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok", "control_plane": "available"}
+    assert calls == ["readiness"]
 
 
 def test_standalone_control_api_is_readable_without_legacy_daemon_dependencies() -> None:
@@ -99,8 +127,46 @@ def test_standalone_control_api_fails_readiness_when_postgres_is_unavailable() -
     assert opportunities.status_code == 503
 
 
+def test_standalone_control_api_health_detaches_a_stalled_readiness_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from polyarb.control_plane import api
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class Policy:
+        request_timeout_seconds = 0.05
+
+    class StalledControlPlane:
+        def readiness(self) -> bool:
+            started.set()
+            release.wait()
+            return True
+
+    monkeypatch.setattr(api, "CONTROL_PLANE_HEALTH_DB_POLICY", Policy())
+    safety_release = threading.Timer(0.4, release.set)
+    safety_release.start()
+    before = monotonic()
+    try:
+        app = api.create_control_plane_app(control_plane=StalledControlPlane())
+        with TestClient(app) as client:
+            health = client.get("/healthz")
+        assert health.status_code == 503
+        assert health.json() == {
+            "status": "unavailable",
+            "reason": "control-plane-read-unavailable",
+        }
+        assert started.is_set()
+        assert monotonic() - before < 0.2
+    finally:
+        release.set()
+        safety_release.cancel()
+
+
 def test_control_api_connection_factory_bounds_postgres_connect_time(monkeypatch) -> None:
     from polyarb.control_plane import api
+    from polyarb.control_plane.db_deadlines import CONTROL_PLANE_HEALTH_DB_POLICY
 
     calls: list[tuple[str, dict[str, object]]] = []
 
@@ -112,6 +178,8 @@ def test_control_api_connection_factory_bounds_postgres_connect_time(monkeypatch
             return self
 
         def fetchone(self):
+            if calls[0][1]["connect_timeout"] == 1:
+                return ("pg_catalog,public", "1s", "250ms", ["pg_catalog", "public"])
             return ("pg_catalog,public", "5s", "1s", ["pg_catalog", "public"])
 
         def cancel_safe(self, *, timeout):
@@ -142,3 +210,19 @@ def test_control_api_connection_factory_bounds_postgres_connect_time(monkeypatch
     assert len(calls) == 2
     assert "set_config('search_path'" in calls[1][0]
     assert calls[1][1] == {"params": ("pg_catalog,public", "5000ms", "1000ms")}
+
+    calls.clear()
+    assert control_plane._readiness_connection_factory() is sentinel
+    assert calls[0] == (
+        "postgresql://control-plane",
+        {
+            "connect_timeout": 1,
+            "options": (
+                "-csearch_path=pg_catalog,public "
+                "-cstatement_timeout=1000ms -clock_timeout=250ms"
+            ),
+        },
+    )
+    assert len(calls) == 2
+    assert calls[1][1] == {"params": ("pg_catalog,public", "1000ms", "250ms")}
+    assert CONTROL_PLANE_HEALTH_DB_POLICY.request_timeout_seconds == 3.5

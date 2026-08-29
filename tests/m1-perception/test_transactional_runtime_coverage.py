@@ -258,6 +258,7 @@ def test_retry_circuit_budget_and_backoff_have_one_runtime_policy_authority() ->
 def test_database_deadlines_have_one_registry_and_no_private_copies() -> None:
     from polyarb.control_plane.db_deadlines import (
         CONTROL_PLANE_DB_POLICY,
+        CONTROL_PLANE_HEALTH_DB_POLICY,
         MIGRATION_DB_POLICY,
         RECOVERY_DB_POLICY,
     )
@@ -265,7 +266,12 @@ def test_database_deadlines_have_one_registry_and_no_private_copies() -> None:
     assert CONTROL_PLANE_DB_POLICY.lock_timeout_ms < CONTROL_PLANE_DB_POLICY.statement_timeout_ms
     assert CONTROL_PLANE_DB_POLICY.request_timeout_seconds > (
         CONTROL_PLANE_DB_POLICY.connect_timeout_seconds
-        + CONTROL_PLANE_DB_POLICY.statement_timeout_ms / 1_000
+        + 2 * CONTROL_PLANE_DB_POLICY.statement_timeout_ms / 1_000
+    )
+    assert CONTROL_PLANE_HEALTH_DB_POLICY.request_timeout_seconds < 5
+    assert (
+        CONTROL_PLANE_HEALTH_DB_POLICY.statement_timeout_ms
+        < CONTROL_PLANE_DB_POLICY.statement_timeout_ms
     )
     assert RECOVERY_DB_POLICY.lock_timeout_ms <= RECOVERY_DB_POLICY.statement_timeout_ms
     assert RECOVERY_DB_POLICY.statement_timeout_ms < CONTROL_PLANE_DB_POLICY.statement_timeout_ms

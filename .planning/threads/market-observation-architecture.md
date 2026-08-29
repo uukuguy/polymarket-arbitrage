@@ -2453,3 +2453,18 @@ success is not user receipt/read evidence.
 - Slow calls retain periodic renewal and drain-before-error. Terminal calls do
   not heartbeat after commit, because a terminal receipt/state transition—not
   a renewed lease—is the post-commit authority.
+
+### §2.70 Platform readiness is not an operator report (2026-08-29)
+
+- The control API's five-second Fly check called the same full snapshot used by
+  operators. Its application envelope was 10.5 seconds and omitted the
+  mandatory scoped-session bootstrap, so recurring platform failures were a
+  deterministic boundary contradiction rather than evidence that Postgres was
+  down.
+- Readiness now performs one `SELECT 1` through a dedicated scoped policy. Its
+  complete `connect -> bootstrap/readback -> probe -> transfer` envelope is
+  3.5 seconds and a deployment-contract test requires it to remain strictly
+  below Fly's five seconds.
+- Full snapshot and opportunity reads keep their richer contracts on operator
+  routes. A health probe may prove the authority is readable, but it may not
+  pay the latency, allocation or query-round cost of rendering operator state.

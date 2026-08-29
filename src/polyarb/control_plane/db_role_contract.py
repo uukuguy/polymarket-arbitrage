@@ -12,7 +12,7 @@ from urllib.parse import parse_qsl, urlsplit
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
 
-from .db_deadlines import CONTROL_PLANE_DB_POLICY
+from .db_deadlines import CONTROL_PLANE_DB_POLICY, DatabaseDeadlinePolicy
 
 ConnectionFactory = Callable[[], psycopg.Connection[Any]]
 TABLE_PRIVILEGES = (
@@ -36,16 +36,6 @@ def _canonical_timeout_setting(milliseconds: int) -> str:
     return f"{milliseconds // 1_000}s" if milliseconds % 1_000 == 0 else f"{milliseconds}ms"
 
 
-_CONTROLLED_SESSION_SETTINGS = (
-    ",".join(CONTROLLED_SEARCH_PATH),
-    CONTROL_PLANE_DB_POLICY.statement_setting,
-    CONTROL_PLANE_DB_POLICY.lock_setting,
-)
-_EXPECTED_SESSION_SETTINGS = (
-    _CONTROLLED_SESSION_SETTINGS[0],
-    _canonical_timeout_setting(CONTROL_PLANE_DB_POLICY.statement_timeout_ms),
-    _canonical_timeout_setting(CONTROL_PLANE_DB_POLICY.lock_timeout_ms),
-)
 # TEMPORARY is intentionally allowed. PostgreSQL grants it to PUBLIC by default;
 # revoking it globally would change the original four applications. Namespace
 # safety instead comes from qualified daemon SQL plus this controlled path.
@@ -147,19 +137,24 @@ class DatabaseRoleContractError(RuntimeError):
         super().__init__(f"{reason_code}: {object_identifier}")
 
 
-def scoped_connection_factory(dsn: str) -> ConnectionFactory:
+def scoped_connection_factory(
+    dsn: str,
+    *,
+    deadline_policy: DatabaseDeadlinePolicy = CONTROL_PLANE_DB_POLICY,
+) -> ConnectionFactory:
     """Return a connection factory with a non-overridable application namespace."""
 
     _reject_dsn_namespace_override(dsn)
+    connection_options = "-csearch_path=pg_catalog,public " + deadline_policy.connection_options
 
     def connect() -> psycopg.Connection[Any]:
         connection = psycopg.connect(
             dsn,
-            connect_timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds,
-            options=CONTROLLED_CONNECTION_OPTIONS,
+            connect_timeout=deadline_policy.connect_timeout_seconds,
+            options=connection_options,
         )
         try:
-            _bootstrap_scoped_session(connection)
+            _bootstrap_scoped_session(connection, deadline_policy=deadline_policy)
         except Exception:
             connection.close()
             raise
@@ -168,23 +163,42 @@ def scoped_connection_factory(dsn: str) -> ConnectionFactory:
     return connect
 
 
-def _bootstrap_scoped_session(connection: psycopg.Connection[Any]) -> None:
+def _bootstrap_scoped_session(
+    connection: psycopg.Connection[Any],
+    *,
+    deadline_policy: DatabaseDeadlinePolicy = CONTROL_PLANE_DB_POLICY,
+) -> None:
     """Reassert and verify policy when a session pooler drops startup options."""
     completed = Event()
     timed_out = Event()
+    session_settings = (
+        ",".join(CONTROLLED_SEARCH_PATH),
+        deadline_policy.statement_setting,
+        deadline_policy.lock_setting,
+    )
+    expected_session_settings = (
+        session_settings[0],
+        _canonical_timeout_setting(deadline_policy.statement_timeout_ms),
+        _canonical_timeout_setting(deadline_policy.lock_timeout_ms),
+    )
+    bootstrap_timeout_seconds = (
+        _BOOTSTRAP_TIMEOUT_SECONDS
+        if deadline_policy is CONTROL_PLANE_DB_POLICY
+        else deadline_policy.statement_timeout_ms / 1_000
+    )
 
     def cancel_bootstrap() -> None:
         if completed.is_set():
             return
         timed_out.set()
         try:
-            connection.cancel_safe(timeout=CONTROL_PLANE_DB_POLICY.connect_timeout_seconds)
+            connection.cancel_safe(timeout=deadline_policy.connect_timeout_seconds)
         except Exception:
             # The caller still closes the connection and fails closed. No
             # provider exception detail may replace the stable contract error.
             pass
 
-    timer = Timer(_BOOTSTRAP_TIMEOUT_SECONDS, cancel_bootstrap)
+    timer = Timer(bootstrap_timeout_seconds, cancel_bootstrap)
     timer.daemon = True
     original_autocommit = connection.autocommit
     connection.autocommit = True
@@ -202,7 +216,7 @@ def _bootstrap_scoped_session(connection: psycopg.Connection[Any]) -> None:
                    pg_catalog.current_schemas(false)
             FROM configured
             """,
-            _CONTROLLED_SESSION_SETTINGS,
+            session_settings,
         )
         row = result.fetchone()
     except Exception as error:
@@ -216,7 +230,7 @@ def _bootstrap_scoped_session(connection: psycopg.Connection[Any]) -> None:
         raise DatabaseRoleContractError("database-role.bootstrap-timeout", "session")
     if (
         row is None
-        or tuple(row[:3]) != _EXPECTED_SESSION_SETTINGS
+        or tuple(row[:3]) != expected_session_settings
         or tuple(row[3]) != CONTROLLED_SEARCH_PATH
     ):
         raise DatabaseRoleContractError("database-role.bootstrap-unsafe", "session")

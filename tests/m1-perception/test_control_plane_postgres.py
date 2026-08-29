@@ -8990,6 +8990,12 @@ def test_operational_snapshot_production_read_owns_database_snapshot_clock(
     assert snapshot["runtime_controller"]["lease_age_seconds"] >= 0
 
 
+def test_readiness_uses_a_minimal_durable_authority_probe(
+    control_plane: PostgresControlPlane,
+) -> None:
+    assert control_plane.readiness() is True
+
+
 def test_operational_snapshot_is_one_bounded_data_statement_and_one_client_round() -> None:
     commands = [
         command.strip()

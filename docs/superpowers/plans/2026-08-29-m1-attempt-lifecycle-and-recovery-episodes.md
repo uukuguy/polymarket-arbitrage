@@ -367,6 +367,37 @@
 - [ ] Roll an exact release and prove the interrupted Opportunity job reclaims,
   publishes a fresh pointer, and allows one uninterrupted qualification epoch.
 
+### Task 13: Separate platform readiness from the operator snapshot
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/api.py`
+- Modify: `src/polyarb/control_plane/db_deadlines.py`
+- Modify: `src/polyarb/control_plane/db_role_contract.py`
+- Modify: `src/polyarb/control_plane/postgres.py`
+- Test: `tests/m1-perception/test_control_plane_api.py`
+- Test: `tests/m1-perception/test_control_plane_deployment_templates.py`
+- Test: `tests/m1-perception/test_control_plane_postgres.py`
+
+**Interfaces:**
+
+- `/healthz` proves only minimal durable-authority readability and never builds
+  `operational_snapshot()`.
+- `CONTROL_PLANE_HEALTH_DB_POLICY` covers connect, session bootstrap, one
+  readiness statement and transfer below the Fly five-second boundary.
+- Default request and stop envelopes include mandatory session bootstrap.
+
+- [x] Correlate recurring 16–56 second Fly health failures with the five-second
+  platform check and the heavier operator-snapshot path.
+- [x] Add RED tests proving health does not call the snapshot and its complete
+  internal policy is strictly below the deployment check timeout.
+- [x] Implement one-statement readiness with a dedicated scoped connection
+  policy; detach stalled reads and return typed 503 without provider detail.
+- [x] Run API, deployment, DB-role, alert-clock, Ruff, Pyright and real
+  PostgreSQL focused gates.
+- [ ] Roll the exact API image and prove a sustained healthy platform window
+  while the full operator endpoint remains available.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,

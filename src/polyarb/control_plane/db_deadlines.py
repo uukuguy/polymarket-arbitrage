@@ -41,19 +41,30 @@ class DatabaseDeadlinePolicy:
 
     @property
     def stop_grace_seconds(self) -> float:
-        """Bound shutdown above connect plus one statement, with one tick margin."""
-        return float(self.connect_timeout_seconds + (self.statement_timeout_ms + 999) // 1_000 + 1)
+        """Bound shutdown above connect, bootstrap, and one data statement."""
+        statement_seconds = (self.statement_timeout_ms + 999) // 1_000
+        return float(self.connect_timeout_seconds + 2 * statement_seconds + 1)
 
     @property
     def request_timeout_seconds(self) -> float:
-        """Envelope one connect plus one statement and bounded response transfer."""
-        return self.connect_timeout_seconds + self.statement_timeout_ms / 1_000 + 0.5
+        """Envelope connect, session bootstrap, one data statement, and transfer."""
+        statement_seconds = self.statement_timeout_ms / 1_000
+        return self.connect_timeout_seconds + 2 * statement_seconds + 0.5
 
 
 CONTROL_PLANE_DB_POLICY = DatabaseDeadlinePolicy(
     connect_timeout_seconds=5,
     statement_timeout_ms=5_000,
     lock_timeout_ms=1_000,
+)
+
+# Fly allows five seconds for the control API readiness request.  This policy
+# covers the complete connection -> bootstrap -> SELECT 1 sequence below that
+# platform boundary, rather than reusing the heavier operator-snapshot budget.
+CONTROL_PLANE_HEALTH_DB_POLICY = DatabaseDeadlinePolicy(
+    connect_timeout_seconds=1,
+    statement_timeout_ms=1_000,
+    lock_timeout_ms=250,
 )
 
 # Recovery actions operate below short controller/action leases, so they use a
@@ -75,6 +86,7 @@ MIGRATION_DB_POLICY = DatabaseDeadlinePolicy(
 
 __all__ = [
     "CONTROL_PLANE_DB_POLICY",
+    "CONTROL_PLANE_HEALTH_DB_POLICY",
     "DatabaseDeadlinePolicy",
     "MIGRATION_DB_POLICY",
     "RECOVERY_DB_POLICY",

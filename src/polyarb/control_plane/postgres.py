@@ -1159,8 +1159,23 @@ def _runtime_index_fingerprint(
 class PostgresControlPlane:
     """Own atomic job transitions; callers provide the connection factory."""
 
-    def __init__(self, connection_factory: ConnectionFactory) -> None:
+    def __init__(
+        self,
+        connection_factory: ConnectionFactory,
+        *,
+        readiness_connection_factory: ConnectionFactory | None = None,
+    ) -> None:
         self._connection_factory = connection_factory
+        self._readiness_connection_factory = readiness_connection_factory or connection_factory
+
+    def readiness(self) -> bool:
+        """Prove the durable authority is readable without building a dashboard snapshot."""
+        with (
+            self._readiness_connection_factory() as connection,
+            connection.cursor() as cursor,
+        ):
+            cursor.execute("SELECT 1")
+            return cursor.fetchone() == (1,)
 
     def start_soak_run(self, *, run_id: str, baseline_record: Mapping[str, object]) -> None:
         """Create one immutable cloud soak run, or prove its exact replay."""

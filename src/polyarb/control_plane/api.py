@@ -16,16 +16,35 @@ from starlette.routing import Route
 from polyarb.http.control_plane import control_plane_status
 
 from .blocking_bridge import run_blocking_call_with_timeout
-from .db_deadlines import CONTROL_PLANE_DB_POLICY
+from .db_deadlines import CONTROL_PLANE_DB_POLICY, CONTROL_PLANE_HEALTH_DB_POLICY
 from .db_role_contract import scoped_connection_factory
 from .postgres import PostgresControlPlane
 
 
 async def control_plane_healthz(request: Request) -> JSONResponse:
     """Expose readiness only when the durable authority is readable."""
-    response = await control_plane_status(request)
-    if response.status_code != 200:
-        return response
+    control_plane = getattr(request.app.state, "control_plane", None)
+    if control_plane is None or not hasattr(control_plane, "readiness"):
+        return JSONResponse(
+            {"status": "unavailable", "reason": "control-plane-read-unavailable"},
+            status_code=503,
+        )
+    try:
+        ready = await run_blocking_call_with_timeout(
+            control_plane.readiness,
+            timeout_seconds=CONTROL_PLANE_HEALTH_DB_POLICY.request_timeout_seconds,
+            thread_name="control-plane-api:readiness",
+        )
+    except Exception:
+        return JSONResponse(
+            {"status": "unavailable", "reason": "control-plane-read-unavailable"},
+            status_code=503,
+        )
+    if ready is not True:
+        return JSONResponse(
+            {"status": "unavailable", "reason": "control-plane-read-unavailable"},
+            status_code=503,
+        )
     return JSONResponse({"status": "ok", "control_plane": "available"})
 
 
@@ -78,7 +97,13 @@ def create_control_plane_app(*, control_plane: Any | None) -> Starlette:
 
 def _build_control_plane(dsn: str) -> PostgresControlPlane:
     """Build the API with the same bounded session contract as every daemon."""
-    return PostgresControlPlane(scoped_connection_factory(dsn))
+    return PostgresControlPlane(
+        scoped_connection_factory(dsn),
+        readiness_connection_factory=scoped_connection_factory(
+            dsn,
+            deadline_policy=CONTROL_PLANE_HEALTH_DB_POLICY,
+        ),
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

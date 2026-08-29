@@ -44,6 +44,7 @@ qualification 86,400 s -- acceptance observation window; it is not a process tim
 | Scheduler cadence | caller `interval_seconds` | never cancels an active lane; recomputes remaining time after observer work | completed turn callback | scheduler service tests |
 | Terminal shutdown | `service_lifecycle.terminal_grace_seconds()` | first cancel requests drain; second cancel detaches; fence owns late result | `ServiceStopRequested` or terminal receipt | service lifecycle and interruption tests |
 | Operator observation | watchdog/Fly read policy constants | daemon reader is abandoned after the derived observation round | watchdog transition, never a job mutation | CLI/watchdog tests |
+| Control API readiness | `CONTROL_PLANE_HEALTH_DB_POLICY` below Fly's 5 s check | detach the read-only probe at 3.5 s; platform never owns the DB call | no mutation; typed 503 | API, deployment-contract and real PostgreSQL tests |
 | Qualification window | immutable qualification policy | service can restart and resume cursors; no outer process timeout | normalized ingress and epoch/certificate | qualification service and 86,400-second certificate |
 
 ## Provider and external-I/O inventory
@@ -57,6 +58,7 @@ qualification 86,400 s -- acceptance observation window; it is not a process tim
 | Telegram outbox delivery | `ALERT_DELIVERY_POLICY.provider_timeout_seconds` | stop grace below alert lease | 1 | failure is a durable retryable outbox delivery. |
 | Runtime watchdog control API / Fly API | 10 s individual read | derived 21 s parallel observation round | 1 | read-only, bounded target sets; a missed round becomes an observation failure, never a Machine mutation. |
 | Runtime watchdog page / private event writer | 5 s request | blocking bridge obeys service cancellation | 1 | watchdog remains independent from the transactional DB path. |
+| Control API `/healthz` | 1 s connect, 1 s bootstrap, one 1 s `SELECT 1` | 3.5 s application envelope below Fly 5 s | 1 | readiness never builds the operator snapshot; `/perception/control-plane` retains the full read model. |
 | Local Fly CLI soak read | 30 s operator read | command process timeout | 1 | operator evidence only. Long-running deployment/certificate commands do not receive this bound. |
 
 The legacy snapshot-only R2 helper retains its historical standard retry
@@ -68,12 +70,15 @@ policy. Formal runtime-v2 paths must use `control_plane_r2_config()`, whose
 | Policy | Connect | Statement | Lock | Consumers |
 |---|---:|---:|---:|---|
 | `CONTROL_PLANE_DB_POLICY` | 5 s | 5 s | 1 s | worker transactions, API reads, qualification facts |
+| `CONTROL_PLANE_HEALTH_DB_POLICY` | 1 s | 1 s | 0.25 s | minimal control API readiness only |
 | `RECOVERY_DB_POLICY` | 5 s | 2 s | 1 s | controller lease, observe ledger, action scheduling/execution |
 | `MIGRATION_DB_POLICY` | 10 s | 30 s | 1 s | Alembic/preflight scans only |
 
-Server-side statement/lock limits are the mutation authority. HTTP or thread
-request envelopes may contain connection plus statement transfer time, but
-must not retry the transaction or claim a second mutation deadline.
+Server-side statement/lock limits are the mutation authority. A fresh scoped
+connection always performs `connect -> bounded bootstrap/readback -> data
+statement`; HTTP and stop envelopes therefore include two statement budgets,
+not one. They must not retry the transaction or claim a second mutation
+deadline.
 
 ## Ordering and restart contract
 
@@ -136,6 +141,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Receipt count stood in for producer success | a checkpointed producer could make an incomplete generation claimable | eligibility joins each receipt to a `succeeded` producer job |
 | Structure source pool hid its lanes' lease policy | SIGTERM drain could not resolve terminal grace and exited the coordinator with `ValueError` | validate one common lane lease and expose it on the pool, matching the Quote pool contract |
 | Fast sub-calls never reached heartbeat polling | a long Opportunity/Structure sequence of healthy sub-30-second calls silently expired its cumulative lease and surfaced `stale-lease` | check the runtime's due heartbeat after every successful nonterminal call boundary as well as while one call blocks |
+| Fly readiness ran the full operator snapshot | a 5 s platform check wrapped a 10.5 s application envelope whose formula also omitted session bootstrap, producing recurring 16–56 s health flaps | use a one-statement durable-authority probe with a dedicated 3.5 s full-sequence policy; derive default request/stop envelopes from connect + bootstrap + data statement |
 | Local SSH waiter outlived an already completed remote Machine | operator process appeared hung despite completed remote work | exact waiter can be interrupted safely; remote durable state is re-read before retry |
 
 ## Prohibited patterns
@@ -152,6 +158,8 @@ structure-fetch -> structure-materialize -> structure-normalize
 - Calling synchronous `.claim_job()` directly from an `async run_once()`.
 - Renewing a repeated blocking sequence only from the single-call timeout branch;
   cumulative lease age must also be checked when each fast call returns.
+- Reusing an operator/report query as a platform readiness probe, or comparing
+  an outer timeout against a budget that omits mandatory bootstrap work.
 
 ## Verification map
 

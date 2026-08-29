@@ -39,6 +39,8 @@ def test_docker_build_context_excludes_local_distribution_artifacts() -> None:
 
 
 def test_control_api_template_has_only_postgres_read_process_and_http_health() -> None:
+    from polyarb.control_plane.db_deadlines import CONTROL_PLANE_HEALTH_DB_POLICY
+
     payload = tomllib.loads(
         (ROOT / "deploy/control-plane/fly-control-api.toml.template").read_text()
     )
@@ -48,6 +50,10 @@ def test_control_api_template_has_only_postgres_read_process_and_http_health() -
     assert payload["processes"] == {"api": "python -m polyarb.control_plane.api"}
     assert payload["http_service"]["processes"] == ["api"]
     assert payload["http_service"]["checks"][0]["path"] == "/healthz"
+    platform_timeout = float(
+        payload["http_service"]["checks"][0]["timeout"].removesuffix("s")
+    )
+    assert CONTROL_PLANE_HEALTH_DB_POLICY.request_timeout_seconds < platform_timeout
     assert "mounts" not in payload
 
 
