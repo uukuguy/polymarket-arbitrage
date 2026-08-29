@@ -540,13 +540,43 @@
 - [ ] Run the complete PostgreSQL/worker/full-M1 gates, build an exact image and
   repeat the Structure-only canary before any sibling rollout.
 
+### Task 19: Close the source-to-materializer generation admission gap
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/postgres.py`
+- Modify: `tests/m1-perception/test_control_plane_postgres.py`
+
+**Interfaces:**
+
+- Structure admission counts unfinished `structure-materialize`,
+  `structure-normalize` and `structure-certify` jobs under the same configured
+  high-water; a generation cannot disappear while changing durable shape.
+- Only the oldest unfinished materializer is claimable, and no materializer is
+  claimable while any prior range or certifier remains unfinished.
+- Existing lease/checkpoint/retry/circuit facts remain the recovery authority;
+  no attempt, lock, provider or freshness timeout changes.
+
+- [x] Prove production had three unfinished generations: source windows admitted
+  at `01:17Z` and `02:04Z` materialized only at `04:37Z` and `04:51Z`, after
+  the admission-only stopgap was already active.
+- [x] Stop only the coordinator before its remaining retryable materializer can
+  enqueue a fourth generation; preserve all durable jobs and sibling workers.
+- [x] Add real-PostgreSQL RED tests for the pre-range materializer gap,
+  post-range/pre-certifier gap, two materializer contenders and prior-generation
+  certification ordering.
+- [ ] Implement one fixed pipeline-backlog predicate in admission and
+  materializer claim eligibility, then run focused and complete gates.
+- [ ] Restore coordinator only on an exact canary release that proves no fourth
+  generation is admitted/materialized while prior generations are unfinished.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
   sequencing, cancellation, event-loop claim isolation, non-blocking fan-in repair,
   inventory, operator wait, production proof, capacity/backpressure and
   connection ownership, worker-identity capacity and producer commit
-  independence all map to Tasks 1–18.
+  independence plus cross-shape generation ordering all map to Tasks 1–19.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

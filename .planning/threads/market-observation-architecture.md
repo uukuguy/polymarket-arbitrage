@@ -2562,3 +2562,20 @@ success is not user receipt/read evidence.
   bounded certifier repair converts committed durable facts into `runnable`
   before claim, so interruption, restart and lost direct wake all share one
   recovery mechanism.
+
+### §2.77 Generation backpressure must survive durable shape changes (2026-08-29)
+
+- A source window can be admitted, finish collection and remain a retryable
+  `structure-materialize` job for hours before any range exists. Counting only
+  unfinished `structure-normalize` jobs therefore produces a false zero before
+  materialization. It produces another false zero after the last range and
+  before the certifier publishes.
+- The coordinator stopgap was configured correctly, but two windows admitted
+  before that configuration materialized later and created two more 1,117-range
+  generations. A third pending materializer proved admission-only policy cannot
+  control already durable upstream work.
+- Admission now counts the materializer, range and certifier forms with a
+  high-water-bounded probe. Claim independently permits only the oldest
+  materializer and only when prior ranges/certifiers are terminal. The atomic
+  materializer commit changes one visible shape into the next without an
+  unobservable gap; no mutable generation counter or new timeout is needed.

@@ -1567,10 +1567,18 @@ class PostgresControlPlane:
             )
             cursor.execute(
                 """
-                SELECT count(*) AS count FROM m1_jobs
-                WHERE job_type = 'structure-normalize'
-                  AND state IN ('runnable', 'retryable', 'leased', 'checkpointed')
-                """
+                SELECT count(*) AS count FROM (
+                    SELECT 1 FROM m1_jobs
+                    WHERE job_type IN (
+                        'structure-materialize', 'structure-normalize', 'structure-certify'
+                    )
+                      AND state IN (
+                        'waiting', 'runnable', 'retryable', 'leased', 'checkpointed'
+                      )
+                    LIMIT %s
+                ) AS unfinished_structure_pipeline
+                """,
+                (structure_high_water,),
             )
             structure_unfinished = cursor.fetchone()
             if structure_unfinished is None:
@@ -1579,10 +1587,14 @@ class PostgresControlPlane:
                 return SourceAdmissionDecision(state="backpressured:structure", job_key=None)
             cursor.execute(
                 """
-                SELECT count(*) AS count FROM m1_jobs
-                WHERE job_type = 'quote-batch'
-                  AND state IN ('runnable', 'retryable', 'leased', 'checkpointed')
-                """
+                SELECT count(*) AS count FROM (
+                    SELECT 1 FROM m1_jobs
+                    WHERE job_type = 'quote-batch'
+                      AND state IN ('runnable', 'retryable', 'leased', 'checkpointed')
+                    LIMIT %s
+                ) AS unfinished_quote_pipeline
+                """,
+                (quote_high_water,),
             )
             quote_unfinished = cursor.fetchone()
             if quote_unfinished is None:
@@ -5253,12 +5265,50 @@ class PostgresControlPlane:
                 or worker_guard["job_key"] is not None
             ):
                 return None
+            materializer_job_key: str | None = None
+            if "structure-materialize" in job_types:
+                # A source window can remain durably queued for materialization
+                # long after its admission turn.  Select only the oldest such
+                # shape, and do not let it overtake any prior range/certifier
+                # generation.  The later FOR UPDATE SKIP LOCKED makes this
+                # fixed observation safe across replacement coordinators.
+                cursor.execute(
+                    """
+                    SELECT (
+                        SELECT materializer.job_key
+                        FROM m1_jobs AS materializer
+                        WHERE materializer.job_type = 'structure-materialize'
+                          AND materializer.state IN (
+                            'waiting', 'runnable', 'retryable', 'leased', 'checkpointed'
+                          )
+                        ORDER BY materializer.created_at, materializer.job_key
+                        LIMIT 1
+                    ) AS oldest_job_key,
+                    NOT EXISTS (
+                        SELECT 1 FROM m1_jobs AS predecessor
+                        WHERE predecessor.job_type IN (
+                            'structure-normalize', 'structure-certify'
+                        )
+                          AND predecessor.state IN (
+                            'waiting', 'runnable', 'retryable', 'leased', 'checkpointed'
+                          )
+                    ) AS predecessors_complete
+                    """
+                )
+                materializer_guard = cursor.fetchone()
+                if materializer_guard is None:
+                    raise ControlPlaneError("Structure materializer guard was not returned")
+                if bool(materializer_guard["predecessors_complete"]):
+                    oldest_job_key = materializer_guard["oldest_job_key"]
+                    if oldest_job_key is not None:
+                        materializer_job_key = str(oldest_job_key)
             cursor.execute(
                 """
                 SELECT job_key, job_type, input_identity, checkpoint_cursor,
                        checkpoint_digest, lease_epoch, state, attempt_count
                 FROM m1_jobs
                 WHERE job_type = ANY(%s)
+                  AND (job_type <> 'structure-materialize' OR job_key = %s)
                   AND NOT EXISTS (
                       SELECT 1
                       FROM m1_job_circuits AS circuit
@@ -5295,7 +5345,7 @@ class PostgresControlPlane:
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
                 """,
-                (list(job_types), now, now, now, now),
+                (list(job_types), materializer_job_key, now, now, now, now),
             )
             job = cursor.fetchone()
             if job is None:

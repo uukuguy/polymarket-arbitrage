@@ -130,6 +130,21 @@ is the durable convergence authority. It closes the concurrent-final-receipt
 lost-wakeup case without turning the successor row or the one-second database
 lock bound into a synchronized failure point for all producers.
 
+### Cross-shape generation backpressure
+
+One Structure generation changes durable shape as it moves through the DAG:
+one `structure-materialize` job becomes many `structure-normalize` jobs plus a
+waiting `structure-certify` job. Admission must count all three unfinished
+forms. Counting only ranges creates a false zero before materialization and
+after the last range but before certification.
+
+Materializer claim is a second authority because source windows may already be
+durably admitted before a later backpressure configuration takes effect. Only
+the oldest unfinished materializer may claim, and it remains ineligible while
+any range or certifier from a prior generation is unfinished. The transition
+from successful materializer to ranges/certifier is already atomic, so this
+predicate closes the remaining gap without another timer or mutable counter.
+
 ## Sequencing and interruption invariants
 
 1. The eight-job DAG in `runtime_deadlines.py` remains the only stage order.
@@ -149,6 +164,8 @@ lock bound into a synchronized failure point for all producers.
    clock on the shared event loop.
 8. A busy certifier row may delay successor eligibility until its next repair
    turn, but it cannot roll back a producer receipt or terminal success.
+9. A generation remains backpressure-visible while it is a materializer, a set
+   of ranges or a certifier; changing shape cannot briefly authorize a sibling.
 
 ## Audit boundary
 

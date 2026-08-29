@@ -1239,6 +1239,74 @@ def test_due_source_admission_backpressures_before_window_insert_when_range_queu
     assert decision.job_key is None
 
 
+def test_due_source_admission_backpressures_while_prior_window_awaits_materialization(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.admit_structure_source_window(window_key="source-window:materializing", now=now)
+    lease = control_plane.claim_job(
+        worker_id="source-worker-materializing",
+        job_types=("structure-fetch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    control_plane.record_structure_source_page(
+        lease,
+        artifact_key="m1/structure/source/materializing/events-0.json",
+        artifact_digest="a" * 64,
+        next_cursor=None,
+        completed=True,
+        record_count=1,
+        event_embedded_markets=True,
+        now=now,
+    )
+
+    decision = control_plane.admit_due_structure_source_window(
+        cadence_seconds=300,
+        now=now + timedelta(seconds=301),
+    )
+
+    assert decision.state == "backpressured:structure"
+    assert decision.job_key is None
+
+
+def test_due_source_admission_backpressures_until_prior_generation_is_certified(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="range-worker-awaiting-certifier",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    control_plane.complete_structure_range(
+        lease,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/awaiting-certifier/rows.ndjson",
+        artifact_digest="a" * 64,
+        record_count=1,
+        now=now,
+    )
+
+    decision = control_plane.admit_due_structure_source_window(
+        cadence_seconds=300,
+        now=now + timedelta(seconds=301),
+    )
+
+    assert decision.state == "backpressured:structure"
+    assert decision.job_key is None
+
+
 def test_terminal_event_page_atomically_admits_immutable_market_batches(
     control_plane: PostgresControlPlane,
 ) -> None:
@@ -1395,6 +1463,102 @@ def test_terminal_event_with_embedded_markets_releases_materializer_without_mark
     )
     assert materializer is not None
     assert materializer.job_key == f"{window_key}:materialize"
+
+
+def test_only_oldest_structure_materializer_can_hold_a_live_pipeline_slot(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    control_plane.enqueue_job(
+        job_key="source-window:materializer-first:materialize",
+        job_type="structure-materialize",
+        input_identity="source-window:materializer-first",
+        now=now,
+    )
+    control_plane.enqueue_job(
+        job_key="source-window:materializer-second:materialize",
+        job_type="structure-materialize",
+        input_identity="source-window:materializer-second",
+        now=now,
+    )
+
+    first = control_plane.claim_job(
+        worker_id="materializer-lane-a",
+        job_types=("structure-materialize",),
+        lease_seconds=30,
+        now=now,
+    )
+    second = control_plane.claim_job(
+        worker_id="materializer-lane-b",
+        job_types=("structure-materialize",),
+        lease_seconds=30,
+        now=now,
+    )
+
+    assert first is not None
+    assert first.job_key == "source-window:materializer-first:materialize"
+    assert second is None
+
+
+def test_structure_materializer_waits_for_prior_generation_certifier(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )[0]
+    control_plane.enqueue_job(
+        job_key="source-window:next-materializer:materialize",
+        job_type="structure-materialize",
+        input_identity="source-window:next-materializer",
+        now=now,
+    )
+
+    assert (
+        control_plane.claim_job(
+            worker_id="next-materializer",
+            job_types=("structure-materialize",),
+            lease_seconds=30,
+            now=now,
+        )
+        is None
+    )
+    range_lease = control_plane.claim_job(
+        worker_id="prior-range",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert range_lease is not None
+    control_plane.complete_structure_range(
+        range_lease,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/prior-generation/rows.ndjson",
+        artifact_digest="a" * 64,
+        record_count=1,
+        now=now,
+    )
+    certifier = control_plane.claim_job(
+        worker_id="prior-certifier",
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert certifier is not None
+    control_plane.finish(certifier, state=JobState.SUCCEEDED, now=now)
+
+    materializer = control_plane.claim_job(
+        worker_id="next-materializer",
+        job_types=("structure-materialize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert materializer is not None
+    assert materializer.job_key == "source-window:next-materializer:materialize"
 
 
 def test_parallel_scoped_batch_leases_release_materializer_only_after_last_receipt(
