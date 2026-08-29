@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from math import ceil
 
 from .alert_delivery import (
     DEFAULT_RUNTIME_DASHBOARD_URL,
@@ -217,18 +218,21 @@ class ProgressGate:
 
             deadlines_authoritative = deadlines_authoritative and all(
                 field in item
-                for field in ("heartbeat_overdue_seconds", "progress_overdue_seconds")
+                for field in (
+                    "heartbeat_missing_overdue_seconds",
+                    "progress_overdue_seconds",
+                )
             )
 
             for field, reason in (
-                ("heartbeat_overdue_seconds", "job-heartbeat-overdue"),
+                ("heartbeat_missing_overdue_seconds", "job-heartbeat-missing"),
                 ("progress_overdue_seconds", "job-progress-overdue"),
                 ("lease_overdue_seconds", "job-lease-overdue"),
                 ("attempt_overdue_seconds", "job-attempt-overdue"),
             ):
                 overdue = item.get(field)
                 if overdue is None and field in {
-                    "heartbeat_overdue_seconds",
+                    "heartbeat_missing_overdue_seconds",
                     "progress_overdue_seconds",
                 }:
                     continue
@@ -239,7 +243,7 @@ class ProgressGate:
                 ):
                     return None, None, False
                 if overdue > 0:
-                    failures.append(f"control-api:{reason}:{int(overdue)}s")
+                    failures.append(f"control-api:{reason}:{ceil(overdue)}s")
         return tuple(sorted(tokens)), tuple(failures), deadlines_authoritative
 
 

@@ -130,7 +130,7 @@ def test_watchdog_accepts_long_running_job_while_durable_progress_advances() -> 
                         "attempt_id": "attempt-1",
                         "stage": "verify-parity",
                         "progress": {"current": current, "total": 1_117},
-                        "heartbeat_overdue_seconds": 0.0,
+                        "heartbeat_missing_overdue_seconds": 0.0,
                         "progress_overdue_seconds": progress_overdue_seconds,
                         "lease_overdue_seconds": 0.0,
                         "attempt_overdue_seconds": 0.0,
@@ -168,7 +168,7 @@ def test_watchdog_uses_persisted_task_deadlines_instead_of_fixed_wall_clock() ->
                     "attempt_id": "attempt-1",
                     "stage": "verify-parity",
                     "progress": {"current": 500, "total": 1_117},
-                    "heartbeat_overdue_seconds": 0.0,
+                    "heartbeat_missing_overdue_seconds": 0.0,
                     "progress_overdue_seconds": 31.0,
                     "lease_overdue_seconds": 0.0,
                     "attempt_overdue_seconds": 0.0,
@@ -181,6 +181,36 @@ def test_watchdog_uses_persisted_task_deadlines_instead_of_fixed_wall_clock() ->
 
     assert observation.healthy is False
     assert observation.failures == ("control-api:job-progress-overdue:31s",)
+
+
+def test_watchdog_distinguishes_heartbeat_due_from_heartbeat_missing() -> None:
+    from polyarb.control_plane.watchdog import ProgressGate, RuntimeObservation
+
+    gate = ProgressGate(max_stall=timedelta(minutes=5))
+    healthy = RuntimeObservation(healthy=True, failures=())
+    started = datetime(2026, 8, 18, 14, 0, tzinfo=UTC)
+    payload = {
+        "job_counts": {"leased": 1, "succeeded": 100},
+        "active_tasks": {
+            "total": 1,
+            "items": [
+                {
+                    "job_key": "structure:generation:certify",
+                    "attempt_id": "attempt-1",
+                    "stage": "verify-parity",
+                    "progress": {"current": 500, "total": 1_117},
+                    "heartbeat_missing_overdue_seconds": 1.0,
+                    "progress_overdue_seconds": 0.0,
+                    "lease_overdue_seconds": 0.0,
+                    "attempt_overdue_seconds": 0.0,
+                }
+            ],
+        },
+    }
+
+    observation = gate.apply(healthy, payload, now=started)
+
+    assert observation.failures == ("control-api:job-heartbeat-missing:1s",)
 
 
 def test_watchdog_falls_back_to_progress_tokens_during_api_rollout() -> None:

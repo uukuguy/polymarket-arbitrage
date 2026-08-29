@@ -9676,7 +9676,7 @@ def test_runtime_read_model_projects_self_healing_state_bounded_and_read_only(
             "attempt_deadline_at": (now + timedelta(seconds=1180)).isoformat(),
             "heartbeat_age_seconds": 20.0,
             "progress_age_seconds": 7.0,
-            "heartbeat_overdue_seconds": 0.0,
+            "heartbeat_missing_overdue_seconds": 0.0,
             "progress_overdue_seconds": 0.0,
             "lease_overdue_seconds": 0.0,
             "attempt_overdue_seconds": 0.0,
@@ -9740,6 +9740,16 @@ def test_runtime_read_model_projects_self_healing_state_bounded_and_read_only(
     }
     assert "must-not-leak" not in json.dumps(snapshot, sort_keys=True)
     assert second.job_key not in json.dumps(snapshot["active_tasks"]["items"])
+
+    overdue_snapshot = cast(
+        dict[str, Any],
+        control_plane.operational_snapshot(now=now + timedelta(seconds=101), sample_limit=1),
+    )
+    overdue_task = overdue_snapshot["active_tasks"]["items"][0]
+    assert overdue_task["job_key"] == first.job_key
+    assert overdue_task["heartbeat_missing_overdue_seconds"] == 31.0
+    assert overdue_task["progress_overdue_seconds"] == 0.0
+    assert overdue_task["lease_overdue_seconds"] == 1.0
 
 
 def test_runtime_read_model_uses_canonical_controller_and_filters_runtime_incidents(
