@@ -33,6 +33,12 @@ Structure→Quote→Opportunity 的八个节点逐一 commissioning：跑通正�
 - `src/polyarb/control_plane/production_commissioning.py:369`：生成只读 commissioning plan。
 - `src/polyarb/control_plane/production_commissioning.py:480`：fail-closed 验证 release、config、
   正常回合、全部攻击、清理和最终 lineage。
+- `src/polyarb/control_plane/production_commissioning_runner.py:64`：一次攻击的 exact identity
+  与每个阶段的 durable receipt。
+- `src/polyarb/control_plane/production_commissioning_runner.py:195`：disposable attack 串行执行、
+  失败后强制 cleanup 与 append-only 阶段文件。
+- `src/polyarb/control_plane/production_commissioning_runner.py:331`：从 66 个 proof、八个正常
+  回合和最终 lineage 汇总一份可验证 envelope。
 - `src/polyarb/control_plane/qualification.py:30`：真正作废 epoch 的严重原因闭集。
 - `src/polyarb/control_plane/qualification.py:42`：暂停或阻塞健康秒的原因闭集。
 - `src/polyarb/control_plane/qualification.py:656`：单条事实如何改变资格状态。
@@ -73,6 +79,18 @@ injected_at < detected_at < recovery_started_at < recovered_at < verified_at
 `coverage_seconds` 因此不再等于 `now - started_at`。证书只能使用累计健康有效秒，不能
 用墙钟时间把暂停区间偷偷算进去。
 
+## 可中断不等于可以留下未清理注入
+
+一次攻击会依次生成 `00-intent`、preflight、injected、detected、recovery-started、
+cleanup、recovered、verified 与最终 proof 文件。文件使用 exclusive create，已有内容
+不会被重跑覆盖。这样进程中断后可以明确看到停在哪个阶段，残缺目录也永远不能被汇总
+成 ready 证据。
+
+runner 自身不再套一个“整个实验 120 秒”的外层 timeout；Gamma、PostgreSQL、R2、lease
+和 progress 各自使用它们正在验证的权威预算。只要 injection 已经成功，后续 detection
+或 recovery 抛错也会进入 cleanup；如果原故障和 cleanup 同时失败，两条异常会一起
+保留，不能用 cleanup 错误覆盖根因。
+
 ## 设计取舍
 
 1. **先列契约，再写注入器。** 注入器如果先行，很容易只覆盖容易制造的故障；闭合矩阵
@@ -95,6 +113,8 @@ injected_at < detected_at < recovery_started_at < recovered_at < verified_at
 4. Quote 的 `successful_count=3` 小于 Structure 的 `progress_count=10`，为何不能据此判定
    `progress.regressed`？
 5. 哪四类真实外部边界值得 production canary，哪些故障应留在 disposable exact-image？
+6. 一个攻击目录只有 `20-injected.json` 和 `50-cleanup.json`，为什么它既有审计价值，
+   又绝不能被 resume 成一份成功 proof？
 
 ## FAQ 增量
 

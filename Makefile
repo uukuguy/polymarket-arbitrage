@@ -614,7 +614,7 @@ smoke-event-bus:
 # r2-list                — list R2 bucket objects (dev convenience)
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-db-role-preflight control-plane-db-role-provision control-plane-db-role-verify control-plane-db-role-disable control-plane-fly-topology-audit control-plane-egress-preflight control-plane-render-rollout control-plane-render-machine-update control-plane-verify-machine-update control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-start control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify runtime-policy-replay runtime-fault-matrix m1-production-commissioning-plan m1-production-commissioning-verify runtime-controller-status runtime-observe-verify runtime-reconcile-once runtime-reconcile-serve supabase-reconcile r2-list
+.PHONY: supabase-migrate supabase-migrate-test control-plane-migrate-test control-plane-preflight control-plane-db-role-preflight control-plane-db-role-provision control-plane-db-role-verify control-plane-db-role-disable control-plane-fly-topology-audit control-plane-egress-preflight control-plane-render-rollout control-plane-render-machine-update control-plane-verify-machine-update control-plane-verify-shadow-parity control-plane-verify-fault-soak control-plane-soak-start control-plane-soak-sample control-plane-soak-verify control-plane-cloud-soak-start control-plane-cloud-soak-verify control-plane-api-serve control-plane-runtime-event-writer-serve control-plane-shadow-sync control-plane-status quote-control-plane-once structure-control-plane-once structure-control-plane-source-once structure-control-plane-shadow-once structure-control-plane-shadow-publish control-plane-tick-once control-plane-serve control-plane-serve-coordinator control-plane-serve-structure-range control-plane-serve-quote-batch control-plane-alert-serve control-plane-watchdog-serve control-plane-watchdog-verify control-plane-watchdog-supervisor-deploy control-plane-watchdog-supervisor-verify runtime-policy-replay runtime-fault-matrix m1-production-commissioning-plan m1-production-commissioning-assemble m1-production-commissioning-verify runtime-controller-status runtime-observe-verify runtime-reconcile-once runtime-reconcile-serve supabase-reconcile r2-list
 
 ## supabase-migrate: Run Alembic upgrade head against Supabase DSN (auto-loads .env if present)
 supabase-migrate:
@@ -772,6 +772,13 @@ runtime-fault-matrix:
 ## m1-production-commissioning-plan: Print the closed eight-node normal-turn and fault-attack contract; read-only.
 m1-production-commissioning-plan:
 	@uv run python -m polyarb.control_plane.production_commissioning plan --json
+
+## m1-production-commissioning-assemble: Assemble exact node/attack artifacts into one fail-closed commissioning envelope.
+m1-production-commissioning-assemble:
+	@test -n "$(evidence_root)" || (echo "usage: make m1-production-commissioning-assemble evidence_root=<dir> expected_release=<40-char-sha> expected_config=<sha256:id>" >&2; exit 2)
+	@test -n "$(expected_release)" || (echo "ERROR: expected_release is required" >&2; exit 2)
+	@test -n "$(expected_config)" || (echo "ERROR: expected_config is required" >&2; exit 2)
+	@uv run python -m polyarb.control_plane.production_commissioning_runner assemble --root "$(evidence_root)" --expected-release "$(expected_release)" --expected-config "$(expected_config)" --json
 
 ## m1-production-commissioning-verify: Verify exact release/config normal-turn, attack recovery, cleanup, and E2E evidence before qualification.
 m1-production-commissioning-verify:

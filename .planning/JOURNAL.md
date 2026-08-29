@@ -11648,3 +11648,27 @@ Implement executable collectors/adapters for the 14 disposable exact-image and
 four scoped production-canary attacks, execute them with cleanup and final E2E
 lineage proof, and only then start a fresh healthy-effective 86,400-second
 qualification epoch.
+
+### SESSION 340 — 2026-08-30 (cleanup-safe commissioning execution core)
+
+- [EXACT GATE] Plan 05.6-218 exact HEAD `eb623c4a` passed 4,121 M1 tests, one
+  skip and one expected xfail in 1,639.55 seconds with no outer timeout. The
+  120k Structure performance gate remained CPU-active and completed naturally.
+- [EXECUTION CORE] Disposable attacks now follow exact identity-bound preflight,
+  injection, detection, recovery-start, cleanup, recovery and verification
+  stages. Every receipt is exclusive and append-only; a partial experiment
+  cannot be overwritten into success.
+- [CLEANUP GUARANTEE] Any failure after injection attempts cleanup. A simultaneous
+  attack/cleanup failure preserves both errors. Production-canary contracts are
+  rejected by the disposable runner rather than inheriting local authority.
+- [EVIDENCE COLLECTOR] A uniform Make entry assembles eight normal turns, 66
+  attack proofs and final lineage, then invokes the fail-closed verifier before
+  writing the canonical envelope. Nine TDD cases and Ruff/Pyright pass.
+- [BOUNDARY] No concrete attack receipt was fabricated or claimed. No production
+  mutation, Machine action, SSH, Docker context change or database edit occurred.
+
+[NEXT] Commit Plan 05.6-219 without protected user files. Implement the shared
+heartbeat/progress/worker-exit/stale-owner/retry-budget disposable adapter against
+all eight runtime job types, then add node-specific source/R2/parity/admission/
+batch/pointer/freshness adapters. Build one exact OrbStack image only after all
+adapter tests and a fresh full M1 gate pass.
