@@ -811,7 +811,8 @@
   harness clock from a durable fan-in defect.
 - [x] Replace every barrier magic number plus the unbounded barrier with one
   policy-derived diagnostic watchdog and pass all six concurrency contracts.
-- [ ] Confirm the new Climb gate and restart the complete M1 regression.
+- [x] Confirm the new Climb gate; restart the complete M1 regression after the
+  confirmed state is committed.
 
 ## Self-review
 
