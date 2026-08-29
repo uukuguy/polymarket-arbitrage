@@ -398,6 +398,28 @@
 - [ ] Roll the exact API image and prove a sustained healthy platform window
   while the full operator endpoint remains available.
 
+### Task 14: Isolate health-contract tests from host disk pressure
+
+**Files:**
+
+- Modify: `tests/m1-perception/conftest.py`
+- Modify: `tests/m1-perception/test_quote_feed_health.py`
+
+**Interfaces:**
+
+- General health tests receive deterministic 50% volume headroom.
+- The dedicated physical-volume contract still injects 25%, 19% and 9% and
+  remains the sole test of pass/warn/fail thresholds.
+
+- [x] Reproduce four late-suite `pass -> warn` failures and inspect the exact
+  non-pass check rather than treating them as flakes.
+- [x] Prove host free space was 20.18% and crossed the 20% boundary while the
+  suite and Docker image used the same disk.
+- [x] Scope deterministic volume evidence to HTTP/Quote health contracts while
+  preserving the explicit threshold test.
+- [x] Run both complete affected health files and Ruff GREEN.
+- [ ] Run a fresh complete M1 suite without an outer timeout.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,

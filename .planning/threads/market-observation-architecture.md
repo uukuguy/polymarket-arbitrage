@@ -2468,3 +2468,12 @@ success is not user receipt/read evidence.
 - Full snapshot and opportunity reads keep their richer contracts on operator
   routes. A health probe may prove the authority is readable, but it may not
   pay the latency, allocation or query-round cost of rendering operator state.
+
+### §2.71 Health tests must own resource evidence (2026-08-29)
+
+- Four late full-suite `pass -> warn` failures came from host disk headroom,
+  not the Quote/Structure facts under test. The workspace sat at 20.18% free;
+  suite artifacts and a Docker pull crossed the production 20% warning line.
+- General health tests now inject stable headroom. The dedicated volume test
+  alone injects 25/19/9 percent and continues to prove production thresholds.
+  A dynamic host resource must never become an undeclared test-order input.

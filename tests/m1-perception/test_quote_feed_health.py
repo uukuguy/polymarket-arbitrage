@@ -20,6 +20,7 @@ from polyarb.storage.sqlite_store import SQLiteStore
 
 NOW_S = 1_800_000_000.0
 NOW_MS = int(NOW_S * 1000)
+pytestmark = pytest.mark.usefixtures("stable_health_volume")
 
 
 def _settings(tmp_path, *, enabled: bool) -> Settings:

@@ -215,7 +215,24 @@ def daemon_settings_for_test(
 
 
 @pytest.fixture
-def http_test_client(daemon_settings_for_test: Settings) -> Any:
+def stable_health_volume(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep unrelated health assertions independent of host disk pressure."""
+    from types import SimpleNamespace
+
+    from polyarb.http import health as health_module
+
+    monkeypatch.setattr(
+        health_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=100, used=50, free=50),
+    )
+
+
+@pytest.fixture
+def http_test_client(
+    daemon_settings_for_test: Settings,
+    stable_health_volume: None,
+) -> Any:
     """Starlette TestClient built via create_app factory.
 
     Uses a mock scheduler so no real snapshot runs occur in tests.
