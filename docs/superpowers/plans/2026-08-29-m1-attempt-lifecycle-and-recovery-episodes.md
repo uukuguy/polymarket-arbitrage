@@ -786,7 +786,7 @@
 - [x] Add a real-PostgreSQL RED/GREEN contract that runs a half-open attempt
   beyond the original window, interrupts it, immediately reclaims epoch N+1,
   and proves circuit count/state plus episode budget are unchanged.
-- [ ] Run the complete control-plane, Climb lifecycle and full M1 gates before
+- [x] Run the complete control-plane and Climb lifecycle gates; run the full M1 gate before
   rebuilding and rolling the exact image.
 
 ## Self-review
