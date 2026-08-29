@@ -789,6 +789,30 @@
 - [x] Run the complete control-plane and Climb lifecycle gates; run the full M1 gate before
   rebuilding and rolling the exact image.
 
+### Task 29: Remove magic and unbounded PostgreSQL concurrency barriers
+
+**Files:**
+
+- Modify: `tests/m1-perception/test_control_plane_postgres.py`
+- Modify: `tools/climb/eval_local.py`
+- Modify: `tests/climb/test_eval_local.py`
+- Modify: `docs/dev/m1-runtime-boundary-inventory.md`
+
+**Interfaces:**
+
+- Concurrency barriers are diagnostic deadlock watchdogs, not product timing
+  assertions, and use `CONTROL_PLANE_DB_POLICY.stop_grace_seconds` as their
+  single named envelope.
+- No real-PostgreSQL concurrency barrier is unbounded or owns an ad-hoc 5/10
+  second value.
+
+- [x] Reproduce the structure fan-in barrier failing after five seconds only
+  under full-suite load; rerun it five times in isolation to distinguish a
+  harness clock from a durable fan-in defect.
+- [x] Replace every barrier magic number plus the unbounded barrier with one
+  policy-derived diagnostic watchdog and pass all six concurrency contracts.
+- [ ] Confirm the new Climb gate and restart the complete M1 regression.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
@@ -799,7 +823,8 @@
   bounded operator observation, executable recovery entrypoints and bounded
   candidate reads, pre-limit exact selection, bounded transport cleanup and
   lease-independent attempt ceilings, exact image identity and half-open
-  interruption continuity all map to Tasks 1–28.
+  interruption continuity and deterministic concurrency watchdogs all map to
+  Tasks 1–29.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

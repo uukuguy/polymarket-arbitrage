@@ -162,6 +162,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Certifier's nominal absolute hour was `lease * 120` | a deployment lease change silently changed total attempt lifetime | represent the 3,600-second ceiling as a distinct policy authority and reject incompatible leases |
 | Ad-hoc runtime build omitted the OCI revision label | correct bytes could be pushed under a plausible tag without an independently inspectable Git identity | one Make target derives full HEAD, rejects dirty image inputs, writes the OCI revision label and never deploys |
 | A long half-open probe outlived its short claim window | a healthy probe interrupted by deployment became retryable behind an already-expired open circuit and required another recovery action, so repeated normal stops could exhaust the episode budget | the fenced interruption transaction renews the existing policy-derived claim window without closing the circuit, changing its defect history or consuming another action |
+| Concurrent PostgreSQL tests used 5/10-second magic barriers, including one unbounded barrier | a healthy lost-wakeup test failed only under full-suite host load, while a missing peer could make another test hang forever | every real-PostgreSQL concurrency barrier uses one named diagnostic watchdog derived from the control-plane full transaction/stop envelope; wall time is not a product assertion |
 
 ## Prohibited patterns
 
@@ -191,6 +192,8 @@ structure-fetch -> structure-materialize -> structure-normalize
 - Spending a second recovery action merely because an authorized half-open
   attempt ran longer than its original claim window and then received a trusted
   service stop.
+- Encoding ad-hoc wall-clock assertions in concurrency test barriers; diagnostic
+  watchdogs must reuse the named database envelope and must not be unbounded.
 
 ## Verification map
 

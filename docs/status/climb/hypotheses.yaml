@@ -770,3 +770,15 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-028
+  description: Real-PostgreSQL concurrency gates can use one policy-derived diagnostic
+    watchdog without turning host scheduling latency into a product timeout or allowing
+    a missing peer to hang validation forever.
+  parent_paradigm: fenced-deadline-reconciler
+  expected_lift: Make the complete M1 gate repeatable under load while preserving
+    the exact durable fan-in, CAS, action replay and budget assertions.
+  cost_h: 0.5
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-29T17:05:00+08:00'
+  results: []

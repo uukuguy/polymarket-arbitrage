@@ -30,6 +30,7 @@ from polyarb.control_plane import qualification_store as qualification_store_mod
 from polyarb.control_plane import recovery_store as recovery_store_module
 from polyarb.control_plane import runtime_event_writer
 from polyarb.control_plane.alert_delivery import render_runtime_incident_message
+from polyarb.control_plane.db_deadlines import CONTROL_PLANE_DB_POLICY
 from polyarb.control_plane.models import (
     JobLease,
     JobState,
@@ -112,6 +113,12 @@ from polyarb.control_plane.structure_source import (
     TransactionalStructureSourceWorker,
 )
 from polyarb.control_plane.structure_worker import TransactionalStructureWorker
+
+# Diagnostic watchdog only: concurrent PostgreSQL contracts do not assert wall
+# time. Reuse the named full transaction/shutdown envelope so host load cannot
+# turn a magic test-only wait into a false product failure, while a missing peer
+# still terminates instead of hanging the suite forever.
+_POSTGRES_CONCURRENCY_WATCHDOG_SECONDS = CONTROL_PLANE_DB_POLICY.stop_grace_seconds
 
 
 def _docker_available() -> bool:
@@ -2645,11 +2652,11 @@ def test_concurrent_terminal_structure_receipts_cannot_lose_certifier_wakeup(
         for index in range(2)
     )
     assert all(lease is not None for lease in leases)
-    barrier = Barrier(2)
+    barrier = Barrier(2, timeout=_POSTGRES_CONCURRENCY_WATCHDOG_SECONDS)
     original_wake = PostgresControlPlane._wake_structure_certifier_cursor
 
     def synchronized_wake(cursor, *, generation_key: str, now: datetime) -> None:
-        barrier.wait(timeout=5)
+        barrier.wait()
         original_wake(cursor, generation_key=generation_key, now=now)
 
     monkeypatch.setattr(
@@ -3775,11 +3782,11 @@ def test_concurrent_terminal_quote_receipts_cannot_lose_certifier_wakeup(
         for index in range(2)
     )
     assert all(lease is not None for lease in leases)
-    barrier = Barrier(2)
+    barrier = Barrier(2, timeout=_POSTGRES_CONCURRENCY_WATCHDOG_SECONDS)
     original_wake = PostgresControlPlane._wake_quote_certifier_cursor
 
     def synchronized_wake(cursor, *, generation_key: str, now: datetime) -> None:
-        barrier.wait(timeout=5)
+        barrier.wait()
         original_wake(cursor, generation_key=generation_key, now=now)
 
     monkeypatch.setattr(
@@ -5818,7 +5825,7 @@ def test_recovery_action_active_target_race_persists_one_stale_noop(
         )
         for suffix in ("a", "b")
     )
-    barrier = Barrier(2)
+    barrier = Barrier(2, timeout=_POSTGRES_CONCURRENCY_WATCHDOG_SECONDS)
 
     def schedule(controller):
         barrier.wait()
@@ -6896,10 +6903,10 @@ def test_recovery_action_concurrent_exact_schedule_replay_is_atomic(
         lease_seconds=30,
         now=now,
     )
-    barrier = Barrier(2)
+    barrier = Barrier(2, timeout=_POSTGRES_CONCURRENCY_WATCHDOG_SECONDS)
 
     def schedule_from_thread() -> object:
-        barrier.wait(timeout=5)
+        barrier.wait()
         return schedule_action(
             control_plane._connection_factory,
             controller=controller,
@@ -7184,10 +7191,10 @@ def test_recovery_action_concurrent_last_budget_unit_is_consumed_once(
         lease_seconds=30,
         now=now,
     )
-    barrier = Barrier(2)
+    barrier = Barrier(2, timeout=_POSTGRES_CONCURRENCY_WATCHDOG_SECONDS)
 
     def schedule_from_thread() -> object:
-        barrier.wait(timeout=5)
+        barrier.wait()
         return schedule_action(
             control_plane._connection_factory,
             controller=controller,
@@ -11427,10 +11434,10 @@ def test_qualification_epoch_transition_is_state_version_cas_and_rolls_back_old_
             role_identity=policy.role_identity,
         ),
     )
-    barrier = Barrier(2)
+    barrier = Barrier(2, timeout=_POSTGRES_CONCURRENCY_WATCHDOG_SECONDS)
 
     def race(expected_owner: str) -> object:
-        barrier.wait(timeout=10)
+        barrier.wait()
         try:
             return transition_qualification_epoch(
                 control_plane._connection_factory,

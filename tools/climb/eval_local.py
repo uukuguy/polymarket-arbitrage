@@ -463,6 +463,8 @@ FENCED_DEADLINE_RECONCILER_GATE_COMMANDS = {
         "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_concurrent_last_budget_unit_is_consumed_once",
         "tests/m1-perception/test_control_plane_postgres.py::test_recovery_action_statement_timeout_rolls_back_action_event_incident_and_alert",
         "tests/m1-perception/test_control_plane_postgres.py::test_action_terminal_uses_db_clock_and_rolls_back_after_worker_lease_expires",
+        "tests/m1-perception/test_control_plane_postgres.py::test_concurrent_terminal_structure_receipts_cannot_lose_certifier_wakeup",
+        "tests/m1-perception/test_control_plane_postgres.py::test_concurrent_terminal_quote_receipts_cannot_lose_certifier_wakeup",
         "tests/m1-perception/test_control_plane_postgres.py::test_retry_circuit_opens_on_third_failure_with_bounded_probe_delay",
         "tests/m1-perception/test_control_plane_postgres.py::test_runtime_reconcile_exact_target_is_filtered_before_sample_limit",
         "tests/m1-perception/test_control_plane_postgres.py::test_recovery_executor_heartbeats_exact_attempt_without_business_receipt",
