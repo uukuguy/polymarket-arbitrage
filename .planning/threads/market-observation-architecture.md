@@ -2441,3 +2441,15 @@ success is not user receipt/read evidence.
 - Production evidence for the missing contract was a SIGTERM path that reached
   `ValueError` and exited 1. Shutdown exit status is therefore part of rollout
   acceptance, not harmless orchestration noise.
+
+### §2.69 Lease renewal follows cumulative task time, not one slow call (2026-08-29)
+
+- A heartbeat loop hidden inside `Future.result(timeout=interval)` runs only
+  when one sub-call is slow. A task made of many individually fast R2/DB calls
+  can therefore exceed its lease without ever executing that branch.
+- Every successful nonterminal blocking-call boundary now invokes the runtime's
+  due-check. The due-check owns cumulative elapsed-time policy and writes only
+  when necessary; the bridge does not invent another interval or deadline.
+- Slow calls retain periodic renewal and drain-before-error. Terminal calls do
+  not heartbeat after commit, because a terminal receipt/state transition—not
+  a renewed lease—is the post-commit authority.

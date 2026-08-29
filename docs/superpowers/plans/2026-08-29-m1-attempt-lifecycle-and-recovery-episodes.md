@@ -257,7 +257,7 @@
 - [x] Keep single-lane failures local to the role loop instead of terminating
   the Machine; preserve intentional `BaseException` crash injection semantics.
 - [x] Run focused suites, Ruff and modified-file Pyright.
-- [ ] Build and roll the exact release, prove backlog drain inside 900 seconds,
+- [x] Build and roll the exact release, prove backlog drain inside 900 seconds,
   then restart the release-bound qualification epoch.
 
 ### Task 9: Close the reconciler incident lifecycle on durable recovery
@@ -281,7 +281,7 @@
 - [x] Resolve the three bounded dedupe forms atomically and emit one idempotent
   recovered event/alert per incident.
 - [x] Preserve lock/statement timeout rollback and checkpoint recovery proofs.
-- [ ] Roll the exact release, repair the two historical projections through the
+- [x] Roll the exact release, repair the two historical projections through the
   same durable method, and require zero contradictory runtime incidents.
 
 ### Task 10: Make terminal fan-in wakeups serialized, truthful and self-repairing
@@ -312,7 +312,7 @@
 - [x] Add a bounded `FOR UPDATE SKIP LOCKED` repair sweep and invoke it before
   each certifier claim; prove incomplete generations remain waiting.
 - [x] Run affected real-PostgreSQL and worker suites, Ruff and Pyright.
-- [ ] Roll the exact release and prove the production waiting Quote certifier
+- [x] Roll the exact release and prove the production waiting Quote certifier
   repairs itself without manual SQL before restarting qualification.
 
 ### Task 11: Make pooled worker shutdown inherit its lane lifecycle authority
@@ -336,14 +336,42 @@
 - [x] Reject heterogeneous/non-positive lane policies and expose the derived
   lease on the pool.
 - [x] Run source, scheduler, Ruff and Pyright gates.
-- [ ] Build v10, roll all roles and prove every active process exits normally
+- [x] Build v10, roll all roles and prove every active process exits normally
   under the same 40-second Fly kill timeout.
+
+### Task 12: Renew cumulative lease age at every blocking-call boundary
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/quote_worker.py`
+- Modify: `src/polyarb/control_plane/structure_worker.py`
+- Modify: `tests/m1-perception/test_transactional_quote_worker.py`
+- Modify: `tests/m1-perception/test_transactional_structure_worker.py`
+
+**Interfaces:**
+
+- The synchronous blocking bridges keep one absolute attempt deadline, but
+  invoke `heartbeat_if_due()` after every successful nonterminal sub-call as
+  well as during a single slow call.
+- Terminal calls do not renew after their transaction has committed.
+
+- [x] Reproduce the production contradiction: 148 individually fast R2 reads
+  never enter the heartbeat wait timeout, then the cumulative 120-second lease
+  expires and the Opportunity worker reports `stale-lease`.
+- [x] Add RED tests proving a fast successful sub-call still reaches the
+  runtime's due-check for both synchronous bridge implementations.
+- [x] Check the due heartbeat after nonterminal success while retaining the
+  existing slow-call polling, drain-before-error and terminal semantics.
+- [x] Run the complete affected Quote, Opportunity and Structure suites, Ruff
+  and Pyright.
+- [ ] Roll an exact release and prove the interrupted Opportunity job reclaims,
+  publishes a fresh pointer, and allows one uninterrupted qualification epoch.
 
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
   sequencing, cancellation, event-loop claim isolation, fan-in wakeup repair,
-  inventory, operator wait and production proof all map to Tasks 1–11.
+  inventory, operator wait and production proof all map to Tasks 1–12.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

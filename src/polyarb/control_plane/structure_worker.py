@@ -122,7 +122,13 @@ def _run_bounded_sync_call[SyncResult](
             primary_error = TimeoutError("structure sync call exceeded attempt deadline")
             break
         try:
-            return future.result(timeout=min(heartbeat_interval_seconds, remaining))
+            result = future.result(timeout=min(heartbeat_interval_seconds, remaining))
+            # Check cumulative lease age at every completed sub-call boundary.
+            # Otherwise a long attempt made only of fast calls never enters the
+            # timeout branch below and silently expires its lease.
+            if not terminal and heartbeat is not None:
+                heartbeat()
+            return result
         except FutureTimeoutError:
             if terminal or heartbeat is None:
                 continue

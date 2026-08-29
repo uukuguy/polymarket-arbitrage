@@ -135,6 +135,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Concurrent final receipts could both decline a wakeup | every producer was terminal while its certifier remained waiting forever | terminal transition precedes one wake; sibling checks serialize on the certifier row; bounded claim-time repair closes historical gaps |
 | Receipt count stood in for producer success | a checkpointed producer could make an incomplete generation claimable | eligibility joins each receipt to a `succeeded` producer job |
 | Structure source pool hid its lanes' lease policy | SIGTERM drain could not resolve terminal grace and exited the coordinator with `ValueError` | validate one common lane lease and expose it on the pool, matching the Quote pool contract |
+| Fast sub-calls never reached heartbeat polling | a long Opportunity/Structure sequence of healthy sub-30-second calls silently expired its cumulative lease and surfaced `stale-lease` | check the runtime's due heartbeat after every successful nonterminal call boundary as well as while one call blocks |
 | Local SSH waiter outlived an already completed remote Machine | operator process appeared hung despite completed remote work | exact waiter can be interrupted safely; remote durable state is re-read before retry |
 
 ## Prohibited patterns
@@ -149,6 +150,8 @@ structure-fetch -> structure-materialize -> structure-normalize
 - Waiting on a local Fly/SSH process without re-reading the exact remote
   Machine/action state after interruption.
 - Calling synchronous `.claim_job()` directly from an `async run_once()`.
+- Renewing a repeated blocking sequence only from the single-call timeout branch;
+  cumulative lease age must also be checked when each fast call returns.
 
 ## Verification map
 

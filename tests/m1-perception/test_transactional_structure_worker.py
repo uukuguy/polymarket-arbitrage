@@ -38,6 +38,25 @@ from polyarb.control_plane.structure_worker import (
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
 
+def test_structure_bounded_sync_call_checks_heartbeat_after_fast_success() -> None:
+    checks = 0
+
+    def heartbeat() -> None:
+        nonlocal checks
+        checks += 1
+
+    assert (
+        structure_worker_module._run_bounded_sync_call(
+            lambda: "done",
+            heartbeat=heartbeat,
+            heartbeat_interval_seconds=30,
+            attempt_timeout_seconds=120,
+        )
+        == "done"
+    )
+    assert checks == 1
+
+
 def _bundle() -> StructureBundleArtifact:
     identity = StructureBundleIdentity(
         publication_id="publication-1",

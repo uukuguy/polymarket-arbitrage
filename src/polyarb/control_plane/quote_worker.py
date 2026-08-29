@@ -143,7 +143,16 @@ def _run_bounded_sync_call(
             primary_error = TimeoutError("quote sync call exceeded attempt deadline")
             break
         try:
-            return future.result(timeout=min(float(runtime.profile.heartbeat_seconds), remaining))
+            result = future.result(
+                timeout=min(float(runtime.profile.heartbeat_seconds), remaining)
+            )
+            # A long task can consist entirely of individually fast calls.  If
+            # renewal is checked only when one call blocks for a full heartbeat
+            # interval, that healthy sequence silently lets its lease expire.
+            # The runtime itself decides whether enough cumulative time elapsed.
+            if not terminal:
+                runtime.heartbeat_if_due()
+            return result
         except FutureTimeoutError:
             try:
                 runtime.heartbeat_if_due()

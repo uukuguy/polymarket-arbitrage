@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,10 +21,39 @@ from polyarb.control_plane.quote_worker import (
     TransactionalQuoteBatchPool,
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
+    _run_bounded_sync_call,
 )
 from polyarb.control_plane.runtime_contract import ServiceStopRequested
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+def test_bounded_sync_call_checks_heartbeat_after_fast_success() -> None:
+    """Repeated sub-heartbeat calls must still renew a long-running attempt."""
+
+    class Runtime:
+        profile = SimpleNamespace(heartbeat_seconds=30)
+
+        def __init__(self) -> None:
+            self.heartbeat_checks = 0
+
+        def remaining_attempt_seconds(self) -> float:
+            return 120.0
+
+        def heartbeat_if_due(self) -> None:
+            self.heartbeat_checks += 1
+
+    runtime = Runtime()
+
+    assert (
+        _run_bounded_sync_call(
+            lambda: "done",
+            runtime=runtime,  # type: ignore[arg-type]
+            terminal=False,
+        )
+        == "done"
+    )
+    assert runtime.heartbeat_checks == 1
 
 
 class _DelayedQuoteLane:
