@@ -315,11 +315,35 @@
 - [ ] Roll the exact release and prove the production waiting Quote certifier
   repairs itself without manual SQL before restarting qualification.
 
+### Task 11: Make pooled worker shutdown inherit its lane lifecycle authority
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/structure_source.py`
+- Modify: `tests/m1-perception/test_transactional_structure_source_worker.py`
+
+**Interfaces:**
+
+- `TransactionalStructureSourcePool._lease_seconds` is derived from one common
+  positive lane policy, matching the Quote pool contract.
+- `terminal_grace_seconds("structure-source", pool)` resolves from
+  `runtime_policy("structure-fetch", lease_seconds)` without a duplicate
+  shutdown constant.
+
+- [x] Capture the production SIGTERM failure: active Structure source pool had
+  no declared lease and raised `ValueError` while the coordinator drained.
+- [x] Add a RED lifecycle test proving the pool must expose its common lease.
+- [x] Reject heterogeneous/non-positive lane policies and expose the derived
+  lease on the pool.
+- [x] Run source, scheduler, Ruff and Pyright gates.
+- [ ] Build v10, roll all roles and prove every active process exits normally
+  under the same 40-second Fly kill timeout.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
   sequencing, cancellation, event-loop claim isolation, fan-in wakeup repair,
-  inventory, operator wait and production proof all map to Tasks 1–10.
+  inventory, operator wait and production proof all map to Tasks 1–11.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

@@ -183,6 +183,8 @@ class FakeObjectClient:
 
 
 class DelayedLane:
+    _lease_seconds = 120
+
     def __init__(self, job_key: str | None, *, failure: BaseException | None = None) -> None:
         self.job_key = job_key
         self.failure = failure
@@ -448,6 +450,26 @@ def test_source_pool_waits_for_healthy_sibling_before_propagating_lane_failure()
         asyncio.run(TransactionalStructureSourcePool(lanes=(failing, healthy)).run_once())
 
     assert healthy.released.is_set()
+
+
+def test_source_pool_exposes_common_lease_policy_for_terminal_drain() -> None:
+    from polyarb.control_plane.runtime_deadlines import runtime_policy
+    from polyarb.control_plane.service_lifecycle import terminal_grace_seconds
+
+    pool = TransactionalStructureSourcePool(lanes=(DelayedLane("market:1"),))
+
+    assert terminal_grace_seconds("structure-source", pool) == runtime_policy(
+        "structure-fetch", 120
+    ).terminal_grace_seconds
+
+
+def test_source_pool_rejects_heterogeneous_lane_lease_policies() -> None:
+    first = DelayedLane("market:1")
+    second = DelayedLane("market:2")
+    second._lease_seconds = 30
+
+    with pytest.raises(ValueError, match="share one positive lease policy"):
+        TransactionalStructureSourcePool(lanes=(first, second))
 
 
 def test_source_admitter_creates_one_current_window_and_never_overlaps() -> None:

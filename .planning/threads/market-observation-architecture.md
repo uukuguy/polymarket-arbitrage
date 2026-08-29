@@ -2429,3 +2429,15 @@ success is not user receipt/read evidence.
   inputs, receipts and terminal job states. `FOR UPDATE SKIP LOCKED` keeps
   multiple role processes from turning the repair path into a new contention
   point; incomplete generations remain waiting.
+
+### §2.68 Pool wrappers must propagate lifecycle authority (2026-08-29)
+
+- Scheduler cancellation operates on the wrapper it owns, not on an implicit
+  child lane. A pool that hides its lanes' lease policy breaks terminal-grace
+  resolution even when every child is individually correct.
+- Structure and Quote pools validate one common positive lane lease and expose
+  that derived value. `service_lifecycle` remains the sole resolver from
+  durable job policy to shutdown grace; pools never copy the numeric grace.
+- Production evidence for the missing contract was a SIGTERM path that reached
+  `ValueError` and exited 1. Shutdown exit status is therefore part of rollout
+  acceptance, not harmless orchestration noise.

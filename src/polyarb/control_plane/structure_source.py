@@ -109,6 +109,8 @@ class _ObjectClient(Protocol):
 
 
 class _SourceLane(Protocol):
+    _lease_seconds: int
+
     async def run_once(self) -> StructureWorkerResult: ...
 
     async def aclose(self) -> None: ...
@@ -918,7 +920,11 @@ class TransactionalStructureSourcePool:
     def __init__(self, *, lanes: Sequence[_SourceLane]) -> None:
         if not lanes:
             raise ValueError("lanes must be non-empty")
+        lease_seconds = {lane._lease_seconds for lane in lanes}
+        if len(lease_seconds) != 1 or next(iter(lease_seconds)) <= 0:
+            raise ValueError("Structure source lanes must share one positive lease policy")
         self._lanes = tuple(lanes)
+        self._lease_seconds = next(iter(lease_seconds))
 
     async def run_once(self) -> StructureWorkerResult:
         results = await asyncio.gather(

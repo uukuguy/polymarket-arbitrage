@@ -94,6 +94,9 @@ structure-fetch -> structure-materialize -> structure-normalize
   facts before claiming work.
 - Same-name lanes are serial; sibling job-type lanes are independent. One lane
   failure cannot cancel siblings.
+- A pooled worker must expose the single positive lease shared by its lanes;
+  terminal grace is derived from that lease's runtime policy, never copied to
+  the pool as another constant.
 - Every asynchronous worker claim crosses `claim_worker_job()` before its
   attempt runtime starts. Database connection/query/row-lock work never runs
   on the shared event-loop thread and never receives a competing worker timer.
@@ -131,6 +134,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Quote capacity was a serial turn count | 148 batches required about 28 minutes and contradicted the 900-second freshness gate | independently fenced lanes derive capacity from the existing CLOB concurrency authority; lane failures remain local |
 | Concurrent final receipts could both decline a wakeup | every producer was terminal while its certifier remained waiting forever | terminal transition precedes one wake; sibling checks serialize on the certifier row; bounded claim-time repair closes historical gaps |
 | Receipt count stood in for producer success | a checkpointed producer could make an incomplete generation claimable | eligibility joins each receipt to a `succeeded` producer job |
+| Structure source pool hid its lanes' lease policy | SIGTERM drain could not resolve terminal grace and exited the coordinator with `ValueError` | validate one common lane lease and expose it on the pool, matching the Quote pool contract |
 | Local SSH waiter outlived an already completed remote Machine | operator process appeared hung despite completed remote work | exact waiter can be interrupted safely; remote durable state is re-read before retry |
 
 ## Prohibited patterns
