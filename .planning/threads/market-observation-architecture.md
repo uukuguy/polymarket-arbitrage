@@ -2494,3 +2494,17 @@ success is not user receipt/read evidence.
   `ceil(136 / 15)`, two are capacity headroom. Source admission independently
   defaults to one unfinished range, preventing generation overlap. Neither
   authority changes attempt deadlines, freshness, artifacts or pointers.
+
+### §2.73 Transaction context and connection lifetime are different authorities (2026-08-29)
+
+- The unbounded full-suite run showed the 120k Structure classifier holding
+  roughly 600 descriptors to one SQLite database before cyclic GC reclaimed
+  them. Every page was making progress; a process can still fail from resource
+  exhaustion without any individual SQL timeout or stalled cursor.
+- Python's SQLite connection context manager commits or rolls back but does not
+  promise `close()`. High-frequency drift readers now cross one explicit owner
+  that closes on success, early return and exception. Reads remain page-local;
+  no connection pool or cross-checkpoint transaction was introduced.
+- A lifecycle test wraps real SQLite connections, performs ten pages and
+  requires ten observed closes. Resource lifetime must be tested as behavior,
+  not inferred from `with` syntax.

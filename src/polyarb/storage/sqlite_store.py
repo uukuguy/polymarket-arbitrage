@@ -3225,6 +3225,20 @@ class SQLiteStore:
         )
         return con
 
+    @contextmanager
+    def _connect_structure_drift_read(self) -> Iterator[sqlite3.Connection]:
+        """Own and close one high-frequency classifier read connection.
+
+        ``sqlite3.Connection.__exit__`` only commits or rolls back; it does not
+        close the handle. Paginated 120k-row classification can otherwise
+        accumulate hundreds of descriptors until cyclic GC happens to run.
+        """
+        connection = sqlite3.connect(self._db_path)
+        try:
+            yield connection
+        finally:
+            connection.close()
+
     @property
     def db_path(self) -> Path:
         return self._db_path
@@ -4723,7 +4737,7 @@ class SQLiteStore:
         """Expose only receipt-authenticated sidecar evidence."""
         invalid = {"sealed": False, "complete": False,
                    "reason": "structure-event-member-receipt-invalid"}
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_structure_drift_read() as con:
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
             receipt = con.execute(
@@ -6179,7 +6193,7 @@ class SQLiteStore:
             or not 1 <= limit <= STRUCTURE_PUBLICATION_MAX_ROWS
         ):
             raise ValueError("invalid-structure-drift-event-source-chunk")
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_structure_drift_read() as con:
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
             con.execute("BEGIN")
@@ -6302,7 +6316,7 @@ class SQLiteStore:
             or not 1 <= limit <= STRUCTURE_PUBLICATION_MAX_ROWS
         ):
             raise ValueError("invalid-structure-drift-market-source-chunk")
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_structure_drift_read() as con:
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
             con.execute("BEGIN")
@@ -6363,7 +6377,7 @@ class SQLiteStore:
         trace_callback: Callable[[str], None] | None,
     ) -> str:
         """Return one fully authenticated sidecar receipt before candidate reads."""
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_structure_drift_read() as con:
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
             identity = con.execute(
@@ -6486,7 +6500,7 @@ class SQLiteStore:
             ):
                 raise ValueError("invalid-structure-drift-fresh-projection-cursor")
 
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_structure_drift_read() as con:
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
             if sqlite_progress_callback is not None:
@@ -7749,7 +7763,7 @@ class SQLiteStore:
             if after_market_id is None
             else (snapshot_id, after_market_id, limit)
         )
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_structure_drift_read() as con:
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
             rows = con.execute(
@@ -7814,7 +7828,7 @@ class SQLiteStore:
         )
         market_table = f"{prefix}markets"
         placeholders = ",".join("?" for _ in market_ids)
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_structure_drift_read() as con:
             rows = con.execute(
                 "SELECT m.event_id,m.neg_risk_market_id,m.market_id,m.member_kind,"
                 "m.active,m.closed,k.condition_id,k.yes_token_id,k.no_token_id,"
@@ -7870,7 +7884,7 @@ class SQLiteStore:
             raise ValueError("invalid-structure-drift-group-truth-chunk")
         after_event_id = None if after_key is None else after_key[0]
         after_group_id = None if after_key is None else after_key[1]
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_structure_drift_read() as con:
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
             identity = con.execute(
@@ -7925,7 +7939,7 @@ class SQLiteStore:
             structure_drift_diagnostic_sample,
         )
 
-        with sqlite3.connect(self._db_path) as read_con:
+        with self._connect_structure_drift_read() as read_con:
             progress = read_con.execute(
                 "SELECT generation_snapshot_id,publication_id,phase,row_cursor_json,"
                 "class_counts_json,class_digests_json,diagnostic_counts_json,"
@@ -8387,7 +8401,7 @@ class SQLiteStore:
         # Recompute the complete current identity before reading a source chunk.
         if self.initialize_structure_drift_comparison(now_ms=now_ms) != comparison_id:
             raise ValueError("structure-drift-current-identity-invalid")
-        with sqlite3.connect(self._db_path) as phase_con:
+        with self._connect_structure_drift_read() as phase_con:
             phase_row = phase_con.execute(
                 "SELECT phase FROM structure_generation_drift_progress WHERE comparison_id=?",
                 (comparison_id,),
@@ -8413,7 +8427,7 @@ class SQLiteStore:
                 max_rows=max_rows,
                 now_ms=now_ms,
             )
-        with sqlite3.connect(self._db_path) as read_con:
+        with self._connect_structure_drift_read() as read_con:
             progress = read_con.execute(
                 "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,"
                 "window_id,normalization_contract_version,exact_receipt_digest,"
@@ -8636,7 +8650,7 @@ class SQLiteStore:
             reconstruction_root_from_class_commitments,
         )
 
-        with sqlite3.connect(self._db_path) as read_con:
+        with self._connect_structure_drift_read() as read_con:
             progress = read_con.execute(
                 "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,"
                 "window_id,normalization_contract_version,exact_receipt_digest,"
@@ -9249,7 +9263,7 @@ class SQLiteStore:
             structure_drift_diagnostic_tuple,
         )
 
-        with sqlite3.connect(self._db_path) as read_con:
+        with self._connect_structure_drift_read() as read_con:
             progress = read_con.execute(
                 "SELECT legacy_snapshot_id,generation_snapshot_id,publication_id,"
                 "window_id,normalization_contract_version,exact_receipt_digest,"
@@ -9595,7 +9609,7 @@ class SQLiteStore:
         if not members:
             return {}
         placeholders = ",".join("?" for _ in market_ids)
-        with sqlite3.connect(self._db_path) as con:
+        with self._connect_structure_drift_read() as con:
             if trace_callback is not None:
                 con.set_trace_callback(trace_callback)
             con.execute("BEGIN")

@@ -43,6 +43,48 @@ def _median_seconds(operation: Callable[[], object], *, repeats: int = 5) -> flo
     return statistics.median(samples)
 
 
+def test_paginated_drift_reader_closes_each_sqlite_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteStore(tmp_path / "drift-reader-lifecycle.db")
+    store.init_schema()
+    real_connect = sqlite_store_module.sqlite3.connect
+    opened = []
+
+    class TrackedConnection:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self._connection = real_connect(*args, **kwargs)
+            self.closed = False
+            opened.append(self)
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._connection, name)
+
+        def __enter__(self):
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> object:
+            return self._connection.__exit__(*args)
+
+        def close(self) -> None:
+            self.closed = True
+            self._connection.close()
+
+    monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", TrackedConnection)
+
+    for _ in range(10):
+        assert store.fetch_structure_drift_member_chunk(
+            snapshot_id=1,
+            generation=False,
+            after_market_id=None,
+            limit=500,
+        ) == []
+
+    assert len(opened) == 10
+    assert all(connection.closed for connection in opened)
+
+
 def _v1_root(rows: Sequence[object], *, ensure_ascii: bool) -> str:
     digest = SerializableSHA256.new()
     digest.update(b"[")
