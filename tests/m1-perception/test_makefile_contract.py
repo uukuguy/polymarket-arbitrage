@@ -2135,3 +2135,51 @@ def test_l1_deploy_binds_exact_source_sha_and_scales_noninteractively() -> None:
     assert '--env POLYARB_RELEASE_ID="$RELEASE_ID"' in result.stdout
     assert "--ha=false --max-concurrent 1" in result.stdout
     assert "flyctl scale count app=1 cron=1 -a polyarb-l1 --yes" in result.stdout
+
+
+def test_runtime_image_build_binds_exact_revision_and_is_build_only(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log_path = tmp_path / "flyctl-argv.json"
+    fake_flyctl = bin_dir / "flyctl"
+    fake_flyctl.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['FAKE_FLYCTL_LOG'], 'w', encoding='utf-8') as handle:\n"
+        "    json.dump({'argv': sys.argv[1:], 'token': os.environ.get('FLY_API_TOKEN')}, handle)\n"
+    )
+    fake_flyctl.chmod(0o755)
+    env = os.environ.copy()
+    env["FAKE_FLYCTL_LOG"] = str(log_path)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+
+    result = subprocess.run(
+        ["make", "runtime-image-build", "image_tag=test-runtime-exact"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    invocation = json.loads(log_path.read_text(encoding="utf-8"))
+    argv = invocation["argv"]
+    release_id = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert argv[0] == "deploy"
+    assert "--build-only" in argv
+    assert "--push" in argv
+    assert argv[argv.index("--image-label") + 1] == "test-runtime-exact"
+    assert argv[argv.index("--label") + 1] == (
+        f"org.opencontainers.image.revision={release_id}"
+    )
+    assert "--env" not in argv
+    assert invocation["token"] == ""

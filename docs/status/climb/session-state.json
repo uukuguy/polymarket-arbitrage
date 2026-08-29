@@ -1,6 +1,6 @@
 {
   "in_flight": null,
   "last_cycle": 28,
-  "next_action": "rank next pending hypothesis",
+  "next_action": "run H-026 exact runtime image identity gates",
   "session": "2026-07-31-m1-self-healing-structure"
 }

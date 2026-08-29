@@ -946,7 +946,7 @@ tail-logs-local:
 # tail-logs          — tail Fly daemon stdout
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: docker-build docker-run-local docker-smoke deploy smoke-test tail-logs
+.PHONY: docker-build docker-run-local docker-smoke runtime-image-build deploy smoke-test tail-logs
 
 ## docker-build: Build daemon Docker image locally (no push)
 docker-build:
@@ -973,6 +973,22 @@ docker-smoke:
 # Override with FLY_BUILD_MODE=--local-only when the Depot upload path is
 # unavailable; the release identity and post-deploy gates remain identical.
 FLY_BUILD_MODE ?= --remote-only
+
+## runtime-image-build: Build and push an exact non-deploying M1 runtime image. Usage: make runtime-image-build image_tag=m1-runtime-vN-<sha> [fly_app=polyarb-control-worker-m1]
+runtime-image-build:
+	@test -n "$(image_tag)" || (echo "usage: make runtime-image-build image_tag=m1-runtime-vN-<sha> [fly_app=polyarb-control-worker-m1]" >&2; exit 2)
+	@if ! git diff --quiet -- Dockerfile .dockerignore pyproject.toml uv.lock README.md src alembic.ini alembic crontab scripts/polywatch/healthz_watcher.py \
+		|| ! git diff --cached --quiet -- Dockerfile .dockerignore pyproject.toml uv.lock README.md src alembic.ini alembic crontab scripts/polywatch/healthz_watcher.py \
+		|| test -n "$$(git ls-files --others --exclude-standard -- Dockerfile .dockerignore pyproject.toml uv.lock README.md src alembic.ini alembic crontab scripts/polywatch/healthz_watcher.py)"; then \
+		echo "ERROR: runtime image inputs differ from HEAD; commit or remove those changes before building" >&2; exit 2; \
+	fi
+	@RELEASE_ID="$$(git rev-parse HEAD)"; \
+		echo ">> runtime-image-build — build-only image=$(image_tag) release=$$RELEASE_ID"; \
+		FLY_API_TOKEN= NO_COLOR=1 flyctl deploy $(FLY_BUILD_MODE) \
+			--app "$(or $(fly_app),polyarb-control-worker-m1)" --config fly.toml \
+			--build-only --push --image-label "$(image_tag)" \
+			--label "org.opencontainers.image.revision=$$RELEASE_ID" \
+			--ha=false --max-concurrent 1 --wait-timeout 600
 
 ## deploy: Deploy the single-volume L1 serially; never create an unseeded HA app replica.
 deploy:

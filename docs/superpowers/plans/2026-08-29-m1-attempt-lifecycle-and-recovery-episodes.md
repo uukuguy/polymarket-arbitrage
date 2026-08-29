@@ -737,6 +737,30 @@
 - [x] Split relative multiplier and absolute-ceiling policy authorities and
   prove both lease values resolve to exactly 3,600 seconds.
 
+### Task 27: Make exact runtime-image identity part of the executable entrypoint
+
+**Files:**
+
+- Modify: `Makefile`
+- Modify: `tests/m1-perception/test_makefile_contract.py`
+
+**Interfaces:**
+
+- The public build target derives the full Git HEAD itself, rejects dirty
+  runtime-image inputs, pushes without deploying, and writes that full SHA to
+  `org.opencontainers.image.revision`.
+- Image tags remain operator-selected release names; they cannot stand in for
+  the independently inspectable OCI revision label.
+
+- [x] Reproduce a successfully pushed v15 image whose linux/amd64 manifest and
+  UID were correct but whose OCI revision label was null; deploy nothing.
+- [x] Add an executed fake-`flyctl` RED/GREEN contract and the documented
+  `make runtime-image-build image_tag=...` entrypoint; prove build-only, push,
+  exact label, private-app default and ambient-token suppression.
+- [ ] Rebuild the exact committed source through this entrypoint and require
+  label, architecture, UID, revision 036, Supercronic checksum and eight-job
+  order before any Machine update.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
@@ -746,7 +770,8 @@
   independence, cross-shape generation ordering, explicit capacity rollout,
   bounded operator observation, executable recovery entrypoints and bounded
   candidate reads, pre-limit exact selection, bounded transport cleanup and
-  lease-independent attempt ceilings all map to Tasks 1–26.
+  lease-independent attempt ceilings and exact image identity all map to Tasks
+  1–27.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

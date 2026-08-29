@@ -158,6 +158,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Exact recovery target was filtered after the 100-row sample | a valid pinned action disappeared behind unrelated candidates | apply exact `job_key` in SQL before ordering and limit, then verify target type/action in memory |
 | Normal Gamma cleanup had no bound | durable stop could finish but `scheduler.aclose()` could hold the process until platform kill | explicit close uses the same two-second fail-soft transport cleanup boundary |
 | Certifier's nominal absolute hour was `lease * 120` | a deployment lease change silently changed total attempt lifetime | represent the 3,600-second ceiling as a distinct policy authority and reject incompatible leases |
+| Ad-hoc runtime build omitted the OCI revision label | correct bytes could be pushed under a plausible tag without an independently inspectable Git identity | one Make target derives full HEAD, rejects dirty image inputs, writes the OCI revision label and never deploys |
 
 ## Prohibited patterns
 
@@ -181,6 +182,9 @@ structure-fetch -> structure-materialize -> structure-normalize
   settings.
 - Calling an unbounded provider/client close after the worker stop grace has
   already completed.
+- Building a production runtime image with an ad-hoc `flyctl deploy` command;
+  the exact Make entrypoint owns source cleanliness, build-only mode and the
+  full OCI revision label.
 
 ## Verification map
 

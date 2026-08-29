@@ -484,6 +484,7 @@ FENCED_DEADLINE_RECONCILER_GATE_COMMANDS = {
         "tests/m1-perception/test_makefile_contract.py::test_make_runtime_mutation_target_has_enable_guard",
         "tests/m1-perception/test_makefile_contract.py::test_make_runtime_status_is_read_only_dry_run",
         "tests/m1-perception/test_makefile_contract.py::test_make_runtime_reconcile_once_forwards_exact_target_selector",
+        "tests/m1-perception/test_makefile_contract.py::test_runtime_image_build_binds_exact_revision_and_is_build_only",
         "-q",
     ],
     "restart": [

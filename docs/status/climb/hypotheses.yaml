@@ -721,3 +721,14 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-026
+  description: A single executable runtime-image build entrypoint can bind clean
+    image inputs to the full Git revision while remaining incapable of deployment.
+  parent_paradigm: fenced-deadline-reconciler
+  expected_lift: Remove ad-hoc build-command memory as a release single point and
+    prevent an unlabeled image from entering the Machine rollout sequence.
+  cost_h: 0.5
+  ranking: 1.0
+  status: pending
+  created_at: '2026-08-29T16:22:00+08:00'
+  results: []
