@@ -5959,6 +5959,17 @@ def test_runtime_controller_status_and_facts_are_read_only(
         assert after_budgets_row[0] == before_budgets
 
 
+def test_runtime_reconcile_candidates_use_the_indexed_positive_job_state_set() -> None:
+    source = inspect.getsource(recovery_store_module.read_runtime_reconcile_states)
+
+    assert "j.state NOT IN ('succeeded', 'quarantined')" not in source
+    assert (
+        "j.state IN (\n"
+        "                'runnable', 'leased', 'retryable', 'waiting', 'checkpointed'\n"
+        "            )"
+    ) in source
+
+
 def test_recovery_action_stale_controller_does_not_create_budget_or_poison_schedule(
     control_plane: PostgresControlPlane,
 ) -> None:

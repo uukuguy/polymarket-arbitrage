@@ -190,11 +190,16 @@ def test_make_runtime_mutation_target_has_enable_guard() -> None:
         assert "enable=1" in result.stderr
 
 
-def test_make_runtime_reconcile_once_forwards_exact_target_selector() -> None:
+def test_make_runtime_reconcile_once_forwards_exact_target_selector(
+    tmp_path: Path,
+) -> None:
+    uv = tmp_path / "uv"
+    uv.write_text('#!/bin/sh\nprintf \'%s\\n\' "$*"\n')
+    uv.chmod(0o755)
     result = subprocess.run(
         [
             "make",
-            "-n",
+            "-s",
             "runtime-reconcile-once",
             "enable=1",
             "target_type=circuit",
@@ -204,13 +209,14 @@ def test_make_runtime_reconcile_once_forwards_exact_target_selector() -> None:
         capture_output=True,
         text=True,
         cwd=PROJECT_ROOT,
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
         timeout=5,
     )
 
     assert result.returncode == 0, result.stderr
-    assert '--target-type "circuit"' in result.stdout
-    assert '--target-id "structure-source:window:fetch:events:162"' in result.stdout
-    assert '--expected-action "probe-circuit"' in result.stdout
+    assert "--target-type circuit" in result.stdout
+    assert "--target-id structure-source:window:fetch:events:162" in result.stdout
+    assert "--expected-action probe-circuit" in result.stdout
 
 
 def test_make_render_machine_update_uses_local_contract_translator() -> None:

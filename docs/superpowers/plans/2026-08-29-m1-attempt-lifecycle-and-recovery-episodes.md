@@ -627,9 +627,55 @@
   111k-row attempt-history scan.
 - [x] Add RED/GREEN revision tests for concurrent DDL, exact definitions,
   downgrade and real PostgreSQL planner use of both indexes.
-- [ ] Apply revision 036, repeat the production plan/status probe under load,
+- [x] Apply revision 036, repeat the production plan/status probe under load,
   and require an index-backed result within the unchanged five-second statement
   boundary before rolling the new exact runtime image.
+
+### Task 22: Make the exact recovery Make entrypoint executable
+
+**Files:**
+
+- Modify: `Makefile`
+- Modify: `tests/m1-perception/test_makefile_contract.py`
+
+**Interfaces:**
+
+- The three exact selector fields remain all-or-none and `enable=1` remains
+  mandatory, but the guard must be valid POSIX `/bin/sh` when executed.
+- The test executes the recipe through a fake `uv`; `make -n` is insufficient
+  because it never parses the shell guard that failed in production use.
+
+- [x] Reproduce the exact selector command failing before the CLI with an
+  unescaped-parenthesis `/bin/sh` syntax error.
+- [x] Replace it with a grouped all-or-none test and execute the Make contract
+  through a no-I/O fake `uv`; the complete Makefile contract file passes.
+
+### Task 23: Keep recovery candidate selection inside its own deadline
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/recovery_store.py`
+- Modify: `tests/m1-perception/test_control_plane_postgres.py`
+
+**Interfaces:**
+
+- Candidate selection names the five legal nonterminal job states positively,
+  allowing the existing `m1_jobs_state` index to bound the selective side of
+  the join. It must not express the predicate as `NOT IN` over terminal history.
+- Recovery keeps its original two-second statement and one-second lock policy.
+  No controller lease, circuit probe time or action budget changes.
+
+- [x] Prove the isolated execute one-shot uses the correct scoped DB role and
+  exact candidate/action, but fails before action INSERT with PostgreSQL
+  `QueryCanceled` / SQLSTATE 57014.
+- [x] Reproduce `read_runtime_reconcile_states()` locally in 4.872 seconds and
+  the warm production plan at 739.698ms, scanning 102,828 terminal jobs and
+  7,010 runtime rows before returning 16 candidates.
+- [x] Add a RED/GREEN query-shape contract and switch to the five positive
+  states; production `EXPLAIN ANALYZE` falls to 19.528ms and the real read
+  succeeds under the unchanged central recovery deadline.
+- [ ] Build the exact image and rerun the same isolated, execute-only,
+  target/action-pinned circuit probe before rolling the resident controller.
 
 ## Self-review
 
@@ -637,8 +683,9 @@
   sequencing, cancellation, event-loop claim isolation, non-blocking fan-in repair,
   inventory, operator wait, production proof, capacity/backpressure and
   connection ownership, worker-identity capacity and producer commit
-  independence, cross-shape generation ordering and explicit capacity rollout
-  and bounded operator observation all map to Tasks 1–21.
+  independence, cross-shape generation ordering, explicit capacity rollout,
+  bounded operator observation, executable recovery entrypoints and bounded
+  candidate reads all map to Tasks 1–23.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

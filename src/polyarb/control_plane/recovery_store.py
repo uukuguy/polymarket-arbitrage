@@ -643,7 +643,9 @@ def read_runtime_reconcile_states(
                  WHEN c.state = 'open' THEN COALESCE(c.failure_fingerprint, 'legacy')
                  ELSE r.attempt_id
              END
-            WHERE j.state NOT IN ('succeeded', 'quarantined')
+            WHERE j.state IN (
+                'runnable', 'leased', 'retryable', 'waiting', 'checkpointed'
+            )
               AND r.recovery_state <> 'terminal'
             ORDER BY r.updated_at ASC, j.job_key ASC
             LIMIT %s

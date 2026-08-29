@@ -780,7 +780,7 @@ runtime-observe-verify:
 ## runtime-reconcile-once: Evaluate runtime facts in observe-only mode by default; execute mode may pin one exact target/action.
 runtime-reconcile-once:
 	@test "$(enable)" = "1" || (echo "usage: make runtime-reconcile-once enable=1 [controller_id=m1-runtime-reconciler] [target_type=circuit target_id=<exact-job-key> expected_action=probe-circuit]" >&2; exit 2)
-	@test -z "$(target_type)$(target_id)$(expected_action)" -o ( -n "$(target_type)" -a -n "$(target_id)" -a -n "$(expected_action)" ) || (echo "target_type, target_id and expected_action must be provided together" >&2; exit 2)
+	@test -z "$(target_type)$(target_id)$(expected_action)" || { test -n "$(target_type)" && test -n "$(target_id)" && test -n "$(expected_action)"; } || (echo "target_type, target_id and expected_action must be provided together" >&2; exit 2)
 	@uv run python -m polyarb.cli_control_plane runtime-reconcile-once --enable --controller-id "$(or $(controller_id),m1-runtime-reconciler)" --owner-id "$(or $(owner_id),runtime-reconcile-once)" --worker-id "$(or $(worker_id),runtime-recovery-executor)" --limit "$(or $(limit),100)" $(if $(target_id),--target-type "$(target_type)" --target-id "$(target_id)" --expected-action "$(expected_action)") --json
 
 ## runtime-reconcile-serve: Run sequential observe-only reconciliation by default; explicit execute mode allows one-action recovery turns.
