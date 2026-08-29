@@ -3084,6 +3084,7 @@ def test_qualification_serve_stops_on_tick_error_without_overlap(monkeypatch, ca
     captured = capsys.readouterr()
     assert calls == ["tick"]
     assert "qualification-service.tick-failed" in captured.err
+    assert "error_class=RuntimeError" in captured.err
     for leaked in (
         "source query timeout",
         "db.internal",
@@ -3094,3 +3095,45 @@ def test_qualification_serve_stops_on_tick_error_without_overlap(monkeypatch, ca
         "password",
     ):
         assert leaked not in captured.err
+
+
+def test_qualification_serve_reports_safe_postgres_error_metadata(monkeypatch, capsys) -> None:
+    from polyarb import cli_control_plane
+
+    monkeypatch.setenv("POLYARB_QUALIFICATION_DB_DSN", "postgresql://qualification@example/control")
+    monkeypatch.setattr(cli_control_plane.psycopg, "connect", lambda *_args, **_kwargs: object())
+
+    class Diagnostics:
+        constraint_name = "uq_m1_qualification_active_identity"
+
+    class QualificationUniqueViolation(cli_control_plane.psycopg.errors.UniqueViolation):
+        @property
+        def diag(self):
+            return Diagnostics()
+
+    class Service:
+        def tick(self, _now):
+            raise QualificationUniqueViolation(
+                "duplicate dsn=postgresql://operator:password@example/control"
+            )
+
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_qualification_service_from_env",
+        lambda **_kwargs: Service(),
+    )
+
+    assert (
+        cli_control_plane.main(
+            ["qualification-serve", "--enable", "--interval-seconds", "0.001", "--json"]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert "qualification-service.tick-failed" in captured.err
+    assert "error_class=QualificationUniqueViolation" in captured.err
+    assert "sqlstate=23505" in captured.err
+    assert "constraint=uq_m1_qualification_active_identity" in captured.err
+    assert "postgresql://" not in captured.err
+    assert "operator" not in captured.err
+    assert "password" not in captured.err

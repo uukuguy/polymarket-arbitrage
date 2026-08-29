@@ -1299,7 +1299,7 @@ def _fetch_current_runtime_epoch(
                    SELECT 1 FROM public.m1_qualification_certificates AS certificate
                    WHERE certificate.epoch_id = epoch.epoch_id
                )))
-        ORDER BY started_at DESC, epoch_id DESC
+        ORDER BY updated_at DESC, started_at DESC, epoch_id DESC
         LIMIT 1
         """
         + (" FOR UPDATE" if for_update else ""),

@@ -11544,3 +11544,34 @@ until `eligible_seconds >= 86400`. Then run `make qualification-status`,
 `make qualification-certificates`, the eight-Machine topology audit and the
 full-endpoint watchdog verifier independently. M1 remains incomplete until the
 immutable 86,400-second certificate and its independent revalidation both pass.
+
+### SESSION 337 — 2026-08-30 (qualification causal-head restart repair)
+
+- [V22 QUALIFICATION DEFECT] After initially reaching 31 eligible seconds, the
+  qualification Machine entered 20–32-second exit/restart cycles, exhausted its
+  restart policy, and stopped. Process events proved exit code 1 without OOM or
+  requested stop. The Session 336 qualification window is therefore invalid
+  and cannot be certified.
+- [SAFE DIAGNOSIS] One exact-v22, 512 MiB, restart-disabled, auto-removed
+  diagnostic Machine reported only `UniqueViolation`, SQLSTATE `23505`, and
+  `uq_m1_qualification_active_identity`. No resident low-memory Machine was
+  accessed through SSH, no secret or provider body was printed, and no database
+  row was manually mutated. The diagnostic Machine has auto-removed.
+- [ROOT CAUSE] A single fact batch can persist recovering and accumulating
+  epochs with the same `started_at`. Restart ordered that tie by hashed
+  `epoch_id`, sometimes selected the stale recovering parent, and tried to open
+  a second accumulating child. The uniqueness constraint correctly failed
+  closed; retrying the same wrong parent created the restart storm.
+- [TDD REPAIR] Runtime-head selection now prioritizes database `updated_at`.
+  A real-PostgreSQL restart regression was red before the fix and green after
+  it. Qualification process failures now retain secret suppression while
+  exposing validated error class, SQLSTATE, and constraint identifiers.
+- [LOCAL PROOF] All 23 qualification PostgreSQL cases and all 153 CLI/policy/
+  identity/service cases pass. Ruff, formatting, Pyright, and diff checks pass.
+  No timeout or retry policy was enlarged.
+
+[NEXT] Run the complete M1 gate, planning-status and climb checks; commit Plan
+05.6-216 without protected user files. Build and independently inspect exact
+v23 through OrbStack only. Canary the stopped qualification Machine first,
+prove monotonic multi-tick accumulation with no restart, then roll all eight
+formal Machines to one exact release and begin a new 86,400-second window.

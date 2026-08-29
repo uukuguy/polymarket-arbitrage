@@ -12235,14 +12235,21 @@ def test_qualification_same_batch_recovery_keeps_recovering_epoch_empty(
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT state, jsonb_array_length(fact_records), runtime_fact_count
+            SELECT state, jsonb_array_length(fact_records), runtime_fact_count,
+                   epoch_id, started_at, updated_at, previous_epoch_id
             FROM m1_qualification_epochs
             ORDER BY started_at, state
             """
         )
         rows = cursor.fetchall()
-    assert ("recovering", 0, 0) in rows
-    assert ("accumulating", 0, 1) in rows
+    recovering_row = next(row for row in rows if row[:3] == ("recovering", 0, 0))
+    accumulating_row = next(row for row in rows if row[:3] == ("accumulating", 0, 1))
+    assert accumulating_row[5] > recovering_row[5]
+
+    restarted_store = PostgresQualificationServiceStore(control_plane._connection_factory)
+    restarted_store.initialize(_qualification_policy(), now=now + timedelta(seconds=3))
+    assert restarted_store.current.state is QualificationState.ACCUMULATING
+    assert restarted_store.current.epoch_id == result.epoch_id
 
 
 def test_qualification_recovering_observes_second_breaker_status_and_restart(

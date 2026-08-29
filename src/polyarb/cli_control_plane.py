@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -125,6 +126,8 @@ from polyarb.control_plane.watchdog import (
 from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
 from polyarb.storage.r2_sync import _build_client, control_plane_r2_config
 
+_SAFE_ERROR_IDENTIFIER = re.compile(r"^[A-Za-z0-9_]{1,128}$")
+_SAFE_SQLSTATE = re.compile(r"^[0-9A-Z]{5}$")
 _R2_UPLOAD_FAULT_ACK = "staging-r2-upload-before-receipt"
 _FLY_HTTP_TIMEOUT_SECONDS = 10.0
 _FLY_CLI_READ_TIMEOUT_SECONDS = 30.0
@@ -511,6 +514,26 @@ def _write(payload: Mapping[str, object], *, as_json: bool) -> None:
         return
     for key, value in payload.items():
         print(f"{key}={value}")
+
+
+def _safe_qualification_failure_context(error: BaseException) -> str:
+    """Expose diagnostic identifiers while never rendering exception messages."""
+    error_class = type(error).__name__
+    if _SAFE_ERROR_IDENTIFIER.fullmatch(error_class) is None:
+        error_class = "BaseException"
+    fields = [f"error_class={error_class}"]
+    if not isinstance(error, psycopg.Error):
+        return " ".join(fields)
+    sqlstate = error.sqlstate
+    if isinstance(sqlstate, str) and _SAFE_SQLSTATE.fullmatch(sqlstate) is not None:
+        fields.append(f"sqlstate={sqlstate}")
+    constraint_name = error.diag.constraint_name
+    if (
+        isinstance(constraint_name, str)
+        and _SAFE_ERROR_IDENTIFIER.fullmatch(constraint_name) is not None
+    ):
+        fields.append(f"constraint={constraint_name}")
+    return " ".join(fields)
 
 
 def _read_soak_control_snapshot(url: str) -> dict[str, object]:
@@ -2025,8 +2048,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         except QualificationIdentityError as error:
             print(f"qualification service unavailable: {error}", file=sys.stderr)
             return 1
-        except (OSError, RuntimeError, ValueError, psycopg.Error):
-            print(f"qualification service unavailable: {failure_reason}", file=sys.stderr)
+        except (OSError, RuntimeError, ValueError, psycopg.Error) as error:
+            context = _safe_qualification_failure_context(error)
+            print(
+                f"qualification service unavailable: {failure_reason} {context}",
+                file=sys.stderr,
+            )
             return 1
     try:
         control_plane = _control_plane_from_env()
