@@ -169,6 +169,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | L2 top-of-book writes ran in an anonymous background task | handler return raced the write under host load, tests passed by scheduler luck, and shutdown had no owner to drain the last coalesced batch | an explicit callable dispatcher owns pending rows and its one drain generation; tests wait for idle and daemon cleanup closes it after stopping producers on every exit path |
 | L2 task drain used a private five-second default while Fly declared no stop contract | cooperative cleanup could be force-cancelled early or the platform could choose an implicit signal/window, making the actual ordering deployment-dependent | one daemon lifecycle policy owns a 30-second drain below an explicit `SIGTERM/40s` platform window; the executable config/signature contract rejects drift |
 | L1/L2 copied HTTP startup loops and L1 stopped observing tasks after bind | loop count and sleep cadence formed a second nominal 10-second clock; a later uvicorn/producer exit left the process alive with missing capability | one monotonic stop-aware startup helper owns both entrypoints; L1 supervises every resident task and turns any unexpected exit into ordered sibling drain plus nonzero process exit |
+| Real Structure drift child had a 45-second cooperative slice inside a test-local 10-second parent timeout | full-suite host load let the outer test clock kill a healthy child before it could report `writer-busy`; production separately copied `75.0` | derive the normal parent envelope as `child slice + 30-second owned TERM/KILL budget`; production and real-child tests no longer pass another number |
 
 ## Prohibited patterns
 
@@ -206,6 +207,8 @@ structure-fetch -> structure-materialize -> structure-normalize
   platform termination window and a tested ordering relationship.
 - Encoding startup duration as `loop count * sleep`, or waiting only for a
   signal after readiness without supervising every long-lived resident task.
+- Giving a real subprocess less parent time than its cooperative slice; its
+  normal envelope must be derived from child work plus the named reap budget.
 
 ## Verification map
 

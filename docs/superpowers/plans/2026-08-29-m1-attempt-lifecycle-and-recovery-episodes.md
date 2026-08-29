@@ -911,6 +911,31 @@
 - [x] Pass the complete L1/L2 lifecycle group and add the exact contracts to
   the Climb restart gate before the next full M1 regression.
 
+### Task 34: Derive the Structure drift parent envelope
+
+**Files:**
+
+- Modify: `src/polyarb/daemon/scheduler.py`
+- Modify: `tests/m1-perception/test_scheduler.py`
+- Modify: `tests/m1-perception/test_structure_drift_end_to_end.py`
+- Modify: `tools/climb/eval_local.py`
+- Modify: `tests/climb/test_eval_local.py`
+
+**Interfaces:**
+
+- The normal parent subprocess envelope is exactly the requested cooperative
+  drift slice plus `STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S`.
+- Explicit tiny timeout injection remains available only to exercise the
+  TERM/KILL failure path; production and real-child tests do not copy a second
+  outer number.
+
+- [x] Reproduce the full-suite-only failure where a real child allowed 45
+  seconds was killed by a test-local 10-second outer timeout under host load.
+- [x] Add a RED derivation contract, remove production's copied `75.0` and the
+  four real-child `10.0` overrides, and retain the existing bounded kill tests.
+- [x] Pass the complete scheduler and Structure drift E2E files, then add the
+  derivation and real SQLite contention nodes to Climb.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
@@ -922,7 +947,7 @@
   candidate reads, pre-limit exact selection, bounded transport cleanup and
   lease-independent attempt ceilings, exact image identity and half-open
   interruption continuity and deterministic concurrency watchdogs all map to
-  Tasks 1–33.
+  Tasks 1–34.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and
