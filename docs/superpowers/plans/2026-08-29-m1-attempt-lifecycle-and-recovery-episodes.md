@@ -833,7 +833,7 @@
   three after trusted interruption became the fourth policy consumer.
 - [x] Replace exact consumer cardinality with lookup/use parity plus existing
   private-formula prohibitions; pass the exact authority and certifier tests.
-- [ ] Confirm the amended Climb gate before rerunning the full M1 suite.
+- [x] Confirm the amended Climb gate before rerunning the full M1 suite.
 
 ## Self-review
 
