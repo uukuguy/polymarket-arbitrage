@@ -18,6 +18,8 @@
 
 app = "polyarb-l2"
 primary_region = "ams"   # same region as the L1 app — private network latency to event bus
+kill_signal = "SIGTERM"
+kill_timeout = 40
 
 [build]
 

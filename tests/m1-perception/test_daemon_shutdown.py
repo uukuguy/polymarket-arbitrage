@@ -47,6 +47,22 @@ def test_shutdown_authority_outlives_structure_child_cleanup() -> None:
     assert fly_config["kill_timeout"] > STRUCTURE_SUBPROCESS_SHUTDOWN_BUDGET_S
 
 
+def test_l2_shutdown_uses_one_budget_below_the_platform_window() -> None:
+    from polyarb.daemon import l2_main
+    from polyarb.daemon.lifecycle import (
+        DAEMON_TASK_DRAIN_BUDGET_SECONDS,
+        PLATFORM_TERMINATION_WINDOW_SECONDS,
+    )
+
+    fly_config = tomllib.loads(Path("fly-l2.toml").read_text())
+    timeout_default = inspect.signature(l2_main._drain_daemon_tasks).parameters["timeout_s"].default
+
+    assert timeout_default == DAEMON_TASK_DRAIN_BUDGET_SECONDS
+    assert 0 < DAEMON_TASK_DRAIN_BUDGET_SECONDS < PLATFORM_TERMINATION_WINDOW_SECONDS
+    assert fly_config["kill_signal"] == "SIGTERM"
+    assert fly_config["kill_timeout"] == PLATFORM_TERMINATION_WINDOW_SECONDS
+
+
 @pytest.mark.asyncio
 async def test_supervisor_sigkill_wait_and_output_drain_are_bounded() -> None:
     from polyarb.perception.supervisor import ProducerSupervisor

@@ -28,7 +28,7 @@ Architecture:
                                        else: await asyncio.sleep(0.1)
     9. await stop_event.wait() — signal-driven shutdown
     10. server.should_exit = True
-    11. drain writer/server/peers under one 5-second deadline — F-04 bounded shutdown
+    11. drain writer/server/peers under the shared daemon deadline — F-04 bounded shutdown
 
 Plan 05 placeholder: `event_listener` still starts as None; health check
 renders "warn" with output="not_configured" until Plan 05 wires it.
@@ -58,6 +58,7 @@ from loguru import logger
 # All imports below are patched at IMPORT SITE (polyarb.daemon.l2_main.*)
 # by tests — Phase 02 L9. Never patch at definition site.
 from polyarb.config import load_settings
+from polyarb.daemon.lifecycle import DAEMON_TASK_DRAIN_BUDGET_SECONDS
 from polyarb.daemon.ws_consumer import WsConsumer
 from polyarb.daemon.ws_watchdog import WsWatchdog
 from polyarb.events.listener import listen_snapshot_complete
@@ -303,7 +304,7 @@ async def _drain_daemon_tasks(
     peer_tasks: Iterable[asyncio.Task[Any] | None],
     normal_shutdown: bool,
     producers_done: asyncio.Event | None = None,
-    timeout_s: float = 5.0,
+    timeout_s: float = DAEMON_TASK_DRAIN_BUDGET_SECONDS,
 ) -> None:
     """Stop all daemon tasks under one deadline, preserving writer drain time.
 
