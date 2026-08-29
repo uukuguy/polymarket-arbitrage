@@ -10049,7 +10049,9 @@ def test_runtime_read_model_projects_self_healing_state_bounded_and_read_only(
         "release_id": "release-a",
         "config_id": "config-a",
         "role_identity": ["m1", "structure"],
-        "certificate": None,
+            "certificate": None,
+            "eligibility_state": "blocked",
+            "eligibility_reason": None,
     }
     assert "must-not-leak" not in json.dumps(snapshot, sort_keys=True)
     assert second.job_key not in json.dumps(snapshot["active_tasks"]["items"])
@@ -11752,7 +11754,7 @@ def test_qualification_epoch_transition_is_state_version_cas_and_rolls_back_old_
         QualificationFact.breaking(
             "fact-breaker",
             now + timedelta(hours=1),
-            "lease.expired",
+            "integrity.conflict",
             policy_version=policy.policy_version,
             release_id=policy.release_id,
             config_id=policy.config_id,
@@ -11792,7 +11794,7 @@ def test_qualification_epoch_transition_is_state_version_cas_and_rolls_back_old_
     assert after_race.state == "invalidated"
     assert after_race.version == 2
     assert after_race.invalidated_at == now + timedelta(hours=1)
-    assert after_race.invalidation_reason == "lease.expired"
+    assert after_race.invalidation_reason == "integrity.conflict"
     with control_plane._connection_factory() as connection:
         assert connection.execute(
             """
@@ -12130,7 +12132,13 @@ def test_qualification_malformed_quote_pointer_fails_structure_freshness_closed(
 
     result = _qualification_service(control_plane, batch_size=20).tick(now)
 
-    assert result.state is QualificationState.RECOVERING
+    assert result.state is QualificationState.ACCUMULATING
+    status = PostgresQualificationServiceStore(
+        control_plane._connection_factory
+    ).status(now=now)
+    epoch = cast(dict[str, object], status["epoch"])
+    assert epoch["eligibility_state"] == "blocked"
+    assert epoch["eligibility_reason"] == "evidence.gap"
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
@@ -12168,7 +12176,7 @@ def test_qualification_ingress_late_runtime_commit_is_consumed_after_cursor(
     restarted = _qualification_service(control_plane, batch_size=20)
     second = restarted.tick(now + timedelta(seconds=1))
 
-    assert second.state is QualificationState.RECOVERING
+    assert second.state is QualificationState.ACCUMULATING
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
@@ -12180,12 +12188,18 @@ def test_qualification_ingress_late_runtime_commit_is_consumed_after_cursor(
         assert cursor.fetchone() == (2,)
         cursor.execute(
             """
-            SELECT state, invalidation_reason
+            SELECT state, invalidation_reason, slo->>'eligibility_state',
+                   slo->>'eligibility_reason'
             FROM m1_qualification_epochs
-            WHERE state = 'invalidated'
+            WHERE state = 'accumulating'
             """
         )
-        assert cursor.fetchone() == ("invalidated", "lease.expired")
+        assert cursor.fetchone() == (
+            "accumulating",
+            None,
+            "paused",
+            "lease.expired",
+        )
 
 
 def test_qualification_recovery_restart_keeps_epoch_fact_history_local(
@@ -12202,8 +12216,8 @@ def test_qualification_recovery_restart_keeps_epoch_fact_history_local(
         sequence=2,
     )
     service = _qualification_service(control_plane, batch_size=10)
-    invalidated = service.tick(now + timedelta(seconds=1))
-    assert invalidated.state is QualificationState.RECOVERING
+    paused = service.tick(now + timedelta(seconds=1))
+    assert paused.state is QualificationState.ACCUMULATING
 
     _insert_runtime_event(
         control_plane,
@@ -12227,17 +12241,18 @@ def test_qualification_recovery_restart_keeps_epoch_fact_history_local(
             """
         )
         rows = cursor.fetchall()
-    states = [row[0] for row in rows]
-    assert states == ["invalidated", "recovering", "accumulating"]
-    invalidated_row = next(row for row in rows if row[0] == "invalidated")
-    accumulating_row = next(row for row in rows if row[0] == "accumulating")
-    recovering_row = next(row for row in rows if row[0] == "recovering")
-    assert invalidated_row[1] == 0
-    assert invalidated_row[4] == 2
-    assert recovering_row[1] == 0
+    assert len(rows) == 1
+    accumulating_row = rows[0]
+    assert accumulating_row[0] == "accumulating"
     assert accumulating_row[1] == 0
-    assert accumulating_row[4] == 1
+    assert accumulating_row[4] >= 6
     assert accumulating_row[3] >= accumulating_row[2]
+    status = PostgresQualificationServiceStore(
+        control_plane._connection_factory
+    ).status(now=now + timedelta(seconds=3))
+    epoch = cast(dict[str, object], status["epoch"])
+    assert epoch["eligibility_state"] == "eligible"
+    assert epoch["eligibility_reason"] is None
 
 
 def test_qualification_same_batch_recovery_keeps_recovering_epoch_empty(
@@ -12275,9 +12290,11 @@ def test_qualification_same_batch_recovery_keeps_recovering_epoch_empty(
             """
         )
         rows = cursor.fetchall()
-    recovering_row = next(row for row in rows if row[:3] == ("recovering", 0, 0))
-    accumulating_row = next(row for row in rows if row[:3] == ("accumulating", 0, 1))
-    assert accumulating_row[5] > recovering_row[5]
+    assert len(rows) == 1
+    accumulating_row = rows[0]
+    assert accumulating_row[:2] == ("accumulating", 0)
+    assert accumulating_row[2] >= 6
+    assert accumulating_row[6] is None
 
     restarted_store = PostgresQualificationServiceStore(control_plane._connection_factory)
     restarted_store.initialize(_qualification_policy(), now=now + timedelta(seconds=3))
@@ -12299,7 +12316,7 @@ def test_qualification_recovering_observes_second_breaker_status_and_restart(
         sequence=2,
     )
     first = _qualification_service(control_plane, batch_size=20).tick(now + timedelta(seconds=1))
-    assert first.state is QualificationState.RECOVERING
+    assert first.state is QualificationState.ACCUMULATING
 
     _insert_runtime_event(
         control_plane,
@@ -12310,21 +12327,15 @@ def test_qualification_recovering_observes_second_breaker_status_and_restart(
         sequence=3,
     )
     observed = _qualification_service(control_plane, batch_size=20).tick(now + timedelta(seconds=3))
-    assert observed.state is QualificationState.RECOVERING
+    assert observed.state is QualificationState.ACCUMULATING
     assert observed.cursor is not None
 
     store = PostgresQualificationServiceStore(control_plane._connection_factory)
     status = store.status(now=now + timedelta(seconds=3))
-    assert status["last_breaker"] == {
-        "observed_at": (now + timedelta(seconds=3)).isoformat(),
-        "reason": "lease.expired",
-    }
-    assert cast(int, status["recovery_observation_count"]) >= 1
-    assert status["last_recovery_observation"] is not None
-    last_breaking_observation = cast(
-        dict[str, object], status["last_recovery_breaking_observation"]
-    )
-    assert last_breaking_observation["reason"] == "lease.expired"
+    status_epoch = cast(dict[str, object], status["epoch"])
+    assert status_epoch["eligibility_state"] == "paused"
+    assert status_epoch["eligibility_reason"] == "lease.expired"
+    assert status["recovery_observation_count"] == 0
 
     _insert_runtime_event(
         control_plane,
@@ -12342,10 +12353,10 @@ def test_qualification_recovering_observes_second_breaker_status_and_restart(
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT observation_id, reason
-            FROM m1_qualification_recovery_observations
+            SELECT fact_id, reason
+            FROM m1_qualification_epoch_facts
             WHERE reason = 'lease.expired'
-            ORDER BY ingest_seq
+            ORDER BY ordinal
             """
         )
         observations = cursor.fetchall()
@@ -12353,9 +12364,9 @@ def test_qualification_recovering_observes_second_breaker_status_and_restart(
         with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
             cursor.execute(
                 """
-                UPDATE m1_qualification_recovery_observations
+                UPDATE m1_qualification_epoch_facts
                 SET reason = 'healthy'
-                WHERE observation_id = %s
+                WHERE fact_id = %s
                 """,
                 (observations[-1][0],),
             )
@@ -12363,14 +12374,14 @@ def test_qualification_recovering_observes_second_breaker_status_and_restart(
         with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
             cursor.execute(
                 """
-                DELETE FROM m1_qualification_recovery_observations
-                WHERE observation_id = %s
+                DELETE FROM m1_qualification_epoch_facts
+                WHERE fact_id = %s
                 """,
                 (observations[-1][0],),
             )
 
 
-def test_qualification_freshness_reobserves_same_pointer_and_invalidates_on_aging(
+def test_qualification_freshness_reobserves_same_pointer_and_pauses_on_aging(
     control_plane: PostgresControlPlane,
 ) -> None:
     now = _now()
@@ -12389,7 +12400,7 @@ def test_qualification_freshness_reobserves_same_pointer_and_invalidates_on_agin
     )
     second = service.tick(now + timedelta(seconds=200))
 
-    assert second.state is QualificationState.RECOVERING
+    assert second.state is QualificationState.ACCUMULATING
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
             """
@@ -12401,12 +12412,17 @@ def test_qualification_freshness_reobserves_same_pointer_and_invalidates_on_agin
         assert cursor.fetchone() == (2,)
         cursor.execute(
             """
-            SELECT invalidation_reason
+            SELECT state, invalidation_reason, slo->>'eligibility_state',
+                   slo->>'eligibility_reason'
             FROM m1_qualification_epochs
-            WHERE state = 'invalidated'
+            WHERE state = 'accumulating'
             """
         )
-        assert cursor.fetchone() == ("freshness.structure",)
+        state, invalidation_reason, eligibility_state, eligibility_reason = cursor.fetchone()
+        assert state == "accumulating"
+        assert invalidation_reason is None
+        assert eligibility_state == "paused"
+        assert str(eligibility_reason).startswith("freshness.")
 
 
 def test_qualification_status_ignores_bloated_predecessor_evidence(
@@ -12501,7 +12517,8 @@ def test_qualification_certificate_is_canonical_idempotent_and_conflict_loud(
         b'"identity":{"config_id":"config-a","epoch_id":"qualification-epoch-cert",'
         b'"policy_version":"m1-rolling-qualification-v1","release_id":"release-a",'
         b'"role_identity":["m1","structure"]},"policy_version":"m1-rolling-qualification-v1",'
-        b'"recovery_actions":[],"slo":{"evidence_gap_seconds":900,"evidence_gap_status":"pass",'
+        b'"recovery_actions":[],"slo":{"eligibility_reason":null,"eligibility_state":"qualified",'
+        b'"evidence_gap_seconds":900,"evidence_gap_status":"pass",'
         b'"freshness":"pass","recovery":"pass","required_seconds":86400}}'
     )
     first = insert_qualification_certificate(

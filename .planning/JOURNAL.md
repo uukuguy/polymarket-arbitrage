@@ -11609,3 +11609,42 @@ Structure target through the exact controller action, certify fresh Structure /
 Quote / opportunity publication, roll all eight formal Machines, and start a
 new 86,400-second qualification identity. M1 remains incomplete until its
 immutable certificate and independent reverification pass.
+
+### SESSION 339 — 2026-08-30 (production commissioning and healthy-effective qualification)
+
+- [DESIGN CORRECTION] The 86,400-second production run is no longer treated as
+  a zero-fault integration test. Known node failures must be attacked and their
+  recovery playbooks proven before qualification; expected runtime faults pause
+  or block evidence rather than erasing already earned healthy history.
+- [COMMISSIONING CONTRACT] The exact eight-node runtime DAG now owns 18 typed
+  attacks and 66 node-level proof obligations. Every proof binds exact
+  release/config and requires ordered injection, detection, recovery start,
+  recovery, cleanup and business postcondition facts. A later end-to-end
+  Structure→Quote→Opportunity lineage is mandatory.
+- [ATTACK BOUNDARY] Four named Gamma/CLOB external-boundary cases require scoped
+  production canaries. Fourteen attack types stay in disposable exact-image
+  environments. The verifier rejects missing, extra, out-of-order, unclean or
+  identity-mismatched evidence.
+- [QUALIFICATION V2] Healthy effective seconds accrue only across eligible
+  intervals. Expected incidents pause; freshness/evidence/recovery-SLO failures
+  block; confirmed recovery resumes the same epoch. Only fence, integrity,
+  producer-scoped progress regression or policy/release/config/role identity
+  defects invalidate.
+- [REGRESSION REPAIR] Removed false global progress regression comparisons
+  across Structure, Quote and Opportunity sources. Focused and integrated
+  qualification/commissioning/Postgres/dashboard/API/runtime-matrix regressions,
+  Ruff and Pyright pass. No timeout was enlarged.
+- [RESTART COMPATIBILITY] TDD exposed legacy v1 `recovering` rows without the new
+  SLO fields being defaulted to eligible, conflicting with the state-machine
+  replay. Runtime replay and status now derive their fallback from the durable
+  epoch state; old recovery rows remain blocked and restart-safe.
+- [PRODUCTION BOUNDARY] No deployment, restart, resident SSH or manual database
+  mutation occurred. v24 was never deployed and is obsolete after these runtime
+  changes.
+
+[NEXT] Commit Plan 05.6-218 without protected user files and run the full exact-
+HEAD M1 gate. Build and inspect the next exact image through OrbStack only.
+Implement executable collectors/adapters for the 14 disposable exact-image and
+four scoped production-canary attacks, execute them with cleanup and final E2E
+lineage proof, and only then start a fresh healthy-effective 86,400-second
+qualification epoch.

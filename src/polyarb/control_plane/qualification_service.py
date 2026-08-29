@@ -86,8 +86,16 @@ _INCIDENT_KINDS = frozenset(
     }
 )
 _INCIDENT_RECOVERY_KINDS = frozenset({"recovered", "resolved"})
-_INCIDENT_BREAKING_KINDS = frozenset({"circuit-opened", "circuit-probe-failed", "escalated"})
-_INCIDENT_RECOVERY_STARTED_KINDS = frozenset({"attempt-failed", "recovery-started"})
+_INCIDENT_BLOCKING_KINDS = frozenset({"escalated"})
+_INCIDENT_RECOVERY_STARTED_KINDS = frozenset(
+    {
+        "attempt-failed",
+        "circuit-opened",
+        "circuit-probe-failed",
+        "detected",
+        "recovery-started",
+    }
+)
 _INCIDENT_SEVERITIES = frozenset({"info", "warning", "critical"})
 _INCIDENT_STATES = frozenset({"open", "acknowledged", "resolved"})
 _FRESHNESS_PRODUCTS = frozenset({"structure", "quote", "opportunity"})
@@ -243,6 +251,8 @@ class _QualificationStatusEpoch:
     contained_recoveries: tuple[str, ...]
     contained_recovery_count: int
     last_fact_record: QualificationFactRecord | None
+    eligibility_state: str
+    eligibility_reason: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +275,8 @@ class _RuntimeEpochProjection:
     progress_count: int | None
     successful_count: int | None
     runtime_fact_count: int
+    eligibility_state: str
+    eligibility_reason: str | None
 
 
 class QualificationFactSource(Protocol):
@@ -956,6 +968,8 @@ class PostgresQualificationServiceStore:
                     else record.qualified_at.isoformat(),
                     "previous_epoch_id": record.previous_epoch_id,
                     "version": record.version,
+                    "eligibility_state": record.eligibility_state,
+                    "eligibility_reason": record.eligibility_reason,
                 },
                 "duration_seconds": max(0, int((observed_at - record.started_at).total_seconds())),
                 "evidence_gap_seconds": record.max_gap_seconds,
@@ -1096,11 +1110,7 @@ def incident_event_row_to_fact_record(row: Mapping[str, object]) -> Qualificatio
     if kind in _INCIDENT_RECOVERY_KINDS or state == "resolved":
         reason = "recovery.confirmed"
         kwargs: dict[str, Any] = {"recovery_confirmed": True}
-    elif (
-        kind in _INCIDENT_BREAKING_KINDS
-        or bool(detail.get("qualification_breaking"))
-        or severity == "critical"
-    ):
+    elif kind in _INCIDENT_BLOCKING_KINDS or bool(detail.get("qualification_breaking")):
         reason = "incident.p1-slo"
         kwargs = {}
     elif kind in _INCIDENT_RECOVERY_STARTED_KINDS:
@@ -1291,7 +1301,7 @@ def _fetch_current_runtime_epoch(
                role_identity, started_at, last_fact_at, invalidated_at,
                invalidation_reason, qualified_at, previous_epoch_id,
                coverage_seconds, max_gap_seconds, progress_count, successful_count,
-               runtime_fact_count
+               runtime_fact_count, slo
         FROM public.m1_qualification_epochs AS epoch
         WHERE identity_key = %s
           AND (state IN ('accumulating', 'recovering')
@@ -1318,7 +1328,7 @@ def _fetch_runtime_epoch(
                role_identity, started_at, last_fact_at, invalidated_at,
                invalidation_reason, qualified_at, previous_epoch_id,
                coverage_seconds, max_gap_seconds, progress_count, successful_count,
-               runtime_fact_count
+               runtime_fact_count, slo
         FROM public.m1_qualification_epochs
         WHERE epoch_id = %s
         """
@@ -1329,10 +1339,21 @@ def _fetch_runtime_epoch(
     return None if row is None else _runtime_epoch_from_row(row)
 
 
+def _persisted_eligibility_state(*, state: str, slo: Mapping[str, object]) -> str:
+    legacy_default = {
+        "recovering": "blocked",
+        "invalidated": "invalidated",
+        "qualified": "qualified",
+    }.get(state, "eligible")
+    return str(slo.get("eligibility_state", legacy_default))
+
+
 def _runtime_epoch_from_row(row: Mapping[str, object]) -> _RuntimeEpochProjection:
+    slo = _detail(row.get("slo"))
+    state = str(row["state"])
     return _RuntimeEpochProjection(
         epoch_id=str(row["epoch_id"]),
-        state=str(row["state"]),
+        state=state,
         version=int(cast(int, row["version"])),
         policy_version=str(row["policy_version"]),
         release_id=str(row["release_id"]),
@@ -1369,6 +1390,12 @@ def _runtime_epoch_from_row(row: Mapping[str, object]) -> _RuntimeEpochProjectio
             None if row["successful_count"] is None else int(cast(int, row["successful_count"]))
         ),
         runtime_fact_count=int(cast(int, row["runtime_fact_count"])),
+        eligibility_state=_persisted_eligibility_state(state=state, slo=slo),
+        eligibility_reason=(
+            None
+            if slo.get("eligibility_reason") is None
+            else str(slo["eligibility_reason"])
+        ),
     )
 
 
@@ -1450,6 +1477,8 @@ def _decision_from_runtime_epoch(
         or decision.max_gap_seconds != record.max_gap_seconds
         or decision.progress_count != record.progress_count
         or decision.successful_count != record.successful_count
+        or decision.eligibility_state != record.eligibility_state
+        or decision.eligibility_reason != record.eligibility_reason
     ):
         raise QualificationServiceError("qualification epoch replay conflicts")
     return decision
@@ -1476,6 +1505,7 @@ def _compact_active_decision(decision: QualificationDecision) -> QualificationDe
         signature_counts=decision.signature_counts,
         recovery_confirmed_at=decision.recovery_confirmed_at,
         pending_recovery_started=decision.pending_recovery_started,
+        eligibility_reason=decision.eligibility_reason,
     )
 
 
@@ -1522,6 +1552,7 @@ def _materialize_terminal_decision(
         signature_counts=decision.signature_counts,
         recovery_confirmed_at=decision.recovery_confirmed_at,
         pending_recovery_started=decision.pending_recovery_started,
+        eligibility_reason=decision.eligibility_reason,
     )
 
 
@@ -1533,6 +1564,7 @@ def _fetch_latest_status_epoch(
         SELECT epoch.epoch_id, epoch.state, epoch.version, epoch.started_at,
                epoch.last_fact_at, epoch.invalidated_at, epoch.invalidation_reason,
                epoch.qualified_at, epoch.previous_epoch_id, epoch.max_gap_seconds,
+               epoch.slo,
                latest.fact_record AS last_fact_record,
                COALESCE(recent.fact_ids, '[]'::jsonb) AS contained_recoveries,
                epoch.runtime_contained_recovery_count AS contained_recovery_count
@@ -1956,7 +1988,10 @@ def _derived_epoch_evidence(decision: QualificationDecision) -> dict[str, object
     return {
         "evidence_digest": hashlib.sha256(digest).hexdigest(),
         "required_seconds": None,
-        "slo": {},
+        "slo": {
+            "eligibility_reason": decision.eligibility_reason,
+            "eligibility_state": decision.eligibility_state,
+        },
         "contained_incidents": [],
         "recovery_actions": [],
     }
@@ -2121,9 +2156,11 @@ def _observation_projection(row: Mapping[str, object]) -> dict[str, object]:
 
 def _status_epoch_from_row(row: Mapping[str, object]) -> _QualificationStatusEpoch:
     last_fact_payload = row["last_fact_record"]
+    slo = _detail(row.get("slo"))
+    state = str(row["state"])
     return _QualificationStatusEpoch(
         epoch_id=str(row["epoch_id"]),
-        state=str(row["state"]),
+        state=state,
         version=int(cast(int, row["version"])),
         started_at=_require_aware(cast(datetime, row["started_at"]), "started_at"),
         last_fact_at=(
@@ -2156,6 +2193,12 @@ def _status_epoch_from_row(row: Mapping[str, object]) -> _QualificationStatusEpo
             None
             if last_fact_payload is None
             else QualificationFactRecord.from_json(cast(Mapping[str, object], last_fact_payload))
+        ),
+        eligibility_state=_persisted_eligibility_state(state=state, slo=slo),
+        eligibility_reason=(
+            None
+            if slo.get("eligibility_reason") is None
+            else str(slo["eligibility_reason"])
         ),
     )
 

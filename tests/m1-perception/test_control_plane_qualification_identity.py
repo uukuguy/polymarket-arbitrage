@@ -25,7 +25,7 @@ def test_qualification_config_identity_is_canonical() -> None:
         "batch_size": 100,
         "interval_seconds": 30,
         "max_gap_seconds": 900,
-        "policy_version": "m1-rolling-qualification-v1",
+        "policy_version": "m1-rolling-qualification-v2",
         "required_seconds": 86400,
         "role_identity": ["opportunity", "quote", "structure"],
         "runtime_recovery_allowed_targets": [],

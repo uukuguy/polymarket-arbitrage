@@ -28,6 +28,15 @@ terminal grace     -- applies only after stop; it is not an I/O retry budget
 qualification 86,400 s -- acceptance observation window; it is not a process timeout
 ```
 
+Before that window may start, the exact release/config must pass the closed
+eight-node production commissioning contract. Every node needs a normal turn,
+all assigned directed fault attacks, ordered detection/recovery evidence,
+cleanup, its business postcondition, and a final Structure-to-Opportunity
+lineage proof. Qualification then counts healthy eligible seconds rather than
+wall time: an expected recoverable incident pauses or blocks accumulation in
+the same epoch; only truth, fencing, progress-integrity or identity defects
+invalidate the epoch.
+
 ## Authoritative boundaries
 
 | Boundary | Sole authority | Cancellation / late result | Durable evidence | Verification |
@@ -46,7 +55,8 @@ qualification 86,400 s -- acceptance observation window; it is not a process tim
 | Terminal shutdown | `service_lifecycle.terminal_grace_seconds()` | first cancel requests drain; second cancel detaches; fence owns late result | `ServiceStopRequested` or terminal receipt | service lifecycle and interruption tests |
 | Operator observation | watchdog/Fly read policy constants | daemon reader is abandoned after the derived observation round | watchdog transition, never a job mutation | CLI/watchdog tests |
 | Control API readiness | `CONTROL_PLANE_HEALTH_DB_POLICY` below Fly's 5 s check | detach the read-only probe at 3.5 s; platform never owns the DB call | no mutation; typed 503 | API, deployment-contract and real PostgreSQL tests |
-| Qualification window | immutable qualification policy | service can restart and resume cursors; no outer process timeout | normalized ingress and epoch/certificate | qualification service and 86,400-second certificate |
+| Pre-qualification commissioning | `production_commissioning.py` closed runtime-DAG and attack registries | disposable exact-image by default; exact production canary only for named provider boundaries; cleanup is mandatory | exact release/config normal turn, attack lifecycle, recovery and business postcondition facts | `m1-production-commissioning-plan`, `m1-production-commissioning-verify` and commissioning tests |
+| Qualification window | immutable qualification policy | service can restart and resume cursors; expected recovery pauses/blocks eligible seconds in the same epoch; no outer process timeout | normalized ingress, eligibility state/reason and epoch/certificate | qualification service and 86,400 healthy-effective-second certificate |
 
 ## Provider and external-I/O inventory
 
@@ -214,6 +224,11 @@ structure-fetch -> structure-materialize -> structure-normalize
   signal after readiness without supervising every long-lived resident task.
 - Giving a real subprocess less parent time than its cooperative slice; its
   normal envelope must be derived from child work plus the named reap budget.
+- Starting or restarting a qualification window before the exact release/config
+  has complete eight-node normal-turn, directed-attack, cleanup, postcondition
+  and end-to-end lineage evidence.
+- Invalidating an epoch for an expected recoverable incident, or counting its
+  detection/recovery interval as healthy eligible time.
 
 ## Verification map
 

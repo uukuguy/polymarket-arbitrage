@@ -29,22 +29,36 @@ class QualificationState(StrEnum):
 
 BREAKING_REASONS: Final[frozenset[str]] = frozenset(
     {
-        "lease.expired",
         "fence.mutated-stale",
         "integrity.conflict",
+        "progress.regressed",
+        "identity.policy",
+        "identity.release",
+        "identity.config",
+        "identity.role",
+    }
+)
+
+BLOCKING_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "lease.expired",
         "freshness.structure",
         "freshness.quote",
         "freshness.opportunity",
         "evidence.gap",
         "incident.p1-slo",
-        "progress.regressed",
         "recovery.human-intervention",
         "recovery.signature-budget",
         "recovery.slo",
-        "identity.policy",
-        "identity.release",
-        "identity.config",
-        "identity.role",
+    }
+)
+_HARD_BLOCKING_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "evidence.gap",
+        "incident.p1-slo",
+        "recovery.human-intervention",
+        "recovery.signature-budget",
+        "recovery.slo",
     }
 )
 
@@ -68,7 +82,9 @@ _NON_BREAKING_REASONS: Final[frozenset[str]] = frozenset(
         "recovery.confirmed",
     }
 )
-_KNOWN_REASONS: Final[frozenset[str]] = BREAKING_REASONS | CONTAINED_REASONS | _NON_BREAKING_REASONS
+_KNOWN_REASONS: Final[frozenset[str]] = (
+    BREAKING_REASONS | BLOCKING_REASONS | CONTAINED_REASONS | _NON_BREAKING_REASONS
+)
 _REASON_ALIASES: Final[dict[str, str]] = {
     "ok": "healthy",
     "observation.ok": "healthy",
@@ -334,6 +350,7 @@ class QualificationDecision:
     signature_counts: tuple[tuple[str, int], ...] = ()
     recovery_confirmed_at: datetime | None = None
     pending_recovery_started: bool = False
+    eligibility_reason: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.state) is not QualificationState:
@@ -376,6 +393,17 @@ class QualificationDecision:
                 _non_negative(value, field=field)
         if type(self.pending_recovery_started) is not bool:
             raise QualificationError("pending_recovery_started must be a boolean")
+        if self.eligibility_reason is not None:
+            normalized_eligibility_reason = _normal_reason(self.eligibility_reason)
+            if normalized_eligibility_reason not in BLOCKING_REASONS and (
+                normalized_eligibility_reason != "recovery.started"
+            ):
+                raise QualificationError("eligibility_reason must pause or block eligibility")
+            object.__setattr__(
+                self,
+                "eligibility_reason",
+                normalized_eligibility_reason,
+            )
         facts = tuple(self.facts)
         if any(type(fact) is not QualificationFact for fact in facts):
             raise QualificationError("facts must contain QualificationFact values")
@@ -393,14 +421,26 @@ class QualificationDecision:
         object.__setattr__(self, "fact_digests", expected_digests)
         if facts:
             pending_recovery_started = False
+            eligibility_reason: str | None = None
             for fact in facts:
-                if fact.reason == "recovery.started":
+                if fact.reason == "recovery.started" or fact.reason in BLOCKING_REASONS:
                     pending_recovery_started = True
+                    eligibility_reason = fact.reason
                 elif fact.reason in CONTAINED_REASONS or (
                     fact.reason == "recovery.confirmed" and fact.recovery_confirmed
                 ):
                     pending_recovery_started = False
+                    eligibility_reason = None
+            pending_recovery_started = (
+                pending_recovery_started or self.pending_recovery_started
+            )
+            eligibility_reason = self.eligibility_reason or eligibility_reason
             object.__setattr__(self, "pending_recovery_started", pending_recovery_started)
+            object.__setattr__(self, "eligibility_reason", eligibility_reason)
+        if self.pending_recovery_started != (self.eligibility_reason is not None):
+            raise QualificationError(
+                "pending recovery and eligibility reason must agree"
+            )
         if self.last_fact_at is None and facts:
             object.__setattr__(self, "last_fact_at", facts[-1].observed_at)
         if self.state is QualificationState.QUALIFIED and self.qualified_at is None:
@@ -421,6 +461,7 @@ class QualificationDecision:
                 or self.signature_counts
                 or self.recovery_confirmed_at is not None
                 or self.pending_recovery_started
+                or self.eligibility_reason is not None
             ):
                 raise QualificationError(
                     "recovering decision may carry only previous epoch identity"
@@ -475,11 +516,25 @@ class QualificationDecision:
     def certificate_eligible(self) -> bool:
         return self.state is QualificationState.QUALIFIED
 
+    @property
+    def eligibility_state(self) -> str:
+        if self.state is QualificationState.INVALIDATED:
+            return "invalidated"
+        if self.state is QualificationState.RECOVERING:
+            return "blocked"
+        if self.state is QualificationState.QUALIFIED:
+            return "qualified"
+        if self.eligibility_reason in _HARD_BLOCKING_REASONS:
+            return "blocked"
+        if self.pending_recovery_started:
+            return "paused"
+        return "eligible"
+
 
 class RollingQualificationPolicy:
     """Apply ordered facts to an immutable virtual-time qualification epoch."""
 
-    DEFAULT_POLICY_VERSION: Final[str] = "m1-rolling-qualification-v1"
+    DEFAULT_POLICY_VERSION: Final[str] = "m1-rolling-qualification-v2"
 
     def __init__(
         self,
@@ -641,20 +696,29 @@ class RollingQualificationPolicy:
                 invalidated_at=fact.observed_at,
                 invalidation_reason=breaking_reason,
                 qualified_at=None,
+                pending_recovery_started=False,
+                eligibility_reason=None,
             )
 
-        if fact.reason == "recovery.started":
-            return self._append_fact(state, fact)
-        appended = self._append_fact(state, fact)
+        blocking_reason = self._blocking_reason(state, fact)
+        appended = self._append_fact(
+            state,
+            fact,
+            blocking_reason=blocking_reason,
+        )
+        if blocking_reason is not None or fact.reason == "recovery.started":
+            return appended
         if self._has_pending_recovery_start(state):
             if fact.reason not in CONTAINED_REASONS and not self._is_recovery_confirmation(fact):
                 return appended
         if appended.coverage_seconds >= self.required_seconds and fact.evidence_complete:
-            boundary = appended.started_at + timedelta(seconds=self.required_seconds)
+            surplus = appended.coverage_seconds - self.required_seconds
+            boundary = fact.observed_at - timedelta(seconds=surplus)
             return replace(
                 appended,
                 state=QualificationState.QUALIFIED,
                 qualified_at=boundary,
+                coverage_seconds=self.required_seconds,
             )
         return appended
 
@@ -686,6 +750,15 @@ class RollingQualificationPolicy:
             return "identity.role"
         if fact.reason in BREAKING_REASONS:
             return fact.reason
+        return None
+
+    def _blocking_reason(
+        self,
+        state: QualificationDecision,
+        fact: QualificationFact,
+    ) -> str | None:
+        if fact.reason in BLOCKING_REASONS:
+            return fact.reason
         if not fact.evidence_complete:
             return "evidence.gap"
         if (
@@ -716,19 +789,6 @@ class RollingQualificationPolicy:
                 counts = dict(state.signature_counts)
                 if counts.get(signature, 0) + 1 > self.signature_budget:
                     return "recovery.signature-budget"
-        progress_pairs = (
-            (state.progress_count, fact.progress_count),
-            (state.successful_count, fact.successful_count),
-        )
-        for previous, current in progress_pairs:
-            if previous is not None and current is not None and current < previous:
-                return "progress.regressed"
-        if (
-            state.progress_count is not None
-            and fact.count is not None
-            and fact.count < state.progress_count
-        ):
-            return "progress.regressed"
         return None
 
     def _append_fact(
@@ -737,13 +797,20 @@ class RollingQualificationPolicy:
         fact: QualificationFact,
         *,
         next_state: QualificationState | None = None,
+        blocking_reason: str | None = None,
     ) -> QualificationDecision:
         gap = 0.0
         gap_anchor = current.last_fact_at or current.started_at
         if gap_anchor is not None:
             gap = (fact.observed_at - gap_anchor).total_seconds()
         max_gap = max(current.max_gap_seconds, int(gap))
-        coverage = max(0, int((fact.observed_at - current.started_at).total_seconds()))
+        coverage_delta = 0
+        if not current.pending_recovery_started and blocking_reason is None:
+            coverage_delta = max(0, int(gap))
+            if fact.reason in CONTAINED_REASONS:
+                assert fact.recovery_duration_seconds is not None
+                coverage_delta = max(0, coverage_delta - fact.recovery_duration_seconds)
+        coverage = current.coverage_seconds + coverage_delta
         signatures = dict(current.signature_counts)
         if fact.reason in CONTAINED_REASONS and fact.signature is not None:
             signatures[fact.signature] = signatures.get(fact.signature, 0) + 1
@@ -751,10 +818,13 @@ class RollingQualificationPolicy:
         if fact.reason in CONTAINED_REASONS:
             contained = (*contained, fact.fact_id)
         pending_recovery_started = current.pending_recovery_started
-        if fact.reason == "recovery.started":
+        eligibility_reason = current.eligibility_reason
+        if fact.reason == "recovery.started" or blocking_reason is not None:
             pending_recovery_started = True
+            eligibility_reason = blocking_reason or "recovery.started"
         elif fact.reason in CONTAINED_REASONS or self._is_recovery_confirmation(fact):
             pending_recovery_started = False
+            eligibility_reason = None
         progress_count = current.progress_count
         if fact.progress_count is not None:
             progress_count = fact.progress_count
@@ -776,6 +846,7 @@ class RollingQualificationPolicy:
             successful_count=successful_count,
             signature_counts=tuple(sorted(signatures.items())),
             pending_recovery_started=pending_recovery_started,
+            eligibility_reason=eligibility_reason,
         )
 
     def _open_recovered_epoch(
@@ -857,6 +928,7 @@ class RollingQualificationPolicy:
 
 
 __all__ = [
+    "BLOCKING_REASONS",
     "BREAKING_REASONS",
     "CONTAINED_REASONS",
     "QualificationDecision",

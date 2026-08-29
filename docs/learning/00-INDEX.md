@@ -107,6 +107,7 @@
 | 93 | [任务生命周期为何不能由多个时钟共同决定](93-任务生命周期为何不能由多个时钟共同决定.md) | 单一 lifecycle authority / DAG lane / bounded stop / lease reclaim / circuit probe / qualification cursor handoff |
 | 94 | [增长证据不能放进每轮状态行](94-增长证据不能放进每轮状态行.md) | 状态与证据分离 / append-only fact / fixed-size epoch / 500-row restart replay / bounded certificate projection |
 | 95 | [超时、任务序列与可恢复性审计](95-超时任务序列与可恢复性审计.md) | 四类时间权威 / 两阶段取消 / durable barrier / lease fencing / active-task progress / liveness-readiness 分离 |
+| 96 | [生产链 Commissioning 与健康有效秒](96-生产链Commissioning与健康有效秒.md) | 八节点准入 / 定向故障攻击 / 恢复后业务后置条件 / 普通故障暂停计时 / 严重缺陷才作废 epoch |
 
 ## Phase 02.1 教学增量（2026-05）
 

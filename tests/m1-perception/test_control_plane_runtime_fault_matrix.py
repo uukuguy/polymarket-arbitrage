@@ -111,7 +111,7 @@ def test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database(
     assert canonical_fault_matrix_bytes(first) == canonical_fault_matrix_bytes(second)
     assert first == second
     assert first["status"] == "pass"
-    assert first["schema_version"] == "m1-runtime-fault-matrix-v3"
+    assert first["schema_version"] == "m1-runtime-fault-matrix-v4"
     assert first["scoped_roles"] == {
         "qualification_worker": {
             "facts_consumed": first["qualification_fact_count"],
@@ -207,7 +207,7 @@ def test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database(
     assert by_fault["stale-action"]["action"]["result"] == "stale-noop"
     assert "recovery" in by_fault["stale-action"]["qualification_projection"]["sources"]
     assert by_fault["database-event-writer-failure"]["recovery"]["rollback_verified"] is True
-    assert by_fault["database-event-writer-failure"]["qualification_impact"] == "breaking"
+    assert by_fault["database-event-writer-failure"]["qualification_impact"] == "delayed"
     assert by_fault["watchdog-failure"]["incident_transition"]["source"] == "record_incident_event"
     assert "incident" in by_fault["watchdog-failure"]["qualification_projection"]["sources"]
 

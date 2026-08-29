@@ -197,10 +197,13 @@ _SNAPSHOT_ACTION_RESULTS = frozenset({"succeeded", "failed", "stale-noop", "disa
 _SNAPSHOT_QUALIFICATION_STATES = frozenset(
     {"accumulating", "invalidated", "recovering", "qualified"}
 )
+_SNAPSHOT_QUALIFICATION_ELIGIBILITY_STATES = frozenset(
+    {"eligible", "paused", "blocked", "invalidated", "qualified"}
+)
 _QUALIFICATION_SNAPSHOT_SQL = """
     SELECT epoch_id, state, role_identity, started_at, last_fact_at,
            required_seconds, coverage_seconds, max_gap_seconds,
-           policy_version, release_id, config_id, previous_epoch_id
+           policy_version, release_id, config_id, previous_epoch_id, slo
     FROM m1_qualification_epochs
     ORDER BY CASE WHEN state IN ('accumulating', 'recovering') THEN 0 ELSE 1 END,
              updated_at DESC, epoch_id DESC
@@ -227,7 +230,7 @@ runtime_incident_sample AS MATERIALIZED (
 qualification_epoch AS MATERIALIZED (
     SELECT epoch_id, state, role_identity, started_at, last_fact_at,
            required_seconds, coverage_seconds, max_gap_seconds,
-           policy_version, release_id, config_id, previous_epoch_id
+           policy_version, release_id, config_id, previous_epoch_id, slo
     FROM m1_qualification_epochs
     ORDER BY CASE WHEN state IN ('accumulating', 'recovering') THEN 0 ELSE 1 END,
              updated_at DESC, epoch_id DESC
@@ -8050,11 +8053,32 @@ class PostgresControlPlane:
                 "config_id": None,
                 "role_identity": [],
                 "certificate": None,
+                "eligibility_state": "blocked",
+                "eligibility_reason": "commissioning-or-epoch-missing",
             }
         state = _snapshot_text(epoch["state"], "qualification_state")
         if state not in _SNAPSHOT_QUALIFICATION_STATES:
             raise ControlPlaneError("qualification state is malformed")
         role_identity = _snapshot_role_identity(epoch["role_identity"])
+        slo = _snapshot_mapping(epoch["slo"], "qualification_slo")
+        default_eligibility_state = {
+            "invalidated": "invalidated",
+            "qualified": "qualified",
+            "recovering": "blocked",
+        }.get(state, "eligible")
+        eligibility_state = _snapshot_text(
+            slo.get("eligibility_state", default_eligibility_state),
+            "qualification_eligibility_state",
+        )
+        if eligibility_state not in _SNAPSHOT_QUALIFICATION_ELIGIBILITY_STATES:
+            raise ControlPlaneError("qualification eligibility state is malformed")
+        eligibility_reason = (
+            None
+            if slo.get("eligibility_reason") is None
+            else _snapshot_text(
+                slo["eligibility_reason"], "qualification_eligibility_reason"
+            )
+        )
         started_at = _snapshot_aware(epoch["started_at"], "qualification_started_at")
         if started_at > observed_at:
             raise ControlPlaneError("qualification time source is malformed")
@@ -8124,6 +8148,8 @@ class PostgresControlPlane:
             "config_id": _snapshot_text(epoch["config_id"], "config_id"),
             "role_identity": role_identity,
             "certificate": certificate_summary,
+            "eligibility_state": eligibility_state,
+            "eligibility_reason": eligibility_reason,
         }
 
     def current_opportunities(self, *, limit: int, after_group_id: str) -> dict[str, object]:

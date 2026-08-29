@@ -520,11 +520,9 @@ def _decision_derived_evidence(decision: QualificationDecision) -> dict[str, obj
 def _decision_required_seconds(decision: QualificationDecision) -> int:
     if decision.qualified_at is None:
         raise QualificationCertificateConflict("qualification decision has no qualified_at")
-    required_seconds = int((decision.qualified_at - decision.started_at).total_seconds())
+    required_seconds = decision.coverage_seconds
     if required_seconds <= 0:
         raise QualificationCertificateConflict("qualification decision has invalid bounds")
-    if decision.coverage_seconds < required_seconds:
-        raise QualificationCertificateConflict("qualification coverage is incomplete")
     return required_seconds
 
 
@@ -547,6 +545,8 @@ def _decision_slo(
     required_seconds: int | None,
 ) -> dict[str, object]:
     return {
+        "eligibility_reason": decision.eligibility_reason,
+        "eligibility_state": decision.eligibility_state,
         "evidence_gap_seconds": decision.max_gap_seconds,
         "evidence_gap_status": "pass",
         "freshness": "pass",

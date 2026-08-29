@@ -2579,3 +2579,27 @@ success is not user receipt/read evidence.
   materializer and only when prior ranges/certifiers are terminal. The atomic
   materializer commit changes one visible shape into the next without an
   unobservable gap; no mutable generation counter or new timeout is needed.
+
+### §2.78 Known faults belong in commissioning, not in the 24-hour discovery loop (2026-08-30)
+
+- The 86,400-second window had become an expensive integration test: a known
+  node fault could first appear hours into the run, reset the whole window and
+  hide whether the recovery playbook itself was usable. The corrected boundary
+  commissions every node before qualification.
+- The closed runtime DAG has eight nodes and 18 attack contracts. Expanding
+  shared attacks across their target nodes yields 66 node-level proofs. Each
+  binds exact release/config and proves ordered injection, detection, recovery
+  start, recovery, cleanup and a business postcondition; a final lineage proof
+  must follow all node evidence.
+- Four real provider-boundary attacks use scoped production canaries; the other
+  fourteen use disposable exact-image environments. Production is not a chaos
+  playground, but external provider behavior also cannot be proven entirely by
+  mocks.
+- Qualification v2 accumulates healthy effective seconds. Expected incidents
+  pause, SLO/evidence failures block, and confirmed recovery resumes the same
+  epoch. Only fencing, integrity, producer-scoped progress regression or
+  policy/release/config/role identity defects invalidate history.
+- Cross-source counts are not comparable progress authorities. Automatically
+  comparing Structure, Quote and Opportunity counters created false progress
+  regression; only an explicit producer-scoped regression fact can now break
+  the epoch.

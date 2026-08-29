@@ -151,6 +151,59 @@ def _policy() -> RollingQualificationPolicy:
     )
 
 
+def test_legacy_recovering_epoch_without_eligibility_slo_replays_as_blocked() -> None:
+    row: dict[str, object] = {
+        "epoch_id": "epoch-recovering",
+        "state": "recovering",
+        "version": 2,
+        "policy_version": "m1-rolling-qualification-v1",
+        "release_id": "a" * 40,
+        "config_id": f"sha256:{'b' * 64}",
+        "role_identity": ["structure", "quote", "opportunity"],
+        "started_at": NOW,
+        "last_fact_at": None,
+        "invalidated_at": None,
+        "invalidation_reason": None,
+        "qualified_at": None,
+        "previous_epoch_id": "epoch-invalidated",
+        "coverage_seconds": 0,
+        "max_gap_seconds": 0,
+        "progress_count": None,
+        "successful_count": None,
+        "runtime_fact_count": 0,
+        "slo": {},
+    }
+
+    projection = qualification_service_module._runtime_epoch_from_row(row)
+
+    assert projection.eligibility_state == "blocked"
+    assert projection.eligibility_reason is None
+
+
+def test_legacy_recovering_status_without_eligibility_slo_reports_blocked() -> None:
+    row: dict[str, object] = {
+        "epoch_id": "epoch-recovering",
+        "state": "recovering",
+        "version": 2,
+        "started_at": NOW,
+        "last_fact_at": None,
+        "invalidated_at": None,
+        "invalidation_reason": None,
+        "qualified_at": None,
+        "previous_epoch_id": "epoch-invalidated",
+        "max_gap_seconds": 0,
+        "contained_recoveries": [],
+        "contained_recovery_count": 0,
+        "last_fact_record": None,
+        "slo": {},
+    }
+
+    projection = qualification_service_module._status_epoch_from_row(row)
+
+    assert projection.eligibility_state == "blocked"
+    assert projection.eligibility_reason is None
+
+
 def _record(
     source: str,
     index: int,
@@ -279,11 +332,16 @@ def test_legitimate_incident_kinds_map_to_closed_qualification_reasons() -> None
     )
     assert recovery_started.fact.reason == "recovery.started"
 
-    for index, kind in enumerate(("circuit-opened", "circuit-probe-failed", "escalated")):
+    for index, kind in enumerate(("circuit-opened", "circuit-probe-failed")):
         record = incident_event_row_to_fact_record(
             {**base, "incident_event_id": f"incident-break-{index}", "kind": kind}
         )
-        assert record.fact.reason == "incident.p1-slo"
+        assert record.fact.reason == "recovery.started"
+
+    escalated = incident_event_row_to_fact_record(
+        {**base, "incident_event_id": "incident-escalated", "kind": "escalated"}
+    )
+    assert escalated.fact.reason == "incident.p1-slo"
 
     critical = incident_event_row_to_fact_record(
         {
@@ -326,7 +384,7 @@ def test_incident_mapper_accepts_schema_severity_enum(severity: str) -> None:
         }
     )
 
-    assert record.fact.reason == ("incident.p1-slo" if severity == "critical" else "healthy")
+    assert record.fact.reason == "recovery.started"
 
 
 @pytest.mark.parametrize("state", ["open", "acknowledged", "resolved"])
@@ -343,7 +401,9 @@ def test_incident_mapper_accepts_schema_state_enum(state: str) -> None:
         }
     )
 
-    assert record.fact.reason == ("recovery.confirmed" if state == "resolved" else "healthy")
+    assert record.fact.reason == (
+        "recovery.confirmed" if state == "resolved" else "recovery.started"
+    )
 
 
 @pytest.mark.parametrize(
@@ -628,17 +688,15 @@ def test_virtual_26h_recovery_replay_seals_one_reproducible_certificate() -> Non
     left = run_once()
     right = run_once()
 
-    assert len(left.epochs) == 3
-    invalidated = left.epochs[0]
-    assert invalidated.state is QualificationState.INVALIDATED
-    assert invalidated.invalidated_at == NOW + timedelta(hours=2)
-    assert invalidated.invalidation_reason == "lease.expired"
-    assert left.epochs[1].state is QualificationState.RECOVERING
-    assert left.epochs[2].state is QualificationState.QUALIFIED
+    assert len(left.epochs) == 1
+    assert left.epochs[0].state is QualificationState.QUALIFIED
+    assert left.epochs[0].started_at == first_start
+    assert left.epochs[0].invalidated_at is None
+    assert left.epochs[0].coverage_seconds == 86_400
     assert len(left.certificates) == 1
     payload = cast(Mapping[str, object], left.certificates[0]["payload"])
     identity = cast(Mapping[str, object], payload["identity"])
-    assert identity["epoch_id"] == left.epochs[2].epoch_id
+    assert identity["epoch_id"] == left.epochs[0].epoch_id
     assert left.certificates[0]["certificate_digest"] == certificate_digest(payload)
     assert left.certificates[0]["certificate_digest"] == right.certificates[0]["certificate_digest"]
 
@@ -700,7 +758,7 @@ def test_new_release_cursor_is_seeded_from_current_ledger_high_water() -> None:
     assert "ON CONFLICT (identity_key) DO NOTHING" in ensure
 
 
-def test_recovering_nonconfirmation_facts_are_observed_without_entering_epoch() -> None:
+def test_blocked_facts_and_confirmation_remain_in_the_same_epoch() -> None:
     breaker_at = NOW + timedelta(minutes=1)
     second_breaker_at = NOW + timedelta(minutes=2)
     confirmed_at = NOW + timedelta(minutes=3)
@@ -725,16 +783,15 @@ def test_recovering_nonconfirmation_facts_are_observed_without_entering_epoch() 
     )
 
     first = service.tick(breaker_at)
-    assert first.state is QualificationState.RECOVERING
+    assert first.state is QualificationState.ACCUMULATING
+    assert store.current.pending_recovery_started is True
     recovered = service.tick(confirmed_at)
 
     assert recovered.state is QualificationState.ACCUMULATING
-    assert store.epochs[0].state is QualificationState.INVALIDATED
-    assert store.epochs[0].facts == (records[0].fact,)
-    assert store.epochs[1].state is QualificationState.RECOVERING
-    assert store.epochs[1].facts == ()
-    assert store.epochs[2].facts == (records[2].fact,)
-    assert store.recovery_observations == (records[1],)
+    assert len(store.epochs) == 1
+    assert store.epochs[0].facts == tuple(record.fact for record in records)
+    assert store.epochs[0].pending_recovery_started is False
+    assert store.recovery_observations == ()
     assert store.cursor == records[2].cursor
 
 

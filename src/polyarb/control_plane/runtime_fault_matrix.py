@@ -205,7 +205,7 @@ def run_fault_matrix() -> dict[str, object]:
                     "observe_decision_count": observe_decision_count,
                     "qualification_fact_count": qualification_fact_count,
                     "qualification_identity_digest": _qualification_identity_digest(),
-                    "schema_version": "m1-runtime-fault-matrix-v3",
+                    "schema_version": "m1-runtime-fault-matrix-v4",
                     "scoped_roles": {
                         "qualification_worker": {
                             "facts_consumed": qualification_fact_count,
