@@ -857,7 +857,8 @@
 - [x] Add RED contracts for explicit idle observation, terminal drain and
   post-close rejection; implement the minimal owner and pass all L2 dispatcher,
   startup and daemon-shutdown tests.
-- [ ] Confirm the lifecycle through Climb and a fresh complete M1 gate.
+- [x] Confirm the lifecycle through Climb; run a fresh complete M1 gate before
+  exact-image build.
 
 ## Self-review
 

@@ -821,13 +821,26 @@ hypotheses:
     decision_reason: all local gates passed
 - id: H-030
   description: Coalesced L2 mirror writes can remain non-blocking while an explicit
-    dispatcher owner exposes deterministic idle and drains the final generation
-    after producers stop.
+    dispatcher owner exposes deterministic idle and drains the final generation after
+    producers stop.
   parent_paradigm: fenced-deadline-reconciler
   expected_lift: Eliminate scheduler-luck tests and orphan top-of-book tasks without
     putting PostgREST latency back into the WebSocket receive loop.
   cost_h: 0.5
   ranking: 1.0
-  status: pending
+  status: confirmed
   created_at: '2026-08-29T17:55:00+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 33
+    run: 20260829-093503-h-030
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed

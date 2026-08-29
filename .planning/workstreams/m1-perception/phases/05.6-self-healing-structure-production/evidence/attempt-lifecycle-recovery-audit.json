@@ -99,6 +99,7 @@
     "retry_policy_authority_contract": "lookup/backoff parity passed without fixed consumer count",
     "climb_h029": "100/100 confirmed",
     "l2_dispatcher_lifecycle": "31 focused dispatcher/startup/shutdown tests passed",
+    "climb_h030": "100/100 confirmed",
     "pre_task12_full_m1_suite": "4055 passed, 1 skipped, 1 xfailed in 1653.81 seconds",
     "exact_release_full_m1_suite": "running 4059 tests without an outer timeout"
   },
