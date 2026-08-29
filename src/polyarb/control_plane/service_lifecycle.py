@@ -4,15 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
+from datetime import datetime
 from typing import Any, Protocol
 
 from .blocking_bridge import run_blocking_call
+from .models import JobLease
 from .runtime_deadlines import runtime_policy
 
 
 class Worker(Protocol):
     def run_once(self) -> Any: ...
+
+
+class ClaimStore(Protocol):
+    def claim_job(
+        self,
+        *,
+        worker_id: str,
+        job_types: Sequence[str],
+        lease_seconds: int,
+        now: datetime,
+    ) -> JobLease | None: ...
 
 
 _WORKER_JOB_TYPES = {
@@ -41,6 +54,29 @@ def terminal_grace_seconds(worker_name: str, worker: Worker) -> float:
     return float(runtime_policy(job_type, lease_seconds).terminal_grace_seconds)
 
 
+async def claim_worker_job(
+    store: ClaimStore,
+    *,
+    worker_id: str,
+    job_types: Sequence[str],
+    lease_seconds: int,
+    now: datetime,
+) -> JobLease | None:
+    """Claim through the shared bridge without inventing another DB deadline."""
+    return await run_blocking_call(
+        store.claim_job,
+        worker_id=worker_id,
+        job_types=job_types,
+        lease_seconds=lease_seconds,
+        now=now,
+        thread_name=f"transactional-claim:{','.join(job_types)}",
+    )
+
+
+async def _await_worker_result(result: Awaitable[Any]) -> Any:
+    return await result
+
+
 async def run_worker(worker: Worker) -> Any:
     """Run async work on-loop and blocking work in a non-joining daemon thread.
 
@@ -56,7 +92,7 @@ async def run_worker(worker: Worker) -> Any:
     def invoke() -> Any:
         return_value = worker.run_once()
         if isinstance(return_value, Awaitable):
-            return asyncio.run(return_value)
+            return asyncio.run(_await_worker_result(return_value))
         return return_value
 
     return await run_blocking_call(
@@ -95,6 +131,7 @@ async def drain_worker_task(
 
 
 __all__ = [
+    "claim_worker_job",
     "drain_worker_task",
     "run_worker",
     "terminal_grace_seconds",

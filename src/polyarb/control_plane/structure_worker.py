@@ -25,6 +25,7 @@ from .models import JobLease, JobState, StructureRangeSpec
 from .postgres import IncompleteStructureGenerationError, PostgresControlPlane, StaleLeaseError
 from .runtime_contract import AttemptRuntime, ServiceStopRequested
 from .runtime_deadlines import runtime_deadline_profile, runtime_policy
+from .service_lifecycle import claim_worker_job
 from .structure_artifact import (
     StructureBundleError,
     StructureManifestArtifact,
@@ -237,7 +238,8 @@ class TransactionalStructureWorker:
         self._acceptance_run_id = acceptance_run_id
 
     async def run_once(self) -> StructureWorkerResult:
-        lease = self._control_plane.claim_job(
+        lease = await claim_worker_job(
+            self._control_plane,
             worker_id=self._worker_id,
             job_types=("structure-normalize",),
             lease_seconds=self._lease_seconds,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,6 +35,31 @@ def test_scheduler_has_no_competing_outer_worker_timeout() -> None:
     assert "wait_for(self._run_worker" not in source
     assert "wait_for(worker.run_once" not in source
     assert "remaining = cycle_deadline - asyncio.get_running_loop().time()" in source
+
+
+def test_async_transactional_workers_never_claim_on_the_event_loop_thread() -> None:
+    root = Path("src/polyarb/control_plane")
+    worker_modules = (
+        "structure_source.py",
+        "structure_worker.py",
+        "quote_admission.py",
+        "quote_worker.py",
+    )
+    offenders: list[str] = []
+    for module_name in worker_modules:
+        tree = ast.parse((root / module_name).read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef) or node.name != "run_once":
+                continue
+            for descendant in ast.walk(node):
+                if (
+                    isinstance(descendant, ast.Call)
+                    and isinstance(descendant.func, ast.Attribute)
+                    and descendant.func.attr == "claim_job"
+                ):
+                    offenders.append(f"{module_name}:{descendant.lineno}")
+
+    assert offenders == []
 
 
 def soak_record(

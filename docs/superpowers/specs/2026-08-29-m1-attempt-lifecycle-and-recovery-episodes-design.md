@@ -27,6 +27,23 @@ same app/region/image completed in 0.115 seconds. The page, cursor, image and
 Fly egress are therefore healthy; the differing variable is transport
 lifetime.
 
+Production rollout disproved the narrower form of that diagnosis. A fresh
+revision-035 transport did replace the old generation, yet three coordinator
+attempts still reached the 29-second worker-I/O boundary. The same release,
+cursor, provider policy, app and Fly region fetched 100 records in 0.164
+seconds in an isolated Machine. A read-only production probe measured eight
+sequential claim-shaped database reads in 2.292 seconds, so neither the page
+nor one database query is intrinsically slow.
+
+The remaining differentiator is coordinator scheduling. Its source pool runs
+eight asynchronous lanes and its materializer budget adds eight more turns.
+Several `async run_once()` implementations execute synchronous `claim_job()`
+on the event-loop thread before their first `await`. Those calls serialize
+connection bootstrap, query and row-lock work across otherwise independent
+lanes. Under live contention they can prevent both the provider socket and its
+15-second timer from being serviced until the outer 29-second timer is already
+due. This is an event-loop ownership defect, not a reason to enlarge a timeout.
+
 ## Chosen architecture
 
 One durable attempt owns one ordered lifecycle:
@@ -84,6 +101,21 @@ Observe records include the episode key so replay and live scheduling resolve
 the same budget. Action detail records the episode key; scheduling, budget
 consumption and idempotency validate it in one transaction.
 
+### Non-blocking claim boundary
+
+Every worker claim is database I/O and therefore uses the shared cancellable
+blocking bridge before an asynchronous worker starts its attempt runtime.
+There is no per-worker timeout around the claim: connection, statement and
+lock deadlines remain the sole database authorities. Cancellation follows the
+same two-step service-stop contract as all other nonterminal blocking calls.
+
+Synchronous workers continue to be bridged as a whole by `run_worker()`.
+Asynchronous workers may execute provider I/O on the event loop only after all
+synchronous database/R2 work has crossed an explicit bridge. A static coverage
+test rejects direct `.claim_job()` calls inside the audited async worker
+modules, and a behavioral test blocks a fake claim while proving an unrelated
+loop task continues to run.
+
 ## Sequencing and interruption invariants
 
 1. The eight-job DAG in `runtime_deadlines.py` remains the only stage order.
@@ -98,6 +130,9 @@ consumption and idempotency validate it in one transaction.
    operator turn may consume an older action.
 6. A circuit probe changes only the job/circuit state and never publication
    pointers.
+7. A slow claim may delay that worker's lease acquisition, but it cannot delay
+   a sibling provider request, heartbeat, watchdog, signal handler or cadence
+   clock on the shared event loop.
 
 ## Audit boundary
 
@@ -125,6 +160,9 @@ The release is acceptable only when:
   episode isolation, service interruption and exact probe execution;
 - the complete M1 suite, Ruff, Pyright, climb and planning gates pass without
   an arbitrary outer timeout;
+- a blocking-claim regression test proves event-loop liveness and production
+  logs show the exact source page crossing fetch, validation, upload and the
+  terminal receipt on the revised image;
 - an exact production image is rolled sequentially with `SIGTERM/40s`;
 - the exhausted legacy budget remains immutable, a new fingerprint episode
   owns its own budget, the exact source page succeeds, and downstream
@@ -142,3 +180,7 @@ The release is acceptable only when:
   later budget exhaustion unverifiable.
 - Rewriting the scheduler: unnecessary for the proven failure and expands the
   production risk surface before the M1 certificate.
+- Raising the 29-second worker-I/O bound: it would preserve the event-loop
+  starvation and merely move the single-point failure later.
+- Making the eight-lane pool sequential: it hides the unsafe boundary and
+  discards deliberate exact-ID concurrency; the claim itself belongs off-loop.

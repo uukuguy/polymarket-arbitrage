@@ -22,6 +22,7 @@ from .quote_artifact import QuoteBatchInputArtifact, upload_quote_batch_artifact
 from .quote_worker import QuoteBatchWorkerResult
 from .runtime_contract import AsyncAttemptRuntime
 from .runtime_deadlines import runtime_deadline_profile, runtime_policy
+from .service_lifecycle import claim_worker_job
 from .structure_artifact import (
     StructureBundleError,
     parse_structure_bundle_bytes,
@@ -318,7 +319,8 @@ class TransactionalQuoteAdmitter:
         self._runtime_sleep = runtime_sleep
 
     async def run_once(self) -> QuoteBatchWorkerResult:
-        lease = self._control_plane.claim_job(
+        lease = await claim_worker_job(
+            self._control_plane,
             worker_id=self._worker_id,
             job_types=("quote-admit",),
             lease_seconds=self._lease_seconds,

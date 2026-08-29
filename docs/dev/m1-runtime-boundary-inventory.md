@@ -36,6 +36,7 @@ qualification 86,400 s -- acceptance observation window; it is not a process tim
 | Provider request | provider client configured from `RuntimePolicy.provider_timeout_seconds` | provider coroutine/socket is cancelled or closed | stage-start remains current | Gamma, Quote and R2 focused tests |
 | Worker I/O | `RuntimePolicy.io_timeout_seconds` | cancels/detaches only the subordinate request | typed retryable result at current stage | source/quote worker tests and fault matrix |
 | Database connect/statement/lock | `db_deadlines.py` named policy | PostgreSQL statement/lock timeout rolls back transaction | no partial event/state mutation | real PostgreSQL deadline tests |
+| Worker claim bridge | `service_lifecycle.claim_worker_job()` delegates to database policy without another timer | first service cancellation drains; grace expiry detaches and the lease fence owns a late result | claimed lease and attempt row, or no mutation | blocking-claim event-loop test plus static async-worker audit |
 | Durable retry | `RuntimeRetryPolicy` | no in-process retry sleep; writes `next_attempt_at` | attempt, circuit and incident rows | retry/circuit PostgreSQL tests |
 | Circuit probe | `m1_job_circuits.next_probe_at` | no recovery-budget-derived clock | circuit row and action ledger | revision 034 and circuit-clock tests |
 | Recovery action count | revision 035 episode row | no reset on controller reclaim; new episode gets a separate row | `(controller,target,episode)` budget | revision 035 and episode fault case |
@@ -88,6 +89,9 @@ structure-fetch -> structure-materialize -> structure-normalize
   truth.
 - Same-name lanes are serial; sibling job-type lanes are independent. One lane
   failure cannot cancel siblings.
+- Every asynchronous worker claim crosses `claim_worker_job()` before its
+  attempt runtime starts. Database connection/query/row-lock work never runs
+  on the shared event-loop thread and never receives a competing worker timer.
 - Every external source boundary persists `current=0` before I/O. Completion
   persists `current=1` only after I/O. `commit-page=0` precedes the terminal
   transaction; the terminal job receipt, not a premature progress row, proves
@@ -118,6 +122,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Schema migrated to 035 while rollout/role gates expected 034 | release preflight stopped after a successful migration | one checked 035 head across role admin, rollout and matrix |
 | Fault cases selected global `LIMIT 1` | an earlier resumable row changed later test decisions | select the case's exact durable `job_key` |
 | Cadence reused time measured before observer callback | slow observers added the same wait twice and reduced progress | recompute monotonic remainder after callback |
+| Async workers claimed synchronously on the event loop | live 8-lane source plus materializer turns starved a healthy 0.164-second Gamma read until the 29-second worker-I/O timer won | route all five async claim sites through the cancellable blocking bridge; static audit forbids regression |
 | Local SSH waiter outlived an already completed remote Machine | operator process appeared hung despite completed remote work | exact waiter can be interrupted safely; remote durable state is re-read before retry |
 
 ## Prohibited patterns
@@ -131,6 +136,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 - Resetting/deleting an exhausted recovery row to make a new incident run.
 - Waiting on a local Fly/SSH process without re-reading the exact remote
   Machine/action state after interruption.
+- Calling synchronous `.claim_job()` directly from an `async run_once()`.
 
 ## Verification map
 
@@ -141,7 +147,8 @@ structure-fetch -> structure-materialize -> structure-normalize
 - Episode budgets and schema round trip: `test_035.py`, recovery PostgreSQL
   tests and runtime observe replay tests.
 - Scheduling, cancellation and cadence: shared runtime contract, blocking
-  bridge, service lifecycle and transactional scheduler tests.
+  bridge, blocking-claim liveness/static audit, service lifecycle and
+  transactional scheduler tests.
 - Integrated durable effects: fault matrix v3 contains 16 cases, including
   transport replacement, pre-I/O timeout, service interruption and recovery
   episode isolation.

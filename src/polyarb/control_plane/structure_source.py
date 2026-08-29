@@ -25,6 +25,7 @@ from .models import StructureSourcePageSpec
 from .postgres import PostgresControlPlane, StaleLeaseError
 from .runtime_contract import AsyncAttemptRuntime
 from .runtime_deadlines import runtime_deadline_profile, runtime_policy
+from .service_lifecycle import claim_worker_job
 from .structure_artifact import (
     StructureBundleArtifact,
     StructureBundleIdentity,
@@ -667,7 +668,8 @@ class TransactionalStructureSourceWorker:
         await self._gamma.aclose()
 
     async def run_once(self) -> StructureWorkerResult:
-        lease = self._control_plane.claim_job(
+        lease = await claim_worker_job(
+            self._control_plane,
             worker_id=self._worker_id,
             job_types=("structure-fetch",),
             lease_seconds=self._lease_seconds,
@@ -713,8 +715,9 @@ class TransactionalStructureSourceWorker:
             # fresh, internally consistent scope. Event and non-integrity
             # failures retain the normal retry/incident path below.
             try:
-                error_spec = self._control_plane.structure_source_page_spec(
-                    runtime.current_lease.job_key
+                error_spec = await _to_thread(
+                    self._control_plane.structure_source_page_spec,
+                    runtime.current_lease.job_key,
                 )
             except Exception:
                 error_spec = None
@@ -1025,7 +1028,8 @@ class TransactionalStructureSourceMaterializer:
         self._runtime_sleep = runtime_sleep
 
     async def run_once(self) -> StructureWorkerResult:
-        lease = self._control_plane.claim_job(
+        lease = await claim_worker_job(
+            self._control_plane,
             worker_id=self._worker_id,
             job_types=("structure-materialize",),
             lease_seconds=self._lease_seconds,

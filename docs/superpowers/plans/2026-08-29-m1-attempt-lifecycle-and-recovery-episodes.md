@@ -192,11 +192,49 @@
 - [ ] Write teaching, evidence, SUMMARY, architecture thread, STATE and JOURNAL;
   run `make planning-status`, then commit only owned files.
 
+### Task 7: Remove synchronous claim I/O from asynchronous worker lanes
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/service_lifecycle.py`
+- Modify: `src/polyarb/control_plane/structure_source.py`
+- Modify: `src/polyarb/control_plane/structure_worker.py`
+- Modify: `src/polyarb/control_plane/quote_admission.py`
+- Modify: `src/polyarb/control_plane/quote_worker.py`
+- Modify: `tests/m1-perception/test_transactional_control_plane_scheduler.py`
+- Modify: `tests/m1-perception/test_control_plane_runtime_policy.py`
+- Modify: `docs/dev/m1-runtime-boundary-inventory.md`
+
+**Interfaces:**
+
+- Produces: `claim_worker_job(store, *, worker_id, job_types,
+  lease_seconds, now) -> Awaitable[JobLease | None]` in the shared service
+  lifecycle module.
+- Database connection, statement and lock policies remain the only claim
+  deadlines. The helper adds no timeout and uses the existing two-cancellation
+  blocking bridge.
+
+- [ ] Write a behavioral RED test with a fake synchronous `claim_job()` blocked
+  on a thread event; require an independent event-loop task to advance before
+  the claim is released.
+- [ ] Write a static RED contract covering all audited async transactional
+  worker modules; reject direct `self._control_plane.claim_job(` expressions.
+- [ ] Run the exact tests and require RED against the current inline calls.
+- [ ] Implement `claim_worker_job()` with `run_blocking_call()` and replace the
+  five async worker claim sites; also bridge source failure-path spec lookup.
+- [ ] Run the behavioral/static tests and all affected worker suites GREEN;
+  run Ruff and Pyright on the modified files.
+- [ ] Rebuild and push an exact revision image, roll only the coordinator first,
+  release the exact circuit episode through the authorized one-shot executor,
+  and require the source page's terminal receipt before rolling sibling roles.
+- [ ] Update the inventory, teaching/evidence and `05.6-212-SUMMARY.md`, then
+  commit only owned files with scope `fix(05.6-212)`.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
-  sequencing, cancellation, inventory, operator wait and production proof all
-  map to Tasks 1–6.
+  sequencing, cancellation, event-loop claim isolation, inventory, operator
+  wait and production proof all map to Tasks 1–7.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

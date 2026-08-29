@@ -2,12 +2,59 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from datetime import UTC, datetime
 from time import monotonic
 
 import pytest
 
 from polyarb.control_plane.postgres import StaleLeaseError
 from polyarb.control_plane.scheduler import TransactionalControlPlaneScheduler
+
+
+def test_claim_worker_job_keeps_the_event_loop_live_during_sync_database_io() -> None:
+    from polyarb.control_plane import service_lifecycle
+
+    started = threading.Event()
+    release = threading.Event()
+    loop_advanced = asyncio.Event()
+    expected = object()
+
+    class _BlockingClaimStore:
+        def claim_job(self, **kwargs: object) -> object:
+            assert kwargs["worker_id"] == "worker-a"
+            assert kwargs["job_types"] == ("structure-fetch",)
+            started.set()
+            if not release.wait(timeout=1):
+                raise AssertionError("claim release was not signalled")
+            return expected
+
+    async def run() -> None:
+        claim = asyncio.create_task(
+            service_lifecycle.claim_worker_job(
+                _BlockingClaimStore(),
+                worker_id="worker-a",
+                job_types=("structure-fetch",),
+                lease_seconds=120,
+                now=datetime(2030, 1, 1, tzinfo=UTC),
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+
+        async def advance_loop() -> None:
+            await asyncio.sleep(0)
+            loop_advanced.set()
+
+        ticker = asyncio.create_task(advance_loop())
+        await asyncio.wait_for(loop_advanced.wait(), timeout=0.1)
+        assert not claim.done()
+        release.set()
+        assert await claim is expected
+        await ticker
+
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
 
 
 class _AsyncWorker:
