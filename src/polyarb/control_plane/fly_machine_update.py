@@ -36,11 +36,16 @@ def render_machine_update_payload(
     expected_machine_id: str,
     target_image: str,
     update_env_from_fly: Sequence[str] = (),
+    target_cpu_kind: str | None = None,
+    target_cpus: int | None = None,
+    target_memory_mb: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return a full optimistic Machines API update and redacted proof.
 
     ``current_machine`` must be a fresh GET response.  Every existing config
-    field is copied; only the image and lifecycle stop contract may change.
+    field is copied; only the image and lifecycle stop contract may change by
+    default.  A complete, explicit guest triple permits one auditable resource
+    shape change without opening an arbitrary config-patch surface.
     """
     if not expected_app or not expected_machine_id or not target_image:
         raise FlyMachineUpdateContractError(
@@ -67,6 +72,20 @@ def render_machine_update_payload(
     if any(key not in _ALLOWED_ENV_UPDATES for key in updated_env_keys):
         raise FlyMachineUpdateContractError("Machine env update key is outside rollout policy")
 
+    guest_values = (target_cpu_kind, target_cpus, target_memory_mb)
+    guest_change_requested = any(value is not None for value in guest_values)
+    if guest_change_requested and not all(value is not None for value in guest_values):
+        raise FlyMachineUpdateContractError("resource shape update requires all guest fields")
+    if guest_change_requested and (
+        not isinstance(target_cpu_kind, str)
+        or not target_cpu_kind
+        or type(target_cpus) is not int
+        or target_cpus <= 0
+        or type(target_memory_mb) is not int
+        or target_memory_mb <= 0
+    ):
+        raise FlyMachineUpdateContractError("resource shape fields must be non-empty and positive")
+
     candidate_config: dict[str, Any] = deepcopy(dict(current_config))
     candidate_config.pop("kill_signal", None)
     candidate_config.pop("kill_timeout", None)
@@ -81,6 +100,21 @@ def render_machine_update_payload(
         for key in updated_env_keys:
             current_env[key] = _required_string(rendered_env, key, "rendered Fly config env")
         candidate_config["env"] = current_env
+    resource_change: dict[str, object] | None = None
+    if guest_change_requested:
+        current_guest = dict(_required_mapping(candidate_config, "guest", "Machine config"))
+        expected_guest_keys = {"cpu_kind", "cpus", "memory_mb"}
+        if set(current_guest) != expected_guest_keys:
+            raise FlyMachineUpdateContractError(
+                "resource shape update requires the canonical three-field guest config"
+            )
+        target_guest = {
+            "cpu_kind": target_cpu_kind,
+            "cpus": target_cpus,
+            "memory_mb": target_memory_mb,
+        }
+        candidate_config["guest"] = target_guest
+        resource_change = {"from": current_guest, "to": target_guest}
 
     preserved_current = deepcopy(dict(current_config))
     preserved_current.pop("image", None)
@@ -90,6 +124,9 @@ def render_machine_update_payload(
     preserved_candidate = deepcopy(candidate_config)
     preserved_candidate.pop("image", None)
     preserved_candidate.pop("stop_config", None)
+    if guest_change_requested:
+        preserved_current.pop("guest", None)
+        preserved_candidate.pop("guest", None)
     for preserved in (preserved_current, preserved_candidate):
         if updated_env_keys:
             preserved_env = dict(_required_mapping(preserved, "env", "preserved config"))
@@ -121,6 +158,8 @@ def render_machine_update_payload(
         "target_image": target_image,
         "updated_env_keys": list(updated_env_keys),
     }
+    if resource_change is not None:
+        proof["resource_change"] = resource_change
     return payload, proof
 
 
@@ -193,6 +232,9 @@ def _parser() -> argparse.ArgumentParser:
     render.add_argument("--expected-machine-id", required=True)
     render.add_argument("--target-image", required=True)
     render.add_argument("--update-env-from-fly", action="append", default=[])
+    render.add_argument("--target-cpu-kind")
+    render.add_argument("--target-cpus", type=int)
+    render.add_argument("--target-memory-mb", type=int)
     render.add_argument("--output", type=Path, required=True)
     render.add_argument("--json", action="store_true")
     verify = subcommands.add_parser(
@@ -217,6 +259,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected_machine_id=args.expected_machine_id,
             target_image=args.target_image,
             update_env_from_fly=args.update_env_from_fly,
+            target_cpu_kind=args.target_cpu_kind,
+            target_cpus=args.target_cpus,
+            target_memory_mb=args.target_memory_mb,
         )
         with args.output.open("x") as handle:
             json.dump(payload, handle, sort_keys=True, indent=2)

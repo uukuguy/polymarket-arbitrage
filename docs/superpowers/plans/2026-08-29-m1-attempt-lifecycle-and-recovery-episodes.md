@@ -570,13 +570,44 @@
 - [ ] Restore coordinator only on an exact canary release that proves no fourth
   generation is admitted/materialized while prior generations are unfinished.
 
+### Task 20: Make production capacity changes explicit and reversible
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/fly_machine_update.py`
+- Modify: `tests/m1-perception/test_fly_machine_update.py`
+- Modify: `Makefile`
+
+**Interfaces:**
+
+- A resource canary supplies `cpu_kind`, `cpus` and `memory_mb` as one complete
+  guest shape; partial patches and non-positive values fail closed.
+- The update still uses one fresh Machine GET, optimistic `current_version`,
+  exact image and `SIGTERM/40s`; every config path outside image, stop contract
+  and the explicitly requested guest shape remains hash-proven unchanged.
+- Capacity is not a timeout. The 900-second generation objective and all lease,
+  attempt, provider and shutdown policies remain unchanged during the A/B test.
+
+- [x] Reject v14 shared-1x after an exact sliding five-minute window produced
+  288 successes (57.6/minute) against the 74.3/minute floor, with zero window
+  `OperationalError`, expired leases or open circuits.
+- [x] Split 168 complete range attempts by durable stages: 2.520s claim/read,
+  6.376s read/normalize, 2.747s normalize/upload, 1.430s upload/commit and
+  1.589s commit/finish on average.
+- [x] Add RED/GREEN contracts for one complete guest-shape update, rejection of
+  partial/invalid shapes, immutable input and redacted old/new resource proof.
+- [ ] Run a shared-2x Structure-only A/B canary and accept it only if a fresh
+  five-minute window exceeds 74.3 successes/minute without ownership growth,
+  repeated operational failures, expired leases or open circuits.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
   sequencing, cancellation, event-loop claim isolation, non-blocking fan-in repair,
   inventory, operator wait, production proof, capacity/backpressure and
   connection ownership, worker-identity capacity and producer commit
-  independence plus cross-shape generation ordering all map to Tasks 1–19.
+  independence, cross-shape generation ordering and explicit capacity rollout
+  all map to Tasks 1–20.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

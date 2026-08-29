@@ -85,6 +85,69 @@ def test_machine_update_maps_toml_lifecycle_to_api_stop_config_and_preserves_res
     assert len(proof["preserved_config_sha256"]) == 64
 
 
+def test_machine_update_allows_one_explicit_full_guest_shape_change(tmp_path: Path) -> None:
+    from polyarb.control_plane.fly_machine_update import render_machine_update_payload
+
+    current = _machine()
+    original = deepcopy(current)
+
+    payload, proof = render_machine_update_payload(
+        current_machine=current,
+        fly_config_path=_fly_config(tmp_path / "fly.toml"),
+        expected_app="polyarb-runtime-controller-m1",
+        expected_machine_id="6e82036dce4958",
+        target_image="registry.fly.io/example:new",
+        target_cpu_kind="shared",
+        target_cpus=2,
+        target_memory_mb=256,
+    )
+
+    assert current == original
+    assert payload["config"]["guest"] == {
+        "cpu_kind": "shared",
+        "cpus": 2,
+        "memory_mb": 256,
+    }
+    assert proof["resource_change"] == {
+        "from": {"cpu_kind": "shared", "cpus": 1, "memory_mb": 256},
+        "to": {"cpu_kind": "shared", "cpus": 2, "memory_mb": 256},
+    }
+
+
+@pytest.mark.parametrize(
+    ("target_cpu_kind", "target_cpus", "target_memory_mb"),
+    (
+        ("shared", None, None),
+        (None, 2, None),
+        (None, None, 256),
+        ("shared", 0, 256),
+        ("", 2, 256),
+    ),
+)
+def test_machine_update_rejects_partial_or_invalid_guest_shape_change(
+    tmp_path: Path,
+    target_cpu_kind: str | None,
+    target_cpus: int | None,
+    target_memory_mb: int | None,
+) -> None:
+    from polyarb.control_plane.fly_machine_update import (
+        FlyMachineUpdateContractError,
+        render_machine_update_payload,
+    )
+
+    with pytest.raises(FlyMachineUpdateContractError):
+        render_machine_update_payload(
+            current_machine=_machine(),
+            fly_config_path=_fly_config(tmp_path / "fly.toml"),
+            expected_app="polyarb-runtime-controller-m1",
+            expected_machine_id="6e82036dce4958",
+            target_image="registry.fly.io/example:new",
+            target_cpu_kind=target_cpu_kind,
+            target_cpus=target_cpus,
+            target_memory_mb=target_memory_mb,
+        )
+
+
 @pytest.mark.parametrize(
     "fly_config",
     (
