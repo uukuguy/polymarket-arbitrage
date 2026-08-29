@@ -37,6 +37,7 @@ qualification 86,400 s -- acceptance observation window; it is not a process tim
 | Worker I/O | `RuntimePolicy.io_timeout_seconds` | cancels/detaches only the subordinate request | typed retryable result at current stage | source/quote worker tests and fault matrix |
 | Database connect/statement/lock | `db_deadlines.py` named policy | PostgreSQL statement/lock timeout rolls back transaction | no partial event/state mutation | real PostgreSQL deadline tests |
 | Worker claim bridge | `service_lifecycle.claim_worker_job()` delegates to database policy without another timer | first service cancellation drains; grace expiry detaches and the lease fence owns a late result | claimed lease and attempt row, or no mutation | blocking-claim event-loop test plus static async-worker audit |
+| Terminal fan-in | predecessor terminal transaction plus certifier-row lock | concurrent siblings serialize their final eligibility read; claim-time repair advances at most one lost wakeup | every input has receipt and matching job is `succeeded` | concurrent PostgreSQL barrier and historical-repair tests |
 | Durable retry | `RuntimeRetryPolicy` | no in-process retry sleep; writes `next_attempt_at` | attempt, circuit and incident rows | retry/circuit PostgreSQL tests |
 | Circuit probe | `m1_job_circuits.next_probe_at` | no recovery-budget-derived clock | circuit row and action ledger | revision 034 and circuit-clock tests |
 | Recovery action count | revision 035 episode row | no reset on controller reclaim; new episode gets a separate row | `(controller,target,episode)` budget | revision 035 and episode fault case |
@@ -87,6 +88,10 @@ structure-fetch -> structure-materialize -> structure-normalize
 - Successor jobs are admitted only by their predecessor's fenced terminal
   receipt. Scheduler iteration order is throughput policy, not dependency
   truth.
+- Fan-in successors require both receipt completeness and terminal producer
+  states. Final siblings serialize on the successor row; each certifier turn
+  repairs at most one historically ready `waiting` row from the same durable
+  facts before claiming work.
 - Same-name lanes are serial; sibling job-type lanes are independent. One lane
   failure cannot cancel siblings.
 - Every asynchronous worker claim crosses `claim_worker_job()` before its
@@ -123,6 +128,9 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Fault cases selected global `LIMIT 1` | an earlier resumable row changed later test decisions | select the case's exact durable `job_key` |
 | Cadence reused time measured before observer callback | slow observers added the same wait twice and reduced progress | recompute monotonic remainder after callback |
 | Async workers claimed synchronously on the event loop | live 8-lane source plus materializer turns starved a healthy 0.164-second Gamma read until the 29-second worker-I/O timer won | route all five async claim sites through the cancellable blocking bridge; static audit forbids regression |
+| Quote capacity was a serial turn count | 148 batches required about 28 minutes and contradicted the 900-second freshness gate | independently fenced lanes derive capacity from the existing CLOB concurrency authority; lane failures remain local |
+| Concurrent final receipts could both decline a wakeup | every producer was terminal while its certifier remained waiting forever | terminal transition precedes one wake; sibling checks serialize on the certifier row; bounded claim-time repair closes historical gaps |
+| Receipt count stood in for producer success | a checkpointed producer could make an incomplete generation claimable | eligibility joins each receipt to a `succeeded` producer job |
 | Local SSH waiter outlived an already completed remote Machine | operator process appeared hung despite completed remote work | exact waiter can be interrupted safely; remote durable state is re-read before retry |
 
 ## Prohibited patterns

@@ -3913,6 +3913,17 @@ class PostgresControlPlane:
     def _wake_structure_certifier_cursor(
         cursor: psycopg.Cursor[dict[str, Any]], *, generation_key: str, now: datetime
     ) -> None:
+        # Every sibling receipt transaction must cross the same row lock before
+        # counting committed siblings. Without this barrier, concurrent final
+        # receipts can each miss the other's uncommitted row and permanently
+        # leave the successor waiting.
+        certifier_job_key = f"{generation_key}:certify"
+        cursor.execute(
+            "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE",
+            (certifier_job_key,),
+        )
+        if cursor.fetchone() is None:
+            raise ControlPlaneError("Structure certifier barrier job is unavailable")
         cursor.execute(
             """
             UPDATE m1_jobs SET state = 'runnable', next_attempt_at = %s,
@@ -3921,17 +3932,26 @@ class PostgresControlPlane:
               AND (SELECT count(*) FROM m1_structure_range_receipts AS receipt
                    JOIN m1_structure_range_inputs AS input
                      ON input.job_key = receipt.job_key
-                   WHERE input.generation_key = %s)
+                   JOIN m1_jobs AS sibling ON sibling.job_key = input.job_key
+                   WHERE input.generation_key = %s
+                     AND sibling.state = 'succeeded')
                 = (SELECT count(*) FROM m1_structure_range_inputs
                    WHERE generation_key = %s)
             """,
-            (now, now, f"{generation_key}:certify", generation_key, generation_key),
+            (now, now, certifier_job_key, generation_key, generation_key),
         )
 
     @staticmethod
     def _wake_quote_certifier_cursor(
         cursor: psycopg.Cursor[dict[str, Any]], *, generation_key: str, now: datetime
     ) -> None:
+        certifier_job_key = f"{generation_key}:certify"
+        cursor.execute(
+            "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE",
+            (certifier_job_key,),
+        )
+        if cursor.fetchone() is None:
+            raise ControlPlaneError("Quote certifier barrier job is unavailable")
         cursor.execute(
             """
             UPDATE m1_jobs SET state = 'runnable', next_attempt_at = %s,
@@ -3940,18 +3960,120 @@ class PostgresControlPlane:
               AND (SELECT count(*) FROM m1_quote_batch_receipts AS receipt
                    JOIN m1_quote_batch_inputs AS input
                      ON input.job_key = receipt.job_key
-                   WHERE input.job_key LIKE %s)
+                   JOIN m1_jobs AS sibling ON sibling.job_key = input.job_key
+                   WHERE input.job_key LIKE %s
+                     AND sibling.state = 'succeeded')
                 = (SELECT count(*) FROM m1_quote_batch_inputs
                    WHERE job_key LIKE %s)
             """,
             (
                 now,
                 now,
-                f"{generation_key}:certify",
+                certifier_job_key,
                 f"{generation_key}:batch:%",
                 f"{generation_key}:batch:%",
             ),
         )
+
+    @staticmethod
+    def _wake_terminal_successor_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]], *, lease: JobLease, now: datetime
+    ) -> None:
+        """Wake a receipt-gated successor only after its producer is terminal."""
+        if lease.job_type == "quote-batch":
+            structure_digest, _universe, _ordinal, _range_digest = (
+                PostgresControlPlane._quote_batch_identity(lease.input_identity)
+            )
+            PostgresControlPlane._wake_quote_certifier_cursor(
+                cursor,
+                generation_key=f"quote:{structure_digest}",
+                now=now,
+            )
+            return
+        if lease.job_type != "structure-normalize":
+            return
+        cursor.execute(
+            "SELECT generation_key FROM m1_structure_range_inputs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise ControlPlaneError("Structure range input is unavailable at terminal wakeup")
+        PostgresControlPlane._wake_structure_certifier_cursor(
+            cursor,
+            generation_key=str(row["generation_key"]),
+            now=now,
+        )
+
+    def repair_ready_certifiers(self, *, job_type: str, now: datetime) -> int:
+        """Repair waiting certifiers whose durable producer barrier is complete.
+
+        Normal producer completion performs the same transition.  This bounded
+        sweep is a crash/lost-wakeup recovery path, so a historical waiting row
+        cannot require an operator SQL mutation to resume.
+        """
+        if job_type not in {"structure-certify", "quote-certify"}:
+            raise ValueError("repair supports Structure or Quote certifiers only")
+        self._validate_aware(now, "now")
+        if job_type == "structure-certify":
+            ready_predicate = """
+                EXISTS (
+                    SELECT 1 FROM m1_structure_range_inputs AS input
+                    WHERE input.generation_key = certifier.input_identity
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM m1_structure_range_inputs AS input
+                    LEFT JOIN m1_structure_range_receipts AS receipt
+                      ON receipt.job_key = input.job_key
+                    LEFT JOIN m1_jobs AS sibling ON sibling.job_key = input.job_key
+                    WHERE input.generation_key = certifier.input_identity
+                      AND (receipt.job_key IS NULL
+                           OR sibling.state IS DISTINCT FROM 'succeeded')
+                )
+            """
+        else:
+            ready_predicate = """
+                EXISTS (
+                    SELECT 1 FROM m1_quote_batch_inputs AS input
+                    WHERE certifier.job_key =
+                          'quote:' || input.structure_receipt_digest || ':certify'
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM m1_quote_batch_inputs AS input
+                    LEFT JOIN m1_quote_batch_receipts AS receipt
+                      ON receipt.job_key = input.job_key
+                    LEFT JOIN m1_jobs AS sibling ON sibling.job_key = input.job_key
+                    WHERE certifier.job_key =
+                          'quote:' || input.structure_receipt_digest || ':certify'
+                      AND (receipt.job_key IS NULL
+                           OR sibling.state IS DISTINCT FROM 'succeeded')
+                )
+            """
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            _set_structure_read_timeouts(cursor, read_only=False)
+            cursor.execute(
+                f"""
+                WITH ready_certifier AS (
+                    SELECT certifier.job_key
+                    FROM m1_jobs AS certifier
+                    WHERE certifier.job_type = %s AND certifier.state = 'waiting'
+                      AND {ready_predicate}
+                    ORDER BY certifier.created_at, certifier.job_key
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE m1_jobs AS certifier
+                SET state = 'runnable', next_attempt_at = %s,
+                    last_error_class = NULL, updated_at = %s
+                FROM ready_certifier
+                WHERE certifier.job_key = ready_certifier.job_key
+                """,
+                (job_type, now, now),
+            )
+            return cursor.rowcount
 
     def record_quote_batch(
         self,
@@ -4110,11 +4232,6 @@ class PostgresControlPlane:
                 WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
                 """,
                 (now, lease.job_key, lease.lease_epoch),
-            )
-            self._wake_quote_certifier_cursor(
-                cursor,
-                generation_key=f"quote:{structure_digest}",
-                now=now,
             )
             if terminal:
                 self._finish_quote_batch_terminal_cursor(
@@ -4384,6 +4501,11 @@ class PostgresControlPlane:
                         checkpoint_digest=artifact_digest,
                         now=now,
                     )
+                    self._wake_structure_certifier_cursor(
+                        cursor,
+                        generation_key=spec.generation_key,
+                        now=now,
+                    )
                 return CheckpointReceipt(
                     receipt_id=str(existing["receipt_id"]),
                     job_key=lease.job_key,
@@ -4496,11 +4618,12 @@ class PostgresControlPlane:
                     lease.lease_epoch,
                 ),
             )
-            self._wake_structure_certifier_cursor(
-                cursor,
-                generation_key=spec.generation_key,
-                now=now,
-            )
+            if terminal:
+                self._wake_structure_certifier_cursor(
+                    cursor,
+                    generation_key=spec.generation_key,
+                    now=now,
+                )
             return receipt
 
     def certify_structure_generation(
@@ -6297,7 +6420,10 @@ class PostgresControlPlane:
             self._validate_aware(next_attempt_at, "next_attempt_at")
         if state is JobState.RETRYABLE and next_attempt_at is None:
             raise ValueError("retryable finish requires next_attempt_at")
-        with self._connection_factory() as connection, connection.cursor() as cursor:
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
             cursor.execute(
                 """
                 UPDATE m1_jobs
@@ -6326,6 +6452,8 @@ class PostgresControlPlane:
                 """,
                 (state.value, now, error_class, lease.job_key, lease.lease_epoch),
             )
+            if state is JobState.SUCCEEDED:
+                self._wake_terminal_successor_cursor(cursor, lease=lease, now=now)
 
     def finish_interrupted(
         self,

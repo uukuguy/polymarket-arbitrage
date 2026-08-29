@@ -2389,6 +2389,7 @@ def test_checkpointed_range_stays_with_original_lease_until_expiry(
         now=now,
     )
 
+    assert control_plane.repair_ready_certifiers(job_type="structure-certify", now=now) == 0
     assert (
         control_plane.claim_job(
             worker_id="structure-b",
@@ -2457,6 +2458,157 @@ def test_structure_certifier_claim_waits_for_all_terminal_range_receipts(
         else:
             assert certifier is not None
             assert certifier.job_key == f"{spec.generation_key}:certify"
+
+
+def test_concurrent_terminal_structure_receipts_cannot_lose_certifier_wakeup(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    specs = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", "m"), ("markets", "", "")),
+        now=now,
+    )
+    leases = tuple(
+        control_plane.claim_job(
+            worker_id=f"concurrent-range-{index}",
+            job_types=("structure-normalize",),
+            lease_seconds=30,
+            now=now,
+        )
+        for index in range(2)
+    )
+    assert all(lease is not None for lease in leases)
+    barrier = Barrier(2)
+    original_wake = PostgresControlPlane._wake_structure_certifier_cursor
+
+    def synchronized_wake(cursor, *, generation_key: str, now: datetime) -> None:
+        barrier.wait(timeout=5)
+        original_wake(cursor, generation_key=generation_key, now=now)
+
+    monkeypatch.setattr(
+        PostgresControlPlane,
+        "_wake_structure_certifier_cursor",
+        staticmethod(synchronized_wake),
+    )
+
+    def complete(index: int) -> None:
+        lease = leases[index]
+        assert lease is not None
+        control_plane.complete_structure_range(
+            lease,
+            range_digest=specs[index].range_digest,
+            artifact_key=f"structure-ranges/concurrent/{index}.ndjson",
+            artifact_digest=str(index + 1) * 64,
+            record_count=1,
+            now=now,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        tuple(executor.map(complete, range(2)))
+
+    certifier = control_plane.claim_job(
+        worker_id="concurrent-structure-certifier",
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=1),
+    )
+    assert certifier is not None
+    assert certifier.job_key == f"{specs[0].generation_key}:certify"
+
+
+def test_structure_receipt_cannot_wake_certifier_before_producer_is_terminal(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="checkpointed-structure",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    control_plane.record_structure_range(
+        lease,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/checkpointed/rows.ndjson",
+        artifact_digest="a" * 64,
+        record_count=1,
+        now=now,
+    )
+
+    assert (
+        control_plane.claim_job(
+            worker_id="premature-structure-certifier",
+            job_types=("structure-certify",),
+            lease_seconds=30,
+            now=now,
+        )
+        is None
+    )
+    control_plane.finish(lease, state=JobState.SUCCEEDED, now=now)
+    certifier = control_plane.claim_job(
+        worker_id="terminal-structure-certifier",
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert certifier is not None
+    assert certifier.job_key == f"{spec.generation_key}:certify"
+
+
+def test_structure_certifier_repairs_historical_lost_wakeup(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="repair-structure-range",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    control_plane.complete_structure_range(
+        lease,
+        range_digest=spec.range_digest,
+        artifact_key="structure-ranges/repair/rows.ndjson",
+        artifact_digest="a" * 64,
+        record_count=1,
+        now=now,
+    )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE m1_jobs SET state = 'waiting', next_attempt_at = NULL "
+            "WHERE job_key = %s",
+            (f"{spec.generation_key}:certify",),
+        )
+
+    assert control_plane.repair_ready_certifiers(
+        job_type="structure-certify", now=now + timedelta(seconds=1)
+    ) == 1
+    assert control_plane.claim_job(
+        worker_id="repaired-structure-certifier",
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=1),
+    ) is not None
 
 
 def test_structure_certification_requires_complete_matching_range_receipts(
@@ -3127,6 +3279,7 @@ def test_checkpointed_quote_batch_stays_with_original_lease_until_expiry(
         now=now,
     )
 
+    assert control_plane.repair_ready_certifiers(job_type="quote-certify", now=now) == 0
     assert (
         control_plane.claim_job(
             worker_id="worker-b",
@@ -3366,6 +3519,165 @@ def test_quote_certifier_claim_waits_for_all_terminal_batch_receipts(
         else:
             assert certifier is not None
             assert certifier.job_key == f"{batch.generation_key}:certify"
+
+
+def test_concurrent_terminal_quote_receipts_cannot_lose_certifier_wakeup(
+    control_plane: PostgresControlPlane,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = _now()
+    batches = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        legs=(_leg("token-concurrent-1"), _leg("token-concurrent-2")),
+        batch_size=1,
+        now=now,
+    )
+    leases = tuple(
+        control_plane.claim_job(
+            worker_id=f"concurrent-batch-{index}",
+            job_types=("quote-batch",),
+            lease_seconds=30,
+            now=now,
+        )
+        for index in range(2)
+    )
+    assert all(lease is not None for lease in leases)
+    barrier = Barrier(2)
+    original_wake = PostgresControlPlane._wake_quote_certifier_cursor
+
+    def synchronized_wake(cursor, *, generation_key: str, now: datetime) -> None:
+        barrier.wait(timeout=5)
+        original_wake(cursor, generation_key=generation_key, now=now)
+
+    monkeypatch.setattr(
+        PostgresControlPlane,
+        "_wake_quote_certifier_cursor",
+        staticmethod(synchronized_wake),
+    )
+
+    def complete(index: int) -> None:
+        lease = leases[index]
+        assert lease is not None
+        control_plane.record_quote_batch(
+            lease,
+            token_range_digest=batches[index].token_range_digest,
+            quote_digest=str(index + 1) * 64,
+            artifact_key=f"quote-batches/concurrent/{index}.ndjson",
+            artifact_digest=str(index + 1) * 64,
+            successful_response_count=1,
+            quoted_at=now,
+            now=now,
+            terminal=True,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        tuple(executor.map(complete, range(2)))
+
+    certifier = control_plane.claim_job(
+        worker_id="concurrent-quote-certifier",
+        job_types=("quote-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=1),
+    )
+    assert certifier is not None
+    assert certifier.job_key == f"{batches[0].generation_key}:certify"
+
+
+def test_quote_receipt_cannot_wake_certifier_before_producer_is_terminal(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        legs=(_leg("token-checkpointed"),),
+        batch_size=1,
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="checkpointed-quote",
+        job_types=("quote-batch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    control_plane.record_quote_batch(
+        lease,
+        token_range_digest=batch.token_range_digest,
+        quote_digest="a" * 64,
+        artifact_key="quote-batches/checkpointed/batch.ndjson",
+        artifact_digest="a" * 64,
+        successful_response_count=1,
+        quoted_at=now,
+        now=now,
+    )
+
+    assert (
+        control_plane.claim_job(
+            worker_id="premature-quote-certifier",
+            job_types=("quote-certify",),
+            lease_seconds=30,
+            now=now,
+        )
+        is None
+    )
+    control_plane.finish(lease, state=JobState.SUCCEEDED, now=now)
+    certifier = control_plane.claim_job(
+        worker_id="terminal-quote-certifier",
+        job_types=("quote-certify",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert certifier is not None
+    assert certifier.job_key == f"{batch.generation_key}:certify"
+
+
+def test_quote_certifier_repairs_historical_lost_wakeup(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        legs=(_leg("token-repair"),),
+        batch_size=1,
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="repair-quote-batch",
+        job_types=("quote-batch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    control_plane.record_quote_batch(
+        lease,
+        token_range_digest=batch.token_range_digest,
+        quote_digest="a" * 64,
+        artifact_key="quote-batches/repair/batch.ndjson",
+        artifact_digest="a" * 64,
+        successful_response_count=1,
+        quoted_at=now,
+        now=now,
+        terminal=True,
+    )
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE m1_jobs SET state = 'waiting', next_attempt_at = NULL "
+            "WHERE job_key = %s",
+            (f"{batch.generation_key}:certify",),
+        )
+
+    assert control_plane.repair_ready_certifiers(
+        job_type="quote-certify", now=now + timedelta(seconds=1)
+    ) == 1
+    assert control_plane.claim_job(
+        worker_id="repaired-quote-certifier",
+        job_types=("quote-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=1),
+    ) is not None
 
 
 def test_transactional_quote_certifier_waits_then_publishes_complete_generation(

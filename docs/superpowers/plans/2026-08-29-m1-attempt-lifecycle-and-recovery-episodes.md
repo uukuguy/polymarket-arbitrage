@@ -284,11 +284,42 @@
 - [ ] Roll the exact release, repair the two historical projections through the
   same durable method, and require zero contradictory runtime incidents.
 
+### Task 10: Make terminal fan-in wakeups serialized, truthful and self-repairing
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/postgres.py`
+- Modify: `src/polyarb/control_plane/quote_worker.py`
+- Modify: `src/polyarb/control_plane/structure_worker.py`
+- Modify: `tests/m1-perception/test_control_plane_postgres.py`
+
+**Interfaces:**
+
+- A producer receipt is necessary but insufficient for successor eligibility;
+  the matching producer job must also be `succeeded`.
+- Concurrent terminal producers serialize their final eligibility observation
+  on the certifier job row.
+- `repair_ready_certifiers()` advances at most one historically lost ready
+  wakeup per certifier turn from durable database facts.
+
+- [x] Reproduce the two-final-receipt lost wakeup deterministically with a
+  transaction barrier for both Structure and Quote.
+- [x] Prove a checkpoint receipt cannot wake a certifier before its producer
+  reaches terminal success.
+- [x] Move wake authority after terminal transition, retain the historical
+  `record → finish` contract, and serialize sibling observations with
+  `FOR UPDATE` on the successor.
+- [x] Add a bounded `FOR UPDATE SKIP LOCKED` repair sweep and invoke it before
+  each certifier claim; prove incomplete generations remain waiting.
+- [x] Run affected real-PostgreSQL and worker suites, Ruff and Pyright.
+- [ ] Roll the exact release and prove the production waiting Quote certifier
+  repairs itself without manual SQL before restarting qualification.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
-  sequencing, cancellation, event-loop claim isolation, inventory, operator
-  wait and production proof all map to Tasks 1–7.
+  sequencing, cancellation, event-loop claim isolation, fan-in wakeup repair,
+  inventory, operator wait and production proof all map to Tasks 1–10.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

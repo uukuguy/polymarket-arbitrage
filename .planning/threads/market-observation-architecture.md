@@ -2413,3 +2413,19 @@ success is not user receipt/read evidence.
   recovery episode for the same target must set the projection back to open and
   clear `resolved_at`; otherwise a genuinely new recovery would be hidden by a
   prior episode's resolved row.
+
+### §2.67 Fan-in eligibility needs a serialized terminal barrier and repair path (2026-08-29)
+
+- Receipt completeness alone is not a terminal fact. A producer can persist a
+  receipt and remain `checkpointed`; successor eligibility therefore requires
+  both the immutable receipt and the matching producer job in `succeeded`.
+- “The last receipt wakes the certifier” is unsafe without serialization. Two
+  concurrent final transactions can each miss the other's uncommitted receipt
+  and both decline the transition. Terminal producers now update themselves
+  first, then lock the common certifier row before counting committed terminal
+  siblings. The shared row establishes one total order for the final check.
+- Crash recovery cannot depend on a future producer that may never run. Before
+  claim, each certifier performs a bounded one-row repair using only durable
+  inputs, receipts and terminal job states. `FOR UPDATE SKIP LOCKED` keeps
+  multiple role processes from turning the repair path into a new contention
+  point; incomplete generations remain waiting.

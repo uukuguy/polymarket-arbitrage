@@ -547,11 +547,15 @@ class TransactionalQuoteCertifier:
         self._stop_requested.set()
 
     def run_once(self) -> QuoteBatchWorkerResult:
+        now = self._now()
+        repair_ready = getattr(self._control_plane, "repair_ready_certifiers", None)
+        if callable(repair_ready):
+            repair_ready(job_type="quote-certify", now=now)
         lease = self._control_plane.claim_job(
             worker_id=self._worker_id,
             job_types=("quote-certify",),
             lease_seconds=self._lease_seconds,
-            now=self._now(),
+            now=now,
         )
         if lease is None:
             return QuoteBatchWorkerResult(job_key=None, outcome="idle")
