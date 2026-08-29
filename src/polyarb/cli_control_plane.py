@@ -64,6 +64,7 @@ from polyarb.control_plane.recovery_executor import RecoveryActionResult, Recove
 from polyarb.control_plane.recovery_models import RecoveryActionType, RecoveryDecision
 from polyarb.control_plane.recovery_records import RecoveryActionRecord, RuntimeControllerLease
 from polyarb.control_plane.recovery_store import (
+    RecoveryProbeLaneBusy,
     RuntimeReconcileCandidate,
     claim_controller,
     read_runtime_controller_status,
@@ -1535,6 +1536,7 @@ def _runtime_reconcile_once(
     decision = None
     scheduled: RecoveryActionRecord | None = None
     result: RecoveryActionResult | None = None
+    deferred_by: dict[str, str] | None = None
     observed_decision_count = 0
     if selected is not None:
         candidate, decision = selected
@@ -1586,46 +1588,59 @@ def _runtime_reconcile_once(
             _raise_if_runtime_reconcile_stopped(stop_requested)
             action_type = getattr(decision, "action", None)
             if isinstance(action_type, RecoveryActionType):
-                scheduled = schedule_action(
-                    connection_factory,
-                    controller=selected_controller,
-                    decision=decision,
-                    incident_key=candidate.incident_key,
-                    component=candidate.component,
-                    target_type=candidate.target_type,
-                    target_id=candidate.target_id,
-                    expected_attempt_id=candidate.runtime_state.attempt_id,
-                    expected_lease_epoch=candidate.runtime_state.lease_epoch,
-                    recovery_budget_remaining=(
-                        candidate.runtime_state.recovery_budget.remaining_actions
-                    ),
-                    recovery_episode_key=candidate.runtime_state.recovery_episode_key,
-                    cooldown_seconds=max(0, candidate.cooldown_seconds),
-                    channels=candidate.channels,
-                    now=now,
-                    detail={
-                        "job_type": candidate.job_type,
-                        "job_state": candidate.job_state,
-                    },
-                )
+                try:
+                    scheduled = schedule_action(
+                        connection_factory,
+                        controller=selected_controller,
+                        decision=decision,
+                        incident_key=candidate.incident_key,
+                        component=candidate.component,
+                        target_type=candidate.target_type,
+                        target_id=candidate.target_id,
+                        expected_attempt_id=candidate.runtime_state.attempt_id,
+                        expected_lease_epoch=candidate.runtime_state.lease_epoch,
+                        recovery_budget_remaining=(
+                            candidate.runtime_state.recovery_budget.remaining_actions
+                        ),
+                        recovery_episode_key=candidate.runtime_state.recovery_episode_key,
+                        cooldown_seconds=max(0, candidate.cooldown_seconds),
+                        channels=candidate.channels,
+                        now=now,
+                        detail={
+                            "job_type": candidate.job_type,
+                            "job_state": candidate.job_state,
+                        },
+                    )
+                except RecoveryProbeLaneBusy as error:
+                    deferred_by = {
+                        "blocking_kind": _runtime_safe_text(error.blocking_kind),
+                        "blocking_target_id": _runtime_safe_text(error.blocking_target_id),
+                        "worker_id": _runtime_safe_text(error.worker_id),
+                    }
         _raise_if_runtime_reconcile_stopped(stop_requested)
-        executor = RecoveryExecutor(
-            control_plane=control_plane,
-            controller=selected_controller,
-            worker_id=args.worker_id,
-            connection_factory=connection_factory,
-            action_lease_seconds=args.action_lease_seconds,
-            heartbeat_lease_seconds=args.heartbeat_lease_seconds,
-        )
-        if expected_action is not None and scheduled is not None:
-            result = executor.run_once(now=now, expected_action_id=scheduled.action_id)
-        else:
-            result = executor.run_once(now=now)
+        if deferred_by is None:
+            executor = RecoveryExecutor(
+                control_plane=control_plane,
+                controller=selected_controller,
+                worker_id=args.worker_id,
+                connection_factory=connection_factory,
+                action_lease_seconds=args.action_lease_seconds,
+                heartbeat_lease_seconds=args.heartbeat_lease_seconds,
+            )
+            if expected_action is not None and scheduled is not None:
+                result = executor.run_once(now=now, expected_action_id=scheduled.action_id)
+            else:
+                result = executor.run_once(now=now)
     decision_action = None if decision is None else getattr(decision, "action", None)
     reason = "runtime.no-active-attempts" if decision is None else decision.reason_code
+    if deferred_by is not None:
+        reason = "circuit.probe-lane-busy"
     if recovery_mode == "observe-only":
         state = "observe-only"
         outcome = "no-mutation"
+    elif deferred_by is not None:
+        state = "deferred"
+        outcome = "worker-lane-busy"
     elif result is not None:
         state = "recovery-executed"
         outcome = result.outcome
@@ -1653,6 +1668,8 @@ def _runtime_reconcile_once(
     elif result is not None:
         action_name = result.action_type
     elif recovery_mode == "observe-only" and isinstance(decision_action, RecoveryActionType):
+        action_name = decision_action.value
+    elif deferred_by is not None and isinstance(decision_action, RecoveryActionType):
         action_name = decision_action.value
     budget_remaining = None
     if candidate is not None:
@@ -1701,6 +1718,7 @@ def _runtime_reconcile_once(
             else (None if scheduled.finished_at is None else scheduled.finished_at.isoformat()),
         },
         "executor": _runtime_result_payload(result),
+        "deferred_by": deferred_by,
         "observed_decision_count": observed_decision_count,
         "pointer_mutations": 0,
     }

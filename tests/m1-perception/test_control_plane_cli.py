@@ -1350,6 +1350,130 @@ def test_runtime_reconcile_once_evaluates_schedules_and_executes_one_action(
     assert payload["pointer_mutations"] == 0
 
 
+def test_runtime_reconcile_once_reports_retryable_probe_lane_deferral(
+    monkeypatch, capsys
+) -> None:
+    from datetime import UTC, datetime
+
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.recovery_models import (
+        RecoveryActionType,
+        RecoveryBudget,
+        RecoveryDecision,
+        RecoveryRuntimeState,
+    )
+    from polyarb.control_plane.recovery_records import RuntimeControllerLease
+    from polyarb.control_plane.recovery_store import (
+        RecoveryProbeLaneBusy,
+        RuntimeReconcileCandidate,
+    )
+    from polyarb.control_plane.runtime_models import RuntimeDeadlineProfile
+
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    controller = RuntimeControllerLease("controller-a", "owner-a", 1, now + timedelta(seconds=90))
+    fingerprint = "sha256:" + "2" * 64
+    candidate = RuntimeReconcileCandidate(
+        runtime_state=RecoveryRuntimeState(
+            job_key="circuit-b",
+            attempt_id="attempt-b",
+            lease_epoch=2,
+            owner_is_current=True,
+            profile=RuntimeDeadlineProfile("test", 30, 10, 20, 60),
+            attempt_started_at=now - timedelta(minutes=5),
+            last_heartbeat_at=now - timedelta(minutes=5),
+            last_progress_at=now - timedelta(minutes=5),
+            lease_expires_at=now - timedelta(minutes=4),
+            retry_count=3,
+            recovery_budget=RecoveryBudget(2),
+            recovery_episode_key=fingerprint,
+            open_circuit=True,
+            circuit_opened_at=now - timedelta(minutes=5),
+            circuit_next_probe_at=now,
+        ),
+        job_type="structure-certify",
+        job_state="retryable",
+        worker_id="singleton:structure-certifier",
+        target_type="circuit",
+        target_id="circuit-b",
+        component="structure-certify",
+        incident_key="recovery:circuit:circuit-b",
+        channels=("dashboard",),
+        cooldown_seconds=0,
+    )
+    decision = RecoveryDecision(
+        action=RecoveryActionType.PROBE_CIRCUIT,
+        reason_code="circuit.probe-due",
+        incident_severity="warning",
+        qualification_breaking=False,
+        next_check_at=now,
+    )
+
+    class ControlPlane:
+        _connection_factory = object()
+
+    monkeypatch.setenv("POLYARB_RUNTIME_ROLE", "control-plane")
+    monkeypatch.setenv("POLYARB_RUNTIME_RECOVERY_MODE", "execute")
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: ControlPlane())
+    monkeypatch.setattr(cli_control_plane, "claim_controller", lambda *a, **k: controller)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "read_runtime_reconcile_states",
+        lambda *a, **k: (candidate,),
+    )
+    monkeypatch.setattr(cli_control_plane.RuntimeReconciler, "evaluate", lambda *a, **k: decision)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "schedule_action",
+        lambda *a, **k: (_ for _ in ()).throw(
+            RecoveryProbeLaneBusy(
+                worker_id="singleton:structure-certifier",
+                blocking_target_id="circuit-a",
+                blocking_kind="released-probe",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "RecoveryExecutor",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a deferred probe must not run the action executor")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_control_plane,
+        "datetime",
+        type("Clock", (), {"now": staticmethod(lambda *_args: now)}),
+    )
+
+    assert (
+        cli_control_plane.main(
+            [
+                "runtime-reconcile-once",
+                "--enable",
+                "--target-type",
+                "circuit",
+                "--target-id",
+                "circuit-b",
+                "--expected-action",
+                "probe-circuit",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "deferred"
+    assert payload["reason"] == "circuit.probe-lane-busy"
+    assert payload["outcome"] == "worker-lane-busy"
+    assert payload["action"] == "probe-circuit"
+    assert payload["budget"]["remaining_actions"] == 2
+    assert payload["deferred_by"] == {
+        "blocking_kind": "released-probe",
+        "blocking_target_id": "circuit-a",
+        "worker_id": "singleton:structure-certifier",
+    }
+
+
 def test_runtime_reconcile_once_observe_only_records_every_candidate_without_recovery_mutation(
     monkeypatch, capsys
 ) -> None:

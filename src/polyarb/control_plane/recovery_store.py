@@ -53,6 +53,16 @@ class RecoveryActionConflict(RecoveryStoreError):
     """An idempotency key or active target was reused for conflicting content."""
 
 
+class RecoveryProbeLaneBusy(RecoveryStoreError):
+    """A circuit probe is deferred until its singleton worker lane is free."""
+
+    def __init__(self, *, worker_id: str, blocking_target_id: str, blocking_kind: str) -> None:
+        super().__init__("circuit probe worker lane is busy")
+        self.worker_id = worker_id
+        self.blocking_target_id = blocking_target_id
+        self.blocking_kind = blocking_kind
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeReconcileCandidate:
     """Bounded read projection consumed by one reconciler turn.
@@ -972,6 +982,91 @@ def _fetch_active_action_for_target(
     return None if row is None else action_from_row(row)
 
 
+def _raise_if_probe_worker_lane_busy(
+    cursor: psycopg.Cursor[Any],
+    *,
+    worker_id: str,
+    target_id: str,
+    now: datetime,
+) -> None:
+    """Serialize circuit-probe admission on the persisted runtime worker lane.
+
+    A probe action first becomes pending and then releases a short claim
+    window.  Both states reserve the singleton lane; a currently leased job on
+    that lane does too.  Deferral happens before action/idempotency/budget rows
+    are written so the exact command can safely retry in the same controller
+    epoch.
+    """
+    cursor.execute(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS acquired",
+        (f"m1:recovery-probe-lane:{worker_id}",),
+    )
+    lock_row = cursor.fetchone()
+    if lock_row is None or lock_row["acquired"] is not True:
+        raise RecoveryProbeLaneBusy(
+            worker_id=worker_id,
+            blocking_target_id="pending-probe-admission",
+            blocking_kind="admission-lock",
+        )
+    cursor.execute(
+        """
+        SELECT blocking_target_id, blocking_kind
+        FROM (
+            SELECT action.target_id AS blocking_target_id,
+                   'active-probe-action'::text AS blocking_kind,
+                   1 AS priority
+            FROM public.m1_recovery_actions AS action
+            JOIN public.m1_job_runtime_state AS runtime
+              ON runtime.job_key = action.target_id
+            WHERE action.action_type = 'probe-circuit'
+              AND action.state IN ('pending', 'running')
+              AND action.target_id <> %s
+              AND runtime.worker_id = %s
+
+            UNION ALL
+
+            SELECT job.job_key AS blocking_target_id,
+                   'leased-job'::text AS blocking_kind,
+                   2 AS priority
+            FROM public.m1_jobs AS job
+            JOIN public.m1_job_runtime_state AS runtime
+              ON runtime.job_key = job.job_key
+            WHERE job.state = 'leased'
+              AND job.job_key <> %s
+              AND runtime.worker_id = %s
+
+            UNION ALL
+
+            SELECT job.job_key AS blocking_target_id,
+                   'released-probe'::text AS blocking_kind,
+                   3 AS priority
+            FROM public.m1_jobs AS job
+            JOIN public.m1_job_runtime_state AS runtime
+              ON runtime.job_key = job.job_key
+            JOIN public.m1_job_circuits AS circuit
+              ON circuit.job_key = job.job_key
+            WHERE job.job_key <> %s
+              AND runtime.worker_id = %s
+              AND job.state IN ('retryable', 'runnable')
+              AND job.next_attempt_at IS NOT NULL
+              AND job.next_attempt_at <= %s
+              AND circuit.state = 'open'
+              AND circuit.next_probe_at > %s
+        ) AS blockers
+        ORDER BY priority, blocking_target_id
+        LIMIT 1
+        """,
+        (target_id, worker_id, target_id, worker_id, target_id, worker_id, now, now),
+    )
+    row = cursor.fetchone()
+    if row is not None:
+        raise RecoveryProbeLaneBusy(
+            worker_id=worker_id,
+            blocking_target_id=str(row["blocking_target_id"]),
+            blocking_kind=str(row["blocking_kind"]),
+        )
+
+
 def _insert_action_once(
     cursor: psycopg.Cursor[Any],
     *,
@@ -1353,6 +1448,17 @@ def schedule_action(
 
         budget: BudgetState | None = None
         if result_code is None:
+            if (
+                target_type == "circuit"
+                and decision.action is RecoveryActionType.PROBE_CIRCUIT
+                and runtime is not None
+            ):
+                _raise_if_probe_worker_lane_busy(
+                    cursor,
+                    worker_id=runtime.worker_id,
+                    target_id=target_id,
+                    now=observed_at,
+                )
             active = _fetch_active_action_for_target(
                 cursor,
                 target_type=target_type,
@@ -1814,6 +1920,7 @@ def _action_runtime_fence_current(
 
 __all__ = [
     "RecoveryActionConflict",
+    "RecoveryProbeLaneBusy",
     "RecoveryActionRecord",
     "RecoveryStoreError",
     "RuntimeReconcileCandidate",

@@ -1822,22 +1822,18 @@ def test_make_docker_build_dry_run() -> None:
         timeout=5,
     )
     assert result.returncode == 0, f"make -n docker-build failed: {result.stderr}"
-    assert "docker build" in result.stdout, (
-        f"docker-build recipe must invoke 'docker build', got: {result.stdout!r}"
+    assert "docker --context orbstack build" in result.stdout, (
+        f"docker-build recipe must bind OrbStack, got: {result.stdout!r}"
     )
 
 
-def test_docker_targets_scope_context_without_mutating_global_default() -> None:
+def test_docker_targets_are_uniformly_bound_to_orbstack_without_global_mutation() -> None:
     makefile = (PROJECT_ROOT / "Makefile").read_text()
     assert "docker context use" not in makefile
+    assert "colima" not in makefile.lower()
 
     build = subprocess.run(
-        [
-            "make",
-            "-n",
-            "docker-build",
-            "docker_context=colima-polyarb-tests",
-        ],
+        ["make", "-n", "docker-build"],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -1845,13 +1841,7 @@ def test_docker_targets_scope_context_without_mutating_global_default() -> None:
         timeout=5,
     )
     status = subprocess.run(
-        [
-            "make",
-            "-n",
-            "docker-context-status",
-            "docker_context=colima-polyarb-tests",
-            "colima_profile=polyarb-tests",
-        ],
+        ["make", "-n", "docker-context-status"],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -1860,11 +1850,11 @@ def test_docker_targets_scope_context_without_mutating_global_default() -> None:
     )
 
     assert build.returncode == 0, build.stderr
-    assert "docker --context colima-polyarb-tests build" in build.stdout
+    assert "docker --context orbstack build" in build.stdout
     assert status.returncode == 0, status.stderr
     assert "docker context show" in status.stdout
-    assert 'docker --context "$CTX" system df' in status.stdout
-    assert "colima ssh --profile polyarb-tests -- df" in status.stdout
+    assert "docker --context orbstack system df" in status.stdout
+    assert "orb df -h /var/lib/docker" in status.stdout
 
 
 def test_make_deploy_dry_run() -> None:
@@ -2188,7 +2178,8 @@ def test_runtime_image_build_binds_exact_revision_and_is_build_only(
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
         "with open(os.environ['FAKE_FLYCTL_LOG'], 'w', encoding='utf-8') as handle:\n"
-        "    json.dump({'argv': sys.argv[1:], 'token': os.environ.get('FLY_API_TOKEN')}, handle)\n"
+        "    json.dump({'argv': sys.argv[1:], 'token': os.environ.get('FLY_API_TOKEN'), "
+        "'docker_context': os.environ.get('DOCKER_CONTEXT')}, handle)\n"
     )
     fake_flyctl.chmod(0o755)
     env = os.environ.copy()
@@ -2223,6 +2214,7 @@ def test_runtime_image_build_binds_exact_revision_and_is_build_only(
     )
     assert "--env" not in argv
     assert invocation["token"] == ""
+    assert invocation["docker_context"] == "orbstack"
 
 
 def test_runtime_image_build_treats_fly_config_as_release_input() -> None:

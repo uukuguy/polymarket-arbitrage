@@ -948,9 +948,11 @@ tail-logs-local:
 
 .PHONY: docker-build docker-run-local docker-smoke docker-context-status runtime-image-build deploy smoke-test tail-logs
 
-# Docker contexts are user-global state.  Project commands accept an optional
-# command-scoped context and must never switch the user's global default.
-DOCKER = docker$(if $(strip $(docker_context)), --context $(strip $(docker_context)),)
+# Docker contexts are user-global state.  This project uses the user's existing
+# OrbStack daemon explicitly and never switches the global default or creates a
+# second VM runtime.
+DOCKER_CONTEXT_NAME := orbstack
+DOCKER = docker --context $(DOCKER_CONTEXT_NAME)
 
 ## docker-build: Build daemon Docker image locally (no push)
 docker-build:
@@ -965,23 +967,15 @@ docker-run-local:
 ## docker-smoke: Build image + run + curl /health + tear down (Plan 04 Wave 0 contract)
 docker-smoke:
 	@echo ">> docker-smoke — full build + run + health probe"
-	@if [ -n "$(strip $(docker_context))" ]; then \
-		DOCKER_CONTEXT="$(strip $(docker_context))" bash tests/m1-perception/test_docker_smoke.sh; \
-	else \
-		bash tests/m1-perception/test_docker_smoke.sh; \
-	fi
+	@DOCKER_CONTEXT=$(DOCKER_CONTEXT_NAME) bash tests/m1-perception/test_docker_smoke.sh
 
-## docker-context-status: Read-only context/capacity audit. Usage: make docker-context-status docker_context=<name> [colima_profile=<profile>]
+## docker-context-status: Read-only OrbStack context and capacity audit
 docker-context-status:
-	@test -n "$(strip $(docker_context))" || { echo "usage: make docker-context-status docker_context=<name> [colima_profile=<profile>]" >&2; exit 2; }
-	@CTX="$(strip $(docker_context))"; \
-		echo ">> global-default=$$(docker context show) target=$$CTX"; \
-		docker context inspect "$$CTX" --format 'endpoint={{.Endpoints.docker.Host}}'; \
-		docker --context "$$CTX" system df; \
-		if [ -n "$(strip $(colima_profile))" ]; then \
-			command -v colima >/dev/null || { echo "ERROR: colima CLI not found" >&2; exit 1; }; \
-			colima ssh --profile $(strip $(colima_profile)) -- df -h /mnt/lima-colima-$(strip $(colima_profile)); \
-		fi
+	@echo ">> global-default=$$(docker context show) target=$(DOCKER_CONTEXT_NAME)"
+	@docker context inspect $(DOCKER_CONTEXT_NAME) --format 'endpoint={{.Endpoints.docker.Host}}'
+	@docker --context $(DOCKER_CONTEXT_NAME) system df
+	@command -v orb >/dev/null || { echo "ERROR: OrbStack CLI not found" >&2; exit 1; }
+	@orb df -h /var/lib/docker
 
 # Phase 03.1 Plan 03 (GAP-4): every flyctl invocation in this Makefile is
 # prefixed with `FLY_API_TOKEN= ` to force flyctl to fall back to the
@@ -1003,7 +997,7 @@ runtime-image-build:
 		echo "ERROR: runtime image inputs differ from HEAD; commit or remove those changes before building" >&2; exit 2; \
 	fi
 	@RELEASE_ID="$$(git rev-parse HEAD)"; \
-		if [ -n "$(strip $(docker_context))" ]; then export DOCKER_CONTEXT="$(strip $(docker_context))"; fi; \
+		export DOCKER_CONTEXT="$(DOCKER_CONTEXT_NAME)"; \
 		echo ">> runtime-image-build — build-only image=$(image_tag) release=$$RELEASE_ID"; \
 		FLY_API_TOKEN= NO_COLOR=1 flyctl deploy $(FLY_BUILD_MODE) \
 			--app "$(or $(fly_app),polyarb-control-worker-m1)" --config fly.toml \

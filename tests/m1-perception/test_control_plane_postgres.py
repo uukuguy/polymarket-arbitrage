@@ -7748,6 +7748,155 @@ def test_recovery_executor_releases_one_due_circuit_probe(
         assert cursor.fetchone() == ("completed", "succeeded")
 
 
+def test_circuit_probe_defers_same_worker_lane_without_consuming_budget(
+    control_plane: PostgresControlPlane,
+) -> None:
+    """A queued half-open probe must not spend a sibling's recovery budget."""
+    now = _now()
+    worker_id = "singleton:structure-certifier"
+
+    def seed_due_circuit(job_key: str, fingerprint: str) -> JobLease:
+        control_plane.enqueue_job(
+            job_key=job_key,
+            job_type="structure-certify",
+            input_identity=f"{job_key}:input",
+            now=now,
+        )
+        lease = control_plane.claim_job(
+            worker_id=worker_id,
+            job_types=("structure-certify",),
+            lease_seconds=30,
+            now=now,
+        )
+        assert lease is not None
+        with control_plane._connection_factory() as connection:
+            connection.execute(
+                "UPDATE m1_jobs SET state = 'retryable', lease_owner = NULL, "
+                "lease_expires_at = NULL, next_attempt_at = %s WHERE job_key = %s",
+                (now - timedelta(seconds=1), job_key),
+            )
+            connection.execute(
+                "UPDATE m1_job_attempts SET state = 'retryable', finished_at = %s "
+                "WHERE job_key = %s AND lease_epoch = %s",
+                (now, job_key, lease.lease_epoch),
+            )
+            connection.execute(
+                "INSERT INTO m1_job_circuits "
+                "(job_key, consecutive_failures, state, opened_at, next_probe_at, "
+                "updated_at, failure_fingerprint) "
+                "VALUES (%s, 3, 'open', %s, %s, %s, %s)",
+                (job_key, now - timedelta(minutes=5), now, now, fingerprint),
+            )
+        return lease
+
+    first_fingerprint = "sha256:" + "1" * 64
+    second_fingerprint = "sha256:" + "2" * 64
+    first = seed_due_circuit("recovery-probe-lane:first", first_fingerprint)
+    second = seed_due_circuit("recovery-probe-lane:second", second_fingerprint)
+    controller = claim_controller(
+        control_plane._connection_factory,
+        controller_id="m1-runtime-reconciler-probe-lane",
+        owner_id="controller-probe-lane",
+        lease_seconds=120,
+        now=now,
+    )
+    decision = RecoveryDecision(
+        action=RecoveryActionType.PROBE_CIRCUIT,
+        reason_code="circuit.probe-due",
+        incident_severity="warning",
+        qualification_breaking=False,
+        next_check_at=now,
+    )
+
+    def schedule_probe(lease: JobLease, fingerprint: str, observed_at: datetime):
+        return schedule_action(
+            control_plane._connection_factory,
+            controller=controller,
+            decision=decision,
+            incident_key=f"incident:{lease.job_key}",
+            component="structure-certify",
+            target_type="circuit",
+            target_id=lease.job_key,
+            recovery_episode_key=fingerprint,
+            expected_attempt_id=_runtime_attempt_id(control_plane, lease.job_key),
+            expected_lease_epoch=lease.lease_epoch,
+            recovery_budget_remaining=3,
+            cooldown_seconds=0,
+            channels=("dashboard",),
+            now=observed_at,
+        )
+
+    first_action = schedule_probe(first, first_fingerprint, now + timedelta(seconds=1))
+    with pytest.raises(recovery_store_module.RecoveryProbeLaneBusy) as active:
+        schedule_probe(second, second_fingerprint, now + timedelta(seconds=2))
+    assert active.value.blocking_target_id == first.job_key
+    assert active.value.blocking_kind == "active-probe-action"
+
+    first_result = RecoveryExecutor(
+        connection_factory=control_plane._connection_factory,
+        control_plane=control_plane,
+        controller=controller,
+        worker_id="executor-probe-lane",
+    ).run_once(now=now + timedelta(seconds=3), expected_action_id=first_action.action_id)
+    assert first_result is not None and first_result.outcome == "succeeded"
+
+    with pytest.raises(recovery_store_module.RecoveryProbeLaneBusy) as raised:
+        schedule_probe(second, second_fingerprint, now + timedelta(seconds=4))
+    assert raised.value.worker_id == worker_id
+    assert raised.value.blocking_target_id == first.job_key
+    assert raised.value.blocking_kind == "released-probe"
+
+    claimed_first = control_plane.claim_job(
+        worker_id=worker_id,
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=5),
+    )
+    assert claimed_first is not None and claimed_first.job_key == first.job_key
+    with pytest.raises(recovery_store_module.RecoveryProbeLaneBusy) as leased:
+        schedule_probe(second, second_fingerprint, now + timedelta(seconds=6))
+    assert leased.value.blocking_target_id == first.job_key
+    assert leased.value.blocking_kind == "leased-job"
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM m1_recovery_actions WHERE target_id = %s",
+            (second.job_key,),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "SELECT count(*) FROM m1_recovery_target_budgets WHERE target_id = %s",
+            (second.job_key,),
+        )
+        assert cursor.fetchone() == (0,)
+        cursor.execute(
+            "UPDATE m1_jobs SET state = 'succeeded', updated_at = %s WHERE job_key = %s",
+            (now + timedelta(seconds=7), first.job_key),
+        )
+        cursor.execute(
+            "UPDATE m1_job_circuits SET state = 'closed', next_probe_at = NULL, "
+            "updated_at = %s WHERE job_key = %s",
+            (now + timedelta(seconds=7), first.job_key),
+        )
+
+    second_action = schedule_probe(second, second_fingerprint, now + timedelta(seconds=8))
+    assert second_action.state == "pending"
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT remaining_actions FROM m1_recovery_target_budgets "
+            "WHERE target_id = %s AND episode_key = %s",
+            (second.job_key, second_fingerprint),
+        )
+        assert cursor.fetchone() == (2,)
+
+
+def test_probe_lane_admission_lock_is_nonblocking() -> None:
+    source = inspect.getsource(recovery_store_module._raise_if_probe_worker_lane_busy)
+
+    assert "pg_try_advisory_xact_lock" in source
+    assert "pg_advisory_xact_lock(hashtextextended" not in source
+
+
 def test_recovery_action_old_worker_cannot_mutate_after_action_lease_reclaim(
     control_plane: PostgresControlPlane,
 ) -> None:
