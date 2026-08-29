@@ -3928,17 +3928,13 @@ class PostgresControlPlane:
     def _wake_structure_certifier_cursor(
         cursor: psycopg.Cursor[dict[str, Any]], *, generation_key: str, now: datetime
     ) -> None:
-        # Every sibling receipt transaction must cross the same row lock before
-        # counting committed siblings. Without this barrier, concurrent final
-        # receipts can each miss the other's uncommitted row and permanently
-        # leave the successor waiting.
         certifier_job_key = f"{generation_key}:certify"
-        cursor.execute(
-            "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE",
-            (certifier_job_key,),
-        )
-        if cursor.fetchone() is None:
-            raise ControlPlaneError("Structure certifier barrier job is unavailable")
+        if not PostgresControlPlane._try_lock_certifier_job_cursor(
+            cursor,
+            certifier_job_key=certifier_job_key,
+            unavailable_message="Structure certifier barrier job is unavailable",
+        ):
+            return
         cursor.execute(
             """
             UPDATE m1_jobs SET state = 'runnable', next_attempt_at = %s,
@@ -3961,12 +3957,13 @@ class PostgresControlPlane:
         cursor: psycopg.Cursor[dict[str, Any]], *, generation_key: str, now: datetime
     ) -> None:
         certifier_job_key = f"{generation_key}:certify"
-        cursor.execute(
-            "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE",
-            (certifier_job_key,),
-        )
-        if cursor.fetchone() is None:
-            raise ControlPlaneError("Quote certifier barrier job is unavailable")
+        if not PostgresControlPlane._try_lock_certifier_job_cursor(
+            cursor,
+            certifier_job_key=certifier_job_key,
+            unavailable_message="Quote certifier barrier job is unavailable",
+        ):
+            return
+
         cursor.execute(
             """
             UPDATE m1_jobs SET state = 'runnable', next_attempt_at = %s,
@@ -3989,6 +3986,33 @@ class PostgresControlPlane:
                 f"{generation_key}:batch:%",
             ),
         )
+
+    @staticmethod
+    def _try_lock_certifier_job_cursor(
+        cursor: psycopg.Cursor[dict[str, Any]],
+        *,
+        certifier_job_key: str,
+        unavailable_message: str,
+    ) -> bool:
+        """Acquire a successor row only when doing so cannot block a producer.
+
+        Terminal producers must commit their own durable success independently
+        of sibling fan-in.  A busy successor therefore means "skip direct wake",
+        not a producer failure.  Each certifier turn runs
+        ``repair_ready_certifiers`` before claiming work, so committed receipts
+        remain the authoritative lost-wakeup recovery path.
+        """
+        cursor.execute(
+            "SELECT job_key FROM m1_jobs WHERE job_key = %s",
+            (certifier_job_key,),
+        )
+        if cursor.fetchone() is None:
+            raise ControlPlaneError(unavailable_message)
+        cursor.execute(
+            "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE SKIP LOCKED",
+            (certifier_job_key,),
+        )
+        return cursor.fetchone() is not None
 
     @staticmethod
     def _wake_terminal_successor_cursor(
@@ -6945,8 +6969,7 @@ class PostgresControlPlane:
                     f"{suffix_by_dedupe[incident_dedupe_key]}"
                 )
                 cursor.execute(
-                    "SELECT incident_event_id FROM m1_incident_events "
-                    "WHERE idempotency_key = %s",
+                    "SELECT incident_event_id FROM m1_incident_events WHERE idempotency_key = %s",
                     (idempotency_key,),
                 )
                 if cursor.fetchone() is not None:

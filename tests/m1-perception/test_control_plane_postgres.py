@@ -2509,6 +2509,9 @@ def test_concurrent_terminal_structure_receipts_cannot_lose_certifier_wakeup(
     with ThreadPoolExecutor(max_workers=2) as executor:
         tuple(executor.map(complete, range(2)))
 
+    assert control_plane.repair_ready_certifiers(
+        job_type="structure-certify", now=now + timedelta(seconds=1)
+    ) in {0, 1}
     certifier = control_plane.claim_job(
         worker_id="concurrent-structure-certifier",
         job_types=("structure-certify",),
@@ -2517,6 +2520,67 @@ def test_concurrent_terminal_structure_receipts_cannot_lose_certifier_wakeup(
     )
     assert certifier is not None
     assert certifier.job_key == f"{specs[0].generation_key}:certify"
+
+
+def test_terminal_structure_receipt_skips_busy_certifier_and_repairs_from_durable_facts(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    bundle = StructureBundleArtifact.from_bytes(b'{"kind":"structure-bundle"}\n')
+    spec = control_plane.enqueue_structure_generation(
+        identity=_structure_identity(),
+        bundle=bundle,
+        ranges=(("events", "", ""),),
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="nonblocking-structure-range",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    certifier_job_key = f"{spec.generation_key}:certify"
+
+    with control_plane._connection_factory() as blocker, blocker.cursor() as cursor:
+        cursor.execute(
+            "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE",
+            (certifier_job_key,),
+        )
+        assert cursor.fetchone() is not None
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            receipt = executor.submit(
+                control_plane.complete_structure_range,
+                lease,
+                range_digest=spec.range_digest,
+                artifact_key="structure-ranges/nonblocking/rows.ndjson",
+                artifact_digest="a" * 64,
+                record_count=1,
+                now=now,
+            ).result()
+
+    assert receipt.job_key == lease.job_key
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state FROM m1_jobs WHERE job_key IN (%s, %s) ORDER BY job_key",
+            (lease.job_key, certifier_job_key),
+        )
+        assert sorted(row[0] for row in cursor.fetchall()) == ["succeeded", "waiting"]
+
+    assert (
+        control_plane.repair_ready_certifiers(
+            job_type="structure-certify", now=now + timedelta(seconds=1)
+        )
+        == 1
+    )
+    certifier = control_plane.claim_job(
+        worker_id="nonblocking-structure-certifier",
+        job_types=("structure-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=1),
+    )
+    assert certifier is not None
+    assert certifier.job_key == certifier_job_key
 
 
 def test_structure_receipt_cannot_wake_certifier_before_producer_is_terminal(
@@ -2594,20 +2658,25 @@ def test_structure_certifier_repairs_historical_lost_wakeup(
     )
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
-            "UPDATE m1_jobs SET state = 'waiting', next_attempt_at = NULL "
-            "WHERE job_key = %s",
+            "UPDATE m1_jobs SET state = 'waiting', next_attempt_at = NULL WHERE job_key = %s",
             (f"{spec.generation_key}:certify",),
         )
 
-    assert control_plane.repair_ready_certifiers(
-        job_type="structure-certify", now=now + timedelta(seconds=1)
-    ) == 1
-    assert control_plane.claim_job(
-        worker_id="repaired-structure-certifier",
-        job_types=("structure-certify",),
-        lease_seconds=30,
-        now=now + timedelta(seconds=1),
-    ) is not None
+    assert (
+        control_plane.repair_ready_certifiers(
+            job_type="structure-certify", now=now + timedelta(seconds=1)
+        )
+        == 1
+    )
+    assert (
+        control_plane.claim_job(
+            worker_id="repaired-structure-certifier",
+            job_types=("structure-certify",),
+            lease_seconds=30,
+            now=now + timedelta(seconds=1),
+        )
+        is not None
+    )
 
 
 def test_structure_certification_requires_complete_matching_range_receipts(
@@ -3573,6 +3642,9 @@ def test_concurrent_terminal_quote_receipts_cannot_lose_certifier_wakeup(
     with ThreadPoolExecutor(max_workers=2) as executor:
         tuple(executor.map(complete, range(2)))
 
+    assert control_plane.repair_ready_certifiers(
+        job_type="quote-certify", now=now + timedelta(seconds=1)
+    ) in {0, 1}
     certifier = control_plane.claim_job(
         worker_id="concurrent-quote-certifier",
         job_types=("quote-certify",),
@@ -3581,6 +3653,70 @@ def test_concurrent_terminal_quote_receipts_cannot_lose_certifier_wakeup(
     )
     assert certifier is not None
     assert certifier.job_key == f"{batches[0].generation_key}:certify"
+
+
+def test_terminal_quote_receipt_skips_busy_certifier_and_repairs_from_durable_facts(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    batch = control_plane.enqueue_quote_generation(
+        structure_receipt_digest="a" * 64,
+        universe_hash="b" * 64,
+        legs=(_leg("token-nonblocking"),),
+        batch_size=1,
+        now=now,
+    )[0]
+    lease = control_plane.claim_job(
+        worker_id="nonblocking-quote-batch",
+        job_types=("quote-batch",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert lease is not None
+    certifier_job_key = f"{batch.generation_key}:certify"
+
+    with control_plane._connection_factory() as blocker, blocker.cursor() as cursor:
+        cursor.execute(
+            "SELECT job_key FROM m1_jobs WHERE job_key = %s FOR UPDATE",
+            (certifier_job_key,),
+        )
+        assert cursor.fetchone() is not None
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            receipt = executor.submit(
+                control_plane.record_quote_batch,
+                lease,
+                token_range_digest=batch.token_range_digest,
+                quote_digest="a" * 64,
+                artifact_key="quote-batches/nonblocking/batch.ndjson",
+                artifact_digest="a" * 64,
+                successful_response_count=1,
+                quoted_at=now,
+                now=now,
+                terminal=True,
+            ).result()
+
+    assert receipt.job_key == lease.job_key
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state FROM m1_jobs WHERE job_key IN (%s, %s) ORDER BY job_key",
+            (lease.job_key, certifier_job_key),
+        )
+        assert sorted(row[0] for row in cursor.fetchall()) == ["succeeded", "waiting"]
+
+    assert (
+        control_plane.repair_ready_certifiers(
+            job_type="quote-certify", now=now + timedelta(seconds=1)
+        )
+        == 1
+    )
+    certifier = control_plane.claim_job(
+        worker_id="nonblocking-quote-certifier",
+        job_types=("quote-certify",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=1),
+    )
+    assert certifier is not None
+    assert certifier.job_key == certifier_job_key
 
 
 def test_quote_receipt_cannot_wake_certifier_before_producer_is_terminal(
@@ -3663,20 +3799,25 @@ def test_quote_certifier_repairs_historical_lost_wakeup(
     )
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
-            "UPDATE m1_jobs SET state = 'waiting', next_attempt_at = NULL "
-            "WHERE job_key = %s",
+            "UPDATE m1_jobs SET state = 'waiting', next_attempt_at = NULL WHERE job_key = %s",
             (f"{batch.generation_key}:certify",),
         )
 
-    assert control_plane.repair_ready_certifiers(
-        job_type="quote-certify", now=now + timedelta(seconds=1)
-    ) == 1
-    assert control_plane.claim_job(
-        worker_id="repaired-quote-certifier",
-        job_types=("quote-certify",),
-        lease_seconds=30,
-        now=now + timedelta(seconds=1),
-    ) is not None
+    assert (
+        control_plane.repair_ready_certifiers(
+            job_type="quote-certify", now=now + timedelta(seconds=1)
+        )
+        == 1
+    )
+    assert (
+        control_plane.claim_job(
+            worker_id="repaired-quote-certifier",
+            job_types=("quote-certify",),
+            lease_seconds=30,
+            now=now + timedelta(seconds=1),
+        )
+        is not None
+    )
 
 
 def test_transactional_quote_certifier_waits_then_publishes_complete_generation(
@@ -8558,8 +8699,7 @@ def test_successful_job_closes_runtime_recovery_incident_and_next_episode_reopen
 
     with control_plane._connection_factory() as connection, connection.cursor() as cursor:
         cursor.execute(
-            "SELECT state, resolved_at IS NOT NULL FROM m1_incidents "
-            "WHERE dedupe_key = %s",
+            "SELECT state, resolved_at IS NOT NULL FROM m1_incidents WHERE dedupe_key = %s",
             (f"recovery:circuit:{job_key}",),
         )
         assert cursor.fetchone() == ("resolved", True)

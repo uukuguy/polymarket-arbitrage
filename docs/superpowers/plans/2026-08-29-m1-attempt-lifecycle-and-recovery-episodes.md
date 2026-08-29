@@ -284,7 +284,7 @@
 - [x] Roll the exact release, repair the two historical projections through the
   same durable method, and require zero contradictory runtime incidents.
 
-### Task 10: Make terminal fan-in wakeups serialized, truthful and self-repairing
+### Task 10: Make terminal fan-in wakeups truthful and self-repairing
 
 **Files:**
 
@@ -297,8 +297,9 @@
 
 - A producer receipt is necessary but insufficient for successor eligibility;
   the matching producer job must also be `succeeded`.
-- Concurrent terminal producers serialize their final eligibility observation
-  on the certifier job row.
+- Concurrent terminal producers use the certifier job row for direct
+  eligibility observation; Task 18 makes that optimization non-blocking after
+  production disproved blocking serialization.
 - `repair_ready_certifiers()` advances at most one historically lost ready
   wakeup per certifier turn from durable database facts.
 
@@ -511,12 +512,41 @@
   live leases `<= 12`, no retry storm and projected generation drain below 900
   seconds before any sibling rollout.
 
+### Task 18: Decouple producer commit from the shared certifier row
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/postgres.py`
+- Modify: `tests/m1-perception/test_control_plane_postgres.py`
+
+**Interfaces:**
+
+- Terminal Structure/Quote producers must commit their own receipt, job and
+  attempt facts even when another transaction owns the certifier row.
+- Direct wake uses `FOR UPDATE SKIP LOCKED`; row absence remains a fail-closed
+  invariant error, while row contention is a safe best-effort miss.
+- `repair_ready_certifiers()` remains the mandatory bounded convergence path
+  before a certifier claim.
+
+- [x] Measure v13 for an exact five-minute window: 229 successes, 34
+  `OperationalError`, 10 `LeaseExpired`, 45.8 successes/minute and at most 12
+  live worker identities.
+- [x] Correlate the failures with every terminal producer blocking on one
+  certifier row under the one-second lock policy; reject timeout enlargement.
+- [x] Add real-PostgreSQL RED tests holding the successor row while Structure
+  and Quote terminal producers attempt to commit.
+- [x] Make direct wake non-blocking and prove both producers commit, the
+  successor remains waiting, and bounded repair advances it from durable facts.
+- [ ] Run the complete PostgreSQL/worker/full-M1 gates, build an exact image and
+  repeat the Structure-only canary before any sibling rollout.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
-  sequencing, cancellation, event-loop claim isolation, fan-in wakeup repair,
+  sequencing, cancellation, event-loop claim isolation, non-blocking fan-in repair,
   inventory, operator wait, production proof, capacity/backpressure and
-  connection ownership and worker-identity capacity all map to Tasks 1–17.
+  connection ownership, worker-identity capacity and producer commit
+  independence all map to Tasks 1–18.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

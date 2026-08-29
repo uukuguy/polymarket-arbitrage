@@ -2414,21 +2414,23 @@ success is not user receipt/read evidence.
   clear `resolved_at`; otherwise a genuinely new recovery would be hidden by a
   prior episode's resolved row.
 
-### §2.67 Fan-in eligibility needs a serialized terminal barrier and repair path (2026-08-29)
+### §2.67 Fan-in eligibility needs producer-independent commit and repair (2026-08-29)
 
 - Receipt completeness alone is not a terminal fact. A producer can persist a
   receipt and remain `checkpointed`; successor eligibility therefore requires
   both the immutable receipt and the matching producer job in `succeeded`.
-- “The last receipt wakes the certifier” is unsafe without serialization. Two
-  concurrent final transactions can each miss the other's uncommitted receipt
-  and both decline the transition. Terminal producers now update themselves
-  first, then lock the common certifier row before counting committed terminal
-  siblings. The shared row establishes one total order for the final check.
+- “The last receipt wakes the certifier” is unsafe as an exclusive authority.
+  Two concurrent final transactions can each miss the other's uncommitted
+  receipt and both decline the transition. A blocking shared-row barrier fixed
+  that lost wakeup but production later proved it made every producer depend on
+  one row and one lock timeout. Direct wake is now best-effort with `FOR UPDATE
+  SKIP LOCKED`; contention cannot roll back producer terminal facts.
 - Crash recovery cannot depend on a future producer that may never run. Before
   claim, each certifier performs a bounded one-row repair using only durable
   inputs, receipts and terminal job states. `FOR UPDATE SKIP LOCKED` keeps
   multiple role processes from turning the repair path into a new contention
-  point; incomplete generations remain waiting.
+  point; incomplete generations remain waiting. This repair, not a longer lock
+  wait, is the convergence authority.
 
 ### §2.68 Pool wrappers must propagate lifecycle authority (2026-08-29)
 
@@ -2543,3 +2545,20 @@ success is not user receipt/read evidence.
   persist terminal state, the affected capacity lane waits for its durable
   lease to expire and be reclaimed. It may not amplify the outage by opening a
   second attempt.
+
+### §2.76 A successor lock cannot be a prerequisite for producer commit (2026-08-29)
+
+- Exact v13 bounded live ownership at twelve but completed only 229 Structure
+  attempts in five minutes while 34 terminal paths raised `OperationalError`
+  and ten leases expired. The shared certifier row was the common lock target;
+  PostgreSQL had ample connection capacity, so this was fan-in contention, not
+  connection exhaustion.
+- The one-second lock bound correctly limits one database operation. It was
+  incorrectly placed on the critical path of every independent producer. Making
+  it larger would synchronize longer stalls and preserve the single point.
+- Structure and Quote terminal transactions now check successor existence and
+  use `FOR UPDATE SKIP LOCKED`. A busy successor defers eligibility only; the
+  producer's receipt/job/attempt commit remains authoritative. The existing
+  bounded certifier repair converts committed durable facts into `runnable`
+  before claim, so interruption, restart and lost direct wake all share one
+  recovery mechanism.

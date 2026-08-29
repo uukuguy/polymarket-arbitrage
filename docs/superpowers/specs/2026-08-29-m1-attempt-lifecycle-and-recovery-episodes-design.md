@@ -116,6 +116,20 @@ test rejects direct `.claim_job()` calls inside the audited async worker
 modules, and a behavioral test blocks a fake claim while proving an unrelated
 loop task continues to run.
 
+### Fan-in commit independence
+
+A range or batch producer owns only its receipt and terminal attempt state. It
+must not wait for the shared certifier row merely to commit those facts. Direct
+successor wakeup is therefore a best-effort optimization: the producer first
+checks that the successor exists, then acquires it with `FOR UPDATE SKIP
+LOCKED`. A busy row skips the direct wake without changing producer outcome.
+
+Every certifier turn repairs at most one ready waiting successor from committed
+inputs, receipts and producer terminal states before claim. This bounded repair
+is the durable convergence authority. It closes the concurrent-final-receipt
+lost-wakeup case without turning the successor row or the one-second database
+lock bound into a synchronized failure point for all producers.
+
 ## Sequencing and interruption invariants
 
 1. The eight-job DAG in `runtime_deadlines.py` remains the only stage order.
@@ -133,6 +147,8 @@ loop task continues to run.
 7. A slow claim may delay that worker's lease acquisition, but it cannot delay
    a sibling provider request, heartbeat, watchdog, signal handler or cadence
    clock on the shared event loop.
+8. A busy certifier row may delay successor eligibility until its next repair
+   turn, but it cannot roll back a producer receipt or terminal success.
 
 ## Audit boundary
 
