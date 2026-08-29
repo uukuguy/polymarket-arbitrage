@@ -697,15 +697,27 @@ hypotheses:
     verdict: confirmed
     decision_reason: all local gates passed
 - id: H-025
-  description: Exact recovery selection, transport cleanup, and absolute attempt
-    ceilings can be made independent of sample size, platform kill timing, and lease
-    configuration so the recovery controller remains executable under production history
-    and interruption.
+  description: Exact recovery selection, transport cleanup, and absolute attempt ceilings
+    can be made independent of sample size, platform kill timing, and lease configuration
+    so the recovery controller remains executable under production history and interruption.
   parent_paradigm: fenced-deadline-reconciler
-  expected_lift: Close the remaining control-path single points without increasing any
-    provider, database, lease, retry, freshness, or qualification boundary.
+  expected_lift: Close the remaining control-path single points without increasing
+    any provider, database, lease, retry, freshness, or qualification boundary.
   cost_h: 0.75
   ranking: 1.0
-  status: pending
+  status: confirmed
   created_at: '2026-08-29T15:45:00+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 28
+    run: 20260829-073105-h-025
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      restart: 100.0
+      unit: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
