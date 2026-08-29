@@ -76,7 +76,7 @@ kill_timeout = 40
   processes = ["app"]
 
   [[http_service.checks]]
-    grace_period = "120s"
+    grace_period = "60s"
     interval = "30s"
     method = "GET"
     path = "/healthz"

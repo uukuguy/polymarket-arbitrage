@@ -2223,3 +2223,12 @@ def test_runtime_image_build_binds_exact_revision_and_is_build_only(
     )
     assert "--env" not in argv
     assert invocation["token"] == ""
+
+
+def test_runtime_image_build_treats_fly_config_as_release_input() -> None:
+    makefile = (PROJECT_ROOT / "Makefile").read_text()
+    recipe = makefile.split("runtime-image-build:", 1)[1].split("\n## deploy:", 1)[0]
+
+    assert "git diff --quiet -- fly.toml Dockerfile" in recipe
+    assert "git diff --cached --quiet -- fly.toml Dockerfile" in recipe
+    assert "git ls-files --others --exclude-standard -- fly.toml Dockerfile" in recipe

@@ -997,9 +997,9 @@ FLY_BUILD_MODE ?= --remote-only
 ## runtime-image-build: Build and push an exact non-deploying M1 runtime image. Usage: make runtime-image-build image_tag=m1-runtime-vN-<sha> [fly_app=polyarb-control-worker-m1]
 runtime-image-build:
 	@test -n "$(image_tag)" || (echo "usage: make runtime-image-build image_tag=m1-runtime-vN-<sha> [fly_app=polyarb-control-worker-m1]" >&2; exit 2)
-	@if ! git diff --quiet -- Dockerfile .dockerignore pyproject.toml uv.lock README.md src alembic.ini alembic crontab scripts/polywatch/healthz_watcher.py \
-		|| ! git diff --cached --quiet -- Dockerfile .dockerignore pyproject.toml uv.lock README.md src alembic.ini alembic crontab scripts/polywatch/healthz_watcher.py \
-		|| test -n "$$(git ls-files --others --exclude-standard -- Dockerfile .dockerignore pyproject.toml uv.lock README.md src alembic.ini alembic crontab scripts/polywatch/healthz_watcher.py)"; then \
+	@if ! git diff --quiet -- fly.toml Dockerfile .dockerignore pyproject.toml uv.lock README.md src alembic.ini alembic crontab scripts/polywatch/healthz_watcher.py \
+		|| ! git diff --cached --quiet -- fly.toml Dockerfile .dockerignore pyproject.toml uv.lock README.md src alembic.ini alembic crontab scripts/polywatch/healthz_watcher.py \
+		|| test -n "$$(git ls-files --others --exclude-standard -- fly.toml Dockerfile .dockerignore pyproject.toml uv.lock README.md src alembic.ini alembic crontab scripts/polywatch/healthz_watcher.py)"; then \
 		echo "ERROR: runtime image inputs differ from HEAD; commit or remove those changes before building" >&2; exit 2; \
 	fi
 	@RELEASE_ID="$$(git rev-parse HEAD)"; \

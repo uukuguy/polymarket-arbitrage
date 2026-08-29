@@ -63,6 +63,21 @@ def test_l2_shutdown_uses_one_budget_below_the_platform_window() -> None:
     assert fly_config["kill_timeout"] == PLATFORM_TERMINATION_WINDOW_SECONDS
 
 
+@pytest.mark.parametrize("config_path", ("fly.toml", "fly-l2.toml"))
+def test_daemon_readiness_grace_matches_platform_cap_and_outlives_startup(
+    config_path: str,
+) -> None:
+    from polyarb.daemon.lifecycle import DAEMON_HTTP_STARTUP_BUDGET_SECONDS
+
+    fly_config = tomllib.loads(Path(config_path).read_text())
+    grace_seconds = float(
+        fly_config["http_service"]["checks"][0]["grace_period"].removesuffix("s")
+    )
+
+    assert grace_seconds == 60.0
+    assert DAEMON_HTTP_STARTUP_BUDGET_SECONDS < grace_seconds
+
+
 @pytest.mark.asyncio
 async def test_http_startup_gate_is_shared_deadline_based_and_stop_aware() -> None:
     from polyarb.daemon.lifecycle import wait_for_http_server_startup
