@@ -2527,3 +2527,19 @@ success is not user receipt/read evidence.
 - Capacity is accepted only after an exact-image Structure-only canary proves
   distinct concurrent leases, bounded memory and projected complete-generation
   drain below the unchanged 900-second freshness gate.
+
+### §2.75 A worker identity is a capacity fence, not an audit label (2026-08-29)
+
+- The first twelve-lane canary proved all lane IDs but then showed lanes 6 and
+  10 each owning two still-live Structure jobs. A terminal PostgreSQL failure
+  could escape before clearing the first lease; the next pool wave reused the
+  identity and claimed unrelated work.
+- `claim_job()` now takes a nonblocking transaction advisory lock derived from
+  the worker identity and, in the same fixed SQL round, checks for an unexpired
+  `leased` job owned by that identity. Contention or an existing live lease
+  returns no work. `checkpointed` is excluded because its attempt is terminal
+  and the next epoch is intentionally immediately resumable.
+- The rule is generic across all transactional workers. If the database cannot
+  persist terminal state, the affected capacity lane waits for its durable
+  lease to expire and be reclaimed. It may not amplify the outage by opening a
+  second attempt.

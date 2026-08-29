@@ -483,12 +483,40 @@
 - [x] Complete the standalone 120k gate with direct benchmark observers closed
   and record bounded descriptor evidence.
 
+### Task 17: Make worker identity a single-live-lease capacity boundary
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/postgres.py`
+- Modify: `tests/m1-perception/test_control_plane_postgres.py`
+
+**Interfaces:**
+
+- `claim_job()` serializes contenders for the same `worker_id` with a
+  transaction-scoped advisory try-lock.
+- One fixed-round guard refuses a new claim while that identity owns an
+  unexpired `leased` job. A terminal `checkpointed` attempt remains immediately
+  resumable; lease expiry is the recovery authority only for a live attempt
+  whose terminal database write could not complete.
+
+- [x] Reproduce the production overlap: lanes 6 and 10 each owned two live
+  Structure jobs after terminal `OperationalError` paths escaped.
+- [x] Add a real-PostgreSQL RED test proving one worker identity cannot claim a
+  second runnable job while its first lease is live.
+- [x] Combine advisory serialization and active-lease inspection into one SQL
+  round before the existing claim query.
+- [x] Run the complete PostgreSQL/Structure/Quote/scheduler regression group,
+  Ruff and modified-file Pyright.
+- [ ] Build a new exact image and repeat the isolated Structure canary; require
+  live leases `<= 12`, no retry storm and projected generation drain below 900
+  seconds before any sibling rollout.
+
 ## Self-review
 
 - Spec coverage: transport lifetime, stage identity, episode budgets,
   sequencing, cancellation, event-loop claim isolation, fan-in wakeup repair,
   inventory, operator wait, production proof, capacity/backpressure and
-  connection ownership all map to Tasks 1–16.
+  connection ownership and worker-identity capacity all map to Tasks 1–17.
 - Placeholders: none; every task names files, interfaces, RED/GREEN commands or
   production gates.
 - Type consistency: `reset_transport`, `current_stage` and

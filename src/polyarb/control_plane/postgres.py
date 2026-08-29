@@ -5196,6 +5196,39 @@ class PostgresControlPlane:
             self._connection_factory() as connection,
             connection.cursor(row_factory=dict_row) as cursor,
         ):
+            # A worker identity is a capacity lane, not merely an audit label.
+            # Serialize claims for that identity and refuse a second live lease
+            # when a prior terminal write could not close its first one.  Lease
+            # expiry remains the durable recovery authority; opening more work
+            # here would turn a database outage into an unbounded retry storm.
+            cursor.execute(
+                """
+                WITH worker_lock AS (
+                    SELECT pg_try_advisory_xact_lock(
+                        hashtextextended(%s, 0)
+                    ) AS acquired
+                )
+                SELECT worker_lock.acquired, active.job_key
+                FROM worker_lock
+                LEFT JOIN LATERAL (
+                    SELECT job_key
+                    FROM m1_jobs
+                    WHERE lease_owner = %s
+                      AND state = 'leased'
+                      AND (lease_expires_at IS NULL OR lease_expires_at > %s)
+                    FOR UPDATE
+                    LIMIT 1
+                ) AS active ON worker_lock.acquired
+                """,
+                (worker_id, worker_id, now),
+            )
+            worker_guard = cursor.fetchone()
+            if (
+                worker_guard is None
+                or not bool(worker_guard["acquired"])
+                or worker_guard["job_key"] is not None
+            ):
+                return None
             cursor.execute(
                 """
                 SELECT job_key, job_type, input_identity, checkpoint_cursor,

@@ -4380,6 +4380,45 @@ def test_claim_reclaim_and_epoch_fencing(control_plane: PostgresControlPlane) ->
         control_plane.heartbeat(first, now=now + timedelta(seconds=31))
 
 
+def test_worker_identity_cannot_own_two_live_job_leases(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    for suffix in ("alpha", "beta"):
+        control_plane.enqueue_job(
+            job_key=f"worker-single-lease:{suffix}",
+            job_type="structure-normalize",
+            input_identity=f"worker-single-lease:{suffix}",
+            now=now,
+        )
+
+    first = control_plane.claim_job(
+        worker_id="single-lease-worker",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now,
+    )
+    assert first is not None
+
+    assert (
+        control_plane.claim_job(
+            worker_id="single-lease-worker",
+            job_types=("structure-normalize",),
+            lease_seconds=30,
+            now=now + timedelta(seconds=1),
+        )
+        is None
+    )
+    second_worker = control_plane.claim_job(
+        worker_id="independent-worker",
+        job_types=("structure-normalize",),
+        lease_seconds=30,
+        now=now + timedelta(seconds=1),
+    )
+    assert second_worker is not None
+    assert second_worker.job_key != first.job_key
+
+
 def test_running_checkpoint_preserves_lease_and_resumes_next_epoch(
     control_plane: PostgresControlPlane,
 ) -> None:
