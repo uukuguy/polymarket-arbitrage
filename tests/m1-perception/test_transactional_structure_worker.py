@@ -954,6 +954,182 @@ def test_structure_certifier_renews_while_parity_read_exceeds_lease() -> None:
     assert len(control_plane.heartbeats) >= 3
 
 
+def test_structure_certifier_renews_while_v3_parsing_exceeds_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = StructureBundleIdentity(
+        publication_id="source-window:parse-renewal",
+        window_id="parse-renewal",
+        snapshot_id=0,
+        comparison_receipt_digest="a" * 64,
+        normalization_contract_version="gamma-source-window-events-v3-sharded",
+        component_counts={
+            "events": 1,
+            "event_tags": 0,
+            "memberships": 0,
+            "group_truth": 0,
+            "markets": 0,
+            "issues": 0,
+        },
+        source_kind="gamma-source-window-events-v3-sharded",
+    )
+    shard = StructureShardArtifact.from_bytes(
+        canonical_structure_shard_bytes(
+            window_key="parse-renewal",
+            source_digest="a" * 64,
+            component="events",
+            ordinal=0,
+            rows=({"id": "event-a"},),
+        )
+    )
+    manifest = StructureBundleArtifact.from_bytes(
+        canonical_structure_shard_manifest_bytes(
+            identity=identity,
+            shards=(StructureShardReceipt("events", 0, shard.key, shard.sha256, 1),),
+        )
+    )
+    spec = StructureRangeSpec.create(
+        bundle_key=manifest.key,
+        bundle_digest=manifest.sha256,
+        component="events",
+        ordinal=0,
+        range_start="shard:00000000",
+        range_end="shard:00000001",
+    )
+    range_artifact = StructureRangeArtifact.from_bytes(
+        canonical_structure_range_bytes(
+            bundle_digest=manifest.sha256,
+            component="events",
+            range_digest=spec.range_digest,
+            rows=({"id": "event-a"},),
+        )
+    )
+    receipt = StructureRangeReceipt(
+        job_key=spec.job_key,
+        bundle_digest=spec.bundle_digest,
+        component=spec.component,
+        range_digest=spec.range_digest,
+        artifact_key=range_artifact.key,
+        artifact_digest=range_artifact.sha256,
+        record_count=1,
+    )
+
+    class ControlPlane:
+        def __init__(self) -> None:
+            self.heartbeats: list[dict[str, object]] = []
+            self.certified = False
+
+        def claim_job(self, **_kwargs: object) -> JobLease:
+            return JobLease(
+                job_key=spec.generation_key + ":certify",
+                job_type="structure-certify",
+                input_identity=spec.generation_key,
+                lease_owner="certifier-a",
+                lease_epoch=1,
+                lease_expires_at=NOW + timedelta(seconds=3),
+                checkpoint_cursor=None,
+                checkpoint_digest=None,
+            )
+
+        def structure_generation_receipts(self, _generation_key: str):
+            return ((spec, receipt),)
+
+        def running_checkpoints(self, _job_key: str):
+            return ()
+
+        def record_running_checkpoint(self, _lease: JobLease, **_kwargs: object) -> object:
+            return object()
+
+        def structure_manifest_payload(self, _generation_key: str) -> bytes:
+            return b'{"kind":"structure-manifest"}\n'
+
+        def heartbeat_runtime_attempt(self, lease: JobLease, **kwargs: object) -> JobLease:
+            self.heartbeats.append(kwargs)
+            return JobLease(
+                job_key=lease.job_key,
+                job_type=lease.job_type,
+                input_identity=lease.input_identity,
+                lease_owner=lease.lease_owner,
+                lease_epoch=lease.lease_epoch,
+                lease_expires_at=kwargs["now"] + timedelta(seconds=kwargs["lease_seconds"]),
+                checkpoint_cursor=lease.checkpoint_cursor,
+                checkpoint_digest=lease.checkpoint_digest,
+            )
+
+        def record_runtime_progress(self, _lease: JobLease, **_kwargs: object) -> None:
+            return None
+
+        def certify_structure_generation(self, _lease: JobLease, **kwargs: object) -> str:
+            self.certified = True
+            return str(kwargs["artifact_digest"])
+
+        def record_job_recovery(self, _lease: JobLease, **_kwargs: object) -> bool:
+            return False
+
+        def finish_retryable_with_incident(self, _lease: JobLease, **_kwargs: object) -> None:
+            raise AssertionError("blocking v3 parse must retain its lease")
+
+    class Objects:
+        def __init__(self) -> None:
+            self.upload: dict[str, object] = {}
+
+        def get_object(self, **kwargs: object) -> dict[str, object]:
+            payloads = {
+                manifest.key: manifest.payload,
+                shard.key: shard.payload,
+                range_artifact.key: range_artifact.payload,
+            }
+            return {"Body": _Body(payloads[str(kwargs["Key"])])}
+
+        def put_object(self, **kwargs: object) -> None:
+            self.upload = kwargs
+
+        def head_object(self, **_kwargs: object) -> dict[str, object]:
+            return {
+                "ContentLength": len(self.upload["Body"]),
+                "Metadata": self.upload["Metadata"],
+            }
+
+    parse_started = threading.Event()
+    release_parse = threading.Event()
+    original_parse = structure_worker_module.parse_structure_shard_bytes
+
+    def blocking_parse(payload: bytes, *, expected_sha256: str):
+        parse_started.set()
+        if not release_parse.wait(timeout=10):
+            raise AssertionError("blocking v3 parse was not released")
+        return original_parse(payload, expected_sha256=expected_sha256)
+
+    monkeypatch.setattr(structure_worker_module, "parse_structure_shard_bytes", blocking_parse)
+    control_plane = ControlPlane()
+    certifier = TransactionalStructureCertifier(
+        control_plane=control_plane,
+        object_client=Objects(),
+        bucket="structure",
+        worker_id="certifier-a",
+        now=_elapsed_clock(),
+        lease_seconds=3,
+    )
+
+    async def run() -> tuple[StructureWorkerResult, bool]:
+        task = asyncio.create_task(asyncio.to_thread(certifier.run_once))
+        assert await asyncio.to_thread(parse_started.wait, 2)
+        renewed = False
+        for _ in range(300):
+            if len(control_plane.heartbeats) >= 2:
+                renewed = True
+                break
+            await asyncio.sleep(0.01)
+        release_parse.set()
+        return await task, renewed
+
+    result, renewed = asyncio.run(run())
+
+    assert renewed, "v3 parsing must remain inside the lease-renewing call boundary"
+    assert result.outcome == "certified"
+    assert control_plane.certified
+
+
 def test_structure_certifier_resumes_1117_ranges_after_durable_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

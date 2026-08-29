@@ -642,7 +642,7 @@ class TransactionalStructureCertifier:
             payload = sync_call(
                 lambda: self._control_plane.structure_manifest_payload(generation_key)
             )
-            artifact = StructureManifestArtifact.from_bytes(payload)
+            artifact = sync_call(lambda: StructureManifestArtifact.from_bytes(payload))
             sync_call(lambda: runtime.progress(stage="build-manifest", current=1, total=1))
             heartbeat_if_due()
             sync_call(
@@ -744,12 +744,16 @@ class TransactionalStructureCertifier:
             )
         )
         try:
-            identity, source_components = parse_structure_bundle_bytes(
-                source_payload, expected_sha256=source_spec.bundle_digest
+            identity, source_components = sync_call(
+                lambda: parse_structure_bundle_bytes(
+                    source_payload, expected_sha256=source_spec.bundle_digest
+                )
             )
         except StructureBundleError:
-            identity, shards = parse_structure_shard_manifest_bytes(
-                source_payload, expected_sha256=source_spec.bundle_digest
+            identity, shards = sync_call(
+                lambda: parse_structure_shard_manifest_bytes(
+                    source_payload, expected_sha256=source_spec.bundle_digest
+                )
             )
             if identity.source_kind != "gamma-source-window-events-v3-sharded":
                 raise
@@ -779,8 +783,10 @@ class TransactionalStructureCertifier:
                     self._object_client, bucket=self._bucket, key=receipt.artifact_key
                 )
             )
-            range_identity, rows = parse_structure_range_bytes(
-                payload, expected_sha256=receipt.artifact_digest
+            range_identity, rows = sync_call(
+                lambda: parse_structure_range_bytes(
+                    payload, expected_sha256=receipt.artifact_digest
+                )
             )
             if range_identity != (spec.bundle_digest, spec.component, spec.range_digest):
                 raise StructureWorkerError("structure-content-parity-range-identity")
@@ -788,17 +794,21 @@ class TransactionalStructureCertifier:
                 not _in_range(_row_cursor(spec.component, row), spec) for row in rows
             ):
                 raise StructureWorkerError("structure-content-parity-range-content")
-            rebuilt[spec.component].extend(rows)
+            sync_call(lambda: rebuilt[spec.component].extend(rows))
             progress(index, total_ranges)
-        try:
-            reassembled = canonical_structure_bundle_bytes(
-                identity=identity,
-                components={component: tuple(rows) for component, rows in rebuilt.items()},
-            )
-        except ValueError as error:
-            raise StructureWorkerError("structure-content-parity-reassembly") from error
-        if reassembled != source_payload:
-            raise StructureWorkerError("structure-content-parity-reassembly")
+
+        def verify_reassembly() -> None:
+            try:
+                reassembled = canonical_structure_bundle_bytes(
+                    identity=identity,
+                    components={component: tuple(rows) for component, rows in rebuilt.items()},
+                )
+            except ValueError as error:
+                raise StructureWorkerError("structure-content-parity-reassembly") from error
+            if reassembled != source_payload:
+                raise StructureWorkerError("structure-content-parity-reassembly")
+
+        sync_call(verify_reassembly)
 
     def _verify_v3_content_parity(
         self,
@@ -811,9 +821,11 @@ class TransactionalStructureCertifier:
         progress: Callable[[int, int], None],
         sync_call: Callable[..., Any],
     ) -> None:
-        by_identity = {(shard.component, shard.ordinal): shard for shard in shards}
+        by_identity = sync_call(
+            lambda: {(shard.component, shard.ordinal): shard for shard in shards}
+        )
         total_ranges = len(ranges)
-        prefix_digests = _parity_prefix_digests(generation_key, ranges)
+        prefix_digests = sync_call(lambda: _parity_prefix_digests(generation_key, ranges))
         resume_index = 0
         cursor_prefix = f"runtime-v2:{generation_key}:"
         checkpoints = sync_call(
@@ -850,8 +862,10 @@ class TransactionalStructureCertifier:
                     self._object_client, bucket=self._bucket, key=shard_artifact_key
                 )
             )
-            _header, expected_rows = parse_structure_shard_bytes(
-                source_payload, expected_sha256=shard_artifact_digest
+            _header, expected_rows = sync_call(
+                lambda: parse_structure_shard_bytes(
+                    source_payload, expected_sha256=shard_artifact_digest
+                )
             )
             heartbeat()
             payload = sync_call(
@@ -861,11 +875,17 @@ class TransactionalStructureCertifier:
                     key=getattr(receipt, "artifact_key"),
                 )
             )
-            _range_identity, actual_rows = parse_structure_range_bytes(
-                payload, expected_sha256=getattr(receipt, "artifact_digest")
-            )
-            if actual_rows != expected_rows or len(actual_rows) != getattr(receipt, "record_count"):
-                raise StructureWorkerError("structure-v3-content-parity-range-content")
+
+            def verify_range() -> None:
+                _range_identity, actual_rows = parse_structure_range_bytes(
+                    payload, expected_sha256=getattr(receipt, "artifact_digest")
+                )
+                if actual_rows != expected_rows or len(actual_rows) != getattr(
+                    receipt, "record_count"
+                ):
+                    raise StructureWorkerError("structure-v3-content-parity-range-content")
+
+            sync_call(verify_range)
             progress(index, total_ranges)
             if index % checkpoint_interval == 0 or index == total_ranges:
 
