@@ -109,6 +109,7 @@ from polyarb.control_plane.structure_source import (
 )
 from polyarb.control_plane.structure_worker import (
     TransactionalStructureCertifier,
+    TransactionalStructureRangePool,
     TransactionalStructureWorker,
 )
 from polyarb.control_plane.watchdog import (
@@ -246,7 +247,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     serve.add_argument("--max-turns", type=int, default=4)
     serve.add_argument("--pool-turns", type=int, default=1)
-    serve.add_argument("--structure-high-water", type=int, default=2_000)
+    serve.add_argument("--structure-high-water", type=int, default=1)
     serve.add_argument("--quote-high-water", type=int, default=512)
     serve.add_argument("--structure-materializer-turns", type=int, default=0)
     serve.add_argument("--structure-range-turns", type=int, default=0)
@@ -1093,19 +1094,26 @@ def _transactional_structure_worker(
     crash_after_r2_upload: Callable[[JobLease], None] | None = None,
     retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
     acceptance_run_id: str | None = None,
-) -> TransactionalStructureWorker:
+    lane_count: int = 1,
+) -> TransactionalStructureWorker | TransactionalStructureRangePool:
     """Build an explicitly invoked worker; it never exports or changes pointers."""
+    if lane_count <= 0:
+        raise ValueError("lane_count must be positive")
     object_client, bucket = _structure_object_client()
-    return TransactionalStructureWorker(
-        control_plane=control_plane,
-        object_client=object_client,
-        bucket=bucket,
-        worker_id=worker_id,
-        now=lambda: datetime.now(UTC),
-        crash_after_r2_upload=crash_after_r2_upload,
-        retry_fault_before_receipt=retry_fault_before_receipt,
-        acceptance_run_id=acceptance_run_id,
+    lanes = tuple(
+        TransactionalStructureWorker(
+            control_plane=control_plane,
+            object_client=object_client,
+            bucket=bucket,
+            worker_id=(worker_id if lane_count == 1 else f"{worker_id}:{ordinal}"),
+            now=lambda: datetime.now(UTC),
+            crash_after_r2_upload=crash_after_r2_upload,
+            retry_fault_before_receipt=retry_fault_before_receipt,
+            acceptance_run_id=acceptance_run_id,
+        )
+        for ordinal in range(lane_count)
     )
+    return lanes[0] if lane_count == 1 else TransactionalStructureRangePool(lanes=lanes)
 
 
 def _transactional_structure_source_worker(
@@ -1160,7 +1168,7 @@ def _transactional_structure_source_materializer(
 def _transactional_structure_source_admitter(
     control_plane: PostgresControlPlane,
     *,
-    structure_high_water: int = 2_000,
+    structure_high_water: int = 1,
     quote_high_water: int = 512,
 ) -> TransactionalStructureSourceAdmitter:
     """Open cadence windows only inside the transactional worker service."""
@@ -1197,7 +1205,7 @@ def _transactional_scheduler(
     max_turns: int,
     structure_materializer_turns: int,
     structure_range_turns: int,
-    structure_high_water: int = 2_000,
+    structure_high_water: int = 1,
     quote_high_water: int = 512,
     include_structure_range: bool = True,
     include_quote_batch: bool = True,
@@ -2358,7 +2366,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     acceptance_run_id=args.acceptance_run_id,
                 )
             elif args.worker_role == "structure-range":
-                if args.structure_high_water != 2_000 or args.quote_high_water != 512:
+                if args.structure_high_water != 1 or args.quote_high_water != 512:
                     print(
                         "pool roles cannot configure source admission high-water bounds",
                         file=sys.stderr,
@@ -2372,11 +2380,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                         crash_after_r2_upload=crash_after_r2_upload,
                         retry_fault_before_receipt=retry_fault_before_receipt,
                         acceptance_run_id=args.acceptance_run_id,
+                        lane_count=Settings().structure_range_max_concurrency,
                     ),
                     turns_per_tick=args.pool_turns,
                 )
             else:
-                if args.structure_high_water != 2_000 or args.quote_high_water != 512:
+                if args.structure_high_water != 1 or args.quote_high_water != 512:
                     print(
                         "pool roles cannot configure source admission high-water bounds",
                         file=sys.stderr,

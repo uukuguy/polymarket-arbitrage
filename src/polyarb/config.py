@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     # client chunks and transactional quote-batch lease lanes; it remains
     # separate from the global request-rate limiter above.
     clob_batch_max_concurrency: int = Field(default=12, ge=1, le=32)
+    # A production generation currently contains roughly 1,100 immutable
+    # ranges. One lane cannot drain that work inside the 15-minute Structure
+    # freshness contract, so the dedicated range role owns an explicit,
+    # bounded pool with one fenced lease per lane.
+    structure_range_max_concurrency: int = Field(default=12, ge=1, le=32)
 
     # 2026-05-20 (Inj 2 P0 fix): scheduler tick interval, was hardcoded 3600
     # via getattr fallback. Now explicit + env-var configurable so chaos

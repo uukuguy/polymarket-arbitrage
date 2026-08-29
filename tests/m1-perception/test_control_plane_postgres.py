@@ -1232,7 +1232,6 @@ def test_due_source_admission_backpressures_before_window_insert_when_range_queu
     decision = control_plane.admit_due_structure_source_window(
         cadence_seconds=300,
         now=now,
-        structure_high_water=1,
         quote_high_water=10,
     )
 

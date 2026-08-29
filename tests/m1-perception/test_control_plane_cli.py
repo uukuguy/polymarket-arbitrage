@@ -346,7 +346,7 @@ def test_control_plane_serve_builds_one_scheduler_service(monkeypatch, capsys) -
         "max_turns": 2,
         "structure_materializer_turns": 8,
         "structure_range_turns": 8,
-        "structure_high_water": 2_000,
+        "structure_high_water": 1,
         "quote_high_water": 512,
         "include_structure_range": True,
         "include_quote_batch": True,
@@ -429,6 +429,54 @@ def test_quote_role_derives_lane_count_from_the_clob_concurrency_bound(
     assert captured["loop"] == {
         "worker_name": "quote-batch",
         "worker": batch_pool,
+        "turns_per_tick": 1,
+    }
+
+
+def test_structure_role_derives_lane_count_from_the_structure_concurrency_bound(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    scheduler = object()
+    captured: dict[str, object] = {}
+    range_pool = object()
+
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: object())
+    monkeypatch.setattr(
+        cli_control_plane,
+        "Settings",
+        lambda: type("Settings", (), {"structure_range_max_concurrency": 7})(),
+    )
+
+    def structure_worker(_control_plane, **kwargs):
+        captured.update(kwargs)
+        return range_pool
+
+    monkeypatch.setattr(cli_control_plane, "_transactional_structure_worker", structure_worker)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "TransactionalWorkerLoop",
+        lambda **kwargs: captured.update(loop=kwargs) or scheduler,
+    )
+
+    async def run_service(actual_scheduler, **_kwargs):
+        assert actual_scheduler is scheduler
+        return {"status": "stopped", "ticks": 1}
+
+    monkeypatch.setattr(cli_control_plane, "_run_scheduler_service", run_service)
+
+    assert (
+        cli_control_plane.main(
+            ["serve", "--enable", "--worker-role", "structure-range", "--json"]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {"status": "stopped", "ticks": 1}
+    assert captured["lane_count"] == 7
+    assert captured["loop"] == {
+        "worker_name": "structure-range",
+        "worker": range_pool,
         "turns_per_tick": 1,
     }
 
@@ -2020,6 +2068,42 @@ def test_quote_factory_builds_distinct_lanes_from_the_existing_clob_bound(
     ]
     assert len({id(lane["reader"]) for lane in captured}) == 1
     assert len({id(lane["object_client"]) for lane in captured}) == 1
+
+
+def test_structure_factory_builds_distinct_fenced_lanes_with_one_object_client(
+    monkeypatch,
+) -> None:
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.postgres import PostgresControlPlane
+
+    captured: list[dict[str, object]] = []
+    object_client = object()
+
+    class Worker:
+        _lease_seconds = 120
+
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs)
+
+    monkeypatch.setattr(cli_control_plane, "TransactionalStructureWorker", Worker)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "_structure_object_client",
+        lambda: (object_client, "structure-bucket"),
+    )
+
+    range_pool = cli_control_plane._transactional_structure_worker(
+        cast(PostgresControlPlane, object()),
+        worker_id="structure-worker",
+        lane_count=4,
+    )
+
+    assert type(range_pool).__name__ == "TransactionalStructureRangePool"
+    assert [lane["worker_id"] for lane in captured] == [
+        f"structure-worker:{ordinal}" for ordinal in range(4)
+    ]
+    assert {id(lane["object_client"]) for lane in captured} == {id(object_client)}
+    assert {lane["bucket"] for lane in captured} == {"structure-bucket"}
 
 
 def test_watchdog_reads_restart_details_in_one_parallel_round_per_app(monkeypatch) -> None:

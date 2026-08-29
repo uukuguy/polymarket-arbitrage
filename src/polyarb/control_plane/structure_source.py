@@ -961,7 +961,7 @@ class TransactionalStructureSourceAdmitter:
         *,
         control_plane: PostgresControlPlane,
         cadence_seconds: int,
-        structure_high_water: int = 2_000,
+        structure_high_water: int = 1,
         quote_high_water: int = 512,
         now: Callable[[], datetime],
     ) -> None:

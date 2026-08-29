@@ -1530,7 +1530,7 @@ class PostgresControlPlane:
         *,
         cadence_seconds: int,
         now: datetime,
-        structure_high_water: int = 2_000,
+        structure_high_water: int = 1,
         quote_high_water: int = 512,
     ) -> SourceAdmissionDecision:
         """Admit one deterministic current window unless a source traversal is active.

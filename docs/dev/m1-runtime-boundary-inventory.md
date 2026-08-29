@@ -98,7 +98,12 @@ structure-fetch -> structure-materialize -> structure-normalize
   repairs at most one historically ready `waiting` row from the same durable
   facts before claiming work.
 - Same-name lanes are serial; sibling job-type lanes are independent. One lane
-  failure cannot cancel siblings.
+  failure cannot cancel siblings. Dedicated Quote and Structure-range roles
+  execute bounded pools of independently fenced lanes; `pool-turns` counts
+  waves and is not a concurrency control.
+- Structure source admission stops while even one `structure-normalize` job is
+  unfinished. Queue depth may not admit a second generation whose projected
+  completion would violate the 15-minute publication freshness contract.
 - A pooled worker must expose the single positive lease shared by its lanes;
   terminal grace is derived from that lease's runtime policy, never copied to
   the pool as another constant.
@@ -137,6 +142,7 @@ structure-fetch -> structure-materialize -> structure-normalize
 | Cadence reused time measured before observer callback | slow observers added the same wait twice and reduced progress | recompute monotonic remainder after callback |
 | Async workers claimed synchronously on the event loop | live 8-lane source plus materializer turns starved a healthy 0.164-second Gamma read until the 29-second worker-I/O timer won | route all five async claim sites through the cancellable blocking bridge; static audit forbids regression |
 | Quote capacity was a serial turn count | 148 batches required about 28 minutes and contradicted the 900-second freshness gate | independently fenced lanes derive capacity from the existing CLOB concurrency authority; lane failures remain local |
+| Structure capacity was also a serial turn count while admission tolerated 2,000 unfinished ranges | one 1,115-range generation projected to about 136 minutes and a second generation entered behind it, contradicting the same 900-second freshness gate | a 12-lane independently fenced range pool owns execution capacity; the default Structure high-water is one unfinished range, so generations cannot overlap |
 | Concurrent final receipts could both decline a wakeup | every producer was terminal while its certifier remained waiting forever | terminal transition precedes one wake; sibling checks serialize on the certifier row; bounded claim-time repair closes historical gaps |
 | Receipt count stood in for producer success | a checkpointed producer could make an incomplete generation claimable | eligibility joins each receipt to a `succeeded` producer job |
 | Structure source pool hid its lanes' lease policy | SIGTERM drain could not resolve terminal grace and exited the coordinator with `ValueError` | validate one common lane lease and expose it on the pool, matching the Quote pool contract |

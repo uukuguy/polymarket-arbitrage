@@ -2477,3 +2477,20 @@ success is not user receipt/read evidence.
 - General health tests now inject stable headroom. The dedicated volume test
   alone injects 25/19/9 percent and continues to prove production thresholds.
   A dynamic host resource must never become an undeclared test-order input.
+
+### §2.72 Recoverable work still needs capacity and generational backpressure (2026-08-29)
+
+- Production measured one Structure range lane at 41 completions per five
+  minutes and 123 per fifteen minutes. A 1,115-range generation therefore
+  projected to roughly 136 minutes against the 900-second publication
+  freshness gate. Lease renewal and checkpoint recovery were correct but could
+  not repair this throughput contradiction.
+- The old 2,000-job admission high-water allowed a second generation behind an
+  unfinished 1,115-range generation. Queue size was being used as a proxy for
+  generation eligibility, so a healthy producer could continuously create
+  stale work.
+- Structure range execution now derives 12 independently fenced lanes from one
+  bounded Settings authority: ten are the measured minimum
+  `ceil(136 / 15)`, two are capacity headroom. Source admission independently
+  defaults to one unfinished range, preventing generation overlap. Neither
+  authority changes attempt deadlines, freshness, artifacts or pointers.

@@ -35,7 +35,7 @@
 - Produces: `TransactionalStructureRangePool(lanes: Sequence[_StructureRangeLane])` with `_lease_seconds` and `async run_once() -> StructureWorkerResult`.
 - Changes: `_transactional_structure_worker(..., lane_count: int = 1) -> TransactionalStructureWorker | TransactionalStructureRangePool`.
 
-- [ ] **Step 1: Write the failing pool behavior tests**
+- [x] **Step 1: Write the failing pool behavior tests**
 
 ```python
 async def test_structure_range_pool_runs_independent_lanes_concurrently():
@@ -53,7 +53,7 @@ Add CLI construction assertions that `Settings().structure_range_max_concurrency
 lanes are created with IDs ending `:0` through `:11`, and deployment config
 continues to expose only one `structure_range` process group.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -66,7 +66,7 @@ uv run pytest -q \
 
 Expected: imports/construction fail because the Settings field and pool do not exist.
 
-- [ ] **Step 3: Implement the minimal pool and CLI wiring**
+- [x] **Step 3: Implement the minimal pool and CLI wiring**
 
 ```python
 structure_range_max_concurrency: int = Field(default=12, ge=1, le=32)
@@ -86,7 +86,7 @@ class TransactionalStructureRangePool:
 Build lanes over one existing object client/control-plane instance. Do not add
 an executor, semaphore, heartbeat, timeout or retry at pool level.
 
-- [ ] **Step 4: Run GREEN and static checks**
+- [x] **Step 4: Run GREEN and static checks**
 
 Run the RED command, then:
 
@@ -118,7 +118,7 @@ Expected: all pass with zero Ruff/Pyright findings.
 - `SourceAdmissionDecision(state="backpressured:structure", job_key=None)` is
   returned whenever at least one Structure range is unfinished.
 
-- [ ] **Step 1: Write the failing admission tests**
+- [x] **Step 1: Write the failing admission tests**
 
 ```python
 def test_default_admission_blocks_on_one_unfinished_structure_range(control_plane):
@@ -134,7 +134,7 @@ def test_default_admission_blocks_on_one_unfinished_structure_range(control_plan
 Assert the CLI scheduler forwards `structure_high_water=1` and the Quote
 high-water remains 512.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -147,13 +147,13 @@ uv run pytest -q \
 
 Expected: the one range is admitted under the old 2,000-job default.
 
-- [ ] **Step 3: Change only the shared defaults and callers**
+- [x] **Step 3: Change only the shared defaults and callers**
 
 Replace the three default boundaries with `structure_high_water: int = 1` and
 update CLI assertions/help. Keep explicit test overrides working and do not
 change `quote_high_water`.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run the RED command plus the complete source, scheduler and PostgreSQL
 admission groups. Expected: all pass; explicit high-water tests retain their

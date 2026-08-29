@@ -64,6 +64,51 @@ class StructureWorkerResult:
     outcome: str
 
 
+class _StructureRangeLane(Protocol):
+    _lease_seconds: int
+
+    async def run_once(self) -> StructureWorkerResult: ...
+
+
+class TransactionalStructureRangePool:
+    """Run independently fenced Structure range leases concurrently."""
+
+    def __init__(self, *, lanes: Sequence[_StructureRangeLane]) -> None:
+        if not lanes:
+            raise ValueError("lanes must be non-empty")
+        lease_seconds = {lane._lease_seconds for lane in lanes}
+        if len(lease_seconds) != 1 or next(iter(lease_seconds)) <= 0:
+            raise ValueError("structure range lanes must share one positive lease policy")
+        self._lanes = tuple(lanes)
+        self._lease_seconds = next(iter(lease_seconds))
+
+    async def run_once(self) -> StructureWorkerResult:
+        """Drain every sibling lane before exposing an aggregate turn."""
+        results = await asyncio.gather(
+            *(lane.run_once() for lane in self._lanes), return_exceptions=True
+        )
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            raise errors[0]
+        completed = [
+            result
+            for result in results
+            if isinstance(result, StructureWorkerResult) and result.job_key is not None
+        ]
+        if not completed:
+            return StructureWorkerResult(job_key=None, outcome="idle")
+        keys = sorted(str(result.job_key) for result in completed)
+        succeeded = sum(
+            result.outcome.startswith(("succeeded", "recovered")) for result in completed
+        )
+        outcome = (
+            f"succeeded:{succeeded}/{len(self._lanes)}"
+            if succeeded == len(completed)
+            else f"mixed:{succeeded}/{len(completed)}"
+        )
+        return StructureWorkerResult(job_key=",".join(keys), outcome=outcome)
+
+
 async def _to_thread(call: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """Run nonterminal blocking work under the shared service boundary."""
     return await run_blocking_call(

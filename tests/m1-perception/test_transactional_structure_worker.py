@@ -31,11 +31,106 @@ from polyarb.control_plane.structure_artifact import (
 )
 from polyarb.control_plane.structure_worker import (
     StructureWorkerError,
+    StructureWorkerResult,
     TransactionalStructureCertifier,
+    TransactionalStructureRangePool,
     TransactionalStructureWorker,
 )
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+class _RangePoolLane:
+    def __init__(
+        self,
+        *,
+        ordinal: int,
+        entered: list[int],
+        release: asyncio.Event,
+        lease_seconds: int = 120,
+        error: BaseException | None = None,
+    ) -> None:
+        self._ordinal = ordinal
+        self._entered = entered
+        self._release = release
+        self._lease_seconds = lease_seconds
+        self._error = error
+
+    async def run_once(self) -> StructureWorkerResult:
+        self._entered.append(self._ordinal)
+        await self._release.wait()
+        if self._error is not None:
+            raise self._error
+        return StructureWorkerResult(
+            job_key=f"structure:generation:range:{self._ordinal}",
+            outcome="succeeded",
+        )
+
+
+def test_structure_range_pool_runs_all_lanes_concurrently_and_aggregates() -> None:
+    async def exercise() -> None:
+        entered: list[int] = []
+        release = asyncio.Event()
+        pool = TransactionalStructureRangePool(
+            lanes=tuple(
+                _RangePoolLane(ordinal=index, entered=entered, release=release)
+                for index in range(12)
+            )
+        )
+
+        turn = asyncio.create_task(pool.run_once())
+        for _ in range(100):
+            if len(entered) == 12:
+                break
+            await asyncio.sleep(0)
+        assert sorted(entered) == list(range(12))
+        release.set()
+
+        result = await turn
+        assert result.outcome == "succeeded:12/12"
+        assert result.job_key is not None
+        assert len(result.job_key.split(",")) == 12
+
+    asyncio.run(exercise())
+
+
+def test_structure_range_pool_rejects_mixed_lease_policies() -> None:
+    release = asyncio.Event()
+    with pytest.raises(ValueError, match="share one positive lease policy"):
+        TransactionalStructureRangePool(
+            lanes=(
+                _RangePoolLane(ordinal=0, entered=[], release=release, lease_seconds=120),
+                _RangePoolLane(ordinal=1, entered=[], release=release, lease_seconds=90),
+            )
+        )
+
+
+def test_structure_range_pool_drains_siblings_before_raising() -> None:
+    async def exercise() -> None:
+        entered: list[int] = []
+        release = asyncio.Event()
+        pool = TransactionalStructureRangePool(
+            lanes=(
+                _RangePoolLane(
+                    ordinal=0,
+                    entered=entered,
+                    release=release,
+                    error=RuntimeError("lane failed"),
+                ),
+                _RangePoolLane(ordinal=1, entered=entered, release=release),
+            )
+        )
+        turn = asyncio.create_task(pool.run_once())
+        for _ in range(100):
+            if len(entered) == 2:
+                break
+            await asyncio.sleep(0)
+        assert sorted(entered) == [0, 1]
+        release.set()
+        with pytest.raises(RuntimeError, match="lane failed"):
+            await turn
+
+    asyncio.run(exercise())
 
 
 def test_structure_bounded_sync_call_checks_heartbeat_after_fast_success() -> None:

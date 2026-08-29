@@ -475,7 +475,7 @@ def test_source_pool_rejects_heterogeneous_lane_lease_policies() -> None:
 def test_source_admitter_creates_one_current_window_and_never_overlaps() -> None:
     class ControlPlane:
         def __init__(self) -> None:
-            self.calls: list[tuple[int, datetime]] = []
+            self.calls: list[tuple[int, int, int, datetime]] = []
 
         def admit_due_structure_source_window(
             self,
@@ -485,7 +485,9 @@ def test_source_admitter_creates_one_current_window_and_never_overlaps() -> None
             quote_high_water: int,
             now: datetime,
         ):
-            self.calls.append((cadence_seconds, now))
+            self.calls.append(
+                (cadence_seconds, structure_high_water, quote_high_water, now)
+            )
             if len(self.calls) == 1:
                 return SourceAdmissionDecision(
                     state="admitted",
@@ -494,14 +496,16 @@ def test_source_admitter_creates_one_current_window_and_never_overlaps() -> None
             return SourceAdmissionDecision(state="busy", job_key=None)
 
     now = datetime(2026, 8, 12, tzinfo=UTC)
+    control_plane = ControlPlane()
     worker = TransactionalStructureSourceAdmitter(
-        control_plane=ControlPlane(), cadence_seconds=300, now=lambda: now
+        control_plane=control_plane, cadence_seconds=300, now=lambda: now
     )
 
     assert asyncio.run(worker.run_once()) == StructureWorkerResult(
         job_key="structure-source:123:fetch:events:0", outcome="admitted"
     )
     assert asyncio.run(worker.run_once()) == StructureWorkerResult(job_key=None, outcome="busy")
+    assert control_plane.calls[0][1:3] == (1, 512)
 
 
 def test_source_admitter_returns_quote_backpressure_without_claiming_gamma_work() -> None:
