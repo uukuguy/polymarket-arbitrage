@@ -163,7 +163,7 @@
 - Create: `.planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/05.6-212-SUMMARY.md`
 - Create: `.planning/workstreams/m1-perception/phases/05.6-self-healing-structure-production/evidence/attempt-lifecycle-recovery-audit.json`
 - Modify: `docs/learning/00-INDEX.md`
-- Create: `docs/learning/93-任务生命周期与恢复回合.md`
+- Modify: `docs/learning/95-超时任务序列与可恢复性审计.md`
 - Modify: `.planning/threads/market-observation-architecture.md`
 - Modify: `.planning/workstreams/m1-perception/STATE.md`
 - Modify: `.planning/JOURNAL.md`
@@ -229,6 +229,36 @@
   and require the source page's terminal receipt before rolling sibling roles.
 - [ ] Update the inventory, teaching/evidence and `05.6-212-SUMMARY.md`, then
   commit only owned files with scope `fix(05.6-212)`.
+
+### Task 8: Separate Quote pool capacity from serial scheduling turns
+
+**Files:**
+
+- Modify: `src/polyarb/control_plane/quote_worker.py`
+- Modify: `src/polyarb/control_plane/worker_loop.py`
+- Modify: `src/polyarb/cli_control_plane.py`
+- Modify: `src/polyarb/config.py`
+- Modify: `tests/m1-perception/test_transactional_quote_worker.py`
+- Modify: `tests/m1-perception/test_transactional_control_plane_scheduler.py`
+- Modify: `tests/m1-perception/test_control_plane_cli.py`
+
+**Interfaces:**
+
+- Produces `TransactionalQuoteBatchPool`, whose independently identified lanes
+  share the existing `clob_batch_max_concurrency` resource authority.
+- `pool-turns` remains a serial wave budget; it is not redefined as concurrency.
+
+- [x] Reproduce the production capacity contradiction from 148 batches at
+  roughly 11–12 seconds each versus the 900-second freshness gate.
+- [x] Write RED tests for simultaneous lane entry, sibling drain on failure,
+  role-service continuity and all-lane SIGTERM cancellation.
+- [x] Build distinct lease lanes around the shared bounded CLOB/R2 clients and
+  derive their count from `clob_batch_max_concurrency`.
+- [x] Keep single-lane failures local to the role loop instead of terminating
+  the Machine; preserve intentional `BaseException` crash injection semantics.
+- [x] Run focused suites, Ruff and modified-file Pyright.
+- [ ] Build and roll the exact release, prove backlog drain inside 900 seconds,
+  then restart the release-bound qualification epoch.
 
 ## Self-review
 

@@ -43,6 +43,16 @@ class TransactionalWorkerLoop:
             result = await run_worker(self._worker)
         except StaleLeaseError:
             return {"worker": self._worker_name, "job_key": None, "outcome": "stale-lease"}
+        except Exception as error:
+            # The worker owns its durable retry/incident transition. A single
+            # provider or batch failure must not terminate the role service and
+            # strand every unrelated queued lease behind a Machine restart.
+            return {
+                "worker": self._worker_name,
+                "job_key": None,
+                "outcome": "failed",
+                "error_class": type(error).__name__,
+            }
         return {
             "worker": self._worker_name,
             "job_key": result.job_key,

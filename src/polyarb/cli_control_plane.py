@@ -55,6 +55,7 @@ from polyarb.control_plane.qualification_service import (
 )
 from polyarb.control_plane.quote_admission import TransactionalQuoteAdmitter
 from polyarb.control_plane.quote_worker import (
+    TransactionalQuoteBatchPool,
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
 )
@@ -1037,8 +1038,14 @@ def _transactional_quote_workers(
     crash_after_r2_upload: Callable[[JobLease], None] | None = None,
     retry_fault_before_receipt: Callable[[JobLease], None] | None = None,
     acceptance_run_id: str | None = None,
-) -> tuple[TransactionalQuoteBatchWorker, TransactionalQuoteCertifier]:
+    lane_count: int = 1,
+) -> tuple[
+    TransactionalQuoteBatchWorker | TransactionalQuoteBatchPool,
+    TransactionalQuoteCertifier,
+]:
     """Build explicitly invoked workers; nothing schedules these by default."""
+    if lane_count <= 0:
+        raise ValueError("lane_count must be positive")
     provider_policy = runtime_policy("quote-batch", 120)
     settings = Settings().model_copy(
         update={"http_timeout_s": provider_policy.provider_timeout_seconds}
@@ -1051,18 +1058,26 @@ def _transactional_quote_workers(
         settings.r2_secret_access_key.get_secret_value(),
         config=control_plane_r2_config(provider_policy.provider_timeout_seconds),
     )
-    return (
+    reader = cast(Any, ClobReaderClient(settings))
+    lanes = tuple(
         TransactionalQuoteBatchWorker(
             control_plane=control_plane,
-            reader=cast(Any, ClobReaderClient(settings)),
+            reader=reader,
             object_client=cast(Any, object_client),
             bucket=settings.r2_bucket,
-            worker_id=worker_id,
+            worker_id=(worker_id if lane_count == 1 else f"{worker_id}:{ordinal}"),
             now=lambda: datetime.now(UTC),
             crash_after_r2_upload=crash_after_r2_upload,
             retry_fault_before_receipt=retry_fault_before_receipt,
             acceptance_run_id=acceptance_run_id,
-        ),
+        )
+        for ordinal in range(lane_count)
+    )
+    batch_worker: TransactionalQuoteBatchWorker | TransactionalQuoteBatchPool = (
+        lanes[0] if lane_count == 1 else TransactionalQuoteBatchPool(lanes=lanes)
+    )
+    return (
+        batch_worker,
         TransactionalQuoteCertifier(
             control_plane=control_plane,
             worker_id=f"{worker_id}:certifier",
@@ -2373,6 +2388,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     crash_after_r2_upload=crash_after_r2_upload,
                     retry_fault_before_receipt=retry_fault_before_receipt,
                     acceptance_run_id=args.acceptance_run_id,
+                    lane_count=Settings().clob_batch_max_concurrency,
                 )
                 scheduler = TransactionalWorkerLoop(
                     worker_name="quote-batch",

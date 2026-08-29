@@ -421,6 +421,44 @@ def test_role_loop_records_stale_lease_without_stopping_its_tick() -> None:
     }
 
 
+def test_role_loop_records_retryable_lane_failure_without_stopping_service() -> None:
+    from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
+
+    class _RetryableWorker:
+        _lease_seconds = 30
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run_once(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError("provider unavailable")
+            return type("Result", (), {"job_key": "quote:next", "outcome": "succeeded"})()
+
+    worker = _RetryableWorker()
+    loop = TransactionalWorkerLoop(
+        worker_name="quote-batch", worker=worker, turns_per_tick=2
+    )
+
+    assert asyncio.run(loop.run_tick()) == {
+        "status": "ok",
+        "turns": [
+            {
+                "worker": "quote-batch",
+                "job_key": None,
+                "outcome": "failed",
+                "error_class": "TimeoutError",
+            },
+            {
+                "worker": "quote-batch",
+                "job_key": "quote:next",
+                "outcome": "succeeded",
+            },
+        ],
+    }
+
+
 def test_role_service_cancels_current_async_attempt_when_stop_is_requested() -> None:
     from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
 
@@ -453,6 +491,50 @@ def test_role_service_cancels_current_async_attempt_when_stop_is_requested() -> 
         stop_event.set()
         result = await service
         assert finalized.is_set()
+        return result
+
+    assert asyncio.run(run()) == {"status": "stopped", "ticks": 0}
+
+
+def test_quote_pool_service_stop_cancels_and_drains_every_active_lane() -> None:
+    from polyarb.control_plane.quote_worker import TransactionalQuoteBatchPool
+    from polyarb.control_plane.worker_loop import TransactionalWorkerLoop
+
+    started = [asyncio.Event() for _ in range(4)]
+    interrupted = [asyncio.Event() for _ in range(4)]
+    stop_event = asyncio.Event()
+
+    class _InterruptibleLane:
+        _lease_seconds = 30
+
+        def __init__(self, ordinal: int) -> None:
+            self._ordinal = ordinal
+
+        async def run_once(self):
+            started[self._ordinal].set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Production lanes write finish_interrupted here before
+                # re-raising; the event is the deterministic test surrogate.
+                interrupted[self._ordinal].set()
+                raise
+
+    pool = TransactionalQuoteBatchPool(
+        lanes=tuple(_InterruptibleLane(ordinal) for ordinal in range(4))
+    )
+    loop = TransactionalWorkerLoop(
+        worker_name="quote-batch", worker=pool, turns_per_tick=1
+    )
+
+    async def run() -> dict[str, object]:
+        service = asyncio.create_task(
+            loop.run_until_stopped(stop_event=stop_event, interval_seconds=60)
+        )
+        await asyncio.gather(*(event.wait() for event in started))
+        stop_event.set()
+        result = await service
+        assert all(event.is_set() for event in interrupted)
         return result
 
     assert asyncio.run(run()) == {"status": "stopped", "ticks": 0}

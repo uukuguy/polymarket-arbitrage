@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import asdict, dataclass
@@ -186,6 +186,62 @@ def _runtime_sync_call(
 class QuoteBatchWorkerResult:
     job_key: str | None
     outcome: str
+
+
+class _QuoteBatchLane(Protocol):
+    _lease_seconds: int
+
+    async def run_once(self) -> QuoteBatchWorkerResult: ...
+
+
+class TransactionalQuoteBatchPool:
+    """Run independently fenced Quote leases up to the existing CLOB bound."""
+
+    def __init__(self, *, lanes: Sequence[_QuoteBatchLane]) -> None:
+        if not lanes:
+            raise ValueError("lanes must be non-empty")
+        lease_seconds = {lane._lease_seconds for lane in lanes}
+        if len(lease_seconds) != 1 or next(iter(lease_seconds)) <= 0:
+            raise ValueError("quote batch lanes must share one positive lease policy")
+        self._lanes = tuple(lanes)
+        self._lease_seconds = next(iter(lease_seconds))
+
+    async def run_once(self) -> QuoteBatchWorkerResult:
+        """Wait for every sibling lane before exposing one aggregate turn."""
+        results = await asyncio.gather(
+            *(lane.run_once() for lane in self._lanes), return_exceptions=True
+        )
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            raise errors[0]
+        completed = [
+            result
+            for result in results
+            if isinstance(result, QuoteBatchWorkerResult) and result.job_key is not None
+        ]
+        if not completed:
+            return QuoteBatchWorkerResult(job_key=None, outcome="idle")
+        keys = sorted(str(result.job_key) for result in completed)
+        succeeded = sum(
+            result.outcome.startswith(("succeeded", "recovered")) for result in completed
+        )
+        outcome = (
+            f"succeeded:{succeeded}/{len(self._lanes)}"
+            if succeeded == len(completed)
+            else f"mixed:{succeeded}/{len(completed)}"
+        )
+        return QuoteBatchWorkerResult(job_key=",".join(keys), outcome=outcome)
+
+    async def aclose(self) -> None:
+        closers: list[Awaitable[Any]] = []
+        for lane in self._lanes:
+            closer = getattr(lane, "aclose", None)
+            if closer is not None:
+                result = closer()
+                if isinstance(result, Awaitable):
+                    closers.append(result)
+        if closers:
+            await asyncio.gather(*closers)
 
 
 class TransactionalQuoteBatchWorker:

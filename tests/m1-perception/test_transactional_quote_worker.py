@@ -16,12 +16,70 @@ from polyarb.control_plane.models import (
 from polyarb.control_plane.postgres import IncompleteQuoteGenerationError, StaleLeaseError
 from polyarb.control_plane.quote_artifact import QuoteBatchInputArtifact
 from polyarb.control_plane.quote_worker import (
+    QuoteBatchWorkerResult,
+    TransactionalQuoteBatchPool,
     TransactionalQuoteBatchWorker,
     TransactionalQuoteCertifier,
 )
 from polyarb.control_plane.runtime_contract import ServiceStopRequested
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+class _DelayedQuoteLane:
+    _lease_seconds = 120
+
+    def __init__(self, job_key: str | None, *, failure: BaseException | None = None) -> None:
+        self.job_key = job_key
+        self.failure = failure
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def run_once(self):
+        self.started.set()
+        await self.release.wait()
+        if self.failure is not None:
+            raise self.failure
+        return QuoteBatchWorkerResult(
+            job_key=self.job_key,
+            outcome="idle" if self.job_key is None else "succeeded",
+        )
+
+
+def test_quote_batch_pool_runs_distinct_lease_lanes_concurrently() -> None:
+    lanes = tuple(_DelayedQuoteLane(f"quote:batch:{ordinal}") for ordinal in range(4))
+
+    async def run():
+        task = asyncio.create_task(TransactionalQuoteBatchPool(lanes=lanes).run_once())
+        await asyncio.gather(*(lane.started.wait() for lane in lanes))
+        assert not task.done()
+        for lane in lanes:
+            lane.release.set()
+        return await task
+
+    result = asyncio.run(run())
+
+    assert result.job_key == ",".join(f"quote:batch:{ordinal}" for ordinal in range(4))
+    assert result.outcome == "succeeded:4/4"
+
+
+def test_quote_batch_pool_drains_healthy_siblings_before_propagating_failure() -> None:
+    failing = _DelayedQuoteLane(None, failure=TimeoutError("CLOB unavailable"))
+    healthy = _DelayedQuoteLane("quote:batch:healthy")
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            TransactionalQuoteBatchPool(lanes=(failing, healthy)).run_once()
+        )
+        await asyncio.gather(failing.started.wait(), healthy.started.wait())
+        failing.release.set()
+        await asyncio.sleep(0)
+        assert not task.done()
+        healthy.release.set()
+        await task
+
+    with pytest.raises(TimeoutError, match="CLOB unavailable"):
+        asyncio.run(run())
 
 
 class FakeControlPlane:

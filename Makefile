@@ -869,7 +869,7 @@ control-plane-serve-structure-range:
 	if [ -z "$$POLYARB_SUPABASE_DB_DSN" ]; then echo "ERROR: POLYARB_SUPABASE_DB_DSN is required" >&2; exit 2; fi; \
 	uv run python -m polyarb.cli_control_plane serve --enable --worker-id "$(or $(worker_id),control-plane-structure-range)" --worker-role structure-range --pool-turns "$(or $(pool_turns),2)" --interval-seconds "$(or $(interval_seconds),2)" --json
 
-## control-plane-serve-quote-batch: Run only fenced Quote batch jobs; scale this process group for backlog recovery.
+## control-plane-serve-quote-batch: Run fenced Quote batches with lease lanes bounded by POLYARB_CLOB_BATCH_MAX_CONCURRENCY.
 control-plane-serve-quote-batch:
 	@test "$(enable)" = "1" || (echo "usage: make control-plane-serve-quote-batch enable=1 [interval_seconds=2] [pool_turns=2]" >&2; exit 2)
 	@set -a; [ -f .env ] && . ./.env; set +a; \

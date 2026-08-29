@@ -2339,3 +2339,62 @@ success is not user receipt/read evidence.
   remaining action counts and all job deadlines. Historical observe payloads
   are translated only during replay; stale timestamps on a closed circuit are
   ignored because state gates interpretation.
+
+### §2.62 Async ownership begins before the first await (2026-08-29)
+
+- An `async run_once()` is not non-blocking by declaration. Production's eight
+  Structure source lanes and eight materializer turns each performed a
+  synchronous PostgreSQL claim before reaching their first await. Individually,
+  eight claim-shaped reads completed in 2.292 seconds; combined on one shared
+  event loop under live contention, they delayed provider futures and even the
+  provider timer until a later 29-second worker boundary fired.
+- Every asynchronous transactional claim now crosses the shared cancellable
+  daemon bridge. No new claim timeout was added: connect, statement and lock
+  policy still own database I/O. A behavioral test blocks claim while requiring
+  an unrelated loop task to run, and a static test rejects direct `.claim_job()`
+  in all five audited async worker implementations.
+- The exact failed page returned 100 rows in 0.164 seconds in isolation and
+  succeeded after the revised coordinator was deployed. Healthy provider and
+  query timings therefore do not refute event-loop starvation; the scheduling
+  composition is itself part of the I/O boundary.
+
+### §2.63 Recovery budgets belong to immutable failure episodes (2026-08-29)
+
+- Failure fingerprints fixed circuit streak identity, but target-scoped action
+  budgets could still make a new defect inherit an old exhausted balance.
+  Revision 035 adds an immutable episode key: exact attempt ID for job recovery
+  and exact failure fingerprint for circuit recovery. Legacy rows remain under
+  `legacy` and are never refilled or erased.
+- Live projection, observe replay, scheduling, action detail, budget lock and
+  consumption all carry the same episode identity. A real PostgreSQL proof kept
+  the exhausted legacy row while two fingerprints for one target consumed
+  independent budgets. New root cause, new episode; same root cause, same cap.
+
+### §2.64 Deployment app identity is part of the recovery capability (2026-08-29)
+
+- A v7 one-shot launched in the control-worker app inherited the wrong scoped
+  connection and failed closed on `session_user=postgres`; it performed no
+  mutation. The same image launched in the runtime-controller app inherited
+  the intended recovery login and completed the exact circuit action.
+- Image digest alone does not identify authority. A production one-shot must
+  bind app, scoped secret provenance, runtime role, exact target/type/action,
+  restart=no and auto-destroy. The resident controller remains observe-only
+  with an empty allowlist; temporary execute authority exists only in the
+  isolated exact-action Machine.
+
+### §2.65 Pool capacity and scheduling turns are separate authorities (2026-08-29)
+
+- Production proved that `pool-turns` was a serial turn budget, not execution
+  concurrency. At roughly 11–12 seconds per 500-token Quote job, one 148-job
+  generation took about 28 minutes and could not satisfy the 900-second
+  freshness gate regardless of attempt recovery correctness.
+- `TransactionalQuoteBatchPool` now owns independently fenced concurrent lanes.
+  The lane count reuses `clob_batch_max_concurrency`, the same bounded resource
+  authority as the shared CLOB reader; scheduler turns remain a separate count
+  of waves. Every lane receives a distinct worker ID while PostgreSQL lease
+  epoch remains the ownership fence.
+- A lane exception is already durably classified by that worker. The pool waits
+  for healthy siblings, then the role loop emits a bounded failure result and
+  continues. Service stop is intentionally different: cancellation reaches all
+  active lanes, each writes its own interruption transition, and the common
+  lease policy derives the terminal drain grace.

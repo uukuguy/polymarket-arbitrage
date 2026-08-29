@@ -385,6 +385,54 @@ def test_control_plane_serve_coordinator_excludes_dedicated_pool_workers(
     assert captured["include_quote_batch"] is False
 
 
+def test_quote_role_derives_lane_count_from_the_clob_concurrency_bound(
+    monkeypatch, capsys
+) -> None:
+    from polyarb import cli_control_plane
+
+    scheduler = object()
+    captured: dict[str, object] = {}
+    batch_pool = object()
+
+    monkeypatch.setattr(cli_control_plane, "_control_plane_from_env", lambda: object())
+    monkeypatch.setattr(
+        cli_control_plane,
+        "Settings",
+        lambda: type("Settings", (), {"clob_batch_max_concurrency": 7})(),
+    )
+
+    def quote_workers(_control_plane, **kwargs):
+        captured.update(kwargs)
+        return batch_pool, object()
+
+    monkeypatch.setattr(cli_control_plane, "_transactional_quote_workers", quote_workers)
+    monkeypatch.setattr(
+        cli_control_plane,
+        "TransactionalWorkerLoop",
+        lambda **kwargs: captured.update(loop=kwargs) or scheduler,
+    )
+
+    async def run_service(actual_scheduler, **_kwargs):
+        assert actual_scheduler is scheduler
+        return {"status": "stopped", "ticks": 1}
+
+    monkeypatch.setattr(cli_control_plane, "_run_scheduler_service", run_service)
+
+    assert (
+        cli_control_plane.main(
+            ["serve", "--enable", "--worker-role", "quote-batch", "--json"]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {"status": "stopped", "ticks": 1}
+    assert captured["lane_count"] == 7
+    assert captured["loop"] == {
+        "worker_name": "quote-batch",
+        "worker": batch_pool,
+        "turns_per_tick": 1,
+    }
+
+
 def test_r2_upload_fault_callback_requires_exact_acknowledgement_and_job_key() -> None:
     from polyarb import cli_control_plane
     from polyarb.control_plane.models import JobLease
@@ -1931,6 +1979,47 @@ def test_quote_factory_disables_hidden_r2_retries(monkeypatch, settings_for_test
         captured["config"].connect_timeout + captured["config"].read_timeout
         <= policy.provider_timeout_seconds
     )
+
+
+def test_quote_factory_builds_distinct_lanes_from_the_existing_clob_bound(
+    monkeypatch, settings_for_test_with_r2
+) -> None:
+    from polyarb import cli_control_plane
+    from polyarb.control_plane.postgres import PostgresControlPlane
+
+    captured: list[dict[str, object]] = []
+
+    class Worker:
+        _lease_seconds = 120
+
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs)
+
+    class Certifier:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    settings = settings_for_test_with_r2.model_copy(
+        update={"clob_batch_max_concurrency": 4}
+    )
+    monkeypatch.setattr(cli_control_plane, "Settings", lambda: settings)
+    monkeypatch.setattr(cli_control_plane, "_build_client", lambda *_a, **_k: object())
+    monkeypatch.setattr(cli_control_plane, "ClobReaderClient", lambda _settings: object())
+    monkeypatch.setattr(cli_control_plane, "TransactionalQuoteBatchWorker", Worker)
+    monkeypatch.setattr(cli_control_plane, "TransactionalQuoteCertifier", Certifier)
+
+    batch_pool, _certifier = cli_control_plane._transactional_quote_workers(
+        cast(PostgresControlPlane, object()),
+        worker_id="quote-worker",
+        lane_count=settings.clob_batch_max_concurrency,
+    )
+
+    assert type(batch_pool).__name__ == "TransactionalQuoteBatchPool"
+    assert [lane["worker_id"] for lane in captured] == [
+        f"quote-worker:{ordinal}" for ordinal in range(4)
+    ]
+    assert len({id(lane["reader"]) for lane in captured}) == 1
+    assert len({id(lane["object_client"]) for lane in captured}) == 1
 
 
 def test_watchdog_reads_restart_details_in_one_parallel_round_per_app(monkeypatch) -> None:
