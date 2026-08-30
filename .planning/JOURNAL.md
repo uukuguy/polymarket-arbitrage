@@ -12516,3 +12516,28 @@ rebuild.
 the seven-node stage-exact R2 write-timeout disposable contract as H-052, then
 run one combined exact-image rebuild only after both read and write families
 are confirmed.
+
+### SESSION 373 — 2026-08-30 (ambiguous R2 write timeout recovery)
+
+- [CLIMB H-052] Registered the seven-node R2 write timeout hypothesis.
+- [AMBIGUOUS COMMIT] The fault stores exact object bytes/SHA-256, then loses the
+  PUT response with botocore `ReadTimeoutError`; it does not assume timeout
+  means the provider rejected the write.
+- [NO FALSE RECEIPT] The failed epoch commits retryable runtime/incident facts
+  but no node business receipt, even while the immutable object is present.
+- [IDEMPOTENT RECOVERY] The central policy-due replacement retains the exact
+  input identity and HEAD-verifies key/SHA-256 before the fenced DB commit.
+  Assertions require one PUT total, not a blind second upload.
+- [SEVEN NODES] Structure fetch/materialize/normalize/certify, Quote
+  admit/batch, and Opportunity certify passed real PostgreSQL adapters and the
+  cleanup-safe isolated database harness.
+- [REGRESSION] All six H-051 read nodes remain green after sharing the
+  stage-exact timeout lifecycle.
+- [BOUNDARY] Local disposable PostgreSQL and in-memory object boundary only;
+  no production provider/DB, Fly/SSH/deploy, Docker build/context mutation,
+  Colima, canary or qualification operation occurred.
+
+[NEXT] Commit Plan 05.6-240 without protected user files, pass exact-HEAD and
+full related regression, then confirm H-052 through climb cycle 57. Only after
+that, perform one exact-image build-only verification for the combined read and
+write timeout families; do not deploy.

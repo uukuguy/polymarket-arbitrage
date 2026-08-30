@@ -63,6 +63,9 @@ class _DisposableObjectStore:
         self._objects: dict[str, tuple[bytes, dict[str, str]]] = {}
         self._read_timeout_keys: set[str] = set()
         self._read_counts: dict[str, int] = {}
+        self._write_response_timeout_keys: set[str] = set()
+        self._write_counts: dict[str, int] = {}
+        self._head_counts: dict[str, int] = {}
 
     def arm_read_timeout(self, key: str) -> None:
         if key not in self._objects:
@@ -71,6 +74,15 @@ class _DisposableObjectStore:
 
     def read_count(self, key: str) -> int:
         return self._read_counts.get(key, 0)
+
+    def arm_write_response_timeout(self, key: str) -> None:
+        self._write_response_timeout_keys.add(key)
+
+    def write_count(self, key: str) -> int:
+        return self._write_counts.get(key, 0)
+
+    def head_count(self, key: str) -> int:
+        return self._head_counts.get(key, 0)
 
     def restore(self, *, key: str, payload: bytes, digest: str) -> None:
         if sha256(payload).hexdigest() != digest:
@@ -94,6 +106,7 @@ class _DisposableObjectStore:
 
     def put_object(self, **kwargs: Any) -> None:
         key = str(kwargs["Key"])
+        self._write_counts[key] = self.write_count(key) + 1
         body = kwargs["Body"]
         metadata = kwargs.get("Metadata", {})
         if not isinstance(body, bytes) or not isinstance(metadata, dict):
@@ -102,9 +115,13 @@ class _DisposableObjectStore:
             body,
             {str(name): str(value) for name, value in metadata.items()},
         )
+        if key in self._write_response_timeout_keys:
+            self._write_response_timeout_keys.remove(key)
+            raise ReadTimeoutError(endpoint_url=f"https://r2.invalid/{key}")
 
     def head_object(self, **kwargs: Any) -> dict[str, object]:
         key = str(kwargs["Key"])
+        self._head_counts[key] = self.head_count(key) + 1
         try:
             payload, metadata = self._objects[key]
         except KeyError as error:
@@ -1760,7 +1777,10 @@ class RetryBudgetCommissioningAdapter:
 class R2ReadTimeoutCommissioningAdapter:
     """Fail one exact immutable GET, then retry the same node input durably."""
 
-    _READ_STAGES = {
+    _ATTACK_ID = "r2-read-timeout"
+    _DIRECTION = "read"
+    _OPERATION = "get"
+    _STAGES = {
         "structure-materialize": "read-page-receipts",
         "structure-normalize": "read-range",
         "structure-certify": "verify-parity",
@@ -1784,6 +1804,7 @@ class R2ReadTimeoutCommissioningAdapter:
         self._replacement: JobLease | None = None
         self._artifact_key: str | None = None
         self._artifact_digest: str | None = None
+        self._artifact_payload: bytes | None = None
         self._retry_due_at: datetime | None = None
         self._failure_event_id: str | None = None
         self._recovered_proof: dict[str, str] | None = None
@@ -1796,8 +1817,8 @@ class R2ReadTimeoutCommissioningAdapter:
 
     def _require_identity(self, identity: AttackIdentity) -> None:
         if (
-            identity.attack_id != "r2-read-timeout"
-            or identity.node_id not in self._READ_STAGES
+            identity.attack_id != self._ATTACK_ID
+            or identity.node_id not in self._STAGES
         ):
             raise DisposableCommissioningError("wrong-attack-adapter")
 
@@ -1808,17 +1829,18 @@ class R2ReadTimeoutCommissioningAdapter:
             node_id=identity.node_id,
             experiment_id=identity.experiment_id,
             now=self._started_at,
-            progress_through=self._READ_STAGES[identity.node_id],
+            progress_through=self._STAGES[identity.node_id],
         )
         payload = (
-            f"{identity.node_id}:{prepared.lease.input_identity}:immutable-r2-input\n"
+            f"{identity.node_id}:{prepared.lease.input_identity}:immutable-r2-{self._DIRECTION}\n"
         ).encode()
         digest = sha256(payload).hexdigest()
-        key = f"commissioning/r2-read/{digest}/artifact.bin"
-        self._objects.restore(key=key, payload=payload, digest=digest)
+        key = f"commissioning/r2-{self._DIRECTION}/{digest}/artifact.bin"
+        self._stage_artifact(key=key, payload=payload, digest=digest)
         self._prepared = prepared
         self._artifact_key = key
         self._artifact_digest = digest
+        self._artifact_payload = payload
         with self._control_plane._connection_factory() as connection:  # noqa: SLF001
             row = connection.execute(
                 """
@@ -1828,7 +1850,7 @@ class R2ReadTimeoutCommissioningAdapter:
                 (prepared.lease.job_key, prepared.lease.lease_epoch),
             ).fetchone()
         if row is None:
-            raise DisposableCommissioningError("read-timeout-attempt-missing")
+            raise DisposableCommissioningError("r2-timeout-attempt-missing")
         return AttackStageReceipt(
             stage="preflight",
             receipt_id=f"attempt:{row[0]}:artifact:{key}:{digest}",
@@ -1837,11 +1859,11 @@ class R2ReadTimeoutCommissioningAdapter:
 
     def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
         self._require_identity(identity)
-        key = self._need(self._artifact_key, "read-timeout-key-missing")
-        self._objects.arm_read_timeout(key)
+        key = self._need(self._artifact_key, "r2-timeout-key-missing")
+        self._arm_timeout(key)
         return AttackStageReceipt(
             stage="injected",
-            receipt_id=f"r2:get:{key}:ReadTimeoutError",
+            receipt_id=f"r2:{self._OPERATION}:{key}:ReadTimeoutError",
             occurred_at=self._started_at + timedelta(seconds=1),
         )
 
@@ -1851,11 +1873,12 @@ class R2ReadTimeoutCommissioningAdapter:
         injected: AttackStageReceipt,
     ) -> AttackStageReceipt:
         self._require_identity(identity)
-        prepared = self._need(self._prepared, "read-timeout-turn-missing")
-        key = self._need(self._artifact_key, "read-timeout-key-missing")
-        digest = self._need(self._artifact_digest, "read-timeout-digest-missing")
+        prepared = self._need(self._prepared, "r2-timeout-turn-missing")
+        key = self._need(self._artifact_key, "r2-timeout-key-missing")
+        digest = self._need(self._artifact_digest, "r2-timeout-digest-missing")
+        payload = self._need(self._artifact_payload, "r2-timeout-payload-missing")
         try:
-            self._objects.get_object(Bucket="commissioning-artifacts", Key=key)
+            self._invoke_fault(key=key, payload=payload, digest=digest)
         except ReadTimeoutError as error:
             failure_at = self._started_at + timedelta(seconds=2)
             self._retry_due_at = self._control_plane.finish_retryable_with_incident(
@@ -1864,12 +1887,12 @@ class R2ReadTimeoutCommissioningAdapter:
                 incident_key=f"incident:job-retry:{prepared.lease.job_key}",
                 dedupe_key=f"job-retry:{prepared.lease.job_key}",
                 component=identity.node_id,
-                summary=f"{identity.node_id} R2 read timeout",
+                summary=f"{identity.node_id} R2 {self._DIRECTION} timeout",
                 detail={
                     "job_key": prepared.lease.job_key,
                     "lease_epoch": prepared.lease.lease_epoch,
-                    "stage": self._READ_STAGES[identity.node_id],
-                    "object_operation": "get",
+                    "stage": self._STAGES[identity.node_id],
+                    "object_operation": self._OPERATION,
                     "artifact_key": key,
                     "artifact_digest": digest,
                     "error_class": type(error).__name__,
@@ -1878,7 +1901,7 @@ class R2ReadTimeoutCommissioningAdapter:
                 now=failure_at,
             )
         else:
-            raise DisposableCommissioningError("r2-read-timeout-not-injected")
+            raise DisposableCommissioningError("r2-timeout-not-injected")
         with self._control_plane._connection_factory() as connection:  # noqa: SLF001
             row = connection.execute(
                 """
@@ -1889,7 +1912,7 @@ class R2ReadTimeoutCommissioningAdapter:
                 (prepared.lease.job_key, prepared.lease.lease_epoch),
             ).fetchone()
         if row is None:
-            raise DisposableCommissioningError("r2-read-timeout-event-missing")
+            raise DisposableCommissioningError("r2-timeout-event-missing")
         self._failure_event_id = str(row[0])
         return AttackStageReceipt(
             stage="detected",
@@ -1903,10 +1926,10 @@ class R2ReadTimeoutCommissioningAdapter:
         detected: AttackStageReceipt,
     ) -> AttackStageReceipt:
         self._require_identity(identity)
-        prepared = self._need(self._prepared, "read-timeout-turn-missing")
-        due_at = self._need(self._retry_due_at, "read-timeout-retry-due-missing")
+        prepared = self._need(self._prepared, "r2-timeout-turn-missing")
+        due_at = self._need(self._retry_due_at, "r2-timeout-retry-due-missing")
         replacement = self._control_plane.claim_job(
-            worker_id=f"commissioning:r2-read-retry:{identity.node_id}",
+            worker_id=f"commissioning:r2-{self._DIRECTION}-retry:{identity.node_id}",
             job_types=(identity.node_id,),
             lease_seconds=120,
             now=due_at,
@@ -1917,7 +1940,7 @@ class R2ReadTimeoutCommissioningAdapter:
             or replacement.lease_epoch != prepared.lease.lease_epoch + 1
             or replacement.input_identity != prepared.lease.input_identity
         ):
-            raise DisposableCommissioningError("r2-read-replacement-mismatch")
+            raise DisposableCommissioningError("r2-timeout-replacement-mismatch")
         self._replacement = replacement
         return AttackStageReceipt(
             stage="recovery-started",
@@ -1931,16 +1954,16 @@ class R2ReadTimeoutCommissioningAdapter:
         recovery_started: AttackStageReceipt | None,
     ) -> AttackStageReceipt:
         self._require_identity(identity)
-        prepared = self._need(self._prepared, "read-timeout-turn-missing")
-        key = self._need(self._artifact_key, "read-timeout-key-missing")
-        digest = self._need(self._artifact_digest, "read-timeout-digest-missing")
+        prepared = self._need(self._prepared, "r2-timeout-turn-missing")
+        key = self._need(self._artifact_key, "r2-timeout-key-missing")
+        digest = self._need(self._artifact_digest, "r2-timeout-digest-missing")
         with self._control_plane._connection_factory() as connection:  # noqa: SLF001
             try:
                 _postcondition_fact(connection, prepared.lease)
             except DisposableCommissioningError:
                 pass
             else:
-                raise DisposableCommissioningError("r2-read-partial-postcondition")
+                raise DisposableCommissioningError("r2-timeout-partial-postcondition")
             attempt = connection.execute(
                 """
                 SELECT state, error_class FROM m1_job_attempts
@@ -1949,13 +1972,12 @@ class R2ReadTimeoutCommissioningAdapter:
                 (prepared.lease.job_key, prepared.lease.lease_epoch),
             ).fetchone()
         if attempt != ("retryable", "ReadTimeoutError"):
-            raise DisposableCommissioningError("r2-read-failure-shape")
-        if not self._objects.contains(key) or self._objects.read_count(key) != 1:
-            raise DisposableCommissioningError("r2-read-cleanup-shape")
+            raise DisposableCommissioningError("r2-timeout-failure-shape")
+        self._verify_failed_artifact(key=key, digest=digest)
         return AttackStageReceipt(
             stage="cleanup",
             receipt_id=f"artifact:{key}:{digest}:unchanged",
-            occurred_at=self._need(self._retry_due_at, "read-timeout-retry-due-missing")
+            occurred_at=self._need(self._retry_due_at, "r2-timeout-retry-due-missing")
             + timedelta(microseconds=1),
         )
 
@@ -1966,19 +1988,13 @@ class R2ReadTimeoutCommissioningAdapter:
         cleanup: AttackStageReceipt,
     ) -> AttackStageReceipt:
         self._require_identity(identity)
-        prepared = self._need(self._prepared, "read-timeout-turn-missing")
-        replacement = self._need(self._replacement, "read-timeout-replacement-missing")
-        key = self._need(self._artifact_key, "read-timeout-key-missing")
-        digest = self._need(self._artifact_digest, "read-timeout-digest-missing")
-        response = self._objects.get_object(Bucket="commissioning-artifacts", Key=key)
-        body = response.get("Body")
-        if not isinstance(body, BytesIO):
-            raise DisposableCommissioningError("r2-read-recovery-body-missing")
-        payload = body.read()
-        if sha256(payload).hexdigest() != digest:
-            raise DisposableCommissioningError("r2-read-recovery-digest-mismatch")
+        prepared = self._need(self._prepared, "r2-timeout-turn-missing")
+        replacement = self._need(self._replacement, "r2-timeout-replacement-missing")
+        key = self._need(self._artifact_key, "r2-timeout-key-missing")
+        digest = self._need(self._artifact_digest, "r2-timeout-digest-missing")
+        self._recover_artifact(key=key, digest=digest)
         completed_at = self._need(
-            self._retry_due_at, "read-timeout-retry-due-missing"
+            self._retry_due_at, "r2-timeout-retry-due-missing"
         ) + timedelta(seconds=2)
         self._recovered_proof = prepared.complete(lease=replacement, now=completed_at)
         if not self._control_plane.record_job_recovery(
@@ -1987,7 +2003,7 @@ class R2ReadTimeoutCommissioningAdapter:
             channels=("dashboard",),
             now=completed_at + timedelta(seconds=1),
         ):
-            raise DisposableCommissioningError("r2-read-incident-not-resolved")
+            raise DisposableCommissioningError("r2-timeout-incident-not-resolved")
         return AttackStageReceipt(
             stage="recovered",
             receipt_id=f"event:{self._recovered_proof['success_fact_id']}",
@@ -2000,10 +2016,10 @@ class R2ReadTimeoutCommissioningAdapter:
         recovered: AttackStageReceipt,
     ) -> AttackStageReceipt:
         self._require_identity(identity)
-        prepared = self._need(self._prepared, "read-timeout-turn-missing")
-        replacement = self._need(self._replacement, "read-timeout-replacement-missing")
-        proof = self._need(self._recovered_proof, "read-timeout-proof-missing")
-        key = self._need(self._artifact_key, "read-timeout-key-missing")
+        prepared = self._need(self._prepared, "r2-timeout-turn-missing")
+        replacement = self._need(self._replacement, "r2-timeout-replacement-missing")
+        proof = self._need(self._recovered_proof, "r2-timeout-proof-missing")
+        key = self._need(self._artifact_key, "r2-timeout-key-missing")
         with self._control_plane._connection_factory() as connection:  # noqa: SLF001
             state = connection.execute(
                 """
@@ -2034,18 +2050,93 @@ class R2ReadTimeoutCommissioningAdapter:
             None,
             "resolved",
             1,
-            self._READ_STAGES[identity.node_id],
+            self._STAGES[identity.node_id],
         ):
-            raise DisposableCommissioningError("r2-read-recovery-state")
+            raise DisposableCommissioningError("r2-timeout-recovery-state")
         if replacement.input_identity != prepared.lease.input_identity:
-            raise DisposableCommissioningError("r2-read-input-identity-changed")
-        if self._objects.read_count(key) != 2:
-            raise DisposableCommissioningError("r2-read-count-mismatch")
+            raise DisposableCommissioningError("r2-timeout-input-identity-changed")
+        self._verify_operation_counts(key)
         return AttackStageReceipt(
             stage="verified",
             receipt_id=proof["postcondition_fact_id"],
             occurred_at=datetime.fromisoformat(proof["succeeded_at"]) + timedelta(seconds=2),
         )
+
+    def _stage_artifact(self, *, key: str, payload: bytes, digest: str) -> None:
+        self._objects.restore(key=key, payload=payload, digest=digest)
+
+    def _arm_timeout(self, key: str) -> None:
+        self._objects.arm_read_timeout(key)
+
+    def _invoke_fault(self, *, key: str, payload: bytes, digest: str) -> None:
+        del payload, digest
+        self._objects.get_object(Bucket="commissioning-artifacts", Key=key)
+
+    def _verify_failed_artifact(self, *, key: str, digest: str) -> None:
+        del digest
+        if not self._objects.contains(key) or self._objects.read_count(key) != 1:
+            raise DisposableCommissioningError("r2-timeout-cleanup-shape")
+
+    def _recover_artifact(self, *, key: str, digest: str) -> None:
+        response = self._objects.get_object(Bucket="commissioning-artifacts", Key=key)
+        body = response.get("Body")
+        if not isinstance(body, BytesIO):
+            raise DisposableCommissioningError("r2-timeout-recovery-body-missing")
+        if sha256(body.read()).hexdigest() != digest:
+            raise DisposableCommissioningError("r2-timeout-recovery-digest-mismatch")
+
+    def _verify_operation_counts(self, key: str) -> None:
+        if self._objects.read_count(key) != 2:
+            raise DisposableCommissioningError("r2-timeout-count-mismatch")
+
+
+class R2WriteTimeoutCommissioningAdapter(R2ReadTimeoutCommissioningAdapter):
+    """Recover a PUT committed by R2 whose response timed out before DB receipt."""
+
+    _ATTACK_ID = "r2-write-timeout"
+    _DIRECTION = "write"
+    _OPERATION = "put"
+    _STAGES = {
+        "structure-fetch": "upload-page",
+        "structure-materialize": "upload-bundle",
+        "structure-normalize": "upload-range",
+        "structure-certify": "upload-manifest",
+        "quote-admit": "upload-batches",
+        "quote-batch": "upload-artifact",
+        "opportunity-certify": "upload-projection",
+    }
+
+    def _stage_artifact(self, *, key: str, payload: bytes, digest: str) -> None:
+        del key, payload, digest
+
+    def _arm_timeout(self, key: str) -> None:
+        self._objects.arm_write_response_timeout(key)
+
+    def _invoke_fault(self, *, key: str, payload: bytes, digest: str) -> None:
+        self._objects.put_object(
+            Bucket="commissioning-artifacts",
+            Key=key,
+            Body=payload,
+            Metadata={"sha256": digest},
+        )
+
+    def _verified_head(self, *, key: str, digest: str) -> None:
+        head = self._objects.head_object(Bucket="commissioning-artifacts", Key=key)
+        metadata = head.get("Metadata")
+        if not isinstance(metadata, dict) or metadata.get("sha256") != digest:
+            raise DisposableCommissioningError("r2-write-head-digest-mismatch")
+
+    def _verify_failed_artifact(self, *, key: str, digest: str) -> None:
+        if not self._objects.contains(key) or self._objects.write_count(key) != 1:
+            raise DisposableCommissioningError("r2-write-response-loss-shape")
+        self._verified_head(key=key, digest=digest)
+
+    def _recover_artifact(self, *, key: str, digest: str) -> None:
+        self._verified_head(key=key, digest=digest)
+
+    def _verify_operation_counts(self, key: str) -> None:
+        if self._objects.write_count(key) != 1 or self._objects.head_count(key) != 2:
+            raise DisposableCommissioningError("r2-write-idempotency-count-mismatch")
 
 
 class SourceReceiptGapCommissioningAdapter:
@@ -4760,6 +4851,7 @@ __all__ = [
     "PublicationPointerConflictCommissioningAdapter",
     "ProgressStallCommissioningAdapter",
     "R2ReadTimeoutCommissioningAdapter",
+    "R2WriteTimeoutCommissioningAdapter",
     "QuoteAdmissionMissingShardCommissioningAdapter",
     "QuoteBatchIncompleteCommissioningAdapter",
     "RetryBudgetCommissioningAdapter",

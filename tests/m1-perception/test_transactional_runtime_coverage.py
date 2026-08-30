@@ -25,6 +25,7 @@ from polyarb.control_plane.production_commissioning_disposable import (
     QuoteAdmissionMissingShardCommissioningAdapter,
     QuoteBatchIncompleteCommissioningAdapter,
     R2ReadTimeoutCommissioningAdapter,
+    R2WriteTimeoutCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
     SourceReceiptGapCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
@@ -1375,6 +1376,48 @@ def test_r2_read_timeout_adapter_retries_same_artifact_and_input_identity(
         ).fetchone()
 
     assert shape == (1, 1, 1, "closed", 0, "resolved", 1)
+
+
+@pytest.mark.parametrize(
+    "node_id",
+    (
+        "structure-fetch",
+        "structure-materialize",
+        "structure-normalize",
+        "structure-certify",
+        "quote-admit",
+        "quote-batch",
+        "opportunity-certify",
+    ),
+)
+def test_r2_write_timeout_adapter_heads_committed_object_before_single_receipt(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+    node_id: str,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id=f"commission:{node_id}:r2-write-timeout",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id=node_id,
+        attack_id="r2-write-timeout",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=R2WriteTimeoutCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=68),
+        ),
+        evidence_dir=tmp_path / node_id,
+    )
+
+    assert proof["qualification_impact"] == "pause"
+    assert str(proof["detector_fact_id"]).startswith("event:")
+    assert str(proof["recovery_action_id"]).startswith("retry:")
+    assert str(proof["recovery_fact_id"]).startswith("event:")
+    assert str(proof["postcondition_fact_id"]).startswith("postgres:")
+    assert proof["cleanup_verified"] is True
 
 
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:

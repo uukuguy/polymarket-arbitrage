@@ -18,6 +18,7 @@ from polyarb.control_plane.production_commissioning_harness import (
     run_quote_admission_missing_shard_commissioning,
     run_quote_batch_incomplete_commissioning,
     run_r2_read_timeout_commissioning,
+    run_r2_write_timeout_commissioning,
     run_retry_budget_commissioning,
     run_source_receipt_gap_commissioning,
     run_stale_owner_commissioning,
@@ -746,6 +747,45 @@ def test_r2_read_timeout_harness_runs_six_targets_and_cleans_database_and_roles(
     }
     for node_id in nodes:
         assert (root / f"attacks/{node_id}/r2-read-timeout/proof.json").is_file()
+    with psycopg.connect(control_plane_test_dsn) as connection:
+        databases = connection.execute(
+            "SELECT datname FROM pg_database WHERE datname LIKE 'm1_commissioning_%'"
+        ).fetchall()
+    assert databases == []
+
+
+def test_r2_write_timeout_harness_runs_seven_targets_and_cleans_database_and_roles(
+    monkeypatch: pytest.MonkeyPatch,
+    control_plane_test_dsn: str,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("POLYARB_CONTROL_PLANE_TEST_DSN", control_plane_test_dsn)
+    root = tmp_path / "evidence"
+
+    result = run_r2_write_timeout_commissioning(
+        root=root,
+        release_id=RELEASE,
+        config_id=CONFIG,
+    )
+
+    nodes = (
+        "structure-fetch",
+        "structure-materialize",
+        "structure-normalize",
+        "structure-certify",
+        "quote-admit",
+        "quote-batch",
+        "opportunity-certify",
+    )
+    assert result == {
+        "attack_id": "r2-write-timeout",
+        "execution_scope": "disposable-exact-image",
+        "node_count": 7,
+        "proof_count": 7,
+        "status": "pass",
+    }
+    for node_id in nodes:
+        assert (root / f"attacks/{node_id}/r2-write-timeout/proof.json").is_file()
     with psycopg.connect(control_plane_test_dsn) as connection:
         databases = connection.execute(
             "SELECT datname FROM pg_database WHERE datname LIKE 'm1_commissioning_%'"

@@ -19,6 +19,7 @@ from .production_commissioning_disposable import (
     QuoteAdmissionMissingShardCommissioningAdapter,
     QuoteBatchIncompleteCommissioningAdapter,
     R2ReadTimeoutCommissioningAdapter,
+    R2WriteTimeoutCommissioningAdapter,
     RetryBudgetCommissioningAdapter,
     SourceReceiptGapCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
@@ -49,6 +50,7 @@ _NORMALIZATION_PAYLOAD_CORRUPT_ATTACK_ID: Final[str] = "normalization-payload-co
 _STRUCTURE_PARITY_MISMATCH_ATTACK_ID: Final[str] = "structure-parity-mismatch"
 _PUBLICATION_POINTER_CONFLICT_ATTACK_ID: Final[str] = "publication-pointer-conflict"
 _R2_READ_TIMEOUT_ATTACK_ID: Final[str] = "r2-read-timeout"
+_R2_WRITE_TIMEOUT_ATTACK_ID: Final[str] = "r2-write-timeout"
 _BASE_NOW: Final[datetime] = datetime(2031, 1, 1, 12, 0, tzinfo=UTC)
 
 
@@ -362,6 +364,32 @@ def run_r2_read_timeout_commissioning(
     )
 
 
+def run_r2_write_timeout_commissioning(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+) -> dict[str, object]:
+    """Prove each R2-writing node resolves ambiguous PUT response loss."""
+
+    return _run_commissioning(
+        attack_id=_R2_WRITE_TIMEOUT_ATTACK_ID,
+        adapter_factory=R2WriteTimeoutCommissioningAdapter,
+        root=root,
+        release_id=release_id,
+        config_id=config_id,
+        node_ids=(
+            "structure-fetch",
+            "structure-materialize",
+            "structure-normalize",
+            "structure-certify",
+            "quote-admit",
+            "quote-batch",
+            "opportunity-certify",
+        ),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -378,6 +406,7 @@ def _parser() -> argparse.ArgumentParser:
         "structure-parity-mismatch",
         "publication-pointer-conflict",
         "r2-read-timeout",
+        "r2-write-timeout",
     ):
         attack = subcommands.add_parser(command)
         attack.add_argument("--root", type=Path, required=True)
@@ -402,6 +431,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "structure-parity-mismatch": run_structure_parity_mismatch_commissioning,
         "publication-pointer-conflict": run_publication_pointer_conflict_commissioning,
         "r2-read-timeout": run_r2_read_timeout_commissioning,
+        "r2-write-timeout": run_r2_write_timeout_commissioning,
     }
     try:
         result = runners[args.command](
@@ -423,6 +453,7 @@ __all__ = [
     "run_normalization_payload_corrupt_commissioning",
     "run_publication_pointer_conflict_commissioning",
     "run_r2_read_timeout_commissioning",
+    "run_r2_write_timeout_commissioning",
     "run_progress_stall_commissioning",
     "run_quote_admission_missing_shard_commissioning",
     "run_quote_batch_incomplete_commissioning",

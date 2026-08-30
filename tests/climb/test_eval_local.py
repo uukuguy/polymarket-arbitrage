@@ -739,6 +739,7 @@ def test_deterministic_runtime_production_enablement_profile_uses_exact_local_ga
             "tests/m1-perception/test_transactional_runtime_coverage.py::test_structure_parity_mismatch_adapter_invalidates_and_preserves_pointer",
             "tests/m1-perception/test_transactional_runtime_coverage.py::test_publication_pointer_conflict_adapter_preserves_current_lineage",
             "tests/m1-perception/test_transactional_runtime_coverage.py::test_r2_read_timeout_adapter_retries_same_artifact_and_input_identity",
+            "tests/m1-perception/test_transactional_runtime_coverage.py::test_r2_write_timeout_adapter_heads_committed_object_before_single_receipt",
             "tests/m1-perception/test_transactional_structure_worker.py::test_structure_worker_atomically_quarantines_schema_invalid_named_v3_shard",
             "tests/m1-perception/test_transactional_structure_worker.py::test_structure_certifier_quarantines_parity_mismatch_and_invalidates_qualification",
             "tests/m1-perception/test_transactional_quote_worker.py::test_quote_certifier_pointer_conflict_is_visible_and_never_retried",
@@ -759,6 +760,7 @@ def test_deterministic_runtime_production_enablement_profile_uses_exact_local_ga
             "tests/m1-perception/test_production_commissioning_harness.py::test_structure_parity_mismatch_harness_runs_target_and_cleans_database_and_roles",
             "tests/m1-perception/test_production_commissioning_harness.py::test_publication_pointer_conflict_harness_runs_three_targets_and_cleans_database_and_roles",
             "tests/m1-perception/test_production_commissioning_harness.py::test_r2_read_timeout_harness_runs_six_targets_and_cleans_database_and_roles",
+            "tests/m1-perception/test_production_commissioning_harness.py::test_r2_write_timeout_harness_runs_seven_targets_and_cleans_database_and_roles",
             "tests/m1-perception/test_production_commissioning_harness.py::test_disposable_database_cleans_after_interrupted_attack_body",
             "tests/m1-perception/test_production_commissioning_harness.py::test_disposable_database_never_drops_preexisting_cluster_roles",
             "tests/m1-perception/test_production_commissioning_harness.py::test_disposable_database_preserves_attack_and_connection_cleanup_failures",
@@ -786,6 +788,7 @@ def test_deterministic_runtime_production_enablement_profile_uses_exact_local_ga
             "tests/m1-perception/test_makefile_contract.py::test_make_structure_parity_mismatch_commissioning_executes_exact_harness_command",
             "tests/m1-perception/test_makefile_contract.py::test_make_publication_pointer_conflict_commissioning_executes_exact_harness_command",
             "tests/m1-perception/test_makefile_contract.py::test_make_r2_read_timeout_commissioning_executes_exact_harness_command",
+            "tests/m1-perception/test_makefile_contract.py::test_make_r2_write_timeout_commissioning_executes_exact_harness_command",
             "-q",
         ],
         "restart": [

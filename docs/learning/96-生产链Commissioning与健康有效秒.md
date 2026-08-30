@@ -355,3 +355,18 @@ incident 写 read、runtime event 写 commit，就会形成逻辑矛盾的假证
 stage，第二次 GET 校验原 SHA-256，然后提交唯一业务事实并关闭 incident/circuit。6 个实际读
 节点由 `run_r2_read_timeout_commissioning()` 在 6 个独立迁移数据库中逐一执行；runner 本身仍
 没有任意外层超时。
+
+### PUT 报 timeout 时，为什么不能断言“对象一定没写进去”？
+
+因为超时可能发生在 R2 已提交对象、但客户端尚未收到响应之后。若 worker 此时直接把数据库
+receipt 写成成功，就可能为错误内容背书；若无条件重新 PUT，又会把 committed-but-unacknowledged
+边界隐藏掉，并在非确定 key 设计中制造重复对象。
+
+`R2WriteTimeoutCommissioningAdapter` 选择更严格的攻击：第一次 PUT 先按 immutable key 和
+SHA-256 落对象，再抛 provider-shaped `ReadTimeoutError`。失败 epoch 只能写 retryable fact 和
+incident，业务 receipt 必须保持不存在。到共享 policy due-at 后，replacement 不再次 PUT，先用
+HEAD 核对 metadata SHA-256；完全一致才继续原节点的 fenced database commit。
+
+验证同时要求 `PUT count == 1`、`HEAD count == 2`（清理检查和恢复检查）、失败/成功 attempt 的
+job input identity 相同、最终只有一个业务成功事实。7 个写节点分别在独立迁移数据库运行；因此
+“对象已写但响应丢失”不会升级成整链重启，也不会被伪装成对象一定缺失。
