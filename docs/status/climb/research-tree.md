@@ -5,11 +5,11 @@
 ## Session
 
 - Last cycle: 45
-- Next action: rank next pending hypothesis
+- Next action: implement and evaluate H-041 real progress-stall commissioning
 
 ## In flight
 
-- None
+- H-041
 
 ## Hypothesis pool
 
@@ -48,6 +48,7 @@
 - **H-038** [confirmed]: A two-phase disposable transaction can reclaim each production node through the public lease path, reject the superseded owner's real terminal write, and let only the replacement epoch publish terminal and business facts.
 - **H-039** [confirmed]: The eight-node stale-owner primitive can implement the cleanup-safe commissioning protocol using real attempt, runtime-event, and business-postcondition receipt IDs for every append-only lifecycle stage.
 - **H-040** [confirmed]: A shared isolated-database harness can execute the stale-owner commissioning adapter per production node, preserve append-only partial evidence, and always remove only the database and migration roles owned by that experiment.
+- **H-041** [in-flight]: A live leased attempt held after durable progress can be classified only by the shared progress deadline, open one warning incident, execute one exactly fenced cancel action, and let a successor epoch complete the real node transaction and resolve that incident across all eight production nodes.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts

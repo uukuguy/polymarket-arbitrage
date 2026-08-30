@@ -728,7 +728,9 @@ def test_deterministic_runtime_production_enablement_profile_uses_exact_local_ga
             "tests/m1-perception/test_control_plane_qualification_identity.py",
             "tests/m1-perception/test_control_plane_runtime_fault_matrix.py::test_runtime_fault_matrix_is_canonical_ordered_and_cleans_temp_database",
             "tests/m1-perception/test_control_plane_runtime_fault_matrix.py::test_runtime_fault_matrix_exercises_real_migrated_authority_paths",
+            "tests/m1-perception/test_transactional_runtime_coverage.py::test_progress_stall_adapter_executes_real_policy_recovery_and_successor_turn",
             "tests/m1-perception/test_production_commissioning_harness.py::test_stale_owner_harness_runs_real_isolated_node_and_cleans_database_and_roles",
+            "tests/m1-perception/test_production_commissioning_harness.py::test_progress_stall_harness_runs_real_isolated_node_and_cleans_database_and_roles",
             "tests/m1-perception/test_production_commissioning_harness.py::test_disposable_database_cleans_after_interrupted_attack_body",
             "tests/m1-perception/test_production_commissioning_harness.py::test_disposable_database_never_drops_preexisting_cluster_roles",
             "tests/m1-perception/test_production_commissioning_harness.py::test_disposable_database_preserves_attack_and_connection_cleanup_failures",
@@ -745,6 +747,7 @@ def test_deterministic_runtime_production_enablement_profile_uses_exact_local_ga
             "tests/m1-perception/test_makefile_contract.py::test_make_render_rollout_exposes_exact_six_app_topology",
             "tests/m1-perception/test_makefile_contract.py::test_make_fly_topology_audit_exposes_exact_read_only_argv",
             "tests/m1-perception/test_makefile_contract.py::test_make_stale_owner_commissioning_executes_exact_harness_command",
+            "tests/m1-perception/test_makefile_contract.py::test_make_progress_stall_commissioning_executes_exact_harness_command",
             "-q",
         ],
         "restart": [

@@ -171,3 +171,17 @@ successor 或业务事实。现在 harness 每个节点创建一个名称受闭�
 只有在启动前确认这些 role 不存在，才允许本次实验回收它们。如果发现预存
 role，harness 立即拒绝运行，但绝不会删除别人的集群状态。攻击失败与连接清理
 失败同时发生时，两个异常会一起保留，避免“只看到 close 失败、丢了攻击根因”。
+
+### progress stall 为什么必须保持 lease 仍然有效？
+
+如果停止 progress 的同时也停止 heartbeat，最先触发的可能是 heartbeat missing 或
+lease expiry。那只能证明接管过期 owner，不能证明 progress deadline 和 cancel 预案可用。
+真正的 progress-stall 攻击先停在实际节点 terminal transaction 前的 durable checkpoint，
+再按持久化 `RuntimeDeadlineProfile` 续同一 attempt 的 lease；只有 progress deadline 到期。
+`RuntimeReconciler` 此时必须给出非 breaking 的 `cancel-job`，不能误判成 reclaim。
+
+cancel action 也不能只把 action ledger 写成 succeeded。正式 `RecoveryExecutor` 必须让旧
+attempt 进入 `RecoveryProgressStalled/retryable`、清除 lease，并使旧 terminal write 得到
+`StaleLeaseError`。等数据库记录的 backoff 到期，新 epoch 重跑同一个节点事务，产出
+`job.succeeded` 和业务 postcondition，最后用 `record_job_recovery` 关闭原 warning incident。
+这条链证明的是“故障期间不计健康秒，恢复后继续积累”，不是用一次普通停滞重置整窗。

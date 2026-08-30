@@ -5,15 +5,19 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
 from .production_commissioning import PRODUCTION_CHAIN
-from .production_commissioning_disposable import StaleOwnerCommissioningAdapter
+from .production_commissioning_disposable import (
+    ProgressStallCommissioningAdapter,
+    StaleOwnerCommissioningAdapter,
+)
 from .production_commissioning_runner import (
     AttackIdentity,
+    CommissioningAttackAdapter,
     CommissioningAttackError,
     run_disposable_attack,
 )
@@ -23,7 +27,8 @@ from .runtime_fault_matrix import (
     validated_control_plane_test_dsn,
 )
 
-_ATTACK_ID: Final[str] = "stale-owner-terminal-write"
+_STALE_OWNER_ATTACK_ID: Final[str] = "stale-owner-terminal-write"
+_PROGRESS_STALL_ATTACK_ID: Final[str] = "progress-stall"
 _BASE_NOW: Final[datetime] = datetime(2031, 1, 1, 12, 0, tzinfo=UTC)
 
 
@@ -44,14 +49,16 @@ def _selected_nodes(node_ids: Sequence[str] | None) -> tuple[str, ...]:
     return tuple(node_id for node_id in PRODUCTION_CHAIN if node_id in requested_set)
 
 
-def run_stale_owner_commissioning(
+def _run_commissioning(
     *,
+    attack_id: str,
+    adapter_factory: Callable[..., CommissioningAttackAdapter],
     root: Path,
     release_id: str,
     config_id: str,
     node_ids: Sequence[str] | None = None,
 ) -> dict[str, object]:
-    """Prove the stale-owner fence on real transactions in disposable databases.
+    """Run one shared attack on real transactions in disposable databases.
 
     ``node_ids`` exists for integration tests. The command-line contract always
     executes the complete eight-node production chain.
@@ -61,11 +68,11 @@ def run_stale_owner_commissioning(
     try:
         identities = tuple(
             AttackIdentity(
-                experiment_id=f"commission:{node_id}:{_ATTACK_ID}",
+                experiment_id=f"commission:{node_id}:{attack_id}",
                 release_id=release_id,
                 config_id=config_id,
                 node_id=node_id,
-                attack_id=_ATTACK_ID,
+                attack_id=attack_id,
             )
             for node_id in selected
         )
@@ -86,7 +93,7 @@ def run_stale_owner_commissioning(
             with migrated_disposable_control_plane_database() as database:
                 run_disposable_attack(
                     identity=identity,
-                    adapter=StaleOwnerCommissioningAdapter(
+                    adapter=adapter_factory(
                         control_plane=database.control_plane,
                         started_at=_BASE_NOW + timedelta(minutes=index),
                     ),
@@ -99,7 +106,7 @@ def run_stale_owner_commissioning(
         ) from error
 
     return {
-        "attack_id": _ATTACK_ID,
+        "attack_id": attack_id,
         "execution_scope": "disposable-exact-image",
         "node_count": len(identities),
         "proof_count": proof_count,
@@ -107,21 +114,64 @@ def run_stale_owner_commissioning(
     }
 
 
+def run_stale_owner_commissioning(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+    node_ids: Sequence[str] | None = None,
+) -> dict[str, object]:
+    """Prove the stale-owner fence on all selected production transactions."""
+
+    return _run_commissioning(
+        attack_id=_STALE_OWNER_ATTACK_ID,
+        adapter_factory=StaleOwnerCommissioningAdapter,
+        root=root,
+        release_id=release_id,
+        config_id=config_id,
+        node_ids=node_ids,
+    )
+
+
+def run_progress_stall_commissioning(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+    node_ids: Sequence[str] | None = None,
+) -> dict[str, object]:
+    """Prove policy-classified progress-stall recovery on selected transactions."""
+
+    return _run_commissioning(
+        attack_id=_PROGRESS_STALL_ATTACK_ID,
+        adapter_factory=ProgressStallCommissioningAdapter,
+        root=root,
+        release_id=release_id,
+        config_id=config_id,
+        node_ids=node_ids,
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command", required=True)
-    stale_owner = subcommands.add_parser("stale-owner")
-    stale_owner.add_argument("--root", type=Path, required=True)
-    stale_owner.add_argument("--release-id", required=True)
-    stale_owner.add_argument("--config-id", required=True)
-    stale_owner.add_argument("--json", action="store_true")
+    for command in ("stale-owner", "progress-stall"):
+        attack = subcommands.add_parser(command)
+        attack.add_argument("--root", type=Path, required=True)
+        attack.add_argument("--release-id", required=True)
+        attack.add_argument("--config-id", required=True)
+        attack.add_argument("--json", action="store_true")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    runners: dict[str, Callable[..., dict[str, object]]] = {
+        "stale-owner": run_stale_owner_commissioning,
+        "progress-stall": run_progress_stall_commissioning,
+    }
     try:
-        result = run_stale_owner_commissioning(
+        result = runners[args.command](
             root=args.root,
             release_id=args.release_id,
             config_id=args.config_id,
@@ -136,6 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 __all__ = [
     "CommissioningHarnessError",
     "main",
+    "run_progress_stall_commissioning",
     "run_stale_owner_commissioning",
 ]
 

@@ -18,6 +18,7 @@ from psycopg.types.json import Jsonb
 from polyarb.control_plane.models import JobLease, QuoteBatchLeg
 from polyarb.control_plane.postgres import PostgresControlPlane, StaleLeaseError
 from polyarb.control_plane.production_commissioning_disposable import (
+    ProgressStallCommissioningAdapter,
     StaleOwnerCommissioningAdapter,
     complete_normal_turn,
     prepare_normal_turn,
@@ -586,6 +587,87 @@ def test_stale_owner_adapter_writes_real_cleanup_safe_attack_proof(
         "70-verified.json",
         "proof.json",
     ]
+
+
+@pytest.mark.parametrize("job_type", REQUIRED_JOB_TYPES)
+def test_progress_stall_adapter_executes_real_policy_recovery_and_successor_turn(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+    job_type: str,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id=f"commission:{job_type}:progress-stall",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id=job_type,
+        attack_id="progress-stall",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=ProgressStallCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=REQUIRED_JOB_TYPES.index(job_type) + 20),
+        ),
+        evidence_dir=tmp_path / job_type,
+    )
+
+    assert proof["detector_fact_id"].startswith("incident:")
+    assert proof["recovery_action_id"].startswith("action:")
+    assert proof["recovery_fact_id"].startswith("event:")
+    assert proof["postcondition_fact_id"].startswith("postgres:")
+    assert proof["cleanup_verified"] is True
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        attempts = connection.execute(
+            """
+            SELECT lease_epoch, state, error_class
+            FROM m1_job_attempts
+            WHERE job_key = (
+                SELECT target_id FROM m1_recovery_actions
+                WHERE action_id = %s
+            )
+            ORDER BY lease_epoch
+            """,
+            (str(proof["recovery_action_id"]).removeprefix("action:"),),
+        ).fetchall()
+        action = connection.execute(
+            """
+            SELECT action_type, state, result_code
+            FROM m1_recovery_actions WHERE action_id = %s
+            """,
+            (str(proof["recovery_action_id"]).removeprefix("action:"),),
+        ).fetchone()
+        incident = connection.execute(
+            """
+            SELECT severity, state, resolved_at IS NOT NULL
+            FROM m1_incidents WHERE incident_key = %s
+            """,
+            (str(proof["detector_fact_id"]).removeprefix("incident:"),),
+        ).fetchone()
+        recovery_started = connection.execute(
+            """
+            SELECT count(*) FROM m1_job_runtime_events
+            WHERE kind = 'job.recovery-started'
+              AND detail->>'reason_code' = 'job.progress-stalled'
+            """
+        ).fetchone()
+        incident_recovered = connection.execute(
+            """
+            SELECT count(*) FROM m1_incident_events
+            WHERE incident_key = %s AND kind = 'recovered'
+            """,
+            (str(proof["detector_fact_id"]).removeprefix("incident:"),),
+        ).fetchone()
+
+    assert attempts == [
+        (1, "retryable", "RecoveryProgressStalled"),
+        (2, "succeeded", None),
+    ]
+    assert action == ("cancel-job", "completed", "succeeded")
+    assert incident == ("warning", "resolved", True)
+    assert recovery_started == (1,)
+    assert incident_recovered == (1,)
 
 
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:

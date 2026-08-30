@@ -11854,3 +11854,35 @@ files. Register the next climb hypothesis for shared heartbeat/progress/worker-
 exit/retry-budget disposable attack adapters, implement the first closed
 recovery chain, and do not begin production canaries or qualification until the
 commissioning matrix is complete.
+
+### SESSION 349 — 2026-08-30 (live-lease progress-stall commissioning)
+
+- [CLIMB H-041] Registered an in-flight production-enablement hypothesis for
+  all eight real node transactions: progress must stall while heartbeat and
+  lease remain current, so the central reconciler cannot pass by misclassifying
+  lease expiry.
+- [REAL DETECTION] The adapter reads the persisted runtime profile, renews the
+  exact attempt, waits only in virtual policy time to the progress deadline and
+  requires `job.progress-stalled -> cancel-job` with non-breaking severity.
+- [REAL RECOVERY] `RecoveryExecutor` executes the scheduled exact action. The
+  old attempt becomes `RecoveryProgressStalled/retryable`, loses its lease and
+  is rejected at the same real terminal transaction used by the normal turn.
+- [BUSINESS CLOSURE] After the durable retry backoff, epoch 2 completes that
+  node transaction, writes its success/business facts and resolves the warning
+  incident with a recovered event.
+- [EIGHT-NODE TEST] All eight node variants pass on real PostgreSQL. The shared
+  isolated harness also passes a migrated one-node run and removes its database
+  and owned migration roles.
+- [UNIFORM ENTRY] Added `make m1-production-commissioning-progress-stall` with
+  explicit test DSN and exact release/config guards. It has no production
+  fallback, private all-run timeout or global Docker-context mutation.
+- [GATE NOTE] The grouped regression had one expected pre-commit failure: the
+  exact-image build test correctly rejected dirty release inputs. All other
+  grouped tests passed; the release guard must be rerun on committed HEAD.
+- [BOUNDARY] No production DB/provider/Fly/Docker mutation occurred. Remaining
+  commissioning obligations still block canaries and qualification.
+
+[NEXT] Commit Plan 05.6-227 without protected user files, rerun the exact-HEAD
+image guard and H-041 climb profile, then execute the complete eight-node
+progress-stall harness inside the next immutable OrbStack-built image. Preserve
+the release/config-bound evidence before moving to heartbeat-outage or worker-exit.
