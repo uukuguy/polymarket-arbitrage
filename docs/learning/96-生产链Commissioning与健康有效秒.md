@@ -387,3 +387,21 @@ batch，而不是用最新 batch 掩盖早期批次。拒绝发生在任何 R2 G
 identity；新鲜 lineage 成功投影后，由其成功 lease 关闭同一个 incident。commissioning 会攻击
 完整链条：陈旧指针 → 无 R2/无 Opportunity 写入 → blocking incident → 新 Structure/Quote 指针 →
 新 Opportunity 唯一发布 → incident recovered。
+
+### CLOB 少返一条 book，为什么不能当成 `missing-book` 正常发布？
+
+`missing-book` 可以表达一个有身份的 book 没有可执行 ask，但 provider 根本没有返回
+某个请求 token 是另一件事：它可能是分页、代理或上游部分响应。如果把两者合并，
+Quote batch 会把“未观测到”伪装成“已观测且不可执行”，然后 certifier 继续发布不完整
+generation。
+
+现在 `TransactionalQuoteBatchWorker` 在任何 R2 PUT 前比较去重后的 requested token 数与
+provider 实际响应数。少一条就抛出只含计数、不含 token/body 的
+`IncompleteQuoteBatchCoverageError`，通过共享 durable retry/circuit/incident 链处理；失败
+epoch 不得留下 artifact 或 Quote receipt。
+
+commissioning 也修正了边界归属：旧 `perception_chaos.py` 的 `candidate` 是 SQLite 旧链，
+不是 PostgreSQL 新 DAG 的 `quote-batch`，且没有 commissioning `config_id` 绑定。所以不能把
+旧 canary 证据转个字段就冒充新链证明。`clob-missing-leg` 改为 exact-image disposable
+攻击：真实 worker + 真实迁移 PostgreSQL 先拒绝 0/1 覆盖，再按中央 policy due-at 用
+同一 immutable batch 完成 1/1 恢复，最终只有一个 receipt。

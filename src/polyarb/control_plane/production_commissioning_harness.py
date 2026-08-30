@@ -12,6 +12,7 @@ from typing import Final
 
 from .production_commissioning import PRODUCTION_CHAIN
 from .production_commissioning_disposable import (
+    ClobMissingLegCommissioningAdapter,
     HeartbeatOutageCommissioningAdapter,
     NormalizationPayloadCorruptCommissioningAdapter,
     ProgressStallCommissioningAdapter,
@@ -53,6 +54,7 @@ _PUBLICATION_POINTER_CONFLICT_ATTACK_ID: Final[str] = "publication-pointer-confl
 _R2_READ_TIMEOUT_ATTACK_ID: Final[str] = "r2-read-timeout"
 _R2_WRITE_TIMEOUT_ATTACK_ID: Final[str] = "r2-write-timeout"
 _STALE_QUOTE_POINTER_ATTACK_ID: Final[str] = "stale-quote-pointer"
+_CLOB_MISSING_LEG_ATTACK_ID: Final[str] = "clob-missing-leg"
 _BASE_NOW: Final[datetime] = datetime(2031, 1, 1, 12, 0, tzinfo=UTC)
 
 
@@ -410,6 +412,24 @@ def run_stale_quote_pointer_commissioning(
     )
 
 
+def run_clob_missing_leg_commissioning(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+) -> dict[str, object]:
+    """Prove an omitted CLOB response cannot publish a Quote batch."""
+
+    return _run_commissioning(
+        attack_id=_CLOB_MISSING_LEG_ATTACK_ID,
+        adapter_factory=ClobMissingLegCommissioningAdapter,
+        root=root,
+        release_id=release_id,
+        config_id=config_id,
+        node_ids=("quote-batch",),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -428,6 +448,7 @@ def _parser() -> argparse.ArgumentParser:
         "r2-read-timeout",
         "r2-write-timeout",
         "stale-quote-pointer",
+        "clob-missing-leg",
     ):
         attack = subcommands.add_parser(command)
         attack.add_argument("--root", type=Path, required=True)
@@ -454,6 +475,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "r2-read-timeout": run_r2_read_timeout_commissioning,
         "r2-write-timeout": run_r2_write_timeout_commissioning,
         "stale-quote-pointer": run_stale_quote_pointer_commissioning,
+        "clob-missing-leg": run_clob_missing_leg_commissioning,
     }
     try:
         result = runners[args.command](
@@ -472,6 +494,7 @@ __all__ = [
     "CommissioningHarnessError",
     "main",
     "run_heartbeat_outage_commissioning",
+    "run_clob_missing_leg_commissioning",
     "run_normalization_payload_corrupt_commissioning",
     "run_publication_pointer_conflict_commissioning",
     "run_r2_read_timeout_commissioning",

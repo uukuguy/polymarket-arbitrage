@@ -828,6 +828,16 @@ def test_make_help_lists_stale_quote_pointer_commissioning_harness() -> None:
     assert "stale Quote authority blocks Opportunity publication" in result.stdout
 
 
+def test_make_help_lists_clob_missing_leg_commissioning_harness() -> None:
+    result = subprocess.run(
+        ["make", "help"], capture_output=True, text=True, cwd=PROJECT_ROOT, timeout=10
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "m1-production-commissioning-clob-missing-leg:" in result.stdout
+    assert "omitted CLOB coverage cannot publish a Quote batch" in result.stdout
+
+
 def test_make_stale_owner_commissioning_requires_test_dsn_before_fake_uv(
     tmp_path: Path,
 ) -> None:
@@ -1648,6 +1658,47 @@ def test_make_stale_quote_pointer_commissioning_executes_exact_harness_command(
             "-m",
             "polyarb.control_plane.production_commissioning_harness",
             "stale-quote-pointer",
+            "--root",
+            "evidence",
+            "--release-id",
+            release,
+            "--config-id",
+            config,
+            "--json",
+        ]
+    ]
+
+
+def test_make_clob_missing_leg_commissioning_executes_exact_harness_command(
+    tmp_path: Path,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env["POLYARB_CONTROL_PLANE_TEST_DSN"] = "postgresql://localhost/test"
+    release = "a" * 40
+    config = f"sha256:{'b' * 64}"
+    result = subprocess.run(
+        [
+            "make",
+            "m1-production-commissioning-clob-missing-leg",
+            "evidence_root=evidence",
+            f"expected_release={release}",
+            f"expected_config={config}",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _fake_uv_calls(log_path) == [
+        [
+            "run",
+            "python",
+            "-m",
+            "polyarb.control_plane.production_commissioning_harness",
+            "clob-missing-leg",
             "--root",
             "evidence",
             "--release-id",

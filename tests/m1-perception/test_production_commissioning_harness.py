@@ -11,6 +11,7 @@ import pytest
 from polyarb.control_plane import runtime_fault_matrix as matrix_module
 from polyarb.control_plane.production_commissioning_harness import (
     CommissioningHarnessError,
+    run_clob_missing_leg_commissioning,
     run_heartbeat_outage_commissioning,
     run_normalization_payload_corrupt_commissioning,
     run_progress_stall_commissioning,
@@ -853,6 +854,37 @@ def test_disposable_database_cleans_after_interrupted_attack_body(
         ).fetchall()
     assert databases == []
     assert roles == []
+
+
+def test_clob_missing_leg_harness_rejects_then_recovers_complete_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+    control_plane_test_dsn: str,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("POLYARB_CONTROL_PLANE_TEST_DSN", control_plane_test_dsn)
+    root = tmp_path / "evidence"
+
+    result = run_clob_missing_leg_commissioning(
+        root=root,
+        release_id=RELEASE,
+        config_id=CONFIG,
+    )
+
+    assert result == {
+        "attack_id": "clob-missing-leg",
+        "execution_scope": "disposable-exact-image",
+        "node_count": 1,
+        "proof_count": 1,
+        "status": "pass",
+    }
+    assert (
+        root / "attacks/quote-batch/clob-missing-leg/proof.json"
+    ).is_file()
+    with psycopg.connect(control_plane_test_dsn) as connection:
+        databases = connection.execute(
+            "SELECT datname FROM pg_database WHERE datname LIKE 'm1_commissioning_%'"
+        ).fetchall()
+    assert databases == []
 
 
 def test_disposable_database_never_drops_preexisting_cluster_roles(

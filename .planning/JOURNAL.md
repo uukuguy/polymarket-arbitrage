@@ -12643,3 +12643,30 @@ four remaining `production-canary` attacks (Gamma timeout/malformed page and
 CLOB 429/missing leg) against exact target identity, bounded injector,
 detector, rollback, cleanup and qualification semantics before executing any
 production mutation.
+
+### SESSION 378 — 2026-08-30 (CLOB missing-leg false success closed)
+
+- [AUDIT] The old upstream chaos surface targets SQLite `discovery/candidate`,
+  while commissioning targets PostgreSQL `structure-fetch/quote-batch`; old
+  evidence also lacks the new chain's `config_id`. A field-mapping bridge would
+  therefore certify the wrong runtime and was rejected.
+- [REAL DEFECT] `quote-batch` converted an omitted requested CLOB book into a
+  successful `missing-book` terminal row. Certification counted the response
+  but never required complete provider coverage.
+- [FIX] The worker now compares received books with the deduplicated requested
+  token set before R2. Incomplete coverage raises the body-free typed
+  `IncompleteQuoteBatchCoverageError` and follows the central durable retry,
+  circuit and incident path.
+- [COMMISSIONING] `clob-missing-leg` now attacks the real new-chain worker in a
+  migrated disposable PostgreSQL database: 0/1 coverage leaves no artifact or
+  receipt; policy-due recovery of the same immutable input publishes one 1/1
+  receipt, closes the circuit and resolves the incident.
+- [ORBSTACK] Verification used only the global `orbstack` context. No Colima or
+  global Docker mutation occurred.
+- [BOUNDARY] No production provider/DB, Fly/SSH/deploy, Machine, canary, or
+  qualification mutation occurred.
+
+[NEXT] Commit Plan 05.6-243 without protected user files, run the full exact-
+HEAD deterministic production-enablement gates, and confirm H-054. Then audit
+and implement the new-DAG boundaries for Gamma timeout, Gamma malformed page,
+and CLOB 429 without importing legacy SQLite evidence.

@@ -234,7 +234,7 @@ ATTACK_CONTRACTS: Mapping[str, AttackContract] = MappingProxyType(
                 detector="batch validation rejects incomplete market coverage",
                 recovery_action="retry the same immutable batch input",
                 postcondition="receipt proves every requested leg is present",
-                execution_scope="production-canary",
+                execution_scope="disposable-exact-image",
             ),
             _attack(
                 "quote-batch-incomplete",

@@ -1,4 +1,18 @@
 hypotheses:
+- id: H-054
+  description: The transactional Quote worker must reject a CLOB response that
+    omits any requested token before R2 or receipt publication, then recover the
+    same immutable batch through the shared durable retry policy after complete
+    coverage is restored.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Replace a false-success Quote batch with exact 1/1 coverage,
+    one visible retryable fact, no partial artifact or business receipt, and one
+    recovered receipt without using the unrelated legacy perception canary.
+  cost_h: 1.0
+  ranking: 1.0
+  status: testing
+  created_at: '2026-08-30T21:00:00+08:00'
+  results: []
 - id: H-053
   description: A canonical oldest-batch Quote freshness gate can block Opportunity
     publication before R2 or business writes, then let fresh Structure and Quote lineage

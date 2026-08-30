@@ -22,6 +22,7 @@ from polyarb.control_plane.postgres import (
 )
 from polyarb.control_plane.quote_artifact import QuoteBatchInputArtifact
 from polyarb.control_plane.quote_worker import (
+    IncompleteQuoteBatchCoverageError,
     QuoteBatchWorkerResult,
     TransactionalQuoteBatchPool,
     TransactionalQuoteBatchWorker,
@@ -190,6 +191,13 @@ class FakeReader:
 class FailingReader:
     async def get_books(self, token_ids: list[str], *, projection: str = "full"):
         raise TimeoutError("clob unavailable")
+
+
+class MissingLegReader:
+    async def get_books(self, token_ids: list[str], *, projection: str = "full"):
+        assert token_ids == ["token-a"]
+        assert projection == "full"
+        return []
 
 
 class BlockingReader:
@@ -394,6 +402,31 @@ def test_transactional_worker_marks_only_its_batch_retryable_on_fetch_failure() 
     assert control_plane.recorded is None
     assert control_plane.finished == []
     assert control_plane.retry_incidents[0]["component"] == "quote-batch"
+
+
+def test_transactional_worker_rejects_incomplete_clob_coverage_before_upload() -> None:
+    control_plane = FakeControlPlane(_batch())
+    objects = FakeObjectClient()
+    worker = TransactionalQuoteBatchWorker(
+        control_plane=control_plane,
+        reader=MissingLegReader(),
+        object_client=objects,
+        bucket="quotes",
+        worker_id="worker-a",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(IncompleteQuoteBatchCoverageError) as raised:
+        asyncio.run(worker.run_once())
+
+    assert raised.value.requested_count == 1
+    assert raised.value.received_count == 0
+    assert objects.object == {}
+    assert control_plane.recorded is None
+    assert control_plane.finished == []
+    assert control_plane.retry_incidents[0]["error_class"] == (
+        "IncompleteQuoteBatchCoverageError"
+    )
 
 
 def test_transactional_worker_reports_each_quote_batch_stage() -> None:
