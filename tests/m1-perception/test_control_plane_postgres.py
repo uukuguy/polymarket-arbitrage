@@ -8666,6 +8666,103 @@ def test_retryable_finish_creates_one_durable_incident_and_alert_intent(
         connection.close()
 
 
+def test_quarantined_finish_atomically_records_terminal_fact_incident_and_alert(
+    control_plane: PostgresControlPlane,
+) -> None:
+    now = _now()
+    lease = _seed_claimed_job(
+        control_plane,
+        job_key="structure:corrupt:normalize:events:0",
+        job_type="structure-normalize",
+        input_identity="structure:corrupt",
+        now=now,
+    )
+    control_plane.record_runtime_progress(
+        lease,
+        progress=RuntimeProgress(
+            sequence=1,
+            current=1,
+            total=1,
+            stage="normalize-range",
+        ),
+        now=now + timedelta(seconds=1),
+        detail={"component": "structure-normalize", "result_code": "ok"},
+    )
+
+    event_id = control_plane.finish_quarantined_with_incident(
+        lease,
+        error_class="StructureNormalizationInputInvalid",
+        incident_key=f"incident:input-quarantine:{lease.job_key}",
+        dedupe_key=f"input-quarantine:{lease.job_key}",
+        component="structure-normalize",
+        summary="structure-normalize input quarantined",
+        detail={
+            "job_key": lease.job_key,
+            "lease_epoch": lease.lease_epoch,
+            "input_artifact_key": "structure-shards/corrupt/rows.ndjson",
+            "reason_code": "failure.schema",
+        },
+        channels=("dashboard",),
+        now=now + timedelta(seconds=2),
+    )
+
+    with control_plane._connection_factory() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT state, last_error_class, next_attempt_at FROM m1_jobs WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (
+            "quarantined",
+            "StructureNormalizationInputInvalid",
+            None,
+        )
+        cursor.execute(
+            "SELECT state, error_class FROM m1_job_attempts WHERE job_key = %s",
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (
+            "quarantined",
+            "StructureNormalizationInputInvalid",
+        )
+        cursor.execute(
+            """
+            SELECT kind, stage, detail->>'failure_signature',
+                   detail->>'qualification_impact', detail->>'reason_code'
+            FROM m1_job_runtime_events
+            WHERE job_key = %s AND kind = 'job.terminal-failed'
+            """,
+            (lease.job_key,),
+        )
+        assert cursor.fetchone() == (
+            "job.terminal-failed",
+            "normalize-range",
+            "validation.failed",
+            "blocked",
+            "failure.schema",
+        )
+        cursor.execute(
+            """
+            SELECT event.incident_event_id, incident.state, incident.severity,
+                   event.kind, event.detail->>'input_artifact_key',
+                   outbox.channel, outbox.state
+            FROM m1_incidents AS incident
+            JOIN m1_incident_events AS event USING (incident_key)
+            JOIN m1_alert_outbox AS outbox USING (incident_event_id)
+            """
+        )
+        assert cursor.fetchone() == (
+            event_id,
+            "open",
+            "critical",
+            "escalated",
+            "structure-shards/corrupt/rows.ndjson",
+            "dashboard",
+            "pending",
+        )
+        cursor.execute("SELECT count(*) FROM m1_job_circuits")
+        assert cursor.fetchone() == (0,)
+
+
 def test_retryable_finish_lock_timeout_rolls_back_job_circuit_incident_and_alert(
     control_plane: PostgresControlPlane,
 ) -> None:

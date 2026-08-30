@@ -13,6 +13,7 @@ from typing import Final
 from .production_commissioning import PRODUCTION_CHAIN
 from .production_commissioning_disposable import (
     HeartbeatOutageCommissioningAdapter,
+    NormalizationPayloadCorruptCommissioningAdapter,
     ProgressStallCommissioningAdapter,
     QuoteAdmissionMissingShardCommissioningAdapter,
     QuoteBatchIncompleteCommissioningAdapter,
@@ -41,6 +42,7 @@ _WORKER_EXIT_ATTACK_ID: Final[str] = "worker-exit"
 _SOURCE_RECEIPT_GAP_ATTACK_ID: Final[str] = "source-receipt-gap"
 _QUOTE_BATCH_INCOMPLETE_ATTACK_ID: Final[str] = "quote-batch-incomplete"
 _QUOTE_ADMISSION_MISSING_SHARD_ATTACK_ID: Final[str] = "quote-admission-missing-shard"
+_NORMALIZATION_PAYLOAD_CORRUPT_ATTACK_ID: Final[str] = "normalization-payload-corrupt"
 _BASE_NOW: Final[datetime] = datetime(2031, 1, 1, 12, 0, tzinfo=UTC)
 
 
@@ -275,6 +277,24 @@ def run_quote_admission_missing_shard_commissioning(
     )
 
 
+def run_normalization_payload_corrupt_commissioning(
+    *,
+    root: Path,
+    release_id: str,
+    config_id: str,
+) -> dict[str, object]:
+    """Prove bad immutable Structure input is visibly quarantined."""
+
+    return _run_commissioning(
+        attack_id=_NORMALIZATION_PAYLOAD_CORRUPT_ATTACK_ID,
+        adapter_factory=NormalizationPayloadCorruptCommissioningAdapter,
+        root=root,
+        release_id=release_id,
+        config_id=config_id,
+        node_ids=("structure-normalize",),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -287,6 +307,7 @@ def _parser() -> argparse.ArgumentParser:
         "source-receipt-gap",
         "quote-batch-incomplete",
         "quote-admission-missing-shard",
+        "normalization-payload-corrupt",
     ):
         attack = subcommands.add_parser(command)
         attack.add_argument("--root", type=Path, required=True)
@@ -307,6 +328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "source-receipt-gap": run_source_receipt_gap_commissioning,
         "quote-batch-incomplete": run_quote_batch_incomplete_commissioning,
         "quote-admission-missing-shard": run_quote_admission_missing_shard_commissioning,
+        "normalization-payload-corrupt": run_normalization_payload_corrupt_commissioning,
     }
     try:
         result = runners[args.command](
@@ -325,6 +347,7 @@ __all__ = [
     "CommissioningHarnessError",
     "main",
     "run_heartbeat_outage_commissioning",
+    "run_normalization_payload_corrupt_commissioning",
     "run_progress_stall_commissioning",
     "run_quote_admission_missing_shard_commissioning",
     "run_quote_batch_incomplete_commissioning",

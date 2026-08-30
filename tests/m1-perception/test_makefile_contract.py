@@ -768,6 +768,16 @@ def test_make_help_lists_quote_admission_missing_shard_commissioning_harness() -
     assert "missing Structure shard" in result.stdout
 
 
+def test_make_help_lists_normalization_payload_corrupt_commissioning_harness() -> None:
+    result = subprocess.run(
+        ["make", "help"], capture_output=True, text=True, cwd=PROJECT_ROOT, timeout=10
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "m1-production-commissioning-normalization-payload-corrupt:" in result.stdout
+    assert "schema-invalid Structure shard" in result.stdout
+
+
 def test_make_stale_owner_commissioning_requires_test_dsn_before_fake_uv(
     tmp_path: Path,
 ) -> None:
@@ -952,6 +962,31 @@ def test_make_quote_admission_missing_shard_commissioning_requires_test_dsn_befo
         [
             "make",
             "m1-production-commissioning-quote-admission-missing-shard",
+            "evidence_root=evidence",
+            f"expected_release={'a' * 40}",
+            f"expected_config=sha256:{'b' * 64}",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 2
+    assert "POLYARB_CONTROL_PLANE_TEST_DSN" in result.stderr
+    assert _fake_uv_calls(log_path) == []
+
+
+def test_make_normalization_payload_corrupt_commissioning_requires_test_dsn_before_fake_uv(
+    tmp_path: Path,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env.pop("POLYARB_CONTROL_PLANE_TEST_DSN", None)
+    result = subprocess.run(
+        [
+            "make",
+            "m1-production-commissioning-normalization-payload-corrupt",
             "evidence_root=evidence",
             f"expected_release={'a' * 40}",
             f"expected_config=sha256:{'b' * 64}",
@@ -1317,6 +1352,47 @@ def test_make_quote_admission_missing_shard_commissioning_executes_exact_harness
             "-m",
             "polyarb.control_plane.production_commissioning_harness",
             "quote-admission-missing-shard",
+            "--root",
+            "evidence",
+            "--release-id",
+            release,
+            "--config-id",
+            config,
+            "--json",
+        ]
+    ]
+
+
+def test_make_normalization_payload_corrupt_commissioning_executes_exact_harness_command(
+    tmp_path: Path,
+) -> None:
+    env, log_path = _fake_uv_env(tmp_path)
+    env["POLYARB_CONTROL_PLANE_TEST_DSN"] = "postgresql://localhost/test"
+    release = "a" * 40
+    config = f"sha256:{'b' * 64}"
+    result = subprocess.run(
+        [
+            "make",
+            "m1-production-commissioning-normalization-payload-corrupt",
+            "evidence_root=evidence",
+            f"expected_release={release}",
+            f"expected_config={config}",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=PROJECT_ROOT,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _fake_uv_calls(log_path) == [
+        [
+            "run",
+            "python",
+            "-m",
+            "polyarb.control_plane.production_commissioning_harness",
+            "normalization-payload-corrupt",
             "--root",
             "evidence",
             "--release-id",

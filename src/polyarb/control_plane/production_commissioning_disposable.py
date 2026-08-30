@@ -36,9 +36,14 @@ from .structure_artifact import (
     StructureBundleIdentity,
     StructureShardArtifact,
     StructureShardReceipt,
+    canonical_structure_bundle_bytes,
     canonical_structure_manifest_bytes,
     canonical_structure_shard_bytes,
     canonical_structure_shard_manifest_bytes,
+)
+from .structure_worker import (
+    StructureNormalizationInputInvalid,
+    TransactionalStructureWorker,
 )
 
 
@@ -2872,6 +2877,370 @@ class QuoteAdmissionMissingShardCommissioningAdapter:
         )
 
 
+class NormalizationPayloadCorruptCommissioningAdapter:
+    """Quarantine one authenticated bad shard without replacing certified truth."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        started_at: datetime,
+    ) -> None:
+        if started_at.tzinfo is None or started_at.utcoffset() is None:
+            raise DisposableCommissioningError("invalid-started-at")
+        self._control_plane = control_plane
+        self._started_at = started_at.astimezone(UTC)
+        self._clock_at = self._started_at
+        self._objects = _DisposableObjectStore()
+        self._worker: TransactionalStructureWorker | None = None
+        self._job_key: str | None = None
+        self._generation_key: str | None = None
+        self._corrupt: StructureShardArtifact | None = None
+        self._prior_generation_key: str | None = None
+        self._terminal_event_id: str | None = None
+        self._incident_key: str | None = None
+        self._incident_event_id: str | None = None
+        self._outbox_id: str | None = None
+
+    @staticmethod
+    def _require_identity(identity: AttackIdentity) -> None:
+        if (
+            identity.attack_id != "normalization-payload-corrupt"
+            or identity.node_id != "structure-normalize"
+        ):
+            raise DisposableCommissioningError("wrong-attack-adapter")
+
+    @staticmethod
+    def _need[T](value: T | None, reason: str) -> T:
+        if value is None:
+            raise DisposableCommissioningError(reason)
+        return value
+
+    def _certify_prior_generation(self, identity: AttackIdentity) -> str:
+        prior_identity = StructureBundleIdentity(
+            publication_id=f"commissioning:prior:{identity.experiment_id}",
+            window_id=f"prior:{identity.experiment_id}",
+            snapshot_id=1,
+            comparison_receipt_digest=sha256(
+                f"{identity.experiment_id}:prior-comparison".encode()
+            ).hexdigest(),
+            normalization_contract_version="structure-v7",
+            component_counts={
+                "events": 1,
+                "event_tags": 0,
+                "memberships": 0,
+                "group_truth": 0,
+                "markets": 0,
+                "issues": 0,
+            },
+        )
+        prior_bundle = StructureBundleArtifact.from_bytes(
+            canonical_structure_bundle_bytes(
+                identity=prior_identity,
+                components={
+                    "events": ({"id": "prior-event"},),
+                    "event_tags": (),
+                    "memberships": (),
+                    "group_truth": (),
+                    "markets": (),
+                    "issues": (),
+                },
+            )
+        )
+        specs = self._control_plane.enqueue_structure_generation(
+            identity=prior_identity,
+            bundle=prior_bundle,
+            ranges=(("events", "", ""),),
+            now=self._started_at,
+        )
+        if len(specs) != 1:
+            raise DisposableCommissioningError("prior-structure-plan-shape")
+        spec = specs[0]
+        range_digest = sha256(f"{identity.experiment_id}:prior-range".encode()).hexdigest()
+        range_key = f"structure-ranges/{range_digest}/rows.ndjson"
+        normalizer = _claim(
+            self._control_plane, "structure-normalize", self._started_at
+        )
+        _record_progress(self._control_plane, normalizer, self._started_at)
+        self._control_plane.complete_structure_range(
+            normalizer,
+            range_digest=spec.range_digest,
+            artifact_key=range_key,
+            artifact_digest=range_digest,
+            record_count=1,
+            now=self._started_at + timedelta(seconds=1),
+        )
+        certifier = _claim(
+            self._control_plane,
+            "structure-certify",
+            self._started_at + timedelta(seconds=2),
+        )
+        _record_progress(
+            self._control_plane,
+            certifier,
+            self._started_at + timedelta(seconds=2),
+        )
+        manifest_digest = sha256(
+            canonical_structure_manifest_bytes(
+                generation_key=spec.generation_key,
+                bundle_digest=prior_bundle.sha256,
+                receipts=(
+                    {
+                        "job_key": spec.job_key,
+                        "component": "events",
+                        "ordinal": 0,
+                        "range_digest": spec.range_digest,
+                        "artifact_key": range_key,
+                        "artifact_digest": range_digest,
+                        "record_count": 1,
+                    },
+                ),
+            )
+        ).hexdigest()
+        self._control_plane.certify_structure_generation(
+            certifier,
+            generation_key=spec.generation_key,
+            artifact_key=f"structure-manifests/{manifest_digest}/manifest.ndjson",
+            artifact_digest=manifest_digest,
+            now=self._started_at + timedelta(seconds=3),
+        )
+        self._control_plane.publish_structure_shadow(
+            generation_key=spec.generation_key,
+            now=self._started_at + timedelta(seconds=4),
+        )
+        return spec.generation_key
+
+    def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._prior_generation_key = self._certify_prior_generation(identity)
+        corrupt_identity = StructureBundleIdentity(
+            publication_id=f"commissioning:corrupt:{identity.experiment_id}",
+            window_id=f"corrupt:{identity.experiment_id}",
+            snapshot_id=2,
+            comparison_receipt_digest=sha256(
+                f"{identity.experiment_id}:corrupt-comparison".encode()
+            ).hexdigest(),
+            normalization_contract_version="gamma-source-window-events-v3-sharded",
+            component_counts={
+                "events": 1,
+                "event_tags": 0,
+                "memberships": 0,
+                "group_truth": 0,
+                "markets": 0,
+                "issues": 0,
+            },
+            source_kind="gamma-source-window-events-v3-sharded",
+        )
+        corrupt = StructureShardArtifact.from_bytes(
+            b'{"kind":"not-a-structure-shard"}\n'
+        )
+        manifest = StructureBundleArtifact.from_bytes(
+            canonical_structure_shard_manifest_bytes(
+                identity=corrupt_identity,
+                shards=(
+                    StructureShardReceipt("events", 0, corrupt.key, corrupt.sha256, 1),
+                ),
+            )
+        )
+        self._objects.restore(
+            key=manifest.key,
+            payload=manifest.payload,
+            digest=manifest.sha256,
+        )
+        specs = self._control_plane.enqueue_structure_generation(
+            identity=corrupt_identity,
+            bundle=manifest,
+            ranges=(("events", "shard:00000000", "shard:00000001"),),
+            now=self._started_at + timedelta(seconds=5),
+        )
+        if len(specs) != 1:
+            raise DisposableCommissioningError("corrupt-structure-plan-shape")
+        spec = specs[0]
+        self._job_key = spec.job_key
+        self._generation_key = spec.generation_key
+        self._corrupt = corrupt
+        self._clock_at = self._started_at + timedelta(seconds=6)
+        self._worker = TransactionalStructureWorker(
+            control_plane=self._control_plane,
+            object_client=self._objects,
+            bucket="commissioning-artifacts",
+            worker_id="commissioning:structure-normalize",
+            now=lambda: self._clock_at,
+            lease_seconds=120,
+        )
+        return AttackStageReceipt(
+            stage="preflight",
+            receipt_id=f"pointer:structure:current:shadow:{self._prior_generation_key}",
+            occurred_at=self._started_at + timedelta(seconds=6),
+        )
+
+    def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        corrupt = self._need(self._corrupt, "corrupt-structure-shard-missing")
+        self._objects.restore(key=corrupt.key, payload=corrupt.payload, digest=corrupt.sha256)
+        return AttackStageReceipt(
+            stage="injected",
+            receipt_id=f"artifact:{corrupt.key}:{corrupt.sha256}",
+            occurred_at=self._started_at + timedelta(seconds=7),
+        )
+
+    def detect(
+        self,
+        identity: AttackIdentity,
+        injected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        worker = self._need(self._worker, "normalization-worker-missing")
+        corrupt = self._need(self._corrupt, "corrupt-structure-shard-missing")
+        self._clock_at = self._started_at + timedelta(seconds=8)
+        try:
+            asyncio.run(worker.run_once())
+        except StructureNormalizationInputInvalid as error:
+            if error.artifact_key != corrupt.key:
+                raise DisposableCommissioningError("wrong-corrupt-artifact") from error
+        else:
+            raise DisposableCommissioningError("corrupt-artifact-not-detected")
+        job_key = self._need(self._job_key, "normalization-job-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT runtime.event_id, incident.incident_key,
+                       event.incident_event_id, outbox.outbox_id
+                FROM m1_job_runtime_events AS runtime
+                JOIN m1_incidents AS incident
+                  ON incident.dedupe_key = %s
+                JOIN m1_incident_events AS event
+                  ON event.incident_key = incident.incident_key
+                JOIN m1_alert_outbox AS outbox
+                  ON outbox.incident_event_id = event.incident_event_id
+                WHERE runtime.job_key = %s
+                  AND runtime.kind = 'job.terminal-failed'
+                """,
+                (f"input-quarantine:{job_key}", job_key),
+            ).fetchone()
+        if row is None:
+            raise DisposableCommissioningError("quarantine-chain-missing")
+        self._terminal_event_id = str(row[0])
+        self._incident_key = str(row[1])
+        self._incident_event_id = str(row[2])
+        self._outbox_id = str(row[3])
+        return AttackStageReceipt(
+            stage="detected",
+            receipt_id=f"event:{self._terminal_event_id}",
+            occurred_at=self._started_at + timedelta(seconds=8),
+        )
+
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id=f"operator-action:{self._incident_key}:{self._outbox_id}",
+            occurred_at=self._started_at + timedelta(seconds=9),
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._job_key, "normalization-job-missing")
+        generation_key = self._need(self._generation_key, "normalization-generation-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            partial = connection.execute(
+                """
+                SELECT
+                  (SELECT count(*) FROM m1_structure_range_receipts WHERE job_key = %s),
+                  (SELECT count(*) FROM m1_generation_manifests WHERE generation_key = %s),
+                  (SELECT state FROM m1_jobs WHERE job_key = %s),
+                  (SELECT state FROM m1_jobs WHERE job_key = %s || ':certify')
+                """,
+                (job_key, generation_key, job_key, generation_key),
+            ).fetchone()
+        if partial != (0, 0, "quarantined", "waiting"):
+            raise DisposableCommissioningError("normalization-quarantine-partial-effect")
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id=f"postgres:m1_structure_range_receipts:{job_key}:absent",
+            occurred_at=self._started_at + timedelta(seconds=10),
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"incident:{self._incident_event_id}:operator-action-required",
+            occurred_at=self._started_at + timedelta(seconds=11),
+        )
+
+    def verify(
+        self,
+        identity: AttackIdentity,
+        recovered: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        job_key = self._need(self._job_key, "normalization-job-missing")
+        prior_generation = self._need(
+            self._prior_generation_key, "prior-structure-generation-missing"
+        )
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            shape = connection.execute(
+                """
+                SELECT job.state, attempt.state, runtime.kind,
+                       runtime.detail->>'qualification_impact',
+                       incident.state, incident.severity, event.kind,
+                       outbox.channel, outbox.state,
+                       pointer.generation_key,
+                       (SELECT count(*) FROM m1_job_circuits WHERE job_key = job.job_key)
+                FROM m1_jobs AS job
+                JOIN m1_job_attempts AS attempt
+                  ON attempt.job_key = job.job_key AND attempt.lease_epoch = job.lease_epoch
+                JOIN m1_job_runtime_events AS runtime
+                  ON runtime.job_key = job.job_key
+                 AND runtime.lease_epoch = job.lease_epoch
+                 AND runtime.kind = 'job.terminal-failed'
+                JOIN m1_incidents AS incident
+                  ON incident.dedupe_key = 'input-quarantine:' || job.job_key
+                JOIN m1_incident_events AS event
+                  ON event.incident_key = incident.incident_key
+                JOIN m1_alert_outbox AS outbox
+                  ON outbox.incident_event_id = event.incident_event_id
+                JOIN m1_publication_pointers AS pointer
+                  ON pointer.pointer_key = 'structure:current:shadow'
+                WHERE job.job_key = %s
+                """,
+                (job_key,),
+            ).fetchone()
+        if shape != (
+            "quarantined",
+            "quarantined",
+            "job.terminal-failed",
+            "blocked",
+            "open",
+            "critical",
+            "escalated",
+            "dashboard",
+            "pending",
+            prior_generation,
+            0,
+        ):
+            raise DisposableCommissioningError("normalization-quarantine-proof-shape")
+        return AttackStageReceipt(
+            stage="verified",
+            receipt_id=f"pointer:structure:current:shadow:{prior_generation}",
+            occurred_at=self._started_at + timedelta(seconds=12),
+        )
+
+
 def _require(value: Any, reason: str) -> Any:
     if not value:
         raise DisposableCommissioningError(reason)
@@ -3425,6 +3794,7 @@ def _postcondition_fact(connection: Any, lease: JobLease) -> str:
 __all__ = [
     "DisposableCommissioningError",
     "HeartbeatOutageCommissioningAdapter",
+    "NormalizationPayloadCorruptCommissioningAdapter",
     "PreparedNormalTurn",
     "ProgressStallCommissioningAdapter",
     "QuoteAdmissionMissingShardCommissioningAdapter",

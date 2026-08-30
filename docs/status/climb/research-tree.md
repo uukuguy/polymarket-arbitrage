@@ -5,11 +5,11 @@
 ## Session
 
 - Last cycle: 52
-- Next action: rank next pending hypothesis
+- Next action: implement and evaluate H-048 normalization payload corruption commissioning
 
 ## In flight
 
-- None
+- H-048
 
 ## Hypothesis pool
 
@@ -55,6 +55,7 @@
 - **H-045** [confirmed]: Withholding one required Structure source-page receipt can keep the materializer barrier non-terminal without publishing a partial bundle, after which completing that exact fenced receipt releases one materializer turn that commits one complete source bundle.
 - **H-046** [confirmed]: A failed Quote batch can leave its certification barrier incomplete while opening one durable producer incident and publishing no pointer, after which the policy-due fenced retry commits the missing receipt, resolves that incident, and releases exactly one complete certification turn.
 - **H-047** [confirmed]: Translating a manifest-named missing Structure shard into one safe typed Quote admission incident can identify the exact unavailable artifact, prevent partial batch admission, and let the policy-due fenced retry admit the complete generation after that artifact is restored.
+- **H-048** [in-flight]: A schema-invalid manifest-authorized Structure shard can terminate the exact normalizer attempt through one atomic quarantined state, terminal runtime fact, critical operator incident, and alert while preserving the last certified Structure pointer.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts

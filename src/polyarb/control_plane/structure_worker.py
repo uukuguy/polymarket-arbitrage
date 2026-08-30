@@ -46,6 +46,28 @@ class StructureWorkerError(RuntimeError):
     """An admitted Structure bundle violates its frozen range contract."""
 
 
+class StructureNormalizationInputInvalid(StructureWorkerError):
+    """One manifest-authorized immutable input is schema-invalid."""
+
+    def __init__(
+        self,
+        artifact_key: str,
+        *,
+        bundle_digest: str,
+        component: str,
+        range_digest: str,
+    ) -> None:
+        if not artifact_key or "\x00" in artifact_key or len(artifact_key) > 512:
+            raise ValueError("invalid Structure normalization artifact key")
+        if len(bundle_digest) != 64 or len(range_digest) != 64 or not component:
+            raise ValueError("invalid Structure normalization input identity")
+        self.artifact_key = artifact_key
+        self.bundle_digest = bundle_digest
+        self.component = component
+        self.range_digest = range_digest
+        super().__init__(f"Structure normalization input invalid: {artifact_key}")
+
+
 class _Body(Protocol):
     def read(self) -> bytes: ...
 
@@ -432,6 +454,36 @@ class TransactionalStructureWorker:
                 now=self._now(),
             )
             raise
+        except StructureNormalizationInputInvalid as error:
+            error_class = type(error).__name__
+            input_artifact_key = error.artifact_key
+            bundle_digest = error.bundle_digest
+            component = error.component
+            range_digest = error.range_digest
+            await _runtime_sync_call_async(
+                runtime,
+                lambda: self._control_plane.finish_quarantined_with_incident(
+                    runtime.current_lease,
+                    error_class=error_class,
+                    incident_key=f"incident:input-quarantine:{lease.job_key}",
+                    dedupe_key=f"input-quarantine:{lease.job_key}",
+                    component="structure-normalize",
+                    summary="structure-normalize input quarantined",
+                    detail={
+                        "job_key": lease.job_key,
+                        "lease_epoch": lease.lease_epoch,
+                        "input_artifact_key": input_artifact_key,
+                        "bundle_digest": bundle_digest,
+                        "component": component,
+                        "range_digest": range_digest,
+                        "reason_code": "failure.schema",
+                    },
+                    channels=incident_alert_channels(Settings()),
+                    now=self._now(),
+                ),
+                terminal=True,
+            )
+            raise
         except (StructureBundleError, StructureWorkerError):
             await _runtime_sync_call_async(
                 runtime,
@@ -562,7 +614,17 @@ class TransactionalStructureWorker:
         payload = _read_object_bytes(
             self._object_client, bucket=self._bucket, key=shard.artifact_key
         )
-        header, rows = parse_structure_shard_bytes(payload, expected_sha256=shard.artifact_digest)
+        try:
+            header, rows = parse_structure_shard_bytes(
+                payload, expected_sha256=shard.artifact_digest
+            )
+        except StructureBundleError as error:
+            raise StructureNormalizationInputInvalid(
+                shard.artifact_key,
+                bundle_digest=spec.bundle_digest,
+                component=spec.component,
+                range_digest=spec.range_digest,
+            ) from error
         if header.component != spec.component or header.ordinal != shard.ordinal:
             raise StructureWorkerError("structure-v3-range-shard-identity-invalid")
         if heartbeat is not None:

@@ -6964,6 +6964,175 @@ class PostgresControlPlane:
             )
             return next_attempt_at
 
+    def finish_quarantined_with_incident(
+        self,
+        lease: JobLease,
+        *,
+        error_class: str,
+        incident_key: str,
+        dedupe_key: str,
+        component: str,
+        summary: str,
+        detail: dict[str, object],
+        channels: Sequence[str],
+        now: datetime,
+    ) -> str:
+        """Atomically quarantine immutable bad input and surface operator action."""
+        self._validate_aware(now, "now")
+        self._validate_nonempty(
+            error_class=error_class,
+            incident_key=incident_key,
+            dedupe_key=dedupe_key,
+            component=component,
+            summary=summary,
+        )
+        if not channels or any(not channel.strip() for channel in channels):
+            raise ValueError("channels must contain non-empty values")
+        if len(set(channels)) != len(channels):
+            raise ValueError("channels must be unique")
+        failure_fingerprint, failure_signature = _retry_failure_identity(
+            component=component,
+            error_class=error_class,
+            detail=detail,
+        )
+        if failure_signature == "service.interrupted":
+            raise ValueError("service interruption must use finish_interrupted")
+        with (
+            self._connection_factory() as connection,
+            connection.cursor(row_factory=dict_row) as cursor,
+        ):
+            _set_fenced_transaction_timeouts(cursor, lease=lease, now=now)
+            cursor.execute(
+                """
+                SELECT attempt_id, lease_epoch, worker_id, stage, progress_sequence,
+                       progress_current, progress_total
+                FROM public.m1_job_runtime_state
+                WHERE job_key = %s
+                FOR UPDATE
+                """,
+                (lease.job_key,),
+            )
+            state = cursor.fetchone()
+            if state is None or (
+                int(state["lease_epoch"]) != lease.lease_epoch
+                or str(state["worker_id"]) != lease.lease_owner
+            ):
+                raise StaleLeaseError(
+                    f"runtime attempt is no longer current for {lease.job_key}"
+                )
+            attempt_id = str(state["attempt_id"])
+            stage = str(state["stage"])
+            progress_sequence = int(state["progress_sequence"])
+            progress = (
+                None
+                if progress_sequence == 0
+                else RuntimeProgress(
+                    sequence=progress_sequence,
+                    current=int(state["progress_current"]),
+                    total=(
+                        None
+                        if state["progress_total"] is None
+                        else int(state["progress_total"])
+                    ),
+                    stage=stage,
+                )
+            )
+            cursor.execute(
+                """
+                SELECT COALESCE(MAX(event_sequence), 0) + 1 AS next_sequence
+                FROM public.m1_job_runtime_events
+                WHERE attempt_id = %s
+                """,
+                (attempt_id,),
+            )
+            sequence_row = cursor.fetchone()
+            if sequence_row is None:
+                raise ControlPlaneError("runtime event sequence query returned no row")
+            append_runtime_event_cursor(
+                cursor,
+                RuntimeEvent(
+                    job_key=lease.job_key,
+                    attempt_id=attempt_id,
+                    lease_epoch=lease.lease_epoch,
+                    worker_id=lease.lease_owner,
+                    event_sequence=int(sequence_row["next_sequence"]),
+                    kind=RuntimeEventKind.TERMINAL_FAILED,
+                    stage=stage,
+                    progress=progress,
+                    detail={
+                        "component": component,
+                        "failure_signature": failure_signature,
+                        "qualification_impact": "blocked",
+                        "reason_code": "failure.schema",
+                        "result_code": "failed",
+                    },
+                    occurred_at=now,
+                    idempotency_key=f"runtime:{attempt_id}:terminal-failed",
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE public.m1_jobs
+                SET state = 'quarantined', next_attempt_at = NULL,
+                    last_error_class = %s, lease_owner = NULL,
+                    lease_expires_at = NULL, updated_at = %s
+                WHERE job_key = %s AND lease_owner = %s AND lease_epoch = %s
+                  AND state IN ('leased', 'checkpointed')
+                """,
+                (
+                    error_class,
+                    now,
+                    lease.job_key,
+                    lease.lease_owner,
+                    lease.lease_epoch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(f"lease is no longer current for {lease.job_key}")
+            cursor.execute(
+                """
+                UPDATE public.m1_job_attempts
+                SET state = 'quarantined', finished_at = %s, error_class = %s,
+                    error_detail = %s
+                WHERE job_key = %s AND lease_epoch = %s AND state = 'running'
+                """,
+                (
+                    now,
+                    error_class,
+                    Jsonb(
+                        {
+                            "failure_fingerprint": failure_fingerprint,
+                            "failure_signature": failure_signature,
+                        }
+                    ),
+                    lease.job_key,
+                    lease.lease_epoch,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleLeaseError(
+                    f"runtime attempt is no longer current for {lease.job_key}"
+                )
+            return self._record_incident_event(
+                cursor,
+                incident_key=incident_key,
+                dedupe_key=dedupe_key,
+                component=component,
+                severity="critical",
+                summary=summary,
+                kind="escalated",
+                detail={
+                    **detail,
+                    "error_class": error_class,
+                    "failure_fingerprint": failure_fingerprint,
+                    "failure_signature": failure_signature,
+                    "qualification_breaking": True,
+                },
+                idempotency_key=f"input-quarantine:{lease.job_key}:{lease.lease_epoch}",
+                channels=channels,
+                now=now,
+            )
+
     def claim_alert_delivery(
         self,
         *,

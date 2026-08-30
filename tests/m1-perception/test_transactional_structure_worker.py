@@ -30,6 +30,7 @@ from polyarb.control_plane.structure_artifact import (
     canonical_structure_shard_manifest_bytes,
 )
 from polyarb.control_plane.structure_worker import (
+    StructureNormalizationInputInvalid,
     StructureWorkerError,
     StructureWorkerResult,
     TransactionalStructureCertifier,
@@ -667,6 +668,100 @@ def test_structure_worker_reads_only_named_v3_shard() -> None:
 
     assert asyncio.run(worker.run_once()).outcome == "succeeded"
     assert objects.read_keys == [manifest.key, shard.key]
+
+
+def test_structure_worker_atomically_quarantines_schema_invalid_named_v3_shard() -> None:
+    identity = StructureBundleIdentity(
+        publication_id="source-window:corrupt-v3",
+        window_id="corrupt-v3",
+        snapshot_id=0,
+        comparison_receipt_digest="a" * 64,
+        normalization_contract_version="gamma-source-window-events-v3-sharded",
+        component_counts={
+            "events": 1,
+            "event_tags": 0,
+            "memberships": 0,
+            "group_truth": 0,
+            "markets": 0,
+            "issues": 0,
+        },
+        source_kind="gamma-source-window-events-v3-sharded",
+    )
+    corrupt = StructureShardArtifact.from_bytes(b'{"kind":"not-a-structure-shard"}\n')
+    manifest = StructureBundleArtifact.from_bytes(
+        canonical_structure_shard_manifest_bytes(
+            identity=identity,
+            shards=(
+                StructureShardReceipt("events", 0, corrupt.key, corrupt.sha256, 1),
+            ),
+        )
+    )
+    spec = StructureRangeSpec.create(
+        bundle_key=manifest.key,
+        bundle_digest=manifest.sha256,
+        component="events",
+        ordinal=0,
+        range_start="shard:00000000",
+        range_end="shard:00000001",
+    )
+
+    class ControlPlane(FakeControlPlane):
+        def __init__(self) -> None:
+            super().__init__(spec)
+            self.quarantines: list[dict[str, object]] = []
+
+        def finish_quarantined_with_incident(
+            self, _lease: JobLease, **kwargs: object
+        ) -> None:
+            self.quarantines.append(kwargs)
+
+    class Objects(FakeObjectClient):
+        def __init__(self) -> None:
+            self.bundle = manifest
+            self.upload = {}
+
+        def get_object(self, **kwargs: object) -> dict[str, object]:
+            key = str(kwargs["Key"])
+            payloads = {manifest.key: manifest.payload, corrupt.key: corrupt.payload}
+            return {"Body": _Body(payloads[key])}
+
+    control_plane = ControlPlane()
+    objects = Objects()
+    worker = TransactionalStructureWorker(
+        control_plane=control_plane,
+        object_client=objects,
+        bucket="structure",
+        worker_id="worker-a",
+        now=lambda: NOW,
+    )
+
+    with pytest.raises(StructureNormalizationInputInvalid) as invalid:
+        asyncio.run(worker.run_once())
+
+    assert invalid.value.artifact_key == corrupt.key
+    assert control_plane.completed is None
+    assert control_plane.finished == []
+    assert objects.upload == {}
+    assert control_plane.quarantines == [
+        {
+            "error_class": "StructureNormalizationInputInvalid",
+            "incident_key": f"incident:input-quarantine:{spec.job_key}",
+            "dedupe_key": f"input-quarantine:{spec.job_key}",
+            "component": "structure-normalize",
+            "summary": "structure-normalize input quarantined",
+            "detail": {
+                "job_key": spec.job_key,
+                "lease_epoch": 1,
+                "input_artifact_key": corrupt.key,
+                "bundle_digest": spec.bundle_digest,
+                "component": spec.component,
+                "range_digest": spec.range_digest,
+                "reason_code": "failure.schema",
+            },
+            "channels": ("dashboard",),
+            "now": NOW,
+        }
+    ]
 
 
 def test_structure_certifier_service_stop_uses_interruption_not_defect_retry() -> None:

@@ -290,3 +290,13 @@ commissioning 还验证了一个容易误解的存储边界：Quote admission �
 `m1_quote_batch_inputs` 不会再次存两份 legs/token IDs。真实 authority 是已 HEAD 验证的 Quote batch
 artifact，数据库只存 key、SHA-256 和 `leg_count`。恢复证据必须核对这三者，而不是为了测试方便
 要求冗余 JSON 字段存在。
+
+### 为什么 schema corruption 不能按普通 timeout 重试？
+
+timeout 表示“同一输入稍后可能成功”，所以进入共享 backoff/circuit；而 digest 已认证但 schema
+非法的 immutable shard 表示“同一输入永远不会变好”。继续重试只会耗尽预算并掩盖根因。
+
+因此 normalizer 使用另一条终态：在一个 lease-fenced PostgreSQL 事务内写入
+`job.terminal-failed`、quarantined job/attempt、critical incident 和 Dashboard outbox。
+qualification 被阻断，操作员能看到精确且安全的 artifact key，但旧 certified Structure shadow
+pointer 不动，未损坏的生产读链仍有权威来源。

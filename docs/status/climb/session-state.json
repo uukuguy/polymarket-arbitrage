@@ -1,6 +1,8 @@
 {
-  "in_flight": null,
+  "in_flight": {
+    "hypothesis_id": "H-048"
+  },
   "last_cycle": 52,
-  "next_action": "rank next pending hypothesis",
+  "next_action": "implement and evaluate H-048 normalization payload corruption commissioning",
   "session": "2026-07-31-m1-self-healing-structure"
 }

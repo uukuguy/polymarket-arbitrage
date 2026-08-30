@@ -12307,3 +12307,33 @@ implement the next disposable production-chain fault, preferring
 `normalization-payload-corrupt` because it is the next upstream artifact-truth
 boundary. Continue to defer the combined exact-image run until the remaining
 disposable matrix is complete.
+
+### SESSION 365 — 2026-08-30 (normalization corruption chain-truth)
+
+- [CLIMB H-048] Registered an in-flight hypothesis for a digest-authenticated
+  but schema-invalid manifest-authorized Structure shard.
+- [DESIGN GAP] Normalization previously called generic `finish(...
+  QUARANTINED)`. Runtime observe excludes terminal quarantined jobs, while that
+  transition emitted no terminal runtime fact, incident or alert; a fault that
+  must block qualification could therefore become operationally invisible.
+- [ATOMIC TERMINAL] `finish_quarantined_with_incident` now fences one
+  transaction across `job.terminal-failed`, quarantined job/attempt, critical
+  escalated incident and Dashboard outbox. No retry circuit is created because
+  immutable schema corruption cannot improve with backoff.
+- [SAFE IDENTITY] `StructureNormalizationInputInvalid` carries the exact
+  manifest key and frozen bundle/component/range identity, never provider body,
+  credentials or arbitrary exception text.
+- [DISPOSABLE ATTACK] A good generation is certified and published to the
+  isolated Structure shadow pointer first. The next generation's corrupt shard
+  produces zero range receipt/manifest, leaves its certifier waiting and keeps
+  the prior pointer authoritative.
+- [HARNESS/ENTRY] Typed worker test, atomic real-PostgreSQL contract, real
+  adapter, isolated cleanup, explicit DSN, exact Make argv and climb profile
+  contracts pass. Ruff passes and production-module Pyright reports zero
+  errors.
+- [BOUNDARY] No production provider/DB, Fly, SSH, deployment, Docker build or
+  context mutation, Colima, canary or qualification operation occurred.
+
+[NEXT] Commit Plan 05.6-236 without protected user files, pass exact-HEAD and
+full related regressions, then confirm H-048 through climb. Continue with
+`structure-parity-mismatch`; keep the combined exact-image run deferred.

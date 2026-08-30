@@ -19,6 +19,7 @@ from polyarb.control_plane.models import JobLease, QuoteBatchLeg
 from polyarb.control_plane.postgres import PostgresControlPlane, StaleLeaseError
 from polyarb.control_plane.production_commissioning_disposable import (
     HeartbeatOutageCommissioningAdapter,
+    NormalizationPayloadCorruptCommissioningAdapter,
     ProgressStallCommissioningAdapter,
     QuoteAdmissionMissingShardCommissioningAdapter,
     QuoteBatchIncompleteCommissioningAdapter,
@@ -1147,6 +1148,64 @@ def test_quote_admission_missing_shard_adapter_restores_exact_input_then_admits(
     assert quote_pointer == (0,)
 
 
+def test_normalization_payload_corrupt_adapter_quarantines_and_preserves_pointer(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id="commission:structure-normalize:normalization-payload-corrupt",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id="structure-normalize",
+        attack_id="normalization-payload-corrupt",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=NormalizationPayloadCorruptCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=64),
+        ),
+        evidence_dir=tmp_path / "structure-normalize-corrupt",
+    )
+
+    assert proof["qualification_impact"] == "block"
+    assert str(proof["detector_fact_id"]).startswith("event:")
+    assert str(proof["recovery_action_id"]).startswith("operator-action:")
+    assert str(proof["recovery_fact_id"]).endswith(":operator-action-required")
+    assert str(proof["postcondition_fact_id"]).startswith(
+        "pointer:structure:current:shadow:structure:"
+    )
+    assert proof["cleanup_verified"] is True
+
+    with control_plane._connection_factory() as connection:  # noqa: SLF001
+        shape = connection.execute(
+            """
+            SELECT job.state, attempt.state, incident.state, incident.severity,
+                   event.kind, outbox.state,
+                   (SELECT count(*) FROM m1_structure_range_receipts
+                    WHERE job_key = job.job_key),
+                   (SELECT count(*) FROM m1_job_circuits WHERE job_key = job.job_key)
+            FROM m1_jobs AS job
+            JOIN m1_job_attempts AS attempt ON attempt.job_key = job.job_key
+            JOIN m1_incidents AS incident
+              ON incident.dedupe_key = 'input-quarantine:' || job.job_key
+            JOIN m1_incident_events AS event USING (incident_key)
+            JOIN m1_alert_outbox AS outbox USING (incident_event_id)
+            WHERE job.job_type = 'structure-normalize' AND job.state = 'quarantined'
+            """
+        ).fetchone()
+
+    assert shape == (
+        "quarantined",
+        "quarantined",
+        "open",
+        "critical",
+        "escalated",
+        "pending",
+        0,
+        0,
+    )
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:
     now = NOW + timedelta(minutes=REQUIRED_JOB_TYPES.index(job_type) + 1)
     if job_type == "structure-fetch":

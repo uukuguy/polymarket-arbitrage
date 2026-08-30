@@ -336,6 +336,20 @@ hypotheses:
     online: null
     verdict: confirmed
     decision_reason: all local gates passed
+- id: H-048
+  description: A schema-invalid manifest-authorized Structure shard can terminate
+    the exact normalizer attempt through one atomic quarantined state, terminal
+    runtime fact, critical operator incident, and alert while preserving the last
+    certified Structure pointer.
+  parent_paradigm: deterministic-runtime-production-enablement
+  expected_lift: Close the quarantine visibility gap so immutable input corruption
+    blocks qualification and names the safe exact artifact without entering the
+    retry circuit, exposing provider content, or publishing a partial generation.
+  cost_h: 1.0
+  ranking: 1.0
+  status: in-flight
+  created_at: '2026-08-30T12:15:00+08:00'
+  results: []
 - id: H-002
   description: Caller-supplied immutable close identities make committed-but-unacknowledged
     retries observable and idempotent
