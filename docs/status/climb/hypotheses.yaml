@@ -120,18 +120,35 @@ hypotheses:
     decision_reason: all local gates passed
 - id: H-041
   description: A live leased attempt held after durable progress can be classified
-    only by the shared progress deadline, open one warning incident, execute one
-    exactly fenced cancel action, and let a successor epoch complete the real node
-    transaction and resolve that incident across all eight production nodes.
+    only by the shared progress deadline, open one warning incident, execute one exactly
+    fenced cancel action, and let a successor epoch complete the real node transaction
+    and resolve that incident across all eight production nodes.
   parent_paradigm: deterministic-runtime-production-enablement
   expected_lift: Prove the progress-stall commissioning lifecycle end to end without
     lease expiry, private clocks, arbitrary outer timeouts, synthetic action completion,
     or production database mutation.
   cost_h: 1.0
   ranking: 1.0
-  status: in-flight
+  status: confirmed
   created_at: '2026-08-30T18:00:00+08:00'
-  results: []
+  results:
+  - session: 2026-07-31-m1-self-healing-structure
+    cycle: 46
+    run: 20260830-020206-h-041
+    local: 100.0
+    local_per_task:
+      cli: 100.0
+      integration: 100.0
+      planning: 100.0
+      qualification-identity-digest: 100.0
+      restart: 100.0
+      scoped-qualification-worker: 100.0
+      scoped-runtime-controller: 100.0
+      unit: 100.0
+      zero-recovery-actions: 100.0
+    online: null
+    verdict: confirmed
+    decision_reason: all local gates passed
 - id: H-002
   description: Caller-supplied immutable close identities make committed-but-unacknowledged
     retries observable and idempotent

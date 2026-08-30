@@ -11886,3 +11886,28 @@ commissioning matrix is complete.
 image guard and H-041 climb profile, then execute the complete eight-node
 progress-stall harness inside the next immutable OrbStack-built image. Preserve
 the release/config-bound evidence before moving to heartbeat-outage or worker-exit.
+
+### SESSION 350 — 2026-08-30 (H-041 progress-stall confirmed)
+
+- [EXACT HEAD GUARD] After commit `edaaf74d`, the runtime image build contract
+  accepted the clean release inputs that it had correctly rejected while the
+  implementation was uncommitted.
+- [CLIMB H-041] Cycle 46 passed all nine deterministic production-enablement
+  gates at 100 and confirmed the hypothesis. Integration passed 102 cases,
+  including all eight live-lease progress-stall node transactions and one
+  isolated migrated harness execution.
+- [CHAIN-TRUTH] The confirming gate exercises real warning incident creation,
+  exact `cancel-job` scheduling/execution, stale terminal rejection, policy
+  backoff, successor epoch success, recovered event and business postcondition.
+- [SAFETY OUTPUTS] Scoped runtime/qualification roles, observe-only zero-action
+  behavior, controller restart conflicts, qualification identity and exact Make
+  argv each passed their independent output gate.
+- [BOUNDARY] Confirmation used only local disposable PostgreSQL. No production
+  database, provider, Fly Machine, SSH, deployment or Docker-context mutation
+  occurred.
+
+[NEXT] Commit the H-041 confirmation state, build one immutable exact-HEAD image
+through command-scoped OrbStack, then run and independently verify all eight
+progress-stall proofs against a port-unpublished PostgreSQL 16 container. Remove
+the disposable container after zero-residue checks; do not start production
+canaries or qualification.
