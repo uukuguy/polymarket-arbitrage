@@ -2636,3 +2636,20 @@ success is not user receipt/read evidence.
   back to the replacement epoch before its business postcondition is accepted.
   All eight runtime nodes pass this contract. Runner lifecycle receipts remain
   a separate next step; no final attack proof has yet been claimed.
+
+### §2.81 Negative fence truth must not grant the stale owner a write (2026-08-30)
+
+- The stale-owner adapter now implements the cleanup-safe runner protocol for
+  all eight nodes. Preflight/injection/detection/recovery/cleanup receipts name
+  real original or replacement attempt IDs; recovery names the actual
+  `job.succeeded` event and verification names the business postcondition.
+- There is deliberately no database event saying “the stale write was rejected”
+  from the stale transaction. Allowing that transaction to append such an event
+  would violate the no-write fence being tested. Detection instead proves the
+  replacement epoch and zero old-epoch success facts; cleanup repeats the
+  negative check before the replacement commits.
+- `run_disposable_attack` writes the intent, seven exclusive stage files and
+  proof for each node. The current tests prove the adapter and directory shape
+  against disposable migrated PostgreSQL; exact-image orchestration must still
+  create one isolated database per proof before these eight obligations count
+  toward the production commissioning envelope.

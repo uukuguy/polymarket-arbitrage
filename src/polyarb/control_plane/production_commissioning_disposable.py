@@ -11,7 +11,8 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from .models import JobLease, QuoteBatchLeg
-from .postgres import PostgresControlPlane
+from .postgres import PostgresControlPlane, StaleLeaseError
+from .production_commissioning_runner import AttackIdentity, AttackStageReceipt
 from .runtime_contract import RUNTIME_STAGE_REGISTRY, AttemptRuntime
 from .runtime_deadlines import runtime_deadline_profile
 from .runtime_models import RuntimeEventKind
@@ -51,6 +52,203 @@ class PreparedNormalTurn:
             _record_progress(self.control_plane, active_lease, now - timedelta(seconds=1))
         self._commit(active_lease, now)
         return _normal_turn_proof(self.control_plane, active_lease)
+
+
+class StaleOwnerCommissioningAdapter:
+    """Run the shared stale-terminal-write attack through real node transactions."""
+
+    def __init__(
+        self,
+        *,
+        control_plane: PostgresControlPlane,
+        started_at: datetime,
+    ) -> None:
+        if started_at.tzinfo is None or started_at.utcoffset() is None:
+            raise DisposableCommissioningError("invalid-started-at")
+        self._control_plane = control_plane
+        self._started_at = started_at.astimezone(UTC)
+        self._prepared: PreparedNormalTurn | None = None
+        self._replacement: JobLease | None = None
+        self._old_attempt_id: str | None = None
+        self._replacement_attempt_id: str | None = None
+        self._recovered_proof: dict[str, str] | None = None
+
+    @staticmethod
+    def _require_identity(identity: AttackIdentity) -> None:
+        if identity.attack_id != "stale-owner-terminal-write":
+            raise DisposableCommissioningError("wrong-attack-adapter")
+
+    @staticmethod
+    def _need[T](value: T | None, reason: str) -> T:
+        if value is None:
+            raise DisposableCommissioningError(reason)
+        return value
+
+    def _attempt_id(self, lease: JobLease) -> str:
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            row = connection.execute(
+                """
+                SELECT attempt_id FROM m1_job_attempts
+                WHERE job_key = %s AND lease_epoch = %s
+                """,
+                (lease.job_key, lease.lease_epoch),
+            ).fetchone()
+        if row is None:
+            raise DisposableCommissioningError("attempt-fact-missing")
+        return str(row[0])
+
+    def _assert_stale_absent(self) -> None:
+        prepared = self._need(self._prepared, "preflight-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            attempt = connection.execute(
+                """
+                SELECT count(*) FROM m1_job_attempts
+                WHERE job_key = %s AND lease_epoch = %s AND state = 'succeeded'
+                """,
+                (prepared.lease.job_key, prepared.lease.lease_epoch),
+            ).fetchone()
+            event = connection.execute(
+                """
+                SELECT count(*) FROM m1_job_runtime_events
+                WHERE job_key = %s AND lease_epoch = %s AND kind = %s
+                """,
+                (
+                    prepared.lease.job_key,
+                    prepared.lease.lease_epoch,
+                    RuntimeEventKind.SUCCEEDED.value,
+                ),
+            ).fetchone()
+        if attempt != (0,) or event != (0,):
+            raise DisposableCommissioningError("stale-terminal-effect")
+
+    def _transition_at(self) -> datetime:
+        prepared = self._need(self._prepared, "preflight-missing")
+        return prepared.lease.lease_expires_at + timedelta(microseconds=1)
+
+    def preflight(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._prepared = prepare_normal_turn(
+            self._control_plane,
+            node_id=identity.node_id,
+            experiment_id=identity.experiment_id,
+            now=self._started_at,
+        )
+        self._old_attempt_id = self._attempt_id(self._prepared.lease)
+        return AttackStageReceipt(
+            stage="preflight",
+            receipt_id=f"attempt:{self._old_attempt_id}",
+            occurred_at=self._prepared.lease.lease_expires_at - timedelta(seconds=119),
+        )
+
+    def inject(self, identity: AttackIdentity) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prepared = self._need(self._prepared, "preflight-missing")
+        transition_at = self._transition_at()
+        self._replacement = self._control_plane.claim_job(
+            worker_id=f"commissioning:replacement:{identity.node_id}",
+            job_types=(identity.node_id,),
+            lease_seconds=120,
+            now=transition_at,
+        )
+        replacement = self._need(self._replacement, "replacement-claim-missing")
+        if (
+            replacement.job_key != prepared.lease.job_key
+            or replacement.lease_epoch != prepared.lease.lease_epoch + 1
+        ):
+            raise DisposableCommissioningError("replacement-lease-mismatch")
+        self._replacement_attempt_id = self._attempt_id(replacement)
+        try:
+            prepared.complete(
+                lease=prepared.lease,
+                now=transition_at + timedelta(seconds=1),
+            )
+        except StaleLeaseError:
+            pass
+        else:
+            raise DisposableCommissioningError("stale-owner-not-fenced")
+        return AttackStageReceipt(
+            stage="injected",
+            receipt_id=f"attempt:{self._old_attempt_id}",
+            occurred_at=transition_at + timedelta(seconds=1),
+        )
+
+    def detect(
+        self,
+        identity: AttackIdentity,
+        injected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._assert_stale_absent()
+        return AttackStageReceipt(
+            stage="detected",
+            receipt_id=f"attempt:{self._replacement_attempt_id}",
+            occurred_at=self._transition_at() + timedelta(seconds=2),
+        )
+
+    def start_recovery(
+        self,
+        identity: AttackIdentity,
+        detected: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        return AttackStageReceipt(
+            stage="recovery-started",
+            receipt_id=f"attempt:{self._replacement_attempt_id}",
+            occurred_at=self._transition_at() + timedelta(seconds=3),
+        )
+
+    def cleanup(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt | None,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        self._assert_stale_absent()
+        return AttackStageReceipt(
+            stage="cleanup",
+            receipt_id=f"attempt:{self._old_attempt_id}",
+            occurred_at=self._transition_at() + timedelta(seconds=4),
+        )
+
+    def recover(
+        self,
+        identity: AttackIdentity,
+        recovery_started: AttackStageReceipt,
+        cleanup: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        prepared = self._need(self._prepared, "preflight-missing")
+        replacement = self._need(self._replacement, "replacement-claim-missing")
+        self._recovered_proof = prepared.complete(
+            lease=replacement,
+            now=self._transition_at() + timedelta(seconds=5),
+        )
+        return AttackStageReceipt(
+            stage="recovered",
+            receipt_id=f"event:{self._recovered_proof['success_fact_id']}",
+            occurred_at=self._transition_at() + timedelta(seconds=5),
+        )
+
+    def verify(
+        self,
+        identity: AttackIdentity,
+        recovered: AttackStageReceipt,
+    ) -> AttackStageReceipt:
+        self._require_identity(identity)
+        proof = self._need(self._recovered_proof, "recovery-proof-missing")
+        replacement = self._need(self._replacement, "replacement-claim-missing")
+        with self._control_plane._connection_factory() as connection:  # noqa: SLF001
+            attempt = connection.execute(
+                "SELECT lease_epoch FROM m1_job_attempts WHERE attempt_id = %s",
+                (proof["attempt_id"],),
+            ).fetchone()
+        if attempt != (replacement.lease_epoch,):
+            raise DisposableCommissioningError("replacement-proof-mismatch")
+        return AttackStageReceipt(
+            stage="verified",
+            receipt_id=proof["postcondition_fact_id"],
+            occurred_at=self._transition_at() + timedelta(seconds=6),
+        )
 
 
 def _require(value: Any, reason: str) -> Any:
@@ -606,6 +804,7 @@ def _postcondition_fact(connection: Any, lease: JobLease) -> str:
 __all__ = [
     "DisposableCommissioningError",
     "PreparedNormalTurn",
+    "StaleOwnerCommissioningAdapter",
     "complete_normal_turn",
     "prepare_normal_turn",
 ]

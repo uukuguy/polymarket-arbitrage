@@ -18,8 +18,13 @@ from psycopg.types.json import Jsonb
 from polyarb.control_plane.models import JobLease, QuoteBatchLeg
 from polyarb.control_plane.postgres import PostgresControlPlane, StaleLeaseError
 from polyarb.control_plane.production_commissioning_disposable import (
+    StaleOwnerCommissioningAdapter,
     complete_normal_turn,
     prepare_normal_turn,
+)
+from polyarb.control_plane.production_commissioning_runner import (
+    AttackIdentity,
+    run_disposable_attack,
 )
 from polyarb.control_plane.recovery_store import _runtime_deadline_profile
 from polyarb.control_plane.runtime_contract import RUNTIME_STAGE_REGISTRY, AttemptRuntime
@@ -540,6 +545,47 @@ def test_disposable_commissioning_stale_owner_is_fenced_and_replacement_complete
     assert replacement_attempt == (replacement.lease_epoch,)
     assert proof["terminal_fact_id"] == f"attempt:{proof['attempt_id']}"
     assert proof["postcondition_fact_id"].startswith("postgres:")
+
+
+@pytest.mark.parametrize("job_type", REQUIRED_JOB_TYPES)
+def test_stale_owner_adapter_writes_real_cleanup_safe_attack_proof(
+    control_plane: PostgresControlPlane,
+    tmp_path: Path,
+    job_type: str,
+) -> None:
+    identity = AttackIdentity(
+        experiment_id=f"commission:{job_type}:stale-owner-terminal-write",
+        release_id="a" * 40,
+        config_id=f"sha256:{'b' * 64}",
+        node_id=job_type,
+        attack_id="stale-owner-terminal-write",
+    )
+
+    proof = run_disposable_attack(
+        identity=identity,
+        adapter=StaleOwnerCommissioningAdapter(
+            control_plane=control_plane,
+            started_at=NOW + timedelta(minutes=REQUIRED_JOB_TYPES.index(job_type) + 1),
+        ),
+        evidence_dir=tmp_path / job_type,
+    )
+
+    assert proof["detector_fact_id"].startswith("attempt:")
+    assert proof["recovery_action_id"].startswith("attempt:")
+    assert proof["recovery_fact_id"].startswith("event:")
+    assert proof["postcondition_fact_id"].startswith("postgres:")
+    assert proof["cleanup_verified"] is True
+    assert sorted(path.name for path in (tmp_path / job_type).iterdir()) == [
+        "00-intent.json",
+        "10-preflight.json",
+        "20-injected.json",
+        "30-detected.json",
+        "40-recovery-started.json",
+        "50-cleanup.json",
+        "60-recovered.json",
+        "70-verified.json",
+        "proof.json",
+    ]
 
 
 def _claim_progress_and_complete(control_plane: PostgresControlPlane, *, job_type: str) -> JobLease:

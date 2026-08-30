@@ -5,11 +5,11 @@
 ## Session
 
 - Last cycle: 42
-- Next action: rank next pending hypothesis
+- Next action: evaluate cleanup-safe stale-owner proof directories for H-039
 
 ## In flight
 
-- None
+- H-039
 
 ## Hypothesis pool
 
@@ -46,6 +46,7 @@
 - **H-036** [confirmed]: Platform-exact readiness grace and release-input identity checks can keep declared daemon startup behavior equal to the configuration Fly actually executes.
 - **H-037** [confirmed]: A disposable real-PostgreSQL normal-turn fixture can prove every one of the eight production nodes through its actual terminal attempt, runtime success event, and causally bound business postcondition instead of synthetic evidence.
 - **H-038** [confirmed]: A two-phase disposable transaction can reclaim each production node through the public lease path, reject the superseded owner's real terminal write, and let only the replacement epoch publish terminal and business facts.
+- **H-039** [in-flight]: The eight-node stale-owner primitive can implement the cleanup-safe commissioning protocol using real attempt, runtime-event, and business-postcondition receipt IDs for every append-only lifecycle stage.
 - **H-004** [confirmed]: Explicit exact share quantity and pUSD cost basis eliminate the size/stake unit collision across routing, positions, and full-fill close accounting
 - **H-003** [confirmed]: Micro-pUSD account state and tagged money receipts eliminate cumulative binary-float drift without converting market prices to fixed point
 - **H-005** [confirmed]: Immutable fill identities plus exact cumulative quantity and proceeds make partial closes idempotent across retries and restarts

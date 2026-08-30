@@ -145,3 +145,11 @@ terminal API 之前；攻击通过正式 `claim_job` 在租约到期后获取新
 
 这个测试不直接 `UPDATE lease_expires_at`，因为那会绕过我们正在验证的 claim/
 attempt 接管链。虚拟 `now` 是 control-plane API 既有的确定性输入，不是新的 timeout。
+
+### 为什么围栏拒绝不写一条“拒绝成功”业务事件？
+
+围栏的不变式正是 stale owner **不能写**。如果为了好看的 detector fact 反而让旧
+owner 在同一事务里追加一条事件，就自己破坏了被验证的边界。因此 runner 证据使用
+真实原 attempt、replacement attempt、新 epoch 的 `job.succeeded` event 和业务
+postcondition；“旧 epoch 无 success attempt/event”由 detector 和 cleanup 两次查询证明。
+这是负向事实与正向事实的组合，不是伪造一条业务事件。

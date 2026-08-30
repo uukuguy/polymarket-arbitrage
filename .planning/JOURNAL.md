@@ -11735,3 +11735,26 @@ attack adapter.
 [NEXT] Commit Plan 05.6-222 and confirm H-038 through climb. Then connect the
 stale-owner primitive to `run_disposable_attack` so eight append-only lifecycle
 proof directories can be produced inside the exact image.
+
+### SESSION 344 — 2026-08-30 (cleanup-safe stale-owner proof adapter)
+
+- [CLIMB H-038] Cycle 42 passed all five gates at 100 and confirmed the shared
+  eight-node stale-owner fence primitive.
+- [CLIMB H-039] Added a protocol adapter that drives the real primitive through
+  preflight, injection, detection, recovery-start, cleanup, recovery and verify.
+- [REAL RECEIPTS] Stage and proof IDs refer to actual original/replacement
+  attempts, the replacement `job.succeeded` event and the exact business
+  postcondition. No synthetic production fact or provider body is introduced.
+- [NEGATIVE TRUTH] Detector and cleanup each prove zero old-epoch succeeded
+  attempts/events; the stale transaction is not granted a write merely to log
+  its own rejection.
+- [VERIFICATION] All 58 runtime and commissioning-runner tests pass, including
+  eight complete append-only proof-directory cases. Ruff and Pyright pass.
+- [BOUNDARY] Tests use disposable migrated PostgreSQL. The adapter has not yet
+  been invoked by an exact-image isolated-database CLI, so the eight artifacts
+  are executable capability evidence, not final release-bound commissioning.
+
+[NEXT] Commit Plan 05.6-223 and confirm H-039. Build an exact-image disposable
+harness that provisions one migrated database per node/attack, invokes this
+adapter, always drops the database after artifact closure and exposes one Make
+entry without an all-run timeout.
